@@ -11,6 +11,8 @@ const settingsRoutes = require("./routes/settings");
 const usersRoutes = require("./routes/users");
 const logsRoutes = require("./routes/logs");
 const transactionsRoutes = require("./routes/transactions");
+const tenYearSwmPlanRoutes = require("./routes/tenYearSwmPlan");
+const fundedMRFRoutes = require("./routes/fundedMRF");
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -112,6 +114,8 @@ app.use("/api/settings", settingsRoutes);
 app.use("/api/users", usersRoutes);
 app.use("/api/logs", logsRoutes);
 app.use("/api/transactions", transactionsRoutes);
+app.use("/api/ten-year-swm", tenYearSwmPlanRoutes);
+app.use("/api/funded-mrf", fundedMRFRoutes);
 
 // Get local IP address
 function getLocalIP() {

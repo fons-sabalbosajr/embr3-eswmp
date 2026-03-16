@@ -12,3 +12,137 @@ body {
     Arial, "Noto Sans", sans-serif;
   -webkit-font-smoothing: antialiased;
 }
+
+/* Submenu background aligned with sider theme */
+.sider-menu .ant-menu-sub.ant-menu-inline {
+  background: rgba(0, 0, 0, 0.15) !important;
+}
+
+/* Status badge animations */
+.status-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  border-radius: 4px;
+  padding: 1px 8px;
+  font-size: 11px;
+  font-weight: 600;
+  animation: statusFadeIn 0.35s ease-out;
+}
+.status-badge-compliant {
+  background: #f6ffed;
+  color: #52c41a;
+}
+.status-badge-noncompliant {
+  background: #fff2f0;
+  color: #ff4d4f;
+  animation: statusFadeIn 0.35s ease-out, statusPulse 2s ease-in-out infinite;
+}
+.status-badge-pending {
+  background: #fffbe6;
+  color: #faad14;
+  animation: statusFadeIn 0.35s ease-out, statusGlow 1.8s ease-in-out infinite;
+}
+.status-badge-approved {
+  background: #f6ffed;
+  color: #52c41a;
+}
+.status-badge-renewal {
+  background: #fffbe6;
+  color: #faad14;
+  animation: statusFadeIn 0.35s ease-out, statusGlow 1.8s ease-in-out infinite;
+}
+.status-badge-other {
+  background: #f5f5f5;
+  color: #595959;
+}
+@keyframes statusFadeIn {
+  from { opacity: 0; transform: scale(0.85); }
+  to   { opacity: 1; transform: scale(1); }
+}
+@keyframes statusPulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(255, 77, 79, 0.3); }
+  50%      { box-shadow: 0 0 0 4px rgba(255, 77, 79, 0); }
+}
+@keyframes statusGlow {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(250, 173, 20, 0.3); }
+  50%      { box-shadow: 0 0 0 4px rgba(250, 173, 20, 0); }
+}
+
+/* Popup quick action buttons */
+.popup-action-btn {
+  flex: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 4px 0;
+  border: 1px solid #d9d9d9;
+  border-radius: 4px;
+  background: #fafafa;
+  color: #595959;
+  font-size: 11px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+.popup-action-btn:hover {
+  background: #1890ff;
+  color: #fff;
+  border-color: #1890ff;
+}
+
+/* Dark mode popup */
+.leaflet-popup-dark .leaflet-popup-content-wrapper {
+  background: #1f1f1f;
+  color: #e8e8e8;
+  box-shadow: 0 3px 14px rgba(0,0,0,.5);
+}
+.leaflet-popup-dark .leaflet-popup-tip {
+  background: #1f1f1f;
+}
+.leaflet-popup-dark .leaflet-popup-close-button {
+  color: #999 !important;
+}
+.leaflet-popup-dark .leaflet-popup-close-button:hover {
+  color: #fff !important;
+}
+.popup-dark {
+  color: #e8e8e8;
+}
+.popup-dark hr {
+  border-top-color: #303030 !important;
+}
+.popup-dark .popup-action-btn {
+  background: #2a2a2a;
+  border-color: #434343;
+  color: #b3b3b3;
+}
+.popup-dark .popup-action-btn:hover {
+  background: #1890ff;
+  color: #fff;
+  border-color: #1890ff;
+}
+.popup-dark .status-badge-compliant {
+  background: #162312;
+  color: #52c41a;
+}
+.popup-dark .status-badge-noncompliant {
+  background: #2a1215;
+  color: #ff4d4f;
+}
+.popup-dark .status-badge-pending {
+  background: #2b2111;
+  color: #faad14;
+}
+.popup-dark .status-badge-approved {
+  background: #162312;
+  color: #52c41a;
+}
+.popup-dark .status-badge-renewal {
+  background: #2b2111;
+  color: #faad14;
+}
+.popup-dark .status-badge-other {
+  background: #2a2a2a;
+  color: #b3b3b3;
+}
