@@ -30,9 +30,12 @@ import {
 import dayjs from "dayjs";
 import api from "../../api";
 import { exportToExcel } from "../../utils/exportExcel";
+import secureStorage from "../../utils/secureStorage";
 
 const { Title, Text } = Typography;
 const { Option } = Select;
+const CACHE_KEY = "reports-txn-cache";
+const CACHE_TTL = 5 * 60 * 1000;
 
 const TYPE_CONFIG = {
   submission: { color: "blue", icon: <SendOutlined />, label: "Submission" },
@@ -59,7 +62,17 @@ export default function Reports() {
   const [threadLoading, setThreadLoading] = useState(false);
   const [threadSubId, setThreadSubId] = useState("");
 
-  const fetchTransactions = useCallback(async () => {
+  const fetchTransactions = useCallback(async (skipCache = false) => {
+    const cacheSubKey = `${CACHE_KEY}-${page}-${pageSize}-${filterCompany || ""}-${filterType || ""}-${search || ""}`;
+    if (!skipCache) {
+      const cached = secureStorage.getJSON(cacheSubKey);
+      if (cached && Date.now() - cached.ts < CACHE_TTL) {
+        setTransactions(cached.data.transactions);
+        setTotal(cached.data.total);
+        setLoading(false);
+        return;
+      }
+    }
     setLoading(true);
     try {
       const params = { page, limit: pageSize };
@@ -70,6 +83,7 @@ export default function Reports() {
       const { data } = await api.get("/transactions", { params });
       setTransactions(data.transactions);
       setTotal(data.total);
+      secureStorage.setJSON(cacheSubKey, { data, ts: Date.now() });
     } catch {
       /* silent */
     } finally {
@@ -79,8 +93,14 @@ export default function Reports() {
 
   const fetchCompanies = useCallback(async () => {
     try {
+      const cached = secureStorage.getJSON("reports-companies-cache");
+      if (cached && Date.now() - cached.ts < CACHE_TTL) {
+        setCompanies(cached.data);
+        return;
+      }
       const { data } = await api.get("/transactions/companies");
       setCompanies(data);
+      secureStorage.setJSON("reports-companies-cache", { data, ts: Date.now() });
     } catch {
       /* silent */
     }
@@ -287,6 +307,7 @@ export default function Reports() {
         onCancel={() => setThreadVisible(false)}
         footer={null}
         width={600}
+        style={{ maxWidth: "95vw" }}
       >
         {threadLoading ? (
           <div style={{ textAlign: "center", padding: 40 }}>

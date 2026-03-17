@@ -2,6 +2,9 @@ const mongoose = require("mongoose");
 
 const tenYearSWMPlanSchema = new mongoose.Schema(
   {
+    // Data Year (which monitoring year this record belongs to)
+    dataYear: { type: Number, default: 2026, index: true },
+
     // Location
     province: { type: String, trim: true },
     municipality: { type: String, trim: true },

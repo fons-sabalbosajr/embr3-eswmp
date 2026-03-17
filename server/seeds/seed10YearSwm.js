@@ -1,5 +1,5 @@
 /**
- * Seed script: Import 10-YEAR SWM PLAN data from Excel into MongoDB
+ * Seed script: Import 10-YEAR SWM PLAN data (2026) from Excel into MongoDB
  *
  * Usage:  node seeds/seed10YearSwm.js
  */
@@ -55,6 +55,7 @@ async function seed() {
   const records = rows
     .filter((r) => r["Province"] && r["Municipality"])
     .map((r) => ({
+      dataYear: 2026,
       province: str(r["Province"]),
       municipality: str(r["Municipality"]),
       manilaBayArea: str(r["Manila Bay Area (MBA)"]),
@@ -124,9 +125,9 @@ async function seed() {
 
   console.log(`Mapped ${records.length} valid records.`);
 
-  // Clear existing data and insert fresh
-  const deleted = await TenYearSWMPlan.deleteMany({});
-  console.log(`Cleared ${deleted.deletedCount} existing records.`);
+  // Clear existing 2026 data and insert fresh
+  const deleted = await TenYearSWMPlan.deleteMany({ dataYear: { $in: [2026, null] } });
+  console.log(`Cleared ${deleted.deletedCount} existing 2026 records.`);
 
   const inserted = await TenYearSWMPlan.insertMany(records);
   console.log(`Inserted ${inserted.length} records into 10_year_swm collection.`);

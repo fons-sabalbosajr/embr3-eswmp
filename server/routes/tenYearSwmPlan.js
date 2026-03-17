@@ -17,6 +17,40 @@ router.get("/", async (req, res) => {
 // Dashboard stats
 router.get("/stats", async (req, res) => {
   try {
+    // Latest year filter for summary cards
+    const latestYear = 2026;
+    const latestFilter = { dataYear: latestYear };
+
+    // Helper: build compliance $cond
+    const complianceCond = {
+      $cond: [
+        { $regexMatch: { input: { $ifNull: ["$remarksAndRecommendation", ""] }, regex: /compliant/i } },
+        {
+          $cond: [
+            { $regexMatch: { input: { $ifNull: ["$remarksAndRecommendation", ""] }, regex: /non/i } },
+            "Non-Compliant",
+            "Compliant",
+          ],
+        },
+        "Pending",
+      ],
+    };
+
+    // Helper: build renewal $cond
+    const renewalCond = {
+      $cond: [
+        { $regexMatch: { input: { $ifNull: ["$forRenewal", ""] }, regex: /approved/i } },
+        "Approved",
+        {
+          $cond: [
+            { $regexMatch: { input: { $ifNull: ["$forRenewal", ""] }, regex: /renewal/i } },
+            "For Renewal",
+            "Other",
+          ],
+        },
+      ],
+    };
+
     const [
       totalRecords,
       byProvince,
@@ -27,60 +61,34 @@ router.get("/stats", async (req, res) => {
       wasteComposition,
       diversionByProvince,
       mapData,
+      yearlyTrend,
     ] = await Promise.all([
-      TenYearSWMPlan.countDocuments(),
+      TenYearSWMPlan.countDocuments(latestFilter),
       TenYearSWMPlan.aggregate([
-        { $group: { _id: "$province", count: { $sum: 1 } } },
+        { $match: latestFilter },
+        { $addFields: { _normProvince: { $replaceAll: { input: "$province", find: "Province of ", replacement: "" } } } },
+        { $group: { _id: "$_normProvince", count: { $sum: 1 } } },
         { $sort: { count: -1 } },
       ]),
       TenYearSWMPlan.aggregate([
-        {
-          $group: {
-            _id: {
-              $cond: [
-                { $regexMatch: { input: { $ifNull: ["$remarksAndRecommendation", ""] }, regex: /compliant/i } },
-                {
-                  $cond: [
-                    { $regexMatch: { input: { $ifNull: ["$remarksAndRecommendation", ""] }, regex: /non/i } },
-                    "Non-Compliant",
-                    "Compliant",
-                  ],
-                },
-                "Pending",
-              ],
-            },
-            count: { $sum: 1 },
-          },
-        },
+        { $match: latestFilter },
+        { $group: { _id: complianceCond, count: { $sum: 1 } } },
       ]),
       TenYearSWMPlan.aggregate([
+        { $match: latestFilter },
         { $group: { _id: "$manilaBayArea", count: { $sum: 1 } } },
         { $sort: { count: -1 } },
       ]),
       TenYearSWMPlan.aggregate([
+        { $match: latestFilter },
         { $group: { _id: "$typeOfSWMPlan", count: { $sum: 1 } } },
       ]),
       TenYearSWMPlan.aggregate([
-        {
-          $group: {
-            _id: {
-              $cond: [
-                { $regexMatch: { input: { $ifNull: ["$forRenewal", ""], }, regex: /approved/i } },
-                "Approved",
-                {
-                  $cond: [
-                    { $regexMatch: { input: { $ifNull: ["$forRenewal", ""] }, regex: /renewal/i } },
-                    "For Renewal",
-                    "Other",
-                  ],
-                },
-              ],
-            },
-            count: { $sum: 1 },
-          },
-        },
+        { $match: latestFilter },
+        { $group: { _id: renewalCond, count: { $sum: 1 } } },
       ]),
       TenYearSWMPlan.aggregate([
+        { $match: latestFilter },
         {
           $group: {
             _id: null,
@@ -94,6 +102,7 @@ router.get("/stats", async (req, res) => {
         },
       ]),
       TenYearSWMPlan.aggregate([
+        { $match: latestFilter },
         {
           $group: {
             _id: "$province",
@@ -105,7 +114,7 @@ router.get("/stats", async (req, res) => {
         { $sort: { avgDiversion: -1 } },
       ]),
       TenYearSWMPlan.find(
-        { latitude: { $ne: null }, longitude: { $ne: null } },
+        { dataYear: latestYear, latitude: { $ne: null }, longitude: { $ne: null } },
         {
           municipality: 1, province: 1, latitude: 1, longitude: 1,
           manilaBayArea: 1, congressionalDistrict: 1,
@@ -116,9 +125,48 @@ router.get("/stats", async (req, res) => {
           lguFinalDisposal: 1,
           biodegradablePercent: 1, recyclablePercent: 1,
           residualPercent: 1, specialPercent: 1,
-          signedDocument: 1,
+          signedDocument: 1, dataYear: 1,
         }
       ).lean(),
+      // Year-over-year trend aggregation
+      TenYearSWMPlan.aggregate([
+        {
+          $group: {
+            _id: { $ifNull: ["$dataYear", 2026] },
+            totalRecords: { $sum: 1 },
+            compliant: {
+              $sum: {
+                $cond: [
+                  {
+                    $and: [
+                      { $regexMatch: { input: { $ifNull: ["$remarksAndRecommendation", ""] }, regex: /compliant/i } },
+                      { $not: { $regexMatch: { input: { $ifNull: ["$remarksAndRecommendation", ""] }, regex: /non/i } } },
+                    ],
+                  },
+                  1,
+                  0,
+                ],
+              },
+            },
+            nonCompliant: {
+              $sum: {
+                $cond: [
+                  { $regexMatch: { input: { $ifNull: ["$remarksAndRecommendation", ""] }, regex: /non/i } },
+                  1,
+                  0,
+                ],
+              },
+            },
+            avgDiversionRate: { $avg: { $ifNull: ["$wasteDiversionRate", 0] } },
+            totalWasteGen: { $sum: { $ifNull: ["$totalWasteGeneration", 0] } },
+            avgBiodegradable: { $avg: { $ifNull: ["$biodegradablePercent", 0] } },
+            avgRecyclable: { $avg: { $ifNull: ["$recyclablePercent", 0] } },
+            avgResidual: { $avg: { $ifNull: ["$residualPercent", 0] } },
+            avgSpecial: { $avg: { $ifNull: ["$specialPercent", 0] } },
+          },
+        },
+        { $sort: { _id: 1 } },
+      ]),
     ]);
 
     const complianceMap = {};
@@ -147,7 +195,20 @@ router.get("/stats", async (req, res) => {
       wasteComposition: wasteComposition[0] || {},
       diversionByProvince,
       mapData,
+      yearlyTrend,
     });
+  } catch (error) {
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+});
+
+// Get records for a municipality across all years (for comparison)
+router.get("/history/:municipality", async (req, res) => {
+  try {
+    const records = await TenYearSWMPlan.find({
+      municipality: { $regex: new RegExp(`^${req.params.municipality.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "i") },
+    }).sort({ dataYear: -1 });
+    res.json(records);
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });
   }

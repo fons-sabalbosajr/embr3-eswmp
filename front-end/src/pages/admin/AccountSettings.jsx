@@ -99,7 +99,7 @@ export default function AccountSettings() {
 
   const openEditModal = (record) => {
     setEditModal(record);
-    setEditValues({ position: record.position || "", designation: record.designation || "" });
+    setEditValues({ username: record.username || "", position: record.position || "", designation: record.designation || "" });
   };
 
   const saveProfile = async () => {
@@ -143,7 +143,8 @@ export default function AccountSettings() {
     (u) =>
       u.firstName?.toLowerCase().includes(search.toLowerCase()) ||
       u.lastName?.toLowerCase().includes(search.toLowerCase()) ||
-      u.email?.toLowerCase().includes(search.toLowerCase())
+      u.email?.toLowerCase().includes(search.toLowerCase()) ||
+      u.username?.toLowerCase().includes(search.toLowerCase())
   );
 
   const columns = [
@@ -158,6 +159,11 @@ export default function AccountSettings() {
       ),
     },
     { title: "Email", dataIndex: "email", key: "email" },
+    {
+      title: "Username",
+      key: "username",
+      render: (_, r) => <Text>{r.username || "—"}</Text>,
+    },
     {
       title: "Position",
       key: "position",
@@ -212,13 +218,13 @@ export default function AccountSettings() {
       <Text type="secondary">Manage user accounts, roles, and access permissions</Text>
 
       <Card style={{ marginTop: 16, borderRadius: 10 }}>
-        <Space style={{ marginBottom: 16, flexWrap: "wrap" }}>
+        <Space style={{ marginBottom: 16, flexWrap: "wrap", width: "100%" }}>
           <Input
             placeholder="Search users..."
             prefix={<SearchOutlined />}
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            style={{ width: 360 }}
+            style={{ width: "100%", maxWidth: 360 }}
             allowClear
           />
           <Button
@@ -245,6 +251,7 @@ export default function AccountSettings() {
           loading={loading}
           pagination={{ pageSize: 10 }}
           size="middle"
+          scroll={{ x: 900 }}
         />
       </Card>
 
@@ -268,6 +275,13 @@ export default function AccountSettings() {
             </div>
             <Divider style={{ margin: "12px 0" }} />
             <Form layout="vertical">
+              <Form.Item label="Username">
+                <Input
+                  value={editValues.username}
+                  onChange={(e) => setEditValues((v) => ({ ...v, username: e.target.value }))}
+                  placeholder="Enter username"
+                />
+              </Form.Item>
               <Form.Item label="Position">
                 <Input
                   value={editValues.position}

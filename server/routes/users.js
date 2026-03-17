@@ -28,13 +28,20 @@ router.patch("/:id/role", async (req, res) => {
   }
 });
 
-// Update user profile (position, designation)
+// Update user profile (position, designation, username)
 router.patch("/:id/profile", async (req, res) => {
   try {
-    const { position, designation } = req.body;
+    const { position, designation, username } = req.body;
     const update = {};
     if (position !== undefined) update.position = position;
     if (designation !== undefined) update.designation = designation;
+    if (username !== undefined) {
+      if (username) {
+        const existing = await User.findOne({ username, _id: { $ne: req.params.id } });
+        if (existing) return res.status(400).json({ message: "Username already taken" });
+      }
+      update.username = username;
+    }
     const user = await User.findByIdAndUpdate(req.params.id, update, { returnDocument: "after" }).select("-password");
     if (!user) return res.status(404).json({ message: "User not found" });
     res.json({ message: "Profile updated", data: user });

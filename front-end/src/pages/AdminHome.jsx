@@ -24,6 +24,8 @@ import {
   Badge,
   Tooltip,
   Select,
+  Drawer,
+  Grid,
 } from "antd";
 import {
   DashboardOutlined,
@@ -68,6 +70,7 @@ import {
   CheckCircleOutlined,
   CloseCircleOutlined,
   CalendarOutlined,
+  DatabaseOutlined,
 } from "@ant-design/icons";
 import { useNavigate } from "react-router-dom";
 import Swal from "sweetalert2";
@@ -75,14 +78,33 @@ import AccountSettings from "./admin/AccountSettings";
 import FieldSettings from "./admin/FieldSettings";
 import SubmissionSettings from "./admin/SubmissionSettings";
 import DeveloperSettings from "./admin/DeveloperSettings";
+import DataReferences from "./admin/DataReferences";
 import SLFMonitoring from "./admin/SLFMonitoring";
+import SLFWasteGenerators from "./admin/SLFWasteGenerators";
 import TenYearSWMPlan from "./admin/TenYearSWMPlan";
 import FundedMRF from "./admin/FundedMRF";
+import LguInitiatedMRF from "./admin/LguInitiatedMRF";
+import TrashTraps from "./admin/TrashTraps";
+import SwmEquipment from "./admin/SwmEquipment";
+import OpenDumpsites from "./admin/OpenDumpsites";
+import ResidualContainment from "./admin/ResidualContainment";
+import ProjectDescScoping from "./admin/ProjectDescScoping";
+import TransferStations from "./admin/TransferStations";
+import LguAssistDiversion from "./admin/LguAssistDiversion";
+import TechnicalAssistance from "./admin/TechnicalAssistance";
 import Reports from "./admin/Reports";
 import api from "../api";
 import secureStorage from "../utils/secureStorage";
+import { DataRefProvider } from "../utils/dataRef";
 import embLogo from "../assets/emblogo.svg";
-import { MapContainer, TileLayer, Marker, Popup, GeoJSON, useMap } from "react-leaflet";
+import {
+  MapContainer,
+  TileLayer,
+  Marker,
+  Popup,
+  GeoJSON,
+  useMap,
+} from "react-leaflet";
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
 import dayjs from "dayjs";
@@ -90,7 +112,8 @@ import dayjs from "dayjs";
 // Fix default Leaflet marker icons
 delete L.Icon.Default.prototype._getIconUrl;
 L.Icon.Default.mergeOptions({
-  iconRetinaUrl: "https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon-2x.png",
+  iconRetinaUrl:
+    "https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon-2x.png",
   iconUrl: "https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon.png",
   shadowUrl: "https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png",
 });
@@ -118,7 +141,8 @@ const planStatusIcon = (forRenewal) => {
 };
 
 /* Province boundary overlay — fetches PH province GeoJSON and highlights filtered province */
-const PH_GEOJSON_URL = "https://raw.githubusercontent.com/macoymejia/geojsonph/master/Province/Provinces.json";
+const PH_GEOJSON_URL =
+  "https://raw.githubusercontent.com/macoymejia/geojsonph/master/Province/Provinces.json";
 let _phGeoCache = null;
 
 function ProvinceBoundary({ province }) {
@@ -132,12 +156,24 @@ function ProvinceBoundary({ province }) {
         try {
           const res = await fetch(PH_GEOJSON_URL);
           _phGeoCache = await res.json();
-        } catch { _phGeoCache = null; return; }
+        } catch {
+          _phGeoCache = null;
+          return;
+        }
       }
       if (!_phGeoCache || cancelled) return;
       const match = _phGeoCache.features.filter((f) => {
-        const name = (f.properties.PROVINCE || f.properties.NAME || f.properties.name || "").toUpperCase();
-        return name === province.toUpperCase() || name.includes(province.toUpperCase()) || province.toUpperCase().includes(name);
+        const name = (
+          f.properties.PROVINCE ||
+          f.properties.NAME ||
+          f.properties.name ||
+          ""
+        ).toUpperCase();
+        return (
+          name === province.toUpperCase() ||
+          name.includes(province.toUpperCase()) ||
+          province.toUpperCase().includes(name)
+        );
       });
       if (cancelled) return;
       if (match.length > 0) {
@@ -150,10 +186,23 @@ function ProvinceBoundary({ province }) {
       }
     };
     load();
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+    };
   }, [province, map]);
   if (!geoData) return null;
-  return <GeoJSON data={geoData} style={{ color: "#1890ff", weight: 3, fillColor: "#1890ff", fillOpacity: 0.10, dashArray: "6 4" }} />;
+  return (
+    <GeoJSON
+      data={geoData}
+      style={{
+        color: "#1890ff",
+        weight: 3,
+        fillColor: "#1890ff",
+        fillOpacity: 0.1,
+        dashArray: "6 4",
+      }}
+    />
+  );
 }
 
 function FitBounds({ points }) {
@@ -170,19 +219,36 @@ function FitBounds({ points }) {
 }
 
 const TILE_LAYERS = {
-  street: { name: "Street", url: "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", attr: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>' },
-  satellite: { name: "Satellite", url: "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}", attr: '&copy; Esri, Maxar, Earthstar' },
-  terrain: { name: "Terrain", url: "https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png", attr: '&copy; OpenTopoMap' },
-  dark: { name: "Dark", url: "https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png", attr: '&copy; CARTO' },
+  street: {
+    name: "Street",
+    url: "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
+    attr: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
+  },
+  satellite: {
+    name: "Satellite",
+    url: "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+    attr: "&copy; Esri, Maxar, Earthstar",
+  },
+  terrain: {
+    name: "Terrain",
+    url: "https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png",
+    attr: "&copy; OpenTopoMap",
+  },
+  dark: {
+    name: "Dark",
+    url: "https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png",
+    attr: "&copy; CARTO",
+  },
 };
 
 const { Header, Sider, Content } = Layout;
 const { Title, Text } = Typography;
+const { useBreakpoint } = Grid;
 
 export default function AdminHome() {
   const [collapsed, setCollapsed] = useState(false);
   const [user, setUser] = useState(null);
-  const [activeMenu, setActiveMenu] = useState("slf-overview");
+  const [activeMenu, setActiveMenu] = useState("dashboard");
   const [isDark, setIsDark] = useState(false);
   const [primaryColor, setPrimaryColor] = useState("#1a3353");
   const [siderColor, setSiderColor] = useState("#1a3353");
@@ -192,6 +258,9 @@ export default function AdminHome() {
   const [sidebarStyle, setSidebarStyle] = useState("gradient");
   const [currentTime, setCurrentTime] = useState(dayjs());
   const [profileModalOpen, setProfileModalOpen] = useState(false);
+  const [drawerOpen, setDrawerOpen] = useState(false);
+  const screens = useBreakpoint();
+  const isMobile = !screens.md;
   const navigate = useNavigate();
 
   useEffect(() => {
@@ -265,7 +334,11 @@ export default function AdminHome() {
     const comingSoonStyle = { opacity: 0.4, cursor: "not-allowed" };
 
     if (hasAccess("dashboard")) {
-      items.push({ key: "dashboard", icon: <DashboardOutlined />, label: "Dashboard" });
+      items.push({
+        key: "dashboard",
+        icon: <DashboardOutlined />,
+        label: "Dashboard",
+      });
     }
 
     // ── SWM Programs ──
@@ -274,28 +347,49 @@ export default function AdminHome() {
       icon: <AppstoreOutlined />,
       label: "SWM Programs",
       children: [
-        { key: "cs-trash-traps", icon: <ExperimentOutlined />, label: "Trash Traps", disabled: true, style: comingSoonStyle },
-        { key: "10yr-plan", icon: <FundProjectionScreenOutlined />, label: "10 Year SWM Plan" },
+        {
+          key: "cs-trash-traps",
+          icon: <ExperimentOutlined />,
+          label: "Trash Traps",
+        },
+        {
+          key: "10yr-plan",
+          icon: <FundProjectionScreenOutlined />,
+          label: "10 Year SWM Plan",
+        },
         { key: "funded-mrf", icon: <BankOutlined />, label: "Funded MRF" },
-        { key: "cs-lgu-mrf", icon: <ApartmentOutlined />, label: "LGU Initiated MRF", disabled: true, style: comingSoonStyle },
-        { key: "cs-swm-equip", icon: <CarOutlined />, label: "SWM Equipments", disabled: true, style: comingSoonStyle },
+        {
+          key: "cs-lgu-mrf",
+          icon: <ApartmentOutlined />,
+          label: "LGU Initiated MRF",
+        },
+        { key: "cs-swm-equip", icon: <CarOutlined />, label: "SWM Equipments" },
       ],
     });
 
     // ── Sanitary Landfill Monitoring ──
     const slfChildren = [];
-    slfChildren.push({ key: "slf-overview", icon: <DashboardOutlined />, label: "Overview" });
-    if (hasAccess("submissions")) {
-      slfChildren.push({ key: "submissions", icon: <InboxOutlined />, label: "Submissions" });
-    }
     if (hasAccess("slfMonitoring")) {
-      slfChildren.push({ key: "slf-monitoring", icon: <ReconciliationOutlined />, label: "SLF Facilities" });
+      slfChildren.push({
+        key: "slf-monitoring",
+        icon: <ReconciliationOutlined />,
+        label: "SLF Data Table",
+      });
     }
-    if (hasAccess("reports")) {
-      slfChildren.push({ key: "reports", icon: <BarChartOutlined />, label: "Reports" });
+    if (hasAccess("submissions") || hasAccess("reports")) {
+      slfChildren.push({
+        key: "slf-waste-generators",
+        icon: <InboxOutlined />,
+        label: "SLF Waste Generators",
+      });
     }
     if (slfChildren.length > 0) {
-      items.push({ key: "slf-group", icon: <SafetyCertificateOutlined />, label: "Sanitary Landfill", children: slfChildren });
+      items.push({
+        key: "slf-group",
+        icon: <SafetyCertificateOutlined />,
+        label: "Sanitary Landfill",
+        children: slfChildren,
+      });
     }
 
     // ── Monitoring & Assistance ──
@@ -304,26 +398,68 @@ export default function AdminHome() {
       icon: <AuditOutlined />,
       label: "Monitoring",
       children: [
-        { key: "cs-tech-assist", icon: <FundOutlined />, label: "Technical Asst. (Brgy)", disabled: true, style: comingSoonStyle },
-        { key: "cs-transfer-station", icon: <ContainerOutlined />, label: "Transfer Station", disabled: true, style: comingSoonStyle },
-        { key: "cs-open-dump", icon: <DeleteOutlined />, label: "Open Dump Sites", disabled: true, style: comingSoonStyle },
-        { key: "cs-pds", icon: <FileDoneOutlined />, label: "PDS (Scoping)", disabled: true, style: comingSoonStyle },
-        { key: "cs-rca", icon: <AlertOutlined />, label: "Residual Containment", disabled: true, style: comingSoonStyle },
-        { key: "cs-lgu-diversion", icon: <EnvironmentOutlined />, label: "LGU Asst. & Diversion", disabled: true, style: comingSoonStyle },
+        {
+          key: "cs-tech-assist",
+          icon: <FundOutlined />,
+          label: "Technical Asst. (Brgy)",
+        },
+        {
+          key: "cs-transfer-station",
+          icon: <ContainerOutlined />,
+          label: "Transfer Station",
+        },
+        {
+          key: "cs-open-dump",
+          icon: <DeleteOutlined />,
+          label: "Open Dump Sites",
+        },
+        {
+          key: "cs-pds",
+          icon: <FileDoneOutlined />,
+          label: "PDS (Scoping)",
+        },
+        {
+          key: "cs-rca",
+          icon: <AlertOutlined />,
+          label: "Residual Containment",
+        },
+        {
+          key: "cs-lgu-diversion",
+          icon: <EnvironmentOutlined />,
+          label: "LGU Asst. & Diversion",
+        },
       ],
     });
 
     // ── Settings ──
     const settingsChildren = [];
     if (hasAccess("accountSettings")) {
-      settingsChildren.push({ key: "settings-accounts", icon: <TeamOutlined />, label: "Accounts & Roles" });
+      settingsChildren.push({
+        key: "settings-accounts",
+        icon: <TeamOutlined />,
+        label: "Accounts & Roles",
+      });
     }
     if (hasAccess("portalFields")) {
-      settingsChildren.push({ key: "settings-fields", icon: <FormOutlined />, label: "Portal Fields" });
+      settingsChildren.push({
+        key: "settings-fields",
+        icon: <FormOutlined />,
+        label: "Portal Fields",
+      });
     }
+    settingsChildren.push({
+      key: "settings-data-refs",
+      icon: <DatabaseOutlined />,
+      label: "Data References",
+    });
     if (settingsChildren.length > 0) {
       items.push({ type: "divider" });
-      items.push({ key: "settings", icon: <SettingOutlined />, label: "Settings", children: settingsChildren });
+      items.push({
+        key: "settings",
+        icon: <SettingOutlined />,
+        label: "Settings",
+        children: settingsChildren,
+      });
     }
 
     if (isDeveloper) {
@@ -374,69 +510,165 @@ export default function AdminHome() {
   };
 
   const renderContent = () => {
-    const denied = <DashboardContent user={user} isDark={isDark} setActiveMenu={setActiveMenu} />;
+    const denied = (
+      <DashboardContent
+        user={user}
+        isDark={isDark}
+        setActiveMenu={setActiveMenu}
+      />
+    );
 
-    // Coming soon pages
-    if (activeMenu.startsWith("cs-")) {
-      const csLabels = {
-        "cs-trash-traps": "SWM Trash Traps",
-        "cs-lgu-mrf": "LGU Initiated MRF",
-        "cs-swm-equip": "SWM Equipments",
-        "cs-tech-assist": "SWM Technical Assistance (Barangay)",
-        "cs-transfer-station": "SWM Transfer Station",
-        "cs-open-dump": "Open Dump Sites",
-        "cs-pds": "Project Description for Scoping (PDS)",
-        "cs-rca": "Residual Containment Area Monitoring",
-        "cs-lgu-diversion": "LGU Assistance & Waste Diversion",
-      };
-      return <ComingSoonContent isDark={isDark} title={csLabels[activeMenu] || "Module"} />;
-    }
+    // Coming soon pages — (none remaining)
 
     switch (activeMenu) {
-      case "slf-overview":
-        return <DashboardContent user={user} isDark={isDark} setActiveMenu={setActiveMenu} />;
       case "10yr-plan":
         return <TenYearSWMPlan />;
       case "funded-mrf":
         return <FundedMRF />;
+      case "cs-lgu-mrf":
+        return <LguInitiatedMRF />;
+      case "cs-trash-traps":
+        return <TrashTraps />;
+      case "cs-swm-equip":
+        return <SwmEquipment />;
+      case "cs-open-dump":
+        return <OpenDumpsites />;
+      case "cs-rca":
+        return <ResidualContainment />;
+      case "cs-pds":
+        return <ProjectDescScoping />;
+      case "cs-transfer-station":
+        return <TransferStations />;
+      case "cs-lgu-diversion":
+        return <LguAssistDiversion />;
+      case "cs-tech-assist":
+        return <TechnicalAssistance />;
       case "settings-accounts":
         return hasAccess("accountSettings") ? <AccountSettings /> : denied;
       case "settings-fields":
         return hasAccess("portalFields") ? <FieldSettings /> : denied;
-      case "submissions":
-        return hasAccess("submissions") ? <SubmissionSettings /> : denied;
+      case "settings-data-refs":
+        return <DataReferences />;
       case "slf-monitoring":
         return hasAccess("slfMonitoring") ? <SLFMonitoring /> : denied;
-      case "reports":
-        return hasAccess("reports") ? <Reports /> : denied;
+      case "slf-waste-generators":
+        return hasAccess("submissions") || hasAccess("reports") ? (
+          <SLFWasteGenerators />
+        ) : (
+          denied
+        );
       case "dev-settings":
-        return isDeveloper ? <DeveloperSettings onSettingsSaved={(s) => {
-          if (s.primaryColor) {
-            setPrimaryColor(s.primaryColor);
-            secureStorage.set("admin-primary-color", s.primaryColor);
-          }
-          if (s.theme) {
-            setIsDark(s.theme === "dark");
-            secureStorage.set("admin-theme", s.theme);
-          }
-          if (s.siderColor) setSiderColor(s.siderColor);
-          if (s.siderColorDark) setSiderColorDark(s.siderColorDark);
-          if (s.headerColor) setHeaderColor(s.headerColor);
-          if (s.headerColorDark) setHeaderColorDark(s.headerColorDark);
-          if (s.sidebarStyle) setSidebarStyle(s.sidebarStyle);
-        }} /> : <DashboardContent user={user} isDark={isDark} setActiveMenu={setActiveMenu} />;
+        return isDeveloper ? (
+          <DeveloperSettings
+            onSettingsSaved={(s) => {
+              if (s.primaryColor) {
+                setPrimaryColor(s.primaryColor);
+                secureStorage.set("admin-primary-color", s.primaryColor);
+              }
+              if (s.theme) {
+                setIsDark(s.theme === "dark");
+                secureStorage.set("admin-theme", s.theme);
+              }
+              if (s.siderColor) setSiderColor(s.siderColor);
+              if (s.siderColorDark) setSiderColorDark(s.siderColorDark);
+              if (s.headerColor) setHeaderColor(s.headerColor);
+              if (s.headerColorDark) setHeaderColorDark(s.headerColorDark);
+              if (s.sidebarStyle) setSidebarStyle(s.sidebarStyle);
+            }}
+          />
+        ) : (
+          <DashboardContent
+            user={user}
+            isDark={isDark}
+            setActiveMenu={setActiveMenu}
+          />
+        );
       default:
-        return <DashboardContent user={user} isDark={isDark} setActiveMenu={setActiveMenu} />;
+        return (
+          <DashboardContent
+            user={user}
+            isDark={isDark}
+            setActiveMenu={setActiveMenu}
+          />
+        );
     }
   };
 
   // Theme-aware styles
   const s = useMemo(
-    () => getStyles(isDark, { siderColor, siderColorDark, headerColor, headerColorDark, sidebarStyle }),
-    [isDark, siderColor, siderColorDark, headerColor, headerColorDark, sidebarStyle]
+    () =>
+      getStyles(isDark, {
+        siderColor,
+        siderColorDark,
+        headerColor,
+        headerColorDark,
+        sidebarStyle,
+      }),
+    [
+      isDark,
+      siderColor,
+      siderColorDark,
+      headerColor,
+      headerColorDark,
+      sidebarStyle,
+    ],
+  );
+
+  const siderMenu = (
+    <>
+      <div style={s.logo}>
+        <img
+          src={embLogo}
+          alt="EMBR3"
+          style={{
+            height: isMobile ? 36 : collapsed ? 32 : 40,
+            marginRight: isMobile ? 10 : collapsed ? 0 : 10,
+            transition: "all 0.2s",
+          }}
+        />
+        {(isMobile || !collapsed) && (
+          <Title level={5} style={s.logoText}>
+            EMBR3 ESWMP
+          </Title>
+        )}
+      </div>
+      <div style={{ flex: 1, overflowY: "auto", overflowX: "hidden" }}>
+        <Menu
+          theme="dark"
+          mode="inline"
+          selectedKeys={[activeMenu]}
+          onClick={({ key }) => {
+            setActiveMenu(key);
+            if (isMobile) setDrawerOpen(false);
+          }}
+          items={menuItems}
+          inlineIndent={12}
+          style={{
+            background: "transparent",
+            borderRight: 0,
+            padding: "8px 0",
+          }}
+          className="sider-menu"
+        />
+      </div>
+      {(isMobile || !collapsed) && (
+        <div style={s.siderFooter}>
+          <Text
+            style={{
+              color: "rgba(255,255,255,0.35)",
+              fontSize: 10,
+              letterSpacing: 0.5,
+            }}
+          >
+            EMBR3-ESWMP v1.0.0
+          </Text>
+        </div>
+      )}
+    </>
   );
 
   return (
+    <DataRefProvider>
     <ConfigProvider
       theme={{
         algorithm: isDark ? antTheme.darkAlgorithm : antTheme.defaultAlgorithm,
@@ -444,66 +676,85 @@ export default function AdminHome() {
       }}
     >
       <Layout style={{ minHeight: "100vh" }}>
-        <Sider
-          trigger={null}
-          collapsible
-          collapsed={collapsed}
-          style={s.sider}
-          width={220}
-        >
-          <div style={s.logo}>
-            <img
-              src={embLogo}
-              alt="EMBR3"
-              style={{
-                height: collapsed ? 32 : 40,
-                marginRight: collapsed ? 0 : 10,
-                transition: "all 0.2s",
-              }}
-            />
-            {!collapsed && (
-              <Title level={5} style={s.logoText}>
-                EMBR3 ESWMP
-              </Title>
-            )}
-          </div>
-          <div style={{ flex: 1, overflowY: "auto", overflowX: "hidden" }}>
-            <Menu
-              theme="dark"
-              mode="inline"
-              selectedKeys={[activeMenu]}
-              onClick={({ key }) => {
-                if (!key.startsWith("cs-")) setActiveMenu(key);
-              }}
-              items={menuItems}
-              style={{ background: "transparent", borderRight: 0, padding: "8px 0" }}
-              className="sider-menu"
-            />
-          </div>
-          {!collapsed && (
-            <div style={s.siderFooter}>
-              <Text style={{ color: "rgba(255,255,255,0.35)", fontSize: 10, letterSpacing: 0.5 }}>
-                ESWMP v1.0.0
-              </Text>
-            </div>
-          )}
-        </Sider>
+        {/* Desktop Sider */}
+        {!isMobile && (
+          <Sider
+            trigger={null}
+            collapsible
+            collapsed={collapsed}
+            style={s.sider}
+            width={220}
+          >
+            {siderMenu}
+          </Sider>
+        )}
+
+        {/* Mobile Drawer */}
+        {isMobile && (
+          <Drawer
+            placement="left"
+            open={drawerOpen}
+            onClose={() => setDrawerOpen(false)}
+            width={260}
+            styles={{
+              body: {
+                padding: 0,
+                background: isDark
+                  ? siderColorDark || "#111927"
+                  : siderColor || "#1a3353",
+                display: "flex",
+                flexDirection: "column",
+              },
+            }}
+            closable={false}
+          >
+            {siderMenu}
+          </Drawer>
+        )}
 
         <Layout style={{ height: "100vh", overflow: "auto" }}>
           <Header style={s.header}>
             <Button
               type="text"
-              icon={collapsed ? <MenuUnfoldOutlined /> : <MenuFoldOutlined />}
-              onClick={() => setCollapsed(!collapsed)}
+              icon={
+                isMobile ? (
+                  <MenuUnfoldOutlined />
+                ) : collapsed ? (
+                  <MenuUnfoldOutlined />
+                ) : (
+                  <MenuFoldOutlined />
+                )
+              }
+              onClick={() =>
+                isMobile ? setDrawerOpen(true) : setCollapsed(!collapsed)
+              }
               style={{ fontSize: 18, color: isDark ? "#fff" : undefined }}
             />
-            <div style={s.headerRight}>
-              <div style={{ display: "flex", alignItems: "center", marginRight: 16, gap: 6 }}>
-                <ClockCircleOutlined style={{ fontSize: 14, color: isDark ? "#999" : "#888" }} />
-                <Text style={{ fontSize: 13, color: isDark ? "#ccc" : "#666", whiteSpace: "nowrap" }}>
-                  {currentTime.format("ddd, MMM DD YYYY \u2014 h:mm:ss A")}
-                </Text>
-              </div>
+            <div className="admin-header-right">
+              {!isMobile && (
+                <div
+                  className="admin-clock"
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    marginRight: 16,
+                    gap: 6,
+                  }}
+                >
+                  <ClockCircleOutlined
+                    style={{ fontSize: 14, color: isDark ? "#999" : "#888" }}
+                  />
+                  <Text
+                    style={{
+                      fontSize: 13,
+                      color: isDark ? "#ccc" : "#666",
+                      whiteSpace: "nowrap",
+                    }}
+                  >
+                    {currentTime.format("ddd, MMM DD YYYY \u2014 h:mm:ss A")}
+                  </Text>
+                </div>
+              )}
               <Switch
                 checked={!isDark}
                 onChange={toggleTheme}
@@ -515,7 +766,11 @@ export default function AdminHome() {
                 <Button
                   type="text"
                   icon={<MessageOutlined />}
-                  style={{ fontSize: 18, color: isDark ? "#999" : "#666", marginRight: 4 }}
+                  style={{
+                    fontSize: 18,
+                    color: isDark ? "#999" : "#666",
+                    marginRight: 4,
+                  }}
                 />
               </Tooltip>
               <Tooltip title="Notifications (Coming Soon)">
@@ -523,7 +778,11 @@ export default function AdminHome() {
                   <Button
                     type="text"
                     icon={<BellOutlined />}
-                    style={{ fontSize: 18, color: isDark ? "#999" : "#666", marginRight: 12 }}
+                    style={{
+                      fontSize: 18,
+                      color: isDark ? "#999" : "#666",
+                      marginRight: 12,
+                    }}
                   />
                 </Badge>
               </Tooltip>
@@ -536,7 +795,14 @@ export default function AdminHome() {
                     style={{ backgroundColor: "#1a3353" }}
                     icon={<UserOutlined />}
                   />
-                  <Text strong style={{ marginLeft: 8, cursor: "pointer", color: isDark ? "#fff" : undefined }}>
+                  <Text
+                    strong
+                    style={{
+                      marginLeft: 8,
+                      cursor: "pointer",
+                      color: isDark ? "#fff" : undefined,
+                    }}
+                  >
                     {user?.firstName}
                   </Text>
                 </div>
@@ -544,29 +810,56 @@ export default function AdminHome() {
             </div>
           </Header>
 
-          <Content style={s.content}>{renderContent()}</Content>
+          <Content
+            className="admin-content"
+            style={{ background: isDark ? "#1f1f1f" : "#f0f2f5" }}
+          >
+            {renderContent()}
+          </Content>
 
           <div style={s.footer}>
             <Text style={{ color: isDark ? "#666" : "#999", fontSize: 12 }}>
-              © 2026 EMBR3 — Ecological Solid Waste Management Pipeline. All rights reserved.
+              © 2026 EMBR3 — Ecological Solid Waste Management Pipeline. All
+              rights reserved.
             </Text>
           </div>
         </Layout>
       </Layout>
 
       <Modal
-        title={<Space><UserOutlined /> My Profile</Space>}
+        title={
+          <Space>
+            <UserOutlined /> My Profile
+          </Space>
+        }
         open={profileModalOpen}
         onCancel={() => setProfileModalOpen(false)}
-        footer={<Button onClick={() => setProfileModalOpen(false)}>Close</Button>}
+        footer={
+          <Button onClick={() => setProfileModalOpen(false)}>Close</Button>
+        }
       >
         {user && (
           <>
             <div style={{ textAlign: "center", marginBottom: 16 }}>
-              <Avatar size={72} style={{ backgroundColor: primaryColor }} icon={<UserOutlined />} />
+              <Avatar
+                size={72}
+                style={{ backgroundColor: primaryColor }}
+                icon={<UserOutlined />}
+              />
               <div style={{ marginTop: 12 }}>
-                <Title level={4} style={{ margin: 0 }}>{user.firstName} {user.lastName}</Title>
-                <Tag color={user.role === "developer" ? "purple" : user.role === "admin" ? "gold" : "blue"} style={{ marginTop: 6 }}>
+                <Title level={4} style={{ margin: 0 }}>
+                  {user.firstName} {user.lastName}
+                </Title>
+                <Tag
+                  color={
+                    user.role === "developer"
+                      ? "purple"
+                      : user.role === "admin"
+                        ? "gold"
+                        : "blue"
+                  }
+                  style={{ marginTop: 6 }}
+                >
                   {user.role?.toUpperCase()}
                 </Tag>
               </div>
@@ -574,36 +867,60 @@ export default function AdminHome() {
             <Divider style={{ margin: "12px 0" }} />
             <Descriptions column={1} size="small">
               <Descriptions.Item label="Email">{user.email}</Descriptions.Item>
-              <Descriptions.Item label="Position">{user.position || "\u2014"}</Descriptions.Item>
-              <Descriptions.Item label="Designation">{user.designation || "\u2014"}</Descriptions.Item>
+              <Descriptions.Item label="Position">
+                {user.position || "\u2014"}
+              </Descriptions.Item>
+              <Descriptions.Item label="Designation">
+                {user.designation || "\u2014"}
+              </Descriptions.Item>
             </Descriptions>
           </>
         )}
       </Modal>
-
     </ConfigProvider>
+    </DataRefProvider>
   );
 }
 
 function ComingSoonContent({ isDark, title, description }) {
   const textColor = isDark ? "#e0e0e0" : "#1a3353";
   return (
-    <div style={{ display: "flex", alignItems: "center", justifyContent: "center", minHeight: 400 }}>
+    <div
+      style={{
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        minHeight: 400,
+      }}
+    >
       <Card
         style={{
           borderRadius: 16,
           textAlign: "center",
           maxWidth: 480,
           width: "100%",
-          boxShadow: isDark ? "0 4px 24px rgba(0,0,0,0.3)" : "0 4px 24px rgba(0,0,0,0.08)",
+          boxShadow: isDark
+            ? "0 4px 24px rgba(0,0,0,0.3)"
+            : "0 4px 24px rgba(0,0,0,0.08)",
         }}
       >
         <div style={{ fontSize: 56, marginBottom: 16, opacity: 0.25 }}>🚧</div>
-        <Title level={3} style={{ margin: 0, color: textColor }}>{title}</Title>
-        <Text type="secondary" style={{ display: "block", marginTop: 8, fontSize: 15 }}>
-          {description || "This module is currently under development and will be available soon."}
+        <Title level={3} style={{ margin: 0, color: textColor }}>
+          {title}
+        </Title>
+        <Text
+          type="secondary"
+          style={{ display: "block", marginTop: 8, fontSize: 15 }}
+        >
+          {description ||
+            "This module is currently under development and will be available soon."}
         </Text>
-        <Tag color="gold" style={{ marginTop: 20, fontSize: 13, padding: "4px 16px" }}>Coming Soon</Tag>
+        <Tag
+          color="gold"
+          style={{ marginTop: 20, fontSize: 13, padding: "4px 16px" }}
+        >
+          Coming Soon
+        </Tag>
       </Card>
     </div>
   );
@@ -613,6 +930,10 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
   const [stats, setStats] = useState(null);
   const [swmStats, setSwmStats] = useState(null);
   const [mrfStats, setMrfStats] = useState(null);
+  const [lguMrfStats, setLguMrfStats] = useState(null);
+  const [trapStats, setTrapStats] = useState(null);
+  const [equipStats, setEquipStats] = useState(null);
+  const [slfFacStats, setSlfFacStats] = useState(null);
   const [loading, setLoading] = useState(true);
   const [tileKey, setTileKey] = useState("street");
   const [mapFilterProvince, setMapFilterProvince] = useState(null);
@@ -621,16 +942,45 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
   const [mrfTileKey, setMrfTileKey] = useState("street");
   const [mrfFilterProvince, setMrfFilterProvince] = useState(null);
   const [mrfFilterStatus, setMrfFilterStatus] = useState(null);
+  const [lguTileKey, setLguTileKey] = useState("street");
+  const [lguFilterProvince, setLguFilterProvince] = useState(null);
+  const [lguFilterStatus, setLguFilterStatus] = useState(null);
+  const [trapTileKey, setTrapTileKey] = useState("street");
+  const [trapFilterProvince, setTrapFilterProvince] = useState(null);
+  const [trapFilterStatus, setTrapFilterStatus] = useState(null);
+  const [equipTileKey, setEquipTileKey] = useState("street");
+  const [equipFilterProvince, setEquipFilterProvince] = useState(null);
+  const [equipFilterType, setEquipFilterType] = useState(null);
+  const [slfTileKey, setSlfTileKey] = useState("street");
+  const [slfFilterProvince, setSlfFilterProvince] = useState(null);
+  const [slfFilterStatus, setSlfFilterStatus] = useState(null);
 
-  const mapPts = useMemo(() => ((swmStats && swmStats.mapData) || [])
-    .filter((r) => r.latitude && r.longitude && !isNaN(r.latitude) && !isNaN(r.longitude))
-    .map((r) => ({ lat: Number(r.latitude), lng: Number(r.longitude), record: r })),
-  [swmStats && swmStats.mapData]);
+  const mapPts = useMemo(
+    () =>
+      ((swmStats && swmStats.mapData) || [])
+        .filter(
+          (r) =>
+            r.latitude &&
+            r.longitude &&
+            !isNaN(r.latitude) &&
+            !isNaN(r.longitude),
+        )
+        .map((r) => ({
+          lat: Number(r.latitude),
+          lng: Number(r.longitude),
+          record: r,
+        })),
+    [swmStats && swmStats.mapData],
+  );
 
   const filteredMapPts = useMemo(() => {
     let pts = mapPts;
-    if (mapFilterProvince) pts = pts.filter((p) => p.record.province === mapFilterProvince);
-    if (mapFilterStatus) pts = pts.filter((p) => getPlanStatus(p.record.forRenewal) === mapFilterStatus);
+    if (mapFilterProvince)
+      pts = pts.filter((p) => p.record.province === mapFilterProvince);
+    if (mapFilterStatus)
+      pts = pts.filter(
+        (p) => getPlanStatus(p.record.forRenewal) === mapFilterStatus,
+      );
     return pts;
   }, [mapPts, mapFilterProvince, mapFilterStatus]);
 
@@ -640,26 +990,262 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
   }, [mapPts]);
 
   // MRF map points
-  const mrfMapPts = useMemo(() => ((mrfStats && mrfStats.mapData) || [])
-    .filter((r) => r.latitude && r.longitude && !isNaN(r.latitude) && !isNaN(r.longitude))
-    .map((r) => ({ lat: Number(r.latitude), lng: Number(r.longitude), record: r })),
-  [mrfStats && mrfStats.mapData]);
+  const mrfMapPts = useMemo(
+    () =>
+      ((mrfStats && mrfStats.mapData) || [])
+        .filter(
+          (r) =>
+            r.latitude &&
+            r.longitude &&
+            !isNaN(r.latitude) &&
+            !isNaN(r.longitude),
+        )
+        .map((r) => ({
+          lat: Number(r.latitude),
+          lng: Number(r.longitude),
+          record: r,
+        })),
+    [mrfStats && mrfStats.mapData],
+  );
 
   const filteredMrfMapPts = useMemo(() => {
     let pts = mrfMapPts;
-    if (mrfFilterProvince) pts = pts.filter((p) => p.record.province === mrfFilterProvince);
+    if (mrfFilterProvince)
+      pts = pts.filter((p) => p.record.province === mrfFilterProvince);
     if (mrfFilterStatus) {
-      if (mrfFilterStatus === "Operational") pts = pts.filter((p) => /operational/i.test(p.record.statusOfMRF) && !/non/i.test(p.record.statusOfMRF));
-      else if (mrfFilterStatus === "Non-Operational") pts = pts.filter((p) => /non/i.test(p.record.statusOfMRF));
+      if (mrfFilterStatus === "Operational")
+        pts = pts.filter(
+          (p) =>
+            /operational/i.test(p.record.statusOfMRF) &&
+            !/non/i.test(p.record.statusOfMRF),
+        );
+      else if (mrfFilterStatus === "Non-Operational")
+        pts = pts.filter((p) => /non/i.test(p.record.statusOfMRF));
       else pts = pts.filter((p) => !p.record.statusOfMRF);
     }
     return pts;
   }, [mrfMapPts, mrfFilterProvince, mrfFilterStatus]);
 
   const mrfProvinceOptions = useMemo(() => {
-    const set = new Set(mrfMapPts.map((p) => p.record.province).filter(Boolean));
+    const set = new Set(
+      mrfMapPts.map((p) => p.record.province).filter(Boolean),
+    );
     return [...set].sort().map((v) => ({ label: v, value: v }));
   }, [mrfMapPts]);
+
+  // LGU MRF map points
+  const lguMapPts = useMemo(
+    () =>
+      ((lguMrfStats && lguMrfStats.mapData) || [])
+        .filter(
+          (r) =>
+            r.latitude &&
+            r.longitude &&
+            !isNaN(r.latitude) &&
+            !isNaN(r.longitude),
+        )
+        .map((r) => ({
+          lat: Number(r.latitude),
+          lng: Number(r.longitude),
+          record: r,
+        })),
+    [lguMrfStats && lguMrfStats.mapData],
+  );
+
+  const filteredLguMapPts = useMemo(() => {
+    let pts = lguMapPts;
+    if (lguFilterProvince)
+      pts = pts.filter((p) => p.record.province === lguFilterProvince);
+    if (lguFilterStatus) {
+      if (lguFilterStatus === "Operational")
+        pts = pts.filter(
+          (p) =>
+            /operational/i.test(p.record.statusOfMRF) &&
+            !/non/i.test(p.record.statusOfMRF),
+        );
+      else if (lguFilterStatus === "Non-Operational")
+        pts = pts.filter((p) => /non/i.test(p.record.statusOfMRF));
+      else pts = pts.filter((p) => !p.record.statusOfMRF);
+    }
+    return pts;
+  }, [lguMapPts, lguFilterProvince, lguFilterStatus]);
+
+  const lguProvinceOptions = useMemo(() => {
+    const set = new Set(
+      lguMapPts.map((p) => p.record.province).filter(Boolean),
+    );
+    return [...set].sort().map((v) => ({ label: v, value: v }));
+  }, [lguMapPts]);
+
+  // Trash Trap map points
+  const trapMapPts = useMemo(
+    () =>
+      ((trapStats && trapStats.mapData) || [])
+        .filter(
+          (r) =>
+            r.latitude &&
+            r.longitude &&
+            !isNaN(r.latitude) &&
+            !isNaN(r.longitude),
+        )
+        .map((r) => ({
+          lat: Number(r.latitude),
+          lng: Number(r.longitude),
+          record: r,
+        })),
+    [trapStats && trapStats.mapData],
+  );
+
+  const filteredTrapMapPts = useMemo(() => {
+    let pts = trapMapPts;
+    if (trapFilterProvince)
+      pts = pts.filter((p) => p.record.province === trapFilterProvince);
+    if (trapFilterStatus) {
+      if (trapFilterStatus === "Operational")
+        pts = pts.filter(
+          (p) =>
+            /operational/i.test(p.record.statusOfTrashTraps) &&
+            !/non/i.test(p.record.statusOfTrashTraps),
+        );
+      else if (trapFilterStatus === "Non-Operational")
+        pts = pts.filter((p) => /non/i.test(p.record.statusOfTrashTraps));
+      else pts = pts.filter((p) => !p.record.statusOfTrashTraps);
+    }
+    return pts;
+  }, [trapMapPts, trapFilterProvince, trapFilterStatus]);
+
+  const trapProvinceOptions = useMemo(() => {
+    const set = new Set(
+      trapMapPts.map((p) => p.record.province).filter(Boolean),
+    );
+    return [...set].sort().map((v) => ({ label: v, value: v }));
+  }, [trapMapPts]);
+
+  // SWM Equipment map points
+  const equipMapPts = useMemo(
+    () =>
+      ((equipStats && equipStats.mapData) || [])
+        .filter(
+          (r) =>
+            r.latitude &&
+            r.longitude &&
+            !isNaN(r.latitude) &&
+            !isNaN(r.longitude),
+        )
+        .map((r) => ({
+          lat: Number(r.latitude),
+          lng: Number(r.longitude),
+          record: r,
+        })),
+    [equipStats && equipStats.mapData],
+  );
+
+  const filteredEquipMapPts = useMemo(() => {
+    let pts = equipMapPts;
+    if (equipFilterProvince)
+      pts = pts.filter((p) => p.record.province === equipFilterProvince);
+    if (equipFilterType)
+      pts = pts.filter((p) => p.record.typeOfEquipment === equipFilterType);
+    return pts;
+  }, [equipMapPts, equipFilterProvince, equipFilterType]);
+
+  const equipProvinceOptions = useMemo(() => {
+    const set = new Set(
+      equipMapPts.map((p) => p.record.province).filter(Boolean),
+    );
+    return [...set].sort().map((v) => ({ label: v, value: v }));
+  }, [equipMapPts]);
+
+  const equipTypeOptions = useMemo(() => {
+    const set = new Set(
+      equipMapPts.map((p) => p.record.typeOfEquipment).filter(Boolean),
+    );
+    return [...set].sort().map((v) => ({ label: v, value: v }));
+  }, [equipMapPts]);
+
+  // SLF Facility map points
+  const slfMapPts = useMemo(
+    () =>
+      ((slfFacStats && slfFacStats.mapData) || [])
+        .filter(
+          (r) =>
+            r.latitude &&
+            r.longitude &&
+            !isNaN(r.latitude) &&
+            !isNaN(r.longitude),
+        )
+        .map((r) => ({
+          lat: Number(r.latitude),
+          lng: Number(r.longitude),
+          record: r,
+        })),
+    [slfFacStats && slfFacStats.mapData],
+  );
+
+  const filteredSlfMapPts = useMemo(() => {
+    let pts = slfMapPts;
+    if (slfFilterProvince)
+      pts = pts.filter((p) => p.record.province === slfFilterProvince);
+    if (slfFilterStatus) {
+      if (slfFilterStatus === "Operational")
+        pts = pts.filter(
+          (p) =>
+            /operational/i.test(p.record.statusOfSLF) &&
+            !/non/i.test(p.record.statusOfSLF),
+        );
+      else if (slfFilterStatus === "Non-Operational")
+        pts = pts.filter((p) => /non/i.test(p.record.statusOfSLF));
+      else pts = pts.filter((p) => !p.record.statusOfSLF);
+    }
+    return pts;
+  }, [slfMapPts, slfFilterProvince, slfFilterStatus]);
+
+  const slfProvinceOptions = useMemo(() => {
+    const set = new Set(
+      slfMapPts.map((p) => p.record.province).filter(Boolean),
+    );
+    return [...set].sort().map((v) => ({ label: v, value: v }));
+  }, [slfMapPts]);
+
+  const trapStatusIcon = (statusOfTrashTraps) => {
+    const isOp =
+      /operational/i.test(statusOfTrashTraps) &&
+      !/non/i.test(statusOfTrashTraps);
+    const isNonOp = /non/i.test(statusOfTrashTraps);
+    const bg = isOp ? "#52c41a" : isNonOp ? "#ff4d4f" : "#8c8c8c";
+    const icon = isOp ? "✓" : isNonOp ? "✕" : "●";
+    return L.divIcon({
+      className: "",
+      html: `<div style="width:20px;height:20px;border-radius:50%;background:${bg};border:2px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,.35);display:flex;align-items:center;justify-content:center;color:#fff;font-size:11px;font-weight:bold">${icon}</div>`,
+      iconSize: [20, 20],
+      iconAnchor: [10, 10],
+      popupAnchor: [0, -12],
+    });
+  };
+
+  const equipStatusIcon = (record) => {
+    const shredderOp =
+      /operational/i.test(record.statusOfBioShredder) &&
+      !/non/i.test(record.statusOfBioShredder);
+    const composterOp =
+      /operational/i.test(record.statusOfBioComposter) &&
+      !/non/i.test(record.statusOfBioComposter);
+    const bg =
+      shredderOp && composterOp
+        ? "#52c41a"
+        : shredderOp || composterOp
+          ? "#faad14"
+          : "#ff4d4f";
+    const icon =
+      shredderOp && composterOp ? "✓" : shredderOp || composterOp ? "▲" : "✕";
+    return L.divIcon({
+      className: "",
+      html: `<div style="width:20px;height:20px;border-radius:50%;background:${bg};border:2px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,.35);display:flex;align-items:center;justify-content:center;color:#fff;font-size:11px;font-weight:bold">${icon}</div>`,
+      iconSize: [20, 20],
+      iconAnchor: [10, 10],
+      popupAnchor: [0, -12],
+    });
+  };
 
   const mrfStatusIcon = (statusOfMRF) => {
     const isOp = /operational/i.test(statusOfMRF) && !/non/i.test(statusOfMRF);
@@ -675,19 +1261,91 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
     });
   };
 
+  const slfStatusIcon = (statusOfSLF) => {
+    const isOp = /operational/i.test(statusOfSLF) && !/non/i.test(statusOfSLF);
+    const isNonOp = /non/i.test(statusOfSLF);
+    const bg = isOp ? "#52c41a" : isNonOp ? "#ff4d4f" : "#8c8c8c";
+    const icon = isOp ? "✓" : isNonOp ? "✕" : "●";
+    return L.divIcon({
+      className: "",
+      html: `<div style="width:20px;height:20px;border-radius:50%;background:${bg};border:2px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,.35);display:flex;align-items:center;justify-content:center;color:#fff;font-size:11px;font-weight:bold">${icon}</div>`,
+      iconSize: [20, 20],
+      iconAnchor: [10, 10],
+      popupAnchor: [0, -12],
+    });
+  };
+
   const tile = TILE_LAYERS[tileKey];
   const mrfTile = TILE_LAYERS[mrfTileKey];
 
-  const fetchStats = useCallback(async () => {
+  const DASH_CACHE_KEY = "dashboard-stats-cache";
+  const DASH_CACHE_TTL = 5 * 60 * 1000;
+
+  const fetchStats = useCallback(async (skipCache = false) => {
     try {
-      const [slfRes, swmRes, mrfRes] = await Promise.all([
-        api.get("/data-slf/stats"),
-        api.get("/ten-year-swm/stats").catch(() => ({ data: null })),
-        api.get("/funded-mrf/stats").catch(() => ({ data: null })),
-      ]);
-      setStats(slfRes.data);
-      setSwmStats(swmRes.data);
-      setMrfStats(mrfRes.data);
+      if (!skipCache) {
+        const cached = secureStorage.getJSON(DASH_CACHE_KEY);
+        if (cached && Date.now() - cached.ts < DASH_CACHE_TTL) {
+          setStats(cached.stats);
+          setSwmStats(cached.swmStats);
+          setMrfStats(cached.mrfStats);
+          setLguMrfStats(cached.lguMrfStats);
+          setTrapStats(cached.trapStats);
+          setEquipStats(cached.equipStats);
+          setSlfFacStats(cached.slfFacStats);
+          setLoading(false);
+          return;
+        }
+      }
+      const [slfRes, swmRes, mrfRes, lguMrfRes, trapRes, equipRes, slfFacRes] =
+        await Promise.all([
+          api.get("/data-slf/stats"),
+          api.get("/ten-year-swm/stats").catch(() => ({ data: null })),
+          api.get("/funded-mrf/stats").catch(() => ({ data: null })),
+          api.get("/lgu-initiated-mrf/stats").catch(() => ({ data: null })),
+          api.get("/trash-traps/stats").catch(() => ({ data: null })),
+          api.get("/swm-equipment/stats").catch(() => ({ data: null })),
+          api.get("/slf-facilities/stats").catch(() => ({ data: null })),
+        ]);
+      // Only update state when data actually changes to prevent re-render glitching
+      setStats((prev) => {
+        const next = slfRes.data;
+        return JSON.stringify(prev) === JSON.stringify(next) ? prev : next;
+      });
+      setSwmStats((prev) => {
+        const next = swmRes.data;
+        return JSON.stringify(prev) === JSON.stringify(next) ? prev : next;
+      });
+      setMrfStats((prev) => {
+        const next = mrfRes.data;
+        return JSON.stringify(prev) === JSON.stringify(next) ? prev : next;
+      });
+      setLguMrfStats((prev) => {
+        const next = lguMrfRes.data;
+        return JSON.stringify(prev) === JSON.stringify(next) ? prev : next;
+      });
+      setTrapStats((prev) => {
+        const next = trapRes.data;
+        return JSON.stringify(prev) === JSON.stringify(next) ? prev : next;
+      });
+      setEquipStats((prev) => {
+        const next = equipRes.data;
+        return JSON.stringify(prev) === JSON.stringify(next) ? prev : next;
+      });
+      setSlfFacStats((prev) => {
+        const next = slfFacRes.data;
+        return JSON.stringify(prev) === JSON.stringify(next) ? prev : next;
+      });
+      secureStorage.setJSON(DASH_CACHE_KEY, {
+        stats: slfRes.data,
+        swmStats: swmRes.data,
+        mrfStats: mrfRes.data,
+        lguMrfStats: lguMrfRes.data,
+        trapStats: trapRes.data,
+        equipStats: equipRes.data,
+        slfFacStats: slfFacRes.data,
+        ts: Date.now(),
+      });
     } catch {
       /* silently fail */
     } finally {
@@ -697,11 +1355,15 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
 
   useEffect(() => {
     fetchStats();
-    const interval = setInterval(fetchStats, 8000);
+    const interval = setInterval(fetchStats, 30000);
     return () => clearInterval(interval);
   }, [fetchStats]);
 
-  const statusColors = { pending: "#faad14", acknowledged: "#52c41a", rejected: "#ff4d4f" };
+  const statusColors = {
+    pending: "#faad14",
+    acknowledged: "#52c41a",
+    rejected: "#ff4d4f",
+  };
   const textColor = isDark ? "#e0e0e0" : "#1a3353";
 
   const pendingCount = stats?.byStatus?.pending || 0;
@@ -710,21 +1372,35 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
   const totalSub = stats?.submissions || 0;
 
   const months = (stats?.monthlyData || []).map((m) => ({
-    label: dayjs().month(m._id.month - 1).format("MMM") + " " + m._id.year,
+    label:
+      dayjs()
+        .month(m._id.month - 1)
+        .format("MMM") +
+      " " +
+      m._id.year,
     count: m.count,
     volume: m.totalVolume,
   }));
   const maxCount = Math.max(...months.map((m) => m.count), 1);
 
   const recentColumns = [
-    { title: "ID", dataIndex: "idNo", key: "idNo", render: (v) => <Tag>{v}</Tag> },
+    {
+      title: "ID",
+      dataIndex: "idNo",
+      key: "idNo",
+      render: (v) => <Tag>{v}</Tag>,
+    },
     { title: "Company", dataIndex: "lguCompanyName", key: "lguCompanyName" },
     { title: "Type", dataIndex: "companyType", key: "companyType" },
     {
       title: "Status",
       dataIndex: "status",
       key: "status",
-      render: (v) => <Tag color={statusColors[v]}>{v?.charAt(0).toUpperCase() + v?.slice(1)}</Tag>,
+      render: (v) => (
+        <Tag color={statusColors[v]}>
+          {v?.charAt(0).toUpperCase() + v?.slice(1)}
+        </Tag>
+      ),
     },
     {
       title: "Date",
@@ -737,210 +1413,6 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
   // Build tab items — only show tabs that have data
   const tabItems = [];
 
-  // Overview tab always shows
-  tabItems.push({
-    key: "overview",
-    label: <><DashboardOutlined /> Overview</>,
-    children: (
-      <>
-        <Row gutter={[16, 16]}>
-          <Col xs={24} sm={12} lg={6}>
-            <Card hoverable style={{ borderRadius: 10 }} loading={loading}>
-              <Statistic
-                title="SLF Facilities"
-                value={stats?.generators || 0}
-                prefix={<ReconciliationOutlined style={{ color: "#1a3353" }} />}
-              />
-            </Card>
-          </Col>
-          <Col xs={24} sm={12} lg={6}>
-            <Card hoverable style={{ borderRadius: 10 }} loading={loading}>
-              <Statistic
-                title="Total Submissions"
-                value={totalSub}
-                prefix={<InboxOutlined style={{ color: "#2d5f8a" }} />}
-              />
-            </Card>
-          </Col>
-          <Col xs={24} sm={12} lg={6}>
-            <Card hoverable style={{ borderRadius: 10 }} loading={loading}>
-              <Statistic
-                title="Pending"
-                value={pendingCount}
-                styles={{ content: { color: "#faad14" } }}
-                prefix={<ClockCircleOutlined />}
-              />
-            </Card>
-          </Col>
-          <Col xs={24} sm={12} lg={6}>
-            <Card hoverable style={{ borderRadius: 10 }} loading={loading}>
-              <Statistic
-                title="Total Trucks"
-                value={stats?.totalTrucks || 0}
-                prefix={<RiseOutlined style={{ color: "#52c41a" }} />}
-              />
-            </Card>
-          </Col>
-        </Row>
-
-        <Row gutter={[16, 16]} style={{ marginTop: 16 }}>
-          <Col xs={24} md={12}>
-            <Card title={<><PieChartOutlined /> Submission Status</>} style={{ borderRadius: 10 }} loading={loading}>
-              <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-                {[
-                  { label: "Acknowledged", count: ackCount, color: "#52c41a" },
-                  { label: "Pending", count: pendingCount, color: "#faad14" },
-                  { label: "Rejected", count: rejCount, color: "#ff4d4f" },
-                ].map((s) => (
-                  <div key={s.label}>
-                    <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
-                      <Text style={{ color: isDark ? "#ccc" : undefined }}>{s.label}</Text>
-                      <Text strong style={{ color: isDark ? "#fff" : undefined }}>
-                        {s.count} {totalSub > 0 && <span style={{ color: "#999", fontWeight: 400 }}>({Math.round((s.count / totalSub) * 100)}%)</span>}
-                      </Text>
-                    </div>
-                    <Progress
-                      percent={totalSub > 0 ? Math.round((s.count / totalSub) * 100) : 0}
-                      strokeColor={s.color}
-                      showInfo={false}
-                      size="small"
-                    />
-                  </div>
-                ))}
-              </div>
-            </Card>
-          </Col>
-          <Col xs={24} md={12}>
-            <Card title={<><BarChartOutlined /> Waste Disposal by Type</>} style={{ borderRadius: 10 }} loading={loading}>
-              {(stats?.wasteByType || []).length > 0 ? (
-                <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-                  {stats.wasteByType.map((w) => (
-                    <div key={w._id || "unknown"}>
-                      <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
-                        <Text style={{ color: isDark ? "#ccc" : undefined }}>{w._id || "Unknown"}</Text>
-                        <Text strong style={{ color: isDark ? "#fff" : undefined }}>
-                          {w.totalVolume.toLocaleString()} tons ({w.count} trips)
-                        </Text>
-                      </div>
-                      <Progress
-                        percent={100}
-                        strokeColor={w._id === "Residual" ? "#1890ff" : "#ff7a45"}
-                        showInfo={false}
-                        size="small"
-                      />
-                    </div>
-                  ))}
-                  <div style={{ marginTop: 8 }}>
-                    <Text type="secondary" style={{ fontSize: 12 }}>
-                      Company breakdown: LGU ({stats?.byCompanyType?.LGU || 0}) · Private ({stats?.byCompanyType?.Private || 0})
-                    </Text>
-                  </div>
-                </div>
-              ) : (
-                <Text type="secondary">No waste data yet.</Text>
-              )}
-            </Card>
-          </Col>
-        </Row>
-      </>
-    ),
-  });
-
-  // Trends tab — show only if monthly data exists
-  if (months.length > 0) {
-    tabItems.push({
-      key: "trends",
-      label: <><BarChartOutlined /> Trends</>,
-      children: (
-        <Row gutter={[16, 16]}>
-          <Col xs={24}>
-            <Card title={<><BarChartOutlined /> Monthly Submissions</>} style={{ borderRadius: 10 }}>
-              <div style={{ display: "flex", alignItems: "flex-end", gap: 8, height: 220, padding: "0 4px" }}>
-                {months.map((m, i) => (
-                  <div
-                    key={i}
-                    style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center" }}
-                  >
-                    <Text style={{ fontSize: 11, color: isDark ? "#ccc" : "#666", marginBottom: 4 }}>
-                      {m.count}
-                    </Text>
-                    <div
-                      style={{
-                        width: "100%",
-                        maxWidth: 48,
-                        height: `${Math.max((m.count / maxCount) * 180, 8)}px`,
-                        background: "linear-gradient(180deg, #1a3353 0%, #4fc3f7 100%)",
-                        borderRadius: "4px 4px 0 0",
-                        transition: "height 0.5s ease",
-                      }}
-                    />
-                    <Text style={{ fontSize: 10, color: isDark ? "#aaa" : "#999", marginTop: 4 }}>
-                      {m.label}
-                    </Text>
-                  </div>
-                ))}
-              </div>
-            </Card>
-          </Col>
-          {months.some((m) => m.volume > 0) && (
-            <Col xs={24}>
-              <Card title={<><RiseOutlined /> Monthly Volume (tons)</>} style={{ borderRadius: 10 }}>
-                <div style={{ display: "flex", alignItems: "flex-end", gap: 8, height: 220, padding: "0 4px" }}>
-                  {months.map((m, i) => {
-                    const maxVol = Math.max(...months.map((x) => x.volume), 1);
-                    return (
-                      <div
-                        key={i}
-                        style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center" }}
-                      >
-                        <Text style={{ fontSize: 11, color: isDark ? "#ccc" : "#666", marginBottom: 4 }}>
-                          {m.volume?.toLocaleString()}
-                        </Text>
-                        <div
-                          style={{
-                            width: "100%",
-                            maxWidth: 48,
-                            height: `${Math.max((m.volume / maxVol) * 180, 8)}px`,
-                            background: "linear-gradient(180deg, #389e0d 0%, #95de64 100%)",
-                            borderRadius: "4px 4px 0 0",
-                            transition: "height 0.5s ease",
-                          }}
-                        />
-                        <Text style={{ fontSize: 10, color: isDark ? "#aaa" : "#999", marginTop: 4 }}>
-                          {m.label}
-                        </Text>
-                      </div>
-                    );
-                  })}
-                </div>
-              </Card>
-            </Col>
-          )}
-        </Row>
-      ),
-    });
-  }
-
-  // Recent Activity tab — show only if submissions exist
-  if ((stats?.recentSubmissions || []).length > 0) {
-    tabItems.push({
-      key: "activity",
-      label: <><FileTextOutlined /> Recent Activity</>,
-      children: (
-        <Card title={<><FileTextOutlined /> Recent Submissions</>} style={{ borderRadius: 10 }}>
-          <Table
-            dataSource={stats.recentSubmissions}
-            columns={recentColumns}
-            rowKey="_id"
-            size="small"
-            pagination={false}
-            scroll={{ x: 600 }}
-          />
-        </Card>
-      ),
-    });
-  }
-
   // 10-Year SWM Plan tab
   if (swmStats && swmStats.totalRecords > 0) {
     const provList = swmStats.byProvinceList || [];
@@ -948,306 +1420,1460 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
     const divProv = swmStats.diversionByProvince || [];
     const wc = swmStats.wasteComposition || {};
 
+    // Year-over-year trend data
+    const trend = swmStats.yearlyTrend || [];
+    const trendByYear = {};
+    trend.forEach((t) => (trendByYear[t._id] = t));
+    const y2025 = trendByYear[2025] || {};
+    const y2026 = trendByYear[2026] || {};
+
+    // Helper: compute change between years
+    const trendDelta = (curr, prev) => {
+      if (prev == null || prev === 0) return null;
+      return ((curr - prev) / Math.abs(prev)) * 100;
+    };
+    const trendArrow = (delta) => {
+      if (delta == null) return null;
+      if (delta > 0) return { icon: "▲", color: "#52c41a" };
+      if (delta < 0) return { icon: "▼", color: "#ff4d4f" };
+      return { icon: "—", color: "#8c8c8c" };
+    };
+    // For metrics where decrease is good (e.g., non-compliant, waste gen)
+    const trendArrowInverse = (delta) => {
+      if (delta == null) return null;
+      if (delta > 0) return { icon: "▲", color: "#ff4d4f" };
+      if (delta < 0) return { icon: "▼", color: "#52c41a" };
+      return { icon: "—", color: "#8c8c8c" };
+    };
+
     const CARD_H = 280;
 
     tabItems.push({
       key: "swm-plan",
-      label: <><FundProjectionScreenOutlined /> 10-Year SWM Plan</>,
+      label: (
+        <>
+          <FundProjectionScreenOutlined /> 10-Year SWM Plan
+        </>
+      ),
       children: (
         <>
-        {/* Row 1: Full-width stat tiles */}
-        <Row gutter={[16, 16]} style={{ marginBottom: 16 }}>
-          <Col xs={12} sm={12} md={6}>
-            <Card hoverable style={{ borderRadius: 10, height: 110 }} loading={loading}>
-              <Statistic title="Total LGUs" value={swmStats.totalRecords} prefix={<EnvironmentOutlined style={{ color: "#1a3353" }} />} />
-            </Card>
-          </Col>
-          <Col xs={12} sm={12} md={6}>
-            <Card hoverable style={{ borderRadius: 10, height: 110 }} loading={loading}>
-              <Statistic title="Compliant" value={swmStats.byCompliance?.Compliant || 0} prefix={<SafetyCertificateOutlined style={{ color: "#52c41a" }} />} />
-            </Card>
-          </Col>
-          <Col xs={12} sm={12} md={6}>
-            <Card hoverable style={{ borderRadius: 10, height: 110 }} loading={loading}>
-              <Statistic title="Non-Compliant" value={swmStats.byCompliance?.["Non-Compliant"] || 0} styles={{ content: { color: "#ff4d4f" } }} prefix={<ClockCircleOutlined />} />
-            </Card>
-          </Col>
-          <Col xs={12} sm={12} md={6}>
-            <Card hoverable style={{ borderRadius: 10, height: 110 }} loading={loading}>
-              <Statistic title="Avg. Diversion" value={((wc.avgDiversionRate || 0) * 100).toFixed(1)} suffix="%" prefix={<RiseOutlined style={{ color: "#1890ff" }} />} />
-            </Card>
-          </Col>
-        </Row>
+          {/* Row 1: Full-width stat tiles */}
+          <Row gutter={[16, 16]} style={{ marginBottom: 16 }}>
+            <Col xs={12} sm={12} md={6}>
+              <Card
+                hoverable
+                style={{ borderRadius: 10, height: 110 }}
+                loading={loading}
+              >
+                <Statistic
+                  title="Total LGUs"
+                  value={swmStats.totalRecords}
+                  prefix={<EnvironmentOutlined style={{ color: "#1a3353" }} />}
+                  suffix={(() => {
+                    const d = trendDelta(y2026.totalRecords, y2025.totalRecords);
+                    const a = trendArrow(d);
+                    return a ? <span style={{ fontSize: 12, color: a.color, marginLeft: 4 }}>{a.icon} {Math.abs(d).toFixed(0)}%</span> : null;
+                  })()}
+                />
+              </Card>
+            </Col>
+            <Col xs={12} sm={12} md={6}>
+              <Card
+                hoverable
+                style={{ borderRadius: 10, height: 110 }}
+                loading={loading}
+              >
+                <Statistic
+                  title="Compliant"
+                  value={swmStats.byCompliance?.Compliant || 0}
+                  prefix={
+                    <SafetyCertificateOutlined style={{ color: "#52c41a" }} />
+                  }
+                  suffix={(() => {
+                    const d = trendDelta(y2026.compliant, y2025.compliant);
+                    const a = trendArrow(d);
+                    return a ? <span style={{ fontSize: 12, color: a.color, marginLeft: 4 }}>{a.icon} {Math.abs(d).toFixed(0)}%</span> : null;
+                  })()}
+                />
+              </Card>
+            </Col>
+            <Col xs={12} sm={12} md={6}>
+              <Card
+                hoverable
+                style={{ borderRadius: 10, height: 110 }}
+                loading={loading}
+              >
+                <Statistic
+                  title="Non-Compliant"
+                  value={swmStats.byCompliance?.["Non-Compliant"] || 0}
+                  styles={{ content: { color: "#ff4d4f" } }}
+                  prefix={<ClockCircleOutlined />}
+                  suffix={(() => {
+                    const d = trendDelta(y2026.nonCompliant, y2025.nonCompliant);
+                    const a = trendArrowInverse(d);
+                    return a ? <span style={{ fontSize: 12, color: a.color, marginLeft: 4 }}>{a.icon} {Math.abs(d).toFixed(0)}%</span> : null;
+                  })()}
+                />
+              </Card>
+            </Col>
+            <Col xs={12} sm={12} md={6}>
+              <Card
+                hoverable
+                style={{ borderRadius: 10, height: 110 }}
+                loading={loading}
+              >
+                <Statistic
+                  title="Avg. Diversion"
+                  value={((wc.avgDiversionRate || 0) * 100).toFixed(1)}
+                  suffix={<>%{(() => {
+                    const d = trendDelta(y2026.avgDiversionRate, y2025.avgDiversionRate);
+                    const a = trendArrow(d);
+                    return a ? <span style={{ fontSize: 12, color: a.color, marginLeft: 4 }}>{a.icon} {Math.abs(d).toFixed(0)}%</span> : null;
+                  })()}</>}
+                  prefix={<RiseOutlined style={{ color: "#1890ff" }} />}
+                />
+              </Card>
+            </Col>
+          </Row>
 
-        {/* Two-column layout: cards left, map right */}
-        <Row gutter={[16, 16]}>
-          {/* LEFT COLUMN — Stats cards */}
-          <Col xs={24} lg={14}>
-            <Row gutter={[16, 16]}>
-              {/* Compliance Status */}
-              <Col xs={24} sm={12}>
-                <Card title={<><PieChartOutlined /> Compliance Status</>} style={{ borderRadius: 10, height: CARD_H }} loading={loading} styles={{ body: { overflow: "auto", height: CARD_H - 57 } }}>
-                  <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-                    {[
-                      { label: "Compliant", count: swmStats.byCompliance?.Compliant || 0, color: "#52c41a" },
-                      { label: "Non-Compliant", count: swmStats.byCompliance?.["Non-Compliant"] || 0, color: "#ff4d4f" },
-                      { label: "Pending", count: swmStats.byCompliance?.Pending || 0, color: "#faad14" },
-                    ].map((s) => (
-                      <div key={s.label}>
-                        <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
-                          <Text style={{ color: isDark ? "#ccc" : undefined }}>{s.label}</Text>
-                          <Text strong style={{ color: isDark ? "#fff" : undefined }}>
-                            {s.count} {swmStats.totalRecords > 0 && <span style={{ color: "#999", fontWeight: 400 }}>({Math.round((s.count / swmStats.totalRecords) * 100)}%)</span>}
-                          </Text>
-                        </div>
-                        <Progress percent={swmStats.totalRecords > 0 ? Math.round((s.count / swmStats.totalRecords) * 100) : 0} strokeColor={s.color} showInfo={false} size="small" />
+          {/* Year-over-Year Trend Comparison */}
+          {trend.length >= 2 && (
+            <Row gutter={[16, 16]} style={{ marginBottom: 16 }}>
+              <Col span={24}>
+                <Card
+                  title={<><BarChartOutlined /> Year-over-Year Trend (2025 vs 2026)</>}
+                  style={{ borderRadius: 10 }}
+                  loading={loading}
+                  styles={{ body: { padding: "12px 24px" } }}
+                >
+                  <Row gutter={[24, 16]}>
+                    {/* Compliance Trend */}
+                    <Col xs={24} md={8}>
+                      <div style={{ marginBottom: 12 }}>
+                        <Text strong style={{ fontSize: 13, color: isDark ? "#ccc" : "#595959" }}>Compliance</Text>
                       </div>
-                    ))}
-                  </div>
-                </Card>
-              </Col>
+                      {[
+                        { label: "Compliant", key: "compliant", color: "#52c41a" },
+                        { label: "Non-Compliant", key: "nonCompliant", color: "#ff4d4f" },
+                      ].map((item) => {
+                        const v25 = y2025[item.key] || 0;
+                        const v26 = y2026[item.key] || 0;
+                        const maxVal = Math.max(v25, v26, 1);
+                        return (
+                          <div key={item.key} style={{ marginBottom: 10 }}>
+                            <Text style={{ fontSize: 11, color: isDark ? "#aaa" : "#999" }}>{item.label}</Text>
+                            <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 2 }}>
+                              <Text style={{ fontSize: 11, color: isDark ? "#aaa" : "#999", minWidth: 30 }}>2025</Text>
+                              <div style={{ flex: 1, height: 14, background: isDark ? "#2a2a2a" : "#f5f5f5", borderRadius: 3, overflow: "hidden" }}>
+                                <div style={{ width: `${(v25 / maxVal) * 100}%`, height: "100%", background: item.color, opacity: 0.5, borderRadius: 3, transition: "width 0.5s" }} />
+                              </div>
+                              <Text style={{ fontSize: 11, fontWeight: 600, minWidth: 24, textAlign: "right", color: isDark ? "#ccc" : undefined }}>{v25}</Text>
+                            </div>
+                            <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 2 }}>
+                              <Text style={{ fontSize: 11, color: isDark ? "#aaa" : "#999", minWidth: 30 }}>2026</Text>
+                              <div style={{ flex: 1, height: 14, background: isDark ? "#2a2a2a" : "#f5f5f5", borderRadius: 3, overflow: "hidden" }}>
+                                <div style={{ width: `${(v26 / maxVal) * 100}%`, height: "100%", background: item.color, borderRadius: 3, transition: "width 0.5s" }} />
+                              </div>
+                              <Text style={{ fontSize: 11, fontWeight: 600, minWidth: 24, textAlign: "right", color: isDark ? "#ccc" : undefined }}>{v26}</Text>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </Col>
 
-              {/* Waste Composition */}
-              <Col xs={24} sm={12}>
-                <Card title={<><BarChartOutlined /> Waste Composition</>} style={{ borderRadius: 10, height: CARD_H }} loading={loading} styles={{ body: { overflow: "auto", height: CARD_H - 57 } }}>
-                  <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-                    {[
-                      { label: "Biodegradable", pct: (wc.avgBiodegradable || 0) * 100, color: "#52c41a" },
-                      { label: "Recyclable", pct: (wc.avgRecyclable || 0) * 100, color: "#1890ff" },
-                      { label: "Residual", pct: (wc.avgResidual || 0) * 100, color: "#ff4d4f" },
-                      { label: "Special", pct: (wc.avgSpecial || 0) * 100, color: "#722ed1" },
-                    ].map((w) => (
-                      <div key={w.label}>
-                        <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
-                          <Text style={{ color: isDark ? "#ccc" : undefined }}>{w.label}</Text>
-                          <Text strong style={{ color: isDark ? "#fff" : undefined }}>{w.pct.toFixed(1)}%</Text>
-                        </div>
-                        <Progress percent={Math.round(w.pct)} strokeColor={w.color} showInfo={false} size="small" />
+                    {/* Diversion & Waste Trend */}
+                    <Col xs={24} md={8}>
+                      <div style={{ marginBottom: 12 }}>
+                        <Text strong style={{ fontSize: 13, color: isDark ? "#ccc" : "#595959" }}>Diversion & Waste</Text>
                       </div>
-                    ))}
-                  </div>
-                </Card>
-              </Col>
+                      {/* Avg Diversion Rate */}
+                      <div style={{ marginBottom: 10 }}>
+                        <Text style={{ fontSize: 11, color: isDark ? "#aaa" : "#999" }}>Avg. Diversion Rate</Text>
+                        {[
+                          { year: "2025", val: (y2025.avgDiversionRate || 0) * 100 },
+                          { year: "2026", val: (y2026.avgDiversionRate || 0) * 100 },
+                        ].map((r) => (
+                          <div key={r.year} style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 2 }}>
+                            <Text style={{ fontSize: 11, color: isDark ? "#aaa" : "#999", minWidth: 30 }}>{r.year}</Text>
+                            <div style={{ flex: 1, height: 14, background: isDark ? "#2a2a2a" : "#f5f5f5", borderRadius: 3, overflow: "hidden" }}>
+                              <div style={{ width: `${Math.min(r.val, 100)}%`, height: "100%", background: r.val >= 25 ? "#52c41a" : "#faad14", opacity: r.year === "2025" ? 0.5 : 1, borderRadius: 3, transition: "width 0.5s" }} />
+                            </div>
+                            <Text style={{ fontSize: 11, fontWeight: 600, minWidth: 40, textAlign: "right", color: isDark ? "#ccc" : undefined }}>{r.val.toFixed(1)}%</Text>
+                          </div>
+                        ))}
+                      </div>
+                      {/* Total Waste Generation */}
+                      <div style={{ marginBottom: 10 }}>
+                        <Text style={{ fontSize: 11, color: isDark ? "#aaa" : "#999" }}>Total Waste Generation</Text>
+                        {(() => {
+                          const w25 = y2025.totalWasteGen || 0;
+                          const w26 = y2026.totalWasteGen || 0;
+                          const maxW = Math.max(w25, w26, 1);
+                          return [
+                            { year: "2025", val: w25 },
+                            { year: "2026", val: w26 },
+                          ].map((r) => (
+                            <div key={r.year} style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 2 }}>
+                              <Text style={{ fontSize: 11, color: isDark ? "#aaa" : "#999", minWidth: 30 }}>{r.year}</Text>
+                              <div style={{ flex: 1, height: 14, background: isDark ? "#2a2a2a" : "#f5f5f5", borderRadius: 3, overflow: "hidden" }}>
+                                <div style={{ width: `${(r.val / maxW) * 100}%`, height: "100%", background: "#1890ff", opacity: r.year === "2025" ? 0.5 : 1, borderRadius: 3, transition: "width 0.5s" }} />
+                              </div>
+                              <Text style={{ fontSize: 11, fontWeight: 600, minWidth: 55, textAlign: "right", color: isDark ? "#ccc" : undefined }}>{r.val.toLocaleString()}</Text>
+                            </div>
+                          ));
+                        })()}
+                      </div>
+                    </Col>
 
-              {/* LGUs per Province */}
-              <Col xs={24} sm={12}>
-                <Card title={<><BarChartOutlined /> LGUs per Province</>} style={{ borderRadius: 10, height: CARD_H }} loading={loading} styles={{ body: { overflow: "auto", height: CARD_H - 57 } }}>
-                  <div style={{ display: "flex", alignItems: "flex-end", gap: 6, height: 170, padding: "0 2px" }}>
-                    {provList.map((p, i) => (
-                      <div key={i} style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center" }}>
-                        <Text style={{ fontSize: 10, color: isDark ? "#ccc" : "#666", marginBottom: 2 }}>{p.count}</Text>
-                        <div style={{ width: "100%", maxWidth: 32, height: `${Math.max((p.count / maxProvCount) * 140, 6)}px`, background: "linear-gradient(180deg, #1a3353 0%, #4fc3f7 100%)", borderRadius: "3px 3px 0 0", transition: "height 0.5s ease" }} />
-                        <Text style={{ fontSize: 8, color: isDark ? "#aaa" : "#999", marginTop: 2, textAlign: "center" }}>{p._id}</Text>
+                    {/* Waste Composition Trend */}
+                    <Col xs={24} md={8}>
+                      <div style={{ marginBottom: 12 }}>
+                        <Text strong style={{ fontSize: 13, color: isDark ? "#ccc" : "#595959" }}>Waste Composition</Text>
                       </div>
-                    ))}
-                  </div>
-                </Card>
-              </Col>
-
-              {/* Diversion Rate by Province */}
-              <Col xs={24} sm={12}>
-                <Card title={<><RiseOutlined /> Diversion by Province</>} style={{ borderRadius: 10, height: CARD_H }} loading={loading} styles={{ body: { overflow: "auto", height: CARD_H - 57 } }}>
-                  <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                    {divProv.slice(0, 7).map((d) => (
-                      <div key={d._id}>
-                        <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 2 }}>
-                          <Text style={{ color: isDark ? "#ccc" : undefined, fontSize: 12 }}>{d._id}</Text>
-                          <Text strong style={{ color: isDark ? "#fff" : undefined, fontSize: 12 }}>
-                            {(d.avgDiversion * 100).toFixed(1)}% <span style={{ color: "#999", fontWeight: 400, fontSize: 10 }}>({d.count})</span>
-                          </Text>
-                        </div>
-                        <Progress percent={Math.round(d.avgDiversion * 100)} strokeColor={d.avgDiversion * 100 >= 50 ? "#52c41a" : "#faad14"} showInfo={false} size="small" />
+                      {[
+                        { label: "Biodegradable", key: "avgBiodegradable", color: "#52c41a" },
+                        { label: "Recyclable", key: "avgRecyclable", color: "#1890ff" },
+                        { label: "Residual", key: "avgResidual", color: "#ff4d4f" },
+                        { label: "Special", key: "avgSpecial", color: "#722ed1" },
+                      ].map((item) => {
+                        const v25 = ((y2025[item.key] || 0) * 100);
+                        const v26 = ((y2026[item.key] || 0) * 100);
+                        return (
+                          <div key={item.key} style={{ marginBottom: 6 }}>
+                            <Text style={{ fontSize: 11, color: isDark ? "#aaa" : "#999" }}>{item.label}</Text>
+                            <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                              <Tooltip title={`2025: ${v25.toFixed(1)}%`}>
+                                <div style={{ flex: 1, height: 10, background: isDark ? "#2a2a2a" : "#f5f5f5", borderRadius: 3, overflow: "hidden" }}>
+                                  <div style={{ width: `${Math.min(v25, 100)}%`, height: "100%", background: item.color, opacity: 0.5, borderRadius: 3 }} />
+                                </div>
+                              </Tooltip>
+                              <Tooltip title={`2026: ${v26.toFixed(1)}%`}>
+                                <div style={{ flex: 1, height: 10, background: isDark ? "#2a2a2a" : "#f5f5f5", borderRadius: 3, overflow: "hidden" }}>
+                                  <div style={{ width: `${Math.min(v26, 100)}%`, height: "100%", background: item.color, borderRadius: 3 }} />
+                                </div>
+                              </Tooltip>
+                              <Text style={{ fontSize: 10, color: isDark ? "#aaa" : "#999", minWidth: 65, textAlign: "right" }}>
+                                {v25.toFixed(0)}% → {v26.toFixed(0)}%
+                              </Text>
+                            </div>
+                          </div>
+                        );
+                      })}
+                      <div style={{ display: "flex", gap: 12, fontSize: 10, color: "#999", marginTop: 4 }}>
+                        <span style={{ display: "flex", alignItems: "center", gap: 3 }}><span style={{ width: 12, height: 6, borderRadius: 2, background: "#8c8c8c", opacity: 0.5, display: "inline-block" }} /> 2025</span>
+                        <span style={{ display: "flex", alignItems: "center", gap: 3 }}><span style={{ width: 12, height: 6, borderRadius: 2, background: "#8c8c8c", display: "inline-block" }} /> 2026</span>
                       </div>
-                    ))}
-                  </div>
-                </Card>
-              </Col>
-
-              {/* Renewal Status */}
-              <Col xs={24} sm={12}>
-                <Card title="Renewal Status" style={{ borderRadius: 10, height: CARD_H }} loading={loading} styles={{ body: { overflow: "auto", height: CARD_H - 57 } }}>
-                  <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-                    {Object.entries(swmStats.renewalStatus || {}).map(([key, count]) => (
-                      <div key={key}>
-                        <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
-                          <Text style={{ color: isDark ? "#ccc" : undefined }}>{key}</Text>
-                          <Text strong style={{ color: isDark ? "#fff" : undefined }}>{count}</Text>
-                        </div>
-                        <Progress percent={swmStats.totalRecords > 0 ? Math.round((count / swmStats.totalRecords) * 100) : 0} strokeColor={key === "Approved" ? "#52c41a" : key === "For Renewal" ? "#faad14" : "#1890ff"} showInfo={false} size="small" />
-                      </div>
-                    ))}
-                  </div>
-                </Card>
-              </Col>
-
-              {/* Manila Bay Area */}
-              <Col xs={24} sm={12}>
-                <Card title="Manila Bay Area" style={{ borderRadius: 10, height: CARD_H }} loading={loading} styles={{ body: { overflow: "auto", height: CARD_H - 57 } }}>
-                  <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-                    {Object.entries(swmStats.byManilaBayArea || {}).map(([key, count]) => (
-                      <div key={key}>
-                        <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
-                          <Text style={{ color: isDark ? "#ccc" : undefined }}>{key || "Unspecified"}</Text>
-                          <Text strong style={{ color: isDark ? "#fff" : undefined }}>{count}</Text>
-                        </div>
-                        <Progress percent={swmStats.totalRecords > 0 ? Math.round((count / swmStats.totalRecords) * 100) : 0} strokeColor={key === "MBA" ? "#1890ff" : "#8c8c8c"} showInfo={false} size="small" />
-                      </div>
-                    ))}
-                  </div>
+                    </Col>
+                  </Row>
                 </Card>
               </Col>
             </Row>
-          </Col>
+          )}
 
-          {/* RIGHT COLUMN — Map (sticky) */}
-          <Col xs={24} lg={10}>
-            <div style={{ position: "sticky", top: 80, height: "calc(100vh - 200px)", minHeight: 520 }}>
-              <Card
-                size="small"
-                title={<><GlobalOutlined /> LGU Location Map <Tag bordered={false} color="blue">{filteredMapPts.length} plotted</Tag>{filteredMapPts.length !== mapPts.length && <Tag bordered={false} color="default">of {mapPts.length}</Tag>}</>}
-                style={{ borderRadius: 10, height: "100%" }}
-                loading={loading}
-                extra={
-                  <Space size={4}>
-                    <Tooltip title="Street"><Button size="small" type={tileKey === "street" ? "primary" : "default"} icon={<GlobalOutlined />} onClick={() => setTileKey("street")} /></Tooltip>
-                    <Tooltip title="Satellite"><Button size="small" type={tileKey === "satellite" ? "primary" : "default"} icon={<EnvironmentOutlined />} onClick={() => setTileKey("satellite")} /></Tooltip>
-                    <Tooltip title="Terrain"><Button size="small" type={tileKey === "terrain" ? "primary" : "default"} icon={<FundOutlined />} onClick={() => setTileKey("terrain")} /></Tooltip>
-                    <Tooltip title="Dark"><Button size="small" type={tileKey === "dark" ? "primary" : "default"} icon={<AppstoreOutlined />} onClick={() => setTileKey("dark")} /></Tooltip>
-                  </Space>
-                }
-                styles={{ body: { padding: 0, height: "calc(100% - 100px)" } }}
-              >
-                {/* Filter bar */}
-                <div style={{ display: "flex", gap: 6, padding: "8px 10px", background: "#fafafa", borderBottom: "1px solid #f0f0f0", flexWrap: "wrap" }}>
-                  <Select size="small" allowClear placeholder="Province" value={mapFilterProvince} onChange={setMapFilterProvince} options={provinceOptions} style={{ minWidth: 120, flex: 1 }} />
-                  <Select size="small" allowClear placeholder="Plan Status" value={mapFilterStatus} onChange={setMapFilterStatus} options={[{ label: "✓ Approved", value: "Approved" }, { label: "▲ For Renewal", value: "For Renewal" }, { label: "● Other", value: "Other" }]} style={{ minWidth: 110, flex: 1 }} />
-                  {(mapFilterProvince || mapFilterStatus) && <Button size="small" type="link" danger onClick={() => { setMapFilterProvince(null); setMapFilterStatus(null); }}>Clear</Button>}
-                  {/* Legend */}
-                  <div style={{ display: "flex", gap: 8, alignItems: "center", marginLeft: "auto", fontSize: 11, color: "#999" }}>
-                    <span><span style={{ display: "inline-block", width: 10, height: 10, borderRadius: "50%", background: "#52c41a", marginRight: 3, verticalAlign: "middle" }} />Approved</span>
-                    <span><span style={{ display: "inline-block", width: 10, height: 10, borderRadius: "50%", background: "#faad14", marginRight: 3, verticalAlign: "middle" }} />For Renewal</span>
-                    <span><span style={{ display: "inline-block", width: 10, height: 10, borderRadius: "50%", background: "#8c8c8c", marginRight: 3, verticalAlign: "middle" }} />Other</span>
-                  </div>
-                </div>
-                {filteredMapPts.length > 0 ? (
-                  <MapContainer
-                    center={[15.0, 120.7]}
-                    zoom={8}
-                    style={{ height: "100%", width: "100%", borderRadius: "0 0 10px 10px" }}
-                    scrollWheelZoom={true}
-                    zoomControl={false}
+          {/* Two-column layout: cards left, map right */}
+          <Row gutter={[16, 16]}>
+            {/* LEFT COLUMN — Stats cards */}
+            <Col xs={24} lg={14}>
+              <Row gutter={[16, 16]}>
+                {/* Compliance Status */}
+                <Col xs={24} sm={12}>
+                  <Card
+                    title={
+                      <>
+                        <PieChartOutlined /> Compliance Status
+                      </>
+                    }
+                    style={{ borderRadius: 10, height: CARD_H }}
+                    loading={loading}
+                    styles={{ body: { overflow: "auto", height: CARD_H - 57 } }}
                   >
-                    <TileLayer key={tileKey} attribution={tile.attr} url={tile.url} />
-                    <FitBounds points={filteredMapPts} />
-                    <ProvinceBoundary key={mapFilterProvince || "__none__"} province={mapFilterProvince} />
-                    {filteredMapPts.map((pt, idx) => (
-                      <Marker
-                        key={pt.record._id || idx}
-                        position={[pt.lat, pt.lng]}
-                        icon={planStatusIcon(pt.record.forRenewal)}
-                      >
-                        <Popup maxWidth={320} minWidth={260}>
-                          <div className="popup-light" style={{ fontSize: 12, lineHeight: 1.7, padding: 2 }}>
-                            {/* Header */}
-                            <div style={{ fontWeight: 700, fontSize: 14, marginBottom: 2 }}>{pt.record.municipality}</div>
-                            <div style={{ display: "flex", gap: 4, flexWrap: "wrap", marginBottom: 6 }}>
-                              <span style={{ display: "inline-flex", alignItems: "center", gap: 3, background: "#e6f7ff", color: "#1890ff", borderRadius: 4, padding: "1px 6px", fontSize: 11 }}><EnvironmentOutlined /> {pt.record.province}</span>
-                              {pt.record.congressionalDistrict && <span style={{ display: "inline-flex", alignItems: "center", gap: 3, background: "#f0f0f0", color: "#595959", borderRadius: 4, padding: "1px 6px", fontSize: 11 }}>{pt.record.congressionalDistrict}</span>}
-                              {pt.record.manilaBayArea && <span style={{ display: "inline-flex", alignItems: "center", gap: 3, background: pt.record.manilaBayArea === "MBA" ? "#e6f7ff" : "#f5f5f5", color: pt.record.manilaBayArea === "MBA" ? "#1890ff" : "#8c8c8c", borderRadius: 4, padding: "1px 6px", fontSize: 11 }}><GlobalOutlined /> {pt.record.manilaBayArea}</span>}
-                            </div>
-                            <hr style={{ margin: "4px 0 6px", border: "none", borderTop: "1px solid #f0f0f0" }} />
-
-                            {/* Compliance & Renewal */}
-                            <div style={{ display: "flex", gap: 4, flexWrap: "wrap", marginBottom: 6 }}>
-                              {(() => { const r = pt.record.remarksAndRecommendation || ""; const isC = /compliant/i.test(r) && !/non/i.test(r); const isNC = /non/i.test(r) && /compliant/i.test(r); return <span className={`status-badge ${isC ? "status-badge-compliant" : isNC ? "status-badge-noncompliant" : "status-badge-pending"}`}><SafetyCertificateOutlined /> {isC ? "Compliant" : isNC ? "Non-Compliant" : "Pending"}</span>; })()}
-                              {pt.record.forRenewal && <span className={`status-badge ${/approved/i.test(pt.record.forRenewal) ? "status-badge-approved" : /renewal/i.test(pt.record.forRenewal) ? "status-badge-renewal" : "status-badge-other"}`}><AuditOutlined /> {pt.record.forRenewal}</span>}
-                            </div>
-
-                            {/* Plan Info */}
-                            <div style={{ display: "flex", flexDirection: "column", gap: 3, marginBottom: 6 }}>
-                              {pt.record.typeOfSWMPlan && <div style={{ display: "flex", alignItems: "center", gap: 5 }}><FileDoneOutlined style={{ color: "#1890ff" }} /> <span style={{ color: "#595959" }}>Plan:</span> <strong>{pt.record.typeOfSWMPlan}</strong></div>}
-                              {pt.record.periodCovered && <div style={{ display: "flex", alignItems: "center", gap: 5 }}><ClockCircleOutlined style={{ color: "#722ed1" }} /> <span style={{ color: "#595959" }}>Period:</span> {pt.record.periodCovered}</div>}
-                              {pt.record.yearApproved && <div style={{ display: "flex", alignItems: "center", gap: 5 }}><AuditOutlined style={{ color: "#52c41a" }} /> <span style={{ color: "#595959" }}>Approved:</span> {pt.record.yearApproved}</div>}
-                            </div>
-
-                            {/* Environmental Data */}
-                            <div style={{ background: "#fafafa", borderRadius: 6, padding: "6px 8px", marginBottom: 6 }}>
-                              <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 3 }}>
-                                <span style={{ color: "#595959" }}><BarChartOutlined style={{ color: "#1890ff" }} /> Diversion Rate</span>
-                                <strong style={{ color: pt.record.wasteDiversionRate >= 0.25 ? "#52c41a" : "#ff4d4f" }}>{pt.record.wasteDiversionRate ? `${(pt.record.wasteDiversionRate * 100).toFixed(1)}%` : "—"}</strong>
-                              </div>
-                              {pt.record.totalWasteGeneration != null && <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 3 }}>
-                                <span style={{ color: "#595959" }}><DeleteOutlined style={{ color: "#ff4d4f" }} /> Waste Gen.</span>
-                                <strong>{pt.record.totalWasteGeneration.toLocaleString()} tons</strong>
-                              </div>}
-                              {pt.record.pcg != null && <div style={{ display: "flex", justifyContent: "space-between" }}>
-                                <span style={{ color: "#595959" }}><ExperimentOutlined style={{ color: "#722ed1" }} /> PCG</span>
-                                <strong>{pt.record.pcg}</strong>
-                              </div>}
-                            </div>
-
-                            {/* Waste Composition mini bars */}
-                            {(pt.record.biodegradablePercent || pt.record.recyclablePercent || pt.record.residualPercent || pt.record.specialPercent) && (
-                              <div style={{ marginBottom: 6 }}>
-                                <div style={{ fontSize: 11, color: "#595959", marginBottom: 2, fontWeight: 600 }}>Waste Composition</div>
-                                <div style={{ display: "flex", gap: 2, height: 8, borderRadius: 4, overflow: "hidden" }}>
-                                  {pt.record.biodegradablePercent > 0 && <div title={`Biodegradable ${(pt.record.biodegradablePercent * 100).toFixed(1)}%`} style={{ flex: pt.record.biodegradablePercent, background: "#52c41a" }} />}
-                                  {pt.record.recyclablePercent > 0 && <div title={`Recyclable ${(pt.record.recyclablePercent * 100).toFixed(1)}%`} style={{ flex: pt.record.recyclablePercent, background: "#1890ff" }} />}
-                                  {pt.record.residualPercent > 0 && <div title={`Residual ${(pt.record.residualPercent * 100).toFixed(1)}%`} style={{ flex: pt.record.residualPercent, background: "#ff4d4f" }} />}
-                                  {pt.record.specialPercent > 0 && <div title={`Special ${(pt.record.specialPercent * 100).toFixed(1)}%`} style={{ flex: pt.record.specialPercent, background: "#722ed1" }} />}
-                                </div>
-                                <div style={{ display: "flex", gap: 8, fontSize: 10, color: "#999", marginTop: 2, flexWrap: "wrap" }}>
-                                  <span><span style={{ display: "inline-block", width: 6, height: 6, borderRadius: 1, background: "#52c41a", marginRight: 2 }} />Bio {(pt.record.biodegradablePercent * 100).toFixed(0)}%</span>
-                                  <span><span style={{ display: "inline-block", width: 6, height: 6, borderRadius: 1, background: "#1890ff", marginRight: 2 }} />Rec {(pt.record.recyclablePercent * 100).toFixed(0)}%</span>
-                                  <span><span style={{ display: "inline-block", width: 6, height: 6, borderRadius: 1, background: "#ff4d4f", marginRight: 2 }} />Res {(pt.record.residualPercent * 100).toFixed(0)}%</span>
-                                  <span><span style={{ display: "inline-block", width: 6, height: 6, borderRadius: 1, background: "#722ed1", marginRight: 2 }} />Spc {(pt.record.specialPercent * 100).toFixed(0)}%</span>
-                                </div>
-                              </div>
-                            )}
-
-                            {/* Disposal */}
-                            {pt.record.lguFinalDisposal && <div style={{ display: "flex", alignItems: "center", gap: 5, marginBottom: 4 }}><ContainerOutlined style={{ color: "#fa8c16" }} /> <span style={{ color: "#595959" }}>Disposal:</span> {pt.record.lguFinalDisposal}</div>}
-
-                            {/* Personnel */}
-                            <hr style={{ margin: "4px 0 5px", border: "none", borderTop: "1px solid #f0f0f0" }} />
-                            <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
-                              {pt.record.focalPerson && <div style={{ display: "flex", alignItems: "center", gap: 5 }}><UserOutlined style={{ color: "#1890ff" }} /> <span style={{ color: "#595959" }}>Focal:</span> <strong>{pt.record.focalPerson}</strong></div>}
-                              {pt.record.enmoAssigned && <div style={{ display: "flex", alignItems: "center", gap: 5 }}><TeamOutlined style={{ color: "#52c41a" }} /> <span style={{ color: "#595959" }}>ENMO:</span> {pt.record.enmoAssigned}</div>}
-                            </div>
-
-                            {/* Remarks */}
-                            {pt.record.remarksAndRecommendation && (
-                              <div style={{ marginTop: 6, background: "#fffbe6", borderRadius: 4, padding: "4px 6px", fontSize: 11, color: "#ad8b00" }}>
-                                <AlertOutlined /> {pt.record.remarksAndRecommendation}
-                              </div>
-                            )}
-
-                            {/* Signed Document */}
-                            {pt.record.signedDocument && (
-                              <a href={pt.record.signedDocument} target="_blank" rel="noopener noreferrer" style={{ display: "flex", alignItems: "center", gap: 5, marginTop: 6, padding: "4px 8px", background: "#e6f7ff", borderRadius: 4, fontSize: 11, color: "#1890ff", textDecoration: "none", fontWeight: 600 }}>
-                                <LinkOutlined /> View Signed Document
-                              </a>
-                            )}
-
-                            {/* Quick Actions */}
-                            <div style={{ display: "flex", gap: 4, marginTop: 8, paddingTop: 6, borderTop: "1px solid #f0f0f0" }}>
-                              <button onClick={() => { api.get(`/ten-year-swm/${pt.record._id}`).then(({ data }) => setMapViewRecord(data)).catch(() => setMapViewRecord(pt.record)); }} className="popup-action-btn" title="View Full Record"><EyeOutlined /> View</button>
-                              <button onClick={() => { const txt = `${pt.record.municipality}, ${pt.record.province} (${pt.lat}, ${pt.lng})`; navigator.clipboard.writeText(txt); }} className="popup-action-btn" title="Copy Location"><CopyOutlined /> Copy</button>
-                            </div>
+                    <div
+                      style={{
+                        display: "flex",
+                        flexDirection: "column",
+                        gap: 12,
+                      }}
+                    >
+                      {[
+                        {
+                          label: "Compliant",
+                          count: swmStats.byCompliance?.Compliant || 0,
+                          color: "#52c41a",
+                        },
+                        {
+                          label: "Non-Compliant",
+                          count: swmStats.byCompliance?.["Non-Compliant"] || 0,
+                          color: "#ff4d4f",
+                        },
+                        {
+                          label: "Pending",
+                          count: swmStats.byCompliance?.Pending || 0,
+                          color: "#faad14",
+                        },
+                      ].map((s) => (
+                        <div key={s.label}>
+                          <div
+                            style={{
+                              display: "flex",
+                              justifyContent: "space-between",
+                              marginBottom: 4,
+                            }}
+                          >
+                            <Text
+                              style={{ color: isDark ? "#ccc" : undefined }}
+                            >
+                              {s.label}
+                            </Text>
+                            <Text
+                              strong
+                              style={{ color: isDark ? "#fff" : undefined }}
+                            >
+                              {s.count}{" "}
+                              {swmStats.totalRecords > 0 && (
+                                <span
+                                  style={{ color: "#999", fontWeight: 400 }}
+                                >
+                                  (
+                                  {Math.round(
+                                    (s.count / swmStats.totalRecords) * 100,
+                                  )}
+                                  %)
+                                </span>
+                              )}
+                            </Text>
                           </div>
-                        </Popup>
-                      </Marker>
-                    ))}
-                  </MapContainer>
-                ) : (
-                  <div style={{ height: "100%", display: "flex", alignItems: "center", justifyContent: "center" }}>
-                    <Text type="secondary">No coordinate data available</Text>
+                          <Progress
+                            percent={
+                              swmStats.totalRecords > 0
+                                ? Math.round(
+                                    (s.count / swmStats.totalRecords) * 100,
+                                  )
+                                : 0
+                            }
+                            strokeColor={s.color}
+                            showInfo={false}
+                            size="small"
+                          />
+                        </div>
+                      ))}
+                    </div>
+                  </Card>
+                </Col>
+
+                {/* Waste Composition */}
+                <Col xs={24} sm={12}>
+                  <Card
+                    title={
+                      <>
+                        <BarChartOutlined /> Waste Composition
+                      </>
+                    }
+                    style={{ borderRadius: 10, height: CARD_H }}
+                    loading={loading}
+                    styles={{ body: { overflow: "auto", height: CARD_H - 57 } }}
+                  >
+                    <div
+                      style={{
+                        display: "flex",
+                        flexDirection: "column",
+                        gap: 12,
+                      }}
+                    >
+                      {[
+                        {
+                          label: "Biodegradable",
+                          pct: (wc.avgBiodegradable || 0) * 100,
+                          color: "#52c41a",
+                        },
+                        {
+                          label: "Recyclable",
+                          pct: (wc.avgRecyclable || 0) * 100,
+                          color: "#1890ff",
+                        },
+                        {
+                          label: "Residual",
+                          pct: (wc.avgResidual || 0) * 100,
+                          color: "#ff4d4f",
+                        },
+                        {
+                          label: "Special",
+                          pct: (wc.avgSpecial || 0) * 100,
+                          color: "#722ed1",
+                        },
+                      ].map((w) => (
+                        <div key={w.label}>
+                          <div
+                            style={{
+                              display: "flex",
+                              justifyContent: "space-between",
+                              marginBottom: 4,
+                            }}
+                          >
+                            <Text
+                              style={{ color: isDark ? "#ccc" : undefined }}
+                            >
+                              {w.label}
+                            </Text>
+                            <Text
+                              strong
+                              style={{ color: isDark ? "#fff" : undefined }}
+                            >
+                              {w.pct.toFixed(1)}%
+                            </Text>
+                          </div>
+                          <Progress
+                            percent={Math.round(w.pct)}
+                            strokeColor={w.color}
+                            showInfo={false}
+                            size="small"
+                          />
+                        </div>
+                      ))}
+                    </div>
+                  </Card>
+                </Col>
+
+                {/* LGUs per Province */}
+                <Col xs={24} sm={12}>
+                  <Card
+                    title={
+                      <>
+                        <BarChartOutlined /> LGUs per Province
+                      </>
+                    }
+                    style={{ borderRadius: 10, height: CARD_H }}
+                    loading={loading}
+                    styles={{ body: { overflow: "auto", height: CARD_H - 57 } }}
+                  >
+                    <div
+                      style={{
+                        display: "flex",
+                        flexDirection: "column",
+                        gap: 5,
+                        maxHeight: 170,
+                        overflowY: "auto",
+                        padding: "0 2px",
+                      }}
+                    >
+                      {provList.map((p, i) => (
+                        <div
+                          key={i}
+                          style={{
+                            display: "flex",
+                            alignItems: "center",
+                            gap: 6,
+                          }}
+                        >
+                          <Text
+                            style={{
+                              fontSize: 10,
+                              color: isDark ? "#aaa" : "#999",
+                              minWidth: 70,
+                              textAlign: "right",
+                              whiteSpace: "nowrap",
+                              overflow: "hidden",
+                              textOverflow: "ellipsis",
+                            }}
+                          >
+                            {p._id}
+                          </Text>
+                          <div
+                            style={{
+                              flex: 1,
+                              height: 16,
+                              background: isDark ? "#2a2a2a" : "#f5f5f5",
+                              borderRadius: 3,
+                              overflow: "hidden",
+                            }}
+                          >
+                            <div
+                              style={{
+                                width: `${Math.max((p.count / maxProvCount) * 100, 4)}%`,
+                                height: "100%",
+                                background:
+                                  "linear-gradient(90deg, #1a3353 0%, #4fc3f7 100%)",
+                                borderRadius: "3px 0 0 3px",
+                                transition: "width 0.5s ease",
+                              }}
+                            />
+                          </div>
+                          <Text
+                            style={{
+                              fontSize: 10,
+                              color: isDark ? "#ccc" : "#666",
+                              minWidth: 20,
+                              textAlign: "right",
+                              fontWeight: 600,
+                            }}
+                          >
+                            {p.count}
+                          </Text>
+                        </div>
+                      ))}
+                    </div>
+                  </Card>
+                </Col>
+
+                {/* Diversion Rate by Province */}
+                <Col xs={24} sm={12}>
+                  <Card
+                    title={
+                      <>
+                        <RiseOutlined /> Diversion by Province
+                      </>
+                    }
+                    style={{ borderRadius: 10, height: CARD_H }}
+                    loading={loading}
+                    styles={{ body: { overflow: "auto", height: CARD_H - 57 } }}
+                  >
+                    <div
+                      style={{
+                        display: "flex",
+                        flexDirection: "column",
+                        gap: 8,
+                      }}
+                    >
+                      {divProv.slice(0, 7).map((d) => (
+                        <div key={d._id}>
+                          <div
+                            style={{
+                              display: "flex",
+                              justifyContent: "space-between",
+                              marginBottom: 2,
+                            }}
+                          >
+                            <Text
+                              style={{
+                                color: isDark ? "#ccc" : undefined,
+                                fontSize: 12,
+                              }}
+                            >
+                              {d._id}
+                            </Text>
+                            <Text
+                              strong
+                              style={{
+                                color: isDark ? "#fff" : undefined,
+                                fontSize: 12,
+                              }}
+                            >
+                              {(d.avgDiversion * 100).toFixed(1)}%{" "}
+                              <span
+                                style={{
+                                  color: "#999",
+                                  fontWeight: 400,
+                                  fontSize: 10,
+                                }}
+                              >
+                                ({d.count})
+                              </span>
+                            </Text>
+                          </div>
+                          <Progress
+                            percent={Math.round(d.avgDiversion * 100)}
+                            strokeColor={
+                              d.avgDiversion * 100 >= 50 ? "#52c41a" : "#faad14"
+                            }
+                            showInfo={false}
+                            size="small"
+                          />
+                        </div>
+                      ))}
+                    </div>
+                  </Card>
+                </Col>
+
+                {/* Renewal Status */}
+                <Col xs={24} sm={12}>
+                  <Card
+                    title="Renewal Status"
+                    style={{ borderRadius: 10, height: CARD_H }}
+                    loading={loading}
+                    styles={{ body: { overflow: "auto", height: CARD_H - 57 } }}
+                  >
+                    <div
+                      style={{
+                        display: "flex",
+                        flexDirection: "column",
+                        gap: 12,
+                      }}
+                    >
+                      {Object.entries(swmStats.renewalStatus || {}).map(
+                        ([key, count]) => (
+                          <div key={key}>
+                            <div
+                              style={{
+                                display: "flex",
+                                justifyContent: "space-between",
+                                marginBottom: 4,
+                              }}
+                            >
+                              <Text
+                                style={{ color: isDark ? "#ccc" : undefined }}
+                              >
+                                {key}
+                              </Text>
+                              <Text
+                                strong
+                                style={{ color: isDark ? "#fff" : undefined }}
+                              >
+                                {count}
+                              </Text>
+                            </div>
+                            <Progress
+                              percent={
+                                swmStats.totalRecords > 0
+                                  ? Math.round(
+                                      (count / swmStats.totalRecords) * 100,
+                                    )
+                                  : 0
+                              }
+                              strokeColor={
+                                key === "Approved"
+                                  ? "#52c41a"
+                                  : key === "For Renewal"
+                                    ? "#faad14"
+                                    : "#1890ff"
+                              }
+                              showInfo={false}
+                              size="small"
+                            />
+                          </div>
+                        ),
+                      )}
+                    </div>
+                  </Card>
+                </Col>
+
+                {/* Manila Bay Area */}
+                <Col xs={24} sm={12}>
+                  <Card
+                    title="Manila Bay Area"
+                    style={{ borderRadius: 10, height: CARD_H }}
+                    loading={loading}
+                    styles={{ body: { overflow: "auto", height: CARD_H - 57 } }}
+                  >
+                    <div
+                      style={{
+                        display: "flex",
+                        flexDirection: "column",
+                        gap: 12,
+                      }}
+                    >
+                      {Object.entries(swmStats.byManilaBayArea || {}).map(
+                        ([key, count]) => (
+                          <div key={key}>
+                            <div
+                              style={{
+                                display: "flex",
+                                justifyContent: "space-between",
+                                marginBottom: 4,
+                              }}
+                            >
+                              <Text
+                                style={{ color: isDark ? "#ccc" : undefined }}
+                              >
+                                {key || "Unspecified"}
+                              </Text>
+                              <Text
+                                strong
+                                style={{ color: isDark ? "#fff" : undefined }}
+                              >
+                                {count}
+                              </Text>
+                            </div>
+                            <Progress
+                              percent={
+                                swmStats.totalRecords > 0
+                                  ? Math.round(
+                                      (count / swmStats.totalRecords) * 100,
+                                    )
+                                  : 0
+                              }
+                              strokeColor={
+                                key === "MBA" ? "#1890ff" : "#8c8c8c"
+                              }
+                              showInfo={false}
+                              size="small"
+                            />
+                          </div>
+                        ),
+                      )}
+                    </div>
+                  </Card>
+                </Col>
+              </Row>
+            </Col>
+
+            {/* RIGHT COLUMN — Map (sticky) */}
+            <Col xs={24} lg={10}>
+              <div
+                style={{
+                  position: "sticky",
+                  top: 80,
+                  height: "calc(100vh - 200px)",
+                  minHeight: 520,
+                }}
+              >
+                <Card
+                  size="small"
+                  title={
+                    <>
+                      <GlobalOutlined /> LGU Location Map{" "}
+                      <Tag bordered={false} color="blue">
+                        {filteredMapPts.length} plotted
+                      </Tag>
+                      {filteredMapPts.length !== mapPts.length && (
+                        <Tag bordered={false} color="default">
+                          of {mapPts.length}
+                        </Tag>
+                      )}
+                    </>
+                  }
+                  style={{ borderRadius: 10, height: "100%" }}
+                  loading={loading}
+                  extra={
+                    <Space size={4}>
+                      <Tooltip title="Street">
+                        <Button
+                          size="small"
+                          type={tileKey === "street" ? "primary" : "default"}
+                          icon={<GlobalOutlined />}
+                          onClick={() => setTileKey("street")}
+                        />
+                      </Tooltip>
+                      <Tooltip title="Satellite">
+                        <Button
+                          size="small"
+                          type={tileKey === "satellite" ? "primary" : "default"}
+                          icon={<EnvironmentOutlined />}
+                          onClick={() => setTileKey("satellite")}
+                        />
+                      </Tooltip>
+                      <Tooltip title="Terrain">
+                        <Button
+                          size="small"
+                          type={tileKey === "terrain" ? "primary" : "default"}
+                          icon={<FundOutlined />}
+                          onClick={() => setTileKey("terrain")}
+                        />
+                      </Tooltip>
+                      <Tooltip title="Dark">
+                        <Button
+                          size="small"
+                          type={tileKey === "dark" ? "primary" : "default"}
+                          icon={<AppstoreOutlined />}
+                          onClick={() => setTileKey("dark")}
+                        />
+                      </Tooltip>
+                    </Space>
+                  }
+                  styles={{
+                    body: { padding: 0, height: "calc(100% - 100px)" },
+                  }}
+                >
+                  {/* Filter bar */}
+                  <div
+                    style={{
+                      display: "flex",
+                      gap: 6,
+                      padding: "8px 10px",
+                      background: "#fafafa",
+                      borderBottom: "1px solid #f0f0f0",
+                      flexWrap: "wrap",
+                    }}
+                  >
+                    <Select
+                      size="small"
+                      allowClear
+                      placeholder="Province"
+                      value={mapFilterProvince}
+                      onChange={setMapFilterProvince}
+                      options={provinceOptions}
+                      style={{ minWidth: 120, flex: 1 }}
+                    />
+                    <Select
+                      size="small"
+                      allowClear
+                      placeholder="Plan Status"
+                      value={mapFilterStatus}
+                      onChange={setMapFilterStatus}
+                      options={[
+                        { label: "✓ Approved", value: "Approved" },
+                        { label: "▲ For Renewal", value: "For Renewal" },
+                        { label: "● Other", value: "Other" },
+                      ]}
+                      style={{ minWidth: 110, flex: 1 }}
+                    />
+                    {(mapFilterProvince || mapFilterStatus) && (
+                      <Button
+                        size="small"
+                        type="link"
+                        danger
+                        onClick={() => {
+                          setMapFilterProvince(null);
+                          setMapFilterStatus(null);
+                        }}
+                      >
+                        Clear
+                      </Button>
+                    )}
+                    {/* Legend */}
+                    <div
+                      style={{
+                        display: "flex",
+                        gap: 8,
+                        alignItems: "center",
+                        marginLeft: "auto",
+                        fontSize: 11,
+                        color: "#999",
+                      }}
+                    >
+                      <span>
+                        <span
+                          style={{
+                            display: "inline-block",
+                            width: 10,
+                            height: 10,
+                            borderRadius: "50%",
+                            background: "#52c41a",
+                            marginRight: 3,
+                            verticalAlign: "middle",
+                          }}
+                        />
+                        Approved
+                      </span>
+                      <span>
+                        <span
+                          style={{
+                            display: "inline-block",
+                            width: 10,
+                            height: 10,
+                            borderRadius: "50%",
+                            background: "#faad14",
+                            marginRight: 3,
+                            verticalAlign: "middle",
+                          }}
+                        />
+                        For Renewal
+                      </span>
+                      <span>
+                        <span
+                          style={{
+                            display: "inline-block",
+                            width: 10,
+                            height: 10,
+                            borderRadius: "50%",
+                            background: "#8c8c8c",
+                            marginRight: 3,
+                            verticalAlign: "middle",
+                          }}
+                        />
+                        Other
+                      </span>
+                    </div>
                   </div>
-                )}
-              </Card>
-            </div>
-          </Col>
-        </Row>
+                  {filteredMapPts.length > 0 ? (
+                    <MapContainer
+                      center={[15.0, 120.7]}
+                      zoom={8}
+                      style={{
+                        height: "100%",
+                        width: "100%",
+                        borderRadius: "0 0 10px 10px",
+                      }}
+                      scrollWheelZoom={true}
+                      zoomControl={false}
+                    >
+                      <TileLayer
+                        key={tileKey}
+                        attribution={tile.attr}
+                        url={tile.url}
+                      />
+                      <FitBounds points={filteredMapPts} />
+                      <ProvinceBoundary
+                        key={mapFilterProvince || "__none__"}
+                        province={mapFilterProvince}
+                      />
+                      {filteredMapPts.map((pt, idx) => (
+                        <Marker
+                          key={pt.record._id || idx}
+                          position={[pt.lat, pt.lng]}
+                          icon={planStatusIcon(pt.record.forRenewal)}
+                        >
+                          <Popup maxWidth={320} minWidth={260}>
+                            <div
+                              className="popup-light"
+                              style={{
+                                fontSize: 12,
+                                lineHeight: 1.7,
+                                padding: 2,
+                              }}
+                            >
+                              {/* Header */}
+                              <div
+                                style={{
+                                  fontWeight: 700,
+                                  fontSize: 14,
+                                  marginBottom: 2,
+                                }}
+                              >
+                                {pt.record.municipality}
+                              </div>
+                              <div
+                                style={{
+                                  display: "flex",
+                                  gap: 4,
+                                  flexWrap: "wrap",
+                                  marginBottom: 6,
+                                }}
+                              >
+                                <span
+                                  style={{
+                                    display: "inline-flex",
+                                    alignItems: "center",
+                                    gap: 3,
+                                    background: "#e6f7ff",
+                                    color: "#1890ff",
+                                    borderRadius: 4,
+                                    padding: "1px 6px",
+                                    fontSize: 11,
+                                  }}
+                                >
+                                  <EnvironmentOutlined /> {pt.record.province}
+                                </span>
+                                {pt.record.congressionalDistrict && (
+                                  <span
+                                    style={{
+                                      display: "inline-flex",
+                                      alignItems: "center",
+                                      gap: 3,
+                                      background: "#f0f0f0",
+                                      color: "#595959",
+                                      borderRadius: 4,
+                                      padding: "1px 6px",
+                                      fontSize: 11,
+                                    }}
+                                  >
+                                    {pt.record.congressionalDistrict}
+                                  </span>
+                                )}
+                                {pt.record.manilaBayArea && (
+                                  <span
+                                    style={{
+                                      display: "inline-flex",
+                                      alignItems: "center",
+                                      gap: 3,
+                                      background:
+                                        pt.record.manilaBayArea === "MBA"
+                                          ? "#e6f7ff"
+                                          : "#f5f5f5",
+                                      color:
+                                        pt.record.manilaBayArea === "MBA"
+                                          ? "#1890ff"
+                                          : "#8c8c8c",
+                                      borderRadius: 4,
+                                      padding: "1px 6px",
+                                      fontSize: 11,
+                                    }}
+                                  >
+                                    <GlobalOutlined /> {pt.record.manilaBayArea}
+                                  </span>
+                                )}
+                              </div>
+                              <hr
+                                style={{
+                                  margin: "4px 0 6px",
+                                  border: "none",
+                                  borderTop: "1px solid #f0f0f0",
+                                }}
+                              />
+
+                              {/* Compliance & Renewal */}
+                              <div
+                                style={{
+                                  display: "flex",
+                                  gap: 4,
+                                  flexWrap: "wrap",
+                                  marginBottom: 6,
+                                }}
+                              >
+                                {(() => {
+                                  const r =
+                                    pt.record.remarksAndRecommendation || "";
+                                  const isC =
+                                    /compliant/i.test(r) && !/non/i.test(r);
+                                  const isNC =
+                                    /non/i.test(r) && /compliant/i.test(r);
+                                  return (
+                                    <span
+                                      className={`status-badge ${isC ? "status-badge-compliant" : isNC ? "status-badge-noncompliant" : "status-badge-pending"}`}
+                                    >
+                                      <SafetyCertificateOutlined />{" "}
+                                      {isC
+                                        ? "Compliant"
+                                        : isNC
+                                          ? "Non-Compliant"
+                                          : "Pending"}
+                                    </span>
+                                  );
+                                })()}
+                                {pt.record.forRenewal && (
+                                  <span
+                                    className={`status-badge ${/approved/i.test(pt.record.forRenewal) ? "status-badge-approved" : /renewal/i.test(pt.record.forRenewal) ? "status-badge-renewal" : "status-badge-other"}`}
+                                  >
+                                    <AuditOutlined /> {pt.record.forRenewal}
+                                  </span>
+                                )}
+                              </div>
+
+                              {/* Plan Info */}
+                              <div
+                                style={{
+                                  display: "flex",
+                                  flexDirection: "column",
+                                  gap: 3,
+                                  marginBottom: 6,
+                                }}
+                              >
+                                {pt.record.typeOfSWMPlan && (
+                                  <div
+                                    style={{
+                                      display: "flex",
+                                      alignItems: "center",
+                                      gap: 5,
+                                    }}
+                                  >
+                                    <FileDoneOutlined
+                                      style={{ color: "#1890ff" }}
+                                    />{" "}
+                                    <span style={{ color: "#595959" }}>
+                                      Plan:
+                                    </span>{" "}
+                                    <strong>{pt.record.typeOfSWMPlan}</strong>
+                                  </div>
+                                )}
+                                {pt.record.periodCovered && (
+                                  <div
+                                    style={{
+                                      display: "flex",
+                                      alignItems: "center",
+                                      gap: 5,
+                                    }}
+                                  >
+                                    <ClockCircleOutlined
+                                      style={{ color: "#722ed1" }}
+                                    />{" "}
+                                    <span style={{ color: "#595959" }}>
+                                      Period:
+                                    </span>{" "}
+                                    {pt.record.periodCovered}
+                                  </div>
+                                )}
+                                {pt.record.yearApproved && (
+                                  <div
+                                    style={{
+                                      display: "flex",
+                                      alignItems: "center",
+                                      gap: 5,
+                                    }}
+                                  >
+                                    <AuditOutlined
+                                      style={{ color: "#52c41a" }}
+                                    />{" "}
+                                    <span style={{ color: "#595959" }}>
+                                      Approved:
+                                    </span>{" "}
+                                    {pt.record.yearApproved}
+                                  </div>
+                                )}
+                              </div>
+
+                              {/* Environmental Data */}
+                              <div
+                                style={{
+                                  background: "#fafafa",
+                                  borderRadius: 6,
+                                  padding: "6px 8px",
+                                  marginBottom: 6,
+                                }}
+                              >
+                                <div
+                                  style={{
+                                    display: "flex",
+                                    justifyContent: "space-between",
+                                    marginBottom: 3,
+                                  }}
+                                >
+                                  <span style={{ color: "#595959" }}>
+                                    <BarChartOutlined
+                                      style={{ color: "#1890ff" }}
+                                    />{" "}
+                                    Diversion Rate
+                                  </span>
+                                  <strong
+                                    style={{
+                                      color:
+                                        pt.record.wasteDiversionRate >= 0.25
+                                          ? "#52c41a"
+                                          : "#ff4d4f",
+                                    }}
+                                  >
+                                    {pt.record.wasteDiversionRate
+                                      ? `${(pt.record.wasteDiversionRate * 100).toFixed(1)}%`
+                                      : "—"}
+                                  </strong>
+                                </div>
+                                {pt.record.totalWasteGeneration != null && (
+                                  <div
+                                    style={{
+                                      display: "flex",
+                                      justifyContent: "space-between",
+                                      marginBottom: 3,
+                                    }}
+                                  >
+                                    <span style={{ color: "#595959" }}>
+                                      <DeleteOutlined
+                                        style={{ color: "#ff4d4f" }}
+                                      />{" "}
+                                      Waste Gen.
+                                    </span>
+                                    <strong>
+                                      {pt.record.totalWasteGeneration.toLocaleString()}{" "}
+                                      tons
+                                    </strong>
+                                  </div>
+                                )}
+                                {pt.record.pcg != null && (
+                                  <div
+                                    style={{
+                                      display: "flex",
+                                      justifyContent: "space-between",
+                                    }}
+                                  >
+                                    <span style={{ color: "#595959" }}>
+                                      <ExperimentOutlined
+                                        style={{ color: "#722ed1" }}
+                                      />{" "}
+                                      PCG
+                                    </span>
+                                    <strong>{pt.record.pcg}</strong>
+                                  </div>
+                                )}
+                              </div>
+
+                              {/* Waste Composition mini bars */}
+                              {(pt.record.biodegradablePercent ||
+                                pt.record.recyclablePercent ||
+                                pt.record.residualPercent ||
+                                pt.record.specialPercent) && (
+                                <div style={{ marginBottom: 6 }}>
+                                  <div
+                                    style={{
+                                      fontSize: 11,
+                                      color: "#595959",
+                                      marginBottom: 2,
+                                      fontWeight: 600,
+                                    }}
+                                  >
+                                    Waste Composition
+                                  </div>
+                                  <div
+                                    style={{
+                                      display: "flex",
+                                      gap: 2,
+                                      height: 8,
+                                      borderRadius: 4,
+                                      overflow: "hidden",
+                                    }}
+                                  >
+                                    {pt.record.biodegradablePercent > 0 && (
+                                      <div
+                                        title={`Biodegradable ${(pt.record.biodegradablePercent * 100).toFixed(1)}%`}
+                                        style={{
+                                          flex: pt.record.biodegradablePercent,
+                                          background: "#52c41a",
+                                        }}
+                                      />
+                                    )}
+                                    {pt.record.recyclablePercent > 0 && (
+                                      <div
+                                        title={`Recyclable ${(pt.record.recyclablePercent * 100).toFixed(1)}%`}
+                                        style={{
+                                          flex: pt.record.recyclablePercent,
+                                          background: "#1890ff",
+                                        }}
+                                      />
+                                    )}
+                                    {pt.record.residualPercent > 0 && (
+                                      <div
+                                        title={`Residual ${(pt.record.residualPercent * 100).toFixed(1)}%`}
+                                        style={{
+                                          flex: pt.record.residualPercent,
+                                          background: "#ff4d4f",
+                                        }}
+                                      />
+                                    )}
+                                    {pt.record.specialPercent > 0 && (
+                                      <div
+                                        title={`Special ${(pt.record.specialPercent * 100).toFixed(1)}%`}
+                                        style={{
+                                          flex: pt.record.specialPercent,
+                                          background: "#722ed1",
+                                        }}
+                                      />
+                                    )}
+                                  </div>
+                                  <div
+                                    style={{
+                                      display: "flex",
+                                      gap: 8,
+                                      fontSize: 10,
+                                      color: "#999",
+                                      marginTop: 2,
+                                      flexWrap: "wrap",
+                                    }}
+                                  >
+                                    <span>
+                                      <span
+                                        style={{
+                                          display: "inline-block",
+                                          width: 6,
+                                          height: 6,
+                                          borderRadius: 1,
+                                          background: "#52c41a",
+                                          marginRight: 2,
+                                        }}
+                                      />
+                                      Bio{" "}
+                                      {(
+                                        pt.record.biodegradablePercent * 100
+                                      ).toFixed(0)}
+                                      %
+                                    </span>
+                                    <span>
+                                      <span
+                                        style={{
+                                          display: "inline-block",
+                                          width: 6,
+                                          height: 6,
+                                          borderRadius: 1,
+                                          background: "#1890ff",
+                                          marginRight: 2,
+                                        }}
+                                      />
+                                      Rec{" "}
+                                      {(
+                                        pt.record.recyclablePercent * 100
+                                      ).toFixed(0)}
+                                      %
+                                    </span>
+                                    <span>
+                                      <span
+                                        style={{
+                                          display: "inline-block",
+                                          width: 6,
+                                          height: 6,
+                                          borderRadius: 1,
+                                          background: "#ff4d4f",
+                                          marginRight: 2,
+                                        }}
+                                      />
+                                      Res{" "}
+                                      {(
+                                        pt.record.residualPercent * 100
+                                      ).toFixed(0)}
+                                      %
+                                    </span>
+                                    <span>
+                                      <span
+                                        style={{
+                                          display: "inline-block",
+                                          width: 6,
+                                          height: 6,
+                                          borderRadius: 1,
+                                          background: "#722ed1",
+                                          marginRight: 2,
+                                        }}
+                                      />
+                                      Spc{" "}
+                                      {(pt.record.specialPercent * 100).toFixed(
+                                        0,
+                                      )}
+                                      %
+                                    </span>
+                                  </div>
+                                </div>
+                              )}
+
+                              {/* Disposal */}
+                              {pt.record.lguFinalDisposal && (
+                                <div
+                                  style={{
+                                    display: "flex",
+                                    alignItems: "center",
+                                    gap: 5,
+                                    marginBottom: 4,
+                                  }}
+                                >
+                                  <ContainerOutlined
+                                    style={{ color: "#fa8c16" }}
+                                  />{" "}
+                                  <span style={{ color: "#595959" }}>
+                                    Disposal:
+                                  </span>{" "}
+                                  {pt.record.lguFinalDisposal}
+                                </div>
+                              )}
+
+                              {/* Personnel */}
+                              <hr
+                                style={{
+                                  margin: "4px 0 5px",
+                                  border: "none",
+                                  borderTop: "1px solid #f0f0f0",
+                                }}
+                              />
+                              <div
+                                style={{
+                                  display: "flex",
+                                  flexDirection: "column",
+                                  gap: 2,
+                                }}
+                              >
+                                {pt.record.focalPerson && (
+                                  <div
+                                    style={{
+                                      display: "flex",
+                                      alignItems: "center",
+                                      gap: 5,
+                                    }}
+                                  >
+                                    <UserOutlined
+                                      style={{ color: "#1890ff" }}
+                                    />{" "}
+                                    <span style={{ color: "#595959" }}>
+                                      Focal:
+                                    </span>{" "}
+                                    <strong>{pt.record.focalPerson}</strong>
+                                  </div>
+                                )}
+                                {pt.record.enmoAssigned && (
+                                  <div
+                                    style={{
+                                      display: "flex",
+                                      alignItems: "center",
+                                      gap: 5,
+                                    }}
+                                  >
+                                    <TeamOutlined
+                                      style={{ color: "#52c41a" }}
+                                    />{" "}
+                                    <span style={{ color: "#595959" }}>
+                                      ENMO:
+                                    </span>{" "}
+                                    {pt.record.enmoAssigned}
+                                  </div>
+                                )}
+                              </div>
+
+                              {/* Remarks */}
+                              {pt.record.remarksAndRecommendation && (
+                                <div
+                                  style={{
+                                    marginTop: 6,
+                                    background: "#fffbe6",
+                                    borderRadius: 4,
+                                    padding: "4px 6px",
+                                    fontSize: 11,
+                                    color: "#ad8b00",
+                                  }}
+                                >
+                                  <AlertOutlined />{" "}
+                                  {pt.record.remarksAndRecommendation}
+                                </div>
+                              )}
+
+                              {/* Signed Document */}
+                              {pt.record.signedDocument && (
+                                <a
+                                  href={pt.record.signedDocument}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  style={{
+                                    display: "flex",
+                                    alignItems: "center",
+                                    gap: 5,
+                                    marginTop: 6,
+                                    padding: "4px 8px",
+                                    background: "#e6f7ff",
+                                    borderRadius: 4,
+                                    fontSize: 11,
+                                    color: "#1890ff",
+                                    textDecoration: "none",
+                                    fontWeight: 600,
+                                  }}
+                                >
+                                  <LinkOutlined /> View Signed Document
+                                </a>
+                              )}
+
+                              {/* Quick Actions */}
+                              <div
+                                style={{
+                                  display: "flex",
+                                  gap: 4,
+                                  marginTop: 8,
+                                  paddingTop: 6,
+                                  borderTop: "1px solid #f0f0f0",
+                                }}
+                              >
+                                <button
+                                  onClick={() => {
+                                    api
+                                      .get(`/ten-year-swm/${pt.record._id}`)
+                                      .then(({ data }) =>
+                                        setMapViewRecord(data),
+                                      )
+                                      .catch(() => setMapViewRecord(pt.record));
+                                  }}
+                                  className="popup-action-btn"
+                                  title="View Full Record"
+                                >
+                                  <EyeOutlined /> View
+                                </button>
+                                <button
+                                  onClick={() => {
+                                    const txt = `${pt.record.municipality}, ${pt.record.province} (${pt.lat}, ${pt.lng})`;
+                                    navigator.clipboard.writeText(txt);
+                                  }}
+                                  className="popup-action-btn"
+                                  title="Copy Location"
+                                >
+                                  <CopyOutlined /> Copy
+                                </button>
+                              </div>
+                            </div>
+                          </Popup>
+                        </Marker>
+                      ))}
+                    </MapContainer>
+                  ) : (
+                    <div
+                      style={{
+                        height: "100%",
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                      }}
+                    >
+                      <Text type="secondary">No coordinate data available</Text>
+                    </div>
+                  )}
+                </Card>
+              </div>
+            </Col>
+          </Row>
         </>
       ),
     });
@@ -1261,366 +2887,5489 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
     const fs = mrfStats.fundingStats || {};
     const opCount = mrfStats.byStatus?.Operational || 0;
     const nonOpCount = mrfStats.byStatus?.["Non-Operational"] || 0;
-    const opRate = mrfStats.totalRecords > 0 ? (opCount / mrfStats.totalRecords) * 100 : 0;
+    const opRate =
+      mrfStats.totalRecords > 0 ? (opCount / mrfStats.totalRecords) * 100 : 0;
     const avgDiv = (fs.avgDiversionRate || 0) * 100;
 
     const MRF_CARD_H = 280;
 
     tabItems.push({
       key: "funded-mrf",
-      label: <><BankOutlined /> Funded MRF</>,
+      label: (
+        <>
+          <BankOutlined /> Funded MRF
+        </>
+      ),
       children: (
         <>
-        {/* Row 1: Stat tiles */}
-        <Row gutter={[16, 16]} style={{ marginBottom: 16 }}>
-          <Col xs={12} sm={12} md={6}>
-            <Card hoverable style={{ borderRadius: 10, height: 110 }} loading={loading}>
-              <Statistic title="Total MRFs" value={mrfStats.totalRecords} prefix={<BankOutlined style={{ color: "#1a3353" }} />} />
-            </Card>
-          </Col>
-          <Col xs={12} sm={12} md={6}>
-            <Card hoverable style={{ borderRadius: 10, height: 110 }} loading={loading}>
-              <Statistic title="Operational" value={opCount} prefix={<CheckCircleOutlined style={{ color: "#52c41a" }} />} />
-            </Card>
-          </Col>
-          <Col xs={12} sm={12} md={6}>
-            <Card hoverable style={{ borderRadius: 10, height: 110 }} loading={loading}>
-              <Statistic title="Non-Operational" value={nonOpCount} styles={{ content: { color: "#ff4d4f" } }} prefix={<CloseCircleOutlined />} />
-            </Card>
-          </Col>
-          <Col xs={12} sm={12} md={6}>
-            <Card hoverable style={{ borderRadius: 10, height: 110 }} loading={loading}>
-              <Statistic title="Total Funding" value={fs.totalFunding || 0} prefix={<span style={{ color: "#faad14", fontWeight: 700, fontSize: 18 }}>₱</span>} formatter={(v) => Number(v).toLocaleString()} />
-            </Card>
-          </Col>
-        </Row>
-
-        {/* Two-column layout: cards left, map right */}
-        <Row gutter={[16, 16]}>
-          {/* LEFT COLUMN — Stats cards */}
-          <Col xs={24} lg={14}>
-            <Row gutter={[16, 16]}>
-              {/* Operational Status */}
-              <Col xs={24} sm={12}>
-                <Card title={<><PieChartOutlined /> Operational Status</>} style={{ borderRadius: 10, height: MRF_CARD_H }} loading={loading} styles={{ body: { overflow: "auto", height: MRF_CARD_H - 57 } }}>
-                  <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-                    {[
-                      { label: "Operational", count: opCount, color: "#52c41a", icon: <CheckCircleOutlined /> },
-                      { label: "Non-Operational", count: nonOpCount, color: "#ff4d4f", icon: <CloseCircleOutlined /> },
-                      { label: "Unknown", count: mrfStats.byStatus?.Unknown || 0, color: "#d9d9d9", icon: <ClockCircleOutlined /> },
-                    ].map((s) => (
-                      <div key={s.label}>
-                        <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
-                          <Text>{s.label}</Text>
-                          <Text strong>{s.count} <span style={{ color: "#999", fontWeight: 400 }}>({mrfStats.totalRecords > 0 ? Math.round((s.count / mrfStats.totalRecords) * 100) : 0}%)</span></Text>
-                        </div>
-                        <Progress percent={mrfStats.totalRecords > 0 ? Math.round((s.count / mrfStats.totalRecords) * 100) : 0} strokeColor={s.color} showInfo={false} size="small" />
-                      </div>
-                    ))}
-                  </div>
-                </Card>
-              </Col>
-
-              {/* Key Metrics — Enhanced */}
-              <Col xs={24} sm={12}>
-                <Card title={<><BarChartOutlined /> Key Metrics</>} style={{ borderRadius: 10, height: MRF_CARD_H }} loading={loading} styles={{ body: { overflow: "auto", height: MRF_CARD_H - 57, padding: "12px 16px" } }}>
-                  <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-                    {/* Operational Rate with circular progress */}
-                    <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "6px 10px", background: "linear-gradient(135deg, #f6ffed 0%, #fcffe6 100%)", borderRadius: 8, border: "1px solid #d9f7be" }}>
-                      <Progress type="circle" percent={Math.round(opRate)} size={48} strokeColor={{ "0%": "#52c41a", "100%": "#95de64" }} format={(p) => <span style={{ fontSize: 12, fontWeight: 700 }}>{p}%</span>} />
-                      <div><Text type="secondary" style={{ fontSize: 11 }}>Operational Rate</Text><br /><Text strong style={{ fontSize: 16, color: "#389e0d" }}>{opRate.toFixed(1)}%</Text></div>
-                    </div>
-                    {/* Avg Diversion Rate with circular progress */}
-                    <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "6px 10px", background: "linear-gradient(135deg, #e6f7ff 0%, #f0f5ff 100%)", borderRadius: 8, border: "1px solid #bae7ff" }}>
-                      <Progress type="circle" percent={Math.round(avgDiv)} size={48} strokeColor={{ "0%": "#1890ff", "100%": "#69c0ff" }} format={(p) => <span style={{ fontSize: 12, fontWeight: 700 }}>{p}%</span>} />
-                      <div><Text type="secondary" style={{ fontSize: 11 }}>Avg. Diversion Rate</Text><br /><Text strong style={{ fontSize: 16, color: "#096dd9" }}>{avgDiv.toFixed(1)}%</Text></div>
-                    </div>
-                    {/* Bottom stats row */}
-                    <Row gutter={8}>
-                      <Col span={8}>
-                        <div style={{ textAlign: "center", padding: "6px 4px", background: "#f9f0ff", borderRadius: 6, border: "1px solid #efdbff" }}>
-                          <Text type="secondary" style={{ fontSize: 10, display: "block" }}>Brgys Served</Text>
-                          <Text strong style={{ fontSize: 16, color: "#722ed1" }}>{(fs.totalBrgyServed || 0).toLocaleString()}</Text>
-                        </div>
-                      </Col>
-                      <Col span={8}>
-                        <div style={{ textAlign: "center", padding: "6px 4px", background: "#fff7e6", borderRadius: 6, border: "1px solid #ffe7ba" }}>
-                          <Text type="secondary" style={{ fontSize: 10, display: "block" }}>Avg. Funding</Text>
-                          <Text strong style={{ fontSize: 16, color: "#d48806" }}>₱{Math.round(fs.avgFunding || 0).toLocaleString()}</Text>
-                        </div>
-                      </Col>
-                      <Col span={8}>
-                        <div style={{ textAlign: "center", padding: "6px 4px", background: "#fff1f0", borderRadius: 6, border: "1px solid #ffccc7" }}>
-                          <Text type="secondary" style={{ fontSize: 10, display: "block" }}>Waste Gen.</Text>
-                          <Text strong style={{ fontSize: 16, color: "#cf1322" }}>{(fs.totalWasteGen || 0).toLocaleString()}</Text>
-                        </div>
-                      </Col>
-                    </Row>
-                  </div>
-                </Card>
-              </Col>
-
-              {/* MRFs per Province */}
-              <Col xs={24} sm={12}>
-                <Card title={<><BarChartOutlined /> MRFs per Province</>} style={{ borderRadius: 10, height: MRF_CARD_H }} loading={loading} styles={{ body: { overflow: "auto", height: MRF_CARD_H - 57 } }}>
-                  <div style={{ display: "flex", alignItems: "flex-end", gap: 6, height: 170, padding: "0 2px" }}>
-                    {mrfProvList.map((p, i) => (
-                      <div key={i} style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center" }}>
-                        <Text style={{ fontSize: 10, color: "#666", marginBottom: 2 }}>{p.count}</Text>
-                        <div style={{ width: "100%", maxWidth: 32, height: `${Math.max((p.count / mrfMaxProvCount) * 140, 6)}px`, background: "linear-gradient(180deg, #2f54eb 0%, #85a5ff 100%)", borderRadius: "3px 3px 0 0", transition: "height 0.5s ease" }} />
-                        <Text style={{ fontSize: 8, color: "#999", marginTop: 2, textAlign: "center" }}>{p._id}</Text>
-                      </div>
-                    ))}
-                  </div>
-                </Card>
-              </Col>
-
-              {/* Diversion Rate by Province */}
-              <Col xs={24} sm={12}>
-                <Card title={<><RiseOutlined /> Diversion by Province</>} style={{ borderRadius: 10, height: MRF_CARD_H }} loading={loading} styles={{ body: { overflow: "auto", height: MRF_CARD_H - 57 } }}>
-                  <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                    {mrfDivProv.slice(0, 7).map((d) => (
-                      <div key={d._id}>
-                        <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 2 }}>
-                          <Text style={{ fontSize: 12 }}>{d._id}</Text>
-                          <Text strong style={{ fontSize: 12 }}>{(d.avgDiversion * 100).toFixed(1)}% <span style={{ color: "#999", fontWeight: 400, fontSize: 10 }}>({d.count})</span></Text>
-                        </div>
-                        <Progress percent={Math.round(d.avgDiversion * 100)} strokeColor={d.avgDiversion * 100 >= 50 ? "#52c41a" : "#faad14"} showInfo={false} size="small" />
-                      </div>
-                    ))}
-                  </div>
-                </Card>
-              </Col>
-
-              {/* MRF Type Distribution */}
-              <Col xs={24} sm={12}>
-                <Card title={<><BankOutlined /> MRF Type</>} style={{ borderRadius: 10, height: MRF_CARD_H }} loading={loading} styles={{ body: { overflow: "auto", height: MRF_CARD_H - 57 } }}>
-                  <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-                    {Object.entries(mrfStats.byMRFType || {}).map(([key, count]) => (
-                      <div key={key}>
-                        <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
-                          <Text>{key || "Unspecified"}</Text>
-                          <Text strong>{count}</Text>
-                        </div>
-                        <Progress percent={mrfStats.totalRecords > 0 ? Math.round((count / mrfStats.totalRecords) * 100) : 0} strokeColor="#2f54eb" showInfo={false} size="small" />
-                      </div>
-                    ))}
-                  </div>
-                </Card>
-              </Col>
-
-              {/* Manila Bay Area */}
-              <Col xs={24} sm={12}>
-                <Card title="Manila Bay Area" style={{ borderRadius: 10, height: MRF_CARD_H }} loading={loading} styles={{ body: { overflow: "auto", height: MRF_CARD_H - 57 } }}>
-                  <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-                    {Object.entries(mrfStats.byManilaBayArea || {}).map(([key, count]) => (
-                      <div key={key}>
-                        <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
-                          <Text>{key || "Unspecified"}</Text>
-                          <Text strong>{count}</Text>
-                        </div>
-                        <Progress percent={mrfStats.totalRecords > 0 ? Math.round((count / mrfStats.totalRecords) * 100) : 0} strokeColor={key === "MBA" ? "#1890ff" : "#8c8c8c"} showInfo={false} size="small" />
-                      </div>
-                    ))}
-                  </div>
-                </Card>
-              </Col>
-            </Row>
-          </Col>
-
-          {/* RIGHT COLUMN — MRF Map (sticky) */}
-          <Col xs={24} lg={10}>
-            <div style={{ position: "sticky", top: 80, height: "calc(100vh - 200px)", minHeight: 520 }}>
+          {/* Row 1: Stat tiles */}
+          <Row gutter={[16, 16]} style={{ marginBottom: 16 }}>
+            <Col xs={12} sm={12} md={6}>
               <Card
-                size="small"
-                title={<><GlobalOutlined /> MRF Location Map <Tag bordered={false} color="blue">{filteredMrfMapPts.length} plotted</Tag>{filteredMrfMapPts.length !== mrfMapPts.length && <Tag bordered={false} color="default">of {mrfMapPts.length}</Tag>}</>}
-                style={{ borderRadius: 10, height: "100%" }}
+                hoverable
+                style={{ borderRadius: 10, height: 110 }}
                 loading={loading}
-                extra={
-                  <Space size={4}>
-                    <Tooltip title="Street"><Button size="small" type={mrfTileKey === "street" ? "primary" : "default"} icon={<GlobalOutlined />} onClick={() => setMrfTileKey("street")} /></Tooltip>
-                    <Tooltip title="Satellite"><Button size="small" type={mrfTileKey === "satellite" ? "primary" : "default"} icon={<EnvironmentOutlined />} onClick={() => setMrfTileKey("satellite")} /></Tooltip>
-                    <Tooltip title="Terrain"><Button size="small" type={mrfTileKey === "terrain" ? "primary" : "default"} icon={<FundOutlined />} onClick={() => setMrfTileKey("terrain")} /></Tooltip>
-                    <Tooltip title="Dark"><Button size="small" type={mrfTileKey === "dark" ? "primary" : "default"} icon={<AppstoreOutlined />} onClick={() => setMrfTileKey("dark")} /></Tooltip>
-                  </Space>
-                }
-                styles={{ body: { padding: 0, height: "calc(100% - 100px)" } }}
               >
-                {/* Filter bar */}
-                <div style={{ display: "flex", gap: 6, padding: "8px 10px", background: "#fafafa", borderBottom: "1px solid #f0f0f0", flexWrap: "wrap" }}>
-                  <Select size="small" allowClear placeholder="Province" value={mrfFilterProvince} onChange={setMrfFilterProvince} options={mrfProvinceOptions} style={{ minWidth: 120, flex: 1 }} />
-                  <Select size="small" allowClear placeholder="Status" value={mrfFilterStatus} onChange={setMrfFilterStatus} options={[{ label: "✓ Operational", value: "Operational" }, { label: "✕ Non-Operational", value: "Non-Operational" }]} style={{ minWidth: 130, flex: 1 }} />
-                  {(mrfFilterProvince || mrfFilterStatus) && <Button size="small" type="link" danger onClick={() => { setMrfFilterProvince(null); setMrfFilterStatus(null); }}>Clear</Button>}
-                  {/* Legend */}
-                  <div style={{ display: "flex", gap: 8, alignItems: "center", marginLeft: "auto", fontSize: 11, color: "#999" }}>
-                    <span><span style={{ display: "inline-block", width: 10, height: 10, borderRadius: "50%", background: "#52c41a", marginRight: 3, verticalAlign: "middle" }} />Operational</span>
-                    <span><span style={{ display: "inline-block", width: 10, height: 10, borderRadius: "50%", background: "#ff4d4f", marginRight: 3, verticalAlign: "middle" }} />Non-Op</span>
-                    <span><span style={{ display: "inline-block", width: 10, height: 10, borderRadius: "50%", background: "#8c8c8c", marginRight: 3, verticalAlign: "middle" }} />Unknown</span>
-                  </div>
-                </div>
-                {filteredMrfMapPts.length > 0 ? (
-                  <MapContainer
-                    center={[15.0, 120.7]}
-                    zoom={8}
-                    style={{ height: "100%", width: "100%", borderRadius: "0 0 10px 10px" }}
-                    scrollWheelZoom={true}
-                    zoomControl={false}
-                  >
-                    <TileLayer key={mrfTileKey} attribution={mrfTile.attr} url={mrfTile.url} />
-                    <FitBounds points={filteredMrfMapPts} />
-                    <ProvinceBoundary key={mrfFilterProvince || "__mrf_none__"} province={mrfFilterProvince} />
-                    {filteredMrfMapPts.map((pt, idx) => (
-                      <Marker
-                        key={pt.record._id || idx}
-                        position={[pt.lat, pt.lng]}
-                        icon={mrfStatusIcon(pt.record.statusOfMRF)}
-                      >
-                        <Popup maxWidth={300} minWidth={240}>
-                          <div className="popup-light" style={{ fontSize: 12, lineHeight: 1.7, padding: 2 }}>
-                            <div style={{ fontWeight: 700, fontSize: 14, marginBottom: 2 }}>{pt.record.municipality}</div>
-                            <div style={{ display: "flex", gap: 4, flexWrap: "wrap", marginBottom: 6 }}>
-                              <span style={{ display: "inline-flex", alignItems: "center", gap: 3, background: "#e6f7ff", color: "#1890ff", borderRadius: 4, padding: "1px 6px", fontSize: 11 }}><EnvironmentOutlined /> {pt.record.province}</span>
-                              {pt.record.barangay && <span style={{ display: "inline-flex", alignItems: "center", gap: 3, background: "#f0f0f0", color: "#595959", borderRadius: 4, padding: "1px 6px", fontSize: 11 }}>{pt.record.barangay}</span>}
-                              {pt.record.manilaBayArea && <span style={{ display: "inline-flex", alignItems: "center", gap: 3, background: pt.record.manilaBayArea === "MBA" ? "#e6f7ff" : "#f5f5f5", color: pt.record.manilaBayArea === "MBA" ? "#1890ff" : "#8c8c8c", borderRadius: 4, padding: "1px 6px", fontSize: 11 }}><GlobalOutlined /> {pt.record.manilaBayArea}</span>}
-                            </div>
-                            <hr style={{ margin: "4px 0 6px", border: "none", borderTop: "1px solid #f0f0f0" }} />
-                            {pt.record.typeOfMRF && <div style={{ marginBottom: 4 }}><BankOutlined style={{ color: "#2f54eb" }} /> <span style={{ color: "#595959" }}>Type:</span> <strong>{pt.record.typeOfMRF}</strong></div>}
-                            <div style={{ display: "flex", gap: 4, flexWrap: "wrap", marginBottom: 6 }}>
-                              {(() => { const s = pt.record.statusOfMRF; const isOp = /operational/i.test(s) && !/non/i.test(s); const isNon = /non/i.test(s); return <span className={`status-badge ${isOp ? "status-badge-compliant" : isNon ? "status-badge-noncompliant" : "status-badge-pending"}`}><SafetyCertificateOutlined /> {isOp ? "Operational" : isNon ? "Non-Operational" : "Unknown"}</span>; })()}
-                            </div>
-                            <div style={{ background: "#fafafa", borderRadius: 6, padding: "6px 8px", marginBottom: 6 }}>
-                              {pt.record.amountGranted != null && <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 3 }}>
-                                <span style={{ color: "#595959" }}><span style={{ color: "#faad14", fontWeight: 700 }}>₱</span> Funding</span>
-                                <strong>₱{pt.record.amountGranted.toLocaleString()}</strong>
-                              </div>}
-                              {pt.record.yearGranted && <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 3 }}>
-                                <span style={{ color: "#595959" }}><CalendarOutlined style={{ color: "#722ed1" }} /> Year</span>
-                                <strong>{pt.record.yearGranted}</strong>
-                              </div>}
-                              <div style={{ display: "flex", justifyContent: "space-between" }}>
-                                <span style={{ color: "#595959" }}><BarChartOutlined style={{ color: "#1890ff" }} /> Diversion</span>
-                                <strong style={{ color: pt.record.wasteDiversionRate >= 0.25 ? "#52c41a" : "#ff4d4f" }}>{pt.record.wasteDiversionRate ? `${(pt.record.wasteDiversionRate * 100).toFixed(1)}%` : "—"}</strong>
-                              </div>
-                            </div>
-                            {pt.record.focalPerson && <div style={{ display: "flex", alignItems: "center", gap: 5, marginBottom: 2 }}><UserOutlined style={{ color: "#1890ff" }} /> <span style={{ color: "#595959" }}>Focal:</span> <strong>{pt.record.focalPerson}</strong></div>}
-                            {pt.record.enmoAssigned && <div style={{ display: "flex", alignItems: "center", gap: 5 }}><TeamOutlined style={{ color: "#52c41a" }} /> <span style={{ color: "#595959" }}>ENMO:</span> {pt.record.enmoAssigned}</div>}
-                          </div>
-                        </Popup>
-                      </Marker>
-                    ))}
-                  </MapContainer>
-                ) : (
-                  <div style={{ height: "100%", display: "flex", alignItems: "center", justifyContent: "center" }}>
-                    <Text type="secondary">No coordinate data available</Text>
-                  </div>
-                )}
+                <Statistic
+                  title="Total MRFs"
+                  value={mrfStats.totalRecords}
+                  prefix={<BankOutlined style={{ color: "#1a3353" }} />}
+                />
               </Card>
-            </div>
-          </Col>
-        </Row>
+            </Col>
+            <Col xs={12} sm={12} md={6}>
+              <Card
+                hoverable
+                style={{ borderRadius: 10, height: 110 }}
+                loading={loading}
+              >
+                <Statistic
+                  title="Operational"
+                  value={opCount}
+                  prefix={<CheckCircleOutlined style={{ color: "#52c41a" }} />}
+                />
+              </Card>
+            </Col>
+            <Col xs={12} sm={12} md={6}>
+              <Card
+                hoverable
+                style={{ borderRadius: 10, height: 110 }}
+                loading={loading}
+              >
+                <Statistic
+                  title="Non-Operational"
+                  value={nonOpCount}
+                  styles={{ content: { color: "#ff4d4f" } }}
+                  prefix={<CloseCircleOutlined />}
+                />
+              </Card>
+            </Col>
+            <Col xs={12} sm={12} md={6}>
+              <Card
+                hoverable
+                style={{ borderRadius: 10, height: 110 }}
+                loading={loading}
+              >
+                <Statistic
+                  title="Total Funding"
+                  value={fs.totalFunding || 0}
+                  prefix={
+                    <span
+                      style={{
+                        color: "#faad14",
+                        fontWeight: 700,
+                        fontSize: 18,
+                      }}
+                    >
+                      ₱
+                    </span>
+                  }
+                  formatter={(v) => Number(v).toLocaleString()}
+                />
+              </Card>
+            </Col>
+          </Row>
+
+          {/* Two-column layout: cards left, map right */}
+          <Row gutter={[16, 16]}>
+            {/* LEFT COLUMN — Stats cards */}
+            <Col xs={24} lg={14}>
+              <Row gutter={[16, 16]}>
+                {/* Operational Status */}
+                <Col xs={24} sm={12}>
+                  <Card
+                    title={
+                      <>
+                        <PieChartOutlined /> Operational Status
+                      </>
+                    }
+                    style={{ borderRadius: 10, height: MRF_CARD_H }}
+                    loading={loading}
+                    styles={{
+                      body: { overflow: "auto", height: MRF_CARD_H - 57 },
+                    }}
+                  >
+                    <div
+                      style={{
+                        display: "flex",
+                        flexDirection: "column",
+                        gap: 12,
+                      }}
+                    >
+                      {[
+                        {
+                          label: "Operational",
+                          count: opCount,
+                          color: "#52c41a",
+                          icon: <CheckCircleOutlined />,
+                        },
+                        {
+                          label: "Non-Operational",
+                          count: nonOpCount,
+                          color: "#ff4d4f",
+                          icon: <CloseCircleOutlined />,
+                        },
+                        {
+                          label: "Not Yet Monitored",
+                          count: mrfStats.byStatus?.["Not Yet Monitored"] || 0,
+                          color: "#d9d9d9",
+                          icon: <ClockCircleOutlined />,
+                        },
+                      ].map((s) => (
+                        <div key={s.label}>
+                          <div
+                            style={{
+                              display: "flex",
+                              justifyContent: "space-between",
+                              marginBottom: 4,
+                            }}
+                          >
+                            <Text>{s.label}</Text>
+                            <Text strong>
+                              {s.count}{" "}
+                              <span style={{ color: "#999", fontWeight: 400 }}>
+                                (
+                                {mrfStats.totalRecords > 0
+                                  ? Math.round(
+                                      (s.count / mrfStats.totalRecords) * 100,
+                                    )
+                                  : 0}
+                                %)
+                              </span>
+                            </Text>
+                          </div>
+                          <Progress
+                            percent={
+                              mrfStats.totalRecords > 0
+                                ? Math.round(
+                                    (s.count / mrfStats.totalRecords) * 100,
+                                  )
+                                : 0
+                            }
+                            strokeColor={s.color}
+                            showInfo={false}
+                            size="small"
+                          />
+                        </div>
+                      ))}
+                    </div>
+                  </Card>
+                </Col>
+
+                {/* Key Metrics — Enhanced */}
+                <Col xs={24} sm={12}>
+                  <Card
+                    title={
+                      <>
+                        <BarChartOutlined /> Key Metrics
+                      </>
+                    }
+                    style={{ borderRadius: 10, height: MRF_CARD_H }}
+                    loading={loading}
+                    styles={{
+                      body: {
+                        overflow: "auto",
+                        height: MRF_CARD_H - 57,
+                        padding: "12px 16px",
+                      },
+                    }}
+                  >
+                    <div
+                      style={{
+                        display: "flex",
+                        flexDirection: "column",
+                        gap: 10,
+                      }}
+                    >
+                      {/* Operational Rate with circular progress */}
+                      <div
+                        style={{
+                          display: "flex",
+                          alignItems: "center",
+                          gap: 12,
+                          padding: "6px 10px",
+                          background:
+                            "linear-gradient(135deg, #f6ffed 0%, #fcffe6 100%)",
+                          borderRadius: 8,
+                          border: "1px solid #d9f7be",
+                        }}
+                      >
+                        <Progress
+                          type="circle"
+                          percent={Math.round(opRate)}
+                          size={48}
+                          strokeColor={{ "0%": "#52c41a", "100%": "#95de64" }}
+                          format={(p) => (
+                            <span style={{ fontSize: 12, fontWeight: 700 }}>
+                              {p}%
+                            </span>
+                          )}
+                        />
+                        <div>
+                          <Text type="secondary" style={{ fontSize: 11 }}>
+                            Operational Rate
+                          </Text>
+                          <br />
+                          <Text
+                            strong
+                            style={{ fontSize: 16, color: "#389e0d" }}
+                          >
+                            {opRate.toFixed(1)}%
+                          </Text>
+                        </div>
+                      </div>
+                      {/* Avg Diversion Rate with circular progress */}
+                      <div
+                        style={{
+                          display: "flex",
+                          alignItems: "center",
+                          gap: 12,
+                          padding: "6px 10px",
+                          background:
+                            "linear-gradient(135deg, #e6f7ff 0%, #f0f5ff 100%)",
+                          borderRadius: 8,
+                          border: "1px solid #bae7ff",
+                        }}
+                      >
+                        <Progress
+                          type="circle"
+                          percent={Math.round(avgDiv)}
+                          size={48}
+                          strokeColor={{ "0%": "#1890ff", "100%": "#69c0ff" }}
+                          format={(p) => (
+                            <span style={{ fontSize: 12, fontWeight: 700 }}>
+                              {p}%
+                            </span>
+                          )}
+                        />
+                        <div>
+                          <Text type="secondary" style={{ fontSize: 11 }}>
+                            Avg. Diversion Rate
+                          </Text>
+                          <br />
+                          <Text
+                            strong
+                            style={{ fontSize: 16, color: "#096dd9" }}
+                          >
+                            {avgDiv.toFixed(1)}%
+                          </Text>
+                        </div>
+                      </div>
+                      {/* Bottom stats row */}
+                      <Row gutter={8}>
+                        <Col span={8}>
+                          <div
+                            style={{
+                              textAlign: "center",
+                              padding: "6px 4px",
+                              background: "#f9f0ff",
+                              borderRadius: 6,
+                              border: "1px solid #efdbff",
+                            }}
+                          >
+                            <Text
+                              type="secondary"
+                              style={{ fontSize: 10, display: "block" }}
+                            >
+                              Brgys Served
+                            </Text>
+                            <Text
+                              strong
+                              style={{ fontSize: 16, color: "#722ed1" }}
+                            >
+                              {(fs.totalBrgyServed || 0).toLocaleString()}
+                            </Text>
+                          </div>
+                        </Col>
+                        <Col span={8}>
+                          <div
+                            style={{
+                              textAlign: "center",
+                              padding: "6px 4px",
+                              background: "#fff7e6",
+                              borderRadius: 6,
+                              border: "1px solid #ffe7ba",
+                            }}
+                          >
+                            <Text
+                              type="secondary"
+                              style={{ fontSize: 10, display: "block" }}
+                            >
+                              Avg. Funding
+                            </Text>
+                            <Text
+                              strong
+                              style={{ fontSize: 16, color: "#d48806" }}
+                            >
+                              ₱{Math.round(fs.avgFunding || 0).toLocaleString()}
+                            </Text>
+                          </div>
+                        </Col>
+                        <Col span={8}>
+                          <div
+                            style={{
+                              textAlign: "center",
+                              padding: "6px 4px",
+                              background: "#fff1f0",
+                              borderRadius: 6,
+                              border: "1px solid #ffccc7",
+                            }}
+                          >
+                            <Text
+                              type="secondary"
+                              style={{ fontSize: 10, display: "block" }}
+                            >
+                              Waste Gen.
+                            </Text>
+                            <Text
+                              strong
+                              style={{ fontSize: 16, color: "#cf1322" }}
+                            >
+                              {(fs.totalWasteGen || 0).toLocaleString()}
+                            </Text>
+                          </div>
+                        </Col>
+                      </Row>
+                    </div>
+                  </Card>
+                </Col>
+
+                {/* MRFs per Province */}
+                <Col xs={24} sm={12}>
+                  <Card
+                    title={
+                      <>
+                        <BarChartOutlined /> MRFs per Province
+                      </>
+                    }
+                    style={{ borderRadius: 10, height: MRF_CARD_H }}
+                    loading={loading}
+                    styles={{
+                      body: { overflow: "auto", height: MRF_CARD_H - 57 },
+                    }}
+                  >
+                    <div
+                      style={{
+                        display: "flex",
+                        flexDirection: "column",
+                        gap: 5,
+                        maxHeight: 170,
+                        overflowY: "auto",
+                        padding: "0 2px",
+                      }}
+                    >
+                      {mrfProvList.map((p, i) => (
+                        <div
+                          key={i}
+                          style={{
+                            display: "flex",
+                            alignItems: "center",
+                            gap: 6,
+                          }}
+                        >
+                          <Text
+                            style={{
+                              fontSize: 10,
+                              color: isDark ? "#aaa" : "#999",
+                              minWidth: 70,
+                              textAlign: "right",
+                              whiteSpace: "nowrap",
+                              overflow: "hidden",
+                              textOverflow: "ellipsis",
+                            }}
+                          >
+                            {p._id}
+                          </Text>
+                          <div
+                            style={{
+                              flex: 1,
+                              height: 16,
+                              background: isDark ? "#2a2a2a" : "#f5f5f5",
+                              borderRadius: 3,
+                              overflow: "hidden",
+                            }}
+                          >
+                            <div
+                              style={{
+                                width: `${Math.max((p.count / mrfMaxProvCount) * 100, 4)}%`,
+                                height: "100%",
+                                background:
+                                  "linear-gradient(90deg, #2f54eb 0%, #85a5ff 100%)",
+                                borderRadius: "3px 0 0 3px",
+                                transition: "width 0.5s ease",
+                              }}
+                            />
+                          </div>
+                          <Text
+                            style={{
+                              fontSize: 10,
+                              color: isDark ? "#ccc" : "#666",
+                              minWidth: 20,
+                              textAlign: "right",
+                              fontWeight: 600,
+                            }}
+                          >
+                            {p.count}
+                          </Text>
+                        </div>
+                      ))}
+                    </div>
+                  </Card>
+                </Col>
+
+                {/* Diversion Rate by Province */}
+                <Col xs={24} sm={12}>
+                  <Card
+                    title={
+                      <>
+                        <RiseOutlined /> Diversion by Province
+                      </>
+                    }
+                    style={{ borderRadius: 10, height: MRF_CARD_H }}
+                    loading={loading}
+                    styles={{
+                      body: { overflow: "auto", height: MRF_CARD_H - 57 },
+                    }}
+                  >
+                    <div
+                      style={{
+                        display: "flex",
+                        flexDirection: "column",
+                        gap: 8,
+                      }}
+                    >
+                      {mrfDivProv.slice(0, 7).map((d) => (
+                        <div key={d._id}>
+                          <div
+                            style={{
+                              display: "flex",
+                              justifyContent: "space-between",
+                              marginBottom: 2,
+                            }}
+                          >
+                            <Text style={{ fontSize: 12 }}>{d._id}</Text>
+                            <Text strong style={{ fontSize: 12 }}>
+                              {(d.avgDiversion * 100).toFixed(1)}%{" "}
+                              <span
+                                style={{
+                                  color: "#999",
+                                  fontWeight: 400,
+                                  fontSize: 10,
+                                }}
+                              >
+                                ({d.count})
+                              </span>
+                            </Text>
+                          </div>
+                          <Progress
+                            percent={Math.round(d.avgDiversion * 100)}
+                            strokeColor={
+                              d.avgDiversion * 100 >= 50 ? "#52c41a" : "#faad14"
+                            }
+                            showInfo={false}
+                            size="small"
+                          />
+                        </div>
+                      ))}
+                    </div>
+                  </Card>
+                </Col>
+
+                {/* MRF Type Distribution */}
+                <Col xs={24} sm={12}>
+                  <Card
+                    title={
+                      <>
+                        <BankOutlined /> MRF Type
+                      </>
+                    }
+                    style={{ borderRadius: 10, height: MRF_CARD_H }}
+                    loading={loading}
+                    styles={{
+                      body: { overflow: "auto", height: MRF_CARD_H - 57 },
+                    }}
+                  >
+                    <div
+                      style={{
+                        display: "flex",
+                        flexDirection: "column",
+                        gap: 12,
+                      }}
+                    >
+                      {Object.entries(mrfStats.byMRFType || {}).map(
+                        ([key, count]) => (
+                          <div key={key}>
+                            <div
+                              style={{
+                                display: "flex",
+                                justifyContent: "space-between",
+                                marginBottom: 4,
+                              }}
+                            >
+                              <Text>{key || "Unspecified"}</Text>
+                              <Text strong>{count}</Text>
+                            </div>
+                            <Progress
+                              percent={
+                                mrfStats.totalRecords > 0
+                                  ? Math.round(
+                                      (count / mrfStats.totalRecords) * 100,
+                                    )
+                                  : 0
+                              }
+                              strokeColor="#2f54eb"
+                              showInfo={false}
+                              size="small"
+                            />
+                          </div>
+                        ),
+                      )}
+                    </div>
+                  </Card>
+                </Col>
+
+                {/* Manila Bay Area */}
+                <Col xs={24} sm={12}>
+                  <Card
+                    title="Manila Bay Area"
+                    style={{ borderRadius: 10, height: MRF_CARD_H }}
+                    loading={loading}
+                    styles={{
+                      body: { overflow: "auto", height: MRF_CARD_H - 57 },
+                    }}
+                  >
+                    <div
+                      style={{
+                        display: "flex",
+                        flexDirection: "column",
+                        gap: 12,
+                      }}
+                    >
+                      {Object.entries(mrfStats.byManilaBayArea || {}).map(
+                        ([key, count]) => (
+                          <div key={key}>
+                            <div
+                              style={{
+                                display: "flex",
+                                justifyContent: "space-between",
+                                marginBottom: 4,
+                              }}
+                            >
+                              <Text>{key || "Unspecified"}</Text>
+                              <Text strong>{count}</Text>
+                            </div>
+                            <Progress
+                              percent={
+                                mrfStats.totalRecords > 0
+                                  ? Math.round(
+                                      (count / mrfStats.totalRecords) * 100,
+                                    )
+                                  : 0
+                              }
+                              strokeColor={
+                                key === "MBA" ? "#1890ff" : "#8c8c8c"
+                              }
+                              showInfo={false}
+                              size="small"
+                            />
+                          </div>
+                        ),
+                      )}
+                    </div>
+                  </Card>
+                </Col>
+              </Row>
+            </Col>
+
+            {/* RIGHT COLUMN — MRF Map (sticky) */}
+            <Col xs={24} lg={10}>
+              <div
+                style={{
+                  position: "sticky",
+                  top: 80,
+                  height: "calc(100vh - 200px)",
+                  minHeight: 520,
+                }}
+              >
+                <Card
+                  size="small"
+                  title={
+                    <>
+                      <GlobalOutlined /> MRF Location Map{" "}
+                      <Tag bordered={false} color="blue">
+                        {filteredMrfMapPts.length} plotted
+                      </Tag>
+                      {filteredMrfMapPts.length !== mrfMapPts.length && (
+                        <Tag bordered={false} color="default">
+                          of {mrfMapPts.length}
+                        </Tag>
+                      )}
+                    </>
+                  }
+                  style={{ borderRadius: 10, height: "100%" }}
+                  loading={loading}
+                  extra={
+                    <Space size={4}>
+                      <Tooltip title="Street">
+                        <Button
+                          size="small"
+                          type={mrfTileKey === "street" ? "primary" : "default"}
+                          icon={<GlobalOutlined />}
+                          onClick={() => setMrfTileKey("street")}
+                        />
+                      </Tooltip>
+                      <Tooltip title="Satellite">
+                        <Button
+                          size="small"
+                          type={
+                            mrfTileKey === "satellite" ? "primary" : "default"
+                          }
+                          icon={<EnvironmentOutlined />}
+                          onClick={() => setMrfTileKey("satellite")}
+                        />
+                      </Tooltip>
+                      <Tooltip title="Terrain">
+                        <Button
+                          size="small"
+                          type={
+                            mrfTileKey === "terrain" ? "primary" : "default"
+                          }
+                          icon={<FundOutlined />}
+                          onClick={() => setMrfTileKey("terrain")}
+                        />
+                      </Tooltip>
+                      <Tooltip title="Dark">
+                        <Button
+                          size="small"
+                          type={mrfTileKey === "dark" ? "primary" : "default"}
+                          icon={<AppstoreOutlined />}
+                          onClick={() => setMrfTileKey("dark")}
+                        />
+                      </Tooltip>
+                    </Space>
+                  }
+                  styles={{
+                    body: { padding: 0, height: "calc(100% - 100px)" },
+                  }}
+                >
+                  {/* Filter bar */}
+                  <div
+                    style={{
+                      display: "flex",
+                      gap: 6,
+                      padding: "8px 10px",
+                      background: "#fafafa",
+                      borderBottom: "1px solid #f0f0f0",
+                      flexWrap: "wrap",
+                    }}
+                  >
+                    <Select
+                      size="small"
+                      allowClear
+                      placeholder="Province"
+                      value={mrfFilterProvince}
+                      onChange={setMrfFilterProvince}
+                      options={mrfProvinceOptions}
+                      style={{ minWidth: 120, flex: 1 }}
+                    />
+                    <Select
+                      size="small"
+                      allowClear
+                      placeholder="Status"
+                      value={mrfFilterStatus}
+                      onChange={setMrfFilterStatus}
+                      options={[
+                        { label: "✓ Operational", value: "Operational" },
+                        {
+                          label: "✕ Non-Operational",
+                          value: "Non-Operational",
+                        },
+                      ]}
+                      style={{ minWidth: 130, flex: 1 }}
+                    />
+                    {(mrfFilterProvince || mrfFilterStatus) && (
+                      <Button
+                        size="small"
+                        type="link"
+                        danger
+                        onClick={() => {
+                          setMrfFilterProvince(null);
+                          setMrfFilterStatus(null);
+                        }}
+                      >
+                        Clear
+                      </Button>
+                    )}
+                    {/* Legend */}
+                    <div
+                      style={{
+                        display: "flex",
+                        gap: 8,
+                        alignItems: "center",
+                        marginLeft: "auto",
+                        fontSize: 11,
+                        color: "#999",
+                      }}
+                    >
+                      <span>
+                        <span
+                          style={{
+                            display: "inline-block",
+                            width: 10,
+                            height: 10,
+                            borderRadius: "50%",
+                            background: "#52c41a",
+                            marginRight: 3,
+                            verticalAlign: "middle",
+                          }}
+                        />
+                        Operational
+                      </span>
+                      <span>
+                        <span
+                          style={{
+                            display: "inline-block",
+                            width: 10,
+                            height: 10,
+                            borderRadius: "50%",
+                            background: "#ff4d4f",
+                            marginRight: 3,
+                            verticalAlign: "middle",
+                          }}
+                        />
+                        Non-Op
+                      </span>
+                      <span>
+                        <span
+                          style={{
+                            display: "inline-block",
+                            width: 10,
+                            height: 10,
+                            borderRadius: "50%",
+                            background: "#8c8c8c",
+                            marginRight: 3,
+                            verticalAlign: "middle",
+                          }}
+                        />
+                        Not Yet Monitored
+                      </span>
+                    </div>
+                  </div>
+                  {filteredMrfMapPts.length > 0 ? (
+                    <MapContainer
+                      center={[15.0, 120.7]}
+                      zoom={8}
+                      style={{
+                        height: "100%",
+                        width: "100%",
+                        borderRadius: "0 0 10px 10px",
+                      }}
+                      scrollWheelZoom={true}
+                      zoomControl={false}
+                    >
+                      <TileLayer
+                        key={mrfTileKey}
+                        attribution={mrfTile.attr}
+                        url={mrfTile.url}
+                      />
+                      <FitBounds points={filteredMrfMapPts} />
+                      <ProvinceBoundary
+                        key={mrfFilterProvince || "__mrf_none__"}
+                        province={mrfFilterProvince}
+                      />
+                      {filteredMrfMapPts.map((pt, idx) => (
+                        <Marker
+                          key={pt.record._id || idx}
+                          position={[pt.lat, pt.lng]}
+                          icon={mrfStatusIcon(pt.record.statusOfMRF)}
+                        >
+                          <Popup maxWidth={300} minWidth={240}>
+                            <div
+                              className="popup-light"
+                              style={{
+                                fontSize: 12,
+                                lineHeight: 1.7,
+                                padding: 2,
+                              }}
+                            >
+                              <div
+                                style={{
+                                  fontWeight: 700,
+                                  fontSize: 14,
+                                  marginBottom: 2,
+                                }}
+                              >
+                                {pt.record.municipality}
+                              </div>
+                              <div
+                                style={{
+                                  display: "flex",
+                                  gap: 4,
+                                  flexWrap: "wrap",
+                                  marginBottom: 6,
+                                }}
+                              >
+                                <span
+                                  style={{
+                                    display: "inline-flex",
+                                    alignItems: "center",
+                                    gap: 3,
+                                    background: "#e6f7ff",
+                                    color: "#1890ff",
+                                    borderRadius: 4,
+                                    padding: "1px 6px",
+                                    fontSize: 11,
+                                  }}
+                                >
+                                  <EnvironmentOutlined /> {pt.record.province}
+                                </span>
+                                {pt.record.barangay && (
+                                  <span
+                                    style={{
+                                      display: "inline-flex",
+                                      alignItems: "center",
+                                      gap: 3,
+                                      background: "#f0f0f0",
+                                      color: "#595959",
+                                      borderRadius: 4,
+                                      padding: "1px 6px",
+                                      fontSize: 11,
+                                    }}
+                                  >
+                                    {pt.record.barangay}
+                                  </span>
+                                )}
+                                {pt.record.manilaBayArea && (
+                                  <span
+                                    style={{
+                                      display: "inline-flex",
+                                      alignItems: "center",
+                                      gap: 3,
+                                      background:
+                                        pt.record.manilaBayArea === "MBA"
+                                          ? "#e6f7ff"
+                                          : "#f5f5f5",
+                                      color:
+                                        pt.record.manilaBayArea === "MBA"
+                                          ? "#1890ff"
+                                          : "#8c8c8c",
+                                      borderRadius: 4,
+                                      padding: "1px 6px",
+                                      fontSize: 11,
+                                    }}
+                                  >
+                                    <GlobalOutlined /> {pt.record.manilaBayArea}
+                                  </span>
+                                )}
+                              </div>
+                              <hr
+                                style={{
+                                  margin: "4px 0 6px",
+                                  border: "none",
+                                  borderTop: "1px solid #f0f0f0",
+                                }}
+                              />
+                              {pt.record.typeOfMRF && (
+                                <div style={{ marginBottom: 4 }}>
+                                  <BankOutlined style={{ color: "#2f54eb" }} />{" "}
+                                  <span style={{ color: "#595959" }}>
+                                    Type:
+                                  </span>{" "}
+                                  <strong>{pt.record.typeOfMRF}</strong>
+                                </div>
+                              )}
+                              <div
+                                style={{
+                                  display: "flex",
+                                  gap: 4,
+                                  flexWrap: "wrap",
+                                  marginBottom: 6,
+                                }}
+                              >
+                                {(() => {
+                                  const s = pt.record.statusOfMRF;
+                                  const isOp =
+                                    /operational/i.test(s) && !/non/i.test(s);
+                                  const isNon = /non/i.test(s);
+                                  return (
+                                    <span
+                                      className={`status-badge ${isOp ? "status-badge-compliant" : isNon ? "status-badge-noncompliant" : "status-badge-pending"}`}
+                                    >
+                                      <SafetyCertificateOutlined />{" "}
+                                      {isOp
+                                        ? "Operational"
+                                        : isNon
+                                          ? "Non-Operational"
+                                          : "Not Yet Monitored"}
+                                    </span>
+                                  );
+                                })()}
+                              </div>
+                              <div
+                                style={{
+                                  background: "#fafafa",
+                                  borderRadius: 6,
+                                  padding: "6px 8px",
+                                  marginBottom: 6,
+                                }}
+                              >
+                                {pt.record.amountGranted != null && (
+                                  <div
+                                    style={{
+                                      display: "flex",
+                                      justifyContent: "space-between",
+                                      marginBottom: 3,
+                                    }}
+                                  >
+                                    <span style={{ color: "#595959" }}>
+                                      <span
+                                        style={{
+                                          color: "#faad14",
+                                          fontWeight: 700,
+                                        }}
+                                      >
+                                        ₱
+                                      </span>{" "}
+                                      Funding
+                                    </span>
+                                    <strong>
+                                      ₱
+                                      {pt.record.amountGranted.toLocaleString()}
+                                    </strong>
+                                  </div>
+                                )}
+                                {pt.record.yearGranted && (
+                                  <div
+                                    style={{
+                                      display: "flex",
+                                      justifyContent: "space-between",
+                                      marginBottom: 3,
+                                    }}
+                                  >
+                                    <span style={{ color: "#595959" }}>
+                                      <CalendarOutlined
+                                        style={{ color: "#722ed1" }}
+                                      />{" "}
+                                      Year
+                                    </span>
+                                    <strong>{pt.record.yearGranted}</strong>
+                                  </div>
+                                )}
+                                <div
+                                  style={{
+                                    display: "flex",
+                                    justifyContent: "space-between",
+                                  }}
+                                >
+                                  <span style={{ color: "#595959" }}>
+                                    <BarChartOutlined
+                                      style={{ color: "#1890ff" }}
+                                    />{" "}
+                                    Diversion
+                                  </span>
+                                  <strong
+                                    style={{
+                                      color:
+                                        pt.record.wasteDiversionRate >= 0.25
+                                          ? "#52c41a"
+                                          : "#ff4d4f",
+                                    }}
+                                  >
+                                    {pt.record.wasteDiversionRate
+                                      ? `${(pt.record.wasteDiversionRate * 100).toFixed(1)}%`
+                                      : "—"}
+                                  </strong>
+                                </div>
+                              </div>
+                              {pt.record.focalPerson && (
+                                <div
+                                  style={{
+                                    display: "flex",
+                                    alignItems: "center",
+                                    gap: 5,
+                                    marginBottom: 2,
+                                  }}
+                                >
+                                  <UserOutlined style={{ color: "#1890ff" }} />{" "}
+                                  <span style={{ color: "#595959" }}>
+                                    Focal:
+                                  </span>{" "}
+                                  <strong>{pt.record.focalPerson}</strong>
+                                </div>
+                              )}
+                              {pt.record.enmoAssigned && (
+                                <div
+                                  style={{
+                                    display: "flex",
+                                    alignItems: "center",
+                                    gap: 5,
+                                  }}
+                                >
+                                  <TeamOutlined style={{ color: "#52c41a" }} />{" "}
+                                  <span style={{ color: "#595959" }}>
+                                    ENMO:
+                                  </span>{" "}
+                                  {pt.record.enmoAssigned}
+                                </div>
+                              )}
+                            </div>
+                          </Popup>
+                        </Marker>
+                      ))}
+                    </MapContainer>
+                  ) : (
+                    <div
+                      style={{
+                        height: "100%",
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                      }}
+                    >
+                      <Text type="secondary">No coordinate data available</Text>
+                    </div>
+                  )}
+                </Card>
+              </div>
+            </Col>
+          </Row>
         </>
+      ),
+    });
+  }
+
+  // LGU Initiated MRF tab
+  if (lguMrfStats && lguMrfStats.totalRecords > 0) {
+    const lguProvList = lguMrfStats.byProvinceList || [];
+    const lguMaxProvCount = Math.max(...lguProvList.map((p) => p.count), 1);
+    const lguDivProv = lguMrfStats.diversionByProvince || [];
+    const lfs = lguMrfStats.fundingStats || {};
+    const lguOpCount = lguMrfStats.byStatus?.Operational || 0;
+    const lguNonOpCount = lguMrfStats.byStatus?.["Non-Operational"] || 0;
+    const lguOpRate =
+      lguMrfStats.totalRecords > 0
+        ? (lguOpCount / lguMrfStats.totalRecords) * 100
+        : 0;
+    const lguAvgDiv = (lfs.avgDiversionRate || 0) * 100;
+
+    const LGU_CARD_H = 280;
+
+    tabItems.push({
+      key: "lgu-mrf",
+      label: (
+        <>
+          <ApartmentOutlined /> LGU Initiated MRF
+        </>
+      ),
+      children: (
+        <>
+          {/* Row 1: Stat tiles */}
+          <Row gutter={[16, 16]} style={{ marginBottom: 16 }}>
+            <Col xs={12} sm={12} md={6}>
+              <Card
+                hoverable
+                style={{ borderRadius: 10, height: 110 }}
+                loading={loading}
+              >
+                <Statistic
+                  title="Total LGU MRFs"
+                  value={lguMrfStats.totalRecords}
+                  prefix={<ApartmentOutlined style={{ color: "#13c2c2" }} />}
+                />
+              </Card>
+            </Col>
+            <Col xs={12} sm={12} md={6}>
+              <Card
+                hoverable
+                style={{ borderRadius: 10, height: 110 }}
+                loading={loading}
+              >
+                <Statistic
+                  title="Operational"
+                  value={lguOpCount}
+                  prefix={<CheckCircleOutlined style={{ color: "#52c41a" }} />}
+                />
+              </Card>
+            </Col>
+            <Col xs={12} sm={12} md={6}>
+              <Card
+                hoverable
+                style={{ borderRadius: 10, height: 110 }}
+                loading={loading}
+              >
+                <Statistic
+                  title="Non-Operational"
+                  value={lguNonOpCount}
+                  styles={{ content: { color: "#ff4d4f" } }}
+                  prefix={<CloseCircleOutlined />}
+                />
+              </Card>
+            </Col>
+            <Col xs={12} sm={12} md={6}>
+              <Card
+                hoverable
+                style={{ borderRadius: 10, height: 110 }}
+                loading={loading}
+              >
+                <Statistic
+                  title="Total Est. Cost"
+                  value={lfs.totalCost || 0}
+                  prefix={
+                    <span
+                      style={{
+                        color: "#722ed1",
+                        fontWeight: 700,
+                        fontSize: 18,
+                      }}
+                    >
+                      ₱
+                    </span>
+                  }
+                  formatter={(v) => Number(v).toLocaleString()}
+                />
+              </Card>
+            </Col>
+          </Row>
+
+          {/* Two-column layout: cards left, map right */}
+          <Row gutter={[16, 16]}>
+            {/* LEFT COLUMN — Stats cards */}
+            <Col xs={24} lg={14}>
+              <Row gutter={[16, 16]}>
+                {/* Operational Status */}
+                <Col xs={24} sm={12}>
+                  <Card
+                    title={
+                      <>
+                        <PieChartOutlined /> Operational Status
+                      </>
+                    }
+                    style={{ borderRadius: 10, height: LGU_CARD_H }}
+                    loading={loading}
+                    styles={{
+                      body: { overflow: "auto", height: LGU_CARD_H - 57 },
+                    }}
+                  >
+                    <div
+                      style={{
+                        display: "flex",
+                        flexDirection: "column",
+                        gap: 12,
+                      }}
+                    >
+                      {[
+                        {
+                          label: "Operational",
+                          count: lguOpCount,
+                          color: "#52c41a",
+                          icon: <CheckCircleOutlined />,
+                        },
+                        {
+                          label: "Non-Operational",
+                          count: lguNonOpCount,
+                          color: "#ff4d4f",
+                          icon: <CloseCircleOutlined />,
+                        },
+                        {
+                          label: "Not Yet Monitored",
+                          count:
+                            lguMrfStats.byStatus?.["Not Yet Monitored"] || 0,
+                          color: "#d9d9d9",
+                          icon: <ClockCircleOutlined />,
+                        },
+                      ].map((s) => (
+                        <div key={s.label}>
+                          <div
+                            style={{
+                              display: "flex",
+                              justifyContent: "space-between",
+                              marginBottom: 4,
+                            }}
+                          >
+                            <Text>{s.label}</Text>
+                            <Text strong>
+                              {s.count}{" "}
+                              <span style={{ color: "#999", fontWeight: 400 }}>
+                                (
+                                {lguMrfStats.totalRecords > 0
+                                  ? Math.round(
+                                      (s.count / lguMrfStats.totalRecords) *
+                                        100,
+                                    )
+                                  : 0}
+                                %)
+                              </span>
+                            </Text>
+                          </div>
+                          <Progress
+                            percent={
+                              lguMrfStats.totalRecords > 0
+                                ? Math.round(
+                                    (s.count / lguMrfStats.totalRecords) * 100,
+                                  )
+                                : 0
+                            }
+                            strokeColor={s.color}
+                            showInfo={false}
+                            size="small"
+                          />
+                        </div>
+                      ))}
+                    </div>
+                  </Card>
+                </Col>
+
+                {/* Key Metrics */}
+                <Col xs={24} sm={12}>
+                  <Card
+                    title={
+                      <>
+                        <BarChartOutlined /> Key Metrics
+                      </>
+                    }
+                    style={{ borderRadius: 10, height: LGU_CARD_H }}
+                    loading={loading}
+                    styles={{
+                      body: {
+                        overflow: "auto",
+                        height: LGU_CARD_H - 57,
+                        padding: "12px 16px",
+                      },
+                    }}
+                  >
+                    <div
+                      style={{
+                        display: "flex",
+                        flexDirection: "column",
+                        gap: 10,
+                      }}
+                    >
+                      <div
+                        style={{
+                          display: "flex",
+                          alignItems: "center",
+                          gap: 12,
+                          padding: "6px 10px",
+                          background:
+                            "linear-gradient(135deg, #f6ffed 0%, #fcffe6 100%)",
+                          borderRadius: 8,
+                          border: "1px solid #d9f7be",
+                        }}
+                      >
+                        <Progress
+                          type="circle"
+                          percent={Math.round(lguOpRate)}
+                          size={48}
+                          strokeColor={{ "0%": "#52c41a", "100%": "#95de64" }}
+                          format={(p) => (
+                            <span style={{ fontSize: 12, fontWeight: 700 }}>
+                              {p}%
+                            </span>
+                          )}
+                        />
+                        <div>
+                          <Text type="secondary" style={{ fontSize: 11 }}>
+                            Operational Rate
+                          </Text>
+                          <br />
+                          <Text
+                            strong
+                            style={{ fontSize: 16, color: "#389e0d" }}
+                          >
+                            {lguOpRate.toFixed(1)}%
+                          </Text>
+                        </div>
+                      </div>
+                      <div
+                        style={{
+                          display: "flex",
+                          alignItems: "center",
+                          gap: 12,
+                          padding: "6px 10px",
+                          background:
+                            "linear-gradient(135deg, #e6f7ff 0%, #f0f5ff 100%)",
+                          borderRadius: 8,
+                          border: "1px solid #bae7ff",
+                        }}
+                      >
+                        <Progress
+                          type="circle"
+                          percent={Math.round(lguAvgDiv)}
+                          size={48}
+                          strokeColor={{ "0%": "#1890ff", "100%": "#69c0ff" }}
+                          format={(p) => (
+                            <span style={{ fontSize: 12, fontWeight: 700 }}>
+                              {p}%
+                            </span>
+                          )}
+                        />
+                        <div>
+                          <Text type="secondary" style={{ fontSize: 11 }}>
+                            Avg. Diversion Rate
+                          </Text>
+                          <br />
+                          <Text
+                            strong
+                            style={{ fontSize: 16, color: "#096dd9" }}
+                          >
+                            {lguAvgDiv.toFixed(1)}%
+                          </Text>
+                        </div>
+                      </div>
+                      <Row gutter={8}>
+                        <Col span={12}>
+                          <div
+                            style={{
+                              textAlign: "center",
+                              padding: "6px 4px",
+                              background: "#e6fffb",
+                              borderRadius: 6,
+                              border: "1px solid #87e8de",
+                            }}
+                          >
+                            <Text
+                              type="secondary"
+                              style={{ fontSize: 10, display: "block" }}
+                            >
+                              Brgys Served
+                            </Text>
+                            <Text
+                              strong
+                              style={{ fontSize: 16, color: "#13c2c2" }}
+                            >
+                              {(lfs.totalBrgyServed || 0).toLocaleString()}
+                            </Text>
+                          </div>
+                        </Col>
+                        <Col span={12}>
+                          <div
+                            style={{
+                              textAlign: "center",
+                              padding: "6px 4px",
+                              background: "#f9f0ff",
+                              borderRadius: 6,
+                              border: "1px solid #efdbff",
+                            }}
+                          >
+                            <Text
+                              type="secondary"
+                              style={{ fontSize: 10, display: "block" }}
+                            >
+                              Avg. Cost
+                            </Text>
+                            <Text
+                              strong
+                              style={{ fontSize: 16, color: "#722ed1" }}
+                            >
+                              ₱{Math.round(lfs.avgCost || 0).toLocaleString()}
+                            </Text>
+                          </div>
+                        </Col>
+                      </Row>
+                    </div>
+                  </Card>
+                </Col>
+
+                {/* MRFs per Province */}
+                <Col xs={24} sm={12}>
+                  <Card
+                    title={
+                      <>
+                        <BarChartOutlined /> LGU MRFs per Province
+                      </>
+                    }
+                    style={{ borderRadius: 10, height: LGU_CARD_H }}
+                    loading={loading}
+                    styles={{
+                      body: { overflow: "auto", height: LGU_CARD_H - 57 },
+                    }}
+                  >
+                    <div
+                      style={{
+                        display: "flex",
+                        flexDirection: "column",
+                        gap: 5,
+                        maxHeight: 170,
+                        overflowY: "auto",
+                        padding: "0 2px",
+                      }}
+                    >
+                      {lguProvList.map((p, i) => (
+                        <div
+                          key={i}
+                          style={{
+                            display: "flex",
+                            alignItems: "center",
+                            gap: 6,
+                          }}
+                        >
+                          <Text
+                            style={{
+                              fontSize: 10,
+                              color: isDark ? "#aaa" : "#999",
+                              minWidth: 70,
+                              textAlign: "right",
+                              whiteSpace: "nowrap",
+                              overflow: "hidden",
+                              textOverflow: "ellipsis",
+                            }}
+                          >
+                            {p._id}
+                          </Text>
+                          <div
+                            style={{
+                              flex: 1,
+                              height: 16,
+                              background: isDark ? "#2a2a2a" : "#f5f5f5",
+                              borderRadius: 3,
+                              overflow: "hidden",
+                            }}
+                          >
+                            <div
+                              style={{
+                                width: `${Math.max((p.count / lguMaxProvCount) * 100, 4)}%`,
+                                height: "100%",
+                                background:
+                                  "linear-gradient(90deg, #13c2c2 0%, #87e8de 100%)",
+                                borderRadius: "3px 0 0 3px",
+                                transition: "width 0.5s ease",
+                              }}
+                            />
+                          </div>
+                          <Text
+                            style={{
+                              fontSize: 10,
+                              color: isDark ? "#ccc" : "#666",
+                              minWidth: 20,
+                              textAlign: "right",
+                              fontWeight: 600,
+                            }}
+                          >
+                            {p.count}
+                          </Text>
+                        </div>
+                      ))}
+                    </div>
+                  </Card>
+                </Col>
+
+                {/* Diversion Rate by Province */}
+                <Col xs={24} sm={12}>
+                  <Card
+                    title={
+                      <>
+                        <RiseOutlined /> Diversion by Province
+                      </>
+                    }
+                    style={{ borderRadius: 10, height: LGU_CARD_H }}
+                    loading={loading}
+                    styles={{
+                      body: { overflow: "auto", height: LGU_CARD_H - 57 },
+                    }}
+                  >
+                    <div
+                      style={{
+                        display: "flex",
+                        flexDirection: "column",
+                        gap: 8,
+                      }}
+                    >
+                      {lguDivProv.slice(0, 7).map((d) => (
+                        <div key={d._id}>
+                          <div
+                            style={{
+                              display: "flex",
+                              justifyContent: "space-between",
+                              marginBottom: 2,
+                            }}
+                          >
+                            <Text style={{ fontSize: 12 }}>{d._id}</Text>
+                            <Text strong style={{ fontSize: 12 }}>
+                              {(d.avgDiversion * 100).toFixed(1)}%{" "}
+                              <span
+                                style={{
+                                  color: "#999",
+                                  fontWeight: 400,
+                                  fontSize: 10,
+                                }}
+                              >
+                                ({d.count})
+                              </span>
+                            </Text>
+                          </div>
+                          <Progress
+                            percent={Math.round(d.avgDiversion * 100)}
+                            strokeColor={
+                              d.avgDiversion * 100 >= 50 ? "#52c41a" : "#faad14"
+                            }
+                            showInfo={false}
+                            size="small"
+                          />
+                        </div>
+                      ))}
+                    </div>
+                  </Card>
+                </Col>
+
+                {/* MRF Type Distribution */}
+                <Col xs={24} sm={12}>
+                  <Card
+                    title={
+                      <>
+                        <ApartmentOutlined /> MRF Type
+                      </>
+                    }
+                    style={{ borderRadius: 10, height: LGU_CARD_H }}
+                    loading={loading}
+                    styles={{
+                      body: { overflow: "auto", height: LGU_CARD_H - 57 },
+                    }}
+                  >
+                    <div
+                      style={{
+                        display: "flex",
+                        flexDirection: "column",
+                        gap: 12,
+                      }}
+                    >
+                      {Object.entries(lguMrfStats.byMRFType || {}).map(
+                        ([key, count]) => (
+                          <div key={key}>
+                            <div
+                              style={{
+                                display: "flex",
+                                justifyContent: "space-between",
+                                marginBottom: 4,
+                              }}
+                            >
+                              <Text>{key || "Unspecified"}</Text>
+                              <Text strong>{count}</Text>
+                            </div>
+                            <Progress
+                              percent={
+                                lguMrfStats.totalRecords > 0
+                                  ? Math.round(
+                                      (count / lguMrfStats.totalRecords) * 100,
+                                    )
+                                  : 0
+                              }
+                              strokeColor="#13c2c2"
+                              showInfo={false}
+                              size="small"
+                            />
+                          </div>
+                        ),
+                      )}
+                    </div>
+                  </Card>
+                </Col>
+
+                {/* Manila Bay Area */}
+                <Col xs={24} sm={12}>
+                  <Card
+                    title="Manila Bay Area"
+                    style={{ borderRadius: 10, height: LGU_CARD_H }}
+                    loading={loading}
+                    styles={{
+                      body: { overflow: "auto", height: LGU_CARD_H - 57 },
+                    }}
+                  >
+                    <div
+                      style={{
+                        display: "flex",
+                        flexDirection: "column",
+                        gap: 12,
+                      }}
+                    >
+                      {Object.entries(lguMrfStats.byManilaBayArea || {}).map(
+                        ([key, count]) => (
+                          <div key={key}>
+                            <div
+                              style={{
+                                display: "flex",
+                                justifyContent: "space-between",
+                                marginBottom: 4,
+                              }}
+                            >
+                              <Text>{key || "Unspecified"}</Text>
+                              <Text strong>{count}</Text>
+                            </div>
+                            <Progress
+                              percent={
+                                lguMrfStats.totalRecords > 0
+                                  ? Math.round(
+                                      (count / lguMrfStats.totalRecords) * 100,
+                                    )
+                                  : 0
+                              }
+                              strokeColor={
+                                key === "MBA" ? "#1890ff" : "#8c8c8c"
+                              }
+                              showInfo={false}
+                              size="small"
+                            />
+                          </div>
+                        ),
+                      )}
+                    </div>
+                  </Card>
+                </Col>
+              </Row>
+            </Col>
+
+            {/* RIGHT COLUMN — LGU MRF Map (sticky) */}
+            <Col xs={24} lg={10}>
+              <div
+                style={{
+                  position: "sticky",
+                  top: 80,
+                  height: "calc(100vh - 200px)",
+                  minHeight: 520,
+                }}
+              >
+                <Card
+                  size="small"
+                  title={
+                    <>
+                      <GlobalOutlined /> LGU MRF Location Map{" "}
+                      <Tag bordered={false} color="cyan">
+                        {filteredLguMapPts.length} plotted
+                      </Tag>
+                      {filteredLguMapPts.length !== lguMapPts.length && (
+                        <Tag bordered={false} color="default">
+                          of {lguMapPts.length}
+                        </Tag>
+                      )}
+                    </>
+                  }
+                  style={{ borderRadius: 10, height: "100%" }}
+                  loading={loading}
+                  extra={
+                    <Space size={4}>
+                      <Tooltip title="Street">
+                        <Button
+                          size="small"
+                          type={lguTileKey === "street" ? "primary" : "default"}
+                          icon={<GlobalOutlined />}
+                          onClick={() => setLguTileKey("street")}
+                        />
+                      </Tooltip>
+                      <Tooltip title="Satellite">
+                        <Button
+                          size="small"
+                          type={
+                            lguTileKey === "satellite" ? "primary" : "default"
+                          }
+                          icon={<EnvironmentOutlined />}
+                          onClick={() => setLguTileKey("satellite")}
+                        />
+                      </Tooltip>
+                      <Tooltip title="Terrain">
+                        <Button
+                          size="small"
+                          type={
+                            lguTileKey === "terrain" ? "primary" : "default"
+                          }
+                          icon={<FundOutlined />}
+                          onClick={() => setLguTileKey("terrain")}
+                        />
+                      </Tooltip>
+                      <Tooltip title="Dark">
+                        <Button
+                          size="small"
+                          type={lguTileKey === "dark" ? "primary" : "default"}
+                          icon={<AppstoreOutlined />}
+                          onClick={() => setLguTileKey("dark")}
+                        />
+                      </Tooltip>
+                    </Space>
+                  }
+                  styles={{
+                    body: { padding: 0, height: "calc(100% - 100px)" },
+                  }}
+                >
+                  {/* Filter bar */}
+                  <div
+                    style={{
+                      display: "flex",
+                      gap: 6,
+                      padding: "8px 10px",
+                      background: "#fafafa",
+                      borderBottom: "1px solid #f0f0f0",
+                      flexWrap: "wrap",
+                    }}
+                  >
+                    <Select
+                      size="small"
+                      allowClear
+                      placeholder="Province"
+                      value={lguFilterProvince}
+                      onChange={setLguFilterProvince}
+                      options={lguProvinceOptions}
+                      style={{ minWidth: 120, flex: 1 }}
+                    />
+                    <Select
+                      size="small"
+                      allowClear
+                      placeholder="Status"
+                      value={lguFilterStatus}
+                      onChange={setLguFilterStatus}
+                      options={[
+                        { label: "\u2713 Operational", value: "Operational" },
+                        {
+                          label: "\u2715 Non-Operational",
+                          value: "Non-Operational",
+                        },
+                      ]}
+                      style={{ minWidth: 130, flex: 1 }}
+                    />
+                    {(lguFilterProvince || lguFilterStatus) && (
+                      <Button
+                        size="small"
+                        type="link"
+                        danger
+                        onClick={() => {
+                          setLguFilterProvince(null);
+                          setLguFilterStatus(null);
+                        }}
+                      >
+                        Clear
+                      </Button>
+                    )}
+                    {/* Legend */}
+                    <div
+                      style={{
+                        display: "flex",
+                        gap: 8,
+                        alignItems: "center",
+                        marginLeft: "auto",
+                        fontSize: 11,
+                        color: "#999",
+                      }}
+                    >
+                      <span>
+                        <span
+                          style={{
+                            display: "inline-block",
+                            width: 10,
+                            height: 10,
+                            borderRadius: "50%",
+                            background: "#52c41a",
+                            marginRight: 3,
+                            verticalAlign: "middle",
+                          }}
+                        />
+                        Operational
+                      </span>
+                      <span>
+                        <span
+                          style={{
+                            display: "inline-block",
+                            width: 10,
+                            height: 10,
+                            borderRadius: "50%",
+                            background: "#ff4d4f",
+                            marginRight: 3,
+                            verticalAlign: "middle",
+                          }}
+                        />
+                        Non-Op
+                      </span>
+                      <span>
+                        <span
+                          style={{
+                            display: "inline-block",
+                            width: 10,
+                            height: 10,
+                            borderRadius: "50%",
+                            background: "#8c8c8c",
+                            marginRight: 3,
+                            verticalAlign: "middle",
+                          }}
+                        />
+                        Not Yet Monitored
+                      </span>
+                    </div>
+                  </div>
+                  {filteredLguMapPts.length > 0 ? (
+                    <MapContainer
+                      center={[15.0, 120.7]}
+                      zoom={8}
+                      style={{
+                        height: "100%",
+                        width: "100%",
+                        borderRadius: "0 0 10px 10px",
+                      }}
+                      scrollWheelZoom={true}
+                      zoomControl={false}
+                    >
+                      <TileLayer
+                        key={lguTileKey}
+                        attribution={TILE_LAYERS[lguTileKey].attr}
+                        url={TILE_LAYERS[lguTileKey].url}
+                      />
+                      <FitBounds points={filteredLguMapPts} />
+                      <ProvinceBoundary
+                        key={lguFilterProvince || "__lgu_none__"}
+                        province={lguFilterProvince}
+                      />
+                      {filteredLguMapPts.map((pt, idx) => (
+                        <Marker
+                          key={pt.record._id || idx}
+                          position={[pt.lat, pt.lng]}
+                          icon={mrfStatusIcon(pt.record.statusOfMRF)}
+                        >
+                          <Popup maxWidth={300} minWidth={240}>
+                            <div
+                              className="popup-light"
+                              style={{
+                                fontSize: 12,
+                                lineHeight: 1.7,
+                                padding: 2,
+                              }}
+                            >
+                              <div
+                                style={{
+                                  fontWeight: 700,
+                                  fontSize: 14,
+                                  marginBottom: 2,
+                                }}
+                              >
+                                {pt.record.municipality}
+                              </div>
+                              <div
+                                style={{
+                                  display: "flex",
+                                  gap: 4,
+                                  flexWrap: "wrap",
+                                  marginBottom: 6,
+                                }}
+                              >
+                                <span
+                                  style={{
+                                    display: "inline-flex",
+                                    alignItems: "center",
+                                    gap: 3,
+                                    background: "#e6fffb",
+                                    color: "#13c2c2",
+                                    borderRadius: 4,
+                                    padding: "1px 6px",
+                                    fontSize: 11,
+                                  }}
+                                >
+                                  <EnvironmentOutlined /> {pt.record.province}
+                                </span>
+                                {pt.record.barangay && (
+                                  <span
+                                    style={{
+                                      display: "inline-flex",
+                                      alignItems: "center",
+                                      gap: 3,
+                                      background: "#f0f0f0",
+                                      color: "#595959",
+                                      borderRadius: 4,
+                                      padding: "1px 6px",
+                                      fontSize: 11,
+                                    }}
+                                  >
+                                    {pt.record.barangay}
+                                  </span>
+                                )}
+                                {pt.record.manilaBayArea && (
+                                  <span
+                                    style={{
+                                      display: "inline-flex",
+                                      alignItems: "center",
+                                      gap: 3,
+                                      background:
+                                        pt.record.manilaBayArea === "MBA"
+                                          ? "#e6f7ff"
+                                          : "#f5f5f5",
+                                      color:
+                                        pt.record.manilaBayArea === "MBA"
+                                          ? "#1890ff"
+                                          : "#8c8c8c",
+                                      borderRadius: 4,
+                                      padding: "1px 6px",
+                                      fontSize: 11,
+                                    }}
+                                  >
+                                    <GlobalOutlined /> {pt.record.manilaBayArea}
+                                  </span>
+                                )}
+                              </div>
+                              <hr
+                                style={{
+                                  margin: "4px 0 6px",
+                                  border: "none",
+                                  borderTop: "1px solid #f0f0f0",
+                                }}
+                              />
+                              {pt.record.typeOfMRF && (
+                                <div style={{ marginBottom: 4 }}>
+                                  <ApartmentOutlined
+                                    style={{ color: "#13c2c2" }}
+                                  />{" "}
+                                  <span style={{ color: "#595959" }}>
+                                    Type:
+                                  </span>{" "}
+                                  <strong>{pt.record.typeOfMRF}</strong>
+                                </div>
+                              )}
+                              <div
+                                style={{
+                                  display: "flex",
+                                  gap: 4,
+                                  flexWrap: "wrap",
+                                  marginBottom: 6,
+                                }}
+                              >
+                                {(() => {
+                                  const s = pt.record.statusOfMRF;
+                                  const isOp =
+                                    /operational/i.test(s) && !/non/i.test(s);
+                                  const isNon = /non/i.test(s);
+                                  return (
+                                    <span
+                                      className={`status-badge ${isOp ? "status-badge-compliant" : isNon ? "status-badge-noncompliant" : "status-badge-pending"}`}
+                                    >
+                                      <SafetyCertificateOutlined />{" "}
+                                      {isOp
+                                        ? "Operational"
+                                        : isNon
+                                          ? "Non-Operational"
+                                          : "Not Yet Monitored"}
+                                    </span>
+                                  );
+                                })()}
+                              </div>
+                              <div
+                                style={{
+                                  background: "#fafafa",
+                                  borderRadius: 6,
+                                  padding: "6px 8px",
+                                  marginBottom: 6,
+                                }}
+                              >
+                                <div
+                                  style={{
+                                    display: "flex",
+                                    justifyContent: "space-between",
+                                  }}
+                                >
+                                  <span style={{ color: "#595959" }}>
+                                    <BarChartOutlined
+                                      style={{ color: "#1890ff" }}
+                                    />{" "}
+                                    Diversion
+                                  </span>
+                                  <strong
+                                    style={{
+                                      color:
+                                        pt.record.wasteDiversionRate >= 0.25
+                                          ? "#52c41a"
+                                          : "#ff4d4f",
+                                    }}
+                                  >
+                                    {pt.record.wasteDiversionRate
+                                      ? `${(pt.record.wasteDiversionRate * 100).toFixed(1)}%`
+                                      : "\u2014"}
+                                  </strong>
+                                </div>
+                              </div>
+                              {pt.record.focalPerson && (
+                                <div
+                                  style={{
+                                    display: "flex",
+                                    alignItems: "center",
+                                    gap: 5,
+                                    marginBottom: 2,
+                                  }}
+                                >
+                                  <UserOutlined style={{ color: "#13c2c2" }} />{" "}
+                                  <span style={{ color: "#595959" }}>
+                                    Focal:
+                                  </span>{" "}
+                                  <strong>{pt.record.focalPerson}</strong>
+                                </div>
+                              )}
+                              {pt.record.enmoAssigned && (
+                                <div
+                                  style={{
+                                    display: "flex",
+                                    alignItems: "center",
+                                    gap: 5,
+                                  }}
+                                >
+                                  <TeamOutlined style={{ color: "#52c41a" }} />{" "}
+                                  <span style={{ color: "#595959" }}>
+                                    ENMO:
+                                  </span>{" "}
+                                  {pt.record.enmoAssigned}
+                                </div>
+                              )}
+                            </div>
+                          </Popup>
+                        </Marker>
+                      ))}
+                    </MapContainer>
+                  ) : (
+                    <div
+                      style={{
+                        height: "100%",
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                      }}
+                    >
+                      <Text type="secondary">No coordinate data available</Text>
+                    </div>
+                  )}
+                </Card>
+              </div>
+            </Col>
+          </Row>
+        </>
+      ),
+    });
+  }
+
+  // ── Trash Traps Dashboard Tab ──
+  if (trapStats && trapStats.totalRecords > 0) {
+    const trapProvList = trapStats.byProvinceList || [];
+    const trapMaxProv = Math.max(...trapProvList.map((p) => p.count), 1);
+    const trapByStatus = trapStats.byStatus || {};
+    const trapOp = trapByStatus.Operational || 0;
+    const trapNonOp = trapByStatus["Non-Operational"] || 0;
+    const trapNotMonitored = trapByStatus["Not Yet Monitored"] || 0;
+    const trapOpRate =
+      trapStats.totalRecords > 0 ? (trapOp / trapStats.totalRecords) * 100 : 0;
+    const trapOps = trapStats.operationStats || {};
+    const trapTile = TILE_LAYERS[trapTileKey];
+
+    const TRAP_CARD_H = 280;
+
+    tabItems.push({
+      key: "trash-traps",
+      label: (
+        <>
+          <DeleteOutlined /> Trash Traps
+        </>
+      ),
+      children: (
+        <>
+          {/* Row 1: Stat tiles */}
+          <Row gutter={[16, 16]} style={{ marginBottom: 16 }}>
+            <Col xs={12} sm={12} md={6}>
+              <Card
+                hoverable
+                style={{ borderRadius: 10, height: 110 }}
+                loading={loading}
+              >
+                <Statistic
+                  title="Total Traps"
+                  value={trapStats.totalRecords}
+                  prefix={<ExperimentOutlined style={{ color: "#13c2c2" }} />}
+                />
+              </Card>
+            </Col>
+            <Col xs={12} sm={12} md={6}>
+              <Card
+                hoverable
+                style={{ borderRadius: 10, height: 110 }}
+                loading={loading}
+              >
+                <Statistic
+                  title="Operational"
+                  value={trapOp}
+                  valueStyle={{ color: "#52c41a" }}
+                  prefix={<CheckCircleOutlined />}
+                  suffix={
+                    <span
+                      style={{ color: "#999", fontSize: 14, fontWeight: 400 }}
+                    >
+                      ({trapOpRate.toFixed(0)}%)
+                    </span>
+                  }
+                />
+              </Card>
+            </Col>
+            <Col xs={12} sm={12} md={6}>
+              <Card
+                hoverable
+                style={{ borderRadius: 10, height: 110 }}
+                loading={loading}
+              >
+                <Statistic
+                  title="Non-Operational"
+                  value={trapNonOp}
+                  valueStyle={{ color: "#ff4d4f" }}
+                  prefix={<CloseCircleOutlined />}
+                  suffix={
+                    <span
+                      style={{ color: "#999", fontSize: 14, fontWeight: 400 }}
+                    >
+                      (
+                      {(trapStats.totalRecords > 0
+                        ? (trapNonOp / trapStats.totalRecords) * 100
+                        : 0
+                      ).toFixed(0)}
+                      %)
+                    </span>
+                  }
+                />
+              </Card>
+            </Col>
+            <Col xs={12} sm={12} md={6}>
+              <Card
+                hoverable
+                style={{ borderRadius: 10, height: 110 }}
+                loading={loading}
+              >
+                <Statistic
+                  title="HDPE Floaters"
+                  value={trapOps.totalHDPE || 0}
+                  prefix={<ToolOutlined style={{ color: "#1890ff" }} />}
+                />
+              </Card>
+            </Col>
+          </Row>
+
+          <Row gutter={[16, 16]} style={{ marginBottom: 16 }}>
+            <Col xs={12} sm={12} md={6}>
+              <Card
+                hoverable
+                style={{ borderRadius: 10, height: 110 }}
+                loading={loading}
+              >
+                <Statistic
+                  title="Total Waste Hauled"
+                  value={trapOps.totalWasteHauled || 0}
+                  suffix="kg"
+                  prefix={<BarChartOutlined style={{ color: "#722ed1" }} />}
+                  formatter={(v) => Number(v).toLocaleString()}
+                />
+              </Card>
+            </Col>
+            <Col xs={12} sm={12} md={6}>
+              <Card
+                hoverable
+                style={{ borderRadius: 10, height: 110 }}
+                loading={loading}
+              >
+                <Statistic
+                  title="Avg Waste/Trap"
+                  value={(trapOps.avgWasteHauled || 0).toFixed(1)}
+                  suffix="kg"
+                  prefix={<BarChartOutlined style={{ color: "#13c2c2" }} />}
+                />
+              </Card>
+            </Col>
+            <Col xs={12} sm={12} md={6}>
+              <Card
+                hoverable
+                style={{ borderRadius: 10, height: 110 }}
+                loading={loading}
+              >
+                <Statistic
+                  title="Op. Rate"
+                  value={trapOpRate.toFixed(1)}
+                  suffix="%"
+                  prefix={<RiseOutlined style={{ color: "#faad14" }} />}
+                />
+              </Card>
+            </Col>
+            <Col xs={12} sm={12} md={6}>
+              <Card
+                hoverable
+                style={{ borderRadius: 10, height: 110 }}
+                loading={loading}
+              >
+                <Tooltip title="Click to view Trash Traps page">
+                  <div
+                    style={{ cursor: "pointer" }}
+                    onClick={() => setActiveMenu("cs-trash-traps")}
+                  >
+                    <Statistic
+                      title="View All Records"
+                      value={trapStats.totalRecords}
+                      prefix={<FileTextOutlined style={{ color: "#fa8c16" }} />}
+                    />
+                  </div>
+                </Tooltip>
+              </Card>
+            </Col>
+          </Row>
+
+          {/* Two-column layout: cards left, map right */}
+          <Row gutter={[16, 16]}>
+            {/* LEFT COLUMN — Stats cards */}
+            <Col xs={24} lg={14}>
+              <Row gutter={[16, 16]}>
+                {/* Operational Status */}
+                <Col xs={24} sm={12}>
+                  <Card
+                    title={
+                      <>
+                        <PieChartOutlined /> Operational Status
+                      </>
+                    }
+                    style={{ borderRadius: 10, height: TRAP_CARD_H }}
+                    loading={loading}
+                    styles={{
+                      body: { overflow: "auto", height: TRAP_CARD_H - 57 },
+                    }}
+                  >
+                    <div
+                      style={{
+                        display: "flex",
+                        flexDirection: "column",
+                        gap: 12,
+                      }}
+                    >
+                      {[
+                        {
+                          label: "Operational",
+                          count: trapOp,
+                          color: "#52c41a",
+                          icon: <CheckCircleOutlined />,
+                        },
+                        {
+                          label: "Non-Operational",
+                          count: trapNonOp,
+                          color: "#ff4d4f",
+                          icon: <CloseCircleOutlined />,
+                        },
+                        {
+                          label: "Not Yet Monitored",
+                          count: trapNotMonitored,
+                          color: "#d9d9d9",
+                          icon: <ClockCircleOutlined />,
+                        },
+                      ].map((s) => (
+                        <div key={s.label}>
+                          <div
+                            style={{
+                              display: "flex",
+                              justifyContent: "space-between",
+                              marginBottom: 4,
+                            }}
+                          >
+                            <Text>
+                              {s.icon} {s.label}
+                            </Text>
+                            <Text strong>
+                              {s.count}{" "}
+                              <span style={{ color: "#999", fontWeight: 400 }}>
+                                (
+                                {trapStats.totalRecords > 0
+                                  ? Math.round(
+                                      (s.count / trapStats.totalRecords) * 100,
+                                    )
+                                  : 0}
+                                %)
+                              </span>
+                            </Text>
+                          </div>
+                          <Progress
+                            percent={
+                              trapStats.totalRecords > 0
+                                ? Math.round(
+                                    (s.count / trapStats.totalRecords) * 100,
+                                  )
+                                : 0
+                            }
+                            strokeColor={s.color}
+                            showInfo={false}
+                            size="small"
+                          />
+                        </div>
+                      ))}
+                    </div>
+                  </Card>
+                </Col>
+
+                {/* Key Metrics */}
+                <Col xs={24} sm={12}>
+                  <Card
+                    title={
+                      <>
+                        <BarChartOutlined /> Key Metrics
+                      </>
+                    }
+                    style={{ borderRadius: 10, height: TRAP_CARD_H }}
+                    loading={loading}
+                    styles={{
+                      body: {
+                        overflow: "auto",
+                        height: TRAP_CARD_H - 57,
+                        padding: "12px 16px",
+                      },
+                    }}
+                  >
+                    <div
+                      style={{
+                        display: "flex",
+                        flexDirection: "column",
+                        gap: 10,
+                      }}
+                    >
+                      <div
+                        style={{
+                          display: "flex",
+                          alignItems: "center",
+                          gap: 12,
+                          padding: "6px 10px",
+                          background:
+                            "linear-gradient(135deg, #e6fffb 0%, #f0f5ff 100%)",
+                          borderRadius: 8,
+                          border: "1px solid #87e8de",
+                        }}
+                      >
+                        <Progress
+                          type="circle"
+                          percent={Math.round(trapOpRate)}
+                          size={48}
+                          strokeColor={{ "0%": "#13c2c2", "100%": "#87e8de" }}
+                          format={(p) => (
+                            <span style={{ fontSize: 12, fontWeight: 700 }}>
+                              {p}%
+                            </span>
+                          )}
+                        />
+                        <div>
+                          <Text type="secondary" style={{ fontSize: 11 }}>
+                            Operational Rate
+                          </Text>
+                          <br />
+                          <Text
+                            strong
+                            style={{ fontSize: 16, color: "#13c2c2" }}
+                          >
+                            {trapOpRate.toFixed(1)}%
+                          </Text>
+                        </div>
+                      </div>
+                      <Row gutter={8}>
+                        <Col span={12}>
+                          <div
+                            style={{
+                              textAlign: "center",
+                              padding: "6px 4px",
+                              background: "#e6f7ff",
+                              borderRadius: 6,
+                              border: "1px solid #bae7ff",
+                            }}
+                          >
+                            <Text
+                              type="secondary"
+                              style={{ fontSize: 10, display: "block" }}
+                            >
+                              HDPE Floaters
+                            </Text>
+                            <Text
+                              strong
+                              style={{ fontSize: 16, color: "#1890ff" }}
+                            >
+                              {(trapOps.totalHDPE || 0).toLocaleString()}
+                            </Text>
+                          </div>
+                        </Col>
+                        <Col span={12}>
+                          <div
+                            style={{
+                              textAlign: "center",
+                              padding: "6px 4px",
+                              background: "#f9f0ff",
+                              borderRadius: 6,
+                              border: "1px solid #efdbff",
+                            }}
+                          >
+                            <Text
+                              type="secondary"
+                              style={{ fontSize: 10, display: "block" }}
+                            >
+                              Waste Hauled
+                            </Text>
+                            <Text
+                              strong
+                              style={{ fontSize: 16, color: "#722ed1" }}
+                            >
+                              {(trapOps.totalWasteHauled || 0).toLocaleString()}{" "}
+                              kg
+                            </Text>
+                          </div>
+                        </Col>
+                      </Row>
+                      <div
+                        style={{
+                          textAlign: "center",
+                          padding: "6px 4px",
+                          background: "#fcffe6",
+                          borderRadius: 6,
+                          border: "1px solid #fffb8f",
+                        }}
+                      >
+                        <Text
+                          type="secondary"
+                          style={{ fontSize: 10, display: "block" }}
+                        >
+                          Avg Waste per Trap
+                        </Text>
+                        <Text strong style={{ fontSize: 16, color: "#faad14" }}>
+                          {(trapOps.avgWasteHauled || 0).toFixed(1)} kg
+                        </Text>
+                      </div>
+                    </div>
+                  </Card>
+                </Col>
+
+                {/* Traps per Province */}
+                <Col xs={24} sm={12}>
+                  <Card
+                    title={
+                      <>
+                        <BarChartOutlined /> Traps per Province
+                      </>
+                    }
+                    style={{ borderRadius: 10, height: TRAP_CARD_H }}
+                    loading={loading}
+                    styles={{
+                      body: { overflow: "auto", height: TRAP_CARD_H - 57 },
+                    }}
+                  >
+                    <div
+                      style={{
+                        display: "flex",
+                        flexDirection: "column",
+                        gap: 5,
+                        maxHeight: 170,
+                        overflowY: "auto",
+                        padding: "0 2px",
+                      }}
+                    >
+                      {trapProvList.map((p, i) => (
+                        <div
+                          key={i}
+                          style={{
+                            display: "flex",
+                            alignItems: "center",
+                            gap: 6,
+                          }}
+                        >
+                          <Text
+                            style={{
+                              fontSize: 10,
+                              color: isDark ? "#aaa" : "#999",
+                              minWidth: 70,
+                              textAlign: "right",
+                              whiteSpace: "nowrap",
+                              overflow: "hidden",
+                              textOverflow: "ellipsis",
+                            }}
+                          >
+                            {p._id}
+                          </Text>
+                          <div
+                            style={{
+                              flex: 1,
+                              height: 16,
+                              background: isDark ? "#2a2a2a" : "#f5f5f5",
+                              borderRadius: 3,
+                              overflow: "hidden",
+                            }}
+                          >
+                            <div
+                              style={{
+                                width: `${Math.max((p.count / trapMaxProv) * 100, 4)}%`,
+                                height: "100%",
+                                background:
+                                  "linear-gradient(90deg, #13c2c2 0%, #87e8de 100%)",
+                                borderRadius: "3px 0 0 3px",
+                                transition: "width 0.5s ease",
+                              }}
+                            />
+                          </div>
+                          <Text
+                            style={{
+                              fontSize: 10,
+                              color: isDark ? "#ccc" : "#666",
+                              minWidth: 20,
+                              textAlign: "right",
+                              fontWeight: 600,
+                            }}
+                          >
+                            {p.count}
+                          </Text>
+                        </div>
+                      ))}
+                    </div>
+                  </Card>
+                </Col>
+
+                {/* Manila Bay Area */}
+                <Col xs={24} sm={12}>
+                  <Card
+                    title="Manila Bay Area"
+                    style={{ borderRadius: 10, height: TRAP_CARD_H }}
+                    loading={loading}
+                    styles={{
+                      body: { overflow: "auto", height: TRAP_CARD_H - 57 },
+                    }}
+                  >
+                    <div
+                      style={{
+                        display: "flex",
+                        flexDirection: "column",
+                        gap: 12,
+                      }}
+                    >
+                      {Object.entries(trapStats.byManilaBayArea || {}).map(
+                        ([key, count]) => (
+                          <div key={key}>
+                            <div
+                              style={{
+                                display: "flex",
+                                justifyContent: "space-between",
+                                marginBottom: 4,
+                              }}
+                            >
+                              <Text>{key || "Unspecified"}</Text>
+                              <Text strong>
+                                {count}{" "}
+                                <span
+                                  style={{ color: "#999", fontWeight: 400 }}
+                                >
+                                  (
+                                  {trapStats.totalRecords > 0
+                                    ? Math.round(
+                                        (count / trapStats.totalRecords) * 100,
+                                      )
+                                    : 0}
+                                  %)
+                                </span>
+                              </Text>
+                            </div>
+                            <Progress
+                              percent={
+                                trapStats.totalRecords > 0
+                                  ? Math.round(
+                                      (count / trapStats.totalRecords) * 100,
+                                    )
+                                  : 0
+                              }
+                              strokeColor={
+                                key === "MBA" ? "#1890ff" : "#8c8c8c"
+                              }
+                              showInfo={false}
+                              size="small"
+                            />
+                          </div>
+                        ),
+                      )}
+                    </div>
+                  </Card>
+                </Col>
+              </Row>
+            </Col>
+
+            {/* RIGHT COLUMN — Trap Map (sticky) */}
+            <Col xs={24} lg={10}>
+              <div
+                style={{
+                  position: "sticky",
+                  top: 80,
+                  height: "calc(100vh - 200px)",
+                  minHeight: 520,
+                }}
+              >
+                <Card
+                  size="small"
+                  title={
+                    <>
+                      <GlobalOutlined /> Trash Trap Location Map{" "}
+                      <Tag bordered={false} color="cyan">
+                        {filteredTrapMapPts.length} plotted
+                      </Tag>
+                      {filteredTrapMapPts.length !== trapMapPts.length && (
+                        <Tag bordered={false} color="default">
+                          of {trapMapPts.length}
+                        </Tag>
+                      )}
+                    </>
+                  }
+                  style={{ borderRadius: 10, height: "100%" }}
+                  loading={loading}
+                  extra={
+                    <Space size={4}>
+                      <Tooltip title="Street">
+                        <Button
+                          size="small"
+                          type={
+                            trapTileKey === "street" ? "primary" : "default"
+                          }
+                          icon={<GlobalOutlined />}
+                          onClick={() => setTrapTileKey("street")}
+                        />
+                      </Tooltip>
+                      <Tooltip title="Satellite">
+                        <Button
+                          size="small"
+                          type={
+                            trapTileKey === "satellite" ? "primary" : "default"
+                          }
+                          icon={<EnvironmentOutlined />}
+                          onClick={() => setTrapTileKey("satellite")}
+                        />
+                      </Tooltip>
+                      <Tooltip title="Terrain">
+                        <Button
+                          size="small"
+                          type={
+                            trapTileKey === "terrain" ? "primary" : "default"
+                          }
+                          icon={<FundOutlined />}
+                          onClick={() => setTrapTileKey("terrain")}
+                        />
+                      </Tooltip>
+                      <Tooltip title="Dark">
+                        <Button
+                          size="small"
+                          type={trapTileKey === "dark" ? "primary" : "default"}
+                          icon={<AppstoreOutlined />}
+                          onClick={() => setTrapTileKey("dark")}
+                        />
+                      </Tooltip>
+                    </Space>
+                  }
+                  styles={{
+                    body: { padding: 0, height: "calc(100% - 100px)" },
+                  }}
+                >
+                  {/* Filter bar */}
+                  <div
+                    style={{
+                      display: "flex",
+                      gap: 6,
+                      padding: "8px 10px",
+                      background: "#fafafa",
+                      borderBottom: "1px solid #f0f0f0",
+                      flexWrap: "wrap",
+                    }}
+                  >
+                    <Select
+                      size="small"
+                      allowClear
+                      placeholder="Province"
+                      value={trapFilterProvince}
+                      onChange={setTrapFilterProvince}
+                      options={trapProvinceOptions}
+                      style={{ minWidth: 120, flex: 1 }}
+                    />
+                    <Select
+                      size="small"
+                      allowClear
+                      placeholder="Status"
+                      value={trapFilterStatus}
+                      onChange={setTrapFilterStatus}
+                      options={[
+                        { label: "✓ Operational", value: "Operational" },
+                        {
+                          label: "✕ Non-Operational",
+                          value: "Non-Operational",
+                        },
+                      ]}
+                      style={{ minWidth: 130, flex: 1 }}
+                    />
+                    {(trapFilterProvince || trapFilterStatus) && (
+                      <Button
+                        size="small"
+                        type="link"
+                        danger
+                        onClick={() => {
+                          setTrapFilterProvince(null);
+                          setTrapFilterStatus(null);
+                        }}
+                      >
+                        Clear
+                      </Button>
+                    )}
+                    {/* Legend */}
+                    <div
+                      style={{
+                        display: "flex",
+                        gap: 8,
+                        alignItems: "center",
+                        marginLeft: "auto",
+                        fontSize: 11,
+                        color: "#999",
+                      }}
+                    >
+                      <span>
+                        <span
+                          style={{
+                            display: "inline-block",
+                            width: 10,
+                            height: 10,
+                            borderRadius: "50%",
+                            background: "#52c41a",
+                            marginRight: 3,
+                            verticalAlign: "middle",
+                          }}
+                        />
+                        Operational
+                      </span>
+                      <span>
+                        <span
+                          style={{
+                            display: "inline-block",
+                            width: 10,
+                            height: 10,
+                            borderRadius: "50%",
+                            background: "#ff4d4f",
+                            marginRight: 3,
+                            verticalAlign: "middle",
+                          }}
+                        />
+                        Non-Op
+                      </span>
+                      <span>
+                        <span
+                          style={{
+                            display: "inline-block",
+                            width: 10,
+                            height: 10,
+                            borderRadius: "50%",
+                            background: "#8c8c8c",
+                            marginRight: 3,
+                            verticalAlign: "middle",
+                          }}
+                        />
+                        Not Yet Monitored
+                      </span>
+                    </div>
+                  </div>
+                  {filteredTrapMapPts.length > 0 ? (
+                    <MapContainer
+                      center={[15.0, 120.7]}
+                      zoom={8}
+                      style={{
+                        height: "100%",
+                        width: "100%",
+                        borderRadius: "0 0 10px 10px",
+                      }}
+                      scrollWheelZoom={true}
+                      zoomControl={false}
+                    >
+                      <TileLayer
+                        key={trapTileKey}
+                        attribution={trapTile.attr}
+                        url={trapTile.url}
+                      />
+                      <FitBounds points={filteredTrapMapPts} />
+                      <ProvinceBoundary
+                        key={trapFilterProvince || "__trap_none__"}
+                        province={trapFilterProvince}
+                      />
+                      {filteredTrapMapPts.map((pt, idx) => (
+                        <Marker
+                          key={pt.record._id || idx}
+                          position={[pt.lat, pt.lng]}
+                          icon={trapStatusIcon(pt.record.statusOfTrashTraps)}
+                        >
+                          <Popup maxWidth={300} minWidth={240}>
+                            <div
+                              className="popup-light"
+                              style={{
+                                fontSize: 12,
+                                lineHeight: 1.7,
+                                padding: 2,
+                              }}
+                            >
+                              <div
+                                style={{
+                                  fontWeight: 700,
+                                  fontSize: 14,
+                                  marginBottom: 2,
+                                }}
+                              >
+                                {pt.record.municipality}
+                              </div>
+                              <div
+                                style={{
+                                  display: "flex",
+                                  gap: 4,
+                                  flexWrap: "wrap",
+                                  marginBottom: 6,
+                                }}
+                              >
+                                <span
+                                  style={{
+                                    display: "inline-flex",
+                                    alignItems: "center",
+                                    gap: 3,
+                                    background: "#e6fffb",
+                                    color: "#13c2c2",
+                                    borderRadius: 4,
+                                    padding: "1px 6px",
+                                    fontSize: 11,
+                                  }}
+                                >
+                                  <EnvironmentOutlined /> {pt.record.province}
+                                </span>
+                                {pt.record.barangay && (
+                                  <span
+                                    style={{
+                                      display: "inline-flex",
+                                      alignItems: "center",
+                                      gap: 3,
+                                      background: "#f0f0f0",
+                                      color: "#595959",
+                                      borderRadius: 4,
+                                      padding: "1px 6px",
+                                      fontSize: 11,
+                                    }}
+                                  >
+                                    {pt.record.barangay}
+                                  </span>
+                                )}
+                                {pt.record.manilaBayArea && (
+                                  <span
+                                    style={{
+                                      display: "inline-flex",
+                                      alignItems: "center",
+                                      gap: 3,
+                                      background:
+                                        pt.record.manilaBayArea === "MBA"
+                                          ? "#e6f7ff"
+                                          : "#f5f5f5",
+                                      color:
+                                        pt.record.manilaBayArea === "MBA"
+                                          ? "#1890ff"
+                                          : "#8c8c8c",
+                                      borderRadius: 4,
+                                      padding: "1px 6px",
+                                      fontSize: 11,
+                                    }}
+                                  >
+                                    <GlobalOutlined /> {pt.record.manilaBayArea}
+                                  </span>
+                                )}
+                              </div>
+                              <hr
+                                style={{
+                                  margin: "4px 0 6px",
+                                  border: "none",
+                                  borderTop: "1px solid #f0f0f0",
+                                }}
+                              />
+                              <div
+                                style={{
+                                  display: "flex",
+                                  gap: 4,
+                                  flexWrap: "wrap",
+                                  marginBottom: 6,
+                                }}
+                              >
+                                {(() => {
+                                  const s = pt.record.statusOfTrashTraps;
+                                  const isOp =
+                                    /operational/i.test(s) && !/non/i.test(s);
+                                  const isNon = /non/i.test(s);
+                                  return (
+                                    <span
+                                      className={`status-badge ${isOp ? "status-badge-compliant" : isNon ? "status-badge-noncompliant" : "status-badge-pending"}`}
+                                    >
+                                      <SafetyCertificateOutlined />{" "}
+                                      {isOp
+                                        ? "Operational"
+                                        : isNon
+                                          ? "Non-Operational"
+                                          : "Not Yet Monitored"}
+                                    </span>
+                                  );
+                                })()}
+                              </div>
+                              <div
+                                style={{
+                                  background: "#fafafa",
+                                  borderRadius: 6,
+                                  padding: "6px 8px",
+                                  marginBottom: 6,
+                                }}
+                              >
+                                {pt.record.noOfTrashTrapsHDPE != null && (
+                                  <div
+                                    style={{
+                                      display: "flex",
+                                      justifyContent: "space-between",
+                                      marginBottom: 3,
+                                    }}
+                                  >
+                                    <span style={{ color: "#595959" }}>
+                                      <ToolOutlined
+                                        style={{ color: "#1890ff" }}
+                                      />{" "}
+                                      HDPE Floaters
+                                    </span>
+                                    <strong>
+                                      {pt.record.noOfTrashTrapsHDPE}
+                                    </strong>
+                                  </div>
+                                )}
+                                {pt.record.estimatedVolumeWasteHauled !=
+                                  null && (
+                                  <div
+                                    style={{
+                                      display: "flex",
+                                      justifyContent: "space-between",
+                                      marginBottom: 3,
+                                    }}
+                                  >
+                                    <span style={{ color: "#595959" }}>
+                                      <BarChartOutlined
+                                        style={{ color: "#722ed1" }}
+                                      />{" "}
+                                      Waste Hauled
+                                    </span>
+                                    <strong>
+                                      {Number(
+                                        pt.record.estimatedVolumeWasteHauled,
+                                      ).toLocaleString()}{" "}
+                                      kg
+                                    </strong>
+                                  </div>
+                                )}
+                                {pt.record.dateInstalled && (
+                                  <div
+                                    style={{
+                                      display: "flex",
+                                      justifyContent: "space-between",
+                                    }}
+                                  >
+                                    <span style={{ color: "#595959" }}>
+                                      <CalendarOutlined
+                                        style={{ color: "#13c2c2" }}
+                                      />{" "}
+                                      Installed
+                                    </span>
+                                    <strong>
+                                      {dayjs(pt.record.dateInstalled).format(
+                                        "MMM DD, YYYY",
+                                      )}
+                                    </strong>
+                                  </div>
+                                )}
+                              </div>
+                              {pt.record.focalPerson && (
+                                <div
+                                  style={{
+                                    display: "flex",
+                                    alignItems: "center",
+                                    gap: 5,
+                                    marginBottom: 2,
+                                  }}
+                                >
+                                  <UserOutlined style={{ color: "#13c2c2" }} />{" "}
+                                  <span style={{ color: "#595959" }}>
+                                    Focal:
+                                  </span>{" "}
+                                  <strong>{pt.record.focalPerson}</strong>
+                                </div>
+                              )}
+                              {pt.record.enmoAssigned && (
+                                <div
+                                  style={{
+                                    display: "flex",
+                                    alignItems: "center",
+                                    gap: 5,
+                                  }}
+                                >
+                                  <TeamOutlined style={{ color: "#52c41a" }} />{" "}
+                                  <span style={{ color: "#595959" }}>
+                                    ENMO:
+                                  </span>{" "}
+                                  {pt.record.enmoAssigned}
+                                </div>
+                              )}
+                            </div>
+                          </Popup>
+                        </Marker>
+                      ))}
+                    </MapContainer>
+                  ) : (
+                    <div
+                      style={{
+                        height: "100%",
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                      }}
+                    >
+                      <Text type="secondary">No coordinate data available</Text>
+                    </div>
+                  )}
+                </Card>
+              </div>
+            </Col>
+          </Row>
+        </>
+      ),
+    });
+  }
+
+  // ── SWM Equipment Dashboard Tab ──
+  if (equipStats && equipStats.totalRecords > 0) {
+    const equipProvList = equipStats.byProvinceList || [];
+    const equipMaxProv = Math.max(...equipProvList.map((p) => p.count), 1);
+    const equipByType = equipStats.byType || {};
+    const equipOps = equipStats.equipmentStatus || {};
+    const equipTile = TILE_LAYERS[equipTileKey];
+
+    const EQUIP_CARD_H = 280;
+
+    tabItems.push({
+      key: "swm-equip",
+      label: (
+        <>
+          <CarOutlined /> SWM Equipment
+        </>
+      ),
+      children: (
+        <>
+          {/* Row 1: Stat tiles */}
+          <Row gutter={[16, 16]} style={{ marginBottom: 16 }}>
+            <Col xs={12} sm={12} md={6}>
+              <Card
+                hoverable
+                style={{ borderRadius: 10, height: 110 }}
+                loading={loading}
+              >
+                <Statistic
+                  title="Total Equipment"
+                  value={equipStats.totalRecords}
+                  prefix={<CarOutlined style={{ color: "#fa8c16" }} />}
+                />
+              </Card>
+            </Col>
+            <Col xs={12} sm={12} md={6}>
+              <Card
+                hoverable
+                style={{ borderRadius: 10, height: 110 }}
+                loading={loading}
+              >
+                <Statistic
+                  title="Soil Enhancer"
+                  value={equipOps.totalSoilEnhancer || 0}
+                  suffix="kg"
+                  prefix={<BarChartOutlined style={{ color: "#722ed1" }} />}
+                  formatter={(v) => Number(v).toLocaleString()}
+                />
+              </Card>
+            </Col>
+            <Col xs={12} sm={12} md={6}>
+              <Card
+                hoverable
+                style={{ borderRadius: 10, height: 110 }}
+                loading={loading}
+              >
+                <Statistic
+                  title="Chairs Produced"
+                  value={equipOps.totalChairsProduced || 0}
+                  prefix={
+                    <SafetyCertificateOutlined style={{ color: "#13c2c2" }} />
+                  }
+                  formatter={(v) => Number(v).toLocaleString()}
+                />
+              </Card>
+            </Col>
+            <Col xs={12} sm={12} md={6}>
+              <Card
+                hoverable
+                style={{ borderRadius: 10, height: 110 }}
+                loading={loading}
+              >
+                <Tooltip title="Click to view SWM Equipment page">
+                  <div
+                    style={{ cursor: "pointer" }}
+                    onClick={() => setActiveMenu("cs-swm-equip")}
+                  >
+                    <Statistic
+                      title="View All Records"
+                      value={equipStats.totalRecords}
+                      prefix={<FileTextOutlined style={{ color: "#fa8c16" }} />}
+                    />
+                  </div>
+                </Tooltip>
+              </Card>
+            </Col>
+          </Row>
+
+          {/* Two-column layout: cards left, map right */}
+          <Row gutter={[16, 16]}>
+            {/* LEFT COLUMN — Stats cards */}
+            <Col xs={24} lg={14}>
+              <Row gutter={[16, 16]}>
+                {/* Equipment per Province */}
+                <Col xs={24} sm={12}>
+                  <Card
+                    title={
+                      <>
+                        <BarChartOutlined /> Equipment per Province
+                      </>
+                    }
+                    style={{ borderRadius: 10, height: EQUIP_CARD_H }}
+                    loading={loading}
+                    styles={{
+                      body: { overflow: "auto", height: EQUIP_CARD_H - 57 },
+                    }}
+                  >
+                    <div
+                      style={{
+                        display: "flex",
+                        flexDirection: "column",
+                        gap: 5,
+                        maxHeight: 170,
+                        overflowY: "auto",
+                        padding: "0 2px",
+                      }}
+                    >
+                      {equipProvList.map((p, i) => (
+                        <div
+                          key={i}
+                          style={{
+                            display: "flex",
+                            alignItems: "center",
+                            gap: 6,
+                          }}
+                        >
+                          <Text
+                            style={{
+                              fontSize: 10,
+                              color: isDark ? "#aaa" : "#999",
+                              minWidth: 70,
+                              textAlign: "right",
+                              whiteSpace: "nowrap",
+                              overflow: "hidden",
+                              textOverflow: "ellipsis",
+                            }}
+                          >
+                            {p._id}
+                          </Text>
+                          <div
+                            style={{
+                              flex: 1,
+                              height: 16,
+                              background: isDark ? "#2a2a2a" : "#f5f5f5",
+                              borderRadius: 3,
+                              overflow: "hidden",
+                            }}
+                          >
+                            <div
+                              style={{
+                                width: `${Math.max((p.count / equipMaxProv) * 100, 4)}%`,
+                                height: "100%",
+                                background:
+                                  "linear-gradient(90deg, #fa8c16 0%, #ffc069 100%)",
+                                borderRadius: "3px 0 0 3px",
+                                transition: "width 0.5s ease",
+                              }}
+                            />
+                          </div>
+                          <Text
+                            style={{
+                              fontSize: 10,
+                              color: isDark ? "#ccc" : "#666",
+                              minWidth: 20,
+                              textAlign: "right",
+                              fontWeight: 600,
+                            }}
+                          >
+                            {p.count}
+                          </Text>
+                        </div>
+                      ))}
+                    </div>
+                  </Card>
+                </Col>
+
+                {/* Equipment Type Distribution */}
+                <Col xs={24} sm={12}>
+                  <Card
+                    title={
+                      <>
+                        <CarOutlined /> By Equipment Type
+                      </>
+                    }
+                    style={{ borderRadius: 10, height: EQUIP_CARD_H }}
+                    loading={loading}
+                    styles={{
+                      body: { overflow: "auto", height: EQUIP_CARD_H - 57 },
+                    }}
+                  >
+                    <div
+                      style={{
+                        display: "flex",
+                        flexDirection: "column",
+                        gap: 12,
+                      }}
+                    >
+                      {Object.entries(equipByType).map(([type, count]) => (
+                        <div key={type}>
+                          <div
+                            style={{
+                              display: "flex",
+                              justifyContent: "space-between",
+                              marginBottom: 4,
+                            }}
+                          >
+                            <Text>{type}</Text>
+                            <Text strong>
+                              {count}{" "}
+                              <span style={{ color: "#999", fontWeight: 400 }}>
+                                (
+                                {equipStats.totalRecords > 0
+                                  ? Math.round(
+                                      (count / equipStats.totalRecords) * 100,
+                                    )
+                                  : 0}
+                                %)
+                              </span>
+                            </Text>
+                          </div>
+                          <Progress
+                            percent={
+                              equipStats.totalRecords > 0
+                                ? Math.round(
+                                    (count / equipStats.totalRecords) * 100,
+                                  )
+                                : 0
+                            }
+                            strokeColor="#fa8c16"
+                            showInfo={false}
+                            size="small"
+                          />
+                        </div>
+                      ))}
+                    </div>
+                  </Card>
+                </Col>
+
+                {/* Manila Bay Area */}
+                <Col xs={24} sm={12}>
+                  <Card
+                    title="Manila Bay Area"
+                    style={{ borderRadius: 10, height: EQUIP_CARD_H }}
+                    loading={loading}
+                    styles={{
+                      body: { overflow: "auto", height: EQUIP_CARD_H - 57 },
+                    }}
+                  >
+                    <div
+                      style={{
+                        display: "flex",
+                        flexDirection: "column",
+                        gap: 12,
+                      }}
+                    >
+                      {Object.entries(equipStats.byManilaBayArea || {}).map(
+                        ([key, count]) => (
+                          <div key={key}>
+                            <div
+                              style={{
+                                display: "flex",
+                                justifyContent: "space-between",
+                                marginBottom: 4,
+                              }}
+                            >
+                              <Text>{key || "Unspecified"}</Text>
+                              <Text strong>
+                                {count}{" "}
+                                <span
+                                  style={{ color: "#999", fontWeight: 400 }}
+                                >
+                                  (
+                                  {equipStats.totalRecords > 0
+                                    ? Math.round(
+                                        (count / equipStats.totalRecords) * 100,
+                                      )
+                                    : 0}
+                                  %)
+                                </span>
+                              </Text>
+                            </div>
+                            <Progress
+                              percent={
+                                equipStats.totalRecords > 0
+                                  ? Math.round(
+                                      (count / equipStats.totalRecords) * 100,
+                                    )
+                                  : 0
+                              }
+                              strokeColor={
+                                key === "MBA" ? "#1890ff" : "#8c8c8c"
+                              }
+                              showInfo={false}
+                              size="small"
+                            />
+                          </div>
+                        ),
+                      )}
+                    </div>
+                  </Card>
+                </Col>
+
+                {/* Key Metrics */}
+                <Col xs={24} sm={12}>
+                  <Card
+                    title={
+                      <>
+                        <BarChartOutlined /> Key Metrics
+                      </>
+                    }
+                    style={{ borderRadius: 10, height: EQUIP_CARD_H }}
+                    loading={loading}
+                    styles={{
+                      body: {
+                        overflow: "auto",
+                        height: EQUIP_CARD_H - 57,
+                        padding: "12px 16px",
+                      },
+                    }}
+                  >
+                    <div
+                      style={{
+                        display: "flex",
+                        flexDirection: "column",
+                        gap: 10,
+                      }}
+                    >
+                      <Row gutter={8}>
+                        <Col span={12}>
+                          <div
+                            style={{
+                              textAlign: "center",
+                              padding: "8px 4px",
+                              background: "#f9f0ff",
+                              borderRadius: 6,
+                              border: "1px solid #efdbff",
+                            }}
+                          >
+                            <Text
+                              type="secondary"
+                              style={{ fontSize: 10, display: "block" }}
+                            >
+                              Soil Enhancer
+                            </Text>
+                            <Text
+                              strong
+                              style={{ fontSize: 16, color: "#722ed1" }}
+                            >
+                              {(
+                                equipOps.totalSoilEnhancer || 0
+                              ).toLocaleString()}{" "}
+                              kg
+                            </Text>
+                          </div>
+                        </Col>
+                        <Col span={12}>
+                          <div
+                            style={{
+                              textAlign: "center",
+                              padding: "8px 4px",
+                              background: "#e6fffb",
+                              borderRadius: 6,
+                              border: "1px solid #87e8de",
+                            }}
+                          >
+                            <Text
+                              type="secondary"
+                              style={{ fontSize: 10, display: "block" }}
+                            >
+                              Chairs Produced
+                            </Text>
+                            <Text
+                              strong
+                              style={{ fontSize: 16, color: "#13c2c2" }}
+                            >
+                              {(
+                                equipOps.totalChairsProduced || 0
+                              ).toLocaleString()}
+                            </Text>
+                          </div>
+                        </Col>
+                      </Row>
+                      <div
+                        style={{
+                          textAlign: "center",
+                          padding: "8px 4px",
+                          background: "#fff7e6",
+                          borderRadius: 6,
+                          border: "1px solid #ffd591",
+                        }}
+                      >
+                        <Text
+                          type="secondary"
+                          style={{ fontSize: 10, display: "block" }}
+                        >
+                          Total Equipment Records
+                        </Text>
+                        <Text strong style={{ fontSize: 16, color: "#fa8c16" }}>
+                          {equipStats.totalRecords}
+                        </Text>
+                        <Text
+                          type="secondary"
+                          style={{ fontSize: 10, display: "block" }}
+                        >
+                          {Object.keys(equipByType).length} equipment types
+                        </Text>
+                      </div>
+                    </div>
+                  </Card>
+                </Col>
+              </Row>
+            </Col>
+
+            {/* RIGHT COLUMN — Equipment Map (sticky) */}
+            <Col xs={24} lg={10}>
+              <div
+                style={{
+                  position: "sticky",
+                  top: 80,
+                  height: "calc(100vh - 200px)",
+                  minHeight: 520,
+                }}
+              >
+                <Card
+                  size="small"
+                  title={
+                    <>
+                      <GlobalOutlined /> Equipment Location Map{" "}
+                      <Tag bordered={false} color="orange">
+                        {filteredEquipMapPts.length} plotted
+                      </Tag>
+                      {filteredEquipMapPts.length !== equipMapPts.length && (
+                        <Tag bordered={false} color="default">
+                          of {equipMapPts.length}
+                        </Tag>
+                      )}
+                    </>
+                  }
+                  style={{ borderRadius: 10, height: "100%" }}
+                  loading={loading}
+                  extra={
+                    <Space size={4}>
+                      <Tooltip title="Street">
+                        <Button
+                          size="small"
+                          type={
+                            equipTileKey === "street" ? "primary" : "default"
+                          }
+                          icon={<GlobalOutlined />}
+                          onClick={() => setEquipTileKey("street")}
+                        />
+                      </Tooltip>
+                      <Tooltip title="Satellite">
+                        <Button
+                          size="small"
+                          type={
+                            equipTileKey === "satellite" ? "primary" : "default"
+                          }
+                          icon={<EnvironmentOutlined />}
+                          onClick={() => setEquipTileKey("satellite")}
+                        />
+                      </Tooltip>
+                      <Tooltip title="Terrain">
+                        <Button
+                          size="small"
+                          type={
+                            equipTileKey === "terrain" ? "primary" : "default"
+                          }
+                          icon={<FundOutlined />}
+                          onClick={() => setEquipTileKey("terrain")}
+                        />
+                      </Tooltip>
+                      <Tooltip title="Dark">
+                        <Button
+                          size="small"
+                          type={equipTileKey === "dark" ? "primary" : "default"}
+                          icon={<AppstoreOutlined />}
+                          onClick={() => setEquipTileKey("dark")}
+                        />
+                      </Tooltip>
+                    </Space>
+                  }
+                  styles={{
+                    body: { padding: 0, height: "calc(100% - 100px)" },
+                  }}
+                >
+                  {/* Filter bar */}
+                  <div
+                    style={{
+                      display: "flex",
+                      gap: 6,
+                      padding: "8px 10px",
+                      background: "#fafafa",
+                      borderBottom: "1px solid #f0f0f0",
+                      flexWrap: "wrap",
+                    }}
+                  >
+                    <Select
+                      size="small"
+                      allowClear
+                      placeholder="Province"
+                      value={equipFilterProvince}
+                      onChange={setEquipFilterProvince}
+                      options={equipProvinceOptions}
+                      style={{ minWidth: 120, flex: 1 }}
+                    />
+                    <Select
+                      size="small"
+                      allowClear
+                      placeholder="Equipment Type"
+                      value={equipFilterType}
+                      onChange={setEquipFilterType}
+                      options={equipTypeOptions}
+                      style={{ minWidth: 140, flex: 1 }}
+                    />
+                    {(equipFilterProvince || equipFilterType) && (
+                      <Button
+                        size="small"
+                        type="link"
+                        danger
+                        onClick={() => {
+                          setEquipFilterProvince(null);
+                          setEquipFilterType(null);
+                        }}
+                      >
+                        Clear
+                      </Button>
+                    )}
+                    {/* Legend */}
+                    <div
+                      style={{
+                        display: "flex",
+                        gap: 8,
+                        alignItems: "center",
+                        marginLeft: "auto",
+                        fontSize: 11,
+                        color: "#999",
+                      }}
+                    >
+                      <span>
+                        <span
+                          style={{
+                            display: "inline-block",
+                            width: 10,
+                            height: 10,
+                            borderRadius: "50%",
+                            background: "#52c41a",
+                            marginRight: 3,
+                            verticalAlign: "middle",
+                          }}
+                        />
+                        Both Op
+                      </span>
+                      <span>
+                        <span
+                          style={{
+                            display: "inline-block",
+                            width: 10,
+                            height: 10,
+                            borderRadius: "50%",
+                            background: "#faad14",
+                            marginRight: 3,
+                            verticalAlign: "middle",
+                          }}
+                        />
+                        Partial
+                      </span>
+                      <span>
+                        <span
+                          style={{
+                            display: "inline-block",
+                            width: 10,
+                            height: 10,
+                            borderRadius: "50%",
+                            background: "#ff4d4f",
+                            marginRight: 3,
+                            verticalAlign: "middle",
+                          }}
+                        />
+                        Non-Op
+                      </span>
+                    </div>
+                  </div>
+                  {filteredEquipMapPts.length > 0 ? (
+                    <MapContainer
+                      center={[15.0, 120.7]}
+                      zoom={8}
+                      style={{
+                        height: "100%",
+                        width: "100%",
+                        borderRadius: "0 0 10px 10px",
+                      }}
+                      scrollWheelZoom={true}
+                      zoomControl={false}
+                    >
+                      <TileLayer
+                        key={equipTileKey}
+                        attribution={equipTile.attr}
+                        url={equipTile.url}
+                      />
+                      <FitBounds points={filteredEquipMapPts} />
+                      <ProvinceBoundary
+                        key={equipFilterProvince || "__equip_none__"}
+                        province={equipFilterProvince}
+                      />
+                      {filteredEquipMapPts.map((pt, idx) => (
+                        <Marker
+                          key={pt.record._id || idx}
+                          position={[pt.lat, pt.lng]}
+                          icon={equipStatusIcon(pt.record)}
+                        >
+                          <Popup maxWidth={300} minWidth={240}>
+                            <div
+                              className="popup-light"
+                              style={{
+                                fontSize: 12,
+                                lineHeight: 1.7,
+                                padding: 2,
+                              }}
+                            >
+                              <div
+                                style={{
+                                  fontWeight: 700,
+                                  fontSize: 14,
+                                  marginBottom: 2,
+                                }}
+                              >
+                                {pt.record.municipality}
+                              </div>
+                              <div
+                                style={{
+                                  display: "flex",
+                                  gap: 4,
+                                  flexWrap: "wrap",
+                                  marginBottom: 6,
+                                }}
+                              >
+                                <span
+                                  style={{
+                                    display: "inline-flex",
+                                    alignItems: "center",
+                                    gap: 3,
+                                    background: "#fff7e6",
+                                    color: "#fa8c16",
+                                    borderRadius: 4,
+                                    padding: "1px 6px",
+                                    fontSize: 11,
+                                  }}
+                                >
+                                  <EnvironmentOutlined /> {pt.record.province}
+                                </span>
+                                {pt.record.barangay && (
+                                  <span
+                                    style={{
+                                      display: "inline-flex",
+                                      alignItems: "center",
+                                      gap: 3,
+                                      background: "#f0f0f0",
+                                      color: "#595959",
+                                      borderRadius: 4,
+                                      padding: "1px 6px",
+                                      fontSize: 11,
+                                    }}
+                                  >
+                                    {pt.record.barangay}
+                                  </span>
+                                )}
+                                {pt.record.manilaBayArea && (
+                                  <span
+                                    style={{
+                                      display: "inline-flex",
+                                      alignItems: "center",
+                                      gap: 3,
+                                      background:
+                                        pt.record.manilaBayArea === "MBA"
+                                          ? "#e6f7ff"
+                                          : "#f5f5f5",
+                                      color:
+                                        pt.record.manilaBayArea === "MBA"
+                                          ? "#1890ff"
+                                          : "#8c8c8c",
+                                      borderRadius: 4,
+                                      padding: "1px 6px",
+                                      fontSize: 11,
+                                    }}
+                                  >
+                                    <GlobalOutlined /> {pt.record.manilaBayArea}
+                                  </span>
+                                )}
+                              </div>
+                              <hr
+                                style={{
+                                  margin: "4px 0 6px",
+                                  border: "none",
+                                  borderTop: "1px solid #f0f0f0",
+                                }}
+                              />
+                              {pt.record.typeOfEquipment && (
+                                <div style={{ marginBottom: 4 }}>
+                                  <CarOutlined style={{ color: "#fa8c16" }} />{" "}
+                                  <span style={{ color: "#595959" }}>
+                                    Type:
+                                  </span>{" "}
+                                  <strong>{pt.record.typeOfEquipment}</strong>
+                                </div>
+                              )}
+                              <div
+                                style={{
+                                  background: "#fafafa",
+                                  borderRadius: 6,
+                                  padding: "6px 8px",
+                                  marginBottom: 6,
+                                }}
+                              >
+                                <div
+                                  style={{
+                                    display: "flex",
+                                    justifyContent: "space-between",
+                                    marginBottom: 3,
+                                  }}
+                                >
+                                  <span style={{ color: "#595959" }}>
+                                    Bio-Shredder
+                                  </span>
+                                  {(() => {
+                                    const s = pt.record.statusOfBioShredder;
+                                    const isOp =
+                                      /operational/i.test(s) && !/non/i.test(s);
+                                    return (
+                                      <strong
+                                        style={{
+                                          color: isOp ? "#52c41a" : "#ff4d4f",
+                                        }}
+                                      >
+                                        {isOp
+                                          ? "✓ Operational"
+                                          : /non/i.test(s)
+                                            ? "✕ Non-Op"
+                                            : "—"}
+                                      </strong>
+                                    );
+                                  })()}
+                                </div>
+                                <div
+                                  style={{
+                                    display: "flex",
+                                    justifyContent: "space-between",
+                                    marginBottom: 3,
+                                  }}
+                                >
+                                  <span style={{ color: "#595959" }}>
+                                    Bio-Composter
+                                  </span>
+                                  {(() => {
+                                    const s = pt.record.statusOfBioComposter;
+                                    const isOp =
+                                      /operational/i.test(s) && !/non/i.test(s);
+                                    return (
+                                      <strong
+                                        style={{
+                                          color: isOp ? "#52c41a" : "#ff4d4f",
+                                        }}
+                                      >
+                                        {isOp
+                                          ? "✓ Operational"
+                                          : /non/i.test(s)
+                                            ? "✕ Non-Op"
+                                            : "—"}
+                                      </strong>
+                                    );
+                                  })()}
+                                </div>
+                                {pt.record.statusOfCCTV && (
+                                  <div
+                                    style={{
+                                      display: "flex",
+                                      justifyContent: "space-between",
+                                    }}
+                                  >
+                                    <span style={{ color: "#595959" }}>
+                                      CCTV
+                                    </span>
+                                    {(() => {
+                                      const s = pt.record.statusOfCCTV;
+                                      const isOp =
+                                        /operational/i.test(s) &&
+                                        !/non/i.test(s);
+                                      return (
+                                        <strong
+                                          style={{
+                                            color: isOp ? "#52c41a" : "#ff4d4f",
+                                          }}
+                                        >
+                                          {isOp
+                                            ? "✓ Operational"
+                                            : /non/i.test(s)
+                                              ? "✕ Non-Op"
+                                              : "—"}
+                                        </strong>
+                                      );
+                                    })()}
+                                  </div>
+                                )}
+                              </div>
+                              {pt.record.focalPerson && (
+                                <div
+                                  style={{
+                                    display: "flex",
+                                    alignItems: "center",
+                                    gap: 5,
+                                    marginBottom: 2,
+                                  }}
+                                >
+                                  <UserOutlined style={{ color: "#fa8c16" }} />{" "}
+                                  <span style={{ color: "#595959" }}>
+                                    Focal:
+                                  </span>{" "}
+                                  <strong>{pt.record.focalPerson}</strong>
+                                </div>
+                              )}
+                              {pt.record.enmoAssigned && (
+                                <div
+                                  style={{
+                                    display: "flex",
+                                    alignItems: "center",
+                                    gap: 5,
+                                  }}
+                                >
+                                  <TeamOutlined style={{ color: "#52c41a" }} />{" "}
+                                  <span style={{ color: "#595959" }}>
+                                    ENMO:
+                                  </span>{" "}
+                                  {pt.record.enmoAssigned}
+                                </div>
+                              )}
+                            </div>
+                          </Popup>
+                        </Marker>
+                      ))}
+                    </MapContainer>
+                  ) : (
+                    <div
+                      style={{
+                        height: "100%",
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                      }}
+                    >
+                      <Text type="secondary">No coordinate data available</Text>
+                    </div>
+                  )}
+                </Card>
+              </div>
+            </Col>
+          </Row>
+        </>
+      ),
+    });
+  }
+
+  // ── SLF Monitoring Dashboard Tab ──
+  if (slfFacStats && slfFacStats.totalRecords > 0) {
+    const slfProvList = slfFacStats.byProvinceList || [];
+    const slfMaxProv = Math.max(...slfProvList.map((p) => p.count), 1);
+    const slfByStatus = slfFacStats.byStatus || {};
+    const slfByCategory = slfFacStats.byCategory || {};
+    const slfOps = slfFacStats.operationStats || {};
+    const slfTile = TILE_LAYERS[slfTileKey];
+
+    const SLF_CARD_H = 280;
+
+    tabItems.push({
+      key: "slf-monitoring",
+      label: (
+        <>
+          <BankOutlined /> SLF Monitoring
+        </>
+      ),
+      children: (
+        <Tabs
+          defaultActiveKey="slf-facilities"
+          size="small"
+          items={[
+            {
+              key: "slf-facilities",
+              label: (
+                <>
+                  <BankOutlined /> SLF Monitoring
+                </>
+              ),
+              children: (
+                <>
+                  <Row gutter={[16, 16]} style={{ marginBottom: 16 }}>
+                    <Col xs={12} sm={12} md={6}>
+                      <Card
+                        hoverable
+                        style={{ borderRadius: 10, height: 110 }}
+                        loading={loading}
+                      >
+                        <Statistic
+                          title="Total SLFs"
+                          value={slfFacStats.totalRecords}
+                          prefix={<BankOutlined style={{ color: "#2f54eb" }} />}
+                        />
+                      </Card>
+                    </Col>
+                    <Col xs={12} sm={12} md={6}>
+                      <Card
+                        hoverable
+                        style={{ borderRadius: 10, height: 110 }}
+                        loading={loading}
+                      >
+                        <Statistic
+                          title="Total Capacity"
+                          value={slfOps.totalCapacity || 0}
+                          prefix={<BarChartOutlined style={{ color: "#722ed1" }} />}
+                          formatter={(v) => Number(v).toLocaleString()}
+                        />
+                      </Card>
+                    </Col>
+                    <Col xs={12} sm={12} md={6}>
+                      <Card
+                        hoverable
+                        style={{ borderRadius: 10, height: 110 }}
+                        loading={loading}
+                      >
+                        <Statistic
+                          title="LGUs Served"
+                          value={slfOps.totalLGUsServed || 0}
+                          prefix={<TeamOutlined style={{ color: "#fa8c16" }} />}
+                        />
+                      </Card>
+                    </Col>
+                    <Col xs={12} sm={12} md={6}>
+                      <Card
+                        hoverable
+                        style={{ borderRadius: 10, height: 110 }}
+                        loading={loading}
+                      >
+                        <Statistic
+                          title="Waste Received"
+                          value={slfOps.totalWasteReceived || 0}
+                          suffix="tons"
+                          prefix={<BarChartOutlined style={{ color: "#eb2f96" }} />}
+                          formatter={(v) => Number(v).toLocaleString()}
+                        />
+                      </Card>
+                    </Col>
+                  </Row>
+
+                  <Row gutter={[16, 16]} style={{ marginBottom: 16 }}>
+                    <Col xs={12} sm={12} md={6}>
+                      <Card
+                        hoverable
+                        style={{ borderRadius: 10, height: 110 }}
+                        loading={loading}
+                      >
+                        <Statistic
+                          title="Total Cells"
+                          value={slfOps.totalCells || 0}
+                          prefix={<ContainerOutlined style={{ color: "#13c2c2" }} />}
+                        />
+                      </Card>
+                    </Col>
+                    <Col xs={12} sm={12} md={6}>
+                      <Card
+                        hoverable
+                        style={{ borderRadius: 10, height: 110 }}
+                        loading={loading}
+                      >
+                        <Statistic
+                          title="Leachate Ponds"
+                          value={slfOps.totalLeachatePonds || 0}
+                          prefix={<AlertOutlined style={{ color: "#1890ff" }} />}
+                        />
+                      </Card>
+                    </Col>
+                    <Col xs={12} sm={12} md={6}>
+                      <Card
+                        hoverable
+                        style={{ borderRadius: 10, height: 110 }}
+                        loading={loading}
+                      >
+                        <Statistic
+                          title="Gas Vents"
+                          value={slfOps.totalGasVents || 0}
+                          prefix={
+                            <SafetyCertificateOutlined style={{ color: "#52c41a" }} />
+                          }
+                        />
+                      </Card>
+                    </Col>
+                    <Col xs={12} sm={12} md={6}>
+                      <Card
+                        hoverable
+                        style={{ borderRadius: 10, height: 110 }}
+                        loading={loading}
+                      >
+                        <Tooltip title="Click to view SLF Monitoring page">
+                          <div
+                            style={{ cursor: "pointer" }}
+                            onClick={() => setActiveMenu("slf-monitoring")}
+                          >
+                            <Statistic
+                              title="View All Records"
+                              value={slfFacStats.totalRecords}
+                              prefix={<FileTextOutlined style={{ color: "#2f54eb" }} />}
+                            />
+                          </div>
+                        </Tooltip>
+                      </Card>
+                    </Col>
+                  </Row>
+
+                  {/* Two-column layout: cards left, map right */}
+                  <Row gutter={[16, 16]}>
+                    {/* LEFT COLUMN — Stats cards */}
+                    <Col xs={24} lg={14}>
+                      <Row gutter={[16, 16]}>
+                        {/* By Status */}
+                        <Col xs={24} sm={12}>
+                          <Card
+                            title={
+                              <>
+                                <CheckCircleOutlined /> By Status
+                              </>
+                            }
+                            style={{ borderRadius: 10, height: SLF_CARD_H }}
+                            loading={loading}
+                            styles={{
+                              body: { overflow: "auto", height: SLF_CARD_H - 57 },
+                            }}
+                          >
+                            <div
+                              style={{
+                                display: "flex",
+                                flexDirection: "column",
+                                gap: 12,
+                              }}
+                            >
+                              {Object.entries(slfByStatus).map(([status, count]) => (
+                                <div key={status}>
+                                  <div
+                                    style={{
+                                      display: "flex",
+                                      justifyContent: "space-between",
+                                      marginBottom: 4,
+                                    }}
+                                  >
+                                    <Text>{status}</Text>
+                                    <Text strong>
+                                      {count}{" "}
+                                      <span style={{ color: "#999", fontWeight: 400 }}>
+                                        (
+                                        {slfFacStats.totalRecords > 0
+                                          ? Math.round(
+                                              (count / slfFacStats.totalRecords) * 100,
+                                            )
+                                          : 0}
+                                        %)
+                                      </span>
+                                    </Text>
+                                  </div>
+                                  <Progress
+                                    percent={
+                                      slfFacStats.totalRecords > 0
+                                        ? Math.round(
+                                            (count / slfFacStats.totalRecords) * 100,
+                                          )
+                                        : 0
+                                    }
+                                    showInfo={false}
+                                    strokeColor={/non/i.test(status) ? "#ff4d4f" : "#52c41a"}
+                                    size="small"
+                                  />
+                                </div>
+                              ))}
+                            </div>
+                          </Card>
+                        </Col>
+
+                        {/* By Category */}
+                        <Col xs={24} sm={12}>
+                          <Card
+                            title={
+                              <>
+                                <BankOutlined /> By Category
+                              </>
+                            }
+                            style={{ borderRadius: 10, height: SLF_CARD_H }}
+                            loading={loading}
+                            styles={{
+                              body: { overflow: "auto", height: SLF_CARD_H - 57 },
+                            }}
+                          >
+                            <div
+                              style={{
+                                display: "flex",
+                                flexDirection: "column",
+                                gap: 12,
+                              }}
+                            >
+                              {Object.entries(slfByCategory).map(([cat, count]) => (
+                                <div key={cat}>
+                                  <div
+                                    style={{
+                                      display: "flex",
+                                      justifyContent: "space-between",
+                                      marginBottom: 4,
+                                    }}
+                                  >
+                                    <Text>{cat}</Text>
+                                    <Text strong>
+                                      {count}{" "}
+                                      <span style={{ color: "#999", fontWeight: 400 }}>
+                                        (
+                                        {slfFacStats.totalRecords > 0
+                                          ? Math.round(
+                                              (count / slfFacStats.totalRecords) * 100,
+                                            )
+                                          : 0}
+                                        %)
+                                      </span>
+                                    </Text>
+                                  </div>
+                                  <Progress
+                                    percent={
+                                      slfFacStats.totalRecords > 0
+                                        ? Math.round(
+                                            (count / slfFacStats.totalRecords) * 100,
+                                          )
+                                        : 0
+                                    }
+                                    showInfo={false}
+                                    strokeColor="#722ed1"
+                                    size="small"
+                                  />
+                                </div>
+                              ))}
+                            </div>
+                          </Card>
+                        </Col>
+
+                        {/* By Province */}
+                        <Col xs={24} sm={12}>
+                          <Card
+                            title={
+                              <>
+                                <EnvironmentOutlined /> SLFs per Province
+                              </>
+                            }
+                            style={{ borderRadius: 10, height: SLF_CARD_H }}
+                            loading={loading}
+                            styles={{
+                              body: { overflow: "auto", height: SLF_CARD_H - 57 },
+                            }}
+                          >
+                            <div
+                              style={{
+                                display: "flex",
+                                flexDirection: "column",
+                                gap: 5,
+                                maxHeight: 170,
+                                overflowY: "auto",
+                                padding: "0 2px",
+                              }}
+                            >
+                              {slfProvList.map((p, i) => (
+                                <div
+                                  key={i}
+                                  style={{
+                                    display: "flex",
+                                    alignItems: "center",
+                                    gap: 6,
+                                  }}
+                                >
+                                  <Text
+                                    style={{
+                                      fontSize: 10,
+                                      color: isDark ? "#aaa" : "#999",
+                                      minWidth: 70,
+                                      textAlign: "right",
+                                      whiteSpace: "nowrap",
+                                      overflow: "hidden",
+                                      textOverflow: "ellipsis",
+                                    }}
+                                  >
+                                    {p._id}
+                                  </Text>
+                                  <div
+                                    style={{
+                                      flex: 1,
+                                      height: 16,
+                                      background: isDark ? "#2a2a2a" : "#f5f5f5",
+                                      borderRadius: 3,
+                                      overflow: "hidden",
+                                    }}
+                                  >
+                                    <div
+                                      style={{
+                                        width: `${Math.max((p.count / slfMaxProv) * 100, 4)}%`,
+                                        height: "100%",
+                                        background:
+                                          "linear-gradient(90deg, #2f54eb 0%, #85a5ff 100%)",
+                                        borderRadius: "3px 0 0 3px",
+                                        transition: "width 0.5s ease",
+                                      }}
+                                    />
+                                  </div>
+                                  <Text
+                                    style={{
+                                      fontSize: 10,
+                                      color: isDark ? "#ccc" : "#666",
+                                      minWidth: 20,
+                                      textAlign: "right",
+                                      fontWeight: 600,
+                                    }}
+                                  >
+                                    {p.count}
+                                  </Text>
+                                </div>
+                              ))}
+                            </div>
+                          </Card>
+                        </Col>
+
+                        {/* Key Metrics */}
+                        <Col xs={24} sm={12}>
+                          <Card
+                            title={
+                              <>
+                                <BarChartOutlined /> Key Metrics
+                              </>
+                            }
+                            style={{ borderRadius: 10, height: SLF_CARD_H }}
+                            loading={loading}
+                            styles={{
+                              body: {
+                                overflow: "auto",
+                                height: SLF_CARD_H - 57,
+                                padding: "12px 16px",
+                              },
+                            }}
+                          >
+                            <div
+                              style={{
+                                display: "flex",
+                                flexDirection: "column",
+                                gap: 10,
+                              }}
+                            >
+                              <Row gutter={8}>
+                                <Col span={12}>
+                                  <div
+                                    style={{
+                                      textAlign: "center",
+                                      padding: "6px 4px",
+                                      background: "#e6f7ff",
+                                      borderRadius: 6,
+                                      border: "1px solid #bae7ff",
+                                    }}
+                                  >
+                                    <Text
+                                      type="secondary"
+                                      style={{ fontSize: 10, display: "block" }}
+                                    >
+                                      Total Cells
+                                    </Text>
+                                    <Text
+                                      strong
+                                      style={{ fontSize: 16, color: "#13c2c2" }}
+                                    >
+                                      {(slfOps.totalCells || 0).toLocaleString()}
+                                    </Text>
+                                  </div>
+                                </Col>
+                                <Col span={12}>
+                                  <div
+                                    style={{
+                                      textAlign: "center",
+                                      padding: "6px 4px",
+                                      background: "#f9f0ff",
+                                      borderRadius: 6,
+                                      border: "1px solid #efdbff",
+                                    }}
+                                  >
+                                    <Text
+                                      type="secondary"
+                                      style={{ fontSize: 10, display: "block" }}
+                                    >
+                                      Leachate Ponds
+                                    </Text>
+                                    <Text
+                                      strong
+                                      style={{ fontSize: 16, color: "#722ed1" }}
+                                    >
+                                      {(slfOps.totalLeachatePonds || 0).toLocaleString()}
+                                    </Text>
+                                  </div>
+                                </Col>
+                              </Row>
+                              <Row gutter={8}>
+                                <Col span={12}>
+                                  <div
+                                    style={{
+                                      textAlign: "center",
+                                      padding: "6px 4px",
+                                      background: "#f6ffed",
+                                      borderRadius: 6,
+                                      border: "1px solid #b7eb8f",
+                                    }}
+                                  >
+                                    <Text
+                                      type="secondary"
+                                      style={{ fontSize: 10, display: "block" }}
+                                    >
+                                      Gas Vents
+                                    </Text>
+                                    <Text
+                                      strong
+                                      style={{ fontSize: 16, color: "#52c41a" }}
+                                    >
+                                      {(slfOps.totalGasVents || 0).toLocaleString()}
+                                    </Text>
+                                  </div>
+                                </Col>
+                                <Col span={12}>
+                                  <div
+                                    style={{
+                                      textAlign: "center",
+                                      padding: "6px 4px",
+                                      background: "#fff7e6",
+                                      borderRadius: 6,
+                                      border: "1px solid #ffd591",
+                                    }}
+                                  >
+                                    <Text
+                                      type="secondary"
+                                      style={{ fontSize: 10, display: "block" }}
+                                    >
+                                      LGUs Served
+                                    </Text>
+                                    <Text
+                                      strong
+                                      style={{ fontSize: 16, color: "#fa8c16" }}
+                                    >
+                                      {(slfOps.totalLGUsServed || 0).toLocaleString()}
+                                    </Text>
+                                  </div>
+                                </Col>
+                              </Row>
+                            </div>
+                          </Card>
+                        </Col>
+                      </Row>
+                    </Col>
+
+                    {/* RIGHT COLUMN — SLF Map (sticky) */}
+                    <Col xs={24} lg={10}>
+                      <div
+                        style={{
+                          position: "sticky",
+                          top: 80,
+                          height: "calc(100vh - 200px)",
+                          minHeight: 520,
+                        }}
+                      >
+                        <Card
+                          size="small"
+                          title={
+                            <>
+                              <GlobalOutlined /> SLF Location Map{" "}
+                              <Tag bordered={false} color="blue">
+                                {filteredSlfMapPts.length} plotted
+                              </Tag>
+                              {filteredSlfMapPts.length !== slfMapPts.length && (
+                                <Tag bordered={false} color="default">
+                                  of {slfMapPts.length}
+                                </Tag>
+                              )}
+                            </>
+                          }
+                          style={{ borderRadius: 10, height: "100%" }}
+                          loading={loading}
+                          extra={
+                            <Space size={4}>
+                              <Tooltip title="Street">
+                                <Button
+                                  size="small"
+                                  type={slfTileKey === "street" ? "primary" : "default"}
+                                  icon={<GlobalOutlined />}
+                                  onClick={() => setSlfTileKey("street")}
+                                />
+                              </Tooltip>
+                              <Tooltip title="Satellite">
+                                <Button
+                                  size="small"
+                                  type={slfTileKey === "satellite" ? "primary" : "default"}
+                                  icon={<EnvironmentOutlined />}
+                                  onClick={() => setSlfTileKey("satellite")}
+                                />
+                              </Tooltip>
+                              <Tooltip title="Terrain">
+                                <Button
+                                  size="small"
+                                  type={slfTileKey === "terrain" ? "primary" : "default"}
+                                  icon={<FundOutlined />}
+                                  onClick={() => setSlfTileKey("terrain")}
+                                />
+                              </Tooltip>
+                              <Tooltip title="Dark">
+                                <Button
+                                  size="small"
+                                  type={slfTileKey === "dark" ? "primary" : "default"}
+                                  icon={<AppstoreOutlined />}
+                                  onClick={() => setSlfTileKey("dark")}
+                                />
+                              </Tooltip>
+                            </Space>
+                          }
+                          styles={{
+                            body: { padding: 0, height: "calc(100% - 100px)" },
+                          }}
+                        >
+                          {/* Filter bar */}
+                          <div
+                            style={{
+                              display: "flex",
+                              gap: 6,
+                              padding: "8px 10px",
+                              background: "#fafafa",
+                              borderBottom: "1px solid #f0f0f0",
+                              flexWrap: "wrap",
+                            }}
+                          >
+                            <Select
+                              size="small"
+                              allowClear
+                              placeholder="Province"
+                              value={slfFilterProvince}
+                              onChange={setSlfFilterProvince}
+                              options={slfProvinceOptions}
+                              style={{ minWidth: 120, flex: 1 }}
+                            />
+                            <Select
+                              size="small"
+                              allowClear
+                              placeholder="Status"
+                              value={slfFilterStatus}
+                              onChange={setSlfFilterStatus}
+                              options={[
+                                { label: "✓ Operational", value: "Operational" },
+                                {
+                                  label: "✕ Non-Operational",
+                                  value: "Non-Operational",
+                                },
+                              ]}
+                              style={{ minWidth: 130, flex: 1 }}
+                            />
+                            {(slfFilterProvince || slfFilterStatus) && (
+                              <Button
+                                size="small"
+                                type="link"
+                                danger
+                                onClick={() => {
+                                  setSlfFilterProvince(null);
+                                  setSlfFilterStatus(null);
+                                }}
+                              >
+                                Clear
+                              </Button>
+                            )}
+                            {/* Legend */}
+                            <div
+                              style={{
+                                display: "flex",
+                                gap: 8,
+                                alignItems: "center",
+                                marginLeft: "auto",
+                                fontSize: 11,
+                                color: "#999",
+                              }}
+                            >
+                              <span>
+                                <span
+                                  style={{
+                                    display: "inline-block",
+                                    width: 10,
+                                    height: 10,
+                                    borderRadius: "50%",
+                                    background: "#52c41a",
+                                    marginRight: 3,
+                                    verticalAlign: "middle",
+                                  }}
+                                />
+                                Operational
+                              </span>
+                              <span>
+                                <span
+                                  style={{
+                                    display: "inline-block",
+                                    width: 10,
+                                    height: 10,
+                                    borderRadius: "50%",
+                                    background: "#ff4d4f",
+                                    marginRight: 3,
+                                    verticalAlign: "middle",
+                                  }}
+                                />
+                                Non-Op
+                              </span>
+                              <span>
+                                <span
+                                  style={{
+                                    display: "inline-block",
+                                    width: 10,
+                                    height: 10,
+                                    borderRadius: "50%",
+                                    background: "#8c8c8c",
+                                    marginRight: 3,
+                                    verticalAlign: "middle",
+                                  }}
+                                />
+                                Not Yet Monitored
+                              </span>
+                            </div>
+                          </div>
+                          {filteredSlfMapPts.length > 0 ? (
+                            <MapContainer
+                              center={[15.0, 120.7]}
+                              zoom={8}
+                              style={{
+                                height: "100%",
+                                width: "100%",
+                                borderRadius: "0 0 10px 10px",
+                              }}
+                              scrollWheelZoom={true}
+                              zoomControl={false}
+                            >
+                              <TileLayer
+                                key={slfTileKey}
+                                attribution={slfTile.attr}
+                                url={slfTile.url}
+                              />
+                              <FitBounds points={filteredSlfMapPts} />
+                              <ProvinceBoundary
+                                key={slfFilterProvince || "__slf_none__"}
+                                province={slfFilterProvince}
+                              />
+                              {filteredSlfMapPts.map((pt, idx) => (
+                                <Marker
+                                  key={pt.record._id || idx}
+                                  position={[pt.lat, pt.lng]}
+                                  icon={slfStatusIcon(pt.record.statusOfSLF)}
+                                >
+                                  <Popup maxWidth={300} minWidth={240}>
+                                    <div
+                                      className="popup-light"
+                                      style={{
+                                        fontSize: 12,
+                                        lineHeight: 1.7,
+                                        padding: 2,
+                                      }}
+                                    >
+                                      <div
+                                        style={{
+                                          fontWeight: 700,
+                                          fontSize: 14,
+                                          marginBottom: 2,
+                                        }}
+                                      >
+                                        {pt.record.lgu}
+                                      </div>
+                                      <div
+                                        style={{
+                                          display: "flex",
+                                          gap: 4,
+                                          flexWrap: "wrap",
+                                          marginBottom: 6,
+                                        }}
+                                      >
+                                        <span
+                                          style={{
+                                            display: "inline-flex",
+                                            alignItems: "center",
+                                            gap: 3,
+                                            background: "#e6f7ff",
+                                            color: "#1890ff",
+                                            borderRadius: 4,
+                                            padding: "1px 6px",
+                                            fontSize: 11,
+                                          }}
+                                        >
+                                          <EnvironmentOutlined /> {pt.record.province}
+                                        </span>
+                                        {pt.record.barangay && (
+                                          <span
+                                            style={{
+                                              display: "inline-flex",
+                                              alignItems: "center",
+                                              gap: 3,
+                                              background: "#f0f0f0",
+                                              color: "#595959",
+                                              borderRadius: 4,
+                                              padding: "1px 6px",
+                                              fontSize: 11,
+                                            }}
+                                          >
+                                            {pt.record.barangay}
+                                          </span>
+                                        )}
+                                        {pt.record.manilaBayArea && (
+                                          <span
+                                            style={{
+                                              display: "inline-flex",
+                                              alignItems: "center",
+                                              gap: 3,
+                                              background:
+                                                pt.record.manilaBayArea === "MBA"
+                                                  ? "#e6f7ff"
+                                                  : "#f5f5f5",
+                                              color:
+                                                pt.record.manilaBayArea === "MBA"
+                                                  ? "#1890ff"
+                                                  : "#8c8c8c",
+                                              borderRadius: 4,
+                                              padding: "1px 6px",
+                                              fontSize: 11,
+                                            }}
+                                          >
+                                            <GlobalOutlined /> {pt.record.manilaBayArea}
+                                          </span>
+                                        )}
+                                      </div>
+                                      <hr
+                                        style={{
+                                          margin: "4px 0 6px",
+                                          border: "none",
+                                          borderTop: "1px solid #f0f0f0",
+                                        }}
+                                      />
+                                      <div
+                                        style={{
+                                          display: "flex",
+                                          gap: 4,
+                                          flexWrap: "wrap",
+                                          marginBottom: 6,
+                                        }}
+                                      >
+                                        {(() => {
+                                          const s = pt.record.statusOfSLF;
+                                          const isOp =
+                                            /operational/i.test(s) && !/non/i.test(s);
+                                          const isNon = /non/i.test(s);
+                                          return (
+                                            <span
+                                              className={`status-badge ${isOp ? "status-badge-compliant" : isNon ? "status-badge-noncompliant" : "status-badge-pending"}`}
+                                            >
+                                              <SafetyCertificateOutlined />{" "}
+                                              {isOp
+                                                ? "Operational"
+                                                : isNon
+                                                  ? "Non-Operational"
+                                                  : "Not Yet Monitored"}
+                                            </span>
+                                          );
+                                        })()}
+                                        {pt.record.category && (
+                                          <span
+                                            style={{
+                                              display: "inline-flex",
+                                              alignItems: "center",
+                                              gap: 3,
+                                              background: "#f9f0ff",
+                                              color: "#722ed1",
+                                              borderRadius: 4,
+                                              padding: "1px 6px",
+                                              fontSize: 11,
+                                            }}
+                                          >
+                                            {pt.record.category}
+                                          </span>
+                                        )}
+                                      </div>
+                                      <div
+                                        style={{
+                                          background: "#fafafa",
+                                          borderRadius: 6,
+                                          padding: "6px 8px",
+                                          marginBottom: 6,
+                                        }}
+                                      >
+                                        {pt.record.volumeCapacity != null && (
+                                          <div
+                                            style={{
+                                              display: "flex",
+                                              justifyContent: "space-between",
+                                              marginBottom: 3,
+                                            }}
+                                          >
+                                            <span style={{ color: "#595959" }}>
+                                              <BarChartOutlined
+                                                style={{ color: "#722ed1" }}
+                                              />{" "}
+                                              Capacity
+                                            </span>
+                                            <strong>
+                                              {Number(pt.record.volumeCapacity).toLocaleString()}
+                                            </strong>
+                                          </div>
+                                        )}
+                                        {pt.record.noOfLGUServed != null && (
+                                          <div
+                                            style={{
+                                              display: "flex",
+                                              justifyContent: "space-between",
+                                              marginBottom: 3,
+                                            }}
+                                          >
+                                            <span style={{ color: "#595959" }}>
+                                              <TeamOutlined
+                                                style={{ color: "#fa8c16" }}
+                                              />{" "}
+                                              LGUs Served
+                                            </span>
+                                            <strong>
+                                              {pt.record.noOfLGUServed}
+                                            </strong>
+                                          </div>
+                                        )}
+                                        {pt.record.yearStartedOperation && (
+                                          <div
+                                            style={{
+                                              display: "flex",
+                                              justifyContent: "space-between",
+                                            }}
+                                          >
+                                            <span style={{ color: "#595959" }}>
+                                              <CalendarOutlined
+                                                style={{ color: "#13c2c2" }}
+                                              />{" "}
+                                              Year Started
+                                            </span>
+                                            <strong>
+                                              {pt.record.yearStartedOperation}
+                                            </strong>
+                                          </div>
+                                        )}
+                                      </div>
+                                      {pt.record.focalPerson && (
+                                        <div
+                                          style={{
+                                            display: "flex",
+                                            alignItems: "center",
+                                            gap: 5,
+                                            marginBottom: 2,
+                                          }}
+                                        >
+                                          <UserOutlined style={{ color: "#13c2c2" }} />{" "}
+                                          <span style={{ color: "#595959" }}>
+                                            Focal:
+                                          </span>{" "}
+                                          <strong>{pt.record.focalPerson}</strong>
+                                        </div>
+                                      )}
+                                      {pt.record.enmo && (
+                                        <div
+                                          style={{
+                                            display: "flex",
+                                            alignItems: "center",
+                                            gap: 5,
+                                          }}
+                                        >
+                                          <TeamOutlined style={{ color: "#52c41a" }} />{" "}
+                                          <span style={{ color: "#595959" }}>
+                                            ENMO:
+                                          </span>{" "}
+                                          {pt.record.enmo}
+                                        </div>
+                                      )}
+                                    </div>
+                                  </Popup>
+                                </Marker>
+                              ))}
+                            </MapContainer>
+                          ) : (
+                            <div
+                              style={{
+                                height: "100%",
+                                display: "flex",
+                                alignItems: "center",
+                                justifyContent: "center",
+                              }}
+                            >
+                              <Text type="secondary">No coordinate data available</Text>
+                            </div>
+                          )}
+                        </Card>
+                      </div>
+                    </Col>
+                  </Row>
+                </>
+              ),
+            },
+            {
+              key: "waste-generators",
+              label: (
+                <>
+                  <DatabaseOutlined /> Waste Generators
+                </>
+              ),
+              children: (
+                <>
+                  <Row gutter={[16, 16]} style={{ marginBottom: 16 }}>
+                    <Col xs={12} sm={12} md={6}>
+                      <Card
+                        hoverable
+                        style={{ borderRadius: 10, height: 110 }}
+                        loading={loading}
+                      >
+                        <Statistic
+                          title="Total Submissions"
+                          value={stats?.submissions || 0}
+                          prefix={<FileTextOutlined style={{ color: "#2f54eb" }} />}
+                        />
+                      </Card>
+                    </Col>
+                    <Col xs={12} sm={12} md={6}>
+                      <Card
+                        hoverable
+                        style={{ borderRadius: 10, height: 110 }}
+                        loading={loading}
+                      >
+                        <Statistic
+                          title="Generators"
+                          value={stats?.generators || 0}
+                          prefix={<BankOutlined style={{ color: "#722ed1" }} />}
+                        />
+                      </Card>
+                    </Col>
+                    <Col xs={12} sm={12} md={6}>
+                      <Card
+                        hoverable
+                        style={{ borderRadius: 10, height: 110 }}
+                        loading={loading}
+                      >
+                        <Statistic
+                          title="Total Trucks"
+                          value={stats?.totalTrucks || 0}
+                          prefix={<CarOutlined style={{ color: "#fa8c16" }} />}
+                        />
+                      </Card>
+                    </Col>
+                    <Col xs={12} sm={12} md={6}>
+                      <Card
+                        hoverable
+                        style={{ borderRadius: 10, height: 110 }}
+                        loading={loading}
+                      >
+                        <Tooltip title="Click to view Waste Generators page">
+                          <div
+                            style={{ cursor: "pointer" }}
+                            onClick={() => setActiveMenu("slf-waste-generators")}
+                          >
+                            <Statistic
+                              title="View All Records"
+                              value={stats?.submissions || 0}
+                              prefix={<FileTextOutlined style={{ color: "#fa8c16" }} />}
+                            />
+                          </div>
+                        </Tooltip>
+                      </Card>
+                    </Col>
+                  </Row>
+
+                  <Row gutter={[16, 16]}>
+                    <Col xs={24} lg={8}>
+                      <Card
+                        title={
+                          <>
+                            <PieChartOutlined /> By Status
+                          </>
+                        }
+                        size="small"
+                        style={{ borderRadius: 10 }}
+                        loading={loading}
+                      >
+                        {Object.entries(stats?.byStatus || {}).map(([status, count]) => (
+                          <div key={status} style={{ marginBottom: 8 }}>
+                            <div
+                              style={{
+                                display: "flex",
+                                justifyContent: "space-between",
+                                marginBottom: 2,
+                              }}
+                            >
+                              <Text>{status?.charAt(0).toUpperCase() + status?.slice(1)}</Text>
+                              <Text strong>{count}</Text>
+                            </div>
+                            <Progress
+                              percent={
+                                stats?.submissions > 0
+                                  ? Math.round((count / stats.submissions) * 100)
+                                  : 0
+                              }
+                              showInfo={false}
+                              strokeColor={
+                                status === "acknowledged"
+                                  ? "#52c41a"
+                                  : status === "rejected"
+                                    ? "#ff4d4f"
+                                    : "#faad14"
+                              }
+                              size="small"
+                            />
+                          </div>
+                        ))}
+                      </Card>
+                    </Col>
+                    <Col xs={24} lg={8}>
+                      <Card
+                        title={
+                          <>
+                            <ApartmentOutlined /> By Company Type
+                          </>
+                        }
+                        size="small"
+                        style={{ borderRadius: 10 }}
+                        loading={loading}
+                      >
+                        {Object.entries(stats?.byCompanyType || {}).map(
+                          ([type, count]) => (
+                            <div key={type} style={{ marginBottom: 8 }}>
+                              <div
+                                style={{
+                                  display: "flex",
+                                  justifyContent: "space-between",
+                                  marginBottom: 2,
+                                }}
+                              >
+                                <Text>{type || "Unspecified"}</Text>
+                                <Text strong>{count}</Text>
+                              </div>
+                              <Progress
+                                percent={
+                                  stats?.submissions > 0
+                                    ? Math.round((count / stats.submissions) * 100)
+                                    : 0
+                                }
+                                showInfo={false}
+                                strokeColor="#1890ff"
+                                size="small"
+                              />
+                            </div>
+                          ),
+                        )}
+                      </Card>
+                    </Col>
+                    <Col xs={24} lg={8}>
+                      <Card
+                        title={
+                          <>
+                            <BarChartOutlined /> Waste by Type
+                          </>
+                        }
+                        size="small"
+                        style={{ borderRadius: 10 }}
+                        loading={loading}
+                      >
+                        {(stats?.wasteByType || []).map((w) => (
+                          <div key={w._id} style={{ marginBottom: 8 }}>
+                            <div
+                              style={{
+                                display: "flex",
+                                justifyContent: "space-between",
+                                marginBottom: 2,
+                              }}
+                            >
+                              <Text>{w._id || "Unspecified"}</Text>
+                              <Text strong>
+                                {Number(w.totalVolume).toLocaleString()} ({w.count})
+                              </Text>
+                            </div>
+                            <Progress
+                              percent={Math.min(
+                                Math.round(
+                                  (w.totalVolume /
+                                    Math.max(
+                                      ...(stats?.wasteByType || []).map(
+                                        (x) => x.totalVolume,
+                                      ),
+                                      1,
+                                    )) *
+                                    100,
+                                ),
+                                100,
+                              )}
+                              showInfo={false}
+                              strokeColor="#722ed1"
+                              size="small"
+                            />
+                          </div>
+                        ))}
+                      </Card>
+                    </Col>
+                  </Row>
+                </>
+              ),
+            },
+          ]}
+        />
       ),
     });
   }
 
   return (
     <>
+      {" "}
       <Modal
-        title={<Space><FileTextOutlined />{mapViewRecord?.municipality}, {mapViewRecord?.province}</Space>}
+        title={
+          <Space>
+            <FileTextOutlined />
+            {mapViewRecord?.municipality}, {mapViewRecord?.province}
+          </Space>
+        }
         open={!!mapViewRecord}
         onCancel={() => setMapViewRecord(null)}
         footer={<Button onClick={() => setMapViewRecord(null)}>Close</Button>}
         width={800}
       >
         {mapViewRecord && (
-          <Tabs items={[
-            { key: "general", label: <><EnvironmentOutlined /> General Info</>, children: (
-              <>
-                <Row gutter={[16, 12]}>
-                  <Col span={12}><Text type="secondary"><EnvironmentOutlined /> Province:</Text> <Text strong>{mapViewRecord.province}</Text></Col>
-                  <Col span={12}><Text type="secondary"><EnvironmentOutlined /> Municipality:</Text> <Text strong>{mapViewRecord.municipality}</Text></Col>
-                  <Col span={12}><Text type="secondary">Manila Bay Area:</Text> {mapViewRecord.manilaBayArea === "MBA" ? <Tag color="blue" bordered={false}>MBA</Tag> : <Tag color="default" bordered={false}>{mapViewRecord.manilaBayArea || "\u2014"}</Tag>}</Col>
-                  <Col span={12}><Text type="secondary">Congressional District:</Text> <Text>{mapViewRecord.congressionalDistrict || "\u2014"}</Text></Col>
-                  <Col span={12}><Text type="secondary">Coordinates:</Text> <Text>{mapViewRecord.latitude}, {mapViewRecord.longitude}</Text></Col>
-                </Row>
-                <Divider plain orientation="left"><AuditOutlined /> Plan Details</Divider>
-                <Row gutter={[16, 12]}>
-                  <Col span={12}><Text type="secondary"><FileTextOutlined /> Plan Type:</Text> {mapViewRecord.typeOfSWMPlan ? <Tag color="geekblue" bordered={false}>{mapViewRecord.typeOfSWMPlan}</Tag> : "\u2014"}</Col>
-                  <Col span={12}><Text type="secondary"><FileTextOutlined /> Resolution No.:</Text> <Text>{mapViewRecord.resolutionNo || "\u2014"}</Text></Col>
-                  <Col span={12}><Text type="secondary"><ClockCircleOutlined /> Period Covered:</Text> <Tag bordered={false}>{mapViewRecord.periodCovered || "\u2014"}</Tag></Col>
-                  <Col span={12}><Text type="secondary"><ClockCircleOutlined /> Year Approved:</Text> <Text>{mapViewRecord.yearApproved || "\u2014"}</Text></Col>
-                  <Col span={12}><Text type="secondary"><ClockCircleOutlined /> End Period:</Text> <Text>{mapViewRecord.endPeriod || "\u2014"}</Text></Col>
-                  <Col span={12}><Text type="secondary">Status:</Text> {/approved/i.test(mapViewRecord.forRenewal) ? <Tag color="green" bordered={false}>{mapViewRecord.forRenewal}</Tag> : /renewal/i.test(mapViewRecord.forRenewal) ? <Tag color="orange" bordered={false}>{mapViewRecord.forRenewal}</Tag> : <Tag bordered={false}>{mapViewRecord.forRenewal || "\u2014"}</Tag>}</Col>
-                </Row>
-                <Divider plain orientation="left"><TeamOutlined /> Personnel</Divider>
-                <Row gutter={[16, 12]}>
-                  <Col span={8}><Text type="secondary"><UserOutlined /> Focal Person:</Text><br /><Text strong>{mapViewRecord.focalPerson || "\u2014"}</Text></Col>
-                  <Col span={8}><Text type="secondary"><UserOutlined /> ESWM Staff:</Text><br /><Text strong>{mapViewRecord.eswmStaff || "\u2014"}</Text></Col>
-                  <Col span={8}><Text type="secondary"><TeamOutlined /> ENMO Assigned:</Text><br /><Text strong>{mapViewRecord.enmoAssigned || "\u2014"}</Text></Col>
-                </Row>
-                {mapViewRecord.signedDocument && (<>
-                  <Divider plain orientation="left"><LinkOutlined /> Document</Divider>
-                  <a href={mapViewRecord.signedDocument} target="_blank" rel="noopener noreferrer" style={{ display: "inline-flex", alignItems: "center", gap: 5, padding: "4px 12px", background: "#e6f7ff", borderRadius: 4, fontSize: 13, color: "#1890ff", textDecoration: "none", fontWeight: 600 }}><LinkOutlined /> View Signed Document</a>
-                </>)}
-              </>
-            )},
-            { key: "monitoring", label: <><ClockCircleOutlined /> Monitoring</>, children: (
-              <Row gutter={[16, 12]}>
-                <Col span={12}><Text type="secondary">Target Month:</Text> <Text>{mapViewRecord.targetMonth || "\u2014"}</Text></Col>
-                <Col span={12}><Text type="secondary">IIS Number:</Text> <Text>{mapViewRecord.iisNumber || "\u2014"}</Text></Col>
-                <Col span={12}><Text type="secondary">Date of Monitoring:</Text> <Text>{mapViewRecord.dateOfMonitoring ? dayjs(mapViewRecord.dateOfMonitoring).format("MMM D, YYYY") : "\u2014"}</Text></Col>
-                <Col span={12}><Text type="secondary">Report Prepared:</Text> <Text>{mapViewRecord.dateReportPrepared ? dayjs(mapViewRecord.dateReportPrepared).format("MMM D, YYYY") : "\u2014"}</Text></Col>
-                <Col span={12}><Text type="secondary">Reviewed (Staff):</Text> <Text>{mapViewRecord.dateReportReviewedStaff ? dayjs(mapViewRecord.dateReportReviewedStaff).format("MMM D, YYYY") : "\u2014"}</Text></Col>
-                <Col span={12}><Text type="secondary">Reviewed (Focal):</Text> <Text>{mapViewRecord.dateReportReviewedFocal ? dayjs(mapViewRecord.dateReportReviewedFocal).format("MMM D, YYYY") : "\u2014"}</Text></Col>
-                <Col span={12}><Text type="secondary">Report Approved:</Text> <Text>{mapViewRecord.dateReportApproved ? dayjs(mapViewRecord.dateReportApproved).format("MMM D, YYYY") : "\u2014"}</Text></Col>
-                <Col span={12}><Text type="secondary">Tracking:</Text> <Text>{mapViewRecord.trackingOfReports || "\u2014"}</Text></Col>
-              </Row>
-            )},
-            { key: "compliance", label: <><SafetyCertificateOutlined /> Compliance</>, children: (
-              <>
-                <Row gutter={[16, 12]}>
-                  <Col span={24}><Text type="secondary">Remarks & Recommendation:</Text><br /><Text>{mapViewRecord.remarksAndRecommendation || "\u2014"}</Text></Col>
-                  <Col span={12}><Text type="secondary">Source Reduction:</Text> <Text>{mapViewRecord.sourceReduction || "\u2014"}</Text></Col>
-                  <Col span={12}><Text type="secondary">Segregated Collection:</Text> <Text>{mapViewRecord.segregatedCollection || "\u2014"}</Text></Col>
-                  <Col span={12}><Text type="secondary">Storage & Set-out:</Text> <Text>{mapViewRecord.storageAndSetout || "\u2014"}</Text></Col>
-                  <Col span={12}><Text type="secondary">Processing/MRF:</Text> <Text>{mapViewRecord.processingMRF || "\u2014"}</Text></Col>
-                  <Col span={12}><Text type="secondary">Transfer Station:</Text> <Text>{mapViewRecord.transferStation || "\u2014"}</Text></Col>
-                  <Col span={12}><Text type="secondary">Disposal Facilities:</Text> <Text>{mapViewRecord.disposalFacilities || "\u2014"}</Text></Col>
-                  <Col span={12}><Text type="secondary">LGU Final Disposal:</Text> <Text>{mapViewRecord.lguFinalDisposal || "\u2014"}</Text></Col>
-                  <Col span={12}><Text type="secondary">Advise Letter Date:</Text> <Text>{mapViewRecord.adviseLetterDateIssued || "\u2014"}</Text></Col>
-                  <Col span={12}><Text type="secondary">Compliance to Advise:</Text> <Text>{mapViewRecord.complianceToAdvise || "\u2014"}</Text></Col>
-                  <Col span={24}><Text type="secondary">Remarks:</Text> <Text>{mapViewRecord.remarks || "\u2014"}</Text></Col>
-                </Row>
-              </>
-            )},
-            { key: "waste", label: <><BarChartOutlined /> Waste Data</>, children: (
-              <Row gutter={[16, 12]}>
-                <Col span={12}><Text type="secondary">Total Waste Generation:</Text> <Text strong>{mapViewRecord.totalWasteGeneration != null ? `${mapViewRecord.totalWasteGeneration.toLocaleString()} tons` : "\u2014"}</Text></Col>
-                <Col span={12}><Text type="secondary">PCG:</Text> <Text strong>{mapViewRecord.pcg ?? "\u2014"}</Text></Col>
-                <Col span={12}><Text type="secondary">Waste Diversion Rate:</Text> <Text strong>{mapViewRecord.wasteDiversionRate != null ? `${(mapViewRecord.wasteDiversionRate * 100).toFixed(1)}%` : "\u2014"}</Text></Col>
-                <Col span={12}><Text type="secondary">Disposal Rate:</Text> <Text strong>{mapViewRecord.disposalRate != null ? `${(mapViewRecord.disposalRate * 100).toFixed(1)}%` : "\u2014"}</Text></Col>
-                <Divider plain orientation="left">Composition</Divider>
-                <Col span={12}><Text type="secondary" style={{ color: "#52c41a" }}>Biodegradable:</Text> <Text>{mapViewRecord.biodegradableWaste ?? "\u2014"} ({mapViewRecord.biodegradablePercent != null ? `${(mapViewRecord.biodegradablePercent * 100).toFixed(1)}%` : "\u2014"})</Text></Col>
-                <Col span={12}><Text type="secondary" style={{ color: "#1890ff" }}>Recyclable:</Text> <Text>{mapViewRecord.recyclableWaste ?? "\u2014"} ({mapViewRecord.recyclablePercent != null ? `${(mapViewRecord.recyclablePercent * 100).toFixed(1)}%` : "\u2014"})</Text></Col>
-                <Col span={12}><Text type="secondary" style={{ color: "#ff4d4f" }}>Residual:</Text> <Text>{mapViewRecord.residualWasteForDisposal ?? "\u2014"} ({mapViewRecord.residualPercent != null ? `${(mapViewRecord.residualPercent * 100).toFixed(1)}%` : "\u2014"})</Text></Col>
-                <Col span={12}><Text type="secondary" style={{ color: "#722ed1" }}>Special:</Text> <Text>{mapViewRecord.specialWaste ?? "\u2014"} ({mapViewRecord.specialPercent != null ? `${(mapViewRecord.specialPercent * 100).toFixed(1)}%` : "\u2014"})</Text></Col>
-              </Row>
-            )},
-          ]} />
+          <Tabs
+            items={[
+              {
+                key: "general",
+                label: (
+                  <>
+                    <EnvironmentOutlined /> General Info
+                  </>
+                ),
+                children: (
+                  <>
+                    <Row gutter={[16, 12]}>
+                      <Col span={12}>
+                        <Text type="secondary">
+                          <EnvironmentOutlined /> Province:
+                        </Text>{" "}
+                        <Text strong>{mapViewRecord.province}</Text>
+                      </Col>
+                      <Col span={12}>
+                        <Text type="secondary">
+                          <EnvironmentOutlined /> Municipality:
+                        </Text>{" "}
+                        <Text strong>{mapViewRecord.municipality}</Text>
+                      </Col>
+                      <Col span={12}>
+                        <Text type="secondary">Manila Bay Area:</Text>{" "}
+                        {mapViewRecord.manilaBayArea === "MBA" ? (
+                          <Tag color="blue" bordered={false}>
+                            MBA
+                          </Tag>
+                        ) : (
+                          <Tag color="default" bordered={false}>
+                            {mapViewRecord.manilaBayArea || "\u2014"}
+                          </Tag>
+                        )}
+                      </Col>
+                      <Col span={12}>
+                        <Text type="secondary">Congressional District:</Text>{" "}
+                        <Text>
+                          {mapViewRecord.congressionalDistrict || "\u2014"}
+                        </Text>
+                      </Col>
+                      <Col span={12}>
+                        <Text type="secondary">Coordinates:</Text>{" "}
+                        <Text>
+                          {mapViewRecord.latitude}, {mapViewRecord.longitude}
+                        </Text>
+                      </Col>
+                    </Row>
+                    <Divider plain orientation="left">
+                      <AuditOutlined /> Plan Details
+                    </Divider>
+                    <Row gutter={[16, 12]}>
+                      <Col span={12}>
+                        <Text type="secondary">
+                          <FileTextOutlined /> Plan Type:
+                        </Text>{" "}
+                        {mapViewRecord.typeOfSWMPlan ? (
+                          <Tag color="geekblue" bordered={false}>
+                            {mapViewRecord.typeOfSWMPlan}
+                          </Tag>
+                        ) : (
+                          "\u2014"
+                        )}
+                      </Col>
+                      <Col span={12}>
+                        <Text type="secondary">
+                          <FileTextOutlined /> Resolution No.:
+                        </Text>{" "}
+                        <Text>{mapViewRecord.resolutionNo || "\u2014"}</Text>
+                      </Col>
+                      <Col span={12}>
+                        <Text type="secondary">
+                          <ClockCircleOutlined /> Period Covered:
+                        </Text>{" "}
+                        <Tag bordered={false}>
+                          {mapViewRecord.periodCovered || "\u2014"}
+                        </Tag>
+                      </Col>
+                      <Col span={12}>
+                        <Text type="secondary">
+                          <ClockCircleOutlined /> Year Approved:
+                        </Text>{" "}
+                        <Text>{mapViewRecord.yearApproved || "\u2014"}</Text>
+                      </Col>
+                      <Col span={12}>
+                        <Text type="secondary">
+                          <ClockCircleOutlined /> End Period:
+                        </Text>{" "}
+                        <Text>{mapViewRecord.endPeriod || "\u2014"}</Text>
+                      </Col>
+                      <Col span={12}>
+                        <Text type="secondary">Status:</Text>{" "}
+                        {/approved/i.test(mapViewRecord.forRenewal) ? (
+                          <Tag color="green" bordered={false}>
+                            {mapViewRecord.forRenewal}
+                          </Tag>
+                        ) : /renewal/i.test(mapViewRecord.forRenewal) ? (
+                          <Tag color="orange" bordered={false}>
+                            {mapViewRecord.forRenewal}
+                          </Tag>
+                        ) : (
+                          <Tag bordered={false}>
+                            {mapViewRecord.forRenewal || "\u2014"}
+                          </Tag>
+                        )}
+                      </Col>
+                    </Row>
+                    <Divider plain orientation="left">
+                      <TeamOutlined /> Personnel
+                    </Divider>
+                    <Row gutter={[16, 12]}>
+                      <Col span={8}>
+                        <Text type="secondary">
+                          <UserOutlined /> Focal Person:
+                        </Text>
+                        <br />
+                        <Text strong>
+                          {mapViewRecord.focalPerson || "\u2014"}
+                        </Text>
+                      </Col>
+                      <Col span={8}>
+                        <Text type="secondary">
+                          <UserOutlined /> ESWM Staff:
+                        </Text>
+                        <br />
+                        <Text strong>
+                          {mapViewRecord.eswmStaff || "\u2014"}
+                        </Text>
+                      </Col>
+                      <Col span={8}>
+                        <Text type="secondary">
+                          <TeamOutlined /> ENMO Assigned:
+                        </Text>
+                        <br />
+                        <Text strong>
+                          {mapViewRecord.enmoAssigned || "\u2014"}
+                        </Text>
+                      </Col>
+                    </Row>
+                    {mapViewRecord.signedDocument && (
+                      <>
+                        <Divider plain orientation="left">
+                          <LinkOutlined /> Document
+                        </Divider>
+                        <a
+                          href={mapViewRecord.signedDocument}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          style={{
+                            display: "inline-flex",
+                            alignItems: "center",
+                            gap: 5,
+                            padding: "4px 12px",
+                            background: "#e6f7ff",
+                            borderRadius: 4,
+                            fontSize: 13,
+                            color: "#1890ff",
+                            textDecoration: "none",
+                            fontWeight: 600,
+                          }}
+                        >
+                          <LinkOutlined /> View Signed Document
+                        </a>
+                      </>
+                    )}
+                  </>
+                ),
+              },
+              {
+                key: "monitoring",
+                label: (
+                  <>
+                    <ClockCircleOutlined /> Monitoring
+                  </>
+                ),
+                children: (
+                  <Row gutter={[16, 12]}>
+                    <Col span={12}>
+                      <Text type="secondary">Target Month:</Text>{" "}
+                      <Text>{mapViewRecord.targetMonth || "\u2014"}</Text>
+                    </Col>
+                    <Col span={12}>
+                      <Text type="secondary">IIS Number:</Text>{" "}
+                      <Text>{mapViewRecord.iisNumber || "\u2014"}</Text>
+                    </Col>
+                    <Col span={12}>
+                      <Text type="secondary">Date of Monitoring:</Text>{" "}
+                      <Text>
+                        {mapViewRecord.dateOfMonitoring
+                          ? dayjs(mapViewRecord.dateOfMonitoring).format(
+                              "MMM D, YYYY",
+                            )
+                          : "\u2014"}
+                      </Text>
+                    </Col>
+                    <Col span={12}>
+                      <Text type="secondary">Report Prepared:</Text>{" "}
+                      <Text>
+                        {mapViewRecord.dateReportPrepared
+                          ? dayjs(mapViewRecord.dateReportPrepared).format(
+                              "MMM D, YYYY",
+                            )
+                          : "\u2014"}
+                      </Text>
+                    </Col>
+                    <Col span={12}>
+                      <Text type="secondary">Reviewed (Staff):</Text>{" "}
+                      <Text>
+                        {mapViewRecord.dateReportReviewedStaff
+                          ? dayjs(mapViewRecord.dateReportReviewedStaff).format(
+                              "MMM D, YYYY",
+                            )
+                          : "\u2014"}
+                      </Text>
+                    </Col>
+                    <Col span={12}>
+                      <Text type="secondary">Reviewed (Focal):</Text>{" "}
+                      <Text>
+                        {mapViewRecord.dateReportReviewedFocal
+                          ? dayjs(mapViewRecord.dateReportReviewedFocal).format(
+                              "MMM D, YYYY",
+                            )
+                          : "\u2014"}
+                      </Text>
+                    </Col>
+                    <Col span={12}>
+                      <Text type="secondary">Report Approved:</Text>{" "}
+                      <Text>
+                        {mapViewRecord.dateReportApproved
+                          ? dayjs(mapViewRecord.dateReportApproved).format(
+                              "MMM D, YYYY",
+                            )
+                          : "\u2014"}
+                      </Text>
+                    </Col>
+                    <Col span={12}>
+                      <Text type="secondary">Tracking:</Text>{" "}
+                      <Text>{mapViewRecord.trackingOfReports || "\u2014"}</Text>
+                    </Col>
+                  </Row>
+                ),
+              },
+              {
+                key: "compliance",
+                label: (
+                  <>
+                    <SafetyCertificateOutlined /> Compliance
+                  </>
+                ),
+                children: (
+                  <>
+                    <Row gutter={[16, 12]}>
+                      <Col span={24}>
+                        <Text type="secondary">Remarks & Recommendation:</Text>
+                        <br />
+                        <Text>
+                          {mapViewRecord.remarksAndRecommendation || "\u2014"}
+                        </Text>
+                      </Col>
+                      <Col span={12}>
+                        <Text type="secondary">Source Reduction:</Text>{" "}
+                        <Text>{mapViewRecord.sourceReduction || "\u2014"}</Text>
+                      </Col>
+                      <Col span={12}>
+                        <Text type="secondary">Segregated Collection:</Text>{" "}
+                        <Text>
+                          {mapViewRecord.segregatedCollection || "\u2014"}
+                        </Text>
+                      </Col>
+                      <Col span={12}>
+                        <Text type="secondary">Storage & Set-out:</Text>{" "}
+                        <Text>
+                          {mapViewRecord.storageAndSetout || "\u2014"}
+                        </Text>
+                      </Col>
+                      <Col span={12}>
+                        <Text type="secondary">Processing/MRF:</Text>{" "}
+                        <Text>{mapViewRecord.processingMRF || "\u2014"}</Text>
+                      </Col>
+                      <Col span={12}>
+                        <Text type="secondary">Transfer Station:</Text>{" "}
+                        <Text>{mapViewRecord.transferStation || "\u2014"}</Text>
+                      </Col>
+                      <Col span={12}>
+                        <Text type="secondary">Disposal Facilities:</Text>{" "}
+                        <Text>
+                          {mapViewRecord.disposalFacilities || "\u2014"}
+                        </Text>
+                      </Col>
+                      <Col span={12}>
+                        <Text type="secondary">LGU Final Disposal:</Text>{" "}
+                        <Text>
+                          {mapViewRecord.lguFinalDisposal || "\u2014"}
+                        </Text>
+                      </Col>
+                      <Col span={12}>
+                        <Text type="secondary">Advise Letter Date:</Text>{" "}
+                        <Text>
+                          {mapViewRecord.adviseLetterDateIssued || "\u2014"}
+                        </Text>
+                      </Col>
+                      <Col span={12}>
+                        <Text type="secondary">Compliance to Advise:</Text>{" "}
+                        <Text>
+                          {mapViewRecord.complianceToAdvise || "\u2014"}
+                        </Text>
+                      </Col>
+                      <Col span={24}>
+                        <Text type="secondary">Remarks:</Text>{" "}
+                        <Text>{mapViewRecord.remarks || "\u2014"}</Text>
+                      </Col>
+                    </Row>
+                  </>
+                ),
+              },
+              {
+                key: "waste",
+                label: (
+                  <>
+                    <BarChartOutlined /> Waste Data
+                  </>
+                ),
+                children: (
+                  <Row gutter={[16, 12]}>
+                    <Col span={12}>
+                      <Text type="secondary">Total Waste Generation:</Text>{" "}
+                      <Text strong>
+                        {mapViewRecord.totalWasteGeneration != null
+                          ? `${mapViewRecord.totalWasteGeneration.toLocaleString()} tons`
+                          : "\u2014"}
+                      </Text>
+                    </Col>
+                    <Col span={12}>
+                      <Text type="secondary">PCG:</Text>{" "}
+                      <Text strong>{mapViewRecord.pcg ?? "\u2014"}</Text>
+                    </Col>
+                    <Col span={12}>
+                      <Text type="secondary">Waste Diversion Rate:</Text>{" "}
+                      <Text strong>
+                        {mapViewRecord.wasteDiversionRate != null
+                          ? `${(mapViewRecord.wasteDiversionRate * 100).toFixed(1)}%`
+                          : "\u2014"}
+                      </Text>
+                    </Col>
+                    <Col span={12}>
+                      <Text type="secondary">Disposal Rate:</Text>{" "}
+                      <Text strong>
+                        {mapViewRecord.disposalRate != null
+                          ? `${(mapViewRecord.disposalRate * 100).toFixed(1)}%`
+                          : "\u2014"}
+                      </Text>
+                    </Col>
+                    <Divider plain orientation="left">
+                      Composition
+                    </Divider>
+                    <Col span={12}>
+                      <Text type="secondary" style={{ color: "#52c41a" }}>
+                        Biodegradable:
+                      </Text>{" "}
+                      <Text>
+                        {mapViewRecord.biodegradableWaste ?? "\u2014"} (
+                        {mapViewRecord.biodegradablePercent != null
+                          ? `${(mapViewRecord.biodegradablePercent * 100).toFixed(1)}%`
+                          : "\u2014"}
+                        )
+                      </Text>
+                    </Col>
+                    <Col span={12}>
+                      <Text type="secondary" style={{ color: "#1890ff" }}>
+                        Recyclable:
+                      </Text>{" "}
+                      <Text>
+                        {mapViewRecord.recyclableWaste ?? "\u2014"} (
+                        {mapViewRecord.recyclablePercent != null
+                          ? `${(mapViewRecord.recyclablePercent * 100).toFixed(1)}%`
+                          : "\u2014"}
+                        )
+                      </Text>
+                    </Col>
+                    <Col span={12}>
+                      <Text type="secondary" style={{ color: "#ff4d4f" }}>
+                        Residual:
+                      </Text>{" "}
+                      <Text>
+                        {mapViewRecord.residualWasteForDisposal ?? "\u2014"} (
+                        {mapViewRecord.residualPercent != null
+                          ? `${(mapViewRecord.residualPercent * 100).toFixed(1)}%`
+                          : "\u2014"}
+                        )
+                      </Text>
+                    </Col>
+                    <Col span={12}>
+                      <Text type="secondary" style={{ color: "#722ed1" }}>
+                        Special:
+                      </Text>{" "}
+                      <Text>
+                        {mapViewRecord.specialWaste ?? "\u2014"} (
+                        {mapViewRecord.specialPercent != null
+                          ? `${(mapViewRecord.specialPercent * 100).toFixed(1)}%`
+                          : "\u2014"}
+                        )
+                      </Text>
+                    </Col>
+                  </Row>
+                ),
+              },
+            ]}
+          />
         )}
       </Modal>
-
       <div style={{ marginBottom: 16 }}>
         <Title level={3} style={{ margin: 0, color: textColor }}>
           Dashboard
         </Title>
         <Text type="secondary">
-          Welcome back, {user?.firstName}! Here&apos;s a real-time overview.
+          Here&apos;s a real-time overview of the system.
         </Text>
       </div>
-
       <Tabs
-        defaultActiveKey="overview"
+        defaultActiveKey="swm-plan"
         items={tabItems}
         size="large"
         style={{ marginTop: 8 }}
@@ -1675,7 +8424,9 @@ function getStyles(isDark, opts = {}) {
       display: "flex",
       alignItems: "center",
       justifyContent: "space-between",
-      boxShadow: isDark ? "0 1px 4px rgba(0,0,0,0.3)" : "0 1px 4px rgba(0,0,0,0.06)",
+      boxShadow: isDark
+        ? "0 1px 4px rgba(0,0,0,0.3)"
+        : "0 1px 4px rgba(0,0,0,0.06)",
       position: "sticky",
       top: 0,
       zIndex: 10,
@@ -1710,7 +8461,11 @@ function getStyles(isDark, opts = {}) {
 // Lighten / darken a hex color by `amount` (positive = lighten)
 function adjustBrightness(hex, amount) {
   let c = hex.replace("#", "");
-  if (c.length === 3) c = c.split("").map((ch) => ch + ch).join("");
+  if (c.length === 3)
+    c = c
+      .split("")
+      .map((ch) => ch + ch)
+      .join("");
   const num = parseInt(c, 16);
   const r = Math.min(255, Math.max(0, ((num >> 16) & 0xff) + amount));
   const g = Math.min(255, Math.max(0, ((num >> 8) & 0xff) + amount));

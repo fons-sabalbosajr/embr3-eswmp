@@ -353,7 +353,7 @@ export default function SLFPortal() {
                 ) : (
                   <Empty
                     image={Empty.PRESENTED_IMAGE_SIMPLE}
-                    description="No SLF facilities available"
+                    description="No SLF available"
                   />
                 )
               }

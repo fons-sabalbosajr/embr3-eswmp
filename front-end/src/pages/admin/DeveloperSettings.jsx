@@ -452,11 +452,11 @@ export default function DeveloperSettings({ onSettingsSaved }) {
                     </Space>
                   }
                   extra={
-                    <Space>
+                    <Space wrap>
                       <Select
                         value={logLevel}
                         onChange={(v) => { setLogLevel(v); setTimeout(fetchLogs, 0); }}
-                        style={{ width: 110 }}
+                        style={{ width: "100%", minWidth: 90, maxWidth: 110 }}
                         size="small"
                       >
                         <Option value="all">All Levels</Option>
@@ -469,7 +469,7 @@ export default function DeveloperSettings({ onSettingsSaved }) {
                         value={logSearch}
                         onChange={(e) => setLogSearch(e.target.value)}
                         onPressEnter={fetchLogs}
-                        style={{ width: 180 }}
+                        style={{ width: "100%", maxWidth: 180 }}
                         size="small"
                         allowClear
                       />

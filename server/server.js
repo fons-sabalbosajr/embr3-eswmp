@@ -13,10 +13,22 @@ const logsRoutes = require("./routes/logs");
 const transactionsRoutes = require("./routes/transactions");
 const tenYearSwmPlanRoutes = require("./routes/tenYearSwmPlan");
 const fundedMRFRoutes = require("./routes/fundedMRF");
+const lguInitiatedMRFRoutes = require("./routes/lguInitiatedMRF");
+const trashTrapRoutes = require("./routes/trashTraps");
+const swmEquipmentRoutes = require("./routes/swmEquipment");
+const slfFacilityRoutes = require("./routes/slfFacilities");
+const dataReferenceRoutes = require("./routes/dataReferences");
+const openDumpsiteRoutes = require("./routes/openDumpsites");
+const residualContainmentRoutes = require("./routes/residualContainment");
+const projectDescScopingRoutes = require("./routes/projectDescScoping");
+const transferStationRoutes = require("./routes/transferStations");
+const lguAssistDiversionRoutes = require("./routes/lguAssistDiversion");
+const technicalAssistanceRoutes = require("./routes/technicalAssistance");
 
 const app = express();
 const PORT = process.env.PORT || 5000;
-const MONGODB_URI = process.env.MONGODB_URI || "mongodb://127.0.0.1:27017/embr3_eswmp";
+const MONGODB_URI =
+  process.env.MONGODB_URI || "mongodb://127.0.0.1:27017/embr3_eswmp";
 const CLIENT_URL = process.env.CLIENT_URL || "http://localhost:5173";
 
 // Middleware
@@ -37,9 +49,13 @@ mongoose
         submissionId: { $nin: existing },
       });
       if (untracked > 0) {
-        console.log(`Backfilling transactions for ${untracked} untracked entries...`);
+        console.log(
+          `Backfilling transactions for ${untracked} untracked entries...`,
+        );
         // Trigger the seed via internal logic
-        const entries = await DataSLF.find({ submissionId: { $nin: existing } });
+        const entries = await DataSLF.find({
+          submissionId: { $nin: existing },
+        });
         const groups = {};
         for (const e of entries) {
           const sid = e.submissionId || e._id.toString();
@@ -116,6 +132,17 @@ app.use("/api/logs", logsRoutes);
 app.use("/api/transactions", transactionsRoutes);
 app.use("/api/ten-year-swm", tenYearSwmPlanRoutes);
 app.use("/api/funded-mrf", fundedMRFRoutes);
+app.use("/api/lgu-initiated-mrf", lguInitiatedMRFRoutes);
+app.use("/api/trash-traps", trashTrapRoutes);
+app.use("/api/swm-equipment", swmEquipmentRoutes);
+app.use("/api/slf-facilities", slfFacilityRoutes);
+app.use("/api/data-references", dataReferenceRoutes);
+app.use("/api/open-dumpsites", openDumpsiteRoutes);
+app.use("/api/residual-containment", residualContainmentRoutes);
+app.use("/api/project-desc-scoping", projectDescScopingRoutes);
+app.use("/api/transfer-stations", transferStationRoutes);
+app.use("/api/lgu-assist-diversion", lguAssistDiversionRoutes);
+app.use("/api/technical-assistance", technicalAssistanceRoutes);
 
 // Get local IP address
 function getLocalIP() {

@@ -194,7 +194,7 @@ export default function FieldSettings() {
 
   return (
     <div>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4, flexWrap: "wrap", gap: 12 }}>
         <div>
           <Title level={4} style={{ margin: 0 }}>
             Portal Field Settings
@@ -227,6 +227,7 @@ export default function FieldSettings() {
           loading={loading}
           pagination={false}
           size="middle"
+          scroll={{ x: 800 }}
         />
       </Card>
 

@@ -17,6 +17,7 @@ import {
   DatePicker,
   Tooltip,
   Tabs,
+  Collapse,
   Statistic,
   Progress,
   Badge,
@@ -51,18 +52,10 @@ import Swal from "sweetalert2";
 import api from "../../api";
 import { exportToExcel } from "../../utils/exportExcel";
 import secureStorage from "../../utils/secureStorage";
+import { useDataRef } from "../../utils/dataRef";
 import dayjs from "dayjs";
 
 const { Title, Text } = Typography;
-
-const provinceOptions = [
-  "Aurora", "Bataan", "Bulacan", "Nueva Ecija", "Pampanga", "Tarlac", "Zambales",
-].map((p) => ({ label: p, value: p }));
-
-const monthOptions = [
-  "1.January", "2.February", "3.March", "4.April", "5.May", "6.June",
-  "7.July", "8.August", "9.September", "10.October", "11.November", "12.December",
-].map((m) => ({ label: m.replace(/^\d+\./, ""), value: m }));
 
 const CACHE_KEY = "funded-mrf-cache";
 const CACHE_TTL = 5 * 60 * 1000;
@@ -105,6 +98,16 @@ function getStatusTag(v) {
 }
 
 export default function FundedMRF() {
+  const { getValues } = useDataRef();
+  const provinceOptions = getValues("province").map((p) => ({ label: p, value: p }));
+  const monthOptions = getValues("target-month").map((m) => ({ label: m.replace(/^\d+\./, ""), value: m }));
+  const mbaOptions = getValues("manila-bay-area").map((v) => ({ label: v, value: v }));
+  const mrfStatusOptions = getValues("mrf-status").map((v) => ({ label: v, value: v }));
+  const mrfTypeOptions = getValues("type-of-mrf").map((v) => ({ label: v, value: v }));
+  const enmoOptions = getValues("enmo").map((v) => ({ label: v, value: v }));
+  const eswmStaffOptions = getValues("eswm-staff").map((v) => ({ label: v, value: v }));
+  const focalOptions = getValues("eswm-focal").map((v) => ({ label: v, value: v }));
+
   const [records, setRecords] = useState([]);
   const [loading, setLoading] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
@@ -356,7 +359,7 @@ export default function FundedMRF() {
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16, flexWrap: "wrap", gap: 12 }}>
         <Title level={4} style={{ margin: 0 }}><BankOutlined /> Funded MRF</Title>
         <Space wrap>
-          <Input placeholder="Search..." prefix={<SearchOutlined />} value={searchText} onChange={(e) => setSearchText(e.target.value)} style={{ width: 200 }} allowClear />
+          <Input placeholder="Search..." prefix={<SearchOutlined />} value={searchText} onChange={(e) => setSearchText(e.target.value)} style={{ width: "100%", maxWidth: 200 }} allowClear />
           <Button type="primary" icon={<PlusOutlined />} onClick={openAdd}>Add Record</Button>
           <Button icon={<DownloadOutlined />} onClick={() => {
             const rows = filtered.map((r) => ({
@@ -386,11 +389,11 @@ export default function FundedMRF() {
           <Col><FilterOutlined style={{ color: "#1890ff", marginRight: 6 }} /><Text type="secondary" style={{ fontSize: 12 }}>Filters:</Text></Col>
           <Col flex="auto">
             <Space wrap size={8}>
-              <Select placeholder="Province" value={filterProvince} onChange={setFilterProvince} allowClear style={{ width: 140 }} size="small" options={provinceOptions} suffixIcon={<EnvironmentOutlined />} />
-              <Select placeholder="MBA" value={filterMBA} onChange={setFilterMBA} allowClear style={{ width: 130 }} size="small" options={[{ label: "MBA", value: "MBA" }, { label: "OUTSIDE MBA", value: "OUTSIDE MBA" }]} />
-              <Select placeholder="MRF Type" value={filterType} onChange={setFilterType} allowClear style={{ width: 170 }} size="small" options={[{ label: "EMB Funded MRF", value: "EMB FUNDED MRF" }, { label: "EMB Funded Brgy MRF", value: "EMB FUNDED BRGY MRF" }]} suffixIcon={<BankOutlined />} />
-              <Select placeholder="Status" value={filterStatus} onChange={setFilterStatus} allowClear style={{ width: 150 }} size="small" options={[{ label: "Operational", value: "Operational" }, { label: "Non-Operational", value: "Non-Operational" }]} suffixIcon={<AuditOutlined />} />
-              <Select placeholder="Target Month" value={filterMonth} onChange={setFilterMonth} allowClear style={{ width: 140 }} size="small" options={monthOptions} suffixIcon={<CalendarOutlined />} />
+              <Select placeholder="Province" value={filterProvince} onChange={setFilterProvince} allowClear style={{ width: "100%", minWidth: 120, maxWidth: 160 }} size="small" options={provinceOptions} suffixIcon={<EnvironmentOutlined />} />
+              <Select placeholder="MBA" value={filterMBA} onChange={setFilterMBA} allowClear style={{ width: "100%", minWidth: 100, maxWidth: 140 }} size="small" options={mbaOptions} />
+              <Select placeholder="MRF Type" value={filterType} onChange={setFilterType} allowClear style={{ width: "100%", minWidth: 130, maxWidth: 180 }} size="small" options={mrfTypeOptions} suffixIcon={<BankOutlined />} />
+              <Select placeholder="Status" value={filterStatus} onChange={setFilterStatus} allowClear style={{ width: "100%", minWidth: 110, maxWidth: 160 }} size="small" options={mrfStatusOptions} suffixIcon={<AuditOutlined />} />
+              <Select placeholder="Target Month" value={filterMonth} onChange={setFilterMonth} allowClear style={{ width: "100%", minWidth: 110, maxWidth: 150 }} size="small" options={monthOptions} suffixIcon={<CalendarOutlined />} />
               {hasActiveFilters && <Tooltip title="Clear all filters"><Button size="small" type="link" danger icon={<ClearOutlined />} onClick={clearAllFilters}>Clear</Button></Tooltip>}
             </Space>
           </Col>
@@ -430,7 +433,7 @@ export default function FundedMRF() {
         </Col>
         <Col xs={24} sm={12} lg={6}>
           <Card size="small" hoverable className="mrf-card" style={{ borderRadius: 10, borderLeft: "3px solid #faad14", height: "100%", animationDelay: "0.21s" }}>
-            <Statistic title="Total Funding" value={totalFunding} prefix={<span className="mrf-icon-bounce" style={{ color: "#faad14", fontWeight: 700, fontSize: 18 }}>₱</span>} formatter={(v) => `₱${Number(v).toLocaleString()}`} />
+            <Statistic title="Total Funding" value={totalFunding} prefix={<span className="mrf-icon-bounce" style={{ color: "#faad14", fontWeight: 700, fontSize: 18 }}>₱</span>} formatter={(v) => Number(v).toLocaleString()} />
             <div style={{ marginTop: 8, display: "flex", gap: 4, flexWrap: "wrap" }}>
               <Tag color="cyan" bordered={false}>{totalBrgyServed} Brgys Served</Tag>
             </div>
@@ -458,33 +461,34 @@ export default function FundedMRF() {
         onCancel={() => setDetailModal(null)}
         footer={<Button onClick={() => setDetailModal(null)}>Close</Button>}
         width={800}
+        style={{ maxWidth: "95vw" }}
       >
         {detailModal && (
           <Tabs items={[
             { key: "general", label: <><EnvironmentOutlined /> General Info</>, children: (
               <>
                 <Row gutter={[16, 12]}>
-                  <Col span={12}><Text type="secondary"><EnvironmentOutlined /> Province:</Text> <Text strong>{detailModal.province}</Text></Col>
-                  <Col span={12}><Text type="secondary"><EnvironmentOutlined /> Municipality:</Text> <Text strong>{detailModal.municipality}</Text></Col>
-                  <Col span={12}><Text type="secondary">Barangay:</Text> <Text>{detailModal.barangay || "—"}</Text></Col>
-                  <Col span={12}><Text type="secondary">Manila Bay Area:</Text> {detailModal.manilaBayArea === "MBA" ? <Tag color="blue" bordered={false}>MBA</Tag> : <Tag color="default" bordered={false}>{detailModal.manilaBayArea || "—"}</Tag>}</Col>
-                  <Col span={12}><Text type="secondary">Congressional District:</Text> <Text>{detailModal.congressionalDistrict || "—"}</Text></Col>
-                  <Col span={12}><Text type="secondary">Coordinates:</Text> <Text>{detailModal.latitude}, {detailModal.longitude}</Text></Col>
+                  <Col xs={24} sm={12}><Text type="secondary"><EnvironmentOutlined /> Province:</Text> <Text strong>{detailModal.province}</Text></Col>
+                  <Col xs={24} sm={12}><Text type="secondary"><EnvironmentOutlined /> Municipality:</Text> <Text strong>{detailModal.municipality}</Text></Col>
+                  <Col xs={24} sm={12}><Text type="secondary">Barangay:</Text> <Text>{detailModal.barangay || "—"}</Text></Col>
+                  <Col xs={24} sm={12}><Text type="secondary">Manila Bay Area:</Text> {detailModal.manilaBayArea === "MBA" ? <Tag color="blue" bordered={false}>MBA</Tag> : <Tag color="default" bordered={false}>{detailModal.manilaBayArea || "—"}</Tag>}</Col>
+                  <Col xs={24} sm={12}><Text type="secondary">Congressional District:</Text> <Text>{detailModal.congressionalDistrict || "—"}</Text></Col>
+                  <Col xs={24} sm={12}><Text type="secondary">Coordinates:</Text> <Text>{detailModal.latitude}, {detailModal.longitude}</Text></Col>
                 </Row>
                 <Divider plain orientation="left"><BankOutlined /> MRF Details</Divider>
                 <Row gutter={[16, 12]}>
-                  <Col span={12}><Text type="secondary">Type of MRF:</Text> {detailModal.typeOfMRF ? <Tag color="geekblue" bordered={false}>{detailModal.typeOfMRF}</Tag> : "—"}</Col>
-                  <Col span={12}><Text type="secondary">Year Granted:</Text> <Text>{detailModal.yearGranted || "—"}</Text></Col>
-                  <Col span={12}><Text type="secondary">Amount Granted:</Text> <Text strong>{detailModal.amountGranted != null ? `₱${detailModal.amountGranted.toLocaleString()}` : "—"}</Text></Col>
-                  <Col span={12}><Text type="secondary">No. Funding Support:</Text> <Text>{detailModal.noFundingSupport || "—"}</Text></Col>
-                  <Col span={12}><Text type="secondary">Status:</Text> {getStatusTag(detailModal.statusOfMRF)}</Col>
-                  <Col span={12}><Text type="secondary">Brgys Served:</Text> <Text>{detailModal.noOfBrgyServed || "—"}</Text></Col>
+                  <Col xs={24} sm={12}><Text type="secondary">Type of MRF:</Text> {detailModal.typeOfMRF ? <Tag color="geekblue" bordered={false}>{detailModal.typeOfMRF}</Tag> : "—"}</Col>
+                  <Col xs={24} sm={12}><Text type="secondary">Year Granted:</Text> <Text>{detailModal.yearGranted || "—"}</Text></Col>
+                  <Col xs={24} sm={12}><Text type="secondary">Amount Granted:</Text> <Text strong>{detailModal.amountGranted != null ? `₱${detailModal.amountGranted.toLocaleString()}` : "—"}</Text></Col>
+                  <Col xs={24} sm={12}><Text type="secondary">No. Funding Support:</Text> <Text>{detailModal.noFundingSupport || "—"}</Text></Col>
+                  <Col xs={24} sm={12}><Text type="secondary">Status:</Text> {getStatusTag(detailModal.statusOfMRF)}</Col>
+                  <Col xs={24} sm={12}><Text type="secondary">Brgys Served:</Text> <Text>{detailModal.noOfBrgyServed || "—"}</Text></Col>
                 </Row>
                 <Divider plain orientation="left"><TeamOutlined /> Personnel</Divider>
                 <Row gutter={[16, 12]}>
-                  <Col span={8}><Text type="secondary"><UserOutlined /> Focal Person:</Text><br /><Text strong>{detailModal.focalPerson || "—"}</Text></Col>
-                  <Col span={8}><Text type="secondary"><UserOutlined /> ESWM Staff:</Text><br /><Text strong>{detailModal.eswmStaff || "—"}</Text></Col>
-                  <Col span={8}><Text type="secondary"><TeamOutlined /> ENMO Assigned:</Text><br /><Text strong>{detailModal.enmoAssigned || "—"}</Text></Col>
+                  <Col xs={24} sm={8}><Text type="secondary"><UserOutlined /> Focal Person:</Text><br /><Text strong>{detailModal.focalPerson || "—"}</Text></Col>
+                  <Col xs={24} sm={8}><Text type="secondary"><UserOutlined /> ESWM Staff:</Text><br /><Text strong>{detailModal.eswmStaff || "—"}</Text></Col>
+                  <Col xs={24} sm={8}><Text type="secondary"><TeamOutlined /> ENMO Assigned:</Text><br /><Text strong>{detailModal.enmoAssigned || "—"}</Text></Col>
                 </Row>
                 {detailModal.signedDocument && (<>
                   <Divider plain orientation="left"><LinkOutlined /> Document</Divider>
@@ -494,36 +498,36 @@ export default function FundedMRF() {
             )},
             { key: "operations", label: <><ToolOutlined /> Operations</>, children: (
               <Row gutter={[16, 12]}>
-                <Col span={12}><Text type="secondary">Equipment Used:</Text><br /><Text>{detailModal.equipmentUsed || "—"}</Text></Col>
-                <Col span={12}><Text type="secondary">Type of Wastes Received:</Text><br /><Text>{detailModal.typeOfWastesReceived || "—"}</Text></Col>
-                <Col span={12}><Text type="secondary">Quantity Diverted (kg):</Text> <Text strong>{detailModal.quantityOfWasteDiverted || "—"}</Text></Col>
-                <Col span={12}><Text type="secondary">Total Waste Generation (kg/day):</Text> <Text strong>{detailModal.totalWasteGeneration != null ? detailModal.totalWasteGeneration.toLocaleString() : "—"}</Text></Col>
-                <Col span={12}><Text type="secondary">Waste Diversion Rate:</Text> <Text strong>{detailModal.wasteDiversionRate != null ? `${(detailModal.wasteDiversionRate * 100).toFixed(1)}%` : "—"}</Text></Col>
+                <Col xs={24} sm={12}><Text type="secondary">Equipment Used:</Text><br /><Text>{detailModal.equipmentUsed || "—"}</Text></Col>
+                <Col xs={24} sm={12}><Text type="secondary">Type of Wastes Received:</Text><br /><Text>{detailModal.typeOfWastesReceived || "—"}</Text></Col>
+                <Col xs={24} sm={12}><Text type="secondary">Quantity Diverted (kg):</Text> <Text strong>{detailModal.quantityOfWasteDiverted || "—"}</Text></Col>
+                <Col xs={24} sm={12}><Text type="secondary">Total Waste Generation (kg/day):</Text> <Text strong>{detailModal.totalWasteGeneration != null ? detailModal.totalWasteGeneration.toLocaleString() : "—"}</Text></Col>
+                <Col xs={24} sm={12}><Text type="secondary">Waste Diversion Rate:</Text> <Text strong>{detailModal.wasteDiversionRate != null ? `${(detailModal.wasteDiversionRate * 100).toFixed(1)}%` : "—"}</Text></Col>
                 <Col span={24}><Text type="secondary">Remarks (If Not Operational):</Text><br /><Text>{detailModal.remarksIfNotOperational || "—"}</Text></Col>
               </Row>
             )},
             { key: "monitoring", label: <><ClockCircleOutlined /> Monitoring</>, children: (
               <Row gutter={[16, 12]}>
-                <Col span={12}><Text type="secondary">Target Month:</Text> <Text>{detailModal.targetMonth || "—"}</Text></Col>
-                <Col span={12}><Text type="secondary">IIS Number:</Text> <Text>{detailModal.iisNumber || "—"}</Text></Col>
-                <Col span={12}><Text type="secondary">Date of Monitoring:</Text> <Text>{detailModal.dateOfMonitoring ? dayjs(detailModal.dateOfMonitoring).format("MMM D, YYYY") : "—"}</Text></Col>
-                <Col span={12}><Text type="secondary">Report Prepared:</Text> <Text>{detailModal.dateReportPrepared ? dayjs(detailModal.dateReportPrepared).format("MMM D, YYYY") : "—"}</Text></Col>
-                <Col span={12}><Text type="secondary">Reviewed (Staff):</Text> <Text>{detailModal.dateReportReviewedStaff ? dayjs(detailModal.dateReportReviewedStaff).format("MMM D, YYYY") : "—"}</Text></Col>
-                <Col span={12}><Text type="secondary">Reviewed (Focal):</Text> <Text>{detailModal.dateReportReviewedFocal ? dayjs(detailModal.dateReportReviewedFocal).format("MMM D, YYYY") : "—"}</Text></Col>
-                <Col span={12}><Text type="secondary">Report Approved:</Text> <Text>{detailModal.dateReportApproved ? dayjs(detailModal.dateReportApproved).format("MMM D, YYYY") : "—"}</Text></Col>
-                <Col span={12}><Text type="secondary">Tracking:</Text> <Text>{detailModal.trackingOfReports || "—"}</Text></Col>
+                <Col xs={24} sm={12}><Text type="secondary">Target Month:</Text> <Text>{detailModal.targetMonth || "—"}</Text></Col>
+                <Col xs={24} sm={12}><Text type="secondary">IIS Number:</Text> <Text>{detailModal.iisNumber || "—"}</Text></Col>
+                <Col xs={24} sm={12}><Text type="secondary">Date of Monitoring:</Text> <Text>{detailModal.dateOfMonitoring ? dayjs(detailModal.dateOfMonitoring).format("MMM D, YYYY") : "—"}</Text></Col>
+                <Col xs={24} sm={12}><Text type="secondary">Report Prepared:</Text> <Text>{detailModal.dateReportPrepared ? dayjs(detailModal.dateReportPrepared).format("MMM D, YYYY") : "—"}</Text></Col>
+                <Col xs={24} sm={12}><Text type="secondary">Reviewed (Staff):</Text> <Text>{detailModal.dateReportReviewedStaff ? dayjs(detailModal.dateReportReviewedStaff).format("MMM D, YYYY") : "—"}</Text></Col>
+                <Col xs={24} sm={12}><Text type="secondary">Reviewed (Focal):</Text> <Text>{detailModal.dateReportReviewedFocal ? dayjs(detailModal.dateReportReviewedFocal).format("MMM D, YYYY") : "—"}</Text></Col>
+                <Col xs={24} sm={12}><Text type="secondary">Report Approved:</Text> <Text>{detailModal.dateReportApproved ? dayjs(detailModal.dateReportApproved).format("MMM D, YYYY") : "—"}</Text></Col>
+                <Col xs={24} sm={12}><Text type="secondary">Tracking:</Text> <Text>{detailModal.trackingOfReports || "—"}</Text></Col>
               </Row>
             )},
             { key: "compliance", label: <><SafetyCertificateOutlined /> Compliance</>, children: (
               <Row gutter={[16, 12]}>
                 <Col span={24}><Text type="secondary">Remarks & Recommendation:</Text><br /><Text>{detailModal.remarksAndRecommendation || "—"}</Text></Col>
                 <Col span={24}><Text type="secondary">Findings:</Text><br /><Text>{detailModal.findings || "—"}</Text></Col>
-                <Col span={12}><Text type="secondary">Advise Letter Date:</Text> <Text>{detailModal.adviseLetterDateIssued || "—"}</Text></Col>
-                <Col span={12}><Text type="secondary">Compliance to Advise:</Text> <Text>{detailModal.complianceToAdvise || "—"}</Text></Col>
-                <Col span={12}><Text type="secondary">Docket No. / NOV:</Text> <Text>{detailModal.docketNoNOV || "—"}</Text></Col>
-                <Col span={12}><Text type="secondary">Violation:</Text> <Text>{detailModal.violation || "—"}</Text></Col>
-                <Col span={12}><Text type="secondary">Date of Issuance NOV:</Text> <Text>{detailModal.dateOfIssuanceNOV || "—"}</Text></Col>
-                <Col span={12}><Text type="secondary">Date of Tech Conference:</Text> <Text>{detailModal.dateOfTechnicalConference || "—"}</Text></Col>
+                <Col xs={24} sm={12}><Text type="secondary">Advise Letter Date:</Text> <Text>{detailModal.adviseLetterDateIssued || "—"}</Text></Col>
+                <Col xs={24} sm={12}><Text type="secondary">Compliance to Advise:</Text> <Text>{detailModal.complianceToAdvise || "—"}</Text></Col>
+                <Col xs={24} sm={12}><Text type="secondary">Docket No. / NOV:</Text> <Text>{detailModal.docketNoNOV || "—"}</Text></Col>
+                <Col xs={24} sm={12}><Text type="secondary">Violation:</Text> <Text>{detailModal.violation || "—"}</Text></Col>
+                <Col xs={24} sm={12}><Text type="secondary">Date of Issuance NOV:</Text> <Text>{detailModal.dateOfIssuanceNOV || "—"}</Text></Col>
+                <Col xs={24} sm={12}><Text type="secondary">Date of Tech Conference:</Text> <Text>{detailModal.dateOfTechnicalConference || "—"}</Text></Col>
                 <Col span={24}><Text type="secondary">Commitments:</Text><br /><Text>{detailModal.commitments || "—"}</Text></Col>
               </Row>
             )},
@@ -538,66 +542,67 @@ export default function FundedMRF() {
         onCancel={() => setModalOpen(false)}
         onOk={handleSave}
         width={900}
+        style={{ maxWidth: "95vw" }}
         okText={editing ? "Update" : "Create"}
       >
         <Form form={form} layout="vertical" size="small">
-          <Tabs items={[
-            { key: "location", label: "Location", children: (
+          <Collapse defaultActiveKey={["location","mrf","personnel","monitoring","compliance"]} bordered={false} items={[
+            { key: "location", label: <span style={{ color: "#1677ff" }}><EnvironmentOutlined /> Location</span>, children: (
               <Row gutter={16}>
-                <Col span={12}><Form.Item name="province" label="Province" rules={[{ required: true }]}><Select options={provinceOptions} placeholder="Select Province" /></Form.Item></Col>
-                <Col span={12}><Form.Item name="municipality" label="Municipality" rules={[{ required: true }]}><Input /></Form.Item></Col>
-                <Col span={12}><Form.Item name="barangay" label="Barangay"><Input /></Form.Item></Col>
-                <Col span={12}><Form.Item name="manilaBayArea" label="Manila Bay Area"><Select options={[{ label: "MBA", value: "MBA" }, { label: "OUTSIDE MBA", value: "OUTSIDE MBA" }]} allowClear /></Form.Item></Col>
-                <Col span={12}><Form.Item name="congressionalDistrict" label="Congressional District"><Input /></Form.Item></Col>
-                <Col span={6}><Form.Item name="latitude" label="Latitude"><InputNumber style={{ width: "100%" }} step={0.000001} /></Form.Item></Col>
-                <Col span={6}><Form.Item name="longitude" label="Longitude"><InputNumber style={{ width: "100%" }} step={0.000001} /></Form.Item></Col>
+                <Col xs={24} sm={12}><Form.Item name="province" label="Province" rules={[{ required: true }]}><Select options={provinceOptions} placeholder="Select Province" /></Form.Item></Col>
+                <Col xs={24} sm={12}><Form.Item name="municipality" label="Municipality" rules={[{ required: true }]}><Input /></Form.Item></Col>
+                <Col xs={24} sm={12}><Form.Item name="barangay" label="Barangay"><Input /></Form.Item></Col>
+                <Col xs={24} sm={12}><Form.Item name="manilaBayArea" label="Manila Bay Area"><Select options={mbaOptions} allowClear /></Form.Item></Col>
+                <Col xs={24} sm={12}><Form.Item name="congressionalDistrict" label="Congressional District"><Input /></Form.Item></Col>
+                <Col xs={12} sm={6}><Form.Item name="latitude" label="Latitude"><InputNumber style={{ width: "100%" }} step={0.000001} /></Form.Item></Col>
+                <Col xs={12} sm={6}><Form.Item name="longitude" label="Longitude"><InputNumber style={{ width: "100%" }} step={0.000001} /></Form.Item></Col>
               </Row>
             )},
-            { key: "mrf", label: "MRF Details", children: (
+            { key: "mrf", label: <span style={{ color: "#fa8c16" }}><BankOutlined /> MRF Details</span>, children: (
               <Row gutter={16}>
-                <Col span={12}><Form.Item name="typeOfMRF" label="Type of MRF"><Select options={[{ label: "EMB Funded MRF", value: "EMB FUNDED MRF" }, { label: "EMB Funded Brgy MRF", value: "EMB FUNDED BRGY MRF" }]} allowClear /></Form.Item></Col>
-                <Col span={6}><Form.Item name="noFundingSupport" label="No. Funding Support"><InputNumber style={{ width: "100%" }} /></Form.Item></Col>
-                <Col span={6}><Form.Item name="yearGranted" label="Year Granted"><InputNumber style={{ width: "100%" }} /></Form.Item></Col>
-                <Col span={12}><Form.Item name="amountGranted" label="Amount Granted (₱)"><InputNumber style={{ width: "100%" }} formatter={(v) => `${v}`.replace(/\B(?=(\d{3})+(?!\d))/g, ",")} parser={(v) => v.replace(/,/g, "")} /></Form.Item></Col>
-                <Col span={12}><Form.Item name="statusOfMRF" label="Status of MRF"><Select options={[{ label: "Operational", value: "OPERATIONAL" }, { label: "Non-Operational", value: "NON-OPERATIONAL" }]} allowClear /></Form.Item></Col>
-                <Col span={12}><Form.Item name="noOfBrgyServed" label="No. of Brgys Served"><InputNumber style={{ width: "100%" }} /></Form.Item></Col>
-                <Col span={12}><Form.Item name="equipmentUsed" label="Equipment Used"><Input /></Form.Item></Col>
-                <Col span={12}><Form.Item name="typeOfWastesReceived" label="Type of Wastes Received"><Input /></Form.Item></Col>
-                <Col span={12}><Form.Item name="quantityOfWasteDiverted" label="Quantity Diverted (kg)"><Input /></Form.Item></Col>
-                <Col span={12}><Form.Item name="totalWasteGeneration" label="Total Waste Generation (kg/day)"><InputNumber style={{ width: "100%" }} /></Form.Item></Col>
-                <Col span={12}><Form.Item name="wasteDiversionRate" label="Waste Diversion Rate (%)"><InputNumber style={{ width: "100%" }} step={0.01} min={0} max={1} /></Form.Item></Col>
+                <Col xs={24} sm={12}><Form.Item name="typeOfMRF" label="Type of MRF"><Select options={mrfTypeOptions} allowClear /></Form.Item></Col>
+                <Col xs={12} sm={6}><Form.Item name="noFundingSupport" label="No. Funding Support"><InputNumber style={{ width: "100%" }} /></Form.Item></Col>
+                <Col xs={12} sm={6}><Form.Item name="yearGranted" label="Year Granted"><InputNumber style={{ width: "100%" }} /></Form.Item></Col>
+                <Col xs={24} sm={12}><Form.Item name="amountGranted" label="Amount Granted (₱)"><InputNumber style={{ width: "100%" }} formatter={(v) => `${v}`.replace(/\B(?=(\d{3})+(?!\d))/g, ",")} parser={(v) => v.replace(/,/g, "")} /></Form.Item></Col>
+                <Col xs={24} sm={12}><Form.Item name="statusOfMRF" label="Status of MRF"><Select options={mrfStatusOptions} allowClear /></Form.Item></Col>
+                <Col xs={24} sm={12}><Form.Item name="noOfBrgyServed" label="No. of Brgys Served"><InputNumber style={{ width: "100%" }} /></Form.Item></Col>
+                <Col xs={24} sm={12}><Form.Item name="equipmentUsed" label="Equipment Used"><Input /></Form.Item></Col>
+                <Col xs={24} sm={12}><Form.Item name="typeOfWastesReceived" label="Type of Wastes Received"><Input /></Form.Item></Col>
+                <Col xs={24} sm={12}><Form.Item name="quantityOfWasteDiverted" label="Quantity Diverted (kg)"><Input /></Form.Item></Col>
+                <Col xs={24} sm={12}><Form.Item name="totalWasteGeneration" label="Total Waste Generation (kg/day)"><InputNumber style={{ width: "100%" }} /></Form.Item></Col>
+                <Col xs={24} sm={12}><Form.Item name="wasteDiversionRate" label="Waste Diversion Rate (%)"><InputNumber style={{ width: "100%" }} step={0.01} min={0} max={1} /></Form.Item></Col>
               </Row>
             )},
-            { key: "personnel", label: "Personnel", children: (
+            { key: "personnel", label: <span style={{ color: "#52c41a" }}><TeamOutlined /> Personnel</span>, children: (
               <Row gutter={16}>
-                <Col span={8}><Form.Item name="enmoAssigned" label="ENMO Assigned"><Input /></Form.Item></Col>
-                <Col span={8}><Form.Item name="eswmStaff" label="ESWM Staff"><Input /></Form.Item></Col>
-                <Col span={8}><Form.Item name="focalPerson" label="Focal Person"><Input /></Form.Item></Col>
+                <Col xs={24} sm={8}><Form.Item name="enmoAssigned" label="ENMO Assigned"><Select options={enmoOptions} allowClear showSearch placeholder="Select ENMO" /></Form.Item></Col>
+                <Col xs={24} sm={8}><Form.Item name="eswmStaff" label="ESWM Staff"><Select options={eswmStaffOptions} allowClear showSearch placeholder="Select Staff" /></Form.Item></Col>
+                <Col xs={24} sm={8}><Form.Item name="focalPerson" label="Focal Person"><Select options={focalOptions} allowClear showSearch placeholder="Select Focal" /></Form.Item></Col>
               </Row>
             )},
-            { key: "monitoring", label: "Monitoring", children: (
+            { key: "monitoring", label: <span style={{ color: "#13c2c2" }}><CalendarOutlined /> Monitoring</span>, children: (
               <Row gutter={16}>
-                <Col span={8}><Form.Item name="targetMonth" label="Target Month"><Select options={monthOptions} allowClear /></Form.Item></Col>
-                <Col span={8}><Form.Item name="iisNumber" label="IIS Number"><Input /></Form.Item></Col>
-                <Col span={8}><Form.Item name="dateOfMonitoring" label="Date of Monitoring"><DatePicker style={{ width: "100%" }} /></Form.Item></Col>
-                <Col span={8}><Form.Item name="dateReportPrepared" label="Report Prepared"><DatePicker style={{ width: "100%" }} /></Form.Item></Col>
-                <Col span={8}><Form.Item name="dateReportReviewedStaff" label="Reviewed (Staff)"><DatePicker style={{ width: "100%" }} /></Form.Item></Col>
-                <Col span={8}><Form.Item name="dateReportReviewedFocal" label="Reviewed (Focal)"><DatePicker style={{ width: "100%" }} /></Form.Item></Col>
-                <Col span={8}><Form.Item name="dateReportApproved" label="Report Approved"><DatePicker style={{ width: "100%" }} /></Form.Item></Col>
-                <Col span={16}><Form.Item name="trackingOfReports" label="Tracking of Reports"><Input /></Form.Item></Col>
+                <Col xs={24} sm={8}><Form.Item name="targetMonth" label="Target Month"><Select options={monthOptions} allowClear /></Form.Item></Col>
+                <Col xs={24} sm={8}><Form.Item name="iisNumber" label="IIS Number"><Input /></Form.Item></Col>
+                <Col xs={24} sm={8}><Form.Item name="dateOfMonitoring" label="Date of Monitoring"><DatePicker style={{ width: "100%" }} /></Form.Item></Col>
+                <Col xs={24} sm={8}><Form.Item name="dateReportPrepared" label="Report Prepared"><DatePicker style={{ width: "100%" }} /></Form.Item></Col>
+                <Col xs={24} sm={8}><Form.Item name="dateReportReviewedStaff" label="Reviewed (Staff)"><DatePicker style={{ width: "100%" }} /></Form.Item></Col>
+                <Col xs={24} sm={8}><Form.Item name="dateReportReviewedFocal" label="Reviewed (Focal)"><DatePicker style={{ width: "100%" }} /></Form.Item></Col>
+                <Col xs={24} sm={8}><Form.Item name="dateReportApproved" label="Report Approved"><DatePicker style={{ width: "100%" }} /></Form.Item></Col>
+                <Col xs={24} sm={16}><Form.Item name="trackingOfReports" label="Tracking of Reports"><Input /></Form.Item></Col>
               </Row>
             )},
-            { key: "compliance", label: "Compliance", children: (
+            { key: "compliance", label: <span style={{ color: "#eb2f96" }}><SafetyCertificateOutlined /> Compliance</span>, children: (
               <Row gutter={16}>
                 <Col span={24}><Form.Item name="remarksAndRecommendation" label="Remarks & Recommendation"><Input.TextArea rows={2} /></Form.Item></Col>
                 <Col span={24}><Form.Item name="remarksIfNotOperational" label="Remarks (If Not Operational)"><Input.TextArea rows={2} /></Form.Item></Col>
                 <Col span={24}><Form.Item name="findings" label="Findings"><Input.TextArea rows={2} /></Form.Item></Col>
-                <Col span={12}><Form.Item name="adviseLetterDateIssued" label="Advise Letter Date"><Input /></Form.Item></Col>
-                <Col span={12}><Form.Item name="complianceToAdvise" label="Compliance to Advise"><Input /></Form.Item></Col>
-                <Col span={12}><Form.Item name="docketNoNOV" label="Docket No. / NOV"><Input /></Form.Item></Col>
-                <Col span={12}><Form.Item name="violation" label="Violation"><Input /></Form.Item></Col>
-                <Col span={12}><Form.Item name="dateOfIssuanceNOV" label="Date of Issuance NOV"><Input /></Form.Item></Col>
-                <Col span={12}><Form.Item name="dateOfTechnicalConference" label="Date of Tech Conference"><Input /></Form.Item></Col>
+                <Col xs={24} sm={12}><Form.Item name="adviseLetterDateIssued" label="Advise Letter Date"><Input /></Form.Item></Col>
+                <Col xs={24} sm={12}><Form.Item name="complianceToAdvise" label="Compliance to Advise"><Input /></Form.Item></Col>
+                <Col xs={24} sm={12}><Form.Item name="docketNoNOV" label="Docket No. / NOV"><Input /></Form.Item></Col>
+                <Col xs={24} sm={12}><Form.Item name="violation" label="Violation"><Input /></Form.Item></Col>
+                <Col xs={24} sm={12}><Form.Item name="dateOfIssuanceNOV" label="Date of Issuance NOV"><Input /></Form.Item></Col>
+                <Col xs={24} sm={12}><Form.Item name="dateOfTechnicalConference" label="Date of Tech Conference"><Input /></Form.Item></Col>
                 <Col span={24}><Form.Item name="commitments" label="Commitments"><Input.TextArea rows={2} /></Form.Item></Col>
                 <Col span={24}><Form.Item name="signedDocument" label="Signed Document URL"><Input /></Form.Item></Col>
               </Row>

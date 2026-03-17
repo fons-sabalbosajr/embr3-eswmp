@@ -24,10 +24,13 @@ import {
 import { exportToExcel } from "../../utils/exportExcel";
 import Swal from "sweetalert2";
 import api from "../../api";
+import secureStorage from "../../utils/secureStorage";
 import dayjs from "dayjs";
 
 const { Title, Text } = Typography;
 const { Option } = Select;
+const CACHE_KEY = "submissions-cache";
+const CACHE_TTL = 5 * 60 * 1000;
 
 export default function SubmissionSettings() {
   const [data, setData] = useState([]);
@@ -42,10 +45,19 @@ export default function SubmissionSettings() {
     return () => clearInterval(interval);
   }, []);
 
-  const fetchData = async () => {
+  const fetchData = async (skipCache = false) => {
     try {
+      if (!skipCache) {
+        const cached = secureStorage.getJSON(CACHE_KEY);
+        if (cached && Date.now() - cached.ts < CACHE_TTL) {
+          setData(cached.data);
+          setLoading(false);
+          return;
+        }
+      }
       const { data: result } = await api.get("/data-slf");
       setData(result);
+      secureStorage.setJSON(CACHE_KEY, { data: result, ts: Date.now() });
     } catch {
       Swal.fire("Error", "Could not load submissions", "error");
     } finally {
@@ -59,6 +71,7 @@ export default function SubmissionSettings() {
         status,
       });
       setData((prev) => prev.map((d) => (d._id === id ? updated : d)));
+      secureStorage.remove(CACHE_KEY);
       Swal.fire({
         icon: "success",
         title: `Submission ${status}`,
@@ -74,6 +87,7 @@ export default function SubmissionSettings() {
     try {
       await api.delete(`/data-slf/${id}`);
       setData((prev) => prev.filter((d) => d._id !== id));
+      secureStorage.remove(CACHE_KEY);
       Swal.fire({
         icon: "success",
         title: "Deleted",
@@ -209,13 +223,13 @@ export default function SubmissionSettings() {
             prefix={<SearchOutlined />}
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            style={{ width: 300 }}
+            style={{ width: "100%", maxWidth: 300 }}
             allowClear
           />
           <Select
             value={statusFilter}
             onChange={setStatusFilter}
-            style={{ width: 160 }}
+            style={{ width: "100%", maxWidth: 160 }}
           >
             <Option value="all">All Statuses</Option>
             <Option value="pending">Pending</Option>
@@ -267,10 +281,11 @@ export default function SubmissionSettings() {
           ) : null
         }
         width={640}
+        style={{ maxWidth: "95vw" }}
       >
         {viewRecord && (
           <>
-            <Descriptions column={2} bordered size="small">
+            <Descriptions column={{ xs: 1, sm: 2 }} bordered size="small">
               <Descriptions.Item label="ID No.">{viewRecord.idNo}</Descriptions.Item>
               <Descriptions.Item label="Status">
                 <Tag color={statusColors[viewRecord.status]}>

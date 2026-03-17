@@ -65,9 +65,11 @@ router.post("/login", async (req, res) => {
   try {
     const { email, password } = req.body;
 
-    const user = await User.findOne({ email });
+    const user = await User.findOne({
+      $or: [{ email: email }, { username: email }],
+    });
     if (!user) {
-      return res.status(401).json({ message: "Invalid email or password" });
+      return res.status(401).json({ message: "Invalid credentials" });
     }
 
     if (!user.isVerified) {
@@ -76,7 +78,7 @@ router.post("/login", async (req, res) => {
 
     const isMatch = await user.comparePassword(password);
     if (!isMatch) {
-      return res.status(401).json({ message: "Invalid email or password" });
+      return res.status(401).json({ message: "Invalid credentials" });
     }
 
     const token = jwt.sign({ id: user._id, role: user.role }, process.env.JWT_SECRET, {
@@ -90,6 +92,7 @@ router.post("/login", async (req, res) => {
         id: user._id,
         firstName: user.firstName,
         lastName: user.lastName,
+        username: user.username,
         email: user.email,
         role: user.role,
         position: user.position,

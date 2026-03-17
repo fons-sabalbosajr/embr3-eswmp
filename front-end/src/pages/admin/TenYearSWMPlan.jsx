@@ -17,6 +17,7 @@ import {
   DatePicker,
   Tooltip,
   Tabs,
+  Collapse,
   Statistic,
   Progress,
   Badge,
@@ -50,6 +51,7 @@ import Swal from "sweetalert2";
 import api from "../../api";
 import { exportToExcel } from "../../utils/exportExcel";
 import secureStorage from "../../utils/secureStorage";
+import { useDataRef } from "../../utils/dataRef";
 import dayjs from "dayjs";
 import { MapContainer, TileLayer, Marker, Popup } from "react-leaflet";
 import L from "leaflet";
@@ -65,36 +67,6 @@ L.Icon.Default.mergeOptions({
 });
 
 const { Title, Text } = Typography;
-
-const provinceOptions = [
-  "Aurora",
-  "Bataan",
-  "Bulacan",
-  "Nueva Ecija",
-  "Pampanga",
-  "Tarlac",
-  "Zambales",
-].map((p) => ({ label: p, value: p }));
-
-const monthOptions = [
-  "1.January",
-  "2.February",
-  "3.March",
-  "4.April",
-  "5.May",
-  "6.June",
-  "7.July",
-  "8.August",
-  "9.September",
-  "10.October",
-  "11.November",
-  "12.December",
-].map((m) => ({ label: m.replace(/^\d+\./, ""), value: m }));
-
-const yesNoOptions = [
-  { label: "YES", value: "YES" },
-  { label: "NO", value: "NO" },
-];
 
 const CACHE_KEY = "ten-year-swm-cache";
 const CACHE_TTL = 5 * 60 * 1000;
@@ -155,10 +127,24 @@ function computeFields(rec) {
 }
 
 export default function TenYearSWMPlan() {
+  const { getValues } = useDataRef();
+  const provinceOptions = getValues("province").map((p) => ({ label: p, value: p }));
+  const monthOptions = getValues("target-month").map((m) => ({ label: m.replace(/^\d+\./, ""), value: m }));
+  const mbaOptions = getValues("manila-bay-area").map((v) => ({ label: v, value: v }));
+  const yesNoOptions = getValues("yes-no").map((v) => ({ label: v, value: v }));
+  const planStatusOptions = getValues("swm-plan-status").map((v) => ({ label: v, value: v }));
+  const planComplianceOptions = getValues("swm-plan-compliance").map((v) => ({ label: v, value: v }));
+  const typeOfPlanOptions = getValues("type-of-plan").map((v) => ({ label: v, value: v }));
+  const enmoOptions = getValues("enmo").map((v) => ({ label: v, value: v }));
+  const eswmStaffOptions = getValues("eswm-staff").map((v) => ({ label: v, value: v }));
+  const focalOptions = getValues("eswm-focal").map((v) => ({ label: v, value: v }));
+
   const [records, setRecords] = useState([]);
   const [loading, setLoading] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
   const [detailModal, setDetailModal] = useState(null);
+  const [detailYearRecords, setDetailYearRecords] = useState([]);
+  const [detailYear, setDetailYear] = useState(null);
   const [editing, setEditing] = useState(null);
   const [searchText, setSearchText] = useState("");
   const [filterProvince, setFilterProvince] = useState(null);
@@ -193,6 +179,36 @@ export default function TenYearSWMPlan() {
   useEffect(() => {
     fetchRecords();
   }, [fetchRecords]);
+
+  // Fetch cross-year history when viewing a record
+  useEffect(() => {
+    if (!detailModal) {
+      setDetailYearRecords([]);
+      setDetailYear(null);
+      return;
+    }
+    const name = detailModal.municipality;
+    if (!name) return;
+    api
+      .get(`/ten-year-swm/history/${encodeURIComponent(name)}`)
+      .then(({ data }) => {
+        const enriched = data.map((r) => ({ ...r, ...computeFields(r) }));
+        setDetailYearRecords(enriched);
+        // Default to the year of the record that was clicked
+        setDetailYear(detailModal.dataYear || 2026);
+      })
+      .catch(() => {
+        setDetailYearRecords([]);
+        setDetailYear(detailModal.dataYear || 2026);
+      });
+  }, [detailModal]);
+
+  // The record for the currently selected year tab
+  const detailViewRecord = useMemo(() => {
+    if (!detailModal) return null;
+    if (detailYearRecords.length === 0) return detailModal;
+    return detailYearRecords.find((r) => (r.dataYear || 2026) === detailYear) || detailModal;
+  }, [detailModal, detailYearRecords, detailYear]);
 
   const openAdd = () => {
     setEditing(null);
@@ -392,6 +408,25 @@ export default function TenYearSWMPlan() {
   };
 
   const columns = [
+    {
+      title: "Year",
+      dataIndex: "dataYear",
+      key: "dataYear",
+      width: 90,
+      fixed: "left",
+      filters: [
+        { text: "2026", value: 2026 },
+        { text: "2025", value: 2025 },
+      ],
+      onFilter: (v, r) => (r.dataYear || 2026) === v,
+      defaultFilteredValue: [2026],
+      sorter: (a, b) => (a.dataYear || 2026) - (b.dataYear || 2026),
+      render: (v) => (
+        <Tag bordered={false} color={v === 2025 ? "orange" : "blue"}>
+          {v || 2026}
+        </Tag>
+      ),
+    },
     {
       title: (
         <>
@@ -716,7 +751,7 @@ export default function TenYearSWMPlan() {
             prefix={<SearchOutlined />}
             value={searchText}
             onChange={(e) => setSearchText(e.target.value)}
-            style={{ width: 200 }}
+            style={{ width: "100%", maxWidth: 200 }}
             allowClear
           />
           <Button type="primary" icon={<PlusOutlined />} onClick={openAdd}>
@@ -784,7 +819,7 @@ export default function TenYearSWMPlan() {
                 value={filterProvince}
                 onChange={setFilterProvince}
                 allowClear
-                style={{ width: 140 }}
+                style={{ width: "100%", minWidth: 100, maxWidth: 160 }}
                 size="small"
                 options={provinceOptions}
                 suffixIcon={<EnvironmentOutlined />}
@@ -794,25 +829,18 @@ export default function TenYearSWMPlan() {
                 value={filterMBA}
                 onChange={setFilterMBA}
                 allowClear
-                style={{ width: 130 }}
+                style={{ width: "100%", minWidth: 100, maxWidth: 150 }}
                 size="small"
-                options={[
-                  { label: "MBA", value: "MBA" },
-                  { label: "OUTSIDE MBA", value: "OUTSIDE MBA" },
-                ]}
+                options={mbaOptions}
               />
               <Select
                 placeholder="Status"
                 value={filterStatus}
                 onChange={setFilterStatus}
                 allowClear
-                style={{ width: 130 }}
+                style={{ width: "100%", minWidth: 100, maxWidth: 150 }}
                 size="small"
-                options={[
-                  { label: "Approved", value: "Approved" },
-                  { label: "For Renewal", value: "For Renewal" },
-                  { label: "Pending", value: "Pending" },
-                ]}
+                options={planStatusOptions}
                 suffixIcon={<AuditOutlined />}
               />
               <Select
@@ -820,12 +848,9 @@ export default function TenYearSWMPlan() {
                 value={filterCompliance}
                 onChange={setFilterCompliance}
                 allowClear
-                style={{ width: 140 }}
+                style={{ width: "100%", minWidth: 100, maxWidth: 160 }}
                 size="small"
-                options={[
-                  { label: "Compliant", value: "Compliant" },
-                  { label: "Non-Compliant", value: "Non-Compliant" },
-                ]}
+                options={planComplianceOptions}
                 suffixIcon={<SafetyCertificateOutlined />}
               />
               <Select
@@ -833,7 +858,7 @@ export default function TenYearSWMPlan() {
                 value={filterMonth}
                 onChange={setFilterMonth}
                 allowClear
-                style={{ width: 140 }}
+                style={{ width: "100%", minWidth: 100, maxWidth: 160 }}
                 size="small"
                 options={monthOptions}
                 suffixIcon={<CalendarOutlined />}
@@ -1051,14 +1076,43 @@ export default function TenYearSWMPlan() {
           <Space>
             <FileTextOutlined />
             {detailModal?.municipality}, {detailModal?.province}
+            {detailYearRecords.length > 1 && (
+              <Tag color="blue" bordered={false} style={{ marginLeft: 8 }}>
+                {detailYearRecords.length} year records
+              </Tag>
+            )}
           </Space>
         }
         open={!!detailModal}
         onCancel={() => setDetailModal(null)}
         footer={<Button onClick={() => setDetailModal(null)}>Close</Button>}
         width={800}
+        style={{ maxWidth: "95vw" }}
       >
         {detailModal && (
+          <>
+            {/* Year selector tabs */}
+            {detailYearRecords.length > 1 && (
+              <div style={{ marginBottom: 12 }}>
+                <Space size={8}>
+                  <Text type="secondary" style={{ fontSize: 12 }}>Data Year:</Text>
+                  {detailYearRecords
+                    .map((r) => r.dataYear || 2026)
+                    .filter((v, i, a) => a.indexOf(v) === i)
+                    .sort((a, b) => b - a)
+                    .map((yr) => (
+                      <Button
+                        key={yr}
+                        size="small"
+                        type={detailYear === yr ? "primary" : "default"}
+                        onClick={() => setDetailYear(yr)}
+                      >
+                        {yr}
+                      </Button>
+                    ))}
+                </Space>
+              </div>
+            )}
           <Tabs
             items={[
               {
@@ -1071,38 +1125,38 @@ export default function TenYearSWMPlan() {
                 children: (
                   <>
                     <Row gutter={[16, 12]}>
-                      <Col span={12}>
+                      <Col xs={24} sm={12}>
                         <Text type="secondary">
                           <EnvironmentOutlined /> Province:
                         </Text>{" "}
-                        <Text strong>{detailModal.province}</Text>
+                        <Text strong>{detailViewRecord.province}</Text>
                       </Col>
-                      <Col span={12}>
+                      <Col xs={24} sm={12}>
                         <Text type="secondary">
                           <EnvironmentOutlined /> Municipality:
                         </Text>{" "}
-                        <Text strong>{detailModal.municipality}</Text>
+                        <Text strong>{detailViewRecord.municipality}</Text>
                       </Col>
-                      <Col span={12}>
+                      <Col xs={24} sm={12}>
                         <Text type="secondary">Manila Bay Area:</Text>{" "}
-                        {detailModal.manilaBayArea === "MBA" ? (
+                        {detailViewRecord.manilaBayArea === "MBA" ? (
                           <Tag color="blue" bordered={false}>
                             MBA
                           </Tag>
                         ) : (
                           <Tag color="default" bordered={false}>
-                            {detailModal.manilaBayArea || "—"}
+                            {detailViewRecord.manilaBayArea || "—"}
                           </Tag>
                         )}
                       </Col>
-                      <Col span={12}>
+                      <Col xs={24} sm={12}>
                         <Text type="secondary">Congressional District:</Text>{" "}
-                        <Text>{detailModal.congressionalDistrict || "—"}</Text>
+                        <Text>{detailViewRecord.congressionalDistrict || "—"}</Text>
                       </Col>
-                      <Col span={12}>
+                      <Col xs={24} sm={12}>
                         <Text type="secondary">Coordinates:</Text>{" "}
                         <Text>
-                          {detailModal.latitude}, {detailModal.longitude}
+                          {detailViewRecord.latitude}, {detailViewRecord.longitude}
                         </Text>
                       </Col>
                     </Row>
@@ -1110,76 +1164,76 @@ export default function TenYearSWMPlan() {
                       <AuditOutlined /> Plan Details
                     </Divider>
                     <Row gutter={[16, 12]}>
-                      <Col span={12}>
+                      <Col xs={24} sm={12}>
                         <Text type="secondary">
                           <FileTextOutlined /> Plan Type:
                         </Text>{" "}
-                        {detailModal.typeOfSWMPlan ? (
+                        {detailViewRecord.typeOfSWMPlan ? (
                           <Tag color="geekblue" bordered={false}>
-                            {detailModal.typeOfSWMPlan}
+                            {detailViewRecord.typeOfSWMPlan}
                           </Tag>
                         ) : (
                           "—"
                         )}
                       </Col>
-                      <Col span={12}>
+                      <Col xs={24} sm={12}>
                         <Text type="secondary">
                           <FileTextOutlined /> Resolution No.:
                         </Text>{" "}
-                        <Text>{detailModal.resolutionNo || "—"}</Text>
+                        <Text>{detailViewRecord.resolutionNo || "—"}</Text>
                       </Col>
-                      <Col span={12}>
+                      <Col xs={24} sm={12}>
                         <Text type="secondary">
                           <CalendarOutlined /> Period Covered:
                         </Text>{" "}
                         <Tag bordered={false}>
-                          {detailModal.periodCovered || "—"}
+                          {detailViewRecord.periodCovered || "—"}
                         </Tag>
                       </Col>
-                      <Col span={12}>
+                      <Col xs={24} sm={12}>
                         <Text type="secondary">
                           <CalendarOutlined /> Year Approved:
                         </Text>{" "}
-                        <Text>{detailModal.yearApproved || "—"}</Text>
+                        <Text>{detailViewRecord.yearApproved || "—"}</Text>
                       </Col>
-                      <Col span={12}>
+                      <Col xs={24} sm={12}>
                         <Text type="secondary">
                           <CalendarOutlined /> End Period:
                         </Text>{" "}
-                        <Text>{detailModal.endPeriod || "—"}</Text>
+                        <Text>{detailViewRecord.endPeriod || "—"}</Text>
                       </Col>
-                      <Col span={12}>
+                      <Col xs={24} sm={12}>
                         <Text type="secondary">Status:</Text>{" "}
-                        {getRenewalTag(detailModal.forRenewal)}
+                        {getRenewalTag(detailViewRecord.forRenewal)}
                       </Col>
                     </Row>
                     <Divider plain orientation="left">
                       <TeamOutlined /> Personnel
                     </Divider>
                     <Row gutter={[16, 12]}>
-                      <Col span={8}>
+                      <Col xs={24} sm={8}>
                         <Text type="secondary">
                           <UserOutlined /> Focal Person:
                         </Text>
                         <br />
-                        <Text strong>{detailModal.focalPerson || "—"}</Text>
+                        <Text strong>{detailViewRecord.focalPerson || "—"}</Text>
                       </Col>
-                      <Col span={8}>
+                      <Col xs={24} sm={8}>
                         <Text type="secondary">
                           <UserOutlined /> ESWM Staff:
                         </Text>
                         <br />
-                        <Text strong>{detailModal.eswmStaff || "—"}</Text>
+                        <Text strong>{detailViewRecord.eswmStaff || "—"}</Text>
                       </Col>
-                      <Col span={8}>
+                      <Col xs={24} sm={8}>
                         <Text type="secondary">
                           <SolutionOutlined /> ENMO Assigned:
                         </Text>
                         <br />
-                        <Text strong>{detailModal.enmoAssigned || "—"}</Text>
+                        <Text strong>{detailViewRecord.enmoAssigned || "—"}</Text>
                       </Col>
                     </Row>
-                    {detailModal.latitude && detailModal.longitude && (
+                    {detailViewRecord.latitude && detailViewRecord.longitude && (
                       <>
                         <Divider plain orientation="left">
                           <GlobalOutlined /> Location Map
@@ -1193,8 +1247,8 @@ export default function TenYearSWMPlan() {
                         >
                           <MapContainer
                             center={[
-                              Number(detailModal.latitude),
-                              Number(detailModal.longitude),
+                              Number(detailViewRecord.latitude),
+                              Number(detailViewRecord.longitude),
                             ]}
                             zoom={12}
                             style={{
@@ -1210,20 +1264,20 @@ export default function TenYearSWMPlan() {
                             />
                             <Marker
                               position={[
-                                Number(detailModal.latitude),
-                                Number(detailModal.longitude),
+                                Number(detailViewRecord.latitude),
+                                Number(detailViewRecord.longitude),
                               ]}
                             >
                               <Popup>
-                                <Text strong>{detailModal.municipality}</Text>
+                                <Text strong>{detailViewRecord.municipality}</Text>
                                 <br />
                                 <Text type="secondary">
-                                  {detailModal.province}
+                                  {detailViewRecord.province}
                                 </Text>
                                 <br />
                                 <Text style={{ fontSize: 11 }}>
-                                  {detailModal.latitude},{" "}
-                                  {detailModal.longitude}
+                                  {detailViewRecord.latitude},{" "}
+                                  {detailViewRecord.longitude}
                                 </Text>
                               </Popup>
                             </Marker>
@@ -1244,79 +1298,79 @@ export default function TenYearSWMPlan() {
                 children: (
                   <>
                     <Row gutter={[16, 12]}>
-                      <Col span={12}>
+                      <Col xs={24} sm={12}>
                         <Text type="secondary">
                           <CalendarOutlined /> Target Month:
                         </Text>{" "}
-                        {detailModal.targetMonth ? (
+                        {detailViewRecord.targetMonth ? (
                           <Tag color="cyan" bordered={false}>
-                            {detailModal.targetMonth.replace(/^\d+\./, "")}
+                            {detailViewRecord.targetMonth.replace(/^\d+\./, "")}
                           </Tag>
                         ) : (
                           "—"
                         )}
                       </Col>
-                      <Col span={12}>
+                      <Col xs={24} sm={12}>
                         <Text type="secondary">
                           <FileTextOutlined /> IIS Number:
                         </Text>{" "}
-                        <Text>{detailModal.iisNumber || "—"}</Text>
+                        <Text>{detailViewRecord.iisNumber || "—"}</Text>
                       </Col>
-                      <Col span={12}>
+                      <Col xs={24} sm={12}>
                         <Text type="secondary">
                           <CalendarOutlined /> Date of Monitoring:
                         </Text>{" "}
                         <Text>
-                          {detailModal.dateOfMonitoring
-                            ? dayjs(detailModal.dateOfMonitoring).format(
+                          {detailViewRecord.dateOfMonitoring
+                            ? dayjs(detailViewRecord.dateOfMonitoring).format(
                                 "MMM DD, YYYY",
                               )
                             : "—"}
                         </Text>
                       </Col>
-                      <Col span={12}>
+                      <Col xs={24} sm={12}>
                         <Text type="secondary">
                           <CalendarOutlined /> Report Prepared:
                         </Text>{" "}
                         <Text>
-                          {detailModal.dateReportPrepared
-                            ? dayjs(detailModal.dateReportPrepared).format(
+                          {detailViewRecord.dateReportPrepared
+                            ? dayjs(detailViewRecord.dateReportPrepared).format(
                                 "MMM DD, YYYY",
                               )
                             : "—"}
                         </Text>
                       </Col>
-                      <Col span={12}>
+                      <Col xs={24} sm={12}>
                         <Text type="secondary">
                           <CalendarOutlined /> Reviewed (Staff):
                         </Text>{" "}
                         <Text>
-                          {detailModal.dateReportReviewedStaff
-                            ? dayjs(detailModal.dateReportReviewedStaff).format(
+                          {detailViewRecord.dateReportReviewedStaff
+                            ? dayjs(detailViewRecord.dateReportReviewedStaff).format(
                                 "MMM DD, YYYY",
                               )
                             : "—"}
                         </Text>
                       </Col>
-                      <Col span={12}>
+                      <Col xs={24} sm={12}>
                         <Text type="secondary">
                           <CalendarOutlined /> Reviewed (Focal):
                         </Text>{" "}
                         <Text>
-                          {detailModal.dateReportReviewedFocal
-                            ? dayjs(detailModal.dateReportReviewedFocal).format(
+                          {detailViewRecord.dateReportReviewedFocal
+                            ? dayjs(detailViewRecord.dateReportReviewedFocal).format(
                                 "MMM DD, YYYY",
                               )
                             : "—"}
                         </Text>
                       </Col>
-                      <Col span={12}>
+                      <Col xs={24} sm={12}>
                         <Text type="secondary">
                           <CheckCircleOutlined /> Report Approved:
                         </Text>{" "}
                         <Text>
-                          {detailModal.dateReportApproved
-                            ? dayjs(detailModal.dateReportApproved).format(
+                          {detailViewRecord.dateReportApproved
+                            ? dayjs(detailViewRecord.dateReportApproved).format(
                                 "MMM DD, YYYY",
                               )
                             : "—"}
@@ -1327,31 +1381,31 @@ export default function TenYearSWMPlan() {
                       <CalendarOutlined /> Processing Days
                     </Divider>
                     <Row gutter={[16, 8]}>
-                      <Col span={6}>
+                      <Col xs={12} sm={6}>
                         <Statistic
                           title="Prepared"
-                          value={detailModal.totalDaysReportPrepared ?? "—"}
+                          value={detailViewRecord.totalDaysReportPrepared ?? "—"}
                           suffix="days"
                         />
                       </Col>
-                      <Col span={6}>
+                      <Col xs={12} sm={6}>
                         <Statistic
                           title="Staff Review"
-                          value={detailModal.totalDaysReviewedStaff ?? "—"}
+                          value={detailViewRecord.totalDaysReviewedStaff ?? "—"}
                           suffix="days"
                         />
                       </Col>
-                      <Col span={6}>
+                      <Col xs={12} sm={6}>
                         <Statistic
                           title="Focal Review"
-                          value={detailModal.totalDaysReviewedFocal ?? "—"}
+                          value={detailViewRecord.totalDaysReviewedFocal ?? "—"}
                           suffix="days"
                         />
                       </Col>
-                      <Col span={6}>
+                      <Col xs={12} sm={6}>
                         <Statistic
                           title="Approved"
-                          value={detailModal.totalDaysApproved ?? "—"}
+                          value={detailViewRecord.totalDaysApproved ?? "—"}
                           suffix="days"
                         />
                       </Col>
@@ -1367,7 +1421,7 @@ export default function TenYearSWMPlan() {
                     <Row gutter={[16, 8]}>
                       <Col span={24}>
                         <Text type="secondary">Overall Compliance:</Text>{" "}
-                        {getComplianceTag(detailModal.remarksAndRecommendation)}
+                        {getComplianceTag(detailViewRecord.remarksAndRecommendation)}
                       </Col>
                     </Row>
                     <Divider plain>ESWM Components</Divider>
@@ -1375,30 +1429,30 @@ export default function TenYearSWMPlan() {
                       {[
                         {
                           label: "Source Reduction",
-                          val: detailModal.sourceReduction,
+                          val: detailViewRecord.sourceReduction,
                         },
                         {
                           label: "Segregated Collection",
-                          val: detailModal.segregatedCollection,
+                          val: detailViewRecord.segregatedCollection,
                         },
                         {
                           label: "Storage & Setout",
-                          val: detailModal.storageAndSetout,
+                          val: detailViewRecord.storageAndSetout,
                         },
                         {
                           label: "Processing MRF",
-                          val: detailModal.processingMRF,
+                          val: detailViewRecord.processingMRF,
                         },
                         {
                           label: "Transfer Station",
-                          val: detailModal.transferStation,
+                          val: detailViewRecord.transferStation,
                         },
                         {
                           label: "Disposal Facilities",
-                          val: detailModal.disposalFacilities,
+                          val: detailViewRecord.disposalFacilities,
                         },
                       ].map((item) => (
-                        <Col span={8} key={item.label}>
+                        <Col xs={12} sm={8} key={item.label}>
                           <Badge
                             status={
                               item.val === "YES"
@@ -1419,21 +1473,21 @@ export default function TenYearSWMPlan() {
                     </Row>
                     <Divider plain>LGU Disposal & Advise</Divider>
                     <Row gutter={[16, 8]}>
-                      <Col span={12}>
+                      <Col xs={24} sm={12}>
                         <Text type="secondary">LGU Final Disposal:</Text>{" "}
-                        <Text>{detailModal.lguFinalDisposal || "—"}</Text>
+                        <Text>{detailViewRecord.lguFinalDisposal || "—"}</Text>
                       </Col>
-                      <Col span={12}>
+                      <Col xs={24} sm={12}>
                         <Text type="secondary">Advise Letter Date:</Text>{" "}
-                        <Text>{detailModal.adviseLetterDateIssued || "—"}</Text>
+                        <Text>{detailViewRecord.adviseLetterDateIssued || "—"}</Text>
                       </Col>
-                      <Col span={12}>
+                      <Col xs={24} sm={12}>
                         <Text type="secondary">Compliance to Advise:</Text>{" "}
-                        <Text>{detailModal.complianceToAdvise || "—"}</Text>
+                        <Text>{detailViewRecord.complianceToAdvise || "—"}</Text>
                       </Col>
-                      <Col span={12}>
+                      <Col xs={24} sm={12}>
                         <Text type="secondary">Remarks:</Text>{" "}
-                        <Text>{detailModal.remarks || "—"}</Text>
+                        <Text>{detailViewRecord.remarks || "—"}</Text>
                       </Col>
                     </Row>
                   </>
@@ -1449,50 +1503,50 @@ export default function TenYearSWMPlan() {
                 children: (
                   <>
                     <Row gutter={[16, 8]}>
-                      <Col span={12}>
+                      <Col xs={24} sm={12}>
                         <Statistic
                           title="Total Waste Generation"
                           value={
-                            detailModal.totalWasteGeneration?.toLocaleString() ||
+                            detailViewRecord.totalWasteGeneration?.toLocaleString() ||
                             "—"
                           }
                           suffix="kg/day"
                         />
                       </Col>
-                      <Col span={12}>
-                        <Statistic title="PCG" value={detailModal.pcg || "—"} />
+                      <Col xs={24} sm={12}>
+                        <Statistic title="PCG" value={detailViewRecord.pcg || "—"} />
                       </Col>
                     </Row>
                     <Divider plain>Waste Composition</Divider>
                     {[
                       {
                         label: "Biodegradable",
-                        val: detailModal.biodegradableWaste,
-                        pct: detailModal.biodegradablePercent,
+                        val: detailViewRecord.biodegradableWaste,
+                        pct: detailViewRecord.biodegradablePercent,
                         color: "#52c41a",
                       },
                       {
                         label: "Recyclable",
-                        val: detailModal.recyclableWaste,
-                        pct: detailModal.recyclablePercent,
+                        val: detailViewRecord.recyclableWaste,
+                        pct: detailViewRecord.recyclablePercent,
                         color: "#1890ff",
                       },
                       {
                         label: "Residual (Potential)",
-                        val: detailModal.residualWithPotential,
-                        pct: detailModal.residualWithPotentialPercent,
+                        val: detailViewRecord.residualWithPotential,
+                        pct: detailViewRecord.residualWithPotentialPercent,
                         color: "#faad14",
                       },
                       {
                         label: "Residual (Disposal)",
-                        val: detailModal.residualWasteForDisposal,
-                        pct: detailModal.residualPercent,
+                        val: detailViewRecord.residualWasteForDisposal,
+                        pct: detailViewRecord.residualPercent,
                         color: "#ff4d4f",
                       },
                       {
                         label: "Special Waste",
-                        val: detailModal.specialWaste,
-                        pct: detailModal.specialPercent,
+                        val: detailViewRecord.specialWaste,
+                        pct: detailViewRecord.specialPercent,
                         color: "#722ed1",
                       },
                     ].map((w) => (
@@ -1520,36 +1574,36 @@ export default function TenYearSWMPlan() {
                     ))}
                     <Divider />
                     <Row gutter={[16, 16]}>
-                      <Col span={12}>
+                      <Col xs={24} sm={12}>
                         <Statistic
                           title="Waste Diversion Rate"
                           value={(
-                            (detailModal.wasteDiversionRateCalc ||
-                              detailModal.wasteDiversionRate ||
+                            (detailViewRecord.wasteDiversionRateCalc ||
+                              detailViewRecord.wasteDiversionRate ||
                               0) * 100
                           ).toFixed(1)}
                           suffix="%"
                           styles={{ content: { color: "#52c41a" } }}
                         />
                       </Col>
-                      <Col span={12}>
+                      <Col xs={24} sm={12}>
                         <Statistic
                           title="Disposal Rate"
                           value={(
-                            (detailModal.disposalRate || 0) * 100
+                            (detailViewRecord.disposalRate || 0) * 100
                           ).toFixed(1)}
                           suffix="%"
                           styles={{ content: { color: "#ff4d4f" } }}
                         />
                       </Col>
                     </Row>
-                    {detailModal.signedDocument && (
+                    {detailViewRecord.signedDocument && (
                       <>
                         <Divider />
                         <Button
                           type="link"
                           icon={<LinkOutlined />}
-                          href={detailModal.signedDocument}
+                          href={detailViewRecord.signedDocument}
                           target="_blank"
                           rel="noopener noreferrer"
                         >
@@ -1562,6 +1616,7 @@ export default function TenYearSWMPlan() {
               },
             ]}
           />
+          </>
         )}
       </Modal>
 
@@ -1576,24 +1631,26 @@ export default function TenYearSWMPlan() {
         onCancel={() => setModalOpen(false)}
         onOk={handleSave}
         width={920}
+        style={{ maxWidth: "95vw" }}
         okText={editing ? "Update" : "Create"}
         destroyOnHidden
       >
         <Form form={form} layout="vertical" size="small">
-          <Tabs
-            defaultActiveKey="location"
+          <Collapse
+            defaultActiveKey={["location","personnel","compliance","waste","document"]}
+            bordered={false}
             items={[
               {
                 key: "location",
                 label: (
-                  <>
+                  <span style={{ color: "#1677ff" }}>
                     <EnvironmentOutlined /> Location & Plan
-                  </>
+                  </span>
                 ),
                 children: (
                   <>
                     <Row gutter={12}>
-                      <Col span={8}>
+                      <Col xs={24} sm={8}>
                         <Form.Item
                           label={
                             <>
@@ -1610,7 +1667,7 @@ export default function TenYearSWMPlan() {
                           />
                         </Form.Item>
                       </Col>
-                      <Col span={8}>
+                      <Col xs={24} sm={8}>
                         <Form.Item
                           label={
                             <>
@@ -1623,17 +1680,14 @@ export default function TenYearSWMPlan() {
                           <Input placeholder="Municipality / City" />
                         </Form.Item>
                       </Col>
-                      <Col span={4}>
+                      <Col xs={12} sm={4}>
                         <Form.Item label="MBA" name="manilaBayArea">
                           <Select
-                            options={[
-                              { label: "MBA", value: "MBA" },
-                              { label: "OUTSIDE MBA", value: "OUTSIDE MBA" },
-                            ]}
+                            options={mbaOptions}
                           />
                         </Form.Item>
                       </Col>
-                      <Col span={4}>
+                      <Col xs={12} sm={4}>
                         <Form.Item
                           label="District"
                           name="congressionalDistrict"
@@ -1643,7 +1697,7 @@ export default function TenYearSWMPlan() {
                       </Col>
                     </Row>
                     <Row gutter={12}>
-                      <Col span={6}>
+                      <Col xs={12} sm={6}>
                         <Form.Item
                           label={
                             <>
@@ -1658,7 +1712,7 @@ export default function TenYearSWMPlan() {
                           />
                         </Form.Item>
                       </Col>
-                      <Col span={6}>
+                      <Col xs={12} sm={6}>
                         <Form.Item
                           label={
                             <>
@@ -1682,7 +1736,7 @@ export default function TenYearSWMPlan() {
                       <AuditOutlined /> Plan Details
                     </Divider>
                     <Row gutter={12}>
-                      <Col span={6}>
+                      <Col xs={12} sm={6}>
                         <Form.Item
                           label={
                             <>
@@ -1692,20 +1746,11 @@ export default function TenYearSWMPlan() {
                           name="typeOfSWMPlan"
                         >
                           <Select
-                            options={[
-                              {
-                                label: "Municipal / City Plan",
-                                value: "Municipal / City Plan",
-                              },
-                              {
-                                label: "Barangay Plan",
-                                value: "Barangay Plan",
-                              },
-                            ]}
+                            options={typeOfPlanOptions}
                           />
                         </Form.Item>
                       </Col>
-                      <Col span={6}>
+                      <Col xs={12} sm={6}>
                         <Form.Item
                           label={
                             <>
@@ -1717,7 +1762,7 @@ export default function TenYearSWMPlan() {
                           <Input />
                         </Form.Item>
                       </Col>
-                      <Col span={4}>
+                      <Col xs={8} sm={4}>
                         <Form.Item
                           label={
                             <>
@@ -1729,7 +1774,7 @@ export default function TenYearSWMPlan() {
                           <Input placeholder="e.g. 2025-2034" />
                         </Form.Item>
                       </Col>
-                      <Col span={4}>
+                      <Col xs={8} sm={4}>
                         <Form.Item
                           label={
                             <>
@@ -1745,7 +1790,7 @@ export default function TenYearSWMPlan() {
                           />
                         </Form.Item>
                       </Col>
-                      <Col span={4}>
+                      <Col xs={8} sm={4}>
                         <Form.Item
                           label={
                             <>
@@ -1763,7 +1808,7 @@ export default function TenYearSWMPlan() {
                       </Col>
                     </Row>
                     <Row gutter={12}>
-                      <Col span={6}>
+                      <Col xs={12} sm={6}>
                         <Form.Item
                           label={
                             <>
@@ -1773,11 +1818,7 @@ export default function TenYearSWMPlan() {
                           name="forRenewal"
                         >
                           <Select
-                            options={[
-                              { label: "Approved", value: "Approved" },
-                              { label: "For Renewal", value: "For Renewal" },
-                              { label: "Pending", value: "Pending" },
-                            ]}
+                            options={planStatusOptions}
                           />
                         </Form.Item>
                       </Col>
@@ -1788,14 +1829,14 @@ export default function TenYearSWMPlan() {
               {
                 key: "personnel",
                 label: (
-                  <>
+                  <span style={{ color: "#52c41a" }}>
                     <TeamOutlined /> Personnel & Monitoring
-                  </>
+                  </span>
                 ),
                 children: (
                   <>
                     <Row gutter={12}>
-                      <Col span={8}>
+                      <Col xs={24} sm={8}>
                         <Form.Item
                           label={
                             <>
@@ -1804,10 +1845,10 @@ export default function TenYearSWMPlan() {
                           }
                           name="enmoAssigned"
                         >
-                          <Input />
+                          <Select options={enmoOptions} allowClear showSearch placeholder="Select ENMO" />
                         </Form.Item>
                       </Col>
-                      <Col span={8}>
+                      <Col xs={24} sm={8}>
                         <Form.Item
                           label={
                             <>
@@ -1816,10 +1857,10 @@ export default function TenYearSWMPlan() {
                           }
                           name="eswmStaff"
                         >
-                          <Input />
+                          <Select options={eswmStaffOptions} allowClear showSearch placeholder="Select Staff" />
                         </Form.Item>
                       </Col>
-                      <Col span={8}>
+                      <Col xs={24} sm={8}>
                         <Form.Item
                           label={
                             <>
@@ -1828,7 +1869,7 @@ export default function TenYearSWMPlan() {
                           }
                           name="focalPerson"
                         >
-                          <Input />
+                          <Select options={focalOptions} allowClear showSearch placeholder="Select Focal" />
                         </Form.Item>
                       </Col>
                     </Row>
@@ -1840,7 +1881,7 @@ export default function TenYearSWMPlan() {
                       <CalendarOutlined /> Monitoring
                     </Divider>
                     <Row gutter={12}>
-                      <Col span={6}>
+                      <Col xs={12} sm={6}>
                         <Form.Item
                           label={
                             <>
@@ -1852,12 +1893,12 @@ export default function TenYearSWMPlan() {
                           <Select options={monthOptions} />
                         </Form.Item>
                       </Col>
-                      <Col span={6}>
+                      <Col xs={12} sm={6}>
                         <Form.Item label="IIS Number" name="iisNumber">
                           <Input />
                         </Form.Item>
                       </Col>
-                      <Col span={6}>
+                      <Col xs={12} sm={6}>
                         <Form.Item
                           label="Date of Monitoring"
                           name="dateOfMonitoring"
@@ -1865,7 +1906,7 @@ export default function TenYearSWMPlan() {
                           <DatePicker style={{ width: "100%" }} />
                         </Form.Item>
                       </Col>
-                      <Col span={6}>
+                      <Col xs={12} sm={6}>
                         <Form.Item
                           label="Date Report Prepared"
                           name="dateReportPrepared"
@@ -1875,7 +1916,7 @@ export default function TenYearSWMPlan() {
                       </Col>
                     </Row>
                     <Row gutter={12}>
-                      <Col span={6}>
+                      <Col xs={12} sm={6}>
                         <Form.Item
                           label="Reviewed (Staff)"
                           name="dateReportReviewedStaff"
@@ -1883,7 +1924,7 @@ export default function TenYearSWMPlan() {
                           <DatePicker style={{ width: "100%" }} />
                         </Form.Item>
                       </Col>
-                      <Col span={6}>
+                      <Col xs={12} sm={6}>
                         <Form.Item
                           label="Reviewed (Focal)"
                           name="dateReportReviewedFocal"
@@ -1891,7 +1932,7 @@ export default function TenYearSWMPlan() {
                           <DatePicker style={{ width: "100%" }} />
                         </Form.Item>
                       </Col>
-                      <Col span={6}>
+                      <Col xs={12} sm={6}>
                         <Form.Item
                           label="Date Approved"
                           name="dateReportApproved"
@@ -1899,7 +1940,7 @@ export default function TenYearSWMPlan() {
                           <DatePicker style={{ width: "100%" }} />
                         </Form.Item>
                       </Col>
-                      <Col span={6}>
+                      <Col xs={12} sm={6}>
                         <Form.Item label="Tracking" name="trackingOfReports">
                           <Input />
                         </Form.Item>
@@ -1913,7 +1954,7 @@ export default function TenYearSWMPlan() {
                       <ClockCircleOutlined /> Processing Days
                     </Divider>
                     <Row gutter={12}>
-                      <Col span={6}>
+                      <Col xs={12} sm={6}>
                         <Form.Item
                           label="Days (Prepared)"
                           name="totalDaysReportPrepared"
@@ -1921,7 +1962,7 @@ export default function TenYearSWMPlan() {
                           <InputNumber style={{ width: "100%" }} min={0} />
                         </Form.Item>
                       </Col>
-                      <Col span={6}>
+                      <Col xs={12} sm={6}>
                         <Form.Item
                           label="Days (Staff Rev.)"
                           name="totalDaysReviewedStaff"
@@ -1929,7 +1970,7 @@ export default function TenYearSWMPlan() {
                           <InputNumber style={{ width: "100%" }} min={0} />
                         </Form.Item>
                       </Col>
-                      <Col span={6}>
+                      <Col xs={12} sm={6}>
                         <Form.Item
                           label="Days (Focal Rev.)"
                           name="totalDaysReviewedFocal"
@@ -1937,7 +1978,7 @@ export default function TenYearSWMPlan() {
                           <InputNumber style={{ width: "100%" }} min={0} />
                         </Form.Item>
                       </Col>
-                      <Col span={6}>
+                      <Col xs={12} sm={6}>
                         <Form.Item
                           label="Days (Approved)"
                           name="totalDaysApproved"
@@ -1952,19 +1993,19 @@ export default function TenYearSWMPlan() {
               {
                 key: "compliance",
                 label: (
-                  <>
+                  <span style={{ color: "#eb2f96" }}>
                     <CheckCircleOutlined /> Compliance
-                  </>
+                  </span>
                 ),
                 children: (
                   <>
                     <Row gutter={12}>
-                      <Col span={6}>
+                      <Col xs={12} sm={6}>
                         <Form.Item label="PCG" name="pcg">
                           <InputNumber style={{ width: "100%" }} step={0.001} />
                         </Form.Item>
                       </Col>
-                      <Col span={6}>
+                      <Col xs={12} sm={6}>
                         <Form.Item
                           label="Total Waste Gen. (kg/day)"
                           name="totalWasteGeneration"
@@ -1972,7 +2013,7 @@ export default function TenYearSWMPlan() {
                           <InputNumber style={{ width: "100%" }} step={0.01} />
                         </Form.Item>
                       </Col>
-                      <Col span={6}>
+                      <Col xs={12} sm={6}>
                         <Form.Item
                           label="Diversion Rate (%)"
                           name="wasteDiversionRate"
@@ -1980,7 +2021,7 @@ export default function TenYearSWMPlan() {
                           <InputNumber style={{ width: "100%" }} step={0.01} />
                         </Form.Item>
                       </Col>
-                      <Col span={6}>
+                      <Col xs={12} sm={6}>
                         <Form.Item
                           label="LGU Final Disposal"
                           name="lguFinalDisposal"
@@ -1990,19 +2031,13 @@ export default function TenYearSWMPlan() {
                       </Col>
                     </Row>
                     <Row gutter={12}>
-                      <Col span={8}>
+                      <Col xs={24} sm={8}>
                         <Form.Item
                           label="Compliance"
                           name="remarksAndRecommendation"
                         >
                           <Select
-                            options={[
-                              { label: "Compliant", value: "Compliant" },
-                              {
-                                label: "Non-Compliant",
-                                value: "Non-Compliant",
-                              },
-                            ]}
+                            options={planComplianceOptions}
                           />
                         </Form.Item>
                       </Col>
@@ -2015,7 +2050,7 @@ export default function TenYearSWMPlan() {
                       <SafetyCertificateOutlined /> ESWM Components
                     </Divider>
                     <Row gutter={12}>
-                      <Col span={4}>
+                      <Col xs={12} sm={4}>
                         <Form.Item
                           label="Source Reduction"
                           name="sourceReduction"
@@ -2023,7 +2058,7 @@ export default function TenYearSWMPlan() {
                           <Select options={yesNoOptions} />
                         </Form.Item>
                       </Col>
-                      <Col span={4}>
+                      <Col xs={12} sm={4}>
                         <Form.Item
                           label="Segregated Coll."
                           name="segregatedCollection"
@@ -2031,7 +2066,7 @@ export default function TenYearSWMPlan() {
                           <Select options={yesNoOptions} />
                         </Form.Item>
                       </Col>
-                      <Col span={4}>
+                      <Col xs={12} sm={4}>
                         <Form.Item
                           label="Storage/Setout"
                           name="storageAndSetout"
@@ -2039,12 +2074,12 @@ export default function TenYearSWMPlan() {
                           <Select options={yesNoOptions} />
                         </Form.Item>
                       </Col>
-                      <Col span={4}>
+                      <Col xs={12} sm={4}>
                         <Form.Item label="Processing MRF" name="processingMRF">
                           <Select options={yesNoOptions} />
                         </Form.Item>
                       </Col>
-                      <Col span={4}>
+                      <Col xs={12} sm={4}>
                         <Form.Item
                           label="Transfer Station"
                           name="transferStation"
@@ -2052,7 +2087,7 @@ export default function TenYearSWMPlan() {
                           <Select options={yesNoOptions} />
                         </Form.Item>
                       </Col>
-                      <Col span={4}>
+                      <Col xs={12} sm={4}>
                         <Form.Item
                           label="Disposal Fac."
                           name="disposalFacilities"
@@ -2069,7 +2104,7 @@ export default function TenYearSWMPlan() {
                       <FileTextOutlined /> Advise & Remarks
                     </Divider>
                     <Row gutter={12}>
-                      <Col span={8}>
+                      <Col xs={24} sm={8}>
                         <Form.Item
                           label="Advise Letter Date"
                           name="adviseLetterDateIssued"
@@ -2077,7 +2112,7 @@ export default function TenYearSWMPlan() {
                           <Input />
                         </Form.Item>
                       </Col>
-                      <Col span={8}>
+                      <Col xs={24} sm={8}>
                         <Form.Item
                           label="Compliance to Advise"
                           name="complianceToAdvise"
@@ -2085,7 +2120,7 @@ export default function TenYearSWMPlan() {
                           <Input />
                         </Form.Item>
                       </Col>
-                      <Col span={8}>
+                      <Col xs={24} sm={8}>
                         <Form.Item label="Remarks" name="remarks">
                           <Input />
                         </Form.Item>
@@ -2097,14 +2132,14 @@ export default function TenYearSWMPlan() {
               {
                 key: "waste",
                 label: (
-                  <>
+                  <span style={{ color: "#722ed1" }}>
                     <FundProjectionScreenOutlined /> Waste Composition
-                  </>
+                  </span>
                 ),
                 children: (
                   <>
                     <Row gutter={12}>
-                      <Col span={6}>
+                      <Col xs={12} sm={6}>
                         <Form.Item
                           label="Biodegradable (kg/day)"
                           name="biodegradableWaste"
@@ -2112,7 +2147,7 @@ export default function TenYearSWMPlan() {
                           <InputNumber style={{ width: "100%" }} step={0.01} />
                         </Form.Item>
                       </Col>
-                      <Col span={6}>
+                      <Col xs={12} sm={6}>
                         <Form.Item label="Bio (%)" name="biodegradablePercent">
                           <InputNumber
                             style={{ width: "100%" }}
@@ -2120,7 +2155,7 @@ export default function TenYearSWMPlan() {
                           />
                         </Form.Item>
                       </Col>
-                      <Col span={6}>
+                      <Col xs={12} sm={6}>
                         <Form.Item
                           label="Recyclable (kg/day)"
                           name="recyclableWaste"
@@ -2128,7 +2163,7 @@ export default function TenYearSWMPlan() {
                           <InputNumber style={{ width: "100%" }} step={0.01} />
                         </Form.Item>
                       </Col>
-                      <Col span={6}>
+                      <Col xs={12} sm={6}>
                         <Form.Item
                           label="Recyclable (%)"
                           name="recyclablePercent"
@@ -2141,7 +2176,7 @@ export default function TenYearSWMPlan() {
                       </Col>
                     </Row>
                     <Row gutter={12}>
-                      <Col span={6}>
+                      <Col xs={12} sm={6}>
                         <Form.Item
                           label="Residual Potential (kg/day)"
                           name="residualWithPotential"
@@ -2149,7 +2184,7 @@ export default function TenYearSWMPlan() {
                           <InputNumber style={{ width: "100%" }} step={0.01} />
                         </Form.Item>
                       </Col>
-                      <Col span={6}>
+                      <Col xs={12} sm={6}>
                         <Form.Item
                           label="Residual Potential (%)"
                           name="residualWithPotentialPercent"
@@ -2160,7 +2195,7 @@ export default function TenYearSWMPlan() {
                           />
                         </Form.Item>
                       </Col>
-                      <Col span={6}>
+                      <Col xs={12} sm={6}>
                         <Form.Item
                           label="Residual Disposal (kg/day)"
                           name="residualWasteForDisposal"
@@ -2168,7 +2203,7 @@ export default function TenYearSWMPlan() {
                           <InputNumber style={{ width: "100%" }} step={0.01} />
                         </Form.Item>
                       </Col>
-                      <Col span={6}>
+                      <Col xs={12} sm={6}>
                         <Form.Item label="Residual (%)" name="residualPercent">
                           <InputNumber
                             style={{ width: "100%" }}
@@ -2178,7 +2213,7 @@ export default function TenYearSWMPlan() {
                       </Col>
                     </Row>
                     <Row gutter={12}>
-                      <Col span={6}>
+                      <Col xs={12} sm={6}>
                         <Form.Item
                           label="Special Waste (kg/day)"
                           name="specialWaste"
@@ -2186,7 +2221,7 @@ export default function TenYearSWMPlan() {
                           <InputNumber style={{ width: "100%" }} step={0.01} />
                         </Form.Item>
                       </Col>
-                      <Col span={6}>
+                      <Col xs={12} sm={6}>
                         <Form.Item label="Special (%)" name="specialPercent">
                           <InputNumber
                             style={{ width: "100%" }}
@@ -2194,7 +2229,7 @@ export default function TenYearSWMPlan() {
                           />
                         </Form.Item>
                       </Col>
-                      <Col span={6}>
+                      <Col xs={12} sm={6}>
                         <Form.Item
                           label="Diversion Rate (calc)"
                           name="wasteDiversionRateCalc"
@@ -2205,7 +2240,7 @@ export default function TenYearSWMPlan() {
                           />
                         </Form.Item>
                       </Col>
-                      <Col span={6}>
+                      <Col xs={12} sm={6}>
                         <Form.Item label="Disposal Rate" name="disposalRate">
                           <InputNumber
                             style={{ width: "100%" }}
@@ -2220,9 +2255,9 @@ export default function TenYearSWMPlan() {
               {
                 key: "document",
                 label: (
-                  <>
+                  <span style={{ color: "#13c2c2" }}>
                     <LinkOutlined /> Document
-                  </>
+                  </span>
                 ),
                 children: (
                   <Row gutter={12}>

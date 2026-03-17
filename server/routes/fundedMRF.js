@@ -29,7 +29,8 @@ router.get("/stats", async (req, res) => {
     ] = await Promise.all([
       FundedMRF.countDocuments(),
       FundedMRF.aggregate([
-        { $group: { _id: "$province", count: { $sum: 1 } } },
+        { $addFields: { _normProvince: { $replaceAll: { input: "$province", find: "Province of ", replacement: "" } } } },
+        { $group: { _id: "$_normProvince", count: { $sum: 1 } } },
         { $sort: { count: -1 } },
       ]),
       FundedMRF.aggregate([
@@ -48,7 +49,7 @@ router.get("/stats", async (req, res) => {
                     "Operational",
                   ],
                 },
-                "Unknown",
+                "Not Yet Monitored",
               ],
             },
             count: { $sum: 1 },

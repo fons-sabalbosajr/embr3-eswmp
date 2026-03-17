@@ -17,6 +17,9 @@ body {
 .sider-menu .ant-menu-sub.ant-menu-inline {
   background: rgba(0, 0, 0, 0.15) !important;
 }
+.sider-menu .ant-menu-sub.ant-menu-inline .ant-menu-item {
+  font-size: 12px;
+}
 
 /* Status badge animations */
 .status-badge {
@@ -145,4 +148,157 @@ body {
 .popup-dark .status-badge-other {
   background: #2a2a2a;
   color: #b3b3b3;
+}
+
+/* ═══════════════════════════════════════════
+   GLOBAL RESPONSIVE UTILITIES
+   ═══════════════════════════════════════════ */
+
+/* ── Auth pages (Login / Signup) ── */
+.auth-container {
+  display: flex;
+  min-height: 100vh;
+}
+.auth-left {
+  flex: 1;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 48px;
+  overflow: hidden;
+}
+.auth-right {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 32px;
+}
+
+/* ── Admin layout ── */
+.admin-header-right {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.admin-content {
+  padding: 24px;
+  min-height: 280;
+  flex: 1 0 auto;
+}
+
+/* ── Admin sub-page toolbars ── */
+.admin-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: center;
+  margin-bottom: 16px;
+}
+
+/* ── Ant modal responsive ── */
+.ant-modal {
+  max-width: calc(100vw - 32px) !important;
+}
+
+/* ── Desktop+ (≥ 1600px) ── */
+@media (min-width: 1600px) {
+  .admin-content {
+    padding: 32px 48px;
+  }
+  .slf-container {
+    max-width: 1400px;
+  }
+}
+
+/* ── Large desktop (≥ 1200px) ── */
+@media (min-width: 1200px) {
+  .admin-content {
+    padding: 24px 32px;
+  }
+}
+
+/* ── Tablet (≤ 992px) ── */
+@media (max-width: 992px) {
+  .auth-container {
+    flex-direction: column;
+  }
+  .auth-left {
+    padding: 32px 24px;
+    min-height: auto;
+  }
+  .auth-right {
+    padding: 24px 16px;
+  }
+  .admin-content {
+    padding: 16px 12px;
+  }
+  .ant-descriptions-item-label,
+  .ant-descriptions-item-content {
+    font-size: 13px !important;
+  }
+}
+
+/* ── Small tablet / large phone (≤ 768px) ── */
+@media (max-width: 768px) {
+  .auth-left {
+    padding: 24px 20px;
+  }
+  .auth-right {
+    padding: 20px 12px;
+  }
+  .admin-content {
+    padding: 12px 8px;
+  }
+  /* Stack admin header items */
+  .admin-header-right .admin-clock {
+    display: none;
+  }
+}
+
+/* ── Phone (≤ 576px) ── */
+@media (max-width: 576px) {
+  .auth-left {
+    padding: 20px 16px;
+  }
+  .auth-right {
+    padding: 16px 10px;
+  }
+  .admin-content {
+    padding: 8px 4px;
+  }
+  /* Ant modal fullscreen on phone */
+  .ant-modal {
+    top: 8px !important;
+    margin: 0 auto !important;
+    max-width: calc(100vw - 16px) !important;
+  }
+  .ant-modal .ant-modal-body {
+    padding: 12px !important;
+  }
+  /* Ant table compact on phone */
+  .ant-table-cell {
+    padding: 6px 8px !important;
+    font-size: 12px !important;
+  }
+  /* Ant card compact */
+  .ant-card-body {
+    padding: 12px !important;
+  }
+  .ant-card-head {
+    padding: 0 12px !important;
+    min-height: 40px !important;
+  }
+  .ant-card-head-title {
+    font-size: 14px !important;
+  }
+  /* Descriptions single column on phone */
+  .ant-descriptions-row > th,
+  .ant-descriptions-row > td {
+    display: block !important;
+    width: 100% !important;
+  }
 }
