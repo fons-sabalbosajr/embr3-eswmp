@@ -12,6 +12,7 @@ router.post("/", async (req, res) => {
     res.status(201).json({ message: "SLF facility created", data: entry });
     writeLog("info", "slf.create", {
       message: `SLF created: ${entry.slfName}`,
+      user: req.logUser || "admin",
       ip: req.ip,
     });
   } catch (error) {
@@ -55,6 +56,7 @@ router.put("/:id", async (req, res) => {
     res.json({ message: "SLF facility updated", data: entry });
     writeLog("info", "slf.update", {
       message: `SLF updated: ${entry.slfName}`,
+      user: req.logUser || "admin",
       ip: req.ip,
     });
   } catch (error) {
@@ -70,6 +72,7 @@ router.delete("/:id", async (req, res) => {
     res.json({ message: "SLF facility deleted" });
     writeLog("warn", "slf.delete", {
       message: `SLF deleted: ${entry.slfName}`,
+      user: req.logUser || "admin",
       ip: req.ip,
     });
   } catch (error) {

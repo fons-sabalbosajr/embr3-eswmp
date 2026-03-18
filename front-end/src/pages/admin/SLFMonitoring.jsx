@@ -56,9 +56,23 @@ import { exportToExcel } from "../../utils/exportExcel";
 import secureStorage from "../../utils/secureStorage";
 import { useDataRef } from "../../utils/dataRef";
 import dayjs from "dayjs";
+import {
+  PieChart,
+  Pie,
+  Cell as RCell,
+  BarChart,
+  Bar,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  Tooltip as RTooltip,
+  Legend,
+  ResponsiveContainer,
+} from "recharts";
 
 const { Title, Text } = Typography;
 const ACCENT = "#2f54eb";
+const CHART_COLORS = ["#2f54eb", "#52c41a", "#faad14", "#ff4d4f", "#13c2c2", "#722ed1", "#eb2f96"];
 
 const CACHE_KEY = "slf-facility-cache";
 const CACHE_TTL = 5 * 60 * 1000;
@@ -122,6 +136,174 @@ function getStatusTag(v) {
   return <Tag bordered={false}>{v}</Tag>;
 }
 
+// ── SLF Waste Baseline Info Sub-Tab ──
+function WasteBaselineInfo() {
+  const [baselines, setBaselines] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [expandedGen, setExpandedGen] = useState(null);
+
+  useEffect(() => {
+    setLoading(true);
+    api
+      .get("/data-slf/baselines")
+      .then(({ data }) => setBaselines(data))
+      .catch(() => {})
+      .finally(() => setLoading(false));
+  }, []);
+
+  const columns = [
+    {
+      title: "SLF Name",
+      dataIndex: "slfName",
+      key: "slfName",
+      render: (t) => <Text strong>{t}</Text>,
+    },
+    {
+      title: "Status",
+      dataIndex: "isActive",
+      key: "isActive",
+      width: 100,
+      render: (v) =>
+        v ? <Tag color="green">Active</Tag> : <Tag color="red">Inactive</Tag>,
+    },
+    {
+      title: "Total Volume Accepted",
+      key: "totalVolumeAccepted",
+      render: (_, r) =>
+        r.totalVolumeAccepted != null
+          ? `${r.totalVolumeAccepted.toLocaleString()} ${r.totalVolumeAcceptedUnit}`
+          : "—",
+    },
+    {
+      title: "Active Cell (Residual)",
+      key: "activeCellResidual",
+      render: (_, r) =>
+        r.activeCellResidualVolume != null
+          ? `${r.activeCellResidualVolume.toLocaleString()} ${r.activeCellResidualUnit}`
+          : "—",
+    },
+    {
+      title: "Active Cell (Inert)",
+      key: "activeCellInert",
+      render: (_, r) =>
+        r.activeCellInertVolume != null
+          ? `${r.activeCellInertVolume.toLocaleString()} ${r.activeCellInertUnit}`
+          : "—",
+    },
+    {
+      title: "Closed Cell (Residual)",
+      key: "closedCellResidual",
+      render: (_, r) =>
+        r.closedCellResidualVolume != null
+          ? `${r.closedCellResidualVolume.toLocaleString()} ${r.closedCellResidualUnit}`
+          : "—",
+    },
+    {
+      title: "Closed Cell (Inert)",
+      key: "closedCellInert",
+      render: (_, r) =>
+        r.closedCellInertVolume != null
+          ? `${r.closedCellInertVolume.toLocaleString()} ${r.closedCellInertUnit}`
+          : "—",
+    },
+    {
+      title: "Haulers",
+      key: "haulers",
+      width: 80,
+      render: (_, r) => r.accreditedHaulers?.length || 0,
+    },
+    {
+      title: "Submitted By",
+      dataIndex: "submittedBy",
+      key: "submittedBy",
+      ellipsis: true,
+      render: (v) => v || "—",
+    },
+    {
+      title: "Last Updated",
+      dataIndex: "lastUpdated",
+      key: "lastUpdated",
+      width: 140,
+      render: (v) => (v ? dayjs(v).format("MMM DD, YYYY") : "—"),
+    },
+  ];
+
+  return (
+    <>
+      <div
+        style={{
+          display: "flex",
+          justifyContent: "space-between",
+          marginBottom: 12,
+        }}
+      >
+        <Text type="secondary">
+          Baseline waste volume information submitted by SLF portal users.
+        </Text>
+        <Button
+          size="small"
+          icon={<ReloadOutlined />}
+          onClick={() => {
+            setLoading(true);
+            api
+              .get("/data-slf/baselines")
+              .then(({ data }) => setBaselines(data))
+              .catch(() => {})
+              .finally(() => setLoading(false));
+          }}
+        >
+          Refresh
+        </Button>
+      </div>
+      <Table
+        dataSource={baselines}
+        columns={columns}
+        rowKey="_id"
+        loading={loading}
+        size="small"
+        pagination={{ pageSize: 10 }}
+        scroll={{ x: 1200 }}
+        expandable={{
+          expandedRowKeys: expandedGen ? [expandedGen] : [],
+          onExpand: (expanded, record) =>
+            setExpandedGen(expanded ? record._id : null),
+          expandedRowRender: (record) =>
+            record.accreditedHaulers?.length > 0 ? (
+              <Table
+                dataSource={record.accreditedHaulers}
+                rowKey={(_, i) => i}
+                size="small"
+                pagination={false}
+                columns={[
+                  {
+                    title: "Hauler Name",
+                    dataIndex: "haulerName",
+                    key: "haulerName",
+                  },
+                  {
+                    title: "Number of Trucks",
+                    dataIndex: "numberOfTrucks",
+                    key: "numberOfTrucks",
+                    render: (v) => v ?? "—",
+                  },
+                  {
+                    title: "Private Sector Clients",
+                    dataIndex: "privateSectorClients",
+                    key: "privateSectorClients",
+                    render: (v) => v || "—",
+                  },
+                ]}
+              />
+            ) : (
+              <Text type="secondary">No accredited haulers</Text>
+            ),
+          rowExpandable: (record) => record.accreditedHaulers?.length > 0,
+        }}
+      />
+    </>
+  );
+}
+
 // ── Portal Generators Sub-Tab ──
 function PortalGenerators({
   generators,
@@ -131,11 +313,62 @@ function PortalGenerators({
 }) {
   const [modalOpen, setModalOpen] = useState(false);
   const [editing, setEditing] = useState(null);
+  const [portalStats, setPortalStats] = useState([]);
+  const [submissions, setSubmissions] = useState([]);
+  const [loadingSub, setLoadingSub] = useState(false);
   const [form] = Form.useForm();
   const unitOptions = [
     { label: "Tons", value: "tons" },
-    { label: "m³", value: "m3" },
+    { label: "m³", value: "m³" },
   ];
+
+  const fetchSubmissions = useCallback(() => {
+    setLoadingSub(true);
+    api
+      .get("/data-slf")
+      .then(({ data }) => setSubmissions(data))
+      .catch(() => {})
+      .finally(() => setLoadingSub(false));
+  }, []);
+
+  useEffect(() => {
+    api
+      .get("/data-slf/generator-summary")
+      .then(({ data }) => setPortalStats(data))
+      .catch(() => {});
+    fetchSubmissions();
+  }, [fetchSubmissions]);
+
+  // Real-time polling every 8 seconds
+  useEffect(() => {
+    const interval = setInterval(fetchSubmissions, 8000);
+    return () => clearInterval(interval);
+  }, [fetchSubmissions]);
+
+  const statsMap = useMemo(() => {
+    const m = {};
+    portalStats.forEach((s) => (m[s._id] = s));
+    return m;
+  }, [portalStats]);
+
+  const overallStats = useMemo(() => {
+    return portalStats.reduce(
+      (acc, s) => ({
+        totalEntries: acc.totalEntries + s.totalEntries,
+        pendingCount: acc.pendingCount + s.pendingCount,
+        acknowledgedCount: acc.acknowledgedCount + s.acknowledgedCount,
+        totalVolume: acc.totalVolume + s.totalVolume,
+        totalTrucks: acc.totalTrucks + s.totalTrucks,
+      }),
+      {
+        totalEntries: 0,
+        pendingCount: 0,
+        acknowledgedCount: 0,
+        totalVolume: 0,
+        totalTrucks: 0,
+      },
+    );
+  }, [portalStats]);
 
   const openAdd = () => {
     setEditing(null);
@@ -224,6 +457,28 @@ function PortalGenerators({
       render: (_, r) => linkedFacilities[r._id] || 0,
     },
     {
+      title: "Portal Entries",
+      render: (_, r) => {
+        const cnt = statsMap[r._id]?.totalEntries || 0;
+        return cnt > 0 ? (
+          <Tag color="blue">{cnt}</Tag>
+        ) : (
+          <Text type="secondary">0</Text>
+        );
+      },
+    },
+    {
+      title: "Pending",
+      render: (_, r) => {
+        const cnt = statsMap[r._id]?.pendingCount || 0;
+        return cnt > 0 ? (
+          <Tag color="orange">{cnt}</Tag>
+        ) : (
+          <Text type="secondary">0</Text>
+        );
+      },
+    },
+    {
       title: "Status",
       dataIndex: "isActive",
       render: (v) =>
@@ -264,6 +519,47 @@ function PortalGenerators({
 
   return (
     <>
+      <Row gutter={[12, 12]} style={{ marginBottom: 16 }}>
+        <Col xs={12} sm={6}>
+          <Card size="small" style={{ borderRadius: 10 }}>
+            <Statistic
+              title="Portal Submissions"
+              value={overallStats.totalEntries}
+              prefix={<FileTextOutlined />}
+            />
+          </Card>
+        </Col>
+        <Col xs={12} sm={6}>
+          <Card size="small" style={{ borderRadius: 10 }}>
+            <Statistic
+              title="Total Waste Volume"
+              value={overallStats.totalVolume}
+              suffix="tons"
+              prefix={<DatabaseOutlined />}
+            />
+          </Card>
+        </Col>
+        <Col xs={12} sm={6}>
+          <Card size="small" style={{ borderRadius: 10 }}>
+            <Statistic
+              title="Pending Reviews"
+              value={overallStats.pendingCount}
+              valueStyle={{ color: "#faad14" }}
+              prefix={<AlertOutlined />}
+            />
+          </Card>
+        </Col>
+        <Col xs={12} sm={6}>
+          <Card size="small" style={{ borderRadius: 10 }}>
+            <Statistic
+              title="Acknowledged"
+              value={overallStats.acknowledgedCount}
+              valueStyle={{ color: "#52c41a" }}
+              prefix={<CheckCircleOutlined />}
+            />
+          </Card>
+        </Col>
+      </Row>
       <div
         style={{
           display: "flex",
@@ -294,6 +590,129 @@ function PortalGenerators({
         pagination={{ pageSize: 10 }}
         scroll={{ x: 700 }}
       />
+
+      {/* Portal Submissions Data Table */}
+      <Divider orientation="left" plain>
+        <FileTextOutlined style={{ color: ACCENT }} /> Portal Submitted Data
+      </Divider>
+      <Table
+        dataSource={submissions}
+        rowKey="_id"
+        loading={loadingSub}
+        size="small"
+        pagination={{ pageSize: 15, showSizeChanger: true, showTotal: (t) => `${t} entries` }}
+        scroll={{ x: 1100 }}
+        columns={[
+          {
+            title: "ID No",
+            dataIndex: "idNo",
+            key: "idNo",
+            width: 160,
+            render: (t) => <Text strong style={{ fontSize: 12 }}>{t}</Text>,
+          },
+          {
+            title: "SLF Name",
+            key: "slfName",
+            width: 160,
+            render: (_, r) =>
+              r.slfGenerator?.slfName || <Text type="secondary">—</Text>,
+            filters: generators.map((g) => ({ text: g.slfName, value: g._id })),
+            onFilter: (val, r) => {
+              const gid = r.slfGenerator?._id || r.slfGenerator;
+              return gid === val;
+            },
+          },
+          {
+            title: "Company",
+            dataIndex: "lguCompanyName",
+            key: "lguCompanyName",
+            ellipsis: true,
+          },
+          {
+            title: "Type",
+            dataIndex: "companyType",
+            key: "companyType",
+            width: 80,
+            render: (v) =>
+              v === "LGU" ? (
+                <Tag color="blue">LGU</Tag>
+              ) : v === "Private" ? (
+                <Tag color="purple">Private</Tag>
+              ) : (
+                <Tag>{v || "—"}</Tag>
+              ),
+            filters: [
+              { text: "LGU", value: "LGU" },
+              { text: "Private", value: "Private" },
+            ],
+            onFilter: (val, r) => r.companyType === val,
+          },
+          {
+            title: "Date of Disposal",
+            dataIndex: "dateOfDisposal",
+            key: "dateOfDisposal",
+            width: 120,
+            render: (v) => (v ? dayjs(v).format("MMM DD, YYYY") : "—"),
+            sorter: (a, b) =>
+              new Date(a.dateOfDisposal || 0) - new Date(b.dateOfDisposal || 0),
+          },
+          {
+            title: "Trucks",
+            key: "trucks",
+            width: 70,
+            render: (_, r) => r.trucks?.length || 0,
+          },
+          {
+            title: "Total Volume",
+            key: "volume",
+            width: 110,
+            render: (_, r) => {
+              const vol = (r.trucks || []).reduce(
+                (s, t) => s + (t.actualVolume || 0),
+                0,
+              );
+              return vol > 0 ? `${vol.toLocaleString()} tons` : "—";
+            },
+            sorter: (a, b) => {
+              const va = (a.trucks || []).reduce((s, t) => s + (t.actualVolume || 0), 0);
+              const vb = (b.trucks || []).reduce((s, t) => s + (t.actualVolume || 0), 0);
+              return va - vb;
+            },
+          },
+          {
+            title: "Status",
+            dataIndex: "status",
+            key: "status",
+            width: 110,
+            render: (v) => {
+              const color =
+                v === "acknowledged"
+                  ? "green"
+                  : v === "rejected"
+                    ? "red"
+                    : "orange";
+              return <Tag color={color}>{v}</Tag>;
+            },
+            filters: [
+              { text: "Pending", value: "pending" },
+              { text: "Acknowledged", value: "acknowledged" },
+              { text: "Rejected", value: "rejected" },
+            ],
+            onFilter: (val, r) => r.status === val,
+          },
+          {
+            title: "Submitted",
+            dataIndex: "createdAt",
+            key: "createdAt",
+            width: 120,
+            render: (v) => (v ? dayjs(v).format("MMM DD, YYYY") : "—"),
+            sorter: (a, b) =>
+              new Date(a.createdAt || 0) - new Date(b.createdAt || 0),
+            defaultSortOrder: "descend",
+          },
+        ]}
+      />
+
       <Modal
         title={editing ? "Edit Generator" : "Add Generator"}
         open={modalOpen}
@@ -424,6 +843,8 @@ export default function SLFMonitoring() {
   const [loadingGen, setLoadingGen] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
   const [detailModal, setDetailModal] = useState(null);
+  const [baselineData, setBaselineData] = useState(null);
+  const [loadingBaseline, setLoadingBaseline] = useState(false);
   const [editing, setEditing] = useState(null);
   const [searchText, setSearchText] = useState("");
   const [filterProvince, setFilterProvince] = useState(null);
@@ -470,6 +891,27 @@ export default function SLFMonitoring() {
     fetchRecords();
     fetchGenerators();
   }, [fetchRecords, fetchGenerators]);
+
+  // Fetch baseline data when detail modal opens for a facility with linked generator
+  useEffect(() => {
+    if (!detailModal) {
+      setBaselineData(null);
+      return;
+    }
+    const gen = detailModal.slfGenerator;
+    const slfName =
+      gen && typeof gen === "object" ? gen.slfName : null;
+    if (!slfName) {
+      setBaselineData(null);
+      return;
+    }
+    setLoadingBaseline(true);
+    api
+      .get(`/data-slf/baseline/${encodeURIComponent(slfName)}`)
+      .then(({ data }) => setBaselineData(data))
+      .catch(() => setBaselineData(null))
+      .finally(() => setLoadingBaseline(false));
+  }, [detailModal]);
 
   const generatorOptions = useMemo(
     () => generators.map((g) => ({ label: g.slfName, value: g._id })),
@@ -533,10 +975,12 @@ export default function SLFMonitoring() {
           ),
         );
         secureStorage.remove(CACHE_KEY);
+        secureStorage.invalidateDashboard();
         Swal.fire("Updated", "Record updated successfully", "success");
       } else {
         await api.post("/slf-facilities", payload);
         secureStorage.remove(CACHE_KEY);
+        secureStorage.invalidateDashboard();
         Swal.fire("Created", "Record added successfully", "success");
         fetchRecords();
       }
@@ -620,6 +1064,26 @@ export default function SLFMonitoring() {
     (s, r) => s + (r.actualResidualWasteReceived || 0),
     0,
   );
+  const privateSectorCount = filtered.filter(
+    (r) => /private/i.test(r.ownership),
+  ).length;
+
+  // Denominators — counts of records that have a value for each metric
+  const cellsWithData = filtered.filter((r) => r.numberOfCell > 0).length;
+  const lgusWithData = filtered.filter((r) => r.noOfLGUServed > 0).length;
+  const capacityWithData = filtered.filter((r) => r.volumeCapacity > 0).length;
+  const wasteWithData = filtered.filter((r) => r.actualResidualWasteReceived > 0).length;
+  const leachateWithData = filtered.filter((r) => r.noOfLeachatePond > 0).length;
+  const gasVentsWithData = filtered.filter((r) => r.numberOfGasVents > 0).length;
+  const privateWithData = filtered.filter((r) => /private/i.test(r.ownership)).length;
+
+  // Category descriptions
+  const CATEGORY_DESC = {
+    "Cat 1": "< 15 TPD",
+    "Cat 2": "15–75 TPD",
+    "Cat 3": "75–150 TPD",
+    "Cat 4": "> 150 TPD",
+  };
 
   const columns = [
     {
@@ -675,12 +1139,14 @@ export default function SLFMonitoring() {
     {
       title: "Category",
       dataIndex: "category",
-      width: 100,
+      width: 130,
       render: (v) =>
         v ? (
-          <Tag color="blue" bordered={false}>
-            {v}
-          </Tag>
+          <Tooltip title={CATEGORY_DESC[v] || v}>
+            <Tag color="blue" bordered={false}>
+              {v}{CATEGORY_DESC[v] ? ` — ${CATEGORY_DESC[v]}` : ""}
+            </Tag>
+          </Tooltip>
         ) : (
           "—"
         ),
@@ -881,94 +1347,91 @@ export default function SLFMonitoring() {
     <div style={{ padding: 0 }}>
       {/* Summary tiles */}
       <Row gutter={[12, 12]} style={{ marginBottom: 16 }}>
-        {/* Total SLFs + LGUs Served */}
-        <Col xs={24} sm={12} md={6} lg={5}>
-          <Card
-            size="small"
-            hoverable
-            style={{ borderRadius: 10, borderLeft: `4px solid ${ACCENT}`, height: "100%" }}
-          >
+        {/* Row 1 */}
+        <Col xs={12} sm={6} md={6} lg={6}>
+          <Card size="small" hoverable style={{ borderRadius: 10, borderLeft: `4px solid ${ACCENT}`, height: "100%" }}>
             <Statistic
-              title="Total SLFs"
+              title="Total SLF"
               value={totalRecords}
               prefix={<BankOutlined style={{ color: ACCENT }} />}
             />
-            <div style={{ borderTop: "1px dashed #f0f0f0", marginTop: 8, paddingTop: 8 }}>
-              <Text type="secondary" style={{ fontSize: 12 }}>
-                <TeamOutlined style={{ color: "#fa8c16", marginRight: 4 }} />
-                LGUs Served: <Text strong>{totalLGUs}</Text>
-              </Text>
-            </div>
+            <Text type="secondary" style={{ fontSize: 11 }}>
+              <CheckCircleOutlined style={{ color: "#52c41a", marginRight: 3 }} />{opCount}/{totalRecords} Operational
+            </Text>
           </Card>
         </Col>
-        {/* Operational + Non-Operational */}
-        <Col xs={24} sm={12} md={6} lg={5}>
-          <Card
-            size="small"
-            hoverable
-            style={{ borderRadius: 10, borderLeft: "4px solid #52c41a", height: "100%" }}
-          >
-            <Statistic
-              title="Operational"
-              value={opCount}
-              valueStyle={{ color: "#52c41a" }}
-              prefix={<CheckCircleOutlined />}
-            />
-            <div style={{ borderTop: "1px dashed #f0f0f0", marginTop: 8, paddingTop: 8 }}>
-              <Text type="secondary" style={{ fontSize: 12 }}>
-                <CloseCircleOutlined style={{ color: "#ff4d4f", marginRight: 4 }} />
-                Non-Operational: <Text strong style={{ color: "#ff4d4f" }}>{nonOpCount}</Text>
-              </Text>
-            </div>
-          </Card>
-        </Col>
-        {/* Capacity + Waste Received */}
-        <Col xs={24} sm={12} md={6} lg={5}>
-          <Card
-            size="small"
-            hoverable
-            style={{ borderRadius: 10, borderLeft: "4px solid #722ed1", height: "100%" }}
-          >
-            <Statistic
-              title="Capacity"
-              value={totalCapacity}
-              prefix={<DatabaseOutlined style={{ color: "#722ed1" }} />}
-              formatter={(v) => Number(v).toLocaleString()}
-            />
-            <div style={{ borderTop: "1px dashed #f0f0f0", marginTop: 8, paddingTop: 8 }}>
-              <Text type="secondary" style={{ fontSize: 12 }}>
-                <BarChartOutlined style={{ color: "#eb2f96", marginRight: 4 }} />
-                Waste Received: <Text strong>{Number(totalWaste).toLocaleString()} tons</Text>
-              </Text>
-            </div>
-          </Card>
-        </Col>
-        {/* Total Cells */}
-        <Col xs={12} sm={6} md={3} lg={4}>
-          <Card
-            size="small"
-            hoverable
-            style={{ borderRadius: 10, borderLeft: "4px solid #13c2c2", height: "100%" }}
-          >
+        <Col xs={12} sm={6} md={6} lg={6}>
+          <Card size="small" hoverable style={{ borderRadius: 10, borderLeft: "4px solid #13c2c2", height: "100%" }}>
             <Statistic
               title="Total Cells"
               value={totalCells}
               prefix={<ExperimentOutlined style={{ color: "#13c2c2" }} />}
             />
+            <Text type="secondary" style={{ fontSize: 11 }}>{cellsWithData}/{totalRecords} with cells</Text>
           </Card>
         </Col>
-        {/* Leachate Ponds */}
-        <Col xs={12} sm={6} md={3} lg={5}>
-          <Card
-            size="small"
-            hoverable
-            style={{ borderRadius: 10, borderLeft: "4px solid #1890ff", height: "100%" }}
-          >
+        <Col xs={12} sm={6} md={6} lg={6}>
+          <Card size="small" hoverable style={{ borderRadius: 10, borderLeft: "4px solid #fa8c16", height: "100%" }}>
+            <Statistic
+              title="LGUs Served"
+              value={totalLGUs}
+              prefix={<TeamOutlined style={{ color: "#fa8c16" }} />}
+            />
+            <Text type="secondary" style={{ fontSize: 11 }}>{lgusWithData}/{totalRecords} reporting</Text>
+          </Card>
+        </Col>
+        <Col xs={12} sm={6} md={6} lg={6}>
+          <Card size="small" hoverable style={{ borderRadius: 10, borderLeft: "4px solid #722ed1", height: "100%" }}>
+            <Statistic
+              title="Private Sectors Served"
+              value={privateSectorCount}
+              prefix={<BankOutlined style={{ color: "#722ed1" }} />}
+            />
+            <Text type="secondary" style={{ fontSize: 11 }}>{privateWithData}/{totalRecords} private-owned</Text>
+          </Card>
+        </Col>
+        {/* Row 2 */}
+        <Col xs={12} sm={6} md={6} lg={6}>
+          <Card size="small" hoverable style={{ borderRadius: 10, borderLeft: "4px solid #eb2f96", height: "100%" }}>
+            <Statistic
+              title="Total Capacity"
+              value={totalCapacity}
+              prefix={<DatabaseOutlined style={{ color: "#eb2f96" }} />}
+              formatter={(v) => Number(v).toLocaleString()}
+            />
+            <Text type="secondary" style={{ fontSize: 11 }}>{capacityWithData}/{totalRecords} with data</Text>
+          </Card>
+        </Col>
+        <Col xs={12} sm={6} md={6} lg={6}>
+          <Card size="small" hoverable style={{ borderRadius: 10, borderLeft: "4px solid #ff4d4f", height: "100%" }}>
+            <Statistic
+              title="Waste Received"
+              value={totalWaste}
+              suffix="tons"
+              prefix={<BarChartOutlined style={{ color: "#ff4d4f" }} />}
+              formatter={(v) => Number(v).toLocaleString()}
+            />
+            <Text type="secondary" style={{ fontSize: 11 }}>{wasteWithData}/{totalRecords} reporting</Text>
+          </Card>
+        </Col>
+        <Col xs={12} sm={6} md={6} lg={6}>
+          <Card size="small" hoverable style={{ borderRadius: 10, borderLeft: "4px solid #1890ff", height: "100%" }}>
             <Statistic
               title="Leachate Ponds"
               value={totalLeachate}
               prefix={<AlertOutlined style={{ color: "#1890ff" }} />}
             />
+            <Text type="secondary" style={{ fontSize: 11 }}>{leachateWithData}/{totalRecords} with ponds</Text>
+          </Card>
+        </Col>
+        <Col xs={12} sm={6} md={6} lg={6}>
+          <Card size="small" hoverable style={{ borderRadius: 10, borderLeft: "4px solid #52c41a", height: "100%" }}>
+            <Statistic
+              title="Gas Vents"
+              value={totalGasVents}
+              prefix={<ExperimentOutlined style={{ color: "#52c41a" }} />}
+            />
+            <Text type="secondary" style={{ fontSize: 11 }}>{gasVentsWithData}/{totalRecords} with vents</Text>
           </Card>
         </Col>
       </Row>
@@ -1224,12 +1687,12 @@ export default function SLFMonitoring() {
             </Col>
             <Col span={6}>
               <Form.Item name="latitude" label="Latitude">
-                <InputNumber style={{ width: "100%" }} />
+                <InputNumber style={{ width: "100%" }} step={0.0001} precision={10} />
               </Form.Item>
             </Col>
             <Col span={6}>
               <Form.Item name="longitude" label="Longitude">
-                <InputNumber style={{ width: "100%" }} />
+                <InputNumber style={{ width: "100%" }} step={0.0001} precision={10} />
               </Form.Item>
             </Col>
           </Row>
@@ -1584,78 +2047,263 @@ export default function SLFMonitoring() {
               },
               {
                 key: "2",
-                label: "Operations",
-                children: (
-                  <Row gutter={[16, 8]}>
-                    <Col span={8}>
-                      <Text type="secondary">Cells:</Text>{" "}
-                      <Text strong>{detailModal.numberOfCell ?? "—"}</Text>
-                    </Col>
-                    <Col span={8}>
-                      <Text type="secondary">Leachate Ponds:</Text>{" "}
-                      <Text strong>{detailModal.noOfLeachatePond ?? "—"}</Text>
-                    </Col>
-                    <Col span={8}>
-                      <Text type="secondary">Gas Vents:</Text>{" "}
-                      <Text strong>{detailModal.numberOfGasVents ?? "—"}</Text>
-                    </Col>
-                    <Col span={12}>
-                      <Text type="secondary">Waste Received:</Text>{" "}
-                      <Text strong>
-                        {detailModal.actualResidualWasteReceived
-                          ? `${Number(detailModal.actualResidualWasteReceived).toLocaleString()} tons`
-                          : "—"}
-                      </Text>
-                    </Col>
-                    <Col span={12}>
-                      <Text type="secondary">Est. Volume:</Text>{" "}
-                      <Text strong>
-                        {detailModal.estimatedVolumeWaste
-                          ? Number(
-                              detailModal.estimatedVolumeWaste,
-                            ).toLocaleString()
-                          : "—"}
-                      </Text>
-                    </Col>
-                    <Col span={12}>
-                      <Text type="secondary">MRF Established:</Text>{" "}
-                      <Text strong>{detailModal.mrfEstablished || "—"}</Text>
-                    </Col>
-                    <Divider plain orientation="left">
-                      Permits
-                    </Divider>
-                    <Col span={12}>
-                      <Text type="secondary">ECC No.:</Text>{" "}
-                      <Text>{detailModal.eccNo || "—"}</Text>
-                    </Col>
-                    <Col span={12}>
-                      <Text type="secondary">Discharge Permit:</Text>{" "}
-                      <Text>{detailModal.dischargePermit || "—"}</Text>
-                    </Col>
-                    <Col span={12}>
-                      <Text type="secondary">Permit to Operate:</Text>{" "}
-                      <Text>{detailModal.permitToOperate || "—"}</Text>
-                    </Col>
-                    <Col span={12}>
-                      <Text type="secondary">Hazwaste Gen. ID:</Text>{" "}
-                      <Text>{detailModal.hazwasteGenerationId || "—"}</Text>
-                    </Col>
-                    {detailModal.slfGenerator && (
-                      <>
-                        <Divider plain orientation="left">
-                          Portal Link
-                        </Divider>
-                        <Col span={24}>
-                          <Tag color="blue" icon={<LinkOutlined />}>
-                            {typeof detailModal.slfGenerator === "object"
-                              ? detailModal.slfGenerator.slfName
-                              : "Linked Generator"}
-                          </Tag>
-                        </Col>
-                      </>
-                    )}
-                  </Row>
+                label: (
+                  <>
+                    <BarChartOutlined /> Operations
+                  </>
                 ),
+                children: (() => {
+                  const cells = detailModal.numberOfCell || 0;
+                  const leachate = detailModal.noOfLeachatePond || 0;
+                  const gasVents = detailModal.numberOfGasVents || 0;
+                  const wasteReceived = detailModal.actualResidualWasteReceived || 0;
+                  const estVolume = detailModal.estimatedVolumeWaste || 0;
+                  const capacity = detailModal.volumeCapacity || 0;
+                  const infraData = [
+                    { name: "Cells", value: cells },
+                    { name: "Leachate Ponds", value: leachate },
+                    { name: "Gas Vents", value: gasVents },
+                  ].filter((d) => d.value > 0);
+                  const capacityData =
+                    capacity > 0
+                      ? [
+                          { name: "Waste Received", value: Math.min(wasteReceived, capacity) },
+                          { name: "Remaining", value: Math.max(0, capacity - wasteReceived) },
+                        ]
+                      : wasteReceived > 0
+                        ? [{ name: "Waste Received", value: wasteReceived }]
+                        : [];
+                  const volumeData = [
+                    wasteReceived > 0 && { name: "Waste Received", value: wasteReceived },
+                    estVolume > 0 && { name: "Est. Volume", value: estVolume },
+                    capacity > 0 && { name: "Capacity", value: capacity },
+                  ].filter(Boolean);
+                  // Cell volume data from baseline
+                  const cellVolumeData = baselineData
+                    ? [
+                        baselineData.activeCellResidualVolume > 0 && {
+                          name: "Active Residual",
+                          value: baselineData.activeCellResidualVolume,
+                          unit: baselineData.activeCellResidualUnit || "m³",
+                        },
+                        baselineData.activeCellInertVolume > 0 && {
+                          name: "Active Inert",
+                          value: baselineData.activeCellInertVolume,
+                          unit: baselineData.activeCellInertUnit || "m³",
+                        },
+                        baselineData.closedCellResidualVolume > 0 && {
+                          name: "Closed Residual",
+                          value: baselineData.closedCellResidualVolume,
+                          unit: baselineData.closedCellResidualUnit || "m³",
+                        },
+                        baselineData.closedCellInertVolume > 0 && {
+                          name: "Closed Inert",
+                          value: baselineData.closedCellInertVolume,
+                          unit: baselineData.closedCellInertUnit || "m³",
+                        },
+                      ].filter(Boolean)
+                    : [];
+                  const hasCharts = infraData.length > 0 || capacityData.length > 0 || cellVolumeData.length > 0;
+                  return (
+                    <>
+                      <Row gutter={[16, 8]} style={{ marginBottom: 16 }}>
+                        <Col span={8}>
+                          <Text type="secondary">Cells:</Text>{" "}
+                          <Text strong>{cells || "—"}</Text>
+                        </Col>
+                        <Col span={8}>
+                          <Text type="secondary">Leachate Ponds:</Text>{" "}
+                          <Text strong>{leachate || "—"}</Text>
+                        </Col>
+                        <Col span={8}>
+                          <Text type="secondary">Gas Vents:</Text>{" "}
+                          <Text strong>{gasVents || "—"}</Text>
+                        </Col>
+                        <Col span={12}>
+                          <Text type="secondary">Waste Received:</Text>{" "}
+                          <Text strong>
+                            {wasteReceived ? `${Number(wasteReceived).toLocaleString()} tons` : "—"}
+                          </Text>
+                        </Col>
+                        <Col span={12}>
+                          <Text type="secondary">Est. Volume:</Text>{" "}
+                          <Text strong>
+                            {estVolume ? Number(estVolume).toLocaleString() : "—"}
+                          </Text>
+                        </Col>
+                        <Col span={12}>
+                          <Text type="secondary">MRF Established:</Text>{" "}
+                          <Text strong>{detailModal.mrfEstablished || "—"}</Text>
+                        </Col>
+                        <Divider plain orientation="left">
+                          Permits
+                        </Divider>
+                        <Col span={12}>
+                          <Text type="secondary">ECC No.:</Text>{" "}
+                          <Text>{detailModal.eccNo || "—"}</Text>
+                        </Col>
+                        <Col span={12}>
+                          <Text type="secondary">Discharge Permit:</Text>{" "}
+                          <Text>{detailModal.dischargePermit || "—"}</Text>
+                        </Col>
+                        <Col span={12}>
+                          <Text type="secondary">Permit to Operate:</Text>{" "}
+                          <Text>{detailModal.permitToOperate || "—"}</Text>
+                        </Col>
+                        <Col span={12}>
+                          <Text type="secondary">Hazwaste Gen. ID:</Text>{" "}
+                          <Text>{detailModal.hazwasteGenerationId || "—"}</Text>
+                        </Col>
+                        {detailModal.slfGenerator && (
+                          <>
+                            <Divider plain orientation="left">
+                              Portal Link
+                            </Divider>
+                            <Col span={24}>
+                              <Tag color="blue" icon={<LinkOutlined />}>
+                                {typeof detailModal.slfGenerator === "object"
+                                  ? detailModal.slfGenerator.slfName
+                                  : "Linked Generator"}
+                              </Tag>
+                            </Col>
+                          </>
+                        )}
+                      </Row>
+                      {hasCharts && (
+                        <>
+                          <Divider plain orientation="left">
+                            <BarChartOutlined /> Charts
+                          </Divider>
+                          <Row gutter={[16, 16]}>
+                            {/* Infrastructure Breakdown */}
+                            {infraData.length > 0 && (
+                              <Col xs={24} md={12}>
+                                <Card size="small" title="Infrastructure Count" style={{ borderRadius: 10 }}>
+                                  <ResponsiveContainer width="100%" height={220}>
+                                    <BarChart data={infraData}>
+                                      <CartesianGrid strokeDasharray="3 3" />
+                                      <XAxis dataKey="name" tick={{ fontSize: 12 }} />
+                                      <YAxis allowDecimals={false} />
+                                      <RTooltip />
+                                      <Bar dataKey="value" fill={ACCENT} radius={[4, 4, 0, 0]}>
+                                        {infraData.map((_, i) => (
+                                          <RCell key={i} fill={CHART_COLORS[i % CHART_COLORS.length]} />
+                                        ))}
+                                      </Bar>
+                                    </BarChart>
+                                  </ResponsiveContainer>
+                                </Card>
+                              </Col>
+                            )}
+                            {/* Capacity Utilization Pie */}
+                            {capacityData.length > 0 && (
+                              <Col xs={24} md={12}>
+                                <Card size="small" title="Waste Capacity Utilization" style={{ borderRadius: 10 }}>
+                                  <ResponsiveContainer width="100%" height={220}>
+                                    <PieChart>
+                                      <Pie
+                                        data={capacityData}
+                                        cx="50%"
+                                        cy="50%"
+                                        innerRadius={50}
+                                        outerRadius={80}
+                                        paddingAngle={3}
+                                        dataKey="value"
+                                        label={({ name, value }) => `${name}: ${value.toLocaleString()}`}
+                                      >
+                                        {capacityData.map((_, i) => (
+                                          <RCell key={i} fill={CHART_COLORS[i % CHART_COLORS.length]} />
+                                        ))}
+                                      </Pie>
+                                      <RTooltip formatter={(v) => v.toLocaleString()} />
+                                      <Legend />
+                                    </PieChart>
+                                  </ResponsiveContainer>
+                                </Card>
+                              </Col>
+                            )}
+                            {/* Volume Comparison Bar */}
+                            {volumeData.length > 1 && (
+                              <Col xs={24} md={12}>
+                                <Card size="small" title="Volume Comparison" style={{ borderRadius: 10 }}>
+                                  <ResponsiveContainer width="100%" height={220}>
+                                    <BarChart data={volumeData}>
+                                      <CartesianGrid strokeDasharray="3 3" />
+                                      <XAxis dataKey="name" tick={{ fontSize: 12 }} />
+                                      <YAxis />
+                                      <RTooltip formatter={(v) => v.toLocaleString()} />
+                                      <Bar dataKey="value" fill="#52c41a" radius={[4, 4, 0, 0]}>
+                                        {volumeData.map((_, i) => (
+                                          <RCell key={i} fill={CHART_COLORS[i % CHART_COLORS.length]} />
+                                        ))}
+                                      </Bar>
+                                    </BarChart>
+                                  </ResponsiveContainer>
+                                </Card>
+                              </Col>
+                            )}
+                            {/* Cell Volumes (from baseline) */}
+                            {cellVolumeData.length > 0 && (
+                              <Col xs={24} md={cellVolumeData.length >= 2 ? 12 : 24}>
+                                <Card size="small" title="Cell Volumes (Baseline)" style={{ borderRadius: 10 }}>
+                                  <ResponsiveContainer width="100%" height={220}>
+                                    <BarChart data={cellVolumeData}>
+                                      <CartesianGrid strokeDasharray="3 3" />
+                                      <XAxis dataKey="name" tick={{ fontSize: 11 }} />
+                                      <YAxis />
+                                      <RTooltip
+                                        formatter={(v, _, entry) =>
+                                          `${v.toLocaleString()} ${entry.payload.unit || ""}`
+                                        }
+                                      />
+                                      <Bar dataKey="value" fill="#722ed1" radius={[4, 4, 0, 0]}>
+                                        {cellVolumeData.map((_, i) => (
+                                          <RCell key={i} fill={CHART_COLORS[(i + 3) % CHART_COLORS.length]} />
+                                        ))}
+                                      </Bar>
+                                    </BarChart>
+                                  </ResponsiveContainer>
+                                </Card>
+                              </Col>
+                            )}
+                            {/* Per-cell pie if 2+ cells */}
+                            {cells >= 2 && cellVolumeData.length >= 2 && (
+                              <Col xs={24} md={12}>
+                                <Card size="small" title="Cell Volume Distribution" style={{ borderRadius: 10 }}>
+                                  <ResponsiveContainer width="100%" height={220}>
+                                    <PieChart>
+                                      <Pie
+                                        data={cellVolumeData}
+                                        cx="50%"
+                                        cy="50%"
+                                        outerRadius={80}
+                                        paddingAngle={3}
+                                        dataKey="value"
+                                        label={({ name, value }) =>
+                                          `${name}: ${value.toLocaleString()}`
+                                        }
+                                      >
+                                        {cellVolumeData.map((_, i) => (
+                                          <RCell key={i} fill={CHART_COLORS[(i + 3) % CHART_COLORS.length]} />
+                                        ))}
+                                      </Pie>
+                                      <RTooltip
+                                        formatter={(v, _, entry) =>
+                                          `${v.toLocaleString()} ${entry.payload.unit || ""}`
+                                        }
+                                      />
+                                      <Legend />
+                                    </PieChart>
+                                  </ResponsiveContainer>
+                                </Card>
+                              </Col>
+                            )}
+                          </Row>
+                        </>
+                      )}
+                    </>
+                  );
+                })(),
               },
               {
                 key: "3",
@@ -1759,6 +2407,120 @@ export default function SLFMonitoring() {
                   </Row>
                 ),
               },
+              ...(detailModal.slfGenerator
+                ? [
+                    {
+                      key: "5",
+                      label: (
+                        <>
+                          <DatabaseOutlined /> Baseline Info
+                        </>
+                      ),
+                      children: loadingBaseline ? (
+                        <div style={{ textAlign: "center", padding: 32 }}>
+                          <Text type="secondary">Loading baseline data...</Text>
+                        </div>
+                      ) : baselineData ? (
+                        <>
+                          <Row gutter={[16, 12]}>
+                            <Col span={24}>
+                              <Text type="secondary" style={{ fontSize: 12 }}>
+                                Last updated:{" "}
+                                {baselineData.savedAt
+                                  ? dayjs(baselineData.savedAt).format("MMM DD, YYYY h:mm A")
+                                  : "—"}
+                              </Text>
+                            </Col>
+                            <Col span={12}>
+                              <Card size="small" style={{ borderRadius: 8 }}>
+                                <Statistic
+                                  title="Total Volume Accepted"
+                                  value={baselineData.totalVolumeAccepted ?? 0}
+                                  suffix={baselineData.totalVolumeAcceptedUnit || "m³"}
+                                  precision={2}
+                                />
+                              </Card>
+                            </Col>
+                            <Col span={12}>
+                              <Card size="small" style={{ borderRadius: 8 }}>
+                                <Statistic
+                                  title="Active Cell (Residual)"
+                                  value={baselineData.activeCellResidualVolume ?? 0}
+                                  suffix={baselineData.activeCellResidualUnit || "m³"}
+                                  precision={2}
+                                />
+                              </Card>
+                            </Col>
+                            <Col span={12}>
+                              <Card size="small" style={{ borderRadius: 8 }}>
+                                <Statistic
+                                  title="Active Cell (Inert)"
+                                  value={baselineData.activeCellInertVolume ?? 0}
+                                  suffix={baselineData.activeCellInertUnit || "m³"}
+                                  precision={2}
+                                />
+                              </Card>
+                            </Col>
+                            <Col span={12}>
+                              <Card size="small" style={{ borderRadius: 8 }}>
+                                <Statistic
+                                  title="Closed Cell (Residual)"
+                                  value={baselineData.closedCellResidualVolume ?? 0}
+                                  suffix={baselineData.closedCellResidualUnit || "m³"}
+                                  precision={2}
+                                />
+                              </Card>
+                            </Col>
+                            <Col span={12}>
+                              <Card size="small" style={{ borderRadius: 8 }}>
+                                <Statistic
+                                  title="Closed Cell (Inert)"
+                                  value={baselineData.closedCellInertVolume ?? 0}
+                                  suffix={baselineData.closedCellInertUnit || "m³"}
+                                  precision={2}
+                                />
+                              </Card>
+                            </Col>
+                          </Row>
+                          {baselineData.accreditedHaulers?.length > 0 && (
+                            <>
+                              <Divider plain orientation="left">
+                                <TeamOutlined /> Accredited Haulers
+                              </Divider>
+                              <Table
+                                dataSource={baselineData.accreditedHaulers}
+                                rowKey={(_, i) => i}
+                                size="small"
+                                pagination={false}
+                                columns={[
+                                  { title: "Hauler Name", dataIndex: "haulerName", key: "haulerName" },
+                                  {
+                                    title: "No. of Trucks",
+                                    dataIndex: "numberOfTrucks",
+                                    key: "numberOfTrucks",
+                                    render: (v) => v ?? "—",
+                                  },
+                                  {
+                                    title: "Private Sector Clients",
+                                    dataIndex: "privateSectorClients",
+                                    key: "privateSectorClients",
+                                    render: (v) => v || "—",
+                                  },
+                                ]}
+                              />
+                            </>
+                          )}
+                        </>
+                      ) : (
+                        <div style={{ textAlign: "center", padding: 32 }}>
+                          <Text type="secondary">
+                            No baseline data submitted yet for this SLF.
+                          </Text>
+                        </div>
+                      ),
+                    },
+                  ]
+                : []),
             ]}
           />
         )}

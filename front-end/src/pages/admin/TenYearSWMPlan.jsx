@@ -288,10 +288,12 @@ export default function TenYearSWMPlan() {
           ),
         );
         secureStorage.remove(CACHE_KEY);
+        secureStorage.invalidateDashboard();
         Swal.fire("Updated", "Record updated successfully", "success");
       } else {
         await api.post("/ten-year-swm", payload);
         secureStorage.remove(CACHE_KEY);
+        secureStorage.invalidateDashboard();
         Swal.fire("Created", "Record added successfully", "success");
         fetchRecords();
       }

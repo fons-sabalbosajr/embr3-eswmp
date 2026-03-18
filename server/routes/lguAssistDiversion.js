@@ -73,7 +73,7 @@ router.post("/", async (req, res) => {
     res.status(201).json(record);
     writeLog("info", "lgu-assist-diversion.create", {
       message: `LGU Assistance entry created: ${record.lgu}, ${record.province}`,
-      ip: req.ip,
+      req,
     });
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });
@@ -91,7 +91,7 @@ router.post("/bulk", async (req, res) => {
     res.status(201).json({ message: `${saved.length} records imported`, count: saved.length });
     writeLog("info", "lgu-assist-diversion.bulk-import", {
       message: `Bulk import: ${saved.length} records`,
-      ip: req.ip,
+      req,
     });
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });
@@ -106,7 +106,7 @@ router.put("/:id", async (req, res) => {
     res.json(record);
     writeLog("info", "lgu-assist-diversion.update", {
       message: `LGU Assistance entry updated: ${record.lgu}, ${record.province}`,
-      ip: req.ip,
+      req,
     });
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });
@@ -121,7 +121,7 @@ router.delete("/:id", async (req, res) => {
     res.json({ message: "Record deleted" });
     writeLog("warn", "lgu-assist-diversion.delete", {
       message: `LGU Assistance entry deleted: ${record.lgu}, ${record.province}`,
-      ip: req.ip,
+      req,
     });
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });

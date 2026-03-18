@@ -35,8 +35,32 @@ const CLIENT_URL = process.env.CLIENT_URL || "http://localhost:5173/eswm-pipelin
 
 // Middleware
 const corsOrigin = new URL(CLIENT_URL).origin;
+app.set("trust proxy", true);
 app.use(cors({ origin: corsOrigin, credentials: true }));
 app.use(express.json());
+
+// Attach user info from JWT to req for logging
+app.use((req, _res, next) => {
+  const auth = req.headers.authorization;
+  if (auth?.startsWith("Bearer ")) {
+    try {
+      const jwt = require("jsonwebtoken");
+      const decoded = jwt.verify(auth.split(" ")[1], process.env.JWT_SECRET);
+      if (decoded.id) {
+        const User = require("./models/User");
+        User.findById(decoded.id)
+          .select("email")
+          .then((u) => {
+            if (u) req.logUser = u.email;
+          })
+          .catch(() => {})
+          .finally(() => next());
+        return;
+      }
+    } catch { /* invalid token */ }
+  }
+  next();
+});
 
 // Connect to MongoDB
 mongoose

@@ -175,10 +175,12 @@ export default function TrashTraps() {
         const { data } = await api.put(`/trash-traps/${editing._id}`, payload);
         setRecords((prev) => prev.map((r) => r._id === editing._id ? { ...data, ...computeFields(data) } : r));
         secureStorage.remove(CACHE_KEY);
+        secureStorage.invalidateDashboard();
         Swal.fire("Updated", "Record updated successfully", "success");
       } else {
         await api.post("/trash-traps", payload);
         secureStorage.remove(CACHE_KEY);
+        secureStorage.invalidateDashboard();
         Swal.fire("Created", "Record added successfully", "success");
         fetchRecords();
       }

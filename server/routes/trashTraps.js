@@ -87,6 +87,17 @@ router.get("/stats", async (req, res) => {
   }
 });
 
+// Get single record by ID
+router.get("/:id", async (req, res) => {
+  try {
+    const record = await TrashTrap.findById(req.params.id);
+    if (!record) return res.status(404).json({ message: "Not found" });
+    res.json(record);
+  } catch (error) {
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+});
+
 // Create
 router.post("/", async (req, res) => {
   try {

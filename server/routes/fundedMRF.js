@@ -144,7 +144,7 @@ router.post("/", async (req, res) => {
     res.status(201).json(record);
     writeLog("info", "funded-mrf.create", {
       message: `Funded MRF entry created: ${record.municipality}, ${record.province}`,
-      ip: req.ip,
+      req,
     });
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });
@@ -162,7 +162,7 @@ router.post("/bulk", async (req, res) => {
     res.status(201).json({ message: `${saved.length} records imported`, count: saved.length });
     writeLog("info", "funded-mrf.bulk-import", {
       message: `Bulk import: ${saved.length} records`,
-      ip: req.ip,
+      req,
     });
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });
@@ -179,7 +179,7 @@ router.put("/:id", async (req, res) => {
     res.json(record);
     writeLog("info", "funded-mrf.update", {
       message: `Funded MRF entry updated: ${record.municipality}, ${record.province}`,
-      ip: req.ip,
+      req,
     });
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });
@@ -194,7 +194,7 @@ router.delete("/:id", async (req, res) => {
     res.json({ message: "Record deleted" });
     writeLog("warn", "funded-mrf.delete", {
       message: `Funded MRF entry deleted: ${record.municipality}, ${record.province}`,
-      ip: req.ip,
+      req,
     });
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });

@@ -80,6 +80,10 @@ const secureStorage = {
     localStorage.clear();
     sessionStorage.clear();
   },
+  /** Remove dashboard stats cache so next load fetches fresh data */
+  invalidateDashboard() {
+    secureStorage.remove("dashboard-stats-cache");
+  },
 };
 
 export default secureStorage;

@@ -17,8 +17,15 @@ router.post("/", async (req, res) => {
 
     const saved = [];
     for (const item of items) {
+      // Resolve slfGenerator from slfName if not set
+      let genId = item.slfGenerator || null;
+      if (!genId && item.slfName) {
+        const gen = await SLFGenerator.findOne({ slfName: item.slfName });
+        if (gen) genId = gen._id;
+      }
       const doc = new DataSLF({
         ...item,
+        slfGenerator: genId,
         submissionId,
         submittedBy: submittedBy || item.submittedBy || "",
       });
@@ -52,6 +59,76 @@ router.post("/", async (req, res) => {
       ip: req.ip,
       meta: { submissionId: saved[0]?.submissionId, count: saved.length },
     });
+  } catch (error) {
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+});
+
+// Get latest baseline info for an SLF (by assigned name) — portal
+router.get("/baseline/:slfName", async (req, res) => {
+  try {
+    const slfName = decodeURIComponent(req.params.slfName);
+    const generator = await SLFGenerator.findOne({ slfName });
+    if (!generator) return res.json(null);
+
+    const latest = await DataSLF.findOne({
+      slfGenerator: generator._id,
+      totalVolumeAccepted: { $ne: null },
+    }).sort({ createdAt: -1 });
+
+    if (!latest) return res.json(null);
+
+    res.json({
+      totalVolumeAccepted: latest.totalVolumeAccepted,
+      totalVolumeAcceptedUnit: latest.totalVolumeAcceptedUnit,
+      activeCellResidualVolume: latest.activeCellResidualVolume,
+      activeCellResidualUnit: latest.activeCellResidualUnit,
+      activeCellInertVolume: latest.activeCellInertVolume,
+      activeCellInertUnit: latest.activeCellInertUnit,
+      closedCellResidualVolume: latest.closedCellResidualVolume,
+      closedCellResidualUnit: latest.closedCellResidualUnit,
+      closedCellInertVolume: latest.closedCellInertVolume,
+      closedCellInertUnit: latest.closedCellInertUnit,
+      accreditedHaulers: latest.accreditedHaulers || [],
+      savedAt: latest.createdAt,
+    });
+  } catch (error) {
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+});
+
+// Get latest baseline info for ALL SLF generators — admin tab
+router.get("/baselines", async (req, res) => {
+  try {
+    const generators = await SLFGenerator.find().sort({ slfName: 1 });
+    const results = [];
+    for (const gen of generators) {
+      const latest = await DataSLF.findOne({
+        slfGenerator: gen._id,
+        totalVolumeAccepted: { $ne: null },
+      }).sort({ createdAt: -1 });
+      if (latest) {
+        results.push({
+          _id: gen._id,
+          slfName: gen.slfName,
+          isActive: gen.isActive,
+          totalVolumeAccepted: latest.totalVolumeAccepted,
+          totalVolumeAcceptedUnit: latest.totalVolumeAcceptedUnit || "m³",
+          activeCellResidualVolume: latest.activeCellResidualVolume,
+          activeCellResidualUnit: latest.activeCellResidualUnit || "m³",
+          activeCellInertVolume: latest.activeCellInertVolume,
+          activeCellInertUnit: latest.activeCellInertUnit || "m³",
+          closedCellResidualVolume: latest.closedCellResidualVolume,
+          closedCellResidualUnit: latest.closedCellResidualUnit || "m³",
+          closedCellInertVolume: latest.closedCellInertVolume,
+          closedCellInertUnit: latest.closedCellInertUnit || "m³",
+          accreditedHaulers: latest.accreditedHaulers || [],
+          submittedBy: latest.submittedBy,
+          lastUpdated: latest.createdAt,
+        });
+      }
+    }
+    res.json(results);
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });
   }
@@ -130,6 +207,40 @@ router.get("/stats", async (req, res) => {
   }
 });
 
+// Aggregated stats per SLF generator (for Waste Generators tab tiles)
+router.get("/generator-summary", async (req, res) => {
+  try {
+    const summary = await DataSLF.aggregate([
+      { $match: { slfGenerator: { $ne: null } } },
+      {
+        $group: {
+          _id: "$slfGenerator",
+          totalEntries: { $sum: 1 },
+          pendingCount: { $sum: { $cond: [{ $eq: ["$status", "pending"] }, 1, 0] } },
+          acknowledgedCount: { $sum: { $cond: [{ $eq: ["$status", "acknowledged"] }, 1, 0] } },
+          rejectedCount: { $sum: { $cond: [{ $eq: ["$status", "rejected"] }, 1, 0] } },
+          totalTrucks: { $sum: { $size: { $ifNull: ["$trucks", []] } } },
+          totalVolume: {
+            $sum: {
+              $reduce: {
+                input: { $ifNull: ["$trucks", []] },
+                initialValue: 0,
+                in: { $add: ["$$value", { $ifNull: ["$$this.actualVolume", 0] }] },
+              },
+            },
+          },
+          lguCount: { $sum: { $cond: [{ $eq: ["$companyType", "LGU"] }, 1, 0] } },
+          privateCount: { $sum: { $cond: [{ $eq: ["$companyType", "Private"] }, 1, 0] } },
+          lastSubmission: { $max: "$createdAt" },
+        },
+      },
+    ]);
+    res.json(summary);
+  } catch (error) {
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+});
+
 // Get all SLF data entries (admin)
 router.get("/", async (req, res) => {
   try {
@@ -137,6 +248,40 @@ router.get("/", async (req, res) => {
       .populate("slfGenerator")
       .sort({ createdAt: -1 });
     res.json(entries);
+  } catch (error) {
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+});
+
+// Update a pending submission (admin edit)
+router.put("/:id", async (req, res) => {
+  try {
+    const entry = await DataSLF.findById(req.params.id);
+    if (!entry) return res.status(404).json({ message: "Entry not found" });
+    if (entry.status !== "pending") {
+      return res.status(400).json({ message: "Only pending entries can be edited" });
+    }
+    const allowed = [
+      "dateOfDisposal", "lguCompanyName", "companyType", "address",
+      "trucks", "totalVolumeAccepted", "totalVolumeAcceptedUnit",
+      "activeCellResidualVolume", "activeCellResidualUnit",
+      "activeCellInertVolume", "activeCellInertUnit",
+      "closedCellResidualVolume", "closedCellResidualUnit",
+      "closedCellInertVolume", "closedCellInertUnit",
+      "accreditedHaulers",
+    ];
+    for (const key of allowed) {
+      if (req.body[key] !== undefined) entry[key] = req.body[key];
+    }
+    await entry.save();
+    const populated = await DataSLF.findById(entry._id).populate("slfGenerator");
+    res.json(populated);
+    writeLog("info", "submission.update", {
+      message: `Submission ${entry.idNo} edited by admin`,
+      user: req.logUser || "admin",
+      ip: req.ip,
+      meta: { id: entry._id, idNo: entry.idNo },
+    });
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });
   }
@@ -190,6 +335,7 @@ router.patch("/:id/status", async (req, res) => {
 
     writeLog("info", "submission.status", {
       message: `Submission ${entry.idNo} ${status}`,
+      user: req.logUser || "admin",
       ip: req.ip,
       meta: { id: entry._id, status },
     });
@@ -259,6 +405,7 @@ router.patch("/bulk-status", async (req, res) => {
     res.json({ message: `${updated.length} entries ${status}`, data: updated });
     writeLog("info", "submission.bulk-status", {
       message: `Bulk ${status}: ${updated.length} entries`,
+      user: req.logUser || "admin",
       ip: req.ip,
       meta: { status, count: updated.length, ids: updated.map((e) => e.idNo) },
     });
@@ -290,7 +437,7 @@ router.delete("/:id", async (req, res) => {
 
     await DataSLF.findByIdAndDelete(req.params.id);
     res.json({ message: "Entry deleted" });
-    writeLog("warn", "submission.delete", { message: `Submission deleted: ${req.params.id}`, ip: req.ip });
+    writeLog("warn", "submission.delete", { message: `Submission deleted: ${req.params.id}`, user: req.logUser || "admin", ip: req.ip });
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });
   }

@@ -55,7 +55,7 @@ const EMPTY_TRUCK = {
   hauler: "",
   plateNumber: "",
   truckCapacity: null,
-  truckCapacityUnit: "m3",
+  truckCapacityUnit: "m³",
   actualVolume: null,
   actualVolumeUnit: "tons",
   wasteType: undefined,
@@ -84,8 +84,27 @@ export default function SLFPortal() {
   const [haulerDraft, setHaulerDraft] = useState({ haulerName: "", numberOfTrucks: null, privateSectorClients: "" });
   const [editingHaulerKey, setEditingHaulerKey] = useState(null);
   const [haulerErrors, setHaulerErrors] = useState({});
+  const [baselineSaved, setBaselineSaved] = useState(false);
+  const [fieldLabels, setFieldLabels] = useState({});
 
   const isMobile = !screens.md;
+
+  // Fetch portal field settings (labels, required, active) for real-time updates
+  useEffect(() => {
+    api
+      .get("/settings/fields")
+      .then(({ data }) => {
+        const map = {};
+        data.forEach((f) => {
+          map[f.fieldKey] = { label: f.fieldName, required: f.required, options: f.options || [] };
+        });
+        setFieldLabels(map);
+      })
+      .catch(() => {});
+  }, []);
+
+  // Helper to get field label from settings, fallback to default
+  const fl = (key, fallback) => fieldLabels[key]?.label || fallback;
 
   // Load portal user from storage
   useEffect(() => {
@@ -98,6 +117,37 @@ export default function SLFPortal() {
     setPortalUser(user);
     setLoadingUser(false);
   }, [navigate]);
+
+  // Fetch existing baseline when user is loaded
+  useEffect(() => {
+    if (!portalUser?.assignedSlfName) return;
+    api
+      .get(`/data-slf/baseline/${encodeURIComponent(portalUser.assignedSlfName)}`)
+      .then(({ data }) => {
+        if (data && data.totalVolumeAccepted != null) {
+          baselineForm.setFieldsValue({
+            totalVolumeAccepted: data.totalVolumeAccepted,
+            totalVolumeAcceptedUnit: data.totalVolumeAcceptedUnit || "m³",
+            activeCellResidualVolume: data.activeCellResidualVolume,
+            activeCellResidualUnit: data.activeCellResidualUnit || "m³",
+            activeCellInertVolume: data.activeCellInertVolume,
+            activeCellInertUnit: data.activeCellInertUnit || "m³",
+            closedCellResidualVolume: data.closedCellResidualVolume,
+            closedCellResidualUnit: data.closedCellResidualUnit || "m³",
+            closedCellInertVolume: data.closedCellInertVolume,
+            closedCellInertUnit: data.closedCellInertUnit || "m³",
+          });
+          if (data.accreditedHaulers?.length > 0) {
+            setHaulers(
+              data.accreditedHaulers.map((h, i) => ({ key: Date.now() + i, ...h })),
+            );
+          }
+          setBaselineSaved(true);
+          setActiveTab("disposal");
+        }
+      })
+      .catch(() => {});
+  }, [portalUser]);
 
   // Fetch submission history
   useEffect(() => {
@@ -175,7 +225,7 @@ export default function SLFPortal() {
       hauler: record.hauler || "",
       plateNumber: record.plateNumber || "",
       truckCapacity: record.truckCapacity,
-      truckCapacityUnit: record.truckCapacityUnit || "m3",
+      truckCapacityUnit: record.truckCapacityUnit || "m³",
       actualVolume: record.actualVolume,
       actualVolumeUnit: record.actualVolumeUnit || "tons",
       wasteType: record.wasteType,
@@ -303,12 +353,9 @@ export default function SLFPortal() {
       setTrucks([]);
       setTruckDraft({ ...EMPTY_TRUCK });
       setEditingTruckKey(null);
-      setHaulers([]);
-      setHaulerDraft({ haulerName: "", numberOfTrucks: null, privateSectorClients: "" });
-      setEditingHaulerKey(null);
       entryForm.resetFields();
-      baselineForm.resetFields();
-      setActiveTab("baseline");
+      setBaselineSaved(true);
+      setActiveTab("disposal");
     } catch (err) {
       Swal.fire({
         icon: "error",
@@ -337,7 +384,7 @@ export default function SLFPortal() {
       key: "cap",
       render: (_, t) =>
         t.truckCapacity
-          ? `${t.truckCapacity} ${t.truckCapacityUnit || "m3"}`
+          ? `${t.truckCapacity} ${t.truckCapacityUnit || "m³"}`
           : "—",
     },
     {
@@ -571,14 +618,32 @@ export default function SLFPortal() {
                 label: (
                   <span>
                     <DatabaseOutlined /> {isMobile ? "Baseline" : "Baseline Information"}
+                    {baselineSaved && <CheckCircleOutlined style={{ color: "#52c41a", marginLeft: 6 }} />}
                   </span>
                 ),
                 children: (
-                  <Form
-                    form={baselineForm}
-                    layout="vertical"
-                    requiredMark={false}
-                  >
+                  <>
+                    {baselineSaved && (
+                      <div
+                        style={{
+                          background: "#f6ffed",
+                          border: "1px solid #b7eb8f",
+                          borderRadius: 6,
+                          padding: "8px 14px",
+                          marginBottom: 16,
+                        }}
+                      >
+                        <CheckCircleOutlined style={{ color: "#52c41a", marginRight: 8 }} />
+                        <Text style={{ color: "#389e0d" }}>
+                          Baseline information has been saved. You can update it here or proceed to the Disposal tab.
+                        </Text>
+                      </div>
+                    )}
+                    <Form
+                      form={baselineForm}
+                      layout="vertical"
+                      requiredMark={false}
+                    >
                     <Divider titlePlacement="left" className="slf-category-divider">
                       Volume of Waste Accepted
                     </Divider>
@@ -593,9 +658,9 @@ export default function SLFPortal() {
                         </Form.Item>
                       </Col>
                       <Col xs={8} sm={4} md={3}>
-                        <Form.Item name="totalVolumeAcceptedUnit" label="Unit" initialValue="m3">
+                        <Form.Item name="totalVolumeAcceptedUnit" label="Unit" initialValue="m³">
                           <Select>
-                            <Option value="m3">m³</Option>
+                            <Option value="m³">m³</Option>
                             <Option value="tons">Tons</Option>
                           </Select>
                         </Form.Item>
@@ -616,9 +681,9 @@ export default function SLFPortal() {
                         </Form.Item>
                       </Col>
                       <Col xs={8} sm={4} md={3}>
-                        <Form.Item name="activeCellResidualUnit" label="Unit" initialValue="m3">
+                        <Form.Item name="activeCellResidualUnit" label="Unit" initialValue="m³">
                           <Select>
-                            <Option value="m3">m³</Option>
+                            <Option value="m³">m³</Option>
                             <Option value="tons">Tons</Option>
                           </Select>
                         </Form.Item>
@@ -633,9 +698,9 @@ export default function SLFPortal() {
                         </Form.Item>
                       </Col>
                       <Col xs={8} sm={4} md={3}>
-                        <Form.Item name="activeCellInertUnit" label="Unit" initialValue="m3">
+                        <Form.Item name="activeCellInertUnit" label="Unit" initialValue="m³">
                           <Select>
-                            <Option value="m3">m³</Option>
+                            <Option value="m³">m³</Option>
                             <Option value="tons">Tons</Option>
                           </Select>
                         </Form.Item>
@@ -656,9 +721,9 @@ export default function SLFPortal() {
                         </Form.Item>
                       </Col>
                       <Col xs={8} sm={4} md={3}>
-                        <Form.Item name="closedCellResidualUnit" label="Unit" initialValue="m3">
+                        <Form.Item name="closedCellResidualUnit" label="Unit" initialValue="m³">
                           <Select>
-                            <Option value="m3">m³</Option>
+                            <Option value="m³">m³</Option>
                             <Option value="tons">Tons</Option>
                           </Select>
                         </Form.Item>
@@ -673,9 +738,9 @@ export default function SLFPortal() {
                         </Form.Item>
                       </Col>
                       <Col xs={8} sm={4} md={3}>
-                        <Form.Item name="closedCellInertUnit" label="Unit" initialValue="m3">
+                        <Form.Item name="closedCellInertUnit" label="Unit" initialValue="m³">
                           <Select>
-                            <Option value="m3">m³</Option>
+                            <Option value="m³">m³</Option>
                             <Option value="tons">Tons</Option>
                           </Select>
                         </Form.Item>
@@ -743,6 +808,7 @@ export default function SLFPortal() {
                       />
                     </div>
                   </Form>
+                  </>
                 ),
               },
               {
@@ -766,7 +832,7 @@ export default function SLFPortal() {
                       <Col xs={24} sm={12} md={8}>
                         <Form.Item
                           name="dateOfDisposal"
-                          label="Date of Disposal"
+                          label={fl("dateOfDisposal", "Date of Disposal")}
                           rules={[{ required: true, message: "Required" }]}
                         >
                           <DatePicker style={{ width: "100%" }} />
@@ -781,7 +847,7 @@ export default function SLFPortal() {
                       <Col xs={24} sm={14} md={12}>
                         <Form.Item
                           name="lguCompanyName"
-                          label="LGU/Company Name"
+                          label={fl("lguCompanyName", "LGU/Company Name")}
                           rules={[{ required: true, message: "Required" }]}
                         >
                           <Input placeholder="e.g. Dela Cruz, Juan" />
@@ -790,19 +856,23 @@ export default function SLFPortal() {
                       <Col xs={24} sm={10} md={6}>
                         <Form.Item
                           name="companyType"
-                          label="Company Type"
+                          label={fl("companyType", "Company Type")}
                           rules={[{ required: true, message: "Required" }]}
                         >
                           <Select placeholder="Select type">
-                            <Option value="LGU">LGU</Option>
-                            <Option value="Private">Private</Option>
+                            {(fieldLabels.companyType?.options?.length > 0
+                              ? fieldLabels.companyType.options
+                              : ["LGU", "Private"]
+                            ).map((o) => (
+                              <Option key={o} value={o}>{o}</Option>
+                            ))}
                           </Select>
                         </Form.Item>
                       </Col>
                     </Row>
                     <Row gutter={[12, 0]}>
                       <Col xs={24}>
-                        <Form.Item name="address" label="Address">
+                        <Form.Item name="address" label={fl("address", "Address")}>
                           <Input placeholder="Complete address" />
                         </Form.Item>
                       </Col>
@@ -816,7 +886,7 @@ export default function SLFPortal() {
                       <Row gutter={[12, 0]}>
                         <Col xs={24} sm={12} md={5}>
                           <Form.Item
-                            label={isMobile ? "Ticket No." : "Disposal/Trip Ticket No."}
+                            label={isMobile ? "Ticket No." : fl("disposalTicketNo", "Disposal/Trip Ticket No.")}
                             {...fieldErr("disposalTicketNo")}
                           >
                             <Input
@@ -829,7 +899,7 @@ export default function SLFPortal() {
                           </Form.Item>
                         </Col>
                         <Col xs={24} sm={12} md={4}>
-                          <Form.Item label="Hauler" {...fieldErr("hauler")}>
+                          <Form.Item label={fl("hauler", "Hauler")} {...fieldErr("hauler")}>
                             <Input
                               placeholder="Hauler name"
                               value={truckDraft.hauler}
@@ -840,7 +910,7 @@ export default function SLFPortal() {
                           </Form.Item>
                         </Col>
                         <Col xs={24} sm={12} md={4}>
-                          <Form.Item label="Plate Number" {...fieldErr("plateNumber")}>
+                          <Form.Item label={fl("plateNumber", "Plate Number")} {...fieldErr("plateNumber")}>
                             <Input
                               placeholder="e.g. ABC-1234"
                               value={truckDraft.plateNumber}
@@ -851,7 +921,7 @@ export default function SLFPortal() {
                           </Form.Item>
                         </Col>
                         <Col xs={12} sm={8} md={3}>
-                          <Form.Item label={isMobile ? "Capacity" : "Truck Capacity"}>
+                          <Form.Item label={isMobile ? "Capacity" : fl("truckCapacity", "Truck Capacity")}>
                             <InputNumber
                               placeholder="Cap."
                               style={{ width: "100%" }}
@@ -870,7 +940,7 @@ export default function SLFPortal() {
                                 updateTruckDraft("truckCapacityUnit", v)
                               }
                             >
-                              <Option value="m3">m³</Option>
+                              <Option value="m³">m³</Option>
                               <Option value="tons">Tons</Option>
                             </Select>
                           </Form.Item>
@@ -879,7 +949,7 @@ export default function SLFPortal() {
                       <Row gutter={[12, 0]} align="bottom">
                         <Col xs={12} sm={8} md={3}>
                           <Form.Item
-                            label={isMobile ? "Waste Vol." : "Actual Waste Vol."}
+                            label={isMobile ? "Waste Vol." : fl("actualVolume", "Actual Waste Vol.")}
                             {...fieldErr("actualVolume")}
                           >
                             <InputNumber
@@ -901,19 +971,23 @@ export default function SLFPortal() {
                               }
                             >
                               <Option value="tons">Tons</Option>
-                              <Option value="m3">m³</Option>
+                              <Option value="m³">m³</Option>
                             </Select>
                           </Form.Item>
                         </Col>
                         <Col xs={24} sm={12} md={4}>
-                          <Form.Item label="Waste Type" {...fieldErr("wasteType")}>
+                          <Form.Item label={fl("wasteType", "Waste Type")} {...fieldErr("wasteType")}>
                             <Select
                               placeholder="Select"
                               value={truckDraft.wasteType}
                               onChange={(v) => updateTruckDraft("wasteType", v)}
                             >
-                              <Option value="Residual">Residual</Option>
-                              <Option value="Hazardous Waste">Hazardous Waste</Option>
+                              {(fieldLabels.wasteType?.options?.length > 0
+                                ? fieldLabels.wasteType.options
+                                : ["Residual", "Hazardous Waste"]
+                              ).map((o) => (
+                                <Option key={o} value={o}>{o}</Option>
+                              ))}
                             </Select>
                           </Form.Item>
                         </Col>

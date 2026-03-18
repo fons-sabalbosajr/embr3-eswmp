@@ -176,10 +176,12 @@ export default function FundedMRF() {
         const { data } = await api.put(`/funded-mrf/${editing._id}`, payload);
         setRecords((prev) => prev.map((r) => r._id === editing._id ? { ...data, ...computeFields(data) } : r));
         secureStorage.remove(CACHE_KEY);
+        secureStorage.invalidateDashboard();
         Swal.fire("Updated", "Record updated successfully", "success");
       } else {
         await api.post("/funded-mrf", payload);
         secureStorage.remove(CACHE_KEY);
+        secureStorage.invalidateDashboard();
         Swal.fire("Created", "Record added successfully", "success");
         fetchRecords();
       }
@@ -201,6 +203,7 @@ export default function FundedMRF() {
       if (result.isConfirmed) {
         await api.delete(`/funded-mrf/${record._id}`);
         secureStorage.remove(CACHE_KEY);
+        secureStorage.invalidateDashboard();
         setRecords((prev) => prev.filter((r) => r._id !== record._id));
         Swal.fire("Deleted", "Record deleted", "success");
       }

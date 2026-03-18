@@ -178,10 +178,12 @@ export default function LguInitiatedMRF() {
         const { data } = await api.put(`/lgu-initiated-mrf/${editing._id}`, payload);
         setRecords((prev) => prev.map((r) => r._id === editing._id ? { ...data, ...computeFields(data) } : r));
         secureStorage.remove(CACHE_KEY);
+        secureStorage.invalidateDashboard();
         Swal.fire("Updated", "Record updated successfully", "success");
       } else {
         await api.post("/lgu-initiated-mrf", payload);
         secureStorage.remove(CACHE_KEY);
+        secureStorage.invalidateDashboard();
         Swal.fire("Created", "Record added successfully", "success");
         fetchRecords();
       }
@@ -203,6 +205,7 @@ export default function LguInitiatedMRF() {
       if (result.isConfirmed) {
         await api.delete(`/lgu-initiated-mrf/${record._id}`);
         secureStorage.remove(CACHE_KEY);
+        secureStorage.invalidateDashboard();
         setRecords((prev) => prev.filter((r) => r._id !== record._id));
         Swal.fire("Deleted", "Record deleted", "success");
       }

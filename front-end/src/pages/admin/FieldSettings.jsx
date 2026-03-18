@@ -95,12 +95,14 @@ export default function FieldSettings() {
     try {
       if (editing) {
         const { data } = await api.put(`/settings/fields/${editing._id}`, payload);
+        const updated = data.data || data;
         setFields((prev) =>
-          prev.map((f) => (f._id === editing._id ? data : f))
+          prev.map((f) => (f._id === editing._id ? updated : f))
         );
       } else {
         const { data } = await api.post("/settings/fields", payload);
-        setFields((prev) => [...prev, data]);
+        const created = data.data || data;
+        setFields((prev) => [...prev, created]);
       }
       setModalOpen(false);
       Swal.fire({

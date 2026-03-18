@@ -431,35 +431,37 @@ export default function AdminHome() {
       ],
     });
 
-    // ── Settings ──
-    const settingsChildren = [];
-    if (hasAccess("accountSettings")) {
+    // ── Settings (Developer only) ──
+    if (isDeveloper) {
+      const settingsChildren = [];
+      if (hasAccess("accountSettings")) {
+        settingsChildren.push({
+          key: "settings-accounts",
+          icon: <TeamOutlined />,
+          label: "Accounts & Roles",
+        });
+      }
+      if (hasAccess("portalFields")) {
+        settingsChildren.push({
+          key: "settings-fields",
+          icon: <FormOutlined />,
+          label: "Portal Fields",
+        });
+      }
       settingsChildren.push({
-        key: "settings-accounts",
-        icon: <TeamOutlined />,
-        label: "Accounts & Roles",
+        key: "settings-data-refs",
+        icon: <DatabaseOutlined />,
+        label: "Data References",
       });
-    }
-    if (hasAccess("portalFields")) {
-      settingsChildren.push({
-        key: "settings-fields",
-        icon: <FormOutlined />,
-        label: "Portal Fields",
-      });
-    }
-    settingsChildren.push({
-      key: "settings-data-refs",
-      icon: <DatabaseOutlined />,
-      label: "Data References",
-    });
-    if (settingsChildren.length > 0) {
-      items.push({ type: "divider" });
-      items.push({
-        key: "settings",
-        icon: <SettingOutlined />,
-        label: "Settings",
-        children: settingsChildren,
-      });
+      if (settingsChildren.length > 0) {
+        items.push({ type: "divider" });
+        items.push({
+          key: "settings",
+          icon: <SettingOutlined />,
+          label: "Settings",
+          children: settingsChildren,
+        });
+      }
     }
 
     if (isDeveloper) {
@@ -951,6 +953,7 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
   const [trapTileKey, setTrapTileKey] = useState("street");
   const [trapFilterProvince, setTrapFilterProvince] = useState(null);
   const [trapFilterStatus, setTrapFilterStatus] = useState(null);
+  const [trapViewRecord, setTrapViewRecord] = useState(null);
   const [equipTileKey, setEquipTileKey] = useState("street");
   const [equipFilterProvince, setEquipFilterProvince] = useState(null);
   const [equipFilterType, setEquipFilterType] = useState(null);
@@ -1080,17 +1083,18 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
     return [...set].sort().map((v) => ({ label: v, value: v }));
   }, [lguMapPts]);
 
-  // Trash Trap map points
+  // Trash Trap map points — validate within PH bounds
   const trapMapPts = useMemo(
     () =>
       ((trapStats && trapStats.mapData) || [])
-        .filter(
-          (r) =>
-            r.latitude &&
-            r.longitude &&
-            !isNaN(r.latitude) &&
-            !isNaN(r.longitude),
-        )
+        .filter((r) => {
+          const lat = Number(r.latitude);
+          const lng = Number(r.longitude);
+          return (
+            lat && lng && !isNaN(lat) && !isNaN(lng) &&
+            lat >= 4.5 && lat <= 21.5 && lng >= 116 && lng <= 127
+          );
+        })
         .map((r) => ({
           lat: Number(r.latitude),
           lng: Number(r.longitude),
@@ -1166,17 +1170,18 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
     return [...set].sort().map((v) => ({ label: v, value: v }));
   }, [equipMapPts]);
 
-  // SLF Facility map points
+  // SLF Facility map points — validate within PH bounds
   const slfMapPts = useMemo(
     () =>
       ((slfFacStats && slfFacStats.mapData) || [])
-        .filter(
-          (r) =>
-            r.latitude &&
-            r.longitude &&
-            !isNaN(r.latitude) &&
-            !isNaN(r.longitude),
-        )
+        .filter((r) => {
+          const lat = Number(r.latitude);
+          const lng = Number(r.longitude);
+          return (
+            lat && lng && !isNaN(lat) && !isNaN(lng) &&
+            lat >= 4.5 && lat <= 21.5 && lng >= 116 && lng <= 127
+          );
+        })
         .map((r) => ({
           lat: Number(r.latitude),
           lng: Number(r.longitude),
@@ -1282,24 +1287,26 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
   const mrfTile = TILE_LAYERS[mrfTileKey];
 
   const DASH_CACHE_KEY = "dashboard-stats-cache";
-  const DASH_CACHE_TTL = 5 * 60 * 1000;
 
-  const fetchStats = useCallback(async (skipCache = false) => {
+  const applyStats = useCallback((slfData, swmData, mrfData, lguMrfData, trapData, equipData, slfFacData) => {
+    setStats((prev) => { const n = slfData; return JSON.stringify(prev) === JSON.stringify(n) ? prev : n; });
+    setSwmStats((prev) => { const n = swmData; return JSON.stringify(prev) === JSON.stringify(n) ? prev : n; });
+    setMrfStats((prev) => { const n = mrfData; return JSON.stringify(prev) === JSON.stringify(n) ? prev : n; });
+    setLguMrfStats((prev) => { const n = lguMrfData; return JSON.stringify(prev) === JSON.stringify(n) ? prev : n; });
+    setTrapStats((prev) => { const n = trapData; return JSON.stringify(prev) === JSON.stringify(n) ? prev : n; });
+    setEquipStats((prev) => { const n = equipData; return JSON.stringify(prev) === JSON.stringify(n) ? prev : n; });
+    setSlfFacStats((prev) => { const n = slfFacData; return JSON.stringify(prev) === JSON.stringify(n) ? prev : n; });
+  }, []);
+
+  const fetchStats = useCallback(async () => {
     try {
-      if (!skipCache) {
-        const cached = secureStorage.getJSON(DASH_CACHE_KEY);
-        if (cached && Date.now() - cached.ts < DASH_CACHE_TTL) {
-          setStats(cached.stats);
-          setSwmStats(cached.swmStats);
-          setMrfStats(cached.mrfStats);
-          setLguMrfStats(cached.lguMrfStats);
-          setTrapStats(cached.trapStats);
-          setEquipStats(cached.equipStats);
-          setSlfFacStats(cached.slfFacStats);
-          setLoading(false);
-          return;
-        }
+      // Show cached data immediately for instant rendering
+      const cached = secureStorage.getJSON(DASH_CACHE_KEY);
+      if (cached) {
+        applyStats(cached.stats, cached.swmStats, cached.mrfStats, cached.lguMrfStats, cached.trapStats, cached.equipStats, cached.slfFacStats);
+        setLoading(false);
       }
+      // Always fetch fresh data from all endpoints in parallel
       const [slfRes, swmRes, mrfRes, lguMrfRes, trapRes, equipRes, slfFacRes] =
         await Promise.all([
           api.get("/data-slf/stats"),
@@ -1310,35 +1317,7 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
           api.get("/swm-equipment/stats").catch(() => ({ data: null })),
           api.get("/slf-facilities/stats").catch(() => ({ data: null })),
         ]);
-      // Only update state when data actually changes to prevent re-render glitching
-      setStats((prev) => {
-        const next = slfRes.data;
-        return JSON.stringify(prev) === JSON.stringify(next) ? prev : next;
-      });
-      setSwmStats((prev) => {
-        const next = swmRes.data;
-        return JSON.stringify(prev) === JSON.stringify(next) ? prev : next;
-      });
-      setMrfStats((prev) => {
-        const next = mrfRes.data;
-        return JSON.stringify(prev) === JSON.stringify(next) ? prev : next;
-      });
-      setLguMrfStats((prev) => {
-        const next = lguMrfRes.data;
-        return JSON.stringify(prev) === JSON.stringify(next) ? prev : next;
-      });
-      setTrapStats((prev) => {
-        const next = trapRes.data;
-        return JSON.stringify(prev) === JSON.stringify(next) ? prev : next;
-      });
-      setEquipStats((prev) => {
-        const next = equipRes.data;
-        return JSON.stringify(prev) === JSON.stringify(next) ? prev : next;
-      });
-      setSlfFacStats((prev) => {
-        const next = slfFacRes.data;
-        return JSON.stringify(prev) === JSON.stringify(next) ? prev : next;
-      });
+      applyStats(slfRes.data, swmRes.data, mrfRes.data, lguMrfRes.data, trapRes.data, equipRes.data, slfFacRes.data);
       secureStorage.setJSON(DASH_CACHE_KEY, {
         stats: slfRes.data,
         swmStats: swmRes.data,
@@ -1354,11 +1333,11 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [applyStats]);
 
   useEffect(() => {
     fetchStats();
-    const interval = setInterval(fetchStats, 30000);
+    const interval = setInterval(fetchStats, 60000);
     return () => clearInterval(interval);
   }, [fetchStats]);
 
@@ -5895,6 +5874,43 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                                   {pt.record.enmoAssigned}
                                 </div>
                               )}
+                              <div style={{ display: "flex", alignItems: "center", gap: 5, marginTop: 4, color: "#8c8c8c", fontSize: 11 }}>
+                                <EnvironmentOutlined style={{ color: "#faad14" }} />
+                                <span>{pt.lat.toFixed(6)}, {pt.lng.toFixed(6)}</span>
+                              </div>
+                              {/* Quick Actions */}
+                              <div
+                                style={{
+                                  display: "flex",
+                                  gap: 4,
+                                  marginTop: 8,
+                                  paddingTop: 6,
+                                  borderTop: "1px solid #f0f0f0",
+                                }}
+                              >
+                                <button
+                                  onClick={() => {
+                                    api
+                                      .get(`/trash-traps/${pt.record._id}`)
+                                      .then(({ data }) => setTrapViewRecord(data))
+                                      .catch(() => setTrapViewRecord(pt.record));
+                                  }}
+                                  className="popup-action-btn"
+                                  title="View Full Record"
+                                >
+                                  <EyeOutlined /> View
+                                </button>
+                                <button
+                                  onClick={() => {
+                                    const txt = `${pt.record.municipality}, ${pt.record.province} (${pt.lat}, ${pt.lng})`;
+                                    navigator.clipboard.writeText(txt);
+                                  }}
+                                  className="popup-action-btn"
+                                  title="Copy Location"
+                                >
+                                  <CopyOutlined /> Copy
+                                </button>
+                              </div>
                             </div>
                           </Popup>
                         </Marker>
@@ -6787,8 +6803,17 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
     const slfMaxProv = Math.max(...slfProvList.map((p) => p.count), 1);
     const slfByStatus = slfFacStats.byStatus || {};
     const slfByCategory = slfFacStats.byCategory || {};
+    const slfByOwnership = slfFacStats.byOwnership || {};
     const slfOps = slfFacStats.operationStats || {};
     const slfTile = TILE_LAYERS[slfTileKey];
+    const slfPrivateCount = slfByOwnership["Private"] || slfByOwnership["private"] || 0;
+
+    const SLF_CATEGORY_DESC = {
+      "Cat 1": "< 15 TPD",
+      "Cat 2": "15\u201375 TPD",
+      "Cat 3": "75\u2013150 TPD",
+      "Cat 4": "> 150 TPD",
+    };
 
     const SLF_CARD_H = 280;
 
@@ -6813,69 +6838,29 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
               ),
               children: (
                 <>
+                  {/* Row 1: Total SLF | Total Cells | LGUs Served | Private Sectors Served */}
                   <Row gutter={[16, 16]} style={{ marginBottom: 16 }}>
                     <Col xs={12} sm={12} md={6}>
                       <Card
                         hoverable
-                        style={{ borderRadius: 10, height: 110 }}
+                        style={{ borderRadius: 10, height: 120, borderLeft: "4px solid #2f54eb" }}
                         loading={loading}
                       >
                         <Statistic
-                          title="Total SLFs"
+                          title="Total SLF"
                           value={slfFacStats.totalRecords}
                           prefix={<BankOutlined style={{ color: "#2f54eb" }} />}
                         />
+                        <Text type="secondary" style={{ fontSize: 11 }}>
+                          <CheckCircleOutlined style={{ color: "#52c41a", marginRight: 3 }} />
+                          {slfByStatus["Operational"] || 0}/{slfFacStats.totalRecords} Operational
+                        </Text>
                       </Card>
                     </Col>
                     <Col xs={12} sm={12} md={6}>
                       <Card
                         hoverable
-                        style={{ borderRadius: 10, height: 110 }}
-                        loading={loading}
-                      >
-                        <Statistic
-                          title="Total Capacity"
-                          value={slfOps.totalCapacity || 0}
-                          prefix={<BarChartOutlined style={{ color: "#722ed1" }} />}
-                          formatter={(v) => Number(v).toLocaleString()}
-                        />
-                      </Card>
-                    </Col>
-                    <Col xs={12} sm={12} md={6}>
-                      <Card
-                        hoverable
-                        style={{ borderRadius: 10, height: 110 }}
-                        loading={loading}
-                      >
-                        <Statistic
-                          title="LGUs Served"
-                          value={slfOps.totalLGUsServed || 0}
-                          prefix={<TeamOutlined style={{ color: "#fa8c16" }} />}
-                        />
-                      </Card>
-                    </Col>
-                    <Col xs={12} sm={12} md={6}>
-                      <Card
-                        hoverable
-                        style={{ borderRadius: 10, height: 110 }}
-                        loading={loading}
-                      >
-                        <Statistic
-                          title="Waste Received"
-                          value={slfOps.totalWasteReceived || 0}
-                          suffix="tons"
-                          prefix={<BarChartOutlined style={{ color: "#eb2f96" }} />}
-                          formatter={(v) => Number(v).toLocaleString()}
-                        />
-                      </Card>
-                    </Col>
-                  </Row>
-
-                  <Row gutter={[16, 16]} style={{ marginBottom: 16 }}>
-                    <Col xs={12} sm={12} md={6}>
-                      <Card
-                        hoverable
-                        style={{ borderRadius: 10, height: 110 }}
+                        style={{ borderRadius: 10, height: 120, borderLeft: "4px solid #13c2c2" }}
                         loading={loading}
                       >
                         <Statistic
@@ -6883,12 +6868,76 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                           value={slfOps.totalCells || 0}
                           prefix={<ContainerOutlined style={{ color: "#13c2c2" }} />}
                         />
+                        <Text type="secondary" style={{ fontSize: 11 }}>across {slfFacStats.totalRecords} facilities</Text>
                       </Card>
                     </Col>
                     <Col xs={12} sm={12} md={6}>
                       <Card
                         hoverable
-                        style={{ borderRadius: 10, height: 110 }}
+                        style={{ borderRadius: 10, height: 120, borderLeft: "4px solid #fa8c16" }}
+                        loading={loading}
+                      >
+                        <Statistic
+                          title="LGUs Served"
+                          value={slfOps.totalLGUsServed || 0}
+                          prefix={<TeamOutlined style={{ color: "#fa8c16" }} />}
+                        />
+                        <Text type="secondary" style={{ fontSize: 11 }}>from {slfFacStats.totalRecords} SLFs</Text>
+                      </Card>
+                    </Col>
+                    <Col xs={12} sm={12} md={6}>
+                      <Card
+                        hoverable
+                        style={{ borderRadius: 10, height: 120, borderLeft: "4px solid #722ed1" }}
+                        loading={loading}
+                      >
+                        <Statistic
+                          title="Private Sectors Served"
+                          value={slfPrivateCount}
+                          prefix={<BankOutlined style={{ color: "#722ed1" }} />}
+                        />
+                        <Text type="secondary" style={{ fontSize: 11 }}>{slfPrivateCount}/{slfFacStats.totalRecords} private-owned</Text>
+                      </Card>
+                    </Col>
+                  </Row>
+
+                  {/* Row 2: Total Capacity | Waste Received | Leachate Ponds | Gas Vents */}
+                  <Row gutter={[16, 16]} style={{ marginBottom: 16 }}>
+                    <Col xs={12} sm={12} md={6}>
+                      <Card
+                        hoverable
+                        style={{ borderRadius: 10, height: 120, borderLeft: "4px solid #eb2f96" }}
+                        loading={loading}
+                      >
+                        <Statistic
+                          title="Total Capacity"
+                          value={slfOps.totalCapacity || 0}
+                          prefix={<BarChartOutlined style={{ color: "#eb2f96" }} />}
+                          formatter={(v) => Number(v).toLocaleString()}
+                        />
+                        <Text type="secondary" style={{ fontSize: 11 }}>combined volume</Text>
+                      </Card>
+                    </Col>
+                    <Col xs={12} sm={12} md={6}>
+                      <Card
+                        hoverable
+                        style={{ borderRadius: 10, height: 120, borderLeft: "4px solid #ff4d4f" }}
+                        loading={loading}
+                      >
+                        <Statistic
+                          title="Waste Received"
+                          value={slfOps.totalWasteReceived || 0}
+                          suffix="tons"
+                          prefix={<BarChartOutlined style={{ color: "#ff4d4f" }} />}
+                          formatter={(v) => Number(v).toLocaleString()}
+                        />
+                        <Text type="secondary" style={{ fontSize: 11 }}>total across SLFs</Text>
+                      </Card>
+                    </Col>
+                    <Col xs={12} sm={12} md={6}>
+                      <Card
+                        hoverable
+                        style={{ borderRadius: 10, height: 120, borderLeft: "4px solid #1890ff" }}
                         loading={loading}
                       >
                         <Statistic
@@ -6896,41 +6945,21 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                           value={slfOps.totalLeachatePonds || 0}
                           prefix={<AlertOutlined style={{ color: "#1890ff" }} />}
                         />
+                        <Text type="secondary" style={{ fontSize: 11 }}>across facilities</Text>
                       </Card>
                     </Col>
                     <Col xs={12} sm={12} md={6}>
                       <Card
                         hoverable
-                        style={{ borderRadius: 10, height: 110 }}
+                        style={{ borderRadius: 10, height: 120, borderLeft: "4px solid #52c41a" }}
                         loading={loading}
                       >
                         <Statistic
                           title="Gas Vents"
                           value={slfOps.totalGasVents || 0}
-                          prefix={
-                            <SafetyCertificateOutlined style={{ color: "#52c41a" }} />
-                          }
+                          prefix={<SafetyCertificateOutlined style={{ color: "#52c41a" }} />}
                         />
-                      </Card>
-                    </Col>
-                    <Col xs={12} sm={12} md={6}>
-                      <Card
-                        hoverable
-                        style={{ borderRadius: 10, height: 110 }}
-                        loading={loading}
-                      >
-                        <Tooltip title="Click to view SLF Monitoring page">
-                          <div
-                            style={{ cursor: "pointer" }}
-                            onClick={() => setActiveMenu("slf-monitoring")}
-                          >
-                            <Statistic
-                              title="View All Records"
-                              value={slfFacStats.totalRecords}
-                              prefix={<FileTextOutlined style={{ color: "#2f54eb" }} />}
-                            />
-                          </div>
-                        </Tooltip>
+                        <Text type="secondary" style={{ fontSize: 11 }}>across facilities</Text>
                       </Card>
                     </Col>
                   </Row>
@@ -7032,7 +7061,7 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                                       marginBottom: 4,
                                     }}
                                   >
-                                    <Text>{cat}</Text>
+                                    <Text>{cat}{SLF_CATEGORY_DESC[cat] ? ` \u2014 ${SLF_CATEGORY_DESC[cat]}` : ""}</Text>
                                     <Text strong>
                                       {count}{" "}
                                       <span style={{ color: "#999", fontWeight: 400 }}>
@@ -7939,6 +7968,91 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
   return (
     <>
       {" "}
+      {/* Trash Trap View Modal */}
+      <Modal
+        title={
+          <Space>
+            <ExperimentOutlined />
+            {trapViewRecord?.municipality}, {trapViewRecord?.province}
+          </Space>
+        }
+        open={!!trapViewRecord}
+        onCancel={() => setTrapViewRecord(null)}
+        footer={<Button onClick={() => setTrapViewRecord(null)}>Close</Button>}
+        width={800}
+      >
+        {trapViewRecord && (
+          <Tabs
+            items={[
+              {
+                key: "general",
+                label: (<><EnvironmentOutlined /> General Info</>),
+                children: (
+                  <>
+                    <Row gutter={[16, 12]}>
+                      <Col span={12}><Text type="secondary"><EnvironmentOutlined /> Province:</Text>{" "}<Text strong>{trapViewRecord.province}</Text></Col>
+                      <Col span={12}><Text type="secondary"><EnvironmentOutlined /> Municipality:</Text>{" "}<Text strong>{trapViewRecord.municipality}</Text></Col>
+                      <Col span={12}><Text type="secondary">Barangay:</Text>{" "}<Text>{trapViewRecord.barangay || "\u2014"}</Text></Col>
+                      <Col span={12}><Text type="secondary">Manila Bay Area:</Text>{" "}{trapViewRecord.manilaBayArea === "MBA" ? <Tag color="blue" bordered={false}>MBA</Tag> : <Tag color="default" bordered={false}>{trapViewRecord.manilaBayArea || "\u2014"}</Tag>}</Col>
+                      <Col span={12}><Text type="secondary">Coordinates:</Text>{" "}<Text>{trapViewRecord.latitude}, {trapViewRecord.longitude}</Text></Col>
+                    </Row>
+                    <Divider plain orientation="left"><ExperimentOutlined /> Trap Details</Divider>
+                    <Row gutter={[16, 12]}>
+                      <Col span={12}><Text type="secondary">Date Installed:</Text>{" "}<Text strong>{trapViewRecord.dateInstalled ? dayjs(trapViewRecord.dateInstalled).format("MMM DD, YYYY") : "\u2014"}</Text></Col>
+                      <Col span={12}><Text type="secondary">Status:</Text>{" "}<Text strong>{trapViewRecord.statusOfTrashTraps || "\u2014"}</Text></Col>
+                      <Col span={12}><Text type="secondary">HDPE Floaters:</Text>{" "}<Text strong>{trapViewRecord.noOfTrashTrapsHDPE ?? "\u2014"}</Text></Col>
+                      <Col span={12}><Text type="secondary">Waste Hauled:</Text>{" "}<Text strong>{trapViewRecord.estimatedVolumeWasteHauled ? `${Number(trapViewRecord.estimatedVolumeWasteHauled).toLocaleString()} kg` : "\u2014"}</Text></Col>
+                      <Col span={12}><Text type="secondary">Last Hauling:</Text>{" "}<Text>{trapViewRecord.dateOfLastHauling ? dayjs(trapViewRecord.dateOfLastHauling).format("MMM DD, YYYY") : "\u2014"}</Text></Col>
+                    </Row>
+                    <Divider plain orientation="left"><SafetyCertificateOutlined /> Accessories</Divider>
+                    <Row gutter={[16, 12]}>
+                      <Col span={12}><Text type="secondary">Waste Lifter:</Text>{" "}<Text>{trapViewRecord.statusOfWasteLifter || "\u2014"}</Text></Col>
+                      <Col span={12}><Text type="secondary">Plastic Boat:</Text>{" "}<Text>{trapViewRecord.statusOfPlasticBoat || "\u2014"}</Text></Col>
+                    </Row>
+                    <Divider plain orientation="left"><TeamOutlined /> Personnel</Divider>
+                    <Row gutter={[16, 12]}>
+                      <Col span={8}><Text type="secondary">Focal Person:</Text><br /><Text strong>{trapViewRecord.focalPerson || "\u2014"}</Text></Col>
+                      <Col span={8}><Text type="secondary">ESWM Staff:</Text><br /><Text strong>{trapViewRecord.eswmStaff || "\u2014"}</Text></Col>
+                      <Col span={8}><Text type="secondary">ENMO Assigned:</Text><br /><Text strong>{trapViewRecord.enmoAssigned || "\u2014"}</Text></Col>
+                    </Row>
+                  </>
+                ),
+              },
+              {
+                key: "monitoring",
+                label: (<><CalendarOutlined /> Monitoring</>),
+                children: (
+                  <Row gutter={[16, 12]}>
+                    <Col span={12}><Text type="secondary">Target Month:</Text>{" "}<Text>{trapViewRecord.targetMonth || "\u2014"}</Text></Col>
+                    <Col span={12}><Text type="secondary">IIS Number:</Text>{" "}<Text>{trapViewRecord.iisNumber || "\u2014"}</Text></Col>
+                    <Col span={12}><Text type="secondary">Date of Monitoring:</Text>{" "}<Text>{trapViewRecord.dateOfMonitoring ? dayjs(trapViewRecord.dateOfMonitoring).format("MMM D, YYYY") : "\u2014"}</Text></Col>
+                    <Col span={12}><Text type="secondary">Report Prepared:</Text>{" "}<Text>{trapViewRecord.dateReportPrepared ? dayjs(trapViewRecord.dateReportPrepared).format("MMM D, YYYY") : "\u2014"}</Text></Col>
+                    <Col span={12}><Text type="secondary">Reviewed (Staff):</Text>{" "}<Text>{trapViewRecord.dateReportReviewedStaff ? dayjs(trapViewRecord.dateReportReviewedStaff).format("MMM D, YYYY") : "\u2014"}</Text></Col>
+                    <Col span={12}><Text type="secondary">Reviewed (Focal):</Text>{" "}<Text>{trapViewRecord.dateReportReviewedFocal ? dayjs(trapViewRecord.dateReportReviewedFocal).format("MMM D, YYYY") : "\u2014"}</Text></Col>
+                    <Col span={12}><Text type="secondary">Report Approved:</Text>{" "}<Text>{trapViewRecord.dateReportApproved ? dayjs(trapViewRecord.dateReportApproved).format("MMM D, YYYY") : "\u2014"}</Text></Col>
+                    <Col span={8}><Text type="secondary">Days Prepared:</Text>{" "}<Text strong>{trapViewRecord.totalDaysReportPrepared ?? "\u2014"}</Text></Col>
+                    <Col span={8}><Text type="secondary">Days Staff Review:</Text>{" "}<Text strong>{trapViewRecord.totalDaysReviewedStaff ?? "\u2014"}</Text></Col>
+                    <Col span={8}><Text type="secondary">Days Focal Review:</Text>{" "}<Text strong>{trapViewRecord.totalDaysReviewedFocal ?? "\u2014"}</Text></Col>
+                  </Row>
+                ),
+              },
+              {
+                key: "compliance",
+                label: (<><SafetyCertificateOutlined /> Compliance</>),
+                children: (
+                  <Row gutter={[16, 12]}>
+                    <Col span={24}><Text type="secondary">Remarks:</Text><br /><Text>{trapViewRecord.remarks || "\u2014"}</Text></Col>
+                    <Col span={12}><Text type="secondary">Advise Letter:</Text>{" "}<Text>{trapViewRecord.adviseLetterDateIssued || "\u2014"}</Text></Col>
+                    <Col span={12}><Text type="secondary">Compliance:</Text>{" "}<Text>{trapViewRecord.complianceToAdvise || "\u2014"}</Text></Col>
+                    <Col span={12}><Text type="secondary">Signed Report:</Text>{" "}<Text>{trapViewRecord.signedReport || "\u2014"}</Text></Col>
+                  </Row>
+                ),
+              },
+            ]}
+          />
+        )}
+      </Modal>
+      {/* 10-Year SWM Plan View Modal */}
       <Modal
         title={
           <Space>

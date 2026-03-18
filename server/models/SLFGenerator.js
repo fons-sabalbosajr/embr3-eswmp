@@ -11,13 +11,13 @@ const slfGeneratorSchema = new mongoose.Schema(
     slfName: { type: String, required: true, trim: true },
     /* Baseline / Profile Info */
     existingBaselineVolume: { type: Number, default: 0 },
-    existingBaselineUnit: { type: String, enum: ["tons", "m3"], default: "tons" },
+    existingBaselineUnit: { type: String, enum: ["tons", "m³", "m3"], default: "tons" },
     totalVolumeSinceOperation: { type: Number, default: 0 },
-    totalVolumeSinceOperationUnit: { type: String, enum: ["tons", "m3"], default: "tons" },
+    totalVolumeSinceOperationUnit: { type: String, enum: ["tons", "m³", "m3"], default: "tons" },
     totalVolumeActiveCells: { type: Number, default: 0 },
-    totalVolumeActiveCellsUnit: { type: String, enum: ["tons", "m3"], default: "tons" },
+    totalVolumeActiveCellsUnit: { type: String, enum: ["tons", "m³", "m3"], default: "tons" },
     totalVolumeClosedCells: { type: Number, default: 0 },
-    totalVolumeClosedCellsUnit: { type: String, enum: ["tons", "m3"], default: "tons" },
+    totalVolumeClosedCellsUnit: { type: String, enum: ["tons", "m³", "m3"], default: "tons" },
     /* Accredited Haulers */
     accreditedHaulers: [accreditedHaulerSchema],
     /* Status */
