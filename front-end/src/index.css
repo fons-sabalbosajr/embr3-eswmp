@@ -261,11 +261,21 @@ body {
 
 /* ── Phone (≤ 576px) ── */
 @media (max-width: 576px) {
+  /* Auth: minimize branding panel on phone */
   .auth-left {
     padding: 20px 16px;
+    min-height: unset;
+  }
+  .auth-left .brandContent,
+  .auth-left .featureList {
+    display: none;
   }
   .auth-right {
     padding: 16px 10px;
+  }
+  .auth-right .ant-card {
+    border-radius: 12px;
+    padding: 16px 8px;
   }
   .admin-content {
     padding: 8px 4px;
@@ -300,5 +310,9 @@ body {
   .ant-descriptions-row > td {
     display: block !important;
     width: 100% !important;
+  }
+  /* Auth form inputs smaller on phone */
+  .auth-right .ant-form-item-label > label {
+    font-size: 13px;
   }
 }

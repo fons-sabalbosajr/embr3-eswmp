@@ -2,7 +2,7 @@ const express = require("express");
 const crypto = require("crypto");
 const DataSLF = require("../models/DataSLF");
 const SLFGenerator = require("../models/SLFGenerator");
-const { sendAcknowledgementEmail } = require("../utils/email");
+const { sendAcknowledgementEmail, sendBulkAcknowledgeEmail } = require("../utils/email");
 const { writeLog } = require("../utils/logger");
 const Transaction = require("../models/Transaction");
 
@@ -43,49 +43,6 @@ router.post("/", async (req, res) => {
           meta: { entryCount: companyEntries.length, ids: companyEntries.map((e) => e.idNo) },
         });
       } catch { /* silent */ }
-    }
-
-    // Send acknowledgement email once for the whole batch
-    if (submittedBy && saved.length > 0) {
-      try {
-        await sendAcknowledgementEmail(submittedBy, {
-          submissionId,
-          totalEntries: saved.length,
-          entries: saved.map((s) => ({
-            idNo: s.idNo,
-            dateOfDisposal: s.dateOfDisposal,
-            lguCompanyName: s.lguCompanyName,
-            companyType: s.companyType,
-            trucks: s.trucks,
-          })),
-        });
-        // Log email sent
-        try {
-          await Transaction.create({
-            submissionId,
-            companyName: saved[0].lguCompanyName,
-            submittedBy,
-            type: "email_ack_sent",
-            description: `Acknowledgement email sent to ${submittedBy}`,
-            performedBy: "system",
-            meta: { email: submittedBy },
-          });
-        } catch { /* silent */ }
-      } catch (emailErr) {
-        console.error("Acknowledgement email failed:", emailErr.message);
-        // Log email failure
-        try {
-          await Transaction.create({
-            submissionId,
-            companyName: saved[0].lguCompanyName,
-            submittedBy,
-            type: "email_ack_failed",
-            description: `Acknowledgement email failed: ${emailErr.message}`,
-            performedBy: "system",
-            meta: { email: submittedBy, error: emailErr.message },
-          });
-        } catch { /* silent */ }
-      }
     }
 
     res.status(201).json({ message: "Data submitted successfully", data: saved });
@@ -212,10 +169,98 @@ router.patch("/:id/status", async (req, res) => {
       });
     } catch { /* silent */ }
 
+    // Send acknowledgement email when admin acknowledges
+    if (status === "acknowledged" && entry.submittedBy) {
+      try {
+        await sendAcknowledgementEmail(entry.submittedBy, {
+          submissionId: entry.submissionId,
+          totalEntries: 1,
+          entries: [{
+            idNo: entry.idNo,
+            dateOfDisposal: entry.dateOfDisposal,
+            lguCompanyName: entry.lguCompanyName,
+            companyType: entry.companyType,
+            trucks: entry.trucks,
+          }],
+        });
+      } catch (emailErr) {
+        console.error("Acknowledge email failed:", emailErr.message);
+      }
+    }
+
     writeLog("info", "submission.status", {
       message: `Submission ${entry.idNo} ${status}`,
       ip: req.ip,
       meta: { id: entry._id, status },
+    });
+  } catch (error) {
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+});
+
+// Bulk update status (acknowledge/reject multiple entries)
+router.patch("/bulk-status", async (req, res) => {
+  try {
+    const { ids, status } = req.body;
+    if (!Array.isArray(ids) || ids.length === 0) {
+      return res.status(400).json({ message: "No entries selected" });
+    }
+    if (!["acknowledged", "rejected"].includes(status)) {
+      return res.status(400).json({ message: "Invalid status" });
+    }
+
+    await DataSLF.updateMany({ _id: { $in: ids } }, { status });
+
+    const updated = await DataSLF.find({ _id: { $in: ids } }).populate("slfGenerator");
+
+    // Log transactions
+    for (const entry of updated) {
+      try {
+        await Transaction.create({
+          submissionId: entry.submissionId,
+          dataEntry: entry._id,
+          companyName: entry.lguCompanyName,
+          companyType: entry.companyType,
+          submittedBy: entry.submittedBy,
+          type: "status_change",
+          description: `Entry ${entry.idNo} marked as ${status} (bulk)`,
+          performedBy: "admin",
+          meta: { status, idNo: entry.idNo, bulk: true },
+        });
+      } catch { /* silent */ }
+    }
+
+    // Send bulk acknowledge email grouped by submittedBy
+    if (status === "acknowledged") {
+      const byEmail = {};
+      for (const entry of updated) {
+        if (!entry.submittedBy) continue;
+        if (!byEmail[entry.submittedBy]) byEmail[entry.submittedBy] = [];
+        byEmail[entry.submittedBy].push(entry);
+      }
+      for (const [email, entries] of Object.entries(byEmail)) {
+        try {
+          await sendBulkAcknowledgeEmail(email, {
+            totalEntries: entries.length,
+            entries: entries.map((e) => ({
+              idNo: e.idNo,
+              dateOfDisposal: e.dateOfDisposal,
+              lguCompanyName: e.lguCompanyName,
+              companyType: e.companyType,
+              trucks: e.trucks,
+            })),
+          });
+        } catch (emailErr) {
+          console.error("Bulk acknowledge email failed:", emailErr.message);
+        }
+      }
+    }
+
+    res.json({ message: `${updated.length} entries ${status}`, data: updated });
+    writeLog("info", "submission.bulk-status", {
+      message: `Bulk ${status}: ${updated.length} entries`,
+      ip: req.ip,
+      meta: { status, count: updated.length, ids: updated.map((e) => e.idNo) },
     });
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });

@@ -20,6 +20,8 @@ const userSchema = new mongoose.Schema(
       portalFields: { type: Boolean, default: true },
     },
     isVerified: { type: Boolean, default: false },
+    resetToken: { type: String },
+    resetTokenExpiry: { type: Date },
   },
   { timestamps: true }
 );

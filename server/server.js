@@ -24,15 +24,18 @@ const projectDescScopingRoutes = require("./routes/projectDescScoping");
 const transferStationRoutes = require("./routes/transferStations");
 const lguAssistDiversionRoutes = require("./routes/lguAssistDiversion");
 const technicalAssistanceRoutes = require("./routes/technicalAssistance");
+const portalAuthRoutes = require("./routes/portalAuth");
+const portalUsersRoutes = require("./routes/portalUsers");
 
 const app = express();
 const PORT = process.env.PORT || 5000;
 const MONGODB_URI =
   process.env.MONGODB_URI || "mongodb://127.0.0.1:27017/embr3_eswmp";
-const CLIENT_URL = process.env.CLIENT_URL || "http://localhost:5173";
+const CLIENT_URL = process.env.CLIENT_URL || "http://localhost:5173/eswm-pipeline";
 
 // Middleware
-app.use(cors({ origin: CLIENT_URL, credentials: true }));
+const corsOrigin = new URL(CLIENT_URL).origin;
+app.use(cors({ origin: corsOrigin, credentials: true }));
 app.use(express.json());
 
 // Connect to MongoDB
@@ -143,6 +146,8 @@ app.use("/api/project-desc-scoping", projectDescScopingRoutes);
 app.use("/api/transfer-stations", transferStationRoutes);
 app.use("/api/lgu-assist-diversion", lguAssistDiversionRoutes);
 app.use("/api/technical-assistance", technicalAssistanceRoutes);
+app.use("/api/portal-auth", portalAuthRoutes);
+app.use("/api/portal-users", portalUsersRoutes);
 
 // Get local IP address
 function getLocalIP() {

@@ -38,6 +38,7 @@ export default function SubmissionSettings() {
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
   const [viewRecord, setViewRecord] = useState(null);
+  const [selectedRowKeys, setSelectedRowKeys] = useState([]);
 
   useEffect(() => {
     fetchData();
@@ -96,6 +97,48 @@ export default function SubmissionSettings() {
       });
     } catch {
       Swal.fire("Error", "Could not delete submission", "error");
+    }
+  };
+
+  const handleBulkAcknowledge = async () => {
+    const pendingIds = selectedRowKeys.filter((id) => {
+      const entry = data.find((d) => d._id === id);
+      return entry?.status === "pending";
+    });
+    if (pendingIds.length === 0) {
+      Swal.fire("Info", "No pending entries selected.", "info");
+      return;
+    }
+    const confirmed = await Swal.fire({
+      title: `Acknowledge ${pendingIds.length} entry(ies)?`,
+      text: "This will send an acknowledgement email to the submitters.",
+      icon: "question",
+      showCancelButton: true,
+      confirmButtonText: "Acknowledge All",
+      confirmButtonColor: "#52c41a",
+    });
+    if (!confirmed.isConfirmed) return;
+    try {
+      const { data: result } = await api.patch("/data-slf/bulk-status", {
+        ids: pendingIds,
+        status: "acknowledged",
+      });
+      setData((prev) =>
+        prev.map((d) => {
+          const updated = result.data.find((u) => u._id === d._id);
+          return updated || d;
+        })
+      );
+      secureStorage.remove(CACHE_KEY);
+      setSelectedRowKeys([]);
+      Swal.fire({
+        icon: "success",
+        title: `${result.data.length} entries acknowledged`,
+        timer: 1500,
+        showConfirmButton: false,
+      });
+    } catch {
+      Swal.fire("Error", "Could not acknowledge entries", "error");
     }
   };
 
@@ -236,6 +279,16 @@ export default function SubmissionSettings() {
             <Option value="acknowledged">Acknowledged</Option>
             <Option value="rejected">Rejected</Option>
           </Select>
+          {selectedRowKeys.length > 0 && (
+            <Button
+              type="primary"
+              icon={<CheckOutlined />}
+              style={{ background: "#52c41a", borderColor: "#52c41a" }}
+              onClick={handleBulkAcknowledge}
+            >
+              Acknowledge Selected ({selectedRowKeys.length})
+            </Button>
+          )}
         </Space>
 
         <Table
@@ -246,6 +299,10 @@ export default function SubmissionSettings() {
           pagination={{ pageSize: 15 }}
           size="middle"
           scroll={{ x: 900 }}
+          rowSelection={{
+            selectedRowKeys,
+            onChange: setSelectedRowKeys,
+          }}
         />
       </Card>
 

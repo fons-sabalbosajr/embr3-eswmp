@@ -266,7 +266,7 @@ export default function AdminHome() {
   useEffect(() => {
     const stored = secureStorage.getJSON("user");
     if (!stored) {
-      navigate("/login");
+      navigate("/admin/login", { replace: true });
       return;
     }
     setUser(stored);
@@ -320,7 +320,7 @@ export default function AdminHome() {
     }).then((result) => {
       if (result.isConfirmed) {
         secureStorage.clearAll();
-        navigate("/login");
+        navigate("/admin/login");
       }
     });
   };
@@ -666,6 +666,9 @@ export default function AdminHome() {
       )}
     </>
   );
+
+  // Block rendering until auth is checked — prevents dashboard flash
+  if (!user) return null;
 
   return (
     <DataRefProvider>

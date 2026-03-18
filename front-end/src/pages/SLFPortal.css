@@ -5,6 +5,15 @@
   background: #f0f2f5;
 }
 
+/* Portal Sider Logo */
+.portal-sider-logo {
+  display: flex;
+  align-items: center;
+  padding: 16px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+  margin-bottom: 8px;
+}
+
 /* Banner */
 .slf-banner {
   background: linear-gradient(135deg, rgba(26,51,83,0.88) 0%, rgba(45,95,138,0.85) 50%, rgba(26,51,83,0.90) 100%),
@@ -97,6 +106,16 @@
   overflow-x: auto;
 }
 
+/* ── Portal header responsive ── */
+.portal-header {
+  padding: 0 24px;
+}
+
+/* ── Tabs responsive base ── */
+.slf-section .ant-tabs-nav {
+  margin-bottom: 16px;
+}
+
 /* ── Tablet (≤ 992px) ── */
 @media (max-width: 992px) {
   .slf-banner {
@@ -147,6 +166,23 @@
   .slf-footer {
     padding: 16px 16px;
     margin-top: 24px;
+  }
+
+  /* Portal header reduce padding */
+  .portal-header {
+    padding: 0 12px !important;
+  }
+
+  /* Tabs: smaller font on tablet */
+  .slf-section .ant-tabs-tab {
+    font-size: 13px;
+    padding: 8px 12px;
+  }
+
+  /* Card head wrap */
+  .slf-section .ant-card-head-title {
+    white-space: normal;
+    line-height: 1.4;
   }
 }
 
@@ -210,5 +246,40 @@
   /* Category dividers */
   .slf-category-divider {
     font-size: 12px !important;
+  }
+
+  /* Tabs: compact on phone */
+  .slf-section .ant-tabs-tab {
+    font-size: 12px;
+    padding: 6px 10px;
+  }
+
+  .slf-section .ant-tabs-nav {
+    margin-bottom: 12px;
+  }
+
+  /* Portal header compact */
+  .portal-header {
+    padding: 0 8px !important;
+  }
+
+  .portal-header .ant-typography {
+    font-size: 14px !important;
+  }
+
+  /* Truck box form inputs compact */
+  .slf-truck-box .ant-form-item-label > label {
+    font-size: 11px;
+  }
+
+  .slf-truck-box .ant-input,
+  .slf-truck-box .ant-input-number,
+  .slf-truck-box .ant-select-selector {
+    font-size: 13px;
+  }
+
+  /* History card extra button */
+  .slf-section .ant-card-extra {
+    margin-top: 4px;
   }
 }

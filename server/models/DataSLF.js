@@ -14,6 +14,15 @@ const truckSchema = new mongoose.Schema(
   { _id: false }
 );
 
+const haulerSchema = new mongoose.Schema(
+  {
+    haulerName: { type: String, trim: true },
+    numberOfTrucks: { type: Number },
+    privateSectorClients: { type: String, trim: true },
+  },
+  { _id: false }
+);
+
 const dataSLFSchema = new mongoose.Schema(
   {
     slfGenerator: {
@@ -22,6 +31,20 @@ const dataSLFSchema = new mongoose.Schema(
     },
     submissionId: { type: String, trim: true },
     idNo: { type: String, trim: true },
+
+    // Baseline Information
+    totalVolumeAccepted: { type: Number },
+    totalVolumeAcceptedUnit: { type: String, enum: ["m3", "tons"], default: "m3" },
+    activeCellResidualVolume: { type: Number },
+    activeCellResidualUnit: { type: String, enum: ["m3", "tons"], default: "m3" },
+    activeCellInertVolume: { type: Number },
+    activeCellInertUnit: { type: String, enum: ["m3", "tons"], default: "m3" },
+    closedCellResidualVolume: { type: Number },
+    closedCellResidualUnit: { type: String, enum: ["m3", "tons"], default: "m3" },
+    closedCellInertVolume: { type: Number },
+    closedCellInertUnit: { type: String, enum: ["m3", "tons"], default: "m3" },
+    accreditedHaulers: [haulerSchema],
+
     dateOfDisposal: { type: Date, required: true },
     lguCompanyName: { type: String, required: true, trim: true },
     companyType: {

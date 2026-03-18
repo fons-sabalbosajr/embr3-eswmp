@@ -32,7 +32,9 @@ import {
   FileTextOutlined,
   ReloadOutlined,
   DeleteOutlined,
+  TeamOutlined,
 } from "@ant-design/icons";
+import PortalUsers from "./PortalUsers";
 import Swal from "sweetalert2";
 import api from "../../api";
 import dayjs from "dayjs";
@@ -546,8 +548,11 @@ export default function DeveloperSettings({ onSettingsSaved }) {
                 </Card>
               </>
             ),
-          },
-        ]}
+          },          {
+            key: "portal-users",
+            label: <><TeamOutlined /> Portal Users</>,
+            children: <PortalUsers />,
+          },        ]}
       />
     </div>
   );

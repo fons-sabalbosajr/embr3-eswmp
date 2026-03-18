@@ -50,7 +50,7 @@ export default function VerifyEmail() {
             extra={
               <Button
                 type="primary"
-                onClick={() => navigate("/login")}
+                onClick={() => navigate("/admin/login")}
                 style={styles.btn}
               >
                 Go to Login
@@ -66,7 +66,7 @@ export default function VerifyEmail() {
             extra={
               <Button
                 type="primary"
-                onClick={() => navigate("/signup")}
+                onClick={() => navigate("/admin/signup")}
                 style={styles.btn}
               >
                 Sign Up Again

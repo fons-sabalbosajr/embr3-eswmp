@@ -128,16 +128,40 @@ function computeFields(rec) {
 
 export default function TenYearSWMPlan() {
   const { getValues } = useDataRef();
-  const provinceOptions = getValues("province").map((p) => ({ label: p, value: p }));
-  const monthOptions = getValues("target-month").map((m) => ({ label: m.replace(/^\d+\./, ""), value: m }));
-  const mbaOptions = getValues("manila-bay-area").map((v) => ({ label: v, value: v }));
+  const provinceOptions = getValues("province").map((p) => ({
+    label: p,
+    value: p,
+  }));
+  const monthOptions = getValues("target-month").map((m) => ({
+    label: m.replace(/^\d+\./, ""),
+    value: m,
+  }));
+  const mbaOptions = getValues("manila-bay-area").map((v) => ({
+    label: v,
+    value: v,
+  }));
   const yesNoOptions = getValues("yes-no").map((v) => ({ label: v, value: v }));
-  const planStatusOptions = getValues("swm-plan-status").map((v) => ({ label: v, value: v }));
-  const planComplianceOptions = getValues("swm-plan-compliance").map((v) => ({ label: v, value: v }));
-  const typeOfPlanOptions = getValues("type-of-plan").map((v) => ({ label: v, value: v }));
+  const planStatusOptions = getValues("swm-plan-status").map((v) => ({
+    label: v,
+    value: v,
+  }));
+  const planComplianceOptions = getValues("swm-plan-compliance").map((v) => ({
+    label: v,
+    value: v,
+  }));
+  const typeOfPlanOptions = getValues("type-of-plan").map((v) => ({
+    label: v,
+    value: v,
+  }));
   const enmoOptions = getValues("enmo").map((v) => ({ label: v, value: v }));
-  const eswmStaffOptions = getValues("eswm-staff").map((v) => ({ label: v, value: v }));
-  const focalOptions = getValues("eswm-focal").map((v) => ({ label: v, value: v }));
+  const eswmStaffOptions = getValues("eswm-staff").map((v) => ({
+    label: v,
+    value: v,
+  }));
+  const focalOptions = getValues("eswm-focal").map((v) => ({
+    label: v,
+    value: v,
+  }));
 
   const [records, setRecords] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -207,7 +231,10 @@ export default function TenYearSWMPlan() {
   const detailViewRecord = useMemo(() => {
     if (!detailModal) return null;
     if (detailYearRecords.length === 0) return detailModal;
-    return detailYearRecords.find((r) => (r.dataYear || 2026) === detailYear) || detailModal;
+    return (
+      detailYearRecords.find((r) => (r.dataYear || 2026) === detailYear) ||
+      detailModal
+    );
   }, [detailModal, detailYearRecords, detailYear]);
 
   const openAdd = () => {
@@ -734,7 +761,7 @@ export default function TenYearSWMPlan() {
       `}</style>
       <div
         style={{
-          display: "flex",
+          display: "flex", 
           justifyContent: "space-between",
           alignItems: "center",
           marginBottom: 16,
@@ -893,7 +920,11 @@ export default function TenYearSWMPlan() {
             size="small"
             hoverable
             className="swm-card"
-            style={{ borderRadius: 10, borderLeft: "3px solid #1a3353", height: "100%" }}
+            style={{
+              borderRadius: 10,
+              borderLeft: "3px solid #1a3353",
+              height: "100%",
+            }}
           >
             <Statistic
               title="Total LGUs"
@@ -1095,7 +1126,9 @@ export default function TenYearSWMPlan() {
             {detailYearRecords.length > 1 && (
               <div style={{ marginBottom: 12 }}>
                 <Space size={8}>
-                  <Text type="secondary" style={{ fontSize: 12 }}>Data Year:</Text>
+                  <Text type="secondary" style={{ fontSize: 12 }}>
+                    Data Year:
+                  </Text>
                   {detailYearRecords
                     .map((r) => r.dataYear || 2026)
                     .filter((v, i, a) => a.indexOf(v) === i)
@@ -1113,509 +1146,541 @@ export default function TenYearSWMPlan() {
                 </Space>
               </div>
             )}
-          <Tabs
-            items={[
-              {
-                key: "general",
-                label: (
-                  <>
-                    <EnvironmentOutlined /> General Info
-                  </>
-                ),
-                children: (
-                  <>
-                    <Row gutter={[16, 12]}>
-                      <Col xs={24} sm={12}>
-                        <Text type="secondary">
-                          <EnvironmentOutlined /> Province:
-                        </Text>{" "}
-                        <Text strong>{detailViewRecord.province}</Text>
-                      </Col>
-                      <Col xs={24} sm={12}>
-                        <Text type="secondary">
-                          <EnvironmentOutlined /> Municipality:
-                        </Text>{" "}
-                        <Text strong>{detailViewRecord.municipality}</Text>
-                      </Col>
-                      <Col xs={24} sm={12}>
-                        <Text type="secondary">Manila Bay Area:</Text>{" "}
-                        {detailViewRecord.manilaBayArea === "MBA" ? (
-                          <Tag color="blue" bordered={false}>
-                            MBA
+            <Tabs
+              items={[
+                {
+                  key: "general",
+                  label: (
+                    <>
+                      <EnvironmentOutlined /> General Info
+                    </>
+                  ),
+                  children: (
+                    <>
+                      <Row gutter={[16, 12]}>
+                        <Col xs={24} sm={12}>
+                          <Text type="secondary">
+                            <EnvironmentOutlined /> Province:
+                          </Text>{" "}
+                          <Text strong>{detailViewRecord.province}</Text>
+                        </Col>
+                        <Col xs={24} sm={12}>
+                          <Text type="secondary">
+                            <EnvironmentOutlined /> Municipality:
+                          </Text>{" "}
+                          <Text strong>{detailViewRecord.municipality}</Text>
+                        </Col>
+                        <Col xs={24} sm={12}>
+                          <Text type="secondary">Manila Bay Area:</Text>{" "}
+                          {detailViewRecord.manilaBayArea === "MBA" ? (
+                            <Tag color="blue" bordered={false}>
+                              MBA
+                            </Tag>
+                          ) : (
+                            <Tag color="default" bordered={false}>
+                              {detailViewRecord.manilaBayArea || "—"}
+                            </Tag>
+                          )}
+                        </Col>
+                        <Col xs={24} sm={12}>
+                          <Text type="secondary">Congressional District:</Text>{" "}
+                          <Text>
+                            {detailViewRecord.congressionalDistrict || "—"}
+                          </Text>
+                        </Col>
+                        <Col xs={24} sm={12}>
+                          <Text type="secondary">Coordinates:</Text>{" "}
+                          <Text>
+                            {detailViewRecord.latitude},{" "}
+                            {detailViewRecord.longitude}
+                          </Text>
+                        </Col>
+                      </Row>
+                      <Divider plain orientation="left">
+                        <AuditOutlined /> Plan Details
+                      </Divider>
+                      <Row gutter={[16, 12]}>
+                        <Col xs={24} sm={12}>
+                          <Text type="secondary">
+                            <FileTextOutlined /> Plan Type:
+                          </Text>{" "}
+                          {detailViewRecord.typeOfSWMPlan ? (
+                            <Tag color="geekblue" bordered={false}>
+                              {detailViewRecord.typeOfSWMPlan}
+                            </Tag>
+                          ) : (
+                            "—"
+                          )}
+                        </Col>
+                        <Col xs={24} sm={12}>
+                          <Text type="secondary">
+                            <FileTextOutlined /> Resolution No.:
+                          </Text>{" "}
+                          <Text>{detailViewRecord.resolutionNo || "—"}</Text>
+                        </Col>
+                        <Col xs={24} sm={12}>
+                          <Text type="secondary">
+                            <CalendarOutlined /> Period Covered:
+                          </Text>{" "}
+                          <Tag bordered={false}>
+                            {detailViewRecord.periodCovered || "—"}
                           </Tag>
-                        ) : (
-                          <Tag color="default" bordered={false}>
-                            {detailViewRecord.manilaBayArea || "—"}
-                          </Tag>
-                        )}
-                      </Col>
-                      <Col xs={24} sm={12}>
-                        <Text type="secondary">Congressional District:</Text>{" "}
-                        <Text>{detailViewRecord.congressionalDistrict || "—"}</Text>
-                      </Col>
-                      <Col xs={24} sm={12}>
-                        <Text type="secondary">Coordinates:</Text>{" "}
-                        <Text>
-                          {detailViewRecord.latitude}, {detailViewRecord.longitude}
-                        </Text>
-                      </Col>
-                    </Row>
-                    <Divider plain orientation="left">
-                      <AuditOutlined /> Plan Details
-                    </Divider>
-                    <Row gutter={[16, 12]}>
-                      <Col xs={24} sm={12}>
-                        <Text type="secondary">
-                          <FileTextOutlined /> Plan Type:
-                        </Text>{" "}
-                        {detailViewRecord.typeOfSWMPlan ? (
-                          <Tag color="geekblue" bordered={false}>
-                            {detailViewRecord.typeOfSWMPlan}
-                          </Tag>
-                        ) : (
-                          "—"
-                        )}
-                      </Col>
-                      <Col xs={24} sm={12}>
-                        <Text type="secondary">
-                          <FileTextOutlined /> Resolution No.:
-                        </Text>{" "}
-                        <Text>{detailViewRecord.resolutionNo || "—"}</Text>
-                      </Col>
-                      <Col xs={24} sm={12}>
-                        <Text type="secondary">
-                          <CalendarOutlined /> Period Covered:
-                        </Text>{" "}
-                        <Tag bordered={false}>
-                          {detailViewRecord.periodCovered || "—"}
-                        </Tag>
-                      </Col>
-                      <Col xs={24} sm={12}>
-                        <Text type="secondary">
-                          <CalendarOutlined /> Year Approved:
-                        </Text>{" "}
-                        <Text>{detailViewRecord.yearApproved || "—"}</Text>
-                      </Col>
-                      <Col xs={24} sm={12}>
-                        <Text type="secondary">
-                          <CalendarOutlined /> End Period:
-                        </Text>{" "}
-                        <Text>{detailViewRecord.endPeriod || "—"}</Text>
-                      </Col>
-                      <Col xs={24} sm={12}>
-                        <Text type="secondary">Status:</Text>{" "}
-                        {getRenewalTag(detailViewRecord.forRenewal)}
-                      </Col>
-                    </Row>
-                    <Divider plain orientation="left">
-                      <TeamOutlined /> Personnel
-                    </Divider>
-                    <Row gutter={[16, 12]}>
-                      <Col xs={24} sm={8}>
-                        <Text type="secondary">
-                          <UserOutlined /> Focal Person:
-                        </Text>
-                        <br />
-                        <Text strong>{detailViewRecord.focalPerson || "—"}</Text>
-                      </Col>
-                      <Col xs={24} sm={8}>
-                        <Text type="secondary">
-                          <UserOutlined /> ESWM Staff:
-                        </Text>
-                        <br />
-                        <Text strong>{detailViewRecord.eswmStaff || "—"}</Text>
-                      </Col>
-                      <Col xs={24} sm={8}>
-                        <Text type="secondary">
-                          <SolutionOutlined /> ENMO Assigned:
-                        </Text>
-                        <br />
-                        <Text strong>{detailViewRecord.enmoAssigned || "—"}</Text>
-                      </Col>
-                    </Row>
-                    {detailViewRecord.latitude && detailViewRecord.longitude && (
-                      <>
-                        <Divider plain orientation="left">
-                          <GlobalOutlined /> Location Map
-                        </Divider>
-                        <div
-                          style={{
-                            height: 220,
-                            borderRadius: 8,
-                            overflow: "hidden",
-                          }}
-                        >
-                          <MapContainer
-                            center={[
-                              Number(detailViewRecord.latitude),
-                              Number(detailViewRecord.longitude),
-                            ]}
-                            zoom={12}
-                            style={{
-                              height: "100%",
-                              width: "100%",
-                              borderRadius: 8,
-                            }}
-                            scrollWheelZoom={true}
-                          >
-                            <TileLayer
-                              attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
-                              url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
-                            />
-                            <Marker
-                              position={[
-                                Number(detailViewRecord.latitude),
-                                Number(detailViewRecord.longitude),
-                              ]}
+                        </Col>
+                        <Col xs={24} sm={12}>
+                          <Text type="secondary">
+                            <CalendarOutlined /> Year Approved:
+                          </Text>{" "}
+                          <Text>{detailViewRecord.yearApproved || "—"}</Text>
+                        </Col>
+                        <Col xs={24} sm={12}>
+                          <Text type="secondary">
+                            <CalendarOutlined /> End Period:
+                          </Text>{" "}
+                          <Text>{detailViewRecord.endPeriod || "—"}</Text>
+                        </Col>
+                        <Col xs={24} sm={12}>
+                          <Text type="secondary">Status:</Text>{" "}
+                          {getRenewalTag(detailViewRecord.forRenewal)}
+                        </Col>
+                      </Row>
+                      <Divider plain orientation="left">
+                        <TeamOutlined /> Personnel
+                      </Divider>
+                      <Row gutter={[16, 12]}>
+                        <Col xs={24} sm={8}>
+                          <Text type="secondary">
+                            <UserOutlined /> Focal Person:
+                          </Text>
+                          <br />
+                          <Text strong>
+                            {detailViewRecord.focalPerson || "—"}
+                          </Text>
+                        </Col>
+                        <Col xs={24} sm={8}>
+                          <Text type="secondary">
+                            <UserOutlined /> ESWM Staff:
+                          </Text>
+                          <br />
+                          <Text strong>
+                            {detailViewRecord.eswmStaff || "—"}
+                          </Text>
+                        </Col>
+                        <Col xs={24} sm={8}>
+                          <Text type="secondary">
+                            <SolutionOutlined /> ENMO Assigned:
+                          </Text>
+                          <br />
+                          <Text strong>
+                            {detailViewRecord.enmoAssigned || "—"}
+                          </Text>
+                        </Col>
+                      </Row>
+                      {detailViewRecord.latitude &&
+                        detailViewRecord.longitude && (
+                          <>
+                            <Divider plain orientation="left">
+                              <GlobalOutlined /> Location Map
+                            </Divider>
+                            <div
+                              style={{
+                                height: 220,
+                                borderRadius: 8,
+                                overflow: "hidden",
+                              }}
                             >
-                              <Popup>
-                                <Text strong>{detailViewRecord.municipality}</Text>
-                                <br />
-                                <Text type="secondary">
-                                  {detailViewRecord.province}
-                                </Text>
-                                <br />
-                                <Text style={{ fontSize: 11 }}>
-                                  {detailViewRecord.latitude},{" "}
-                                  {detailViewRecord.longitude}
-                                </Text>
-                              </Popup>
-                            </Marker>
-                          </MapContainer>
-                        </div>
-                      </>
-                    )}
-                  </>
-                ),
-              },
-              {
-                key: "monitoring",
-                label: (
-                  <>
-                    <CalendarOutlined /> Monitoring
-                  </>
-                ),
-                children: (
-                  <>
-                    <Row gutter={[16, 12]}>
-                      <Col xs={24} sm={12}>
-                        <Text type="secondary">
-                          <CalendarOutlined /> Target Month:
-                        </Text>{" "}
-                        {detailViewRecord.targetMonth ? (
-                          <Tag color="cyan" bordered={false}>
-                            {detailViewRecord.targetMonth.replace(/^\d+\./, "")}
-                          </Tag>
-                        ) : (
-                          "—"
+                              <MapContainer
+                                center={[
+                                  Number(detailViewRecord.latitude),
+                                  Number(detailViewRecord.longitude),
+                                ]}
+                                zoom={12}
+                                style={{
+                                  height: "100%",
+                                  width: "100%",
+                                  borderRadius: 8,
+                                }}
+                                scrollWheelZoom={true}
+                              >
+                                <TileLayer
+                                  attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
+                                  url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+                                />
+                                <Marker
+                                  position={[
+                                    Number(detailViewRecord.latitude),
+                                    Number(detailViewRecord.longitude),
+                                  ]}
+                                >
+                                  <Popup>
+                                    <Text strong>
+                                      {detailViewRecord.municipality}
+                                    </Text>
+                                    <br />
+                                    <Text type="secondary">
+                                      {detailViewRecord.province}
+                                    </Text>
+                                    <br />
+                                    <Text style={{ fontSize: 11 }}>
+                                      {detailViewRecord.latitude},{" "}
+                                      {detailViewRecord.longitude}
+                                    </Text>
+                                  </Popup>
+                                </Marker>
+                              </MapContainer>
+                            </div>
+                          </>
                         )}
-                      </Col>
-                      <Col xs={24} sm={12}>
-                        <Text type="secondary">
-                          <FileTextOutlined /> IIS Number:
-                        </Text>{" "}
-                        <Text>{detailViewRecord.iisNumber || "—"}</Text>
-                      </Col>
-                      <Col xs={24} sm={12}>
-                        <Text type="secondary">
-                          <CalendarOutlined /> Date of Monitoring:
-                        </Text>{" "}
-                        <Text>
-                          {detailViewRecord.dateOfMonitoring
-                            ? dayjs(detailViewRecord.dateOfMonitoring).format(
-                                "MMM DD, YYYY",
-                              )
-                            : "—"}
-                        </Text>
-                      </Col>
-                      <Col xs={24} sm={12}>
-                        <Text type="secondary">
-                          <CalendarOutlined /> Report Prepared:
-                        </Text>{" "}
-                        <Text>
-                          {detailViewRecord.dateReportPrepared
-                            ? dayjs(detailViewRecord.dateReportPrepared).format(
-                                "MMM DD, YYYY",
-                              )
-                            : "—"}
-                        </Text>
-                      </Col>
-                      <Col xs={24} sm={12}>
-                        <Text type="secondary">
-                          <CalendarOutlined /> Reviewed (Staff):
-                        </Text>{" "}
-                        <Text>
-                          {detailViewRecord.dateReportReviewedStaff
-                            ? dayjs(detailViewRecord.dateReportReviewedStaff).format(
-                                "MMM DD, YYYY",
-                              )
-                            : "—"}
-                        </Text>
-                      </Col>
-                      <Col xs={24} sm={12}>
-                        <Text type="secondary">
-                          <CalendarOutlined /> Reviewed (Focal):
-                        </Text>{" "}
-                        <Text>
-                          {detailViewRecord.dateReportReviewedFocal
-                            ? dayjs(detailViewRecord.dateReportReviewedFocal).format(
-                                "MMM DD, YYYY",
-                              )
-                            : "—"}
-                        </Text>
-                      </Col>
-                      <Col xs={24} sm={12}>
-                        <Text type="secondary">
-                          <CheckCircleOutlined /> Report Approved:
-                        </Text>{" "}
-                        <Text>
-                          {detailViewRecord.dateReportApproved
-                            ? dayjs(detailViewRecord.dateReportApproved).format(
-                                "MMM DD, YYYY",
-                              )
-                            : "—"}
-                        </Text>
-                      </Col>
-                    </Row>
-                    <Divider plain>
-                      <CalendarOutlined /> Processing Days
-                    </Divider>
-                    <Row gutter={[16, 8]}>
-                      <Col xs={12} sm={6}>
-                        <Statistic
-                          title="Prepared"
-                          value={detailViewRecord.totalDaysReportPrepared ?? "—"}
-                          suffix="days"
-                        />
-                      </Col>
-                      <Col xs={12} sm={6}>
-                        <Statistic
-                          title="Staff Review"
-                          value={detailViewRecord.totalDaysReviewedStaff ?? "—"}
-                          suffix="days"
-                        />
-                      </Col>
-                      <Col xs={12} sm={6}>
-                        <Statistic
-                          title="Focal Review"
-                          value={detailViewRecord.totalDaysReviewedFocal ?? "—"}
-                          suffix="days"
-                        />
-                      </Col>
-                      <Col xs={12} sm={6}>
-                        <Statistic
-                          title="Approved"
-                          value={detailViewRecord.totalDaysApproved ?? "—"}
-                          suffix="days"
-                        />
-                      </Col>
-                    </Row>
-                  </>
-                ),
-              },
-              {
-                key: "compliance",
-                label: "Compliance",
-                children: (
-                  <>
-                    <Row gutter={[16, 8]}>
-                      <Col span={24}>
-                        <Text type="secondary">Overall Compliance:</Text>{" "}
-                        {getComplianceTag(detailViewRecord.remarksAndRecommendation)}
-                      </Col>
-                    </Row>
-                    <Divider plain>ESWM Components</Divider>
-                    <Row gutter={[16, 12]}>
-                      {[
-                        {
-                          label: "Source Reduction",
-                          val: detailViewRecord.sourceReduction,
-                        },
-                        {
-                          label: "Segregated Collection",
-                          val: detailViewRecord.segregatedCollection,
-                        },
-                        {
-                          label: "Storage & Setout",
-                          val: detailViewRecord.storageAndSetout,
-                        },
-                        {
-                          label: "Processing MRF",
-                          val: detailViewRecord.processingMRF,
-                        },
-                        {
-                          label: "Transfer Station",
-                          val: detailViewRecord.transferStation,
-                        },
-                        {
-                          label: "Disposal Facilities",
-                          val: detailViewRecord.disposalFacilities,
-                        },
-                      ].map((item) => (
-                        <Col xs={12} sm={8} key={item.label}>
-                          <Badge
-                            status={
-                              item.val === "YES"
-                                ? "success"
-                                : item.val === "NO"
-                                  ? "error"
-                                  : "default"
+                    </>
+                  ),
+                },
+                {
+                  key: "monitoring",
+                  label: (
+                    <>
+                      <CalendarOutlined /> Monitoring
+                    </>
+                  ),
+                  children: (
+                    <>
+                      <Row gutter={[16, 12]}>
+                        <Col xs={24} sm={12}>
+                          <Text type="secondary">
+                            <CalendarOutlined /> Target Month:
+                          </Text>{" "}
+                          {detailViewRecord.targetMonth ? (
+                            <Tag color="cyan" bordered={false}>
+                              {detailViewRecord.targetMonth.replace(
+                                /^\d+\./,
+                                "",
+                              )}
+                            </Tag>
+                          ) : (
+                            "—"
+                          )}
+                        </Col>
+                        <Col xs={24} sm={12}>
+                          <Text type="secondary">
+                            <FileTextOutlined /> IIS Number:
+                          </Text>{" "}
+                          <Text>{detailViewRecord.iisNumber || "—"}</Text>
+                        </Col>
+                        <Col xs={24} sm={12}>
+                          <Text type="secondary">
+                            <CalendarOutlined /> Date of Monitoring:
+                          </Text>{" "}
+                          <Text>
+                            {detailViewRecord.dateOfMonitoring
+                              ? dayjs(detailViewRecord.dateOfMonitoring).format(
+                                  "MMM DD, YYYY",
+                                )
+                              : "—"}
+                          </Text>
+                        </Col>
+                        <Col xs={24} sm={12}>
+                          <Text type="secondary">
+                            <CalendarOutlined /> Report Prepared:
+                          </Text>{" "}
+                          <Text>
+                            {detailViewRecord.dateReportPrepared
+                              ? dayjs(
+                                  detailViewRecord.dateReportPrepared,
+                                ).format("MMM DD, YYYY")
+                              : "—"}
+                          </Text>
+                        </Col>
+                        <Col xs={24} sm={12}>
+                          <Text type="secondary">
+                            <CalendarOutlined /> Reviewed (Staff):
+                          </Text>{" "}
+                          <Text>
+                            {detailViewRecord.dateReportReviewedStaff
+                              ? dayjs(
+                                  detailViewRecord.dateReportReviewedStaff,
+                                ).format("MMM DD, YYYY")
+                              : "—"}
+                          </Text>
+                        </Col>
+                        <Col xs={24} sm={12}>
+                          <Text type="secondary">
+                            <CalendarOutlined /> Reviewed (Focal):
+                          </Text>{" "}
+                          <Text>
+                            {detailViewRecord.dateReportReviewedFocal
+                              ? dayjs(
+                                  detailViewRecord.dateReportReviewedFocal,
+                                ).format("MMM DD, YYYY")
+                              : "—"}
+                          </Text>
+                        </Col>
+                        <Col xs={24} sm={12}>
+                          <Text type="secondary">
+                            <CheckCircleOutlined /> Report Approved:
+                          </Text>{" "}
+                          <Text>
+                            {detailViewRecord.dateReportApproved
+                              ? dayjs(
+                                  detailViewRecord.dateReportApproved,
+                                ).format("MMM DD, YYYY")
+                              : "—"}
+                          </Text>
+                        </Col>
+                      </Row>
+                      <Divider plain>
+                        <CalendarOutlined /> Processing Days
+                      </Divider>
+                      <Row gutter={[16, 8]}>
+                        <Col xs={12} sm={6}>
+                          <Statistic
+                            title="Prepared"
+                            value={
+                              detailViewRecord.totalDaysReportPrepared ?? "—"
                             }
-                            text={
-                              <Text>
-                                {item.label}:{" "}
-                                <Text strong>{item.val || "—"}</Text>
-                              </Text>
-                            }
+                            suffix="days"
                           />
                         </Col>
-                      ))}
-                    </Row>
-                    <Divider plain>LGU Disposal & Advise</Divider>
-                    <Row gutter={[16, 8]}>
-                      <Col xs={24} sm={12}>
-                        <Text type="secondary">LGU Final Disposal:</Text>{" "}
-                        <Text>{detailViewRecord.lguFinalDisposal || "—"}</Text>
-                      </Col>
-                      <Col xs={24} sm={12}>
-                        <Text type="secondary">Advise Letter Date:</Text>{" "}
-                        <Text>{detailViewRecord.adviseLetterDateIssued || "—"}</Text>
-                      </Col>
-                      <Col xs={24} sm={12}>
-                        <Text type="secondary">Compliance to Advise:</Text>{" "}
-                        <Text>{detailViewRecord.complianceToAdvise || "—"}</Text>
-                      </Col>
-                      <Col xs={24} sm={12}>
-                        <Text type="secondary">Remarks:</Text>{" "}
-                        <Text>{detailViewRecord.remarks || "—"}</Text>
-                      </Col>
-                    </Row>
-                  </>
-                ),
-              },
-              {
-                key: "waste",
-                label: (
-                  <>
-                    <FundProjectionScreenOutlined /> Waste Data
-                  </>
-                ),
-                children: (
-                  <>
-                    <Row gutter={[16, 8]}>
-                      <Col xs={24} sm={12}>
-                        <Statistic
-                          title="Total Waste Generation"
-                          value={
-                            detailViewRecord.totalWasteGeneration?.toLocaleString() ||
-                            "—"
-                          }
-                          suffix="kg/day"
-                        />
-                      </Col>
-                      <Col xs={24} sm={12}>
-                        <Statistic title="PCG" value={detailViewRecord.pcg || "—"} />
-                      </Col>
-                    </Row>
-                    <Divider plain>Waste Composition</Divider>
-                    {[
-                      {
-                        label: "Biodegradable",
-                        val: detailViewRecord.biodegradableWaste,
-                        pct: detailViewRecord.biodegradablePercent,
-                        color: "#52c41a",
-                      },
-                      {
-                        label: "Recyclable",
-                        val: detailViewRecord.recyclableWaste,
-                        pct: detailViewRecord.recyclablePercent,
-                        color: "#1890ff",
-                      },
-                      {
-                        label: "Residual (Potential)",
-                        val: detailViewRecord.residualWithPotential,
-                        pct: detailViewRecord.residualWithPotentialPercent,
-                        color: "#faad14",
-                      },
-                      {
-                        label: "Residual (Disposal)",
-                        val: detailViewRecord.residualWasteForDisposal,
-                        pct: detailViewRecord.residualPercent,
-                        color: "#ff4d4f",
-                      },
-                      {
-                        label: "Special Waste",
-                        val: detailViewRecord.specialWaste,
-                        pct: detailViewRecord.specialPercent,
-                        color: "#722ed1",
-                      },
-                    ].map((w) => (
-                      <div key={w.label} style={{ marginBottom: 12 }}>
-                        <div
-                          style={{
-                            display: "flex",
-                            justifyContent: "space-between",
-                            marginBottom: 4,
-                          }}
-                        >
-                          <Text>{w.label}</Text>
-                          <Text strong>
-                            {w.val?.toLocaleString() || 0} kg/day (
-                            {((w.pct || 0) * 100).toFixed(1)}%)
+                        <Col xs={12} sm={6}>
+                          <Statistic
+                            title="Staff Review"
+                            value={
+                              detailViewRecord.totalDaysReviewedStaff ?? "—"
+                            }
+                            suffix="days"
+                          />
+                        </Col>
+                        <Col xs={12} sm={6}>
+                          <Statistic
+                            title="Focal Review"
+                            value={
+                              detailViewRecord.totalDaysReviewedFocal ?? "—"
+                            }
+                            suffix="days"
+                          />
+                        </Col>
+                        <Col xs={12} sm={6}>
+                          <Statistic
+                            title="Approved"
+                            value={detailViewRecord.totalDaysApproved ?? "—"}
+                            suffix="days"
+                          />
+                        </Col>
+                      </Row>
+                    </>
+                  ),
+                },
+                {
+                  key: "compliance",
+                  label: "Compliance",
+                  children: (
+                    <>
+                      <Row gutter={[16, 8]}>
+                        <Col span={24}>
+                          <Text type="secondary">Overall Compliance:</Text>{" "}
+                          {getComplianceTag(
+                            detailViewRecord.remarksAndRecommendation,
+                          )}
+                        </Col>
+                      </Row>
+                      <Divider plain>ESWM Components</Divider>
+                      <Row gutter={[16, 12]}>
+                        {[
+                          {
+                            label: "Source Reduction",
+                            val: detailViewRecord.sourceReduction,
+                          },
+                          {
+                            label: "Segregated Collection",
+                            val: detailViewRecord.segregatedCollection,
+                          },
+                          {
+                            label: "Storage & Setout",
+                            val: detailViewRecord.storageAndSetout,
+                          },
+                          {
+                            label: "Processing MRF",
+                            val: detailViewRecord.processingMRF,
+                          },
+                          {
+                            label: "Transfer Station",
+                            val: detailViewRecord.transferStation,
+                          },
+                          {
+                            label: "Disposal Facilities",
+                            val: detailViewRecord.disposalFacilities,
+                          },
+                        ].map((item) => (
+                          <Col xs={12} sm={8} key={item.label}>
+                            <Badge
+                              status={
+                                item.val === "YES"
+                                  ? "success"
+                                  : item.val === "NO"
+                                    ? "error"
+                                    : "default"
+                              }
+                              text={
+                                <Text>
+                                  {item.label}:{" "}
+                                  <Text strong>{item.val || "—"}</Text>
+                                </Text>
+                              }
+                            />
+                          </Col>
+                        ))}
+                      </Row>
+                      <Divider plain>LGU Disposal & Advise</Divider>
+                      <Row gutter={[16, 8]}>
+                        <Col xs={24} sm={12}>
+                          <Text type="secondary">LGU Final Disposal:</Text>{" "}
+                          <Text>
+                            {detailViewRecord.lguFinalDisposal || "—"}
                           </Text>
+                        </Col>
+                        <Col xs={24} sm={12}>
+                          <Text type="secondary">Advise Letter Date:</Text>{" "}
+                          <Text>
+                            {detailViewRecord.adviseLetterDateIssued || "—"}
+                          </Text>
+                        </Col>
+                        <Col xs={24} sm={12}>
+                          <Text type="secondary">Compliance to Advise:</Text>{" "}
+                          <Text>
+                            {detailViewRecord.complianceToAdvise || "—"}
+                          </Text>
+                        </Col>
+                        <Col xs={24} sm={12}>
+                          <Text type="secondary">Remarks:</Text>{" "}
+                          <Text>{detailViewRecord.remarks || "—"}</Text>
+                        </Col>
+                      </Row>
+                    </>
+                  ),
+                },
+                {
+                  key: "waste",
+                  label: (
+                    <>
+                      <FundProjectionScreenOutlined /> Waste Data
+                    </>
+                  ),
+                  children: (
+                    <>
+                      <Row gutter={[16, 8]}>
+                        <Col xs={24} sm={12}>
+                          <Statistic
+                            title="Total Waste Generation"
+                            value={
+                              detailViewRecord.totalWasteGeneration?.toLocaleString() ||
+                              "—"
+                            }
+                            suffix="kg/day"
+                          />
+                        </Col>
+                        <Col xs={24} sm={12}>
+                          <Statistic
+                            title="PCG"
+                            value={detailViewRecord.pcg || "—"}
+                          />
+                        </Col>
+                      </Row>
+                      <Divider plain>Waste Composition</Divider>
+                      {[
+                        {
+                          label: "Biodegradable",
+                          val: detailViewRecord.biodegradableWaste,
+                          pct: detailViewRecord.biodegradablePercent,
+                          color: "#52c41a",
+                        },
+                        {
+                          label: "Recyclable",
+                          val: detailViewRecord.recyclableWaste,
+                          pct: detailViewRecord.recyclablePercent,
+                          color: "#1890ff",
+                        },
+                        {
+                          label: "Residual (Potential)",
+                          val: detailViewRecord.residualWithPotential,
+                          pct: detailViewRecord.residualWithPotentialPercent,
+                          color: "#faad14",
+                        },
+                        {
+                          label: "Residual (Disposal)",
+                          val: detailViewRecord.residualWasteForDisposal,
+                          pct: detailViewRecord.residualPercent,
+                          color: "#ff4d4f",
+                        },
+                        {
+                          label: "Special Waste",
+                          val: detailViewRecord.specialWaste,
+                          pct: detailViewRecord.specialPercent,
+                          color: "#722ed1",
+                        },
+                      ].map((w) => (
+                        <div key={w.label} style={{ marginBottom: 12 }}>
+                          <div
+                            style={{
+                              display: "flex",
+                              justifyContent: "space-between",
+                              marginBottom: 4,
+                            }}
+                          >
+                            <Text>{w.label}</Text>
+                            <Text strong>
+                              {w.val?.toLocaleString() || 0} kg/day (
+                              {((w.pct || 0) * 100).toFixed(1)}%)
+                            </Text>
+                          </div>
+                          <Progress
+                            percent={Math.round((w.pct || 0) * 100)}
+                            strokeColor={w.color}
+                            showInfo={false}
+                            size="small"
+                          />
                         </div>
-                        <Progress
-                          percent={Math.round((w.pct || 0) * 100)}
-                          strokeColor={w.color}
-                          showInfo={false}
-                          size="small"
-                        />
-                      </div>
-                    ))}
-                    <Divider />
-                    <Row gutter={[16, 16]}>
-                      <Col xs={24} sm={12}>
-                        <Statistic
-                          title="Waste Diversion Rate"
-                          value={(
-                            (detailViewRecord.wasteDiversionRateCalc ||
-                              detailViewRecord.wasteDiversionRate ||
-                              0) * 100
-                          ).toFixed(1)}
-                          suffix="%"
-                          styles={{ content: { color: "#52c41a" } }}
-                        />
-                      </Col>
-                      <Col xs={24} sm={12}>
-                        <Statistic
-                          title="Disposal Rate"
-                          value={(
-                            (detailViewRecord.disposalRate || 0) * 100
-                          ).toFixed(1)}
-                          suffix="%"
-                          styles={{ content: { color: "#ff4d4f" } }}
-                        />
-                      </Col>
-                    </Row>
-                    {detailViewRecord.signedDocument && (
-                      <>
-                        <Divider />
-                        <Button
-                          type="link"
-                          icon={<LinkOutlined />}
-                          href={detailViewRecord.signedDocument}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                        >
-                          View Signed Document
-                        </Button>
-                      </>
-                    )}
-                  </>
-                ),
-              },
-            ]}
-          />
+                      ))}
+                      <Divider />
+                      <Row gutter={[16, 16]}>
+                        <Col xs={24} sm={12}>
+                          <Statistic
+                            title="Waste Diversion Rate"
+                            value={(
+                              (detailViewRecord.wasteDiversionRateCalc ||
+                                detailViewRecord.wasteDiversionRate ||
+                                0) * 100
+                            ).toFixed(1)}
+                            suffix="%"
+                            styles={{ content: { color: "#52c41a" } }}
+                          />
+                        </Col>
+                        <Col xs={24} sm={12}>
+                          <Statistic
+                            title="Disposal Rate"
+                            value={(
+                              (detailViewRecord.disposalRate || 0) * 100
+                            ).toFixed(1)}
+                            suffix="%"
+                            styles={{ content: { color: "#ff4d4f" } }}
+                          />
+                        </Col>
+                      </Row>
+                      {detailViewRecord.signedDocument && (
+                        <>
+                          <Divider />
+                          <Button
+                            type="link"
+                            icon={<LinkOutlined />}
+                            href={detailViewRecord.signedDocument}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                          >
+                            View Signed Document
+                          </Button>
+                        </>
+                      )}
+                    </>
+                  ),
+                },
+              ]}
+            />
           </>
         )}
       </Modal>
@@ -1637,7 +1702,13 @@ export default function TenYearSWMPlan() {
       >
         <Form form={form} layout="vertical" size="small">
           <Collapse
-            defaultActiveKey={["location","personnel","compliance","waste","document"]}
+            defaultActiveKey={[
+              "location",
+              "personnel",
+              "compliance",
+              "waste",
+              "document",
+            ]}
             bordered={false}
             items={[
               {
@@ -1682,9 +1753,7 @@ export default function TenYearSWMPlan() {
                       </Col>
                       <Col xs={12} sm={4}>
                         <Form.Item label="MBA" name="manilaBayArea">
-                          <Select
-                            options={mbaOptions}
-                          />
+                          <Select options={mbaOptions} />
                         </Form.Item>
                       </Col>
                       <Col xs={12} sm={4}>
@@ -1745,9 +1814,7 @@ export default function TenYearSWMPlan() {
                           }
                           name="typeOfSWMPlan"
                         >
-                          <Select
-                            options={typeOfPlanOptions}
-                          />
+                          <Select options={typeOfPlanOptions} />
                         </Form.Item>
                       </Col>
                       <Col xs={12} sm={6}>
@@ -1817,9 +1884,7 @@ export default function TenYearSWMPlan() {
                           }
                           name="forRenewal"
                         >
-                          <Select
-                            options={planStatusOptions}
-                          />
+                          <Select options={planStatusOptions} />
                         </Form.Item>
                       </Col>
                     </Row>
@@ -1845,7 +1910,12 @@ export default function TenYearSWMPlan() {
                           }
                           name="enmoAssigned"
                         >
-                          <Select options={enmoOptions} allowClear showSearch placeholder="Select ENMO" />
+                          <Select
+                            options={enmoOptions}
+                            allowClear
+                            showSearch
+                            placeholder="Select ENMO"
+                          />
                         </Form.Item>
                       </Col>
                       <Col xs={24} sm={8}>
@@ -1857,7 +1927,12 @@ export default function TenYearSWMPlan() {
                           }
                           name="eswmStaff"
                         >
-                          <Select options={eswmStaffOptions} allowClear showSearch placeholder="Select Staff" />
+                          <Select
+                            options={eswmStaffOptions}
+                            allowClear
+                            showSearch
+                            placeholder="Select Staff"
+                          />
                         </Form.Item>
                       </Col>
                       <Col xs={24} sm={8}>
@@ -1869,7 +1944,12 @@ export default function TenYearSWMPlan() {
                           }
                           name="focalPerson"
                         >
-                          <Select options={focalOptions} allowClear showSearch placeholder="Select Focal" />
+                          <Select
+                            options={focalOptions}
+                            allowClear
+                            showSearch
+                            placeholder="Select Focal"
+                          />
                         </Form.Item>
                       </Col>
                     </Row>
@@ -2036,9 +2116,7 @@ export default function TenYearSWMPlan() {
                           label="Compliance"
                           name="remarksAndRecommendation"
                         >
-                          <Select
-                            options={planComplianceOptions}
-                          />
+                          <Select options={planComplianceOptions} />
                         </Form.Item>
                       </Col>
                     </Row>
