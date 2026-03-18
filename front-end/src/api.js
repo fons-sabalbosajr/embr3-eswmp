@@ -2,7 +2,7 @@ import axios from "axios";
 import secureStorage from "./utils/secureStorage";
 
 const api = axios.create({
-  baseURL: "/api",
+  baseURL: "/eswm-pipeline/api",
 });
 
 // Attach token to every request if available (skip if already set explicitly)

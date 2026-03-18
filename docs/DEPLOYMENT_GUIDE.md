@@ -89,12 +89,21 @@ apt install -y git curl wget build-essential nginx certbot python3-certbot-nginx
 Running apps as root is a security risk. Create a dedicated user:
 
 ```bash
-adduser embr3
-usermod -aG sudo embr3
-su - embr3
+adduser embr3_eswm
+usermod -aG sudo embr3_eswm
 ```
 
-> **Important:** All application commands below should be run as the `embr3` user (or your chosen user), NOT as root.
+> **Important:** You must start a **fresh login session** after adding the user to the sudo group. The group change does NOT take effect until the user logs out and back in.
+
+```bash
+# Start a new login session (this refreshes group membership)
+su - embr3_eswm
+
+# Verify sudo access works
+sudo whoami   # Should print: root
+```
+
+> All application commands below should be run as the `embr3_eswm` user, NOT as root.
 
 ---
 
