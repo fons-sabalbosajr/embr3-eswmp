@@ -10,6 +10,17 @@ const truckSchema = new mongoose.Schema(
     actualVolume: { type: Number },
     actualVolumeUnit: { type: String, enum: ["tons", "m³", "m3"], default: "tons" },
     wasteType: { type: String, enum: ["Residual", "Hazardous Waste"] },
+    hazWasteCode: { type: String, trim: true },
+  },
+  { _id: false }
+);
+
+const vehicleSchema = new mongoose.Schema(
+  {
+    plateNumber: { type: String, trim: true },
+    vehicleType: { type: String, trim: true },
+    capacity: { type: Number },
+    capacityUnit: { type: String, enum: ["tons", "m³", "m3"], default: "m³" },
   },
   { _id: false }
 );
@@ -18,7 +29,15 @@ const haulerSchema = new mongoose.Schema(
   {
     haulerName: { type: String, trim: true },
     numberOfTrucks: { type: Number },
-    privateSectorClients: { type: String, trim: true },
+    officeAddress: { type: String, trim: true },
+    // Legacy single-vehicle fields (kept for backward compatibility)
+    plateNumber: { type: String, trim: true },
+    vehicleType: { type: String, trim: true },
+    capacity: { type: Number },
+    capacityUnit: { type: String, enum: ["tons", "m³", "m3"], default: "m³" },
+    // Multi-vehicle entries
+    vehicles: [vehicleSchema],
+    privateSectorClients: [{ type: String, trim: true }],
   },
   { _id: false }
 );
@@ -53,12 +72,22 @@ const dataSLFSchema = new mongoose.Schema(
       required: true,
     },
     address: { type: String, trim: true },
+
+    // Company Information (Basic Info tab)
+    companyRegion: { type: String, trim: true },
+    companyProvince: { type: String, trim: true },
+    companyMunicipality: { type: String, trim: true },
+    companyBarangay: { type: String, trim: true },
+
     trucks: [truckSchema],
     status: {
       type: String,
-      enum: ["pending", "acknowledged", "rejected"],
+      enum: ["pending", "acknowledged", "rejected", "revert_requested"],
       default: "pending",
     },
+    revertRequested: { type: Boolean, default: false },
+    revertReason: { type: String, trim: true },
+    revertRequestedAt: { type: Date },
     submittedBy: { type: String, trim: true },
   },
   { timestamps: true }

@@ -8,7 +8,7 @@ import {
   BarChartOutlined,
 } from "@ant-design/icons";
 import { Link, useNavigate } from "react-router-dom";
-import Swal from "sweetalert2";
+import { useErrorCard } from "../utils/ErrorHandler";
 import api from "../api";
 import secureStorage from "../utils/secureStorage";
 import embLogo from "../assets/emblogo.svg";
@@ -19,6 +19,7 @@ const { Title, Text } = Typography;
 export default function PortalLogin() {
   const [loading, setLoading] = useState(false);
   const navigate = useNavigate();
+  const { showError, card: errorCard } = useErrorCard();
 
   const onFinish = async (values) => {
     setLoading(true);
@@ -28,11 +29,11 @@ export default function PortalLogin() {
       secureStorage.setJSON("portal_user", data.user);
       navigate("/slfportal");
     } catch (err) {
-      Swal.fire({
-        icon: "error",
-        title: "Login Failed",
-        text: err.response?.data?.message || "Something went wrong",
-      });
+      if (!navigator.onLine) {
+        showError({ type: "offline", title: "You’re Offline", message: "It seems you are not connected to the internet. Please check your connection and try again." });
+      } else {
+        showError({ type: "error", title: "Login Failed", message: err.response?.data?.message || "Something went wrong" });
+      }
     } finally {
       setLoading(false);
     }
@@ -40,10 +41,11 @@ export default function PortalLogin() {
 
   return (
     <div className="auth-container">
+      {errorCard}
       {/* Left Branding Panel */}
       <div className="auth-left" style={styles.leftPanel}>
         <div style={styles.overlay} />
-        <div style={styles.brandContent}>
+        <div className="brand-content" style={styles.brandContent}>
           <img src={embLogo} alt="EMBR3 Logo" style={styles.logo} />
           <Title level={1} style={styles.brandTitle}>
             SLF Portal
@@ -51,12 +53,12 @@ export default function PortalLogin() {
           <Text style={styles.brandSubtitle}>
             Sanitary Landfill Generators Portal
           </Text>
-          <div style={styles.brandDivider} />
-          <Text style={styles.brandDesc}>
+          <div className="brand-divider" style={styles.brandDivider} />
+          <Text className="brand-desc" style={styles.brandDesc}>
             Access your SLF portal account to submit disposal data for your
             assigned Sanitary Landfill Facility.
           </Text>
-          <div style={styles.featureList}>
+          <div className="feature-list" style={styles.featureList}>
             {[
               {
                 icon: <SafetyCertificateOutlined />,
@@ -75,7 +77,7 @@ export default function PortalLogin() {
             ))}
           </div>
         </div>
-        <Text style={styles.leftFooter}>
+        <Text className="left-footer" style={styles.leftFooter}>
           &copy; 2026 EMBR3 &mdash; Environmental Management Bureau Region III
         </Text>
       </div>

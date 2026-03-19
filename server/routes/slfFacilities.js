@@ -14,6 +14,22 @@ router.get("/", async (req, res) => {
   }
 });
 
+// Get facility operational info for portal users (by SlfFacility _id)
+router.get("/portal/:id", async (req, res) => {
+  try {
+    const facility = await SlfFacility.findById(req.params.id).select(
+      "province lgu barangay category ownership statusOfSLF remainingLifeSpan " +
+      "volumeCapacity numberOfCell estimatedVolumeWaste actualResidualWasteReceived " +
+      "noOfLeachatePond numberOfGasVents mrfEstablished yearStartedOperation " +
+      "eccNo dischargePermit permitToOperate focalPerson"
+    );
+    if (!facility) return res.status(404).json({ message: "Facility not found" });
+    res.json(facility);
+  } catch (error) {
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+});
+
 // Dashboard stats
 router.get("/stats", async (req, res) => {
   try {

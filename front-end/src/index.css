@@ -227,8 +227,22 @@ body {
     flex-direction: column;
   }
   .auth-left {
-    padding: 32px 24px;
+    padding: 24px 24px 16px;
     min-height: auto;
+  }
+  .auth-left .feature-list,
+  .auth-left .brand-desc,
+  .auth-left .brand-divider,
+  .auth-left .left-footer {
+    display: none !important;
+  }
+  .auth-left .brand-content h1 {
+    font-size: 28px !important;
+    margin-bottom: 2px !important;
+  }
+  .auth-left .brand-content img {
+    width: 56px !important;
+    margin-bottom: 12px !important;
   }
   .auth-right {
     padding: 24px 16px;
@@ -245,7 +259,14 @@ body {
 /* ── Small tablet / large phone (≤ 768px) ── */
 @media (max-width: 768px) {
   .auth-left {
-    padding: 24px 20px;
+    padding: 20px 20px 12px;
+  }
+  .auth-left .brand-content h1 {
+    font-size: 24px !important;
+  }
+  .auth-left .brand-content img {
+    width: 48px !important;
+    margin-bottom: 10px !important;
   }
   .auth-right {
     padding: 20px 12px;
@@ -263,12 +284,18 @@ body {
 @media (max-width: 576px) {
   /* Auth: minimize branding panel on phone */
   .auth-left {
-    padding: 20px 16px;
+    padding: 16px 16px 10px;
     min-height: unset;
   }
-  .auth-left .brandContent,
-  .auth-left .featureList {
-    display: none;
+  .auth-left .brand-content {
+    text-align: center;
+  }
+  .auth-left .brand-content h1 {
+    font-size: 20px !important;
+  }
+  .auth-left .brand-content img {
+    width: 40px !important;
+    margin-bottom: 8px !important;
   }
   .auth-right {
     padding: 16px 10px;

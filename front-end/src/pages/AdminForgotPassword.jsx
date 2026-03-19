@@ -33,19 +33,19 @@ export default function AdminForgotPassword() {
     <div className="auth-container">
       <div className="auth-left" style={styles.leftPanel}>
         <div style={styles.overlay} />
-        <div style={styles.brandContent}>
+        <div className="brand-content" style={styles.brandContent}>
           <img src={embLogo} alt="EMBR3 Logo" style={styles.logo} />
           <Title level={1} style={styles.brandTitle}>
             EMBR3 ESWMP
           </Title>
           <Text style={styles.brandSubtitle}>Password Recovery</Text>
-          <div style={styles.brandDivider} />
-          <Text style={styles.brandDesc}>
+          <div className="brand-divider" style={styles.brandDivider} />
+          <Text className="brand-desc" style={styles.brandDesc}>
             Enter your registered email address and we&#39;ll send you a link to
             reset your admin account password.
           </Text>
         </div>
-        <Text style={styles.leftFooter}>
+        <Text className="left-footer" style={styles.leftFooter}>
           &copy; 2026 EMBR3 &mdash; Environmental Management Bureau Region III
         </Text>
       </div>

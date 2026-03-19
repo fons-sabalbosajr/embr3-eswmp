@@ -27,9 +27,10 @@ const { Title, Text } = Typography;
 const { Option } = Select;
 
 const SECTION_LABELS = {
-  "disposal-info": "Disposal Information",
-  "company-info": "Company Information",
-  "transport-info": "Transport Information & Volume",
+  "disposal-info": "Disposal Report",
+  "company-info": "Waste Generator's Information",
+  "transport-info": "Transport Entry (Per Truck)",
+  "hazwaste-codes": "Hazardous Waste Codes",
 };
 
 export default function FieldSettings() {
@@ -272,9 +273,10 @@ export default function FieldSettings() {
           </Form.Item>
           <Form.Item name="section" label="Section" rules={[{ required: true, message: "Required" }]}>
             <Select placeholder="Select section">
-              <Option value="disposal-info">Disposal Information</Option>
-              <Option value="company-info">Company Information</Option>
-              <Option value="transport-info">Transport Information &amp; Volume</Option>
+              <Option value="disposal-info">Disposal Report (Date, General Info)</Option>
+              <Option value="company-info">Waste Generator&apos;s Information</Option>
+              <Option value="transport-info">Transport Entry (Per Truck)</Option>
+              <Option value="hazwaste-codes">Hazardous Waste Codes</Option>
             </Select>
           </Form.Item>
           <Form.Item name="order" label="Order">

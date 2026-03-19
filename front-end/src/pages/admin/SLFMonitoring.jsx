@@ -49,6 +49,8 @@ import {
   AlertOutlined,
   UserOutlined,
   SolutionOutlined,
+  UndoOutlined,
+  BellOutlined,
 } from "@ant-design/icons";
 import Swal from "sweetalert2";
 import api from "../../api";
@@ -171,7 +173,7 @@ function WasteBaselineInfo() {
       key: "totalVolumeAccepted",
       render: (_, r) =>
         r.totalVolumeAccepted != null
-          ? `${r.totalVolumeAccepted.toLocaleString()} ${r.totalVolumeAcceptedUnit}`
+          ? `${r.totalVolumeAccepted.toLocaleString()} ${(r.totalVolumeAcceptedUnit || "m³").replace("m3", "m³")}`
           : "—",
     },
     {
@@ -179,7 +181,7 @@ function WasteBaselineInfo() {
       key: "activeCellResidual",
       render: (_, r) =>
         r.activeCellResidualVolume != null
-          ? `${r.activeCellResidualVolume.toLocaleString()} ${r.activeCellResidualUnit}`
+          ? `${r.activeCellResidualVolume.toLocaleString()} ${(r.activeCellResidualUnit || "m³").replace("m3", "m³")}`
           : "—",
     },
     {
@@ -187,7 +189,7 @@ function WasteBaselineInfo() {
       key: "activeCellInert",
       render: (_, r) =>
         r.activeCellInertVolume != null
-          ? `${r.activeCellInertVolume.toLocaleString()} ${r.activeCellInertUnit}`
+          ? `${r.activeCellInertVolume.toLocaleString()} ${(r.activeCellInertUnit || "m³").replace("m3", "m³")}`
           : "—",
     },
     {
@@ -195,7 +197,7 @@ function WasteBaselineInfo() {
       key: "closedCellResidual",
       render: (_, r) =>
         r.closedCellResidualVolume != null
-          ? `${r.closedCellResidualVolume.toLocaleString()} ${r.closedCellResidualUnit}`
+          ? `${r.closedCellResidualVolume.toLocaleString()} ${(r.closedCellResidualUnit || "m³").replace("m3", "m³")}`
           : "—",
     },
     {
@@ -203,7 +205,7 @@ function WasteBaselineInfo() {
       key: "closedCellInert",
       render: (_, r) =>
         r.closedCellInertVolume != null
-          ? `${r.closedCellInertVolume.toLocaleString()} ${r.closedCellInertUnit}`
+          ? `${r.closedCellInertVolume.toLocaleString()} ${(r.closedCellInertUnit || "m³").replace("m3", "m³")}`
           : "—",
     },
     {
@@ -319,7 +321,7 @@ function PortalGenerators({
   const [form] = Form.useForm();
   const unitOptions = [
     { label: "Tons", value: "tons" },
-    { label: "m³", value: "m³" },
+    { label: <span>m<sup>3</sup></span>, value: "m³" },
   ];
 
   const fetchSubmissions = useCallback(() => {
@@ -444,12 +446,12 @@ function PortalGenerators({
     {
       title: "Baseline Volume",
       render: (_, r) =>
-        `${(r.existingBaselineVolume ?? 0).toLocaleString()} ${r.existingBaselineUnit || "tons"}`,
+        `${(r.existingBaselineVolume ?? 0).toLocaleString()} ${(r.existingBaselineUnit || "tons").replace("m3", "m³")}`,
     },
     {
       title: "Total Since Operation",
       render: (_, r) =>
-        `${(r.totalVolumeSinceOperation ?? 0).toLocaleString()} ${r.totalVolumeSinceOperationUnit || "tons"}`,
+        `${(r.totalVolumeSinceOperation ?? 0).toLocaleString()} ${(r.totalVolumeSinceOperationUnit || "tons").replace("m3", "m³")}`,
     },
     { title: "Haulers", render: (_, r) => r.accreditedHaulers?.length || 0 },
     {
@@ -594,6 +596,13 @@ function PortalGenerators({
       {/* Portal Submissions Data Table */}
       <Divider orientation="left" plain>
         <FileTextOutlined style={{ color: ACCENT }} /> Portal Submitted Data
+        {submissions.filter((s) => s.revertRequested).length > 0 && (
+          <Badge
+            count={submissions.filter((s) => s.revertRequested).length}
+            style={{ marginLeft: 8, backgroundColor: "#fa8c16" }}
+            title="Revert requests pending"
+          />
+        )}
       </Divider>
       <Table
         dataSource={submissions}
@@ -709,6 +718,40 @@ function PortalGenerators({
             sorter: (a, b) =>
               new Date(a.createdAt || 0) - new Date(b.createdAt || 0),
             defaultSortOrder: "descend",
+          },
+          {
+            title: "Actions",
+            key: "actions",
+            width: 100,
+            render: (_, r) => (
+              <Space size="small">
+                {r.revertRequested && (
+                  <Tooltip title={`Revert requested: ${r.revertReason || "No reason"}`}>
+                    <Popconfirm
+                      title="Approve Revert?"
+                      description="This will set the submission back to Pending so the portal user can edit it."
+                      onConfirm={async () => {
+                        try {
+                          await api.patch(`/data-slf/${r._id}/approve-revert`);
+                          fetchSubmissions();
+                          Swal.fire({ icon: "success", title: "Reverted", text: "Submission reverted to Pending.", confirmButtonColor: ACCENT, timer: 2000 });
+                        } catch (err) {
+                          Swal.fire({ icon: "error", title: "Error", text: err.response?.data?.message || "Failed to revert" });
+                        }
+                      }}
+                      okText="Revert"
+                      okButtonProps={{ style: { background: "#fa8c16", borderColor: "#fa8c16" } }}
+                    >
+                      <Button
+                        type="text"
+                        size="small"
+                        icon={<Badge dot><UndoOutlined style={{ color: "#fa8c16" }} /></Badge>}
+                      />
+                    </Popconfirm>
+                  </Tooltip>
+                )}
+              </Space>
+            ),
           },
         ]}
       />
@@ -2084,22 +2127,22 @@ export default function SLFMonitoring() {
                         baselineData.activeCellResidualVolume > 0 && {
                           name: "Active Residual",
                           value: baselineData.activeCellResidualVolume,
-                          unit: baselineData.activeCellResidualUnit || "m³",
+                          unit: (baselineData.activeCellResidualUnit || "m³").replace("m3", "m³"),
                         },
                         baselineData.activeCellInertVolume > 0 && {
                           name: "Active Inert",
                           value: baselineData.activeCellInertVolume,
-                          unit: baselineData.activeCellInertUnit || "m³",
+                          unit: (baselineData.activeCellInertUnit || "m³").replace("m3", "m³"),
                         },
                         baselineData.closedCellResidualVolume > 0 && {
                           name: "Closed Residual",
                           value: baselineData.closedCellResidualVolume,
-                          unit: baselineData.closedCellResidualUnit || "m³",
+                          unit: (baselineData.closedCellResidualUnit || "m³").replace("m3", "m³"),
                         },
                         baselineData.closedCellInertVolume > 0 && {
                           name: "Closed Inert",
                           value: baselineData.closedCellInertVolume,
-                          unit: baselineData.closedCellInertUnit || "m³",
+                          unit: (baselineData.closedCellInertUnit || "m³").replace("m3", "m³"),
                         },
                       ].filter(Boolean)
                     : [];
@@ -2436,7 +2479,7 @@ export default function SLFMonitoring() {
                                 <Statistic
                                   title="Total Volume Accepted"
                                   value={baselineData.totalVolumeAccepted ?? 0}
-                                  suffix={baselineData.totalVolumeAcceptedUnit || "m³"}
+                                  suffix={(baselineData.totalVolumeAcceptedUnit || "m³").replace("m3", "m³")}
                                   precision={2}
                                 />
                               </Card>
@@ -2446,7 +2489,7 @@ export default function SLFMonitoring() {
                                 <Statistic
                                   title="Active Cell (Residual)"
                                   value={baselineData.activeCellResidualVolume ?? 0}
-                                  suffix={baselineData.activeCellResidualUnit || "m³"}
+                                  suffix={(baselineData.activeCellResidualUnit || "m³").replace("m3", "m³")}
                                   precision={2}
                                 />
                               </Card>
@@ -2456,7 +2499,7 @@ export default function SLFMonitoring() {
                                 <Statistic
                                   title="Active Cell (Inert)"
                                   value={baselineData.activeCellInertVolume ?? 0}
-                                  suffix={baselineData.activeCellInertUnit || "m³"}
+                                  suffix={(baselineData.activeCellInertUnit || "m³").replace("m3", "m³")}
                                   precision={2}
                                 />
                               </Card>
@@ -2466,7 +2509,7 @@ export default function SLFMonitoring() {
                                 <Statistic
                                   title="Closed Cell (Residual)"
                                   value={baselineData.closedCellResidualVolume ?? 0}
-                                  suffix={baselineData.closedCellResidualUnit || "m³"}
+                                  suffix={(baselineData.closedCellResidualUnit || "m³").replace("m3", "m³")}
                                   precision={2}
                                 />
                               </Card>
@@ -2476,7 +2519,7 @@ export default function SLFMonitoring() {
                                 <Statistic
                                   title="Closed Cell (Inert)"
                                   value={baselineData.closedCellInertVolume ?? 0}
-                                  suffix={baselineData.closedCellInertUnit || "m³"}
+                                  suffix={(baselineData.closedCellInertUnit || "m³").replace("m3", "m³")}
                                   precision={2}
                                 />
                               </Card>

@@ -263,6 +263,7 @@ router.put("/:id", async (req, res) => {
     }
     const allowed = [
       "dateOfDisposal", "lguCompanyName", "companyType", "address",
+      "companyRegion", "companyProvince", "companyMunicipality", "companyBarangay",
       "trucks", "totalVolumeAccepted", "totalVolumeAcceptedUnit",
       "activeCellResidualVolume", "activeCellResidualUnit",
       "activeCellInertVolume", "activeCellInertUnit",
@@ -438,6 +439,90 @@ router.delete("/:id", async (req, res) => {
     await DataSLF.findByIdAndDelete(req.params.id);
     res.json({ message: "Entry deleted" });
     writeLog("warn", "submission.delete", { message: `Submission deleted: ${req.params.id}`, user: req.logUser || "admin", ip: req.ip });
+  } catch (error) {
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+});
+
+// Request revert (portal user requests edit on approved submission)
+router.patch("/:id/request-revert", async (req, res) => {
+  try {
+    const { reason, requestedBy } = req.body;
+    const entry = await DataSLF.findById(req.params.id);
+    if (!entry) return res.status(404).json({ message: "Entry not found" });
+    if (entry.status !== "acknowledged") {
+      return res.status(400).json({ message: "Only approved submissions can request a revert" });
+    }
+
+    entry.revertRequested = true;
+    entry.revertReason = reason || "";
+    entry.revertRequestedAt = new Date();
+    await entry.save();
+
+    try {
+      await Transaction.create({
+        submissionId: entry.submissionId,
+        dataEntry: entry._id,
+        companyName: entry.lguCompanyName,
+        companyType: entry.companyType,
+        submittedBy: entry.submittedBy,
+        type: "revert_requested",
+        description: `Revert requested for ${entry.idNo}: ${reason || "No reason provided"}`,
+        performedBy: requestedBy || entry.submittedBy || "portal",
+        meta: { reason, idNo: entry.idNo },
+      });
+    } catch { /* silent */ }
+
+    const populated = await DataSLF.findById(entry._id).populate("slfGenerator");
+    res.json(populated);
+    writeLog("info", "submission.revert-request", {
+      message: `Revert requested for ${entry.idNo}`,
+      user: requestedBy || entry.submittedBy || "portal",
+      ip: req.ip,
+      meta: { id: entry._id, reason },
+    });
+  } catch (error) {
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+});
+
+// Approve revert (admin reverts submission to pending so portal user can edit)
+router.patch("/:id/approve-revert", async (req, res) => {
+  try {
+    const entry = await DataSLF.findById(req.params.id);
+    if (!entry) return res.status(404).json({ message: "Entry not found" });
+    if (!entry.revertRequested) {
+      return res.status(400).json({ message: "No revert has been requested for this entry" });
+    }
+
+    entry.status = "pending";
+    entry.revertRequested = false;
+    entry.revertReason = "";
+    entry.revertRequestedAt = undefined;
+    await entry.save();
+
+    try {
+      await Transaction.create({
+        submissionId: entry.submissionId,
+        dataEntry: entry._id,
+        companyName: entry.lguCompanyName,
+        companyType: entry.companyType,
+        submittedBy: entry.submittedBy,
+        type: "revert_approved",
+        description: `Revert approved for ${entry.idNo}, status set to pending`,
+        performedBy: "admin",
+        meta: { idNo: entry.idNo },
+      });
+    } catch { /* silent */ }
+
+    const populated = await DataSLF.findById(entry._id).populate("slfGenerator");
+    res.json(populated);
+    writeLog("info", "submission.revert-approved", {
+      message: `Revert approved for ${entry.idNo}`,
+      user: req.logUser || "admin",
+      ip: req.ip,
+      meta: { id: entry._id },
+    });
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });
   }

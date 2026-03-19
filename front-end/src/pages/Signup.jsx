@@ -82,7 +82,7 @@ export default function Signup() {
       {/* Left Branding Panel */}
       <div className="auth-left" style={styles.leftPanel}>
         <div style={styles.overlay} />
-        <div className="signup-left-content" style={styles.brandContent}>
+        <div className="signup-left-content brand-content" style={styles.brandContent}>
           <img src={embLogo} alt="EMBR3 Logo" style={styles.logo} />
           <Title level={1} style={styles.brandTitle}>
             EMBR3 ESWMP
@@ -90,12 +90,12 @@ export default function Signup() {
           <Text style={styles.brandSubtitle}>
             Ecological Solid Waste Management Pipeline
           </Text>
-          <div style={styles.brandDivider} />
-          <Text style={styles.brandDesc}>
+          <div className="brand-divider" style={styles.brandDivider} />
+          <Text className="brand-desc" style={styles.brandDesc}>
             Join the platform to manage and monitor solid waste operations
             efficiently across all provinces within Region III.
           </Text>
-          <div style={styles.featureList}>
+          <div className="feature-list" style={styles.featureList}>
             {[
               { icon: <SafetyCertificateOutlined />, text: "Secure Admin Registration" },
               { icon: <TeamOutlined />, text: "Role-based Access Control" },
@@ -108,7 +108,7 @@ export default function Signup() {
             ))}
           </div>
         </div>
-        <Text style={styles.leftFooter}>
+        <Text className="left-footer" style={styles.leftFooter}>
           &copy; 2026 EMBR3 &mdash; Environmental Management Bureau Region III
         </Text>
       </div>

@@ -19,6 +19,7 @@ const portalFieldSchema = new mongoose.Schema(
         "disposal-info",
         "company-info",
         "transport-info",
+        "hazwaste-codes",
       ],
       default: "disposal-info",
     },

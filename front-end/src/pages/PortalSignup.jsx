@@ -76,7 +76,7 @@ export default function PortalSignup() {
       {/* Left Branding Panel */}
       <div className="auth-left" style={styles.leftPanel}>
         <div style={styles.overlay} />
-        <div style={styles.brandContent}>
+        <div className="brand-content" style={styles.brandContent}>
           <img src={embLogo} alt="EMBR3 Logo" style={styles.logo} />
           <Title level={1} style={styles.brandTitle}>
             SLF Portal
@@ -84,12 +84,12 @@ export default function PortalSignup() {
           <Text style={styles.brandSubtitle}>
             Sanitary Landfill Generators Portal
           </Text>
-          <div style={styles.brandDivider} />
-          <Text style={styles.brandDesc}>
+          <div className="brand-divider" style={styles.brandDivider} />
+          <Text className="brand-desc" style={styles.brandDesc}>
             Register as an SLF user to submit disposal data for your assigned
             Sanitary Landfill Facility.
           </Text>
-          <div style={styles.featureList}>
+          <div className="feature-list" style={styles.featureList}>
             {[
               {
                 icon: <SafetyCertificateOutlined />,
@@ -108,7 +108,7 @@ export default function PortalSignup() {
             ))}
           </div>
         </div>
-        <Text style={styles.leftFooter}>
+        <Text className="left-footer" style={styles.leftFooter}>
           &copy; 2026 EMBR3 &mdash; Environmental Management Bureau Region III
         </Text>
       </div>

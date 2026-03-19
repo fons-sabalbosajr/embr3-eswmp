@@ -417,11 +417,11 @@ export default function SubmissionSettings() {
                           label: <Text strong><DatabaseOutlined style={{ color: "#722ed1", marginRight: 6 }} />Baseline Information</Text>,
                           children: (
                             <div>
-                              <div style={fieldStyle}><span style={labelStyle}>Total Volume Accepted</span><span style={valueStyle}>{r.totalVolumeAccepted != null ? `${r.totalVolumeAccepted.toLocaleString()} ${r.totalVolumeAcceptedUnit || "m³"}` : "—"}</span></div>
-                              <div style={fieldStyle}><span style={labelStyle}>Active Cell (Residual)</span><span style={valueStyle}>{r.activeCellResidualVolume != null ? `${r.activeCellResidualVolume.toLocaleString()} ${r.activeCellResidualUnit || "m³"}` : "—"}</span></div>
-                              <div style={fieldStyle}><span style={labelStyle}>Active Cell (Inert)</span><span style={valueStyle}>{r.activeCellInertVolume != null ? `${r.activeCellInertVolume.toLocaleString()} ${r.activeCellInertUnit || "m³"}` : "—"}</span></div>
-                              <div style={fieldStyle}><span style={labelStyle}>Closed Cell (Residual)</span><span style={valueStyle}>{r.closedCellResidualVolume != null ? `${r.closedCellResidualVolume.toLocaleString()} ${r.closedCellResidualUnit || "m³"}` : "—"}</span></div>
-                              <div style={{ ...fieldStyle, borderBottom: "none" }}><span style={labelStyle}>Closed Cell (Inert)</span><span style={valueStyle}>{r.closedCellInertVolume != null ? `${r.closedCellInertVolume.toLocaleString()} ${r.closedCellInertUnit || "m³"}` : "—"}</span></div>
+                              <div style={fieldStyle}><span style={labelStyle}>Total Volume Accepted</span><span style={valueStyle}>{r.totalVolumeAccepted != null ? `${r.totalVolumeAccepted.toLocaleString()} ${(r.totalVolumeAcceptedUnit || "m³").replace("m3", "m³")}` : "—"}</span></div>
+                              <div style={fieldStyle}><span style={labelStyle}>Active Cell (Residual)</span><span style={valueStyle}>{r.activeCellResidualVolume != null ? `${r.activeCellResidualVolume.toLocaleString()} ${(r.activeCellResidualUnit || "m³").replace("m3", "m³")}` : "—"}</span></div>
+                              <div style={fieldStyle}><span style={labelStyle}>Active Cell (Inert)</span><span style={valueStyle}>{r.activeCellInertVolume != null ? `${r.activeCellInertVolume.toLocaleString()} ${(r.activeCellInertUnit || "m³").replace("m3", "m³")}` : "—"}</span></div>
+                              <div style={fieldStyle}><span style={labelStyle}>Closed Cell (Residual)</span><span style={valueStyle}>{r.closedCellResidualVolume != null ? `${r.closedCellResidualVolume.toLocaleString()} ${(r.closedCellResidualUnit || "m³").replace("m3", "m³")}` : "—"}</span></div>
+                              <div style={{ ...fieldStyle, borderBottom: "none" }}><span style={labelStyle}>Closed Cell (Inert)</span><span style={valueStyle}>{r.closedCellInertVolume != null ? `${r.closedCellInertVolume.toLocaleString()} ${(r.closedCellInertUnit || "m³").replace("m3", "m³")}` : "—"}</span></div>
                               {r.accreditedHaulers?.length > 0 && (
                                 <>
                                   <Divider titlePlacement="left" style={{ fontSize: 13, fontWeight: 600, margin: "12px 0 8px" }}>
@@ -471,7 +471,7 @@ export default function SubmissionSettings() {
                             {
                               title: "Capacity",
                               key: "cap",
-                              render: (_, t) => t.truckCapacity ? `${t.truckCapacity} ${t.truckCapacityUnit || "m³"}` : "—",
+                              render: (_, t) => t.truckCapacity ? `${t.truckCapacity} ${(t.truckCapacityUnit || "m³").replace("m3", "m³")}` : "—",
                             },
                             {
                               title: "Volume",
@@ -593,7 +593,7 @@ export default function SubmissionSettings() {
                               <Col xs={12} sm={6}>
                                 <Form.Item {...rest} name={[name, "truckCapacityUnit"]} label="Cap. Unit">
                                   <Select>
-                                    <Option value="m³">m³</Option>
+                                    <Option value="m³">m<sup>3</sup></Option>
                                     <Option value="tons">Tons</Option>
                                   </Select>
                                 </Form.Item>
@@ -607,7 +607,7 @@ export default function SubmissionSettings() {
                                 <Form.Item {...rest} name={[name, "actualVolumeUnit"]} label="Vol. Unit">
                                   <Select>
                                     <Option value="tons">Tons</Option>
-                                    <Option value="m³">m³</Option>
+                                    <Option value="m³">m<sup>3</sup></Option>
                                   </Select>
                                 </Form.Item>
                               </Col>

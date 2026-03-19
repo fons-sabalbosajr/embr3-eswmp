@@ -2,7 +2,7 @@ import { useState } from "react";
 import { Form, Input, Button, Card, Typography, Divider } from "antd";
 import { UserOutlined, LockOutlined, SafetyCertificateOutlined, GlobalOutlined, BarChartOutlined } from "@ant-design/icons";
 import { Link, useNavigate } from "react-router-dom";
-import Swal from "sweetalert2";
+import { useErrorCard } from "../utils/ErrorHandler";
 import api from "../api";
 import secureStorage from "../utils/secureStorage";
 import embLogo from "../assets/emblogo.svg";
@@ -13,6 +13,7 @@ const { Title, Text } = Typography;
 export default function Login() {
   const [loading, setLoading] = useState(false);
   const navigate = useNavigate();
+  const { showError, card: errorCard } = useErrorCard();
 
   const onFinish = async (values) => {
     setLoading(true);
@@ -22,11 +23,11 @@ export default function Login() {
       secureStorage.setJSON("user", data.user);
       navigate("/admin");
     } catch (err) {
-      Swal.fire({
-        icon: "error",
-        title: "Login Failed",
-        text: err.response?.data?.message || "Something went wrong",
-      });
+      if (!navigator.onLine) {
+        showError({ type: "offline", title: "You’re Offline", message: "It seems you are not connected to the internet. Please check your connection and try again." });
+      } else {
+        showError({ type: "error", title: "Login Failed", message: err.response?.data?.message || "Something went wrong" });
+      }
     } finally {
       setLoading(false);
     }
@@ -34,10 +35,11 @@ export default function Login() {
 
   return (
     <div className="auth-container">
+      {errorCard}
       {/* Left Branding Panel */}
       <div className="auth-left" style={styles.leftPanel}>
         <div style={styles.overlay} />
-        <div style={styles.brandContent}>
+        <div className="brand-content" style={styles.brandContent}>
           <img src={embLogo} alt="EMBR3 Logo" style={styles.logo} />
           <Title level={1} style={styles.brandTitle}>
             EMBR3 ESWMP
@@ -45,12 +47,12 @@ export default function Login() {
           <Text style={styles.brandSubtitle}>
             Ecological Solid Waste Management Pipeline
           </Text>
-          <div style={styles.brandDivider} />
-          <Text style={styles.brandDesc}>
+          <div className="brand-divider" style={styles.brandDivider} />
+          <Text className="brand-desc" style={styles.brandDesc}>
             Streamlining waste management operations with modern tools and
             real-time data insights for Region III.
           </Text>
-          <div style={styles.featureList}>
+          <div className="feature-list" style={styles.featureList}>
             {[
               { icon: <SafetyCertificateOutlined />, text: "SLF Monitoring & Compliance" },
               { icon: <GlobalOutlined />, text: "Province-wide Coverage" },
@@ -63,7 +65,7 @@ export default function Login() {
             ))}
           </div>
         </div>
-        <Text style={styles.leftFooter}>
+        <Text className="left-footer" style={styles.leftFooter}>
           &copy; 2026 EMBR3 &mdash; Environmental Management Bureau Region III
         </Text>
       </div>
