@@ -65,7 +65,7 @@ Internet
 **URL Routing:**
 - `/eswm-pipeline/slfportal/*` → SLF Generators Portal (login, signup, data entry)
 - `/eswm-pipeline/admin/*` → Admin Panel (login, dashboard, settings)
-- `/api/*` → Express REST API (proxied via Nginx)
+- `/eswm-pipeline/api/*` → Express REST API (rewritten & proxied via Nginx to port 5003)
 
 ---
 
@@ -222,7 +222,7 @@ nano .env
 ```
 
 ```env
-PORT=5000
+PORT=5003
 MONGODB_URI=mongodb://embr3admin:STRONG_PASSWORD_HERE@127.0.0.1:27017/embr3_eswmp?authSource=admin
 JWT_SECRET=generate-a-long-random-string-here
 EMAIL_USER=your-gmail@gmail.com
@@ -236,7 +236,7 @@ Generate a secure JWT secret:
 node -e "console.log(require('crypto').randomBytes(64).toString('hex'))"
 ```
 
-> **Port 5000** must be unique. If another app already uses 5000, change to a different port (e.g., 5050) and update Nginx accordingly.
+> **Port 5003** is used for ESWMP. Other apps on this VPS: HRPMS (5000), OCSM (5001), AQM (3001).
 
 ---
 
@@ -253,62 +253,62 @@ Copy the build output to the web directory:
 
 ```bash
 sudo mkdir -p /var/www/eswm-pipeline
-sudo cp -r ~/apps/embr3-eswmp/front-end/dist/* /var/www/eswm-pipeline/dist/
+sudo cp -r ~/apps/embr3-eswmp/front-end/dist/* /var/www/eswm-pipeline/
 sudo chown -R www-data:www-data /var/www/eswm-pipeline
 ```
+
+> **Note:** Files go directly into `/var/www/eswm-pipeline/` (NOT a `dist/` subfolder). The Nginx alias points to this directory.
 
 ---
 
 ## Configure Nginx Reverse Proxy
 
-Create a server block for `embr3-onlinesystems.cloud`:
+The VPS uses a **single shared Nginx config** for all apps on `embr3-onlinesystems.cloud`.
 
 ```bash
 sudo nano /etc/nginx/sites-available/eswm-pipeline
 ```
 
+The ESWMP section within the shared config:
+
 ```nginx
-server {
-    listen 80;
-    server_name embr3-onlinesystems.cloud;
+    # ══════════════════════════════════════════════════════════════════
+    # ESWMP – Ecological Solid Waste Management Pipeline (port 5003)
+    # ══════════════════════════════════════════════════════════════════
 
-    client_max_body_size 10M;
-
-    # API proxy — forward to Node.js backend
-    location /api/ {
-        proxy_pass http://127.0.0.1:5000;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection 'upgrade';
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_cache_bypass $http_upgrade;
+    # ── Bare /eswm-pipeline → trailing slash ─────────────────────────
+    location = /eswm-pipeline {
+        return 301 /eswm-pipeline/;
     }
 
-    # Frontend — serve Vite build output
+    # ── ESWMP Front-end (static SPA) ────────────────────────────────
     location /eswm-pipeline/ {
-        alias /var/www/eswm-pipeline/dist/;
+        alias /var/www/eswm-pipeline/;
+        index index.html;
         try_files $uri $uri/ /eswm-pipeline/index.html;
     }
 
-    # Root redirect to SLF Portal
-    location = / {
-        return 302 /eswm-pipeline/slfportal/login;
+    # ── ESWMP API reverse proxy ─────────────────────────────────────
+    location /eswm-pipeline/api/ {
+        rewrite ^/eswm-pipeline/api/(.*) /api/$1 break;
+        proxy_pass         http://127.0.0.1:5003;
+        proxy_http_version 1.1;
+        proxy_set_header   Host              $host;
+        proxy_set_header   X-Real-IP         $remote_addr;
+        proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header   X-Forwarded-Proto $scheme;
+        client_max_body_size 10M;
     }
-}
 ```
 
-Enable the site and test:
+After editing, test and reload:
 
 ```bash
-sudo ln -s /etc/nginx/sites-available/eswm-pipeline /etc/nginx/sites-enabled/
 sudo nginx -t           # Test config — make sure no errors
 sudo systemctl reload nginx
 ```
 
-> **Isolation:** Each app has its own file in `sites-available/`. Enabling/disabling this app's Nginx config has zero impact on other apps.
+> **Important:** This is a shared config with HRPMS (5000), OCSM (5001), and AQM (3001). Only edit the ESWMP section. Always run `nginx -t` before reloading.
 
 ---
 
@@ -464,24 +464,30 @@ If you've already built on your local machine and are uploading via SCP/SFTP:
 
 ```bash
 # 1. On your LOCAL machine — upload the built files
-scp -r front-end/dist/* root@72.61.125.232:/var/www/eswm-pipeline/dist/
+scp -r front-end/dist/* root@72.61.125.232:/var/www/eswm-pipeline/
 scp -r server/* root@72.61.125.232:/home/embr3_eswm/apps/embr3-eswmp/server/
 
 # 2. SSH into VPS
 ssh root@72.61.125.232
 
-# 3. Install server dependencies (if package.json changed)
+# 3. Fix ownership of uploaded files
+sudo chown -R www-data:www-data /var/www/eswm-pipeline/
+sudo chown -R embr3_eswm:embr3_eswm /home/embr3_eswm/apps/embr3-eswmp/server/
+
+# 4. Install server dependencies (if package.json changed)
 cd /home/embr3_eswm/apps/embr3-eswmp/server
 npm install --production
 
-# 4. Re-seed SLF data (IMPORTANT after seed script changes)
+# 5. Re-seed SLF data (IMPORTANT after seed script changes)
 node seeds/seedSlfFacilities.js
 
-# 5. Restart the server
-pm2 restart embr3-server
+# 6. Start or restart the server
+pm2 start server.js --name embr3-server   # first time
+pm2 restart embr3-server                   # subsequent deploys
+pm2 save
 
-# 6. Verify
-curl http://localhost:5000/api/health
+# 7. Verify
+curl http://localhost:5003/api/health
 pm2 logs embr3-server --lines 20
 ```
 
@@ -505,7 +511,7 @@ node seeds/seedDataReferences.js
 ### Checking Server Health
 
 ```bash
-curl http://localhost:5000/api/health
+curl http://localhost:5003/api/health
 # Should return: {"status":"ok","message":"Server is running"}
 ```
 
@@ -538,14 +544,14 @@ mongosh                                # Can you connect locally?
 ### Nginx 502 Bad Gateway
 ```bash
 pm2 list                              # Is embr3-server running?
-curl http://localhost:5000/api/health  # Can Express respond?
+curl http://localhost:5003/api/health  # Can Express respond?
 sudo nginx -t                         # Config valid?
 sudo tail -f /var/log/nginx/error.log # Check Nginx errors
 ```
 
 ### Port already in use
 ```bash
-sudo ss -tlnp | grep 5000
+sudo ss -tlnp | grep 5003
 # Kill conflicting process or change PORT in .env
 ```
 
