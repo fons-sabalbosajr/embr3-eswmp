@@ -21,6 +21,17 @@ const appSettingsSchema = new mongoose.Schema(
     portalEnabled: { type: Boolean, default: true },
     requireEmailOnSubmit: { type: Boolean, default: true },
 
+    // Portal Maintenance
+    portalMaintenanceMode: { type: Boolean, default: false },
+    portalMaintenanceReason: { type: String, default: "" },
+    portalMaintenanceMessage: { type: String, default: "The portal is currently under maintenance. Please try again later." },
+
+    // Portal Announcements
+    portalAnnouncementEnabled: { type: Boolean, default: false },
+    portalAnnouncementType: { type: String, enum: ["info", "warning", "success", "error"], default: "info" },
+    portalAnnouncementTitle: { type: String, default: "" },
+    portalAnnouncementMessage: { type: String, default: "" },
+
     // Email
     emailNotificationsEnabled: { type: Boolean, default: true },
     emailFrom: { type: String, default: "" },
@@ -34,6 +45,30 @@ const appSettingsSchema = new mongoose.Schema(
     // Maintenance
     maintenanceMode: { type: Boolean, default: false },
     maintenanceMessage: { type: String, default: "System is under maintenance. Please try again later." },
+
+    // Dashboard Visibility & Maintenance (per-tab)
+    dashboardTabs: {
+      type: Map,
+      of: new mongoose.Schema({
+        visible: { type: Boolean, default: true },
+        maintenance: { type: Boolean, default: false },
+        maintenanceMessage: { type: String, default: "" },
+      }, { _id: false }),
+      default: {},
+    },
+
+    // Organizational Chart
+    orgChart: {
+      type: [{
+        id: { type: String, required: true },
+        name: { type: String, required: true },
+        title: { type: String, default: "" },
+        parentId: { type: String, default: null },
+        color: { type: String, default: "#1677ff" },
+        avatar: { type: String, default: "" },
+      }],
+      default: [],
+    },
   },
   { timestamps: true }
 );

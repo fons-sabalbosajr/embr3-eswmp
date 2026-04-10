@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useCallback, useRef } from "react";
+import { useState, useEffect, useMemo, useCallback, useRef, Suspense, lazy } from "react";
 import {
   Layout,
   Menu,
@@ -26,6 +26,10 @@ import {
   Select,
   Drawer,
   Grid,
+  Popover,
+  Empty,
+  Spin,
+  List,
 } from "antd";
 import {
   DashboardOutlined,
@@ -71,28 +75,30 @@ import {
   CloseCircleOutlined,
   CalendarOutlined,
   DatabaseOutlined,
+  HistoryOutlined,
+  SwapOutlined,
 } from "@ant-design/icons";
 import { useNavigate } from "react-router-dom";
 import Swal from "sweetalert2";
 import AccountSettings from "./admin/AccountSettings";
-import FieldSettings from "./admin/FieldSettings";
-import SubmissionSettings from "./admin/SubmissionSettings";
-import DeveloperSettings from "./admin/DeveloperSettings";
-import DataReferences from "./admin/DataReferences";
-import SLFMonitoring from "./admin/SLFMonitoring";
-import SLFWasteGenerators from "./admin/SLFWasteGenerators";
-import TenYearSWMPlan from "./admin/TenYearSWMPlan";
-import FundedMRF from "./admin/FundedMRF";
-import LguInitiatedMRF from "./admin/LguInitiatedMRF";
-import TrashTraps from "./admin/TrashTraps";
-import SwmEquipment from "./admin/SwmEquipment";
-import OpenDumpsites from "./admin/OpenDumpsites";
-import ResidualContainment from "./admin/ResidualContainment";
-import ProjectDescScoping from "./admin/ProjectDescScoping";
-import TransferStations from "./admin/TransferStations";
-import LguAssistDiversion from "./admin/LguAssistDiversion";
-import TechnicalAssistance from "./admin/TechnicalAssistance";
-import Reports from "./admin/Reports";
+const FieldSettings = lazy(() => import("./admin/FieldSettings"));
+const SubmissionSettings = lazy(() => import("./admin/SubmissionSettings"));
+const DeveloperSettings = lazy(() => import("./admin/DeveloperSettings"));
+const DataReferences = lazy(() => import("./admin/DataReferences"));
+const SLFMonitoring = lazy(() => import("./admin/SLFMonitoring"));
+const SLFWasteGenerators = lazy(() => import("./admin/SLFWasteGenerators"));
+const TenYearSWMPlan = lazy(() => import("./admin/TenYearSWMPlan"));
+const FundedMRF = lazy(() => import("./admin/FundedMRF"));
+const LguInitiatedMRF = lazy(() => import("./admin/LguInitiatedMRF"));
+const TrashTraps = lazy(() => import("./admin/TrashTraps"));
+const SwmEquipment = lazy(() => import("./admin/SwmEquipment"));
+const OpenDumpsites = lazy(() => import("./admin/OpenDumpsites"));
+const ResidualContainment = lazy(() => import("./admin/ResidualContainment"));
+const ProjectDescScoping = lazy(() => import("./admin/ProjectDescScoping"));
+const TransferStations = lazy(() => import("./admin/TransferStations"));
+const LguAssistDiversion = lazy(() => import("./admin/LguAssistDiversion"));
+const TechnicalAssistance = lazy(() => import("./admin/TechnicalAssistance"));
+const Reports = lazy(() => import("./admin/Reports"));
 import api from "../api";
 import secureStorage from "../utils/secureStorage";
 import { DataRefProvider } from "../utils/dataRef";
@@ -108,6 +114,8 @@ import {
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
 import dayjs from "dayjs";
+import relativeTime from "dayjs/plugin/relativeTime";
+dayjs.extend(relativeTime);
 
 // Fix default Leaflet marker icons
 delete L.Icon.Default.prototype._getIconUrl;
@@ -259,6 +267,10 @@ export default function AdminHome() {
   const [currentTime, setCurrentTime] = useState(dayjs());
   const [profileModalOpen, setProfileModalOpen] = useState(false);
   const [drawerOpen, setDrawerOpen] = useState(false);
+  const [notifOpen, setNotifOpen] = useState(false);
+  const [notifications, setNotifications] = useState([]);
+  const [unreadCount, setUnreadCount] = useState(0);
+  const [notifLoading, setNotifLoading] = useState(false);
   const screens = useBreakpoint();
   const isMobile = !screens.md;
   const navigate = useNavigate();
@@ -303,6 +315,46 @@ export default function AdminHome() {
     return () => clearInterval(timer);
   }, []);
 
+  // Notification polling
+  const fetchNotifications = useCallback(async () => {
+    try {
+      setNotifLoading(true);
+      const { data } = await api.get("/notifications/admin");
+      setNotifications(data.notifications || []);
+      setUnreadCount(data.unreadCount || 0);
+    } catch { /* silent */ }
+    finally { setNotifLoading(false); }
+  }, []);
+
+  useEffect(() => {
+    fetchNotifications();
+    const interval = setInterval(fetchNotifications, 30000);
+    return () => clearInterval(interval);
+  }, [fetchNotifications]);
+
+  const markNotifRead = async (id) => {
+    try {
+      await api.patch(`/notifications/${id}/read`);
+      setNotifications((prev) => prev.map((n) => n._id === id ? { ...n, read: true } : n));
+      setUnreadCount((prev) => Math.max(0, prev - 1));
+    } catch { /* silent */ }
+  };
+
+  const markAllRead = async () => {
+    try {
+      await api.patch("/notifications/admin/read-all");
+      setNotifications((prev) => prev.map((n) => ({ ...n, read: true })));
+      setUnreadCount(0);
+    } catch { /* silent */ }
+  };
+
+  const getNotifIcon = (type) => {
+    if (type === "new_submission") return <InboxOutlined style={{ color: "#2f54eb" }} />;
+    if (type === "resubmission") return <ReconciliationOutlined style={{ color: "#13c2c2" }} />;
+    if (type === "new_portal_user") return <TeamOutlined style={{ color: "#52c41a" }} />;
+    return <BellOutlined style={{ color: "#fa8c16" }} />;
+  };
+
   const toggleTheme = () => {
     const next = !isDark;
     setIsDark(next);
@@ -310,19 +362,8 @@ export default function AdminHome() {
   };
 
   const handleLogout = () => {
-    Swal.fire({
-      title: "Logout",
-      text: "Are you sure you want to logout?",
-      icon: "question",
-      showCancelButton: true,
-      confirmButtonColor: "#1a3353",
-      confirmButtonText: "Yes, logout",
-    }).then((result) => {
-      if (result.isConfirmed) {
-        secureStorage.clearAll();
-        navigate("/admin/login");
-      }
-    });
+    secureStorage.clearAll();
+    navigate("/admin/login");
   };
 
   const isDeveloper = user?.role === "developer";
@@ -380,7 +421,7 @@ export default function AdminHome() {
       slfChildren.push({
         key: "slf-waste-generators",
         icon: <InboxOutlined />,
-        label: "SLF Waste Generators",
+        label: "Portal Submissions",
       });
     }
     if (slfChildren.length > 0) {
@@ -778,8 +819,62 @@ export default function AdminHome() {
                   }}
                 />
               </Tooltip>
-              <Tooltip title="Notifications (Coming Soon)">
-                <Badge count={0} size="small">
+              <Popover
+                open={notifOpen}
+                onOpenChange={setNotifOpen}
+                trigger="click"
+                placement="bottomRight"
+                arrow={false}
+                overlayInnerStyle={{ padding: 0, borderRadius: 12, overflow: "hidden" }}
+                overlayStyle={{ width: 380 }}
+                content={
+                  <div>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "14px 16px 10px", borderBottom: "1px solid #f0f0f0" }}>
+                      <Text strong style={{ fontSize: 15 }}>Notifications</Text>
+                      {unreadCount > 0 && (
+                        <Button type="link" size="small" onClick={markAllRead} style={{ fontSize: 12, padding: 0 }}>Mark all as read</Button>
+                      )}
+                    </div>
+                    <div style={{ maxHeight: 420, overflowY: "auto" }}>
+                      {notifLoading && notifications.length === 0 ? (
+                        <div style={{ textAlign: "center", padding: "40px 0" }}><Spin size="small" /></div>
+                      ) : notifications.length === 0 ? (
+                        <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No notifications" style={{ padding: "40px 0" }} />
+                      ) : (
+                        <List
+                          dataSource={notifications}
+                          renderItem={(n) => (
+                            <div
+                              key={n._id}
+                              onClick={() => { if (!n.read) markNotifRead(n._id); }}
+                              style={{
+                                display: "flex", gap: 12, padding: "12px 16px",
+                                cursor: n.read ? "default" : "pointer",
+                                background: n.read ? "transparent" : (isDark ? "rgba(47,84,235,0.06)" : "#f0f5ff"),
+                                borderBottom: "1px solid #f5f5f5",
+                                transition: "background 0.2s",
+                              }}
+                            >
+                              <div style={{ width: 36, height: 36, borderRadius: "50%", background: isDark ? "#1f1f1f" : "#f5f5f5", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 16, flexShrink: 0 }}>
+                                {getNotifIcon(n.type)}
+                              </div>
+                              <div style={{ flex: 1, minWidth: 0 }}>
+                                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 8 }}>
+                                  <Text strong={!n.read} style={{ fontSize: 13, lineHeight: 1.3 }}>{n.title}</Text>
+                                  {!n.read && <div style={{ width: 8, height: 8, borderRadius: "50%", background: "#2f54eb", flexShrink: 0, marginTop: 4 }} />}
+                                </div>
+                                <Text type="secondary" style={{ fontSize: 12, lineHeight: 1.3, display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" }}>{n.message}</Text>
+                                <Text type="secondary" style={{ fontSize: 11, marginTop: 2, display: "block" }}>{dayjs(n.createdAt).fromNow()}</Text>
+                              </div>
+                            </div>
+                          )}
+                        />
+                      )}
+                    </div>
+                  </div>
+                }
+              >
+                <Badge count={unreadCount} size="small" offset={[-6, 6]} style={{ backgroundColor: "#ff4d4f", boxShadow: "0 0 0 2px #fff", fontSize: 10, lineHeight: "16px", height: 16, minWidth: 16, padding: "0 4px" }}>
                   <Button
                     type="text"
                     icon={<BellOutlined />}
@@ -790,7 +885,7 @@ export default function AdminHome() {
                     }}
                   />
                 </Badge>
-              </Tooltip>
+              </Popover>
               <Dropdown
                 menu={{ items: userMenuItems, onClick: handleUserMenuClick }}
                 trigger={["click"]}
@@ -819,7 +914,9 @@ export default function AdminHome() {
             className="admin-content"
             style={{ background: isDark ? "#1f1f1f" : "#f0f2f5" }}
           >
+            <Suspense fallback={<div style={{ display: "flex", justifyContent: "center", alignItems: "center", padding: 80 }}><Spin size="large" /></div>}>
             {renderContent()}
+            </Suspense>
           </Content>
 
           <div style={s.footer}>
@@ -939,7 +1036,17 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
   const [trapStats, setTrapStats] = useState(null);
   const [equipStats, setEquipStats] = useState(null);
   const [slfFacStats, setSlfFacStats] = useState(null);
+  const [openDumpStats, setOpenDumpStats] = useState(null);
+  const [rcaStats, setRcaStats] = useState(null);
+  const [pdsStats, setPdsStats] = useState(null);
+  const [techAssistStats, setTechAssistStats] = useState(null);
+  const [tsStats, setTsStats] = useState(null);
+  const [lguDivStats, setLguDivStats] = useState(null);
+  const [historyData, setHistoryData] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [dashTab, setDashTab] = useState(null);
+  const [dashboardTabSettings, setDashboardTabSettings] = useState({});
+  const [dashYear, setDashYear] = useState("");
   const [tileKey, setTileKey] = useState("street");
   const [mapFilterProvince, setMapFilterProvince] = useState(null);
   const [mapFilterStatus, setMapFilterStatus] = useState(null);
@@ -1288,7 +1395,7 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
 
   const DASH_CACHE_KEY = "dashboard-stats-cache";
 
-  const applyStats = useCallback((slfData, swmData, mrfData, lguMrfData, trapData, equipData, slfFacData) => {
+  const applyStats = useCallback((slfData, swmData, mrfData, lguMrfData, trapData, equipData, slfFacData, openDumpData, rcaData, pdsData, techAssistData, tsData, lguDivData) => {
     setStats((prev) => { const n = slfData; return JSON.stringify(prev) === JSON.stringify(n) ? prev : n; });
     setSwmStats((prev) => { const n = swmData; return JSON.stringify(prev) === JSON.stringify(n) ? prev : n; });
     setMrfStats((prev) => { const n = mrfData; return JSON.stringify(prev) === JSON.stringify(n) ? prev : n; });
@@ -1296,29 +1403,45 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
     setTrapStats((prev) => { const n = trapData; return JSON.stringify(prev) === JSON.stringify(n) ? prev : n; });
     setEquipStats((prev) => { const n = equipData; return JSON.stringify(prev) === JSON.stringify(n) ? prev : n; });
     setSlfFacStats((prev) => { const n = slfFacData; return JSON.stringify(prev) === JSON.stringify(n) ? prev : n; });
+    setOpenDumpStats((prev) => { const n = openDumpData; return JSON.stringify(prev) === JSON.stringify(n) ? prev : n; });
+    setRcaStats((prev) => { const n = rcaData; return JSON.stringify(prev) === JSON.stringify(n) ? prev : n; });
+    setPdsStats((prev) => { const n = pdsData; return JSON.stringify(prev) === JSON.stringify(n) ? prev : n; });
+    setTechAssistStats((prev) => { const n = techAssistData; return JSON.stringify(prev) === JSON.stringify(n) ? prev : n; });
+    setTsStats((prev) => { const n = tsData; return JSON.stringify(prev) === JSON.stringify(n) ? prev : n; });
+    setLguDivStats((prev) => { const n = lguDivData; return JSON.stringify(prev) === JSON.stringify(n) ? prev : n; });
   }, []);
 
-  const fetchStats = useCallback(async () => {
+  const fetchStats = useCallback(async (year) => {
     try {
+      const yp = year ? `?year=${year}` : "";
       // Show cached data immediately for instant rendering
-      const cached = secureStorage.getJSON(DASH_CACHE_KEY);
+      const cacheKey = `${DASH_CACHE_KEY}-${year || "all"}`;
+      const cached = secureStorage.getJSON(cacheKey);
       if (cached) {
-        applyStats(cached.stats, cached.swmStats, cached.mrfStats, cached.lguMrfStats, cached.trapStats, cached.equipStats, cached.slfFacStats);
+        applyStats(cached.stats, cached.swmStats, cached.mrfStats, cached.lguMrfStats, cached.trapStats, cached.equipStats, cached.slfFacStats, cached.openDumpStats, cached.rcaStats, cached.pdsStats, cached.techAssistStats, cached.tsStats, cached.lguDivStats);
         setLoading(false);
       }
       // Always fetch fresh data from all endpoints in parallel
-      const [slfRes, swmRes, mrfRes, lguMrfRes, trapRes, equipRes, slfFacRes] =
+      const [slfRes, swmRes, mrfRes, lguMrfRes, trapRes, equipRes, slfFacRes, histRes, openDumpRes, rcaRes, pdsRes, techAssistRes, tsRes, lguDivRes] =
         await Promise.all([
           api.get("/data-slf/stats"),
-          api.get("/ten-year-swm/stats").catch(() => ({ data: null })),
-          api.get("/funded-mrf/stats").catch(() => ({ data: null })),
-          api.get("/lgu-initiated-mrf/stats").catch(() => ({ data: null })),
-          api.get("/trash-traps/stats").catch(() => ({ data: null })),
-          api.get("/swm-equipment/stats").catch(() => ({ data: null })),
-          api.get("/slf-facilities/stats").catch(() => ({ data: null })),
+          api.get(`/ten-year-swm/stats${yp}`).catch(() => ({ data: null })),
+          api.get(`/funded-mrf/stats${yp}`).catch(() => ({ data: null })),
+          api.get(`/lgu-initiated-mrf/stats${yp}`).catch(() => ({ data: null })),
+          api.get(`/trash-traps/stats${yp}`).catch(() => ({ data: null })),
+          api.get(`/swm-equipment/stats${yp}`).catch(() => ({ data: null })),
+          api.get(`/slf-facilities/stats${yp}`).catch(() => ({ data: null })),
+          api.get("/data-history/summary").catch(() => ({ data: null })),
+          api.get(`/open-dumpsites/stats${yp}`).catch(() => ({ data: null })),
+          api.get(`/residual-containment/stats${yp}`).catch(() => ({ data: null })),
+          api.get(`/project-desc-scoping/stats${yp}`).catch(() => ({ data: null })),
+          api.get(`/technical-assistance/stats${yp}`).catch(() => ({ data: null })),
+          api.get(`/transfer-stations/stats${yp}`).catch(() => ({ data: null })),
+          api.get(`/lgu-assist-diversion/stats${yp}`).catch(() => ({ data: null })),
         ]);
-      applyStats(slfRes.data, swmRes.data, mrfRes.data, lguMrfRes.data, trapRes.data, equipRes.data, slfFacRes.data);
-      secureStorage.setJSON(DASH_CACHE_KEY, {
+      applyStats(slfRes.data, swmRes.data, mrfRes.data, lguMrfRes.data, trapRes.data, equipRes.data, slfFacRes.data, openDumpRes.data, rcaRes.data, pdsRes.data, techAssistRes.data, tsRes.data, lguDivRes.data);
+      if (histRes.data) setHistoryData(histRes.data);
+      secureStorage.setJSON(cacheKey, {
         stats: slfRes.data,
         swmStats: swmRes.data,
         mrfStats: mrfRes.data,
@@ -1326,6 +1449,12 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
         trapStats: trapRes.data,
         equipStats: equipRes.data,
         slfFacStats: slfFacRes.data,
+        openDumpStats: openDumpRes.data,
+        rcaStats: rcaRes.data,
+        pdsStats: pdsRes.data,
+        techAssistStats: techAssistRes.data,
+        tsStats: tsRes.data,
+        lguDivStats: lguDivRes.data,
         ts: Date.now(),
       });
     } catch {
@@ -1336,10 +1465,17 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
   }, [applyStats]);
 
   useEffect(() => {
-    fetchStats();
-    const interval = setInterval(fetchStats, 60000);
+    setLoading(true);
+    fetchStats(dashYear);
+    // Fetch dashboard tab settings
+    api.get("/settings/app").then(({ data }) => {
+      if (data.dashboardTabs) {
+        setDashboardTabSettings(typeof data.dashboardTabs === "object" ? data.dashboardTabs : {});
+      }
+    }).catch(() => {});
+    const interval = setInterval(() => fetchStats(dashYear), 60000);
     return () => clearInterval(interval);
-  }, [fetchStats]);
+  }, [fetchStats, dashYear]);
 
   const statusColors = {
     pending: "#faad14",
@@ -1392,6 +1528,8 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
     },
   ];
 
+  const CURRENT_YEAR = new Date().getFullYear();
+
   // Build tab items — only show tabs that have data
   const tabItems = [];
 
@@ -1401,32 +1539,6 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
     const maxProvCount = Math.max(...provList.map((p) => p.count), 1);
     const divProv = swmStats.diversionByProvince || [];
     const wc = swmStats.wasteComposition || {};
-
-    // Year-over-year trend data
-    const trend = swmStats.yearlyTrend || [];
-    const trendByYear = {};
-    trend.forEach((t) => (trendByYear[t._id] = t));
-    const y2025 = trendByYear[2025] || {};
-    const y2026 = trendByYear[2026] || {};
-
-    // Helper: compute change between years
-    const trendDelta = (curr, prev) => {
-      if (prev == null || prev === 0) return null;
-      return ((curr - prev) / Math.abs(prev)) * 100;
-    };
-    const trendArrow = (delta) => {
-      if (delta == null) return null;
-      if (delta > 0) return { icon: "▲", color: "#52c41a" };
-      if (delta < 0) return { icon: "▼", color: "#ff4d4f" };
-      return { icon: "—", color: "#8c8c8c" };
-    };
-    // For metrics where decrease is good (e.g., non-compliant, waste gen)
-    const trendArrowInverse = (delta) => {
-      if (delta == null) return null;
-      if (delta > 0) return { icon: "▲", color: "#ff4d4f" };
-      if (delta < 0) return { icon: "▼", color: "#52c41a" };
-      return { icon: "—", color: "#8c8c8c" };
-    };
 
     const CARD_H = 280;
 
@@ -1451,11 +1563,6 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                   title="Total LGUs"
                   value={swmStats.totalRecords}
                   prefix={<EnvironmentOutlined style={{ color: "#1a3353" }} />}
-                  suffix={(() => {
-                    const d = trendDelta(y2026.totalRecords, y2025.totalRecords);
-                    const a = trendArrow(d);
-                    return a ? <span style={{ fontSize: 12, color: a.color, marginLeft: 4 }}>{a.icon} {Math.abs(d).toFixed(0)}%</span> : null;
-                  })()}
                 />
               </Card>
             </Col>
@@ -1471,11 +1578,6 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                   prefix={
                     <SafetyCertificateOutlined style={{ color: "#52c41a" }} />
                   }
-                  suffix={(() => {
-                    const d = trendDelta(y2026.compliant, y2025.compliant);
-                    const a = trendArrow(d);
-                    return a ? <span style={{ fontSize: 12, color: a.color, marginLeft: 4 }}>{a.icon} {Math.abs(d).toFixed(0)}%</span> : null;
-                  })()}
                 />
               </Card>
             </Col>
@@ -1490,11 +1592,6 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                   value={swmStats.byCompliance?.["Non-Compliant"] || 0}
                   styles={{ content: { color: "#ff4d4f" } }}
                   prefix={<ClockCircleOutlined />}
-                  suffix={(() => {
-                    const d = trendDelta(y2026.nonCompliant, y2025.nonCompliant);
-                    const a = trendArrowInverse(d);
-                    return a ? <span style={{ fontSize: 12, color: a.color, marginLeft: 4 }}>{a.icon} {Math.abs(d).toFixed(0)}%</span> : null;
-                  })()}
                 />
               </Card>
             </Col>
@@ -1507,150 +1604,12 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                 <Statistic
                   title="Avg. Diversion"
                   value={((wc.avgDiversionRate || 0) * 100).toFixed(1)}
-                  suffix={<>%{(() => {
-                    const d = trendDelta(y2026.avgDiversionRate, y2025.avgDiversionRate);
-                    const a = trendArrow(d);
-                    return a ? <span style={{ fontSize: 12, color: a.color, marginLeft: 4 }}>{a.icon} {Math.abs(d).toFixed(0)}%</span> : null;
-                  })()}</>}
+                  suffix="%"
                   prefix={<RiseOutlined style={{ color: "#1890ff" }} />}
                 />
               </Card>
             </Col>
           </Row>
-
-          {/* Year-over-Year Trend Comparison */}
-          {trend.length >= 2 && (
-            <Row gutter={[16, 16]} style={{ marginBottom: 16 }}>
-              <Col span={24}>
-                <Card
-                  title={<><BarChartOutlined /> Year-over-Year Trend (2025 vs 2026)</>}
-                  style={{ borderRadius: 10 }}
-                  loading={loading}
-                  styles={{ body: { padding: "12px 24px" } }}
-                >
-                  <Row gutter={[24, 16]}>
-                    {/* Compliance Trend */}
-                    <Col xs={24} md={8}>
-                      <div style={{ marginBottom: 12 }}>
-                        <Text strong style={{ fontSize: 13, color: isDark ? "#ccc" : "#595959" }}>Compliance</Text>
-                      </div>
-                      {[
-                        { label: "Compliant", key: "compliant", color: "#52c41a" },
-                        { label: "Non-Compliant", key: "nonCompliant", color: "#ff4d4f" },
-                      ].map((item) => {
-                        const v25 = y2025[item.key] || 0;
-                        const v26 = y2026[item.key] || 0;
-                        const maxVal = Math.max(v25, v26, 1);
-                        return (
-                          <div key={item.key} style={{ marginBottom: 10 }}>
-                            <Text style={{ fontSize: 11, color: isDark ? "#aaa" : "#999" }}>{item.label}</Text>
-                            <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 2 }}>
-                              <Text style={{ fontSize: 11, color: isDark ? "#aaa" : "#999", minWidth: 30 }}>2025</Text>
-                              <div style={{ flex: 1, height: 14, background: isDark ? "#2a2a2a" : "#f5f5f5", borderRadius: 3, overflow: "hidden" }}>
-                                <div style={{ width: `${(v25 / maxVal) * 100}%`, height: "100%", background: item.color, opacity: 0.5, borderRadius: 3, transition: "width 0.5s" }} />
-                              </div>
-                              <Text style={{ fontSize: 11, fontWeight: 600, minWidth: 24, textAlign: "right", color: isDark ? "#ccc" : undefined }}>{v25}</Text>
-                            </div>
-                            <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 2 }}>
-                              <Text style={{ fontSize: 11, color: isDark ? "#aaa" : "#999", minWidth: 30 }}>2026</Text>
-                              <div style={{ flex: 1, height: 14, background: isDark ? "#2a2a2a" : "#f5f5f5", borderRadius: 3, overflow: "hidden" }}>
-                                <div style={{ width: `${(v26 / maxVal) * 100}%`, height: "100%", background: item.color, borderRadius: 3, transition: "width 0.5s" }} />
-                              </div>
-                              <Text style={{ fontSize: 11, fontWeight: 600, minWidth: 24, textAlign: "right", color: isDark ? "#ccc" : undefined }}>{v26}</Text>
-                            </div>
-                          </div>
-                        );
-                      })}
-                    </Col>
-
-                    {/* Diversion & Waste Trend */}
-                    <Col xs={24} md={8}>
-                      <div style={{ marginBottom: 12 }}>
-                        <Text strong style={{ fontSize: 13, color: isDark ? "#ccc" : "#595959" }}>Diversion & Waste</Text>
-                      </div>
-                      {/* Avg Diversion Rate */}
-                      <div style={{ marginBottom: 10 }}>
-                        <Text style={{ fontSize: 11, color: isDark ? "#aaa" : "#999" }}>Avg. Diversion Rate</Text>
-                        {[
-                          { year: "2025", val: (y2025.avgDiversionRate || 0) * 100 },
-                          { year: "2026", val: (y2026.avgDiversionRate || 0) * 100 },
-                        ].map((r) => (
-                          <div key={r.year} style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 2 }}>
-                            <Text style={{ fontSize: 11, color: isDark ? "#aaa" : "#999", minWidth: 30 }}>{r.year}</Text>
-                            <div style={{ flex: 1, height: 14, background: isDark ? "#2a2a2a" : "#f5f5f5", borderRadius: 3, overflow: "hidden" }}>
-                              <div style={{ width: `${Math.min(r.val, 100)}%`, height: "100%", background: r.val >= 25 ? "#52c41a" : "#faad14", opacity: r.year === "2025" ? 0.5 : 1, borderRadius: 3, transition: "width 0.5s" }} />
-                            </div>
-                            <Text style={{ fontSize: 11, fontWeight: 600, minWidth: 40, textAlign: "right", color: isDark ? "#ccc" : undefined }}>{r.val.toFixed(1)}%</Text>
-                          </div>
-                        ))}
-                      </div>
-                      {/* Total Waste Generation */}
-                      <div style={{ marginBottom: 10 }}>
-                        <Text style={{ fontSize: 11, color: isDark ? "#aaa" : "#999" }}>Total Waste Generation</Text>
-                        {(() => {
-                          const w25 = y2025.totalWasteGen || 0;
-                          const w26 = y2026.totalWasteGen || 0;
-                          const maxW = Math.max(w25, w26, 1);
-                          return [
-                            { year: "2025", val: w25 },
-                            { year: "2026", val: w26 },
-                          ].map((r) => (
-                            <div key={r.year} style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 2 }}>
-                              <Text style={{ fontSize: 11, color: isDark ? "#aaa" : "#999", minWidth: 30 }}>{r.year}</Text>
-                              <div style={{ flex: 1, height: 14, background: isDark ? "#2a2a2a" : "#f5f5f5", borderRadius: 3, overflow: "hidden" }}>
-                                <div style={{ width: `${(r.val / maxW) * 100}%`, height: "100%", background: "#1890ff", opacity: r.year === "2025" ? 0.5 : 1, borderRadius: 3, transition: "width 0.5s" }} />
-                              </div>
-                              <Text style={{ fontSize: 11, fontWeight: 600, minWidth: 55, textAlign: "right", color: isDark ? "#ccc" : undefined }}>{r.val.toLocaleString()}</Text>
-                            </div>
-                          ));
-                        })()}
-                      </div>
-                    </Col>
-
-                    {/* Waste Composition Trend */}
-                    <Col xs={24} md={8}>
-                      <div style={{ marginBottom: 12 }}>
-                        <Text strong style={{ fontSize: 13, color: isDark ? "#ccc" : "#595959" }}>Waste Composition</Text>
-                      </div>
-                      {[
-                        { label: "Biodegradable", key: "avgBiodegradable", color: "#52c41a" },
-                        { label: "Recyclable", key: "avgRecyclable", color: "#1890ff" },
-                        { label: "Residual", key: "avgResidual", color: "#ff4d4f" },
-                        { label: "Special", key: "avgSpecial", color: "#722ed1" },
-                      ].map((item) => {
-                        const v25 = ((y2025[item.key] || 0) * 100);
-                        const v26 = ((y2026[item.key] || 0) * 100);
-                        return (
-                          <div key={item.key} style={{ marginBottom: 6 }}>
-                            <Text style={{ fontSize: 11, color: isDark ? "#aaa" : "#999" }}>{item.label}</Text>
-                            <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                              <Tooltip title={`2025: ${v25.toFixed(1)}%`}>
-                                <div style={{ flex: 1, height: 10, background: isDark ? "#2a2a2a" : "#f5f5f5", borderRadius: 3, overflow: "hidden" }}>
-                                  <div style={{ width: `${Math.min(v25, 100)}%`, height: "100%", background: item.color, opacity: 0.5, borderRadius: 3 }} />
-                                </div>
-                              </Tooltip>
-                              <Tooltip title={`2026: ${v26.toFixed(1)}%`}>
-                                <div style={{ flex: 1, height: 10, background: isDark ? "#2a2a2a" : "#f5f5f5", borderRadius: 3, overflow: "hidden" }}>
-                                  <div style={{ width: `${Math.min(v26, 100)}%`, height: "100%", background: item.color, borderRadius: 3 }} />
-                                </div>
-                              </Tooltip>
-                              <Text style={{ fontSize: 10, color: isDark ? "#aaa" : "#999", minWidth: 65, textAlign: "right" }}>
-                                {v25.toFixed(0)}% → {v26.toFixed(0)}%
-                              </Text>
-                            </div>
-                          </div>
-                        );
-                      })}
-                      <div style={{ display: "flex", gap: 12, fontSize: 10, color: "#999", marginTop: 4 }}>
-                        <span style={{ display: "flex", alignItems: "center", gap: 3 }}><span style={{ width: 12, height: 6, borderRadius: 2, background: "#8c8c8c", opacity: 0.5, display: "inline-block" }} /> 2025</span>
-                        <span style={{ display: "flex", alignItems: "center", gap: 3 }}><span style={{ width: 12, height: 6, borderRadius: 2, background: "#8c8c8c", display: "inline-block" }} /> 2026</span>
-                      </div>
-                    </Col>
-                  </Row>
-                </Card>
-              </Col>
-            </Row>
-          )}
 
           {/* Two-column layout: cards left, map right */}
           <Row gutter={[16, 16]}>
@@ -2093,8 +2052,7 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                 style={{
                   position: "sticky",
                   top: 80,
-                  height: "calc(100vh - 200px)",
-                  minHeight: 520,
+                  height: CARD_H * 3 + 32,
                 }}
               >
                 <Card
@@ -3469,8 +3427,7 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                 style={{
                   position: "sticky",
                   top: 80,
-                  height: "calc(100vh - 200px)",
-                  minHeight: 520,
+                  height: MRF_CARD_H * 3 + 32,
                 }}
               >
                 <Card
@@ -4505,8 +4462,7 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                 style={{
                   position: "sticky",
                   top: 80,
-                  height: "calc(100vh - 200px)",
-                  minHeight: 520,
+                  height: LGU_CARD_H * 3 + 32,
                 }}
               >
                 <Card
@@ -5461,8 +5417,7 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                 style={{
                   position: "sticky",
                   top: 80,
-                  height: "calc(100vh - 200px)",
-                  minHeight: 520,
+                  height: TRAP_CARD_H * 2 + 16,
                 }}
               >
                 <Card
@@ -6355,8 +6310,7 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                 style={{
                   position: "sticky",
                   top: 80,
-                  height: "calc(100vh - 200px)",
-                  minHeight: 520,
+                  height: EQUIP_CARD_H * 3 + 32,
                 }}
               >
                 <Card
@@ -6815,7 +6769,7 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
       "Cat 4": "> 150 TPD",
     };
 
-    const SLF_CARD_H = 280;
+    const SLF_CARD_H = 250;
 
     tabItems.push({
       key: "slf-monitoring",
@@ -6843,8 +6797,9 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                     <Col xs={12} sm={12} md={6}>
                       <Card
                         hoverable
-                        style={{ borderRadius: 10, height: 120, borderLeft: "4px solid #2f54eb" }}
+                        style={{ borderRadius: 10, height: 110, borderLeft: "4px solid #2f54eb" }}
                         loading={loading}
+                        styles={{ body: { padding: "10px 14px" } }}
                       >
                         <Statistic
                           title="Total SLF"
@@ -6860,8 +6815,9 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                     <Col xs={12} sm={12} md={6}>
                       <Card
                         hoverable
-                        style={{ borderRadius: 10, height: 120, borderLeft: "4px solid #13c2c2" }}
+                        style={{ borderRadius: 10, height: 110, borderLeft: "4px solid #13c2c2" }}
                         loading={loading}
+                        styles={{ body: { padding: "10px 14px" } }}
                       >
                         <Statistic
                           title="Total Cells"
@@ -6874,8 +6830,9 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                     <Col xs={12} sm={12} md={6}>
                       <Card
                         hoverable
-                        style={{ borderRadius: 10, height: 120, borderLeft: "4px solid #fa8c16" }}
+                        style={{ borderRadius: 10, height: 110, borderLeft: "4px solid #fa8c16" }}
                         loading={loading}
+                        styles={{ body: { padding: "10px 14px" } }}
                       >
                         <Statistic
                           title="LGUs Served"
@@ -6888,8 +6845,9 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                     <Col xs={12} sm={12} md={6}>
                       <Card
                         hoverable
-                        style={{ borderRadius: 10, height: 120, borderLeft: "4px solid #722ed1" }}
+                        style={{ borderRadius: 10, height: 110, borderLeft: "4px solid #722ed1" }}
                         loading={loading}
+                        styles={{ body: { padding: "10px 14px" } }}
                       >
                         <Statistic
                           title="Private Sectors Served"
@@ -6906,8 +6864,9 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                     <Col xs={12} sm={12} md={6}>
                       <Card
                         hoverable
-                        style={{ borderRadius: 10, height: 120, borderLeft: "4px solid #eb2f96" }}
+                        style={{ borderRadius: 10, height: 110, borderLeft: "4px solid #eb2f96" }}
                         loading={loading}
+                        styles={{ body: { padding: "10px 14px" } }}
                       >
                         <Statistic
                           title="Total Capacity"
@@ -6921,8 +6880,9 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                     <Col xs={12} sm={12} md={6}>
                       <Card
                         hoverable
-                        style={{ borderRadius: 10, height: 120, borderLeft: "4px solid #ff4d4f" }}
+                        style={{ borderRadius: 10, height: 110, borderLeft: "4px solid #ff4d4f" }}
                         loading={loading}
+                        styles={{ body: { padding: "10px 14px" } }}
                       >
                         <Statistic
                           title="Waste Received"
@@ -6937,8 +6897,9 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                     <Col xs={12} sm={12} md={6}>
                       <Card
                         hoverable
-                        style={{ borderRadius: 10, height: 120, borderLeft: "4px solid #1890ff" }}
+                        style={{ borderRadius: 10, height: 110, borderLeft: "4px solid #1890ff" }}
                         loading={loading}
+                        styles={{ body: { padding: "10px 14px" } }}
                       >
                         <Statistic
                           title="Leachate Ponds"
@@ -6951,8 +6912,9 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                     <Col xs={12} sm={12} md={6}>
                       <Card
                         hoverable
-                        style={{ borderRadius: 10, height: 120, borderLeft: "4px solid #52c41a" }}
+                        style={{ borderRadius: 10, height: 110, borderLeft: "4px solid #52c41a" }}
                         loading={loading}
+                        styles={{ body: { padding: "10px 14px" } }}
                       >
                         <Statistic
                           title="Gas Vents"
@@ -7313,8 +7275,7 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                         style={{
                           position: "sticky",
                           top: 80,
-                          height: "calc(100vh - 200px)",
-                          minHeight: 520,
+                          height: SLF_CARD_H * 3 + 32,
                         }}
                       >
                         <Card
@@ -7965,6 +7926,556 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
     });
   }
 
+  /* ─── Data History Tab ─── */
+  {
+    const HIST_CATEGORIES = [
+      { key: "tenYearPlan",          label: "10-Year SWM Plan", liveStats: swmStats },
+      { key: "fundedMrf",            label: "Funded MRF",       liveStats: mrfStats },
+      { key: "lguMrf",               label: "LGU-Initiated MRF", liveStats: lguMrfStats },
+      { key: "slf",                  label: "SLF Facilities",   liveStats: slfFacStats },
+      { key: "trashTraps",           label: "Trash Traps",      liveStats: trapStats },
+      { key: "swmEquipment",         label: "SWM Equipment",    liveStats: equipStats },
+      { key: "residualContainment",  label: "Residual Containment", liveStats: rcaStats },
+      { key: "transferStation",      label: "Transfer Stations", liveStats: tsStats },
+      { key: "openDumpsite",         label: "Open Dumpsites",   liveStats: openDumpStats },
+      { key: "fundedRehab",          label: "Funded Rehab",     liveStats: null },
+    ];
+
+    const HIST_YEARS = Array.from({ length: 5 }, (_, i) => CURRENT_YEAR - 4 + i);
+
+    const getCount = (catKey, yr) => {
+      if (yr === CURRENT_YEAR) {
+        const cat = HIST_CATEGORIES.find((c) => c.key === catKey);
+        return cat?.liveStats?.totalRecords ?? "—";
+      }
+      const arr = historyData?.[catKey];
+      if (!arr) return "—";
+      const rec = arr.find((r) => r.year === yr);
+      return rec?.totalRecords ?? 0;
+    };
+
+    const getChange = (catKey, yr) => {
+      const cur = getCount(catKey, yr);
+      const prev = getCount(catKey, yr - 1);
+      if (typeof cur !== "number" || typeof prev !== "number" || prev === 0) return null;
+      return ((cur - prev) / prev) * 100;
+    };
+
+    const histMax = Math.max(
+      ...HIST_CATEGORIES.flatMap((c) =>
+        HIST_YEARS.map((y) => {
+          const v = getCount(c.key, y);
+          return typeof v === "number" ? v : 0;
+        })
+      ),
+      1
+    );
+
+    const histColumns = [
+      {
+        title: "Category",
+        dataIndex: "label",
+        key: "label",
+        fixed: "left",
+        width: 180,
+        render: (text) => <strong>{text}</strong>,
+      },
+      ...HIST_YEARS.map((yr) => ({
+        title: yr === CURRENT_YEAR ? <Tag color="blue">{yr} (Live)</Tag> : String(yr),
+        dataIndex: `y${yr}`,
+        key: `y${yr}`,
+        width: 150,
+        align: "center",
+        render: (_, row) => {
+          const val = getCount(row.key, yr);
+          const pct = typeof val === "number" ? (val / histMax) * 100 : 0;
+          const change = yr > 2022 ? getChange(row.key, yr) : null;
+          return (
+            <div>
+              <div style={{ fontWeight: 600, fontSize: 16 }}>{typeof val === "number" ? val.toLocaleString() : val}</div>
+              {typeof val === "number" && (
+                <div
+                  style={{
+                    height: 6,
+                    borderRadius: 3,
+                    background: isDark ? "rgba(255,255,255,0.08)" : "#f0f0f0",
+                    marginTop: 4,
+                  }}
+                >
+                  <div
+                    style={{
+                      height: 6,
+                      borderRadius: 3,
+                      width: `${pct}%`,
+                      background: yr === CURRENT_YEAR ? "#1890ff" : "#52c41a",
+                      transition: "width 0.4s",
+                    }}
+                  />
+                </div>
+              )}
+              {change !== null && (
+                <span style={{ fontSize: 11, color: change >= 0 ? "#52c41a" : "#ff4d4f" }}>
+                  {change >= 0 ? "▲" : "▼"} {Math.abs(change).toFixed(1)}%
+                </span>
+              )}
+            </div>
+          );
+        },
+      })),
+    ];
+
+    const histTableData = HIST_CATEGORIES.map((c) => ({
+      key: c.key,
+      label: c.label,
+    }));
+
+    // Build per-category province detail
+    const expandedRowRender = (record) => {
+      const arr = historyData?.[record.key];
+      if (!arr || arr.length === 0) return <span style={{ color: "#999" }}>No historical province data available.</span>;
+
+      // Gather all province names across years
+      const provSet = new Set();
+      arr.forEach((r) => r.byProvince?.forEach((p) => provSet.add(p.province)));
+      const provinces = [...provSet].sort();
+
+      if (provinces.length === 0) return <span style={{ color: "#999" }}>No province breakdown available.</span>;
+
+      const provColumns = [
+        { title: "Province", dataIndex: "province", key: "province", fixed: "left", width: 160 },
+        ...arr.map((r) => ({
+          title: String(r.year),
+          dataIndex: `y${r.year}`,
+          key: `y${r.year}`,
+          width: 100,
+          align: "center",
+        })),
+      ];
+
+      const provData = provinces.map((prov) => {
+        const row = { key: prov, province: prov };
+        arr.forEach((r) => {
+          const found = r.byProvince?.find((p) => p.province === prov);
+          row[`y${r.year}`] = found?.count ?? 0;
+        });
+        return row;
+      });
+
+      return (
+        <Table
+          columns={provColumns}
+          dataSource={provData}
+          size="small"
+          pagination={false}
+          scroll={{ x: "max-content" }}
+          style={{ margin: "8px 0" }}
+        />
+      );
+    };
+
+  // ── Open Dumpsites Dashboard Tab ──
+  if (openDumpStats && openDumpStats.totalRecords > 0) {
+    const odByStatus = openDumpStats.byStatus || {};
+    const odByProv = openDumpStats.byProvince || {};
+    const odProvList = Object.entries(odByProv).map(([k, v]) => ({ province: k, count: v })).sort((a, b) => b.count - a.count);
+    const odMaxProv = Math.max(...odProvList.map(p => p.count), 1);
+    tabItems.push({
+      key: "open-dumpsites",
+      label: <><EnvironmentOutlined /> Open Dumpsites</>,
+      children: (<>
+        <Row gutter={[16, 16]} style={{ marginBottom: 16 }}>
+          <Col xs={12} sm={12} md={6}><Card hoverable style={{ borderRadius: 10, height: 110 }} loading={loading}><Statistic title="Total Sites" value={openDumpStats.totalRecords} prefix={<EnvironmentOutlined style={{ color: "#ff4d4f" }} />} /></Card></Col>
+          {Object.entries(odByStatus).slice(0, 3).map(([k, v]) => (
+            <Col key={k} xs={12} sm={12} md={6}><Card hoverable style={{ borderRadius: 10, height: 110 }} loading={loading}><Statistic title={k} value={v} valueStyle={{ color: k.toLowerCase().includes("rehab") ? "#52c41a" : k.toLowerCase().includes("open") ? "#ff4d4f" : "#faad14" }} /></Card></Col>
+          ))}
+        </Row>
+        <Row gutter={[16, 16]}>
+          <Col xs={24} md={12}>
+            <Card title="By Province" size="small" style={{ borderRadius: 10 }}>
+              {odProvList.map(p => (
+                <div key={p.province} style={{ marginBottom: 6 }}><Text style={{ fontSize: 12 }}>{p.province}</Text><Progress percent={Math.round((p.count / odMaxProv) * 100)} format={() => p.count} size="small" strokeColor="#ff4d4f" /></div>
+              ))}
+            </Card>
+          </Col>
+          <Col xs={24} md={12}>
+            <Card title="By Status" size="small" style={{ borderRadius: 10 }}>
+              {Object.entries(odByStatus).map(([k, v]) => (
+                <div key={k} style={{ marginBottom: 6 }}><Text style={{ fontSize: 12 }}>{k}</Text><Progress percent={Math.round((v / openDumpStats.totalRecords) * 100)} format={() => v} size="small" /></div>
+              ))}
+            </Card>
+          </Col>
+        </Row>
+        <Row style={{ marginTop: 16 }}><Col span={24}><Button type="link" onClick={() => setActiveMenu("cs-open-dump")}>View All Open Dumpsites →</Button></Col></Row>
+      </>),
+    });
+  }
+
+  // ── Residual Containment Dashboard Tab ──
+  if (rcaStats && rcaStats.totalRecords > 0) {
+    const rcaByStatus = rcaStats.byStatus || {};
+    const rcaByProv = rcaStats.byProvince || {};
+    const rcaProvList = Object.entries(rcaByProv).map(([k, v]) => ({ province: k, count: v })).sort((a, b) => b.count - a.count);
+    const rcaMaxProv = Math.max(...rcaProvList.map(p => p.count), 1);
+    tabItems.push({
+      key: "residual-containment",
+      label: <><SafetyCertificateOutlined /> Residual Containment</>,
+      children: (<>
+        <Row gutter={[16, 16]} style={{ marginBottom: 16 }}>
+          <Col xs={12} sm={12} md={6}><Card hoverable style={{ borderRadius: 10, height: 110 }} loading={loading}><Statistic title="Total Facilities" value={rcaStats.totalRecords} prefix={<SafetyCertificateOutlined style={{ color: "#722ed1" }} />} /></Card></Col>
+          {Object.entries(rcaByStatus).slice(0, 3).map(([k, v]) => (
+            <Col key={k} xs={12} sm={12} md={6}><Card hoverable style={{ borderRadius: 10, height: 110 }} loading={loading}><Statistic title={k} value={v} valueStyle={{ color: k.toLowerCase().includes("operational") && !k.toLowerCase().includes("non") ? "#52c41a" : "#ff4d4f" }} /></Card></Col>
+          ))}
+        </Row>
+        <Row gutter={[16, 16]}>
+          <Col xs={24} md={12}>
+            <Card title="By Province" size="small" style={{ borderRadius: 10 }}>
+              {rcaProvList.map(p => (
+                <div key={p.province} style={{ marginBottom: 6 }}><Text style={{ fontSize: 12 }}>{p.province}</Text><Progress percent={Math.round((p.count / rcaMaxProv) * 100)} format={() => p.count} size="small" strokeColor="#722ed1" /></div>
+              ))}
+            </Card>
+          </Col>
+          <Col xs={24} md={12}>
+            <Card title="By Status" size="small" style={{ borderRadius: 10 }}>
+              {Object.entries(rcaByStatus).map(([k, v]) => (
+                <div key={k} style={{ marginBottom: 6 }}><Text style={{ fontSize: 12 }}>{k}</Text><Progress percent={Math.round((v / rcaStats.totalRecords) * 100)} format={() => v} size="small" /></div>
+              ))}
+            </Card>
+          </Col>
+        </Row>
+        <Row style={{ marginTop: 16 }}><Col span={24}><Button type="link" onClick={() => setActiveMenu("cs-rca")}>View All Residual Containment →</Button></Col></Row>
+      </>),
+    });
+  }
+
+  // ── Transfer Stations Dashboard Tab ──
+  if (tsStats && tsStats.totalRecords > 0) {
+    const tsByStatus = tsStats.byStatus || {};
+    const tsByProv = tsStats.byProvince || {};
+    const tsProvList = Object.entries(tsByProv).map(([k, v]) => ({ province: k, count: v })).sort((a, b) => b.count - a.count);
+    const tsMaxProv = Math.max(...tsProvList.map(p => p.count), 1);
+    tabItems.push({
+      key: "transfer-stations",
+      label: <><SwapOutlined /> Transfer Stations</>,
+      children: (<>
+        <Row gutter={[16, 16]} style={{ marginBottom: 16 }}>
+          <Col xs={12} sm={12} md={6}><Card hoverable style={{ borderRadius: 10, height: 110 }} loading={loading}><Statistic title="Total Stations" value={tsStats.totalRecords} prefix={<SwapOutlined style={{ color: "#13c2c2" }} />} /></Card></Col>
+          {Object.entries(tsByStatus).slice(0, 3).map(([k, v]) => (
+            <Col key={k} xs={12} sm={12} md={6}><Card hoverable style={{ borderRadius: 10, height: 110 }} loading={loading}><Statistic title={k} value={v} valueStyle={{ color: k.toLowerCase().includes("operational") && !k.toLowerCase().includes("non") ? "#52c41a" : "#faad14" }} /></Card></Col>
+          ))}
+        </Row>
+        <Row gutter={[16, 16]}>
+          <Col xs={24} md={12}>
+            <Card title="By Province" size="small" style={{ borderRadius: 10 }}>
+              {tsProvList.map(p => (
+                <div key={p.province} style={{ marginBottom: 6 }}><Text style={{ fontSize: 12 }}>{p.province}</Text><Progress percent={Math.round((p.count / tsMaxProv) * 100)} format={() => p.count} size="small" strokeColor="#13c2c2" /></div>
+              ))}
+            </Card>
+          </Col>
+          <Col xs={24} md={12}>
+            <Card title="By Status" size="small" style={{ borderRadius: 10 }}>
+              {Object.entries(tsByStatus).map(([k, v]) => (
+                <div key={k} style={{ marginBottom: 6 }}><Text style={{ fontSize: 12 }}>{k}</Text><Progress percent={Math.round((v / tsStats.totalRecords) * 100)} format={() => v} size="small" /></div>
+              ))}
+            </Card>
+          </Col>
+        </Row>
+        <Row style={{ marginTop: 16 }}><Col span={24}><Button type="link" onClick={() => setActiveMenu("cs-transfer-station")}>View All Transfer Stations →</Button></Col></Row>
+      </>),
+    });
+  }
+
+  // ── Project Description Scoping Dashboard Tab ──
+  if (pdsStats && pdsStats.totalRecords > 0) {
+    const pdsByStatus = pdsStats.byStatus || {};
+    const pdsByProv = pdsStats.byProvince || {};
+    const pdsProvList = Object.entries(pdsByProv).map(([k, v]) => ({ province: k, count: v })).sort((a, b) => b.count - a.count);
+    const pdsMaxProv = Math.max(...pdsProvList.map(p => p.count), 1);
+    tabItems.push({
+      key: "pds-scoping",
+      label: <><FileTextOutlined /> PDS (Scoping)</>,
+      children: (<>
+        <Row gutter={[16, 16]} style={{ marginBottom: 16 }}>
+          <Col xs={12} sm={12} md={6}><Card hoverable style={{ borderRadius: 10, height: 110 }} loading={loading}><Statistic title="Total Records" value={pdsStats.totalRecords} prefix={<FileTextOutlined style={{ color: "#1890ff" }} />} /></Card></Col>
+          {Object.entries(pdsByStatus).slice(0, 3).map(([k, v]) => (
+            <Col key={k} xs={12} sm={12} md={6}><Card hoverable style={{ borderRadius: 10, height: 110 }} loading={loading}><Statistic title={k} value={v} /></Card></Col>
+          ))}
+        </Row>
+        <Row gutter={[16, 16]}>
+          <Col xs={24} md={12}>
+            <Card title="By Province" size="small" style={{ borderRadius: 10 }}>
+              {pdsProvList.map(p => (
+                <div key={p.province} style={{ marginBottom: 6 }}><Text style={{ fontSize: 12 }}>{p.province}</Text><Progress percent={Math.round((p.count / pdsMaxProv) * 100)} format={() => p.count} size="small" strokeColor="#1890ff" /></div>
+              ))}
+            </Card>
+          </Col>
+          <Col xs={24} md={12}>
+            <Card title="By Status" size="small" style={{ borderRadius: 10 }}>
+              {Object.entries(pdsByStatus).map(([k, v]) => (
+                <div key={k} style={{ marginBottom: 6 }}><Text style={{ fontSize: 12 }}>{k}</Text><Progress percent={Math.round((v / pdsStats.totalRecords) * 100)} format={() => v} size="small" /></div>
+              ))}
+            </Card>
+          </Col>
+        </Row>
+        <Row style={{ marginTop: 16 }}><Col span={24}><Button type="link" onClick={() => setActiveMenu("cs-pds")}>View All PDS Records →</Button></Col></Row>
+      </>),
+    });
+  }
+
+  // ── Technical Assistance Dashboard Tab ──
+  if (techAssistStats && techAssistStats.totalRecords > 0) {
+    const taByStatus = techAssistStats.byStatus || {};
+    const taByProv = techAssistStats.byProvince || {};
+    const taByFacility = techAssistStats.byFacilityType || {};
+    const taProvList = Object.entries(taByProv).map(([k, v]) => ({ province: k, count: v })).sort((a, b) => b.count - a.count);
+    const taMaxProv = Math.max(...taProvList.map(p => p.count), 1);
+    tabItems.push({
+      key: "tech-assist",
+      label: <><ToolOutlined /> Technical Assistance</>,
+      children: (<>
+        <Row gutter={[16, 16]} style={{ marginBottom: 16 }}>
+          <Col xs={12} sm={12} md={6}><Card hoverable style={{ borderRadius: 10, height: 110 }} loading={loading}><Statistic title="Total Records" value={techAssistStats.totalRecords} prefix={<ToolOutlined style={{ color: "#fa8c16" }} />} /></Card></Col>
+          {Object.entries(taByStatus).slice(0, 3).map(([k, v]) => (
+            <Col key={k} xs={12} sm={12} md={6}><Card hoverable style={{ borderRadius: 10, height: 110 }} loading={loading}><Statistic title={k} value={v} /></Card></Col>
+          ))}
+        </Row>
+        <Row gutter={[16, 16]}>
+          <Col xs={24} md={8}>
+            <Card title="By Province" size="small" style={{ borderRadius: 10 }}>
+              {taProvList.map(p => (
+                <div key={p.province} style={{ marginBottom: 6 }}><Text style={{ fontSize: 12 }}>{p.province}</Text><Progress percent={Math.round((p.count / taMaxProv) * 100)} format={() => p.count} size="small" strokeColor="#fa8c16" /></div>
+              ))}
+            </Card>
+          </Col>
+          <Col xs={24} md={8}>
+            <Card title="By Status" size="small" style={{ borderRadius: 10 }}>
+              {Object.entries(taByStatus).map(([k, v]) => (
+                <div key={k} style={{ marginBottom: 6 }}><Text style={{ fontSize: 12 }}>{k}</Text><Progress percent={Math.round((v / techAssistStats.totalRecords) * 100)} format={() => v} size="small" /></div>
+              ))}
+            </Card>
+          </Col>
+          <Col xs={24} md={8}>
+            <Card title="By Facility Type" size="small" style={{ borderRadius: 10 }}>
+              {Object.entries(taByFacility).map(([k, v]) => (
+                <div key={k} style={{ marginBottom: 6 }}><Text style={{ fontSize: 12 }}>{k}</Text><Progress percent={Math.round((v / techAssistStats.totalRecords) * 100)} format={() => v} size="small" strokeColor="#722ed1" /></div>
+              ))}
+            </Card>
+          </Col>
+        </Row>
+        <Row style={{ marginTop: 16 }}><Col span={24}><Button type="link" onClick={() => setActiveMenu("cs-tech-assist")}>View All Technical Assistance →</Button></Col></Row>
+      </>),
+    });
+  }
+
+  // ── LGU Assist & Diversion Dashboard Tab ──
+  if (lguDivStats && lguDivStats.totalRecords > 0) {
+    const ldByStatus = lguDivStats.byStatus || {};
+    const ldByProv = lguDivStats.byProvince || {};
+    const ldWaste = lguDivStats.wasteStats || {};
+    const ldProvList = Object.entries(ldByProv).map(([k, v]) => ({ province: k, count: v })).sort((a, b) => b.count - a.count);
+    const ldMaxProv = Math.max(...ldProvList.map(p => p.count), 1);
+    tabItems.push({
+      key: "lgu-diversion",
+      label: <><TeamOutlined /> LGU Assist & Diversion</>,
+      children: (<>
+        <Row gutter={[16, 16]} style={{ marginBottom: 16 }}>
+          <Col xs={12} sm={12} md={6}><Card hoverable style={{ borderRadius: 10, height: 110 }} loading={loading}><Statistic title="Total LGUs" value={lguDivStats.totalRecords} prefix={<TeamOutlined style={{ color: "#52c41a" }} />} /></Card></Col>
+          <Col xs={12} sm={12} md={6}><Card hoverable style={{ borderRadius: 10, height: 110 }} loading={loading}><Statistic title="Avg Diversion" value={(ldWaste.avgDiversion || 0).toFixed(1)} suffix="%" prefix={<RiseOutlined style={{ color: "#1890ff" }} />} /></Card></Col>
+          <Col xs={12} sm={12} md={6}><Card hoverable style={{ borderRadius: 10, height: 110 }} loading={loading}><Statistic title="Total Waste Gen" value={ldWaste.totalWasteGen || 0} prefix={<BarChartOutlined style={{ color: "#ff4d4f" }} />} formatter={(v) => Number(v).toLocaleString()} /></Card></Col>
+          <Col xs={12} sm={12} md={6}><Card hoverable style={{ borderRadius: 10, height: 110 }} loading={loading}><Statistic title="Total Diverted" value={ldWaste.totalDiverted || 0} prefix={<BarChartOutlined style={{ color: "#52c41a" }} />} formatter={(v) => Number(v).toLocaleString()} /></Card></Col>
+        </Row>
+        <Row gutter={[16, 16]}>
+          <Col xs={24} md={12}>
+            <Card title="By Province" size="small" style={{ borderRadius: 10 }}>
+              {ldProvList.map(p => (
+                <div key={p.province} style={{ marginBottom: 6 }}><Text style={{ fontSize: 12 }}>{p.province}</Text><Progress percent={Math.round((p.count / ldMaxProv) * 100)} format={() => p.count} size="small" strokeColor="#52c41a" /></div>
+              ))}
+            </Card>
+          </Col>
+          <Col xs={24} md={12}>
+            <Card title="By Status" size="small" style={{ borderRadius: 10 }}>
+              {Object.entries(ldByStatus).map(([k, v]) => (
+                <div key={k} style={{ marginBottom: 6 }}><Text style={{ fontSize: 12 }}>{k}</Text><Progress percent={Math.round((v / lguDivStats.totalRecords) * 100)} format={() => v} size="small" /></div>
+              ))}
+            </Card>
+          </Col>
+        </Row>
+        <Row style={{ marginTop: 16 }}><Col span={24}><Button type="link" onClick={() => setActiveMenu("cs-lgu-diversion")}>View All LGU Assist & Diversion →</Button></Col></Row>
+      </>),
+    });
+  }
+
+    // Ensure all expected tabs exist even when they have no data for the selected year
+    const ALL_DASH_TABS = [
+      { key: "swm-plan", label: <><FundProjectionScreenOutlined /> 10-Year SWM Plan</> },
+      { key: "funded-mrf", label: <><BankOutlined /> Funded MRF</> },
+      { key: "lgu-mrf", label: <><ApartmentOutlined /> LGU Initiated MRF</> },
+      { key: "trash-traps", label: <><DeleteOutlined /> Trash Traps</> },
+      { key: "swm-equip", label: <><CarOutlined /> SWM Equipment</> },
+      { key: "slf-monitoring", label: <><BankOutlined /> SLF Monitoring</> },
+      { key: "open-dumpsites", label: <><EnvironmentOutlined /> Open Dumpsites</> },
+      { key: "residual-containment", label: <><SafetyCertificateOutlined /> Residual Containment</> },
+      { key: "transfer-stations", label: <><SwapOutlined /> Transfer Stations</> },
+      { key: "pds-scoping", label: <><FileTextOutlined /> PDS (Scoping)</> },
+      { key: "tech-assist", label: <><ToolOutlined /> Technical Assistance</> },
+      { key: "lgu-diversion", label: <><TeamOutlined /> LGU Assist & Diversion</> },
+    ];
+    const existingKeys = new Set(tabItems.map(t => t.key));
+    for (const tab of ALL_DASH_TABS) {
+      if (!existingKeys.has(tab.key)) {
+        tabItems.push({
+          key: tab.key,
+          label: tab.label,
+          children: (
+            <div style={{ textAlign: "center", padding: "60px 20px" }}>
+              <Empty description={<Text type="secondary">No data available{dashYear ? ` for ${dashYear}` : ""}. Records may exist in other years.</Text>} />
+            </div>
+          ),
+        });
+      }
+    }
+
+    tabItems.push({
+      key: "data-history",
+      label: (
+        <>
+          <HistoryOutlined /> Data History
+        </>
+      ),
+      children: (
+        <div style={{ padding: "0 4px" }}>
+          {/* Summary Cards */}
+          <Row gutter={[16, 16]} style={{ marginBottom: 20 }}>
+            {HIST_CATEGORIES.slice(0, 6).map((cat) => {
+              const latest = getCount(cat.key, CURRENT_YEAR);
+              const prev = getCount(cat.key, CURRENT_YEAR - 1);
+              const change = typeof latest === "number" && typeof prev === "number" && prev > 0
+                ? ((latest - prev) / prev) * 100 : null;
+              return (
+                <Col xs={24} sm={12} md={8} lg={4} key={cat.key}>
+                  <Card
+                    size="small"
+                    style={{
+                      borderRadius: 10,
+                      textAlign: "center",
+                      background: isDark ? "#1f1f1f" : "#fafafa",
+                    }}
+                  >
+                    <Statistic
+                      title={cat.label}
+                      value={typeof latest === "number" ? latest : 0}
+                      suffix={
+                        change !== null ? (
+                          <span style={{ fontSize: 12, color: change >= 0 ? "#52c41a" : "#ff4d4f" }}>
+                            {change >= 0 ? "▲" : "▼"}{Math.abs(change).toFixed(1)}%
+                          </span>
+                        ) : null
+                      }
+                    />
+                    <div style={{ fontSize: 11, color: "#999", marginTop: 4 }}>vs {CURRENT_YEAR - 1}</div>
+                  </Card>
+                </Col>
+              );
+            })}
+          </Row>
+
+          {/* Year-over-year table */}
+          <Card
+            title={
+              <Space>
+                <HistoryOutlined />
+                Year-over-Year Comparison ({CURRENT_YEAR - 4} – {CURRENT_YEAR})
+              </Space>
+            }
+            style={{ borderRadius: 12, marginBottom: 20 }}
+          >
+            <Table
+              columns={histColumns}
+              dataSource={histTableData}
+              pagination={false}
+              scroll={{ x: 950 }}
+              size="middle"
+              expandable={{
+                expandedRowRender,
+                rowExpandable: (record) => {
+                  const arr = historyData?.[record.key];
+                  return arr && arr.some((r) => r.byProvince?.length > 0);
+                },
+              }}
+            />
+          </Card>
+
+          {/* Status breakdown per category */}
+          {historyData && (
+            <Card
+              title={
+                <Space>
+                  <BarChartOutlined />
+                  Status Breakdown by Year
+                </Space>
+              }
+              style={{ borderRadius: 12 }}
+            >
+              <Row gutter={[16, 16]}>
+                {HIST_CATEGORIES.filter((c) => {
+                  const arr = historyData[c.key];
+                  return arr && arr.some((r) => r.byStatus?.length > 0);
+                }).map((cat) => {
+                  const arr = historyData[cat.key];
+                  // Show the most recent year's status breakdown
+                  const latest = [...arr].sort((a, b) => b.year - a.year)[0];
+                  const statuses = latest?.byStatus || [];
+                  const total = statuses.reduce((s, v) => s + v.count, 0) || 1;
+                  const statusColors = {
+                    Operational: "#52c41a", Operating: "#52c41a", Active: "#52c41a",
+                    "Non-Operational": "#ff4d4f", Closed: "#ff4d4f", Inactive: "#ff4d4f",
+                    "Under Construction": "#faad14", Proposed: "#1890ff",
+                    "For Closure": "#ff7a45", Compliant: "#52c41a", "Not Compliant": "#ff4d4f",
+                    "For Compliance": "#faad14", Completed: "#52c41a", Ongoing: "#1890ff",
+                  };
+
+                  return (
+                    <Col xs={24} sm={12} md={8} key={cat.key}>
+                      <Card size="small" title={cat.label} style={{ borderRadius: 8 }}>
+                        <div style={{ fontSize: 11, color: "#999", marginBottom: 8 }}>
+                          Latest: {latest?.year}
+                        </div>
+                        {statuses.map((s) => (
+                          <div key={s.status} style={{ marginBottom: 6 }}>
+                            <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12 }}>
+                              <span>{s.status}</span>
+                              <span>{s.count} ({((s.count / total) * 100).toFixed(0)}%)</span>
+                            </div>
+                            <div
+                              style={{
+                                height: 6,
+                                borderRadius: 3,
+                                background: isDark ? "rgba(255,255,255,0.08)" : "#f0f0f0",
+                              }}
+                            >
+                              <div
+                                style={{
+                                  height: 6,
+                                  borderRadius: 3,
+                                  width: `${(s.count / total) * 100}%`,
+                                  background: statusColors[s.status] || "#1890ff",
+                                  transition: "width 0.4s",
+                                }}
+                              />
+                            </div>
+                          </div>
+                        ))}
+                      </Card>
+                    </Col>
+                  );
+                })}
+              </Row>
+            </Card>
+          )}
+        </div>
+      ),
+    });
+  }
+
   return (
     <>
       {" "}
@@ -8477,20 +8988,69 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
           />
         )}
       </Modal>
-      <div style={{ marginBottom: 16 }}>
-        <Title level={3} style={{ margin: 0, color: textColor }}>
-          Dashboard
-        </Title>
-        <Text type="secondary">
-          Here&apos;s a real-time overview of the system.
-        </Text>
+      <div style={{ marginBottom: 16, display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 8 }}>
+        <div>
+          <Title level={3} style={{ margin: 0, color: textColor }}>
+            Dashboard
+          </Title>
+          <Text type="secondary">
+            Here&apos;s a real-time overview of the system.
+          </Text>
+        </div>
+        <Space size="middle">
+          <Select
+            value={dashYear}
+            onChange={(v) => setDashYear(v)}
+            style={{ width: 130 }}
+            options={[
+              { label: "All Years", value: "" },
+              ...Array.from({ length: 7 }, (_, i) => {
+                const y = new Date().getFullYear() - i;
+                return { label: `Year ${y}`, value: y };
+              }),
+            ]}
+          />
+          {loading && <Spin size="small" />}
+        </Space>
       </div>
-      <Tabs
-        defaultActiveKey="swm-plan"
-        items={tabItems}
-        size="large"
-        style={{ marginTop: 8 }}
-      />
+      {/* Filter tabs by dashboard visibility settings, wrap maintenance tabs */}
+      {(() => {
+        const filteredTabs = tabItems
+          .filter(t => {
+            const cfg = dashboardTabSettings[t.key];
+            return !cfg || cfg.visible !== false;
+          })
+          .map(t => {
+            const cfg = dashboardTabSettings[t.key];
+            if (cfg && cfg.maintenance) {
+              return {
+                ...t,
+                label: <>{t.label} <Tag color="warning" style={{ marginLeft: 4, fontSize: 10 }}>Maintenance</Tag></>,
+                children: (
+                  <div style={{ textAlign: "center", padding: "80px 20px" }}>
+                    <ToolOutlined style={{ fontSize: 48, color: "#faad14", marginBottom: 16 }} />
+                    <Title level={4} style={{ color: "#faad14" }}>Under Maintenance</Title>
+                    <Text type="secondary">{cfg.maintenanceMessage || "This dashboard section is currently under maintenance. Please check back later."}</Text>
+                  </div>
+                ),
+              };
+            }
+            return t;
+          });
+
+        // Set initial dashTab to first visible tab
+        const activeKey = filteredTabs.some(t => t.key === dashTab) ? dashTab : filteredTabs[0]?.key;
+
+        return (
+          <Tabs
+            activeKey={activeKey}
+            onChange={setDashTab}
+            items={filteredTabs}
+            size="large"
+            style={{ marginTop: 8 }}
+          />
+        );
+      })()}
     </>
   );
 }

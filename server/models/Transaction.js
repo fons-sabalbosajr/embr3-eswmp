@@ -20,8 +20,10 @@ const transactionSchema = new mongoose.Schema(
         "email_ack_failed",  // acknowledgement email failed
         "status_change",     // admin changed status (acknowledged / rejected)
         "deleted",           // admin deleted entry
+        "resubmission",      // portal user resubmitted after revert
         "revert_requested",  // portal user requested revert
         "revert_approved",   // admin approved revert
+        "baseline_update_request", // portal user requested baseline field update
       ],
       required: true,
       index: true,

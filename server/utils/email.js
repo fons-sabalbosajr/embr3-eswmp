@@ -1,4 +1,19 @@
 const nodemailer = require("nodemailer");
+const os = require("os");
+
+// Resolve CLIENT_URL dynamically — uses env var, but auto-detects network IP as fallback
+function getClientUrl() {
+  if (process.env.CLIENT_URL) return process.env.CLIENT_URL;
+  const nets = os.networkInterfaces();
+  for (const name of Object.keys(nets)) {
+    for (const iface of nets[name]) {
+      if (iface.family === "IPv4" && !iface.internal) {
+        return `http://${iface.address}:5173/eswm-pipeline`;
+      }
+    }
+  }
+  return "http://localhost:5173/eswm-pipeline";
+}
 
 const transporter = nodemailer.createTransport({
   service: "gmail",
@@ -7,6 +22,11 @@ const transporter = nodemailer.createTransport({
     pass: process.env.EMAIL_APP_PASS,
   },
 });
+
+// Verify SMTP connection on startup
+transporter.verify()
+  .then(() => console.log("✅ Email transporter connected (Gmail SMTP ready)"))
+  .catch((err) => console.error("❌ Email transporter error — emails will NOT send:", err.message));
 
 function getVerificationEmailHTML(firstName, verifyLink) {
   return `
@@ -85,8 +105,7 @@ function getVerificationEmailHTML(firstName, verifyLink) {
 }
 
 async function sendVerificationEmail(email, firstName, token) {
-  const CLIENT_URL = process.env.CLIENT_URL || "http://localhost:5173/eswm-pipeline";
-  const verifyLink = `${CLIENT_URL}/admin/verify-email?token=${token}`;
+  const verifyLink = `${getClientUrl()}/admin/verify-email?token=${token}`;
 
   const mailOptions = {
     from: `"EMBR3 ESWMP" <${process.env.EMAIL_USER}>`,
@@ -253,8 +272,7 @@ async function sendPortalSignupEmail(email, firstName) {
 
 // 2. Approval notification – account approved with assigned SLF
 async function sendPortalApprovalEmail(email, firstName, slfName) {
-  const CLIENT_URL = process.env.CLIENT_URL || "http://localhost:5173/eswm-pipeline";
-  const loginLink = `${CLIENT_URL}/slfportal/login`;
+  const loginLink = `${getClientUrl()}/slfportal/login`;
 
   const body = `
     <div style="text-align:center;margin-bottom:24px;">
@@ -323,39 +341,31 @@ async function sendPortalRejectionEmail(email, firstName, reason) {
   });
 }
 
-// 4. Password reset link
-async function sendPortalResetPasswordEmail(email, firstName, resetLink) {
+// 4. Password reset code
+async function sendPortalResetPasswordEmail(email, firstName, resetCode) {
   const body = `
     <h2 style="margin:0 0 8px;color:#1a3353;font-size:22px;">Reset Your Password</h2>
     <p style="margin:0 0 24px;color:#666;font-size:15px;line-height:1.6;">
       Hi <strong>${firstName}</strong>,
     </p>
     <p style="margin:0 0 24px;color:#666;font-size:15px;line-height:1.6;">
-      We received a request to reset your SLF Generators Portal password. Click the button below to set a new password.
+      We received a request to reset your SLF Generators Portal password. Use the code below to proceed:
     </p>
-    <table width="100%" cellpadding="0" cellspacing="0">
-      <tr><td align="center" style="padding:8px 0 24px;">
-        <a href="${resetLink}" target="_blank" style="display:inline-block;background:#1a3353;color:#fff;text-decoration:none;padding:14px 40px;border-radius:8px;font-size:16px;font-weight:600;letter-spacing:0.5px;">
-          Reset Password
-        </a>
-      </td></tr>
-    </table>
-    <p style="margin:0 0 16px;color:#666;font-size:14px;line-height:1.6;">
-      Or copy and paste this link into your browser:
-    </p>
-    <p style="margin:0 0 24px;padding:12px 16px;background:#f5f7fa;border-radius:6px;word-break:break-all;font-size:13px;color:#2d5f8a;">
-      ${resetLink}
-    </p>
+    <div style="text-align:center;margin:0 0 24px;">
+      <div style="display:inline-block;background:#f5f7fa;border:2px dashed #2d5f8a;border-radius:12px;padding:20px 40px;">
+        <span style="font-size:36px;font-weight:800;letter-spacing:12px;color:#1a3353;">${resetCode}</span>
+      </div>
+    </div>
     <div style="border-top:1px solid #eee;padding-top:20px;margin-top:8px;">
       <p style="margin:0;color:#999;font-size:13px;line-height:1.5;">
-        This link will expire in <strong>1 hour</strong>. If you did not request a password reset, you can safely ignore this email.
+        This code will expire in <strong>10 minutes</strong>. If you did not request a password reset, you can safely ignore this email.
       </p>
     </div>`;
 
   await transporter.sendMail({
     from: `"EMBR3 ESWMP" <${process.env.EMAIL_USER}>`,
     to: email,
-    subject: "Reset Your Password — SLF Generators Portal",
+    subject: "Password Reset Code — SLF Generators Portal",
     html: portalEmailWrapper(body),
   });
 }
@@ -419,8 +429,8 @@ async function sendBulkAcknowledgeEmail(email, data) {
   await transporter.sendMail(mailOptions);
 }
 
-// 6. Admin password reset link
-async function sendAdminResetPasswordEmail(email, firstName, resetLink) {
+// 6. Admin password reset code
+async function sendAdminResetPasswordEmail(email, firstName, resetCode) {
   const body = `
 <!DOCTYPE html>
 <html lang="en">
@@ -442,24 +452,16 @@ async function sendAdminResetPasswordEmail(email, firstName, resetLink) {
               Hi <strong>${firstName}</strong>,
             </p>
             <p style="margin:0 0 24px;color:#666;font-size:15px;line-height:1.6;">
-              We received a request to reset your admin account password. Click the button below to set a new password.
+              We received a request to reset your admin account password. Use the code below to proceed:
             </p>
-            <table width="100%" cellpadding="0" cellspacing="0">
-              <tr><td align="center" style="padding:8px 0 24px;">
-                <a href="${resetLink}" target="_blank" style="display:inline-block;background:#1a3353;color:#fff;text-decoration:none;padding:14px 40px;border-radius:8px;font-size:16px;font-weight:600;letter-spacing:0.5px;">
-                  Reset Password
-                </a>
-              </td></tr>
-            </table>
-            <p style="margin:0 0 16px;color:#666;font-size:14px;line-height:1.6;">
-              Or copy and paste this link into your browser:
-            </p>
-            <p style="margin:0 0 24px;padding:12px 16px;background:#f5f7fa;border-radius:6px;word-break:break-all;font-size:13px;color:#2d5f8a;">
-              ${resetLink}
-            </p>
+            <div style="text-align:center;margin:0 0 24px;">
+              <div style="display:inline-block;background:#f5f7fa;border:2px dashed #2d5f8a;border-radius:12px;padding:20px 40px;">
+                <span style="font-size:36px;font-weight:800;letter-spacing:12px;color:#1a3353;">${resetCode}</span>
+              </div>
+            </div>
             <div style="border-top:1px solid #eee;padding-top:20px;margin-top:8px;">
               <p style="margin:0;color:#999;font-size:13px;line-height:1.5;">
-                This link will expire in <strong>1 hour</strong>. If you did not request a password reset, you can safely ignore this email.
+                This code will expire in <strong>10 minutes</strong>. If you did not request a password reset, you can safely ignore this email.
               </p>
             </div>
           </td>
@@ -478,8 +480,30 @@ async function sendAdminResetPasswordEmail(email, firstName, resetLink) {
   await transporter.sendMail({
     from: `"EMBR3 ESWMP" <${process.env.EMAIL_USER}>`,
     to: email,
-    subject: "Reset Your Password — EMBR3 ESWMP Admin",
+    subject: "Password Reset Code — EMBR3 ESWMP Admin",
     html: body,
+  });
+}
+
+// Send a custom email from admin to portal user regarding a submission
+async function sendSubmissionEmail(email, { subject, message, submissionId, companyName }) {
+  const body = `
+    <h2 style="margin:0 0 8px;color:#1a3353;font-size:22px;">${subject}</h2>
+    <p style="margin:0 0 16px;color:#666;font-size:15px;line-height:1.6;">
+      Regarding submission <strong>${submissionId || ""}</strong>${companyName ? ` from <strong>${companyName}</strong>` : ""}:
+    </p>
+    <div style="padding:16px;background:#f6f8fa;border-radius:8px;border:1px solid #e1e4e8;margin-bottom:24px;">
+      <p style="margin:0;color:#333;font-size:14px;line-height:1.8;white-space:pre-wrap;">${message}</p>
+    </div>
+    <p style="margin:0;color:#999;font-size:13px;">
+      If you have questions, please reply to this email or contact the administrator.
+    </p>`;
+
+  await transporter.sendMail({
+    from: `"EMBR3 ESWMP" <${process.env.EMAIL_USER}>`,
+    to: email,
+    subject: `${subject} — EMBR3 ESWMP`,
+    html: portalEmailWrapper(body),
   });
 }
 
@@ -492,4 +516,5 @@ module.exports = {
   sendPortalRejectionEmail,
   sendPortalResetPasswordEmail,
   sendAdminResetPasswordEmail,
+  sendSubmissionEmail,
 };

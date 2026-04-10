@@ -17,6 +17,7 @@ router.get("/", async (req, res) => {
 // Dashboard stats
 router.get("/stats", async (req, res) => {
   try {
+    const yearFilter = req.query.year ? { dataYear: Number(req.query.year) } : {};
     const [
       totalRecords,
       byProvince,
@@ -27,16 +28,19 @@ router.get("/stats", async (req, res) => {
       diversionByProvince,
       mapData,
     ] = await Promise.all([
-      FundedMRF.countDocuments(),
+      FundedMRF.countDocuments(yearFilter),
       FundedMRF.aggregate([
+        ...(Object.keys(yearFilter).length ? [{ $match: yearFilter }] : []),
         { $addFields: { _normProvince: { $replaceAll: { input: "$province", find: "Province of ", replacement: "" } } } },
         { $group: { _id: "$_normProvince", count: { $sum: 1 } } },
         { $sort: { count: -1 } },
       ]),
       FundedMRF.aggregate([
+        ...(Object.keys(yearFilter).length ? [{ $match: yearFilter }] : []),
         { $group: { _id: "$typeOfMRF", count: { $sum: 1 } } },
       ]),
       FundedMRF.aggregate([
+        ...(Object.keys(yearFilter).length ? [{ $match: yearFilter }] : []),
         {
           $group: {
             _id: {
@@ -57,10 +61,12 @@ router.get("/stats", async (req, res) => {
         },
       ]),
       FundedMRF.aggregate([
+        ...(Object.keys(yearFilter).length ? [{ $match: yearFilter }] : []),
         { $group: { _id: "$manilaBayArea", count: { $sum: 1 } } },
         { $sort: { count: -1 } },
       ]),
       FundedMRF.aggregate([
+        ...(Object.keys(yearFilter).length ? [{ $match: yearFilter }] : []),
         {
           $group: {
             _id: null,
@@ -73,6 +79,7 @@ router.get("/stats", async (req, res) => {
         },
       ]),
       FundedMRF.aggregate([
+        ...(Object.keys(yearFilter).length ? [{ $match: yearFilter }] : []),
         {
           $group: {
             _id: "$province",
@@ -84,7 +91,7 @@ router.get("/stats", async (req, res) => {
         { $sort: { avgDiversion: -1 } },
       ]),
       FundedMRF.find(
-        { latitude: { $ne: null }, longitude: { $ne: null } },
+        { ...yearFilter, latitude: { $ne: null }, longitude: { $ne: null } },
         {
           municipality: 1, province: 1, barangay: 1,
           latitude: 1, longitude: 1,
@@ -196,6 +203,18 @@ router.delete("/:id", async (req, res) => {
       message: `Funded MRF entry deleted: ${record.municipality}, ${record.province}`,
       req,
     });
+  } catch (error) {
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+});
+
+// History: all year records for a municipality
+router.get("/history/:municipality", async (req, res) => {
+  try {
+    const records = await FundedMRF.find({
+      municipality: { $regex: new RegExp(`^${req.params.municipality.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "i") },
+    }).sort({ dataYear: -1 });
+    res.json(records);
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });
   }

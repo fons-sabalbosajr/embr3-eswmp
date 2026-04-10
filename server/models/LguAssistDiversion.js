@@ -2,6 +2,8 @@ const mongoose = require("mongoose");
 
 const lguAssistDiversionSchema = new mongoose.Schema(
   {
+    dataYear: { type: Number, default: () => new Date().getFullYear(), index: true },
+
     // Location
     province: { type: String, trim: true },
     lgu: { type: String, trim: true },

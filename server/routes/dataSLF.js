@@ -2,9 +2,23 @@ const express = require("express");
 const crypto = require("crypto");
 const DataSLF = require("../models/DataSLF");
 const SLFGenerator = require("../models/SLFGenerator");
-const { sendAcknowledgementEmail, sendBulkAcknowledgeEmail } = require("../utils/email");
+const SlfFacility = require("../models/SlfFacility");
+const { sendAcknowledgementEmail, sendBulkAcknowledgeEmail, sendSubmissionEmail } = require("../utils/email");
 const { writeLog } = require("../utils/logger");
 const Transaction = require("../models/Transaction");
+const Notification = require("../models/Notification");
+
+// Province code mapping (mirrors DataSLF model)
+const PROVINCE_CODES = {
+  aurora: "AU", bataan: "BA", bulacan: "BU",
+  "nueva ecija": "NE", nueva_ecija: "NE",
+  pampanga: "PA", tarlac: "TA", zambales: "ZA",
+};
+function getProvinceCode(province) {
+  if (!province) return "XX";
+  const key = province.toLowerCase().replace(/^province of\s+/i, "").trim();
+  return PROVINCE_CODES[key] || province.substring(0, 2).toUpperCase();
+}
 
 const router = express.Router();
 
@@ -53,6 +67,20 @@ router.post("/", async (req, res) => {
     }
 
     res.status(201).json({ message: "Data submitted successfully", data: saved });
+
+    // Notify admins of new submission
+    try {
+      await Notification.create({
+        recipient: "admin",
+        type: "new_submission",
+        title: "New Submission",
+        message: `${submittedBy || "A portal user"} submitted ${saved.length} entr${saved.length === 1 ? "y" : "ies"} (${saved[0]?.lguCompanyName || "Unknown"})`,
+        submissionId,
+        dataEntry: saved[0]?._id,
+        meta: { entryCount: saved.length, companyName: saved[0]?.lguCompanyName, submittedBy },
+      });
+    } catch { /* silent */ }
+
     writeLog("info", "submission.create", {
       message: `New submission: ${saved.length} entries by ${submittedBy || "unknown"}`,
       user: submittedBy || "",
@@ -64,15 +92,107 @@ router.post("/", async (req, res) => {
   }
 });
 
+// Update & resubmit a reverted entry (portal user)
+router.put("/:id", async (req, res) => {
+  try {
+    const entry = await DataSLF.findById(req.params.id);
+    if (!entry) return res.status(404).json({ message: "Entry not found" });
+    if (entry.status !== "reverted" && entry.status !== "pending") {
+      return res.status(400).json({ message: "Only reverted or pending entries can be updated" });
+    }
+
+    const allowedFields = [
+      "dateOfDisposal", "lguCompanyName", "companyType", "address",
+      "companyRegion", "companyProvince", "companyMunicipality", "companyBarangay",
+      "trucks", "accreditedHaulers", "slfGenerator", "slfName",
+      "totalVolumeAccepted", "totalVolumeAcceptedUnit",
+      "activeCellResidualVolume", "activeCellResidualUnit",
+      "activeCellInertVolume", "activeCellInertUnit",
+      "closedCellResidualVolume", "closedCellResidualUnit",
+      "closedCellInertVolume", "closedCellInertUnit",
+    ];
+    for (const field of allowedFields) {
+      if (req.body[field] !== undefined) entry[field] = req.body[field];
+    }
+    entry.status = "pending";
+    entry.revertReason = "";
+    entry.revertedBy = "";
+    entry.revertedAt = undefined;
+
+    // Regenerate idNo based on current companyType and SLF province
+    let province = "";
+    if (entry.slfGenerator) {
+      const facility = await SlfFacility.findById(entry.slfGenerator).select("province");
+      console.log("[idNo debug] slfGenerator:", entry.slfGenerator, "| facility:", facility ? { _id: facility._id, province: facility.province } : null);
+      if (facility) province = facility.province;
+    }
+    const provCode = getProvinceCode(province);
+    console.log("[idNo debug] province:", JSON.stringify(province), "| provCode:", provCode);
+    const typeCode = entry.companyType === "Private" ? "PVT" : entry.companyType === "LGU" ? "LGU" : "OTH";
+    const pattern = new RegExp(`^SLF-${typeCode}-${provCode}-`);
+    const lastDoc = await DataSLF.findOne({ idNo: pattern, _id: { $ne: entry._id } }).sort({ idNo: -1 });
+    let seq = 1;
+    if (lastDoc && lastDoc.idNo) {
+      const parts = lastDoc.idNo.split("-");
+      const lastNum = parseInt(parts[3], 10);
+      if (!isNaN(lastNum)) seq = lastNum + 1;
+    }
+    entry.idNo = `SLF-${typeCode}-${provCode}-${String(seq).padStart(4, "0")}`;
+
+    await entry.save();
+
+    const resubmitComment = typeof req.body.resubmitComment === "string" ? req.body.resubmitComment.trim() : "";
+
+    try {
+      await Transaction.create({
+        submissionId: entry.submissionId,
+        dataEntry: entry._id,
+        companyName: entry.lguCompanyName,
+        companyType: entry.companyType,
+        submittedBy: entry.submittedBy,
+        type: "resubmission",
+        description: resubmitComment
+          ? `Resubmitted updated entry ${entry.idNo} — "${resubmitComment}"`
+          : `Resubmitted updated entry ${entry.idNo}`,
+        performedBy: entry.submittedBy || "portal",
+        meta: { idNo: entry.idNo, comment: resubmitComment || undefined },
+      });
+    } catch { /* silent */ }
+
+    const populated = await DataSLF.findById(entry._id).populate("slfGenerator");
+    res.json(populated);
+
+    // Notify admins of resubmission
+    try {
+      await Notification.create({
+        recipient: "admin",
+        type: "resubmission",
+        title: "Resubmission",
+        message: `${entry.submittedBy || "A portal user"} resubmitted entry ${entry.idNo} (${entry.lguCompanyName || ""})`,
+        submissionId: entry.submissionId,
+        dataEntry: entry._id,
+        meta: { idNo: entry.idNo, companyName: entry.lguCompanyName },
+      });
+    } catch { /* silent */ }
+
+    writeLog("info", "submission.resubmit", {
+      message: `Entry ${entry.idNo} resubmitted after revert`,
+      user: entry.submittedBy || "portal",
+      ip: req.ip,
+      meta: { id: entry._id },
+    });
+  } catch (error) {
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+});
+
 // Get latest baseline info for an SLF (by assigned name) — portal
 router.get("/baseline/:slfName", async (req, res) => {
   try {
     const slfName = decodeURIComponent(req.params.slfName);
-    const generator = await SLFGenerator.findOne({ slfName });
-    if (!generator) return res.json(null);
 
     const latest = await DataSLF.findOne({
-      slfGenerator: generator._id,
+      slfName,
       totalVolumeAccepted: { $ne: null },
     }).sort({ createdAt: -1 });
 
@@ -139,15 +259,17 @@ router.get("/stats", async (req, res) => {
   try {
     const [submissions, generators, totalTrucks, byStatus, byCompanyType, wasteByType, monthlyData] =
       await Promise.all([
-        DataSLF.countDocuments(),
+        DataSLF.countDocuments({ deletedAt: null }),
         SLFGenerator.countDocuments(),
         DataSLF.aggregate([
+          { $match: { deletedAt: null } },
           { $project: { count: { $size: { $ifNull: ["$trucks", []] } } } },
           { $group: { _id: null, total: { $sum: "$count" } } },
         ]),
-        DataSLF.aggregate([{ $group: { _id: "$status", count: { $sum: 1 } } }]),
-        DataSLF.aggregate([{ $group: { _id: "$companyType", count: { $sum: 1 } } }]),
+        DataSLF.aggregate([{ $match: { deletedAt: null } }, { $group: { _id: "$status", count: { $sum: 1 } } }]),
+        DataSLF.aggregate([{ $match: { deletedAt: null } }, { $group: { _id: "$companyType", count: { $sum: 1 } } }]),
         DataSLF.aggregate([
+          { $match: { deletedAt: null } },
           { $unwind: "$trucks" },
           {
             $group: {
@@ -158,6 +280,7 @@ router.get("/stats", async (req, res) => {
           },
         ]),
         DataSLF.aggregate([
+          { $match: { deletedAt: null } },
           {
             $group: {
               _id: {
@@ -187,7 +310,7 @@ router.get("/stats", async (req, res) => {
     const companyMap = {};
     byCompanyType.forEach((c) => (companyMap[c._id] = c.count));
 
-    const recentSubmissions = await DataSLF.find()
+    const recentSubmissions = await DataSLF.find({ deletedAt: null })
       .sort({ createdAt: -1 })
       .limit(5)
       .select("idNo lguCompanyName companyType status createdAt trucks");
@@ -211,7 +334,7 @@ router.get("/stats", async (req, res) => {
 router.get("/generator-summary", async (req, res) => {
   try {
     const summary = await DataSLF.aggregate([
-      { $match: { slfGenerator: { $ne: null } } },
+      { $match: { slfGenerator: { $ne: null }, deletedAt: null } },
       {
         $group: {
           _id: "$slfGenerator",
@@ -241,35 +364,33 @@ router.get("/generator-summary", async (req, res) => {
   }
 });
 
-// Get all SLF data entries (admin)
+// Get all SLF data entries (admin) — excludes soft-deleted
 router.get("/", async (req, res) => {
   try {
-    const entries = await DataSLF.find()
+    const entries = await DataSLF.find({ deletedAt: null })
       .populate("slfGenerator")
-      .sort({ createdAt: -1 });
+      .sort({ createdAt: -1 })
+      .lean();
     res.json(entries);
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });
   }
 });
 
-// Update a pending submission (admin edit)
-router.put("/:id", async (req, res) => {
+// Update a submission (admin edit)
+router.patch("/:id/admin-edit", async (req, res) => {
   try {
     const entry = await DataSLF.findById(req.params.id);
     if (!entry) return res.status(404).json({ message: "Entry not found" });
-    if (entry.status !== "pending") {
-      return res.status(400).json({ message: "Only pending entries can be edited" });
-    }
     const allowed = [
       "dateOfDisposal", "lguCompanyName", "companyType", "address",
       "companyRegion", "companyProvince", "companyMunicipality", "companyBarangay",
-      "trucks", "totalVolumeAccepted", "totalVolumeAcceptedUnit",
+      "trucks", "accreditedHaulers", "slfGenerator", "slfName",
+      "totalVolumeAccepted", "totalVolumeAcceptedUnit",
       "activeCellResidualVolume", "activeCellResidualUnit",
       "activeCellInertVolume", "activeCellInertUnit",
       "closedCellResidualVolume", "closedCellResidualUnit",
       "closedCellInertVolume", "closedCellInertUnit",
-      "accreditedHaulers",
     ];
     for (const key of allowed) {
       if (req.body[key] !== undefined) entry[key] = req.body[key];
@@ -300,6 +421,25 @@ router.patch("/:id/status", async (req, res) => {
     if (!entry) return res.status(404).json({ message: "Entry not found" });
     res.json(entry);
 
+    // Notify portal user of status change
+    if (entry.submittedBy) {
+      try {
+        const UserPortal = require("../models/UserPortal");
+        const portalUser = await UserPortal.findOne({ email: entry.submittedBy });
+        if (portalUser) {
+          await Notification.create({
+            recipient: portalUser._id.toString(),
+            type: "status_change",
+            title: status === "acknowledged" ? "Submission Acknowledged" : "Submission Rejected",
+            message: `Your submission ${entry.idNo} (${entry.lguCompanyName || ""}) has been ${status}`,
+            submissionId: entry.submissionId,
+            dataEntry: entry._id,
+            meta: { idNo: entry.idNo, status, companyName: entry.lguCompanyName },
+          });
+        }
+      } catch { /* silent */ }
+    }
+
     // Log status change transaction
     try {
       await Transaction.create({
@@ -315,20 +455,24 @@ router.patch("/:id/status", async (req, res) => {
       });
     } catch { /* silent */ }
 
-    // Send acknowledgement email when admin acknowledges
-    if (status === "acknowledged" && entry.submittedBy) {
+    // Send acknowledgement email only when ALL entries in this submission are acknowledged
+    if (status === "acknowledged" && entry.submittedBy && entry.submissionId) {
       try {
-        await sendAcknowledgementEmail(entry.submittedBy, {
-          submissionId: entry.submissionId,
-          totalEntries: 1,
-          entries: [{
-            idNo: entry.idNo,
-            dateOfDisposal: entry.dateOfDisposal,
-            lguCompanyName: entry.lguCompanyName,
-            companyType: entry.companyType,
-            trucks: entry.trucks,
-          }],
-        });
+        const siblingEntries = await DataSLF.find({ submissionId: entry.submissionId });
+        const allAcknowledged = siblingEntries.every((e) => e.status === "acknowledged");
+        if (allAcknowledged) {
+          await sendAcknowledgementEmail(entry.submittedBy, {
+            submissionId: entry.submissionId,
+            totalEntries: siblingEntries.length,
+            entries: siblingEntries.map((e) => ({
+              idNo: e.idNo,
+              dateOfDisposal: e.dateOfDisposal,
+              lguCompanyName: e.lguCompanyName,
+              companyType: e.companyType,
+              trucks: e.trucks,
+            })),
+          });
+        }
       } catch (emailErr) {
         console.error("Acknowledge email failed:", emailErr.message);
       }
@@ -377,19 +521,25 @@ router.patch("/bulk-status", async (req, res) => {
       } catch { /* silent */ }
     }
 
-    // Send bulk acknowledge email grouped by submittedBy
+    // Send bulk acknowledge email grouped by submittedBy + submissionId (one email per submission)
     if (status === "acknowledged") {
-      const byEmail = {};
+      const bySubmission = {};
       for (const entry of updated) {
-        if (!entry.submittedBy) continue;
-        if (!byEmail[entry.submittedBy]) byEmail[entry.submittedBy] = [];
-        byEmail[entry.submittedBy].push(entry);
+        if (!entry.submittedBy || !entry.submissionId) continue;
+        const key = `${entry.submittedBy}::${entry.submissionId}`;
+        if (!bySubmission[key]) bySubmission[key] = { email: entry.submittedBy, submissionId: entry.submissionId, entries: [] };
+        bySubmission[key].entries.push(entry);
       }
-      for (const [email, entries] of Object.entries(byEmail)) {
+      for (const { email, submissionId, entries } of Object.values(bySubmission)) {
+        // Only send if all entries in this submission are now acknowledged
+        const allInSubmission = await DataSLF.find({ submissionId });
+        const allAcknowledged = allInSubmission.every((e) => e.status === "acknowledged");
+        if (!allAcknowledged) continue;
         try {
           await sendBulkAcknowledgeEmail(email, {
-            totalEntries: entries.length,
-            entries: entries.map((e) => ({
+            submissionId,
+            totalEntries: allInSubmission.length,
+            entries: allInSubmission.map((e) => ({
               idNo: e.idNo,
               dateOfDisposal: e.dateOfDisposal,
               lguCompanyName: e.lguCompanyName,
@@ -436,9 +586,68 @@ router.delete("/:id", async (req, res) => {
       });
     } catch { /* silent */ }
 
+    entry.deletedAt = new Date();
+    entry.deletedBy = req.logUser || "admin";
+    await entry.save();
+    res.json({ message: "Entry moved to trash" });
+    writeLog("warn", "submission.delete", { message: `Submission soft-deleted: ${req.params.id}`, user: req.logUser || "admin", ip: req.ip });
+  } catch (error) {
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+});
+
+// ── Deleted Submissions Management ──
+
+// Get all soft-deleted submissions
+router.get("/trash/list", async (req, res) => {
+  try {
+    const entries = await DataSLF.find({ deletedAt: { $ne: null } })
+      .populate("slfGenerator")
+      .sort({ deletedAt: -1 });
+    res.json(entries);
+  } catch (error) {
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+});
+
+// Restore a soft-deleted submission
+router.patch("/:id/restore", async (req, res) => {
+  try {
+    const entry = await DataSLF.findById(req.params.id);
+    if (!entry) return res.status(404).json({ message: "Entry not found" });
+    if (!entry.deletedAt) return res.status(400).json({ message: "Entry is not deleted" });
+    entry.deletedAt = null;
+    entry.deletedBy = null;
+    await entry.save();
+    try {
+      await Transaction.create({
+        submissionId: entry.submissionId,
+        dataEntry: entry._id,
+        companyName: entry.lguCompanyName,
+        companyType: entry.companyType,
+        submittedBy: entry.submittedBy,
+        type: "status_change",
+        description: `Entry ${entry.idNo} restored from trash`,
+        performedBy: req.logUser || "admin",
+      });
+    } catch { /* silent */ }
+    const populated = await DataSLF.findById(entry._id).populate("slfGenerator");
+    res.json(populated);
+    writeLog("info", "submission.restore", { message: `Submission restored: ${entry.idNo}`, user: req.logUser || "admin", ip: req.ip });
+  } catch (error) {
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+});
+
+// Permanently delete a submission
+router.delete("/:id/permanent", async (req, res) => {
+  try {
+    const entry = await DataSLF.findById(req.params.id);
+    if (!entry) return res.status(404).json({ message: "Entry not found" });
+    if (!entry.deletedAt) return res.status(400).json({ message: "Entry must be soft-deleted first" });
     await DataSLF.findByIdAndDelete(req.params.id);
-    res.json({ message: "Entry deleted" });
-    writeLog("warn", "submission.delete", { message: `Submission deleted: ${req.params.id}`, user: req.logUser || "admin", ip: req.ip });
+    res.json({ message: "Entry permanently deleted" });
+    writeLog("warn", "submission.permanent-delete", { message: `Submission permanently deleted: ${entry.idNo}`, user: req.logUser || "admin", ip: req.ip });
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });
   }
@@ -486,6 +695,85 @@ router.patch("/:id/request-revert", async (req, res) => {
   }
 });
 
+// Admin-initiated revert (admin sends submission back to portal user for correction)
+router.patch("/:id/admin-revert", async (req, res) => {
+  try {
+    const { reason, performedBy } = req.body;
+    if (!reason) return res.status(400).json({ message: "Reason is required" });
+
+    const entry = await DataSLF.findById(req.params.id);
+    if (!entry) return res.status(404).json({ message: "Entry not found" });
+
+    entry.status = "reverted";
+    entry.revertReason = reason;
+    entry.revertedBy = performedBy || "admin";
+    entry.revertedAt = new Date();
+    await entry.save();
+
+    try {
+      await Transaction.create({
+        submissionId: entry.submissionId,
+        dataEntry: entry._id,
+        companyName: entry.lguCompanyName,
+        companyType: entry.companyType,
+        submittedBy: entry.submittedBy,
+        type: "status_change",
+        description: `Admin reverted submission ${entry.idNo}: ${reason}`,
+        performedBy: performedBy || "admin",
+        meta: { idNo: entry.idNo, reason },
+      });
+    } catch { /* silent */ }
+
+    const populated = await DataSLF.findById(entry._id).populate("slfGenerator");
+    res.json(populated);
+
+    // Notify portal user of revert
+    if (entry.submittedBy) {
+      try {
+        const UserPortal = require("../models/UserPortal");
+        const portalUser = await UserPortal.findOne({ email: entry.submittedBy });
+        if (portalUser) {
+          await Notification.create({
+            recipient: portalUser._id.toString(),
+            type: "reverted",
+            title: "Submission Reverted",
+            message: `Your submission ${entry.idNo} (${entry.lguCompanyName || ""}) has been reverted. Reason: ${reason}`,
+            submissionId: entry.submissionId,
+            dataEntry: entry._id,
+            meta: { idNo: entry.idNo, reason, companyName: entry.lguCompanyName },
+          });
+        }
+      } catch { /* silent */ }
+    }
+
+    // Send revert notification email to portal user
+    if (entry.submittedBy) {
+      try {
+        await sendSubmissionEmail(entry.submittedBy, {
+          subject: "Submission Reverted",
+          message: `Your submission ${entry.idNo} (${entry.lguCompanyName || ""}) has been reverted by the administrator.\n\nReason: ${reason}\n\nPlease log in to the portal to review the entry, make necessary corrections, and resubmit.`,
+          submissionId: entry.submissionId,
+          companyName: entry.lguCompanyName,
+        });
+      } catch (emailErr) {
+        writeLog("warn", "submission.revert-email-failed", {
+          message: `Failed to send revert email to ${entry.submittedBy}`,
+          meta: { id: entry._id, error: emailErr.message },
+        });
+      }
+    }
+
+    writeLog("info", "submission.admin-revert", {
+      message: `Admin reverted ${entry.idNo}: ${reason}`,
+      user: req.logUser || performedBy || "admin",
+      ip: req.ip,
+      meta: { id: entry._id, reason },
+    });
+  } catch (error) {
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+});
+
 // Approve revert (admin reverts submission to pending so portal user can edit)
 router.patch("/:id/approve-revert", async (req, res) => {
   try {
@@ -523,6 +811,88 @@ router.patch("/:id/approve-revert", async (req, res) => {
       ip: req.ip,
       meta: { id: entry._id },
     });
+  } catch (error) {
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+});
+
+// Send email to portal user regarding a submission
+router.post("/:id/send-email", async (req, res) => {
+  try {
+    const { subject, message } = req.body;
+    if (!subject || !message) {
+      return res.status(400).json({ message: "Subject and message are required" });
+    }
+    const entry = await DataSLF.findById(req.params.id);
+    if (!entry) return res.status(404).json({ message: "Entry not found" });
+    if (!entry.submittedBy) {
+      return res.status(400).json({ message: "No email address found for this submission" });
+    }
+
+    await sendSubmissionEmail(entry.submittedBy, {
+      subject,
+      message,
+      submissionId: entry.submissionId || entry.idNo,
+      companyName: entry.lguCompanyName,
+    });
+
+    // Log transaction
+    await Transaction.create({
+      submissionId: entry.submissionId,
+      dataEntry: entry._id,
+      companyName: entry.lguCompanyName,
+      submittedBy: entry.submittedBy,
+      type: "email_ack_sent",
+      description: `Email sent to ${entry.submittedBy}: ${subject}`,
+      performedBy: req.logUser || "admin",
+      meta: { email: entry.submittedBy, subject },
+    });
+
+    writeLog("info", "submission.email-sent", {
+      message: `Email sent to ${entry.submittedBy} for ${entry.idNo}: ${subject}`,
+      user: req.logUser || "admin",
+      ip: req.ip,
+    });
+
+    res.json({ message: "Email sent successfully" });
+  } catch (error) {
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+});
+
+// Portal user requests baseline field update — notifies admin
+router.post("/baseline-update-request", async (req, res) => {
+  try {
+    const { slfName, requestedBy, fields, reason } = req.body;
+    if (!slfName || !requestedBy) {
+      return res.status(400).json({ message: "slfName and requestedBy are required" });
+    }
+
+    // Create notification for admin
+    await Notification.create({
+      recipient: "admin",
+      type: "baseline_update_request",
+      title: `Baseline Update Request — ${slfName}`,
+      message: reason || `${requestedBy} is requesting to update baseline fields: ${(fields || []).join(", ")}`,
+      meta: { slfName, requestedBy, fields, reason },
+    });
+
+    // Log transaction
+    await Transaction.create({
+      companyName: slfName,
+      submittedBy: requestedBy,
+      type: "baseline_update_request",
+      description: `Baseline update request: ${(fields || []).join(", ")}`,
+      performedBy: requestedBy,
+      meta: { fields, reason },
+    });
+
+    writeLog("info", "baseline.update-request", {
+      message: `Baseline update request from ${requestedBy} for ${slfName}`,
+      ip: req.ip,
+    });
+
+    res.json({ message: "Request sent to admin" });
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });
   }

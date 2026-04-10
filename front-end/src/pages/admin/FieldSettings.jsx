@@ -31,6 +31,10 @@ const SECTION_LABELS = {
   "company-info": "Waste Generator's Information",
   "transport-info": "Transport Entry (Per Truck)",
   "hazwaste-codes": "Hazardous Waste Codes",
+  "baseline-info": "Baseline Data",
+  "cell-info": "Cell Information",
+  "facility-info": "Facility Information",
+  "compliance-info": "Compliance & Permits",
 };
 
 export default function FieldSettings() {
@@ -38,6 +42,7 @@ export default function FieldSettings() {
   const [loading, setLoading] = useState(true);
   const [modalOpen, setModalOpen] = useState(false);
   const [editing, setEditing] = useState(null);
+  const [filterSection, setFilterSection] = useState(null);
   const [form] = Form.useForm();
 
   useEffect(() => {
@@ -223,8 +228,11 @@ export default function FieldSettings() {
       </div>
 
       <Card style={{ marginTop: 16, borderRadius: 10 }}>
+        <div style={{ marginBottom: 12 }}>
+          <Select placeholder="Filter by Section" allowClear value={filterSection} onChange={setFilterSection} style={{ width: 260 }} options={Object.entries(SECTION_LABELS).map(([k, v]) => ({ label: v, value: k }))} />
+        </div>
         <Table
-          dataSource={fields}
+          dataSource={filterSection ? fields.filter(f => f.section === filterSection) : fields}
           columns={columns}
           rowKey="_id"
           loading={loading}
@@ -277,6 +285,10 @@ export default function FieldSettings() {
               <Option value="company-info">Waste Generator&apos;s Information</Option>
               <Option value="transport-info">Transport Entry (Per Truck)</Option>
               <Option value="hazwaste-codes">Hazardous Waste Codes</Option>
+              <Option value="baseline-info">Baseline Data</Option>
+              <Option value="cell-info">Cell Information</Option>
+              <Option value="facility-info">Facility Information</Option>
+              <Option value="compliance-info">Compliance &amp; Permits</Option>
             </Select>
           </Form.Item>
           <Form.Item name="order" label="Order">

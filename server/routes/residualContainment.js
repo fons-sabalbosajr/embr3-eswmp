@@ -17,16 +17,20 @@ router.get("/", async (req, res) => {
 // Dashboard stats
 router.get("/stats", async (req, res) => {
   try {
+    const yearFilter = req.query.year ? { dataYear: Number(req.query.year) } : {};
     const [totalRecords, byProvince, byStatus, byManilaBayArea] = await Promise.all([
-      ResidualContainment.countDocuments(),
+      ResidualContainment.countDocuments(yearFilter),
       ResidualContainment.aggregate([
+        ...(Object.keys(yearFilter).length ? [{ $match: yearFilter }] : []),
         { $group: { _id: "$province", count: { $sum: 1 } } },
         { $sort: { count: -1 } },
       ]),
       ResidualContainment.aggregate([
+        ...(Object.keys(yearFilter).length ? [{ $match: yearFilter }] : []),
         { $group: { _id: { $ifNull: ["$statusOfFacility", "Unknown"] }, count: { $sum: 1 } } },
       ]),
       ResidualContainment.aggregate([
+        ...(Object.keys(yearFilter).length ? [{ $match: yearFilter }] : []),
         { $group: { _id: "$manilaBayArea", count: { $sum: 1 } } },
         { $sort: { count: -1 } },
       ]),
@@ -114,6 +118,18 @@ router.delete("/:id", async (req, res) => {
       message: `RCA entry deleted: ${record.municipality}, ${record.province}`,
       ip: req.ip,
     });
+  } catch (error) {
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+});
+
+// History: all year records for a municipality
+router.get("/history/:municipality", async (req, res) => {
+  try {
+    const records = await ResidualContainment.find({
+      municipality: { $regex: new RegExp(`^${req.params.municipality.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "i") },
+    }).sort({ dataYear: -1 });
+    res.json(records);
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });
   }

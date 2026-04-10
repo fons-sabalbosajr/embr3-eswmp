@@ -18,7 +18,7 @@ router.get("/", async (req, res) => {
 router.get("/stats", async (req, res) => {
   try {
     // Latest year filter for summary cards
-    const latestYear = 2026;
+    const latestYear = req.query.year ? Number(req.query.year) : new Date().getFullYear();
     const latestFilter = { dataYear: latestYear };
 
     // Helper: build compliance $cond

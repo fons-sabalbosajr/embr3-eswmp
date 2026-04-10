@@ -73,6 +73,35 @@ router.patch("/:id/approve", async (req, res) => {
   }
 });
 
+// Update assigned SLF for an approved portal user
+router.patch("/:id/update-slf", async (req, res) => {
+  try {
+    const { assignedSlf } = req.body;
+    if (!assignedSlf) {
+      return res.status(400).json({ message: "Please select an SLF facility" });
+    }
+    const slf = await SlfFacility.findById(assignedSlf);
+    if (!slf) {
+      return res.status(404).json({ message: "SLF facility not found" });
+    }
+    const slfDisplayName = `${slf.lgu}${slf.ownership ? " (" + slf.ownership + ")" : ""}`;
+    const user = await UserPortal.findByIdAndUpdate(
+      req.params.id,
+      { assignedSlf: slf._id, assignedSlfName: slfDisplayName },
+      { returnDocument: "after" }
+    ).select("-password");
+    if (!user) return res.status(404).json({ message: "User not found" });
+    res.json({ message: "Assigned SLF updated", data: user });
+    writeLog("info", "portal.update-slf", {
+      message: `Portal user ${user.email} reassigned to SLF: ${slfDisplayName}`,
+      user: req.user.id,
+      ip: req.ip,
+    });
+  } catch (error) {
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+});
+
 // Reject a portal user
 router.patch("/:id/reject", async (req, res) => {
   try {

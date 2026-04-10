@@ -26,6 +26,8 @@ const lguAssistDiversionRoutes = require("./routes/lguAssistDiversion");
 const technicalAssistanceRoutes = require("./routes/technicalAssistance");
 const portalAuthRoutes = require("./routes/portalAuth");
 const portalUsersRoutes = require("./routes/portalUsers");
+const dataHistoryRoutes = require("./routes/dataHistory");
+const notificationRoutes = require("./routes/notifications");
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -33,10 +35,35 @@ const MONGODB_URI =
   process.env.MONGODB_URI || "mongodb://127.0.0.1:27017/embr3_eswmp";
 const CLIENT_URL = process.env.CLIENT_URL || "http://localhost:5173/eswm-pipeline";
 
-// Middleware
-const corsOrigin = new URL(CLIENT_URL).origin;
+// Middleware — build allowed CORS origins dynamically
+function getAllowedOrigins() {
+  const origins = new Set();
+  // Always allow the configured CLIENT_URL origin
+  try { origins.add(new URL(CLIENT_URL).origin); } catch {}
+  // Always allow localhost variants
+  origins.add("http://localhost:5173");
+  origins.add("http://127.0.0.1:5173");
+  // Auto-detect the current network IP so CORS survives IP changes
+  const nets = os.networkInterfaces();
+  for (const name of Object.keys(nets)) {
+    for (const iface of nets[name]) {
+      if (iface.family === "IPv4" && !iface.internal) {
+        origins.add(`http://${iface.address}:5173`);
+      }
+    }
+  }
+  return [...origins];
+}
+const allowedOrigins = getAllowedOrigins();
 app.set("trust proxy", true);
-app.use(cors({ origin: corsOrigin, credentials: true }));
+app.use(cors({
+  origin(origin, cb) {
+    // Allow requests with no origin (e.g. server-to-server, curl)
+    if (!origin || allowedOrigins.includes(origin)) return cb(null, true);
+    cb(null, false);
+  },
+  credentials: true,
+}));
 app.use(express.json());
 
 // Attach user info from JWT to req for logging
@@ -172,6 +199,8 @@ app.use("/api/lgu-assist-diversion", lguAssistDiversionRoutes);
 app.use("/api/technical-assistance", technicalAssistanceRoutes);
 app.use("/api/portal-auth", portalAuthRoutes);
 app.use("/api/portal-users", portalUsersRoutes);
+app.use("/api/data-history", dataHistoryRoutes);
+app.use("/api/notifications", notificationRoutes);
 
 // Get local IP address
 function getLocalIP() {

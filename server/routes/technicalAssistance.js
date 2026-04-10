@@ -17,19 +17,24 @@ router.get("/", async (req, res) => {
 // Dashboard stats
 router.get("/stats", async (req, res) => {
   try {
+    const yearFilter = req.query.year ? { dataYear: Number(req.query.year) } : {};
     const [totalRecords, byProvince, byStatus, byFacilityType, byManilaBayArea] = await Promise.all([
-      TechnicalAssistance.countDocuments(),
+      TechnicalAssistance.countDocuments(yearFilter),
       TechnicalAssistance.aggregate([
+        ...(Object.keys(yearFilter).length ? [{ $match: yearFilter }] : []),
         { $group: { _id: "$province", count: { $sum: 1 } } },
         { $sort: { count: -1 } },
       ]),
       TechnicalAssistance.aggregate([
+        ...(Object.keys(yearFilter).length ? [{ $match: yearFilter }] : []),
         { $group: { _id: { $ifNull: ["$status", "Unknown"] }, count: { $sum: 1 } } },
       ]),
       TechnicalAssistance.aggregate([
+        ...(Object.keys(yearFilter).length ? [{ $match: yearFilter }] : []),
         { $group: { _id: { $ifNull: ["$typeOfFacility", "Unknown"] }, count: { $sum: 1 } } },
       ]),
       TechnicalAssistance.aggregate([
+        ...(Object.keys(yearFilter).length ? [{ $match: yearFilter }] : []),
         { $group: { _id: "$manilaBayArea", count: { $sum: 1 } } },
         { $sort: { count: -1 } },
       ]),
@@ -119,6 +124,18 @@ router.delete("/:id", async (req, res) => {
       message: `Tech Assist entry deleted: ${record.barangay}, ${record.municipality}`,
       ip: req.ip,
     });
+  } catch (error) {
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+});
+
+// History: all year records for a municipality
+router.get("/history/:municipality", async (req, res) => {
+  try {
+    const records = await TechnicalAssistance.find({
+      municipality: { $regex: new RegExp(`^${req.params.municipality.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "i") },
+    }).sort({ dataYear: -1 });
+    res.json(records);
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });
   }

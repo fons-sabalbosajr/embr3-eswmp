@@ -2,6 +2,8 @@ const mongoose = require("mongoose");
 
 const slfFacilitySchema = new mongoose.Schema(
   {
+    dataYear: { type: Number, default: () => new Date().getFullYear(), index: true },
+
     // Location
     province: { type: String, trim: true },
     lgu: { type: String, trim: true },
@@ -52,6 +54,8 @@ const slfFacilitySchema = new mongoose.Schema(
     remainingLifeSpan: { type: String, trim: true },
     actualResidualWasteReceived: { type: Number },
     numberOfCell: { type: Number },
+    cellCapacities: [{ type: Number }],
+    cellStatuses: [{ type: String, enum: ["Operational", "Closed"], default: "Operational" }],
     estimatedVolumeWaste: { type: Number },
     noOfLeachatePond: { type: Number },
     numberOfGasVents: { type: Number },

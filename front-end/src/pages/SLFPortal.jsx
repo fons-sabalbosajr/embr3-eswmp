@@ -29,6 +29,9 @@ import {
   Badge,
   Tooltip,
   Collapse,
+  Popover,
+  List,
+  Progress,
 } from "antd";
 import {
   CheckCircleOutlined,
@@ -52,10 +55,21 @@ import {
   EnvironmentOutlined,
   TeamOutlined,
   WifiOutlined,
+  BellOutlined,
+  InboxOutlined,
+  MessageOutlined,
+  PieChartOutlined,
+  BankOutlined,
+  ContainerOutlined,
+  BarChartOutlined,
+  DownOutlined,
+  UpOutlined,
 } from "@ant-design/icons";
 import { useNavigate } from "react-router-dom";
 import Swal from "sweetalert2";
 import dayjs from "dayjs";
+import relativeTime from "dayjs/plugin/relativeTime";
+dayjs.extend(relativeTime);
 import api from "../api";
 import { useErrorCard } from "../utils/ErrorHandler";
 import secureStorage from "../utils/secureStorage";
@@ -77,7 +91,7 @@ const EMPTY_TRUCK = {
   actualVolume: null,
   actualVolumeUnit: "tons",
   wasteType: undefined,
-  hazWasteCode: undefined,
+  hazWasteCode: [],
 };
 
 const KNOWN_TRANSPORT_KEYS = new Set([
@@ -146,10 +160,12 @@ export default function SLFPortal() {
   const [haulerErrors, setHaulerErrors] = useState({});
   const [haulerModalOpen, setHaulerModalOpen] = useState(false);
   const [baselineSaved, setBaselineSaved] = useState(false);
+  const [baselineUpdateLoading, setBaselineUpdateLoading] = useState(false);
   const [slfInfo, setSlfInfo] = useState(null);
   const [slfInfoLoading, setSlfInfoLoading] = useState(false);
+  const [slfCardExpanded, setSlfCardExpanded] = useState(false);
   const [fieldLabels, setFieldLabels] = useState({});
-  const [hazWasteCodes, setHazWasteCodes] = useState([]);
+  const [hazWasteCodes, setHazWasteCodes] = useState(["K301", "K302", "K303 (Treated)", "M501"]);
   const [historyDetailModal, setHistoryDetailModal] = useState(null);
   const [revertModalOpen, setRevertModalOpen] = useState(false);
   const [revertRecord, setRevertRecord] = useState(null);
@@ -197,7 +213,7 @@ export default function SLFPortal() {
         if (f.section === "hazwaste-codes" && f.options?.length > 0) {
           setHazWasteCodes(f.options);
         }
-        if (f.section === "transport-info" && !KNOWN_TRANSPORT_KEYS.has(f.fieldKey)) {
+        if (f.section === "transport-info" && !KNOWN_TRANSPORT_KEYS.has(f.fieldKey) && f.fieldKey !== "hazWasteCode" && !f.fieldKey.toLowerCase().includes("hazwaste")) {
           extraTransport.push(f);
         }
       });
@@ -307,13 +323,20 @@ export default function SLFPortal() {
     setLoadingUser(false);
   }, [navigate]);
 
+  const getNotifIcon = (type) => {
+    if (type === "reverted") return <UndoOutlined style={{ color: "#fa541c" }} />;
+    if (type === "status_change") return <CheckCircleOutlined style={{ color: "#52c41a" }} />;
+    return <BellOutlined style={{ color: "#1a3353" }} />;
+  };
+
   // Fetch SLF facility operational info
   useEffect(() => {
     if (!portalUser?.assignedSlf) return;
     const ac = new AbortController();
     setSlfInfoLoading(true);
+    const nameParam = portalUser.assignedSlfName ? `?slfName=${encodeURIComponent(portalUser.assignedSlfName)}` : "";
     withRetry(
-      () => api.get(`/slf-facilities/portal/${portalUser.assignedSlf}`, { signal: ac.signal }),
+      () => api.get(`/slf-facilities/portal/${portalUser.assignedSlf}${nameParam}`, { signal: ac.signal }),
       { retries: 3, signal: ac.signal },
     ).then(({ data }) => setSlfInfo(data))
       .catch(() => {})
@@ -372,8 +395,11 @@ export default function SLFPortal() {
 
   // Fetch submission history
   const pollingRef = useRef(null);
+  const fetchingRef = useRef(false);
 
   const fetchSubmissions = useCallback(async (silent = false) => {
+    if (fetchingRef.current) return; // deduplicate concurrent requests
+    fetchingRef.current = true;
     if (!silent) setLoadingSubmissions(true);
     try {
       const { data } = await api.get("/portal-auth/my-submissions", {
@@ -385,6 +411,7 @@ export default function SLFPortal() {
     } catch {
       // silent
     } finally {
+      fetchingRef.current = false;
       if (!silent) setLoadingSubmissions(false);
     }
   }, []);
@@ -392,10 +419,10 @@ export default function SLFPortal() {
   useEffect(() => {
     if (activeMenu === "history" && portalUser) {
       fetchSubmissions();
-      // Poll every 15 seconds — but only when online
+      // Poll every 30 seconds — only when online
       pollingRef.current = setInterval(() => {
         if (navigator.onLine) fetchSubmissions(true);
-      }, 15000);
+      }, 30000);
     }
     return () => {
       if (pollingRef.current) clearInterval(pollingRef.current);
@@ -671,6 +698,153 @@ export default function SLFPortal() {
     }
   };
 
+  // ── Request Baseline Update ──
+  const handleBaselineUpdateRequest = async () => {
+    const { value: reason } = await Swal.fire({
+      title: "Request Baseline Update",
+      html: "<p style='font-size:13px'>Your baseline data is locked after your first submission. Provide a reason and the admin will review your request.</p>",
+      input: "textarea",
+      inputPlaceholder: "Describe what needs to be updated and why...",
+      inputAttributes: { "aria-label": "Reason" },
+      showCancelButton: true,
+      confirmButtonText: "Send Request",
+      confirmButtonColor: "#1a3353",
+      inputValidator: (v) => { if (!v?.trim()) return "Please provide a reason"; },
+    });
+    if (!reason) return;
+    setBaselineUpdateLoading(true);
+    try {
+      await api.post("/data-slf/baseline-update-request", {
+        slfName: portalUser?.assignedSlfName,
+        requestedBy: portalUser?.email,
+        fields: ["Volume of Waste Accepted", "Total Volume Disposed in Active Cells", "Accredited Haulers", "Total Volume Disposed in Closed Cells"],
+        reason: reason.trim(),
+      });
+      Swal.fire({
+        icon: "success",
+        title: "Request Sent",
+        text: "Your baseline update request has been sent to the admin for review.",
+        confirmButtonColor: "#1a3353",
+      });
+    } catch (err) {
+      Swal.fire({ icon: "error", title: "Failed", text: err.response?.data?.message || "Could not send request." });
+    } finally {
+      setBaselineUpdateLoading(false);
+    }
+  };
+
+  // ── Edit reverted entry ──
+  const [editingRevertedId, setEditingRevertedId] = useState(null);
+  const [resubmitComment, setResubmitComment] = useState("");
+
+  const handleEditReverted = (record) => {
+    // Load record data into all forms
+    entryForm.setFieldsValue({
+      dateOfDisposal: record.dateOfDisposal ? dayjs(record.dateOfDisposal) : null,
+      lguCompanyName: record.lguCompanyName,
+      companyType: record.companyType,
+      address: record.address,
+    });
+    companyForm.setFieldsValue({
+      lguCompanyName: record.lguCompanyName,
+      companyRegion: record.companyRegion,
+      companyProvince: record.companyProvince,
+      companyMunicipality: record.companyMunicipality,
+      companyBarangay: record.companyBarangay,
+    });
+    baselineForm.setFieldsValue({
+      totalVolumeAccepted: record.totalVolumeAccepted,
+      totalVolumeAcceptedUnit: record.totalVolumeAcceptedUnit,
+      activeCellResidualVolume: record.activeCellResidualVolume,
+      activeCellResidualUnit: record.activeCellResidualUnit,
+      activeCellInertVolume: record.activeCellInertVolume,
+      activeCellInertUnit: record.activeCellInertUnit,
+      closedCellResidualVolume: record.closedCellResidualVolume,
+      closedCellResidualUnit: record.closedCellResidualUnit,
+      closedCellInertVolume: record.closedCellInertVolume,
+      closedCellInertUnit: record.closedCellInertUnit,
+    });
+    // Load trucks
+    const loadedTrucks = (record.trucks || []).map((t, i) => ({
+      ...t,
+      key: `reverted-${i}-${Date.now()}`,
+    }));
+    setTrucks(loadedTrucks);
+    // Load haulers
+    const loadedHaulers = (record.accreditedHaulers || []).map((h, i) => ({
+      ...h,
+      key: `reverted-hauler-${i}-${Date.now()}`,
+    }));
+    setHaulers(loadedHaulers);
+    setEditingRevertedId(record._id);
+    setSubmitted(false);
+    setBaselineSaved(true);
+    setHistoryDetailModal(null);
+    setActiveMenu("data-entry");
+    setActiveTab("disposal");
+    // Cascade address dropdowns if codes are available
+    if (record.companyRegion) fetchProvinces(record.companyRegion);
+    if (record.companyProvince) fetchMunicipalities(record.companyProvince);
+    if (record.companyMunicipality) fetchBarangays(record.companyMunicipality);
+    Swal.fire({
+      icon: "info",
+      title: "Edit Reverted Entry",
+      html: `<b>Reason for revert:</b> ${record.revertReason || "Not specified"}<br/><br/>Please review and update the data across all tabs, then submit again.`,
+      confirmButtonColor: "#1a3353",
+    });
+  };
+
+  const handleResubmitReverted = async () => {
+    if (!navigator.onLine) {
+      showError({ type: "offline", title: "You\u2019re Offline", message: "Please check your internet connection and try again." });
+      return;
+    }
+    setLoading(true);
+    try {
+      const baselineValues = baselineForm.getFieldsValue();
+      const companyValues = companyForm.getFieldsValue();
+      const disposalValues = entryForm.getFieldsValue();
+      const entry = {
+        ...disposalValues,
+        ...baselineValues,
+        ...companyValues,
+        accreditedHaulers: haulers.map(({ key, ...rest }) => rest),
+        slfName: portalUser?.assignedSlfName,
+        slfGenerator: portalUser?.assignedSlf || null,
+        dateOfDisposal: disposalValues.dateOfDisposal
+          ? disposalValues.dateOfDisposal.format("YYYY-MM-DD")
+          : null,
+        trucks: trucks.map(({ key, ...rest }) => rest),
+      };
+      // Update the existing entry and set status back to pending
+      await api.put(`/data-slf/${editingRevertedId}`, { ...entry, resubmitComment });
+      setReviewModalOpen(false);
+      setEditingRevertedId(null);
+      setResubmitComment("");
+      Swal.fire({
+        icon: "success",
+        title: "Resubmitted Successfully!",
+        html: "Your updated disposal data has been resubmitted for review.",
+        confirmButtonColor: "#1a3353",
+      });
+      setSubmitted(true);
+      setTrucks([]);
+      setTruckDraft({ ...EMPTY_TRUCK });
+      setEditingTruckKey(null);
+      entryForm.resetFields();
+      setActiveTab("disposal");
+      fetchSubmissions();
+    } catch (err) {
+      showError({
+        type: "error",
+        title: "Resubmission Failed",
+        message: err.response?.data?.message || "Something went wrong.",
+      });
+    } finally {
+      setLoading(false);
+    }
+  };
+
   // ── Review & Submit handlers ──
 
   const handleReviewOpen = async () => {
@@ -719,6 +893,7 @@ export default function SLFPortal() {
         ...companyValues,
         accreditedHaulers: haulers.map(({ key, ...rest }) => rest),
         slfName: portalUser?.assignedSlfName,
+        slfGenerator: portalUser?.assignedSlf || null,
         dateOfDisposal: disposalValues.dateOfDisposal
           ? disposalValues.dateOfDisposal.format("YYYY-MM-DD")
           : null,
@@ -878,13 +1053,15 @@ export default function SLFPortal() {
             onClick={() => openHaulerModal(h)}
             style={{ color: "#1a3353" }}
           />
-          <Button
-            type="text"
-            danger
-            size="small"
-            icon={<DeleteOutlined />}
-            onClick={() => removeHauler(h.key)}
-          />
+          <Tooltip title="To delete a hauler, please email EMB Region 3 for justification.">
+            <Button
+              type="text"
+              danger
+              size="small"
+              icon={<DeleteOutlined />}
+              disabled
+            />
+          </Tooltip>
         </Space>
       ),
     },
@@ -934,6 +1111,7 @@ export default function SLFPortal() {
         { text: "Pending", value: "pending" },
         { text: "Approved", value: "acknowledged" },
         { text: "Rejected", value: "rejected" },
+        { text: "Reverted", value: "reverted" },
       ],
       onFilter: (value, record) => record.status === value,
       render: (v, r) => {
@@ -958,6 +1136,20 @@ export default function SLFPortal() {
             </Tag>
           );
         }
+        if (v === "reverted") {
+          return (
+            <Space direction="vertical" size={2}>
+              <Tag icon={<UndoOutlined />} color="volcano">
+                REVERTED
+              </Tag>
+              {r.revertReason && (
+                <Text type="secondary" style={{ fontSize: 10 }}>
+                  {r.revertReason}
+                </Text>
+              )}
+            </Space>
+          );
+        }
         return (
           <Tag
             icon={<SyncOutlined spin />}
@@ -978,7 +1170,7 @@ export default function SLFPortal() {
     {
       title: "Actions",
       key: "actions",
-      width: 120,
+      width: 150,
       render: (_, r) => (
         <Space size="small">
           <Tooltip title="View Details">
@@ -999,6 +1191,19 @@ export default function SLFPortal() {
                 onClick={() => openRevertModal(r)}
                 style={{ color: "#fa8c16" }}
               />
+            </Tooltip>
+          )}
+          {r.status === "reverted" && (
+            <Tooltip title="Edit & Resubmit">
+              <Button
+                type="primary"
+                size="small"
+                icon={<EditOutlined />}
+                onClick={() => handleEditReverted(r)}
+                style={{ background: "#fa541c", borderColor: "#fa541c" }}
+              >
+                Edit
+              </Button>
             </Tooltip>
           )}
         </Space>
@@ -1052,9 +1257,22 @@ export default function SLFPortal() {
     );
   };
 
+  const revertedCount = submissions.filter((s) => s.status === "reverted").length;
+
   const menuItems = [
     { key: "data-entry", icon: <FileTextOutlined />, label: "Data Entry" },
-    { key: "history", icon: <HistoryOutlined />, label: "Submission History" },
+    {
+      key: "history",
+      icon: <HistoryOutlined />,
+      label: (
+        <span>
+          Submission History
+          {revertedCount > 0 && (
+            <Badge count={revertedCount} size="small" style={{ marginLeft: 8, backgroundColor: "#fa541c" }} />
+          )}
+        </span>
+      ),
+    },
   ];
 
   const siderContent = (
@@ -1157,19 +1375,23 @@ export default function SLFPortal() {
       <div style={{ maxWidth: 1200, margin: "0 auto" }}>
         {/* SLF Name (read-only, from assigned SLF) */}
         <Card
-          className="slf-section"
+          className="slf-section slf-facility-card"
+          styles={{ header: { background: "linear-gradient(135deg, #1a3353 0%, #2d5f8a 100%)", borderRadius: "10px 10px 0 0", padding: isMobile ? "14px 16px" : "16px 24px", cursor: "pointer" }, body: { padding: slfCardExpanded ? (isMobile ? 16 : 24) : 0, overflow: "hidden", maxHeight: slfCardExpanded ? 3000 : 0, transition: "max-height 0.35s ease, padding 0.35s ease" } }}
           title={
-            <Space wrap>
-              <FileTextOutlined style={{ color: "#1a3353" }} />
-              <Text
-                strong
-                style={{ fontSize: isMobile ? 14 : 16, color: "#1a3353" }}
-              >
-                {isMobile
-                  ? "Assigned SLF"
-                  : "Assigned Sanitary Landfill Facility (SLF)"}
-              </Text>
-            </Space>
+            <div style={{ display: "flex", alignItems: "center", gap: 10 }} onClick={() => setSlfCardExpanded((v) => !v)}>
+              <div style={{ color: "rgba(255,255,255,0.8)", fontSize: 14, transition: "transform 0.3s", transform: slfCardExpanded ? "rotate(180deg)" : "rotate(0deg)", display: "flex", alignItems: "center" }}>
+                <DownOutlined />
+              </div>
+              <div style={{ width: 36, height: 36, borderRadius: 8, background: "rgba(255,255,255,0.15)", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                <BankOutlined style={{ color: "#fff", fontSize: 18 }} />
+              </div>
+              <div style={{ flex: 1 }}>
+                <Text strong style={{ fontSize: isMobile ? 14 : 16, color: "#fff", display: "block", lineHeight: 1.3 }}>
+                  {isMobile ? "Assigned SLF" : "Assigned Sanitary Landfill Facility"}
+                </Text>
+                <Text style={{ fontSize: 12, color: "rgba(255,255,255,0.7)" }}>{portalUser?.assignedSlfName}</Text>
+              </div>
+            </div>
           }
           extra={
             <Button
@@ -1179,56 +1401,164 @@ export default function SLFPortal() {
               loading={loading}
               className="slf-primary-btn"
               size={isMobile ? "middle" : "large"}
+              style={{ background: "#fff", color: "#1a3353", fontWeight: 600, border: "none", boxShadow: "0 2px 8px rgba(0,0,0,0.15)" }}
             >
               {isMobile ? "Submit" : "Review & Submit"}
             </Button>
           }
         >
-          <Tag color="blue" style={{ fontSize: 14, padding: "4px 12px", marginBottom: 12 }}>
-            {portalUser?.assignedSlfName}
-          </Tag>
-
           {slfInfoLoading ? (
-            <div style={{ textAlign: "center", padding: "16px 0" }}>
-              <Spin size="small" /> <Text type="secondary" style={{ marginLeft: 8 }}>Loading facility info...</Text>
+            <div style={{ textAlign: "center", padding: "40px 0" }}>
+              <Spin size="large" />
+              <div style={{ marginTop: 12 }}><Text type="secondary">Loading facility data...</Text></div>
             </div>
-          ) : slfInfo ? (
-            <Descriptions
-              bordered
-              size="small"
-              column={{ xs: 1, sm: 2, md: 3 }}
-              style={{ marginTop: 4 }}
-              labelStyle={{ fontWeight: 600, background: "#f5f7fa", whiteSpace: "nowrap" }}
-            >
-              <Descriptions.Item label="Status">
-                <Tag color={slfInfo.statusOfSLF?.toLowerCase().includes("non") ? "red" : slfInfo.statusOfSLF?.toLowerCase().includes("operational") ? "green" : "default"}>
-                  {slfInfo.statusOfSLF || "Not yet monitored"}
-                </Tag>
-              </Descriptions.Item>
-              <Descriptions.Item label="Category">{slfInfo.category || "—"}</Descriptions.Item>
-              <Descriptions.Item label="Year Started">{slfInfo.yearStartedOperation || "—"}</Descriptions.Item>
-              <Descriptions.Item label="No. of Cells">{slfInfo.numberOfCell ?? "—"}</Descriptions.Item>
-              <Descriptions.Item label="Volume Capacity">
-                {slfInfo.volumeCapacity != null ? `${slfInfo.volumeCapacity.toLocaleString()} m³` : "—"}
-              </Descriptions.Item>
-              <Descriptions.Item label="Remaining Lifespan">{slfInfo.remainingLifeSpan || "—"}</Descriptions.Item>
-              <Descriptions.Item label="Actual Waste Received">
-                {slfInfo.actualResidualWasteReceived != null ? `${slfInfo.actualResidualWasteReceived.toLocaleString()} tons` : "—"}
-              </Descriptions.Item>
-              <Descriptions.Item label="Leachate Ponds">{slfInfo.noOfLeachatePond ?? "—"}</Descriptions.Item>
-              <Descriptions.Item label="Gas Vents">{slfInfo.numberOfGasVents ?? "—"}</Descriptions.Item>
-              <Descriptions.Item label="Location">
-                {[slfInfo.barangay, slfInfo.lgu, slfInfo.province].filter(Boolean).join(", ") || "—"}
-              </Descriptions.Item>
-              <Descriptions.Item label="Ownership">{slfInfo.ownership || "—"}</Descriptions.Item>
-              <Descriptions.Item label="MRF Established">{slfInfo.mrfEstablished || "—"}</Descriptions.Item>
-            </Descriptions>
-          ) : (
-            <div style={{ background: "#fffbe6", border: "1px solid #ffe58f", borderRadius: 6, padding: "10px 16px", marginTop: 4 }}>
-              <InfoCircleOutlined style={{ color: "#faad14", marginRight: 8 }} />
-              <Text style={{ color: "#ad6800" }}>
-                SLF operational data is currently being processed. Monitoring is ongoing — details will appear here once available.
-              </Text>
+          ) : slfInfo ? (() => {
+            const capacity = slfInfo.volumeCapacity || 0;
+            const waste = slfInfo.actualResidualWasteReceived || 0;
+            const pct = capacity > 0 ? Math.min(Math.round((waste / capacity) * 100), 100) : 0;
+            const cells = slfInfo.numberOfCell || 0;
+            const cellCaps = slfInfo.cellCapacities || [];
+            const cellStatuses = slfInfo.cellStatuses || [];
+            const capColor = pct >= 90 ? "#ff4d4f" : pct >= 70 ? "#faad14" : "#52c41a";
+            const capLabel = pct >= 90 ? "Critical" : pct >= 70 ? "Warning" : "Normal";
+            const isOp = !slfInfo.statusOfSLF?.toLowerCase().includes("non");
+            return (
+              <div>
+                {/* Capacity overview banner */}
+                <div style={{ background: `linear-gradient(135deg, ${capColor}08 0%, ${capColor}15 100%)`, border: `1px solid ${capColor}30`, borderRadius: 12, padding: isMobile ? 16 : 20, marginBottom: 20 }}>
+                  <Row gutter={[20, 16]} align="middle">
+                    <Col xs={24} sm={6} style={{ textAlign: "center" }}>
+                      <Progress
+                        type="dashboard"
+                        percent={pct}
+                        size={isMobile ? 100 : 120}
+                        strokeColor={{ "0%": capColor, "100%": capColor }}
+                        strokeWidth={8}
+                        format={() => (
+                          <div style={{ lineHeight: 1.2 }}>
+                            <div style={{ fontSize: 22, fontWeight: 800, color: capColor }}>{pct}%</div>
+                            <div style={{ fontSize: 10, color: "#8c8c8c", fontWeight: 500 }}>UTILIZATION</div>
+                          </div>
+                        )}
+                      />
+                      <Tag color={capColor} style={{ marginTop: 6, fontWeight: 600, fontSize: 11 }}>{capLabel}</Tag>
+                    </Col>
+                    <Col xs={24} sm={18}>
+                      <Row gutter={[12, 12]}>
+                        {[
+                          { label: "Status", value: slfInfo.statusOfSLF || "—", icon: <CheckCircleOutlined />, color: isOp ? "#52c41a" : "#ff4d4f", bg: isOp ? "#f6ffed" : "#fff2f0", border: isOp ? "#b7eb8f" : "#ffccc7", isTag: true },
+                          { label: "Active Cells", value: cells || "—", icon: <ContainerOutlined />, color: "#1890ff", bg: "#e6f7ff", border: "#91d5ff" },
+                          { label: "Waste Received", value: waste > 0 ? `${waste.toLocaleString()} t` : "—", icon: <BarChartOutlined />, color: "#fa8c16", bg: "#fff7e6", border: "#ffd591" },
+                          { label: "Volume Capacity", value: capacity > 0 ? `${capacity.toLocaleString()} m³` : "—", icon: <DatabaseOutlined />, color: "#722ed1", bg: "#f9f0ff", border: "#d3adf7" },
+                        ].map((item, idx) => (
+                          <Col xs={12} sm={12} md={6} key={idx}>
+                            <div style={{ background: item.bg, borderRadius: 10, padding: "12px 14px", border: `1px solid ${item.border}`, height: "100%", transition: "transform 0.2s", cursor: "default" }}>
+                              <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 6 }}>
+                                <span style={{ color: item.color, fontSize: 13 }}>{item.icon}</span>
+                                <span style={{ fontSize: 10, color: "#8c8c8c", textTransform: "uppercase", letterSpacing: 0.6, fontWeight: 600 }}>{item.label}</span>
+                              </div>
+                              {item.isTag ? (
+                                <Tag color={isOp ? "success" : "error"} style={{ fontSize: 13, fontWeight: 600, padding: "2px 10px" }}>{item.value}</Tag>
+                              ) : (
+                                <div style={{ fontSize: 16, fontWeight: 700, color: item.color }}>{item.value}</div>
+                              )}
+                            </div>
+                          </Col>
+                        ))}
+                      </Row>
+                    </Col>
+                  </Row>
+                </div>
+
+                {/* Cell Infrastructure */}
+                {cells > 0 && cellCaps.length > 0 && (
+                  <div style={{ background: "#fff", borderRadius: 12, padding: isMobile ? 14 : 20, marginBottom: 20, border: "1px solid #e8e8e8", boxShadow: "0 1px 4px rgba(0,0,0,0.04)" }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 16 }}>
+                      <div style={{ width: 28, height: 28, borderRadius: 6, background: "#1a3353", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                        <PieChartOutlined style={{ color: "#fff", fontSize: 13 }} />
+                      </div>
+                      <Text strong style={{ fontSize: 14, color: "#1a3353" }}>Cell Infrastructure</Text>
+                      <Tag style={{ marginLeft: "auto", fontWeight: 500 }}>{cells} Cell{cells > 1 ? "s" : ""}</Tag>
+                    </div>
+                    <Row gutter={[12, 12]}>
+                      {cellCaps.map((cap, i) => {
+                        const cellPct = capacity > 0 && cap > 0 ? Math.min(Math.round((cap / capacity) * 100 * cells), 100) : 0;
+                        const cellSt = cellStatuses[i] || "Operational";
+                        const isClosed = cellSt === "Closed";
+                        const cellColor = isClosed ? "#d9d9d9" : cellPct >= 90 ? "#ff4d4f" : cellPct >= 70 ? "#faad14" : "#52c41a";
+                        return (
+                          <Col xs={12} sm={8} md={Math.min(8, Math.floor(24 / cells))} key={i}>
+                            <div style={{ background: isClosed ? "#fafafa" : "#fff", borderRadius: 10, padding: "14px 12px", border: `1px solid ${isClosed ? "#e8e8e8" : cellColor}30`, textAlign: "center", opacity: isClosed ? 0.7 : 1 }}>
+                              <Progress
+                                type="dashboard"
+                                percent={isClosed ? 100 : cellPct}
+                                size={isMobile ? 64 : 80}
+                                strokeWidth={6}
+                                strokeColor={cellColor}
+                                format={() => (
+                                  <span style={{ fontSize: isMobile ? 13 : 15, fontWeight: 700, color: cellColor }}>
+                                    {isClosed ? "—" : `${cellPct}%`}
+                                  </span>
+                                )}
+                              />
+                              <div style={{ fontWeight: 700, fontSize: 13, color: "#1a3353", marginTop: 6 }}>Cell {i + 1}</div>
+                              <Tag color={isClosed ? "default" : "success"} style={{ fontSize: 10, marginTop: 4 }}>{cellSt}</Tag>
+                              <div style={{ fontSize: 11, color: "#8c8c8c", marginTop: 4, fontWeight: 500 }}>
+                                {cap > 0 ? `${cap.toLocaleString()} m³` : "—"}
+                              </div>
+                            </div>
+                          </Col>
+                        );
+                      })}
+                    </Row>
+                  </div>
+                )}
+
+                {/* Facility Details */}
+                <div style={{ background: "#fff", borderRadius: 12, border: "1px solid #e8e8e8", boxShadow: "0 1px 4px rgba(0,0,0,0.04)", overflow: "hidden" }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "12px 20px", borderBottom: "1px solid #f0f0f0", background: "#fafbfc" }}>
+                    <div style={{ width: 28, height: 28, borderRadius: 6, background: "#1a3353", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                      <FileTextOutlined style={{ color: "#fff", fontSize: 13 }} />
+                    </div>
+                    <Text strong style={{ fontSize: 14, color: "#1a3353" }}>Facility Details</Text>
+                  </div>
+                  <div style={{ padding: isMobile ? 12 : 16 }}>
+                    <Row gutter={[16, 12]}>
+                      {[
+                        slfInfo.category && { label: "Category", value: slfInfo.category },
+                        slfInfo.yearStartedOperation && { label: "Year Started", value: slfInfo.yearStartedOperation },
+                        slfInfo.remainingLifeSpan && { label: "Remaining Lifespan", value: slfInfo.remainingLifeSpan },
+                        slfInfo.noOfLeachatePond != null && { label: "Leachate Ponds", value: slfInfo.noOfLeachatePond },
+                        slfInfo.numberOfGasVents != null && { label: "Gas Vents", value: slfInfo.numberOfGasVents },
+                        [slfInfo.barangay, slfInfo.lgu, slfInfo.province].some(Boolean) && { label: "Location", value: [slfInfo.barangay, slfInfo.lgu, slfInfo.province].filter(Boolean).join(", ") },
+                        slfInfo.ownership && { label: "Ownership", value: slfInfo.ownership },
+                        slfInfo.mrfEstablished && { label: "MRF Status", value: slfInfo.mrfEstablished },
+                        slfInfo.eccNo && { label: "ECC No.", value: slfInfo.eccNo },
+                        slfInfo.dischargePermit && { label: "Discharge Permit", value: slfInfo.dischargePermit },
+                        slfInfo.permitToOperate && { label: "Permit to Operate", value: slfInfo.permitToOperate },
+                        slfInfo.hazwasteGenerationId && { label: "Hazwaste Gen. ID", value: slfInfo.hazwasteGenerationId },
+                      ].filter(Boolean).map((item, idx) => (
+                        <Col xs={24} sm={12} md={8} key={idx}>
+                          <div style={{ padding: "8px 12px", borderRadius: 8, background: "#f8f9fb" }}>
+                            <div style={{ fontSize: 11, color: "#8c8c8c", textTransform: "uppercase", letterSpacing: 0.5, fontWeight: 600, marginBottom: 2 }}>{item.label}</div>
+                            <div style={{ fontSize: 13, fontWeight: 600, color: "#262626", wordBreak: "break-word" }}>{item.value}</div>
+                          </div>
+                        </Col>
+                      ))}
+                    </Row>
+                  </div>
+                </div>
+              </div>
+            );
+          })() : (
+            <div style={{ background: "linear-gradient(135deg, #fffbe6 0%, #fff8e1 100%)", border: "1px solid #ffe58f", borderRadius: 10, padding: "16px 20px", display: "flex", alignItems: "center", gap: 12 }}>
+              <InfoCircleOutlined style={{ color: "#faad14", fontSize: 20 }} />
+              <div>
+                <Text strong style={{ color: "#ad6800", display: "block" }}>Facility Data Unavailable</Text>
+                <Text style={{ color: "#ad6800", fontSize: 12 }}>
+                  SLF operational data is currently being processed. Details will appear here once available.
+                </Text>
+              </div>
             </div>
           )}
         </Card>
@@ -1252,6 +1582,21 @@ export default function SLFPortal() {
                     form={companyForm}
                     layout="vertical"
                     requiredMark={false}
+                    onValuesChange={(changed) => {
+                      const vals = companyForm.getFieldsValue();
+                      if ("lguCompanyName" in changed) {
+                        entryForm.setFieldsValue({ lguCompanyName: changed.lguCompanyName });
+                      }
+                      if ("companyRegion" in changed || "companyProvince" in changed || "companyMunicipality" in changed || "companyBarangay" in changed) {
+                        const parts = [
+                          barangays.find(b => b.code === vals.companyBarangay)?.name,
+                          municipalities.find(m => m.code === vals.companyMunicipality)?.name,
+                          provinces.find(p => p.code === vals.companyProvince)?.name,
+                          regions.find(r => r.code === vals.companyRegion)?.name,
+                        ].filter(Boolean);
+                        entryForm.setFieldsValue({ address: parts.join(", ") });
+                      }
+                    }}
                   >
                     <Divider
                       titlePlacement="left"
@@ -1377,26 +1722,43 @@ export default function SLFPortal() {
                     {baselineSaved && (
                       <div
                         style={{
-                          background: "#f6ffed",
-                          border: "1px solid #b7eb8f",
+                          background: "#fff7e6",
+                          border: "1px solid #ffe58f",
                           borderRadius: 6,
-                          padding: "8px 14px",
+                          padding: "10px 14px",
                           marginBottom: 16,
+                          display: "flex",
+                          alignItems: isMobile ? "flex-start" : "center",
+                          justifyContent: "space-between",
+                          flexWrap: "wrap",
+                          gap: 8,
                         }}
                       >
-                        <CheckCircleOutlined
-                          style={{ color: "#52c41a", marginRight: 8 }}
-                        />
-                        <Text style={{ color: "#389e0d" }}>
-                          Baseline data has been saved. You can update it here
-                          or proceed to the Disposal Report tab.
-                        </Text>
+                        <div>
+                          <InfoCircleOutlined
+                            style={{ color: "#faad14", marginRight: 8 }}
+                          />
+                          <Text style={{ color: "#ad6800" }}>
+                            Baseline data is locked after your first submission. To request changes, click the button.
+                          </Text>
+                        </div>
+                        <Button
+                          type="primary"
+                          size="small"
+                          icon={<SendOutlined />}
+                          loading={baselineUpdateLoading}
+                          onClick={handleBaselineUpdateRequest}
+                          style={{ background: "#fa8c16", borderColor: "#fa8c16" }}
+                        >
+                          Request Update
+                        </Button>
                       </div>
                     )}
                     <Form
                       form={baselineForm}
                       layout="vertical"
                       requiredMark={false}
+                      disabled={baselineSaved}
                     >
                       <Divider
                         titlePlacement="left"
@@ -1581,6 +1943,7 @@ export default function SLFPortal() {
                           icon={<PlusOutlined />}
                           className="slf-primary-btn"
                           onClick={() => openHaulerModal(null)}
+                          disabled={baselineSaved}
                         >
                           Add Hauler
                         </Button>
@@ -1618,6 +1981,14 @@ export default function SLFPortal() {
                     layout="vertical"
                     requiredMark={false}
                   >
+                    {/* Assigned SLF Facility */}
+                    <div style={{ background: "#e6f4ff", border: "1px solid #91caff", borderRadius: 8, padding: "10px 16px", marginBottom: 16, display: "flex", alignItems: "center", gap: 10 }}>
+                      <EnvironmentOutlined style={{ color: "#1a3353", fontSize: 16 }} />
+                      <div>
+                        <Text type="secondary" style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: 0.4 }}>Assigned SLF Facility</Text>
+                        <div><Text strong style={{ fontSize: 13 }}>{portalUser?.assignedSlfName || "—"}</Text></div>
+                      </div>
+                    </div>
                     <Row gutter={[12, 0]}>
                       <Col xs={24} sm={12} md={8}>
                         <Form.Item
@@ -1734,7 +2105,7 @@ export default function SLFPortal() {
 
   // ── History Content ──
   const renderHistory = () => (
-    <div style={{ maxWidth: 1200, margin: "0 auto" }}>
+    <div style={{ maxWidth: 1400, margin: "0 auto" }}>
       <Card
         className="slf-section"
         title={
@@ -1762,7 +2133,7 @@ export default function SLFPortal() {
           loading={loadingSubmissions}
           size="small"
           pagination={{ pageSize: 15 }}
-          scroll={{ x: 900 }}
+          scroll={{ x: 1100 }}
           locale={{
             emptyText: (
               <Empty
@@ -1856,6 +2227,7 @@ export default function SLFPortal() {
               SLF Generators Portal
             </Text>
           </Space>
+          <Space size={8}>
           <Dropdown
             menu={{
               items: userMenuItems,
@@ -1881,6 +2253,7 @@ export default function SLFPortal() {
               )}
             </Space>
           </Dropdown>
+          </Space>
         </Header>
 
         {/* Content */}
@@ -2311,7 +2684,7 @@ export default function SLFPortal() {
                         >
                           {opts("wasteType", [
                             "Residual",
-                            "Hazardous Waste",
+                            "Treated Hazardous Waste",
                           ]).map((o) => (
                             <Option key={o} value={o}>
                               {o}
@@ -2321,29 +2694,37 @@ export default function SLFPortal() {
                       </Form.Item>
                     </Col>
                   </Row>
-                  {truckDraft.wasteType === "Hazardous Waste" && (
-                    <Row gutter={[12, 0]}>
-                      <Col xs={24} sm={12}>
-                        <Form.Item label="Hazardous Waste Code (DENR EMB)">
-                          <Select
-                            placeholder="Select code (e.g. M501)"
-                            value={truckDraft.hazWasteCode}
-                            onChange={(v) =>
-                              updateTruckDraft("hazWasteCode", v)
-                            }
-                            showSearch
-                            allowClear
-                          >
-                            {hazWasteCodes.map((code) => (
-                              <Option key={code} value={code}>
-                                {code}
-                              </Option>
-                            ))}
-                          </Select>
-                        </Form.Item>
-                      </Col>
-                    </Row>
-                  )}
+                  <Row gutter={[12, 0]}>
+                    <Col xs={24} sm={12}>
+                      <Form.Item
+                        label="Hazardous Waste Code (DENR EMB)"
+                        tooltip="Applicable only for Treated Hazardous Waste"
+                      >
+                        <Select
+                          mode="multiple"
+                          placeholder="Select code(s) (e.g. M501)"
+                          value={truckDraft.hazWasteCode}
+                          onChange={(v) =>
+                            updateTruckDraft("hazWasteCode", v)
+                          }
+                          disabled={!truckDraft.wasteType?.toLowerCase().includes("hazardous")}
+                          showSearch
+                          allowClear
+                        >
+                          {hazWasteCodes.map((code) => (
+                            <Option key={code} value={code}>
+                              {code}
+                            </Option>
+                          ))}
+                        </Select>
+                        {!truckDraft.wasteType?.toLowerCase().includes("hazardous") && (
+                          <Text type="secondary" style={{ fontSize: 11 }}>
+                            Select &quot;Treated Hazardous Waste&quot; as Waste Type to enable this field.
+                          </Text>
+                        )}
+                      </Form.Item>
+                    </Col>
+                  </Row>
                 </>
               ),
             },
@@ -2437,245 +2818,271 @@ export default function SLFPortal() {
 
       {/* ── Submission Detail Modal ── */}
       <Modal
-        title={
-          historyDetailModal ? (
-            <Space>
-              <FileTextOutlined style={{ color: "#1a3353" }} />
-              <span>Submission Details — {historyDetailModal.idNo}</span>
-            </Space>
-          ) : (
-            "Submission Details"
-          )
-        }
+        title={null}
         open={!!historyDetailModal}
         onCancel={() => setHistoryDetailModal(null)}
         footer={null}
-        width={840}
+        width={900}
         destroyOnHidden
+        styles={{ body: { padding: 0 } }}
+        closeIcon={<span style={{ color: "#fff", fontSize: 18, fontWeight: 700, position: "relative", zIndex: 1 }}>✕</span>}
       >
-        {historyDetailModal && (
-          <Collapse
-            defaultActiveKey={["summary", "baseline", "haulers", "transport"]}
-            bordered={false}
-            expandIconPosition="end"
-            style={{ background: "transparent" }}
-            items={[
-              {
-                key: "summary",
-                label: (
-                  <Text strong style={{ color: "#1a3353" }}>
-                    <InfoCircleOutlined /> Submission Summary
-                  </Text>
-                ),
-                children: (
-                  <Descriptions
-                    bordered
-                    size="small"
-                    column={{ xs: 1, sm: 2 }}
-                  >
-                    <Descriptions.Item label="ID No.">
-                      {historyDetailModal.idNo}
-                    </Descriptions.Item>
-                    <Descriptions.Item label="Status">
-                      {renderStatusTag(
-                        historyDetailModal.status,
-                        historyDetailModal,
-                      )}
-                    </Descriptions.Item>
-                    <Descriptions.Item label="Date of Disposal">
-                      {historyDetailModal.dateOfDisposal
-                        ? dayjs(historyDetailModal.dateOfDisposal).format(
-                            "MMM D, YYYY",
-                          )
-                        : "—"}
-                    </Descriptions.Item>
-                    <Descriptions.Item label="Submitted">
-                      {dayjs(historyDetailModal.createdAt).format(
-                        "MMM D, YYYY h:mm A",
-                      )}
-                    </Descriptions.Item>
-                    <Descriptions.Item label="Company">
-                      {historyDetailModal.lguCompanyName}
-                    </Descriptions.Item>
-                    <Descriptions.Item label="Company Type">
-                      <Tag
-                        color={
-                          historyDetailModal.companyType === "LGU"
-                            ? "blue"
-                            : "green"
-                        }
-                      >
-                        {historyDetailModal.companyType}
-                      </Tag>
-                    </Descriptions.Item>
-                    <Descriptions.Item label="Address" span={2}>
-                      {historyDetailModal.address || "—"}
-                    </Descriptions.Item>
-                  </Descriptions>
-                ),
-              },
-              {
-                key: "baseline",
-                label: (
-                  <Text strong style={{ color: "#1a3353" }}>
-                    <DatabaseOutlined /> Baseline Data
-                  </Text>
-                ),
-                children: (
-                  <Descriptions
-                    bordered
-                    size="small"
-                    column={{ xs: 1, sm: 2 }}
-                  >
-                    <Descriptions.Item label="Total Volume Accepted">
-                      {historyDetailModal.totalVolumeAccepted != null
-                        ? `${historyDetailModal.totalVolumeAccepted} ${(historyDetailModal.totalVolumeAcceptedUnit || "m³").replace("m3", "m³")}`
-                        : "—"}
-                    </Descriptions.Item>
-                    <Descriptions.Item label="Active Cell - Residual">
-                      {historyDetailModal.activeCellResidualVolume != null
-                        ? `${historyDetailModal.activeCellResidualVolume} ${(historyDetailModal.activeCellResidualUnit || "m³").replace("m3", "m³")}`
-                        : "—"}
-                    </Descriptions.Item>
-                    <Descriptions.Item label="Active Cell - Inert">
-                      {historyDetailModal.activeCellInertVolume != null
-                        ? `${historyDetailModal.activeCellInertVolume} ${(historyDetailModal.activeCellInertUnit || "m³").replace("m3", "m³")}`
-                        : "—"}
-                    </Descriptions.Item>
-                    <Descriptions.Item label="Closed Cell - Residual">
-                      {historyDetailModal.closedCellResidualVolume != null
-                        ? `${historyDetailModal.closedCellResidualVolume} ${(historyDetailModal.closedCellResidualUnit || "m³").replace("m3", "m³")}`
-                        : "—"}
-                    </Descriptions.Item>
-                    <Descriptions.Item label="Closed Cell - Inert">
-                      {historyDetailModal.closedCellInertVolume != null
-                        ? `${historyDetailModal.closedCellInertVolume} ${(historyDetailModal.closedCellInertUnit || "m³").replace("m3", "m³")}`
-                        : "—"}
-                    </Descriptions.Item>
-                  </Descriptions>
-                ),
-              },
-              ...(historyDetailModal.accreditedHaulers?.length > 0
-                ? [
+        {historyDetailModal && (() => {
+          const d = historyDetailModal;
+          const totalVolume = (d.trucks || []).reduce((s, t) => s + (t.actualVolume || 0), 0);
+          const sectionTitle = (icon, text) => (
+            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 16 }}>
+              <span style={{ fontSize: 15, color: "#1a3353" }}>{icon}</span>
+              <Text strong style={{ fontSize: 14, color: "#1a3353", letterSpacing: 0.3 }}>{text}</Text>
+            </div>
+          );
+          const fieldRow = (label, value, opts = {}) => (
+            <Col xs={opts.span === 2 ? 24 : 12} sm={opts.span === 2 ? 24 : 12} key={label}>
+              <div style={{ marginBottom: 14 }}>
+                <Text type="secondary" style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: 0.5, display: "block", marginBottom: 2 }}>{label}</Text>
+                <div style={{ fontSize: 13, fontWeight: 600, color: "#262626" }}>{value || "—"}</div>
+              </div>
+            </Col>
+          );
+          return (
+            <div>
+              {/* Header Banner */}
+              <div style={{ background: "linear-gradient(135deg, #0e1e35 0%, #1a3353 100%)", padding: "24px 28px 20px", paddingRight: 48, borderRadius: "8px 8px 0 0" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+                  <div>
+                    <Text style={{ color: "rgba(255,255,255,0.6)", fontSize: 11, textTransform: "uppercase", letterSpacing: 1 }}>Submission Details</Text>
+                    <div style={{ marginTop: 4 }}>
+                      <Text style={{ color: "#fff", fontSize: 20, fontWeight: 700, letterSpacing: 0.5 }}>{d.idNo}</Text>
+                    </div>
+                    <Text style={{ color: "rgba(255,255,255,0.7)", fontSize: 12, marginTop: 4, display: "block" }}>
+                      {d.lguCompanyName} &middot; {d.dateOfDisposal ? dayjs(d.dateOfDisposal).format("MMMM D, YYYY") : "No date"}
+                    </Text>
+                  </div>
+                  <div style={{ textAlign: "right" }}>
+                    {renderStatusTag(d.status, d)}
+                    <div style={{ marginTop: 8 }}>
+                      <Text style={{ color: "rgba(255,255,255,0.5)", fontSize: 11 }}>
+                        Submitted {dayjs(d.createdAt).format("MMM D, YYYY h:mm A")}
+                      </Text>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div style={{ padding: "24px 28px" }}>
+                {/* Summary Stats Bar */}
+                <Row gutter={16} style={{ marginBottom: 24 }}>
+                  <Col xs={8}>
+                    <div style={{ background: "#f0f5ff", borderRadius: 8, padding: "12px 16px", border: "1px solid #d6e4ff", minHeight: 72, display: "flex", flexDirection: "column", justifyContent: "space-between" }}>
+                      <Text type="secondary" style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: 0.5 }}>Company Type</Text>
+                      <div style={{ marginTop: 4 }}>
+                        <Tag color={d.companyType === "LGU" ? "blue" : "green"} style={{ margin: 0, fontWeight: 600 }}>{d.companyType}</Tag>
+                      </div>
+                    </div>
+                  </Col>
+                  <Col xs={8}>
+                    <div style={{ background: "#f6ffed", borderRadius: 8, padding: "12px 16px", border: "1px solid #d9f7be", minHeight: 72, display: "flex", flexDirection: "column", justifyContent: "space-between" }}>
+                      <Text type="secondary" style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: 0.5 }}>Truck Entries</Text>
+                      <div style={{ marginTop: 4 }}><Text strong style={{ fontSize: 18, color: "#52c41a" }}>{d.trucks?.length || 0}</Text></div>
+                    </div>
+                  </Col>
+                  <Col xs={8}>
+                    <div style={{ background: "#fff7e6", borderRadius: 8, padding: "12px 16px", border: "1px solid #ffe7ba", minHeight: 72, display: "flex", flexDirection: "column", justifyContent: "space-between" }}>
+                      <Text type="secondary" style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: 0.5 }}>Total Volume</Text>
+                      <div style={{ marginTop: 4 }}><Text strong style={{ fontSize: 18, color: "#fa8c16" }}>{totalVolume > 0 ? totalVolume.toLocaleString() : "0"}</Text> <Text type="secondary" style={{ fontSize: 11 }}>tons</Text></div>
+                    </div>
+                  </Col>
+                </Row>
+
+                <Collapse
+                  defaultActiveKey={["company", "transport"]}
+                  bordered={false}
+                  size="small"
+                  style={{ background: "transparent" }}
+                  items={[
                     {
-                      key: "haulers",
-                      label: (
-                        <Text strong style={{ color: "#1a3353" }}>
-                          <TeamOutlined /> Accredited Haulers (
-                          {historyDetailModal.accreditedHaulers.length})
-                        </Text>
-                      ),
+                      key: "company",
+                      label: <Text strong style={{ fontSize: 13 }}><EnvironmentOutlined style={{ color: "#1a3353", marginRight: 6 }} />Company & Disposal Information</Text>,
                       children: (
-                        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-                          {historyDetailModal.accreditedHaulers.map((h, i) => {
+                        <Row gutter={16}>
+                          {fieldRow("Company / LGU Name", d.lguCompanyName)}
+                          {fieldRow("Company Type", <Tag color={d.companyType === "LGU" ? "blue" : "green"} bordered={false}>{d.companyType}</Tag>)}
+                          {fieldRow("Address", d.address, { span: 2 })}
+                          {fieldRow("Date of Disposal", d.dateOfDisposal ? dayjs(d.dateOfDisposal).format("MMMM D, YYYY") : null)}
+                          {fieldRow("Submission ID", <Text copyable style={{ fontSize: 12, fontFamily: "monospace" }}>{d.submissionId || "—"}</Text>)}
+                        </Row>
+                      ),
+                    },
+                    {
+                      key: "baseline",
+                      label: <Text strong style={{ fontSize: 13 }}><DatabaseOutlined style={{ color: "#1a3353", marginRight: 6 }} />Baseline Data</Text>,
+                      children: (
+                        <Row gutter={16}>
+                          {fieldRow("Total Volume Accepted", d.totalVolumeAccepted != null ? `${d.totalVolumeAccepted.toLocaleString()} ${(d.totalVolumeAcceptedUnit || "m³").replace("m3", "m³")}` : null)}
+                          {fieldRow("Active Cell — Residual", d.activeCellResidualVolume != null ? `${d.activeCellResidualVolume.toLocaleString()} ${(d.activeCellResidualUnit || "m³").replace("m3", "m³")}` : null)}
+                          {fieldRow("Active Cell — Inert", d.activeCellInertVolume != null ? `${d.activeCellInertVolume.toLocaleString()} ${(d.activeCellInertUnit || "m³").replace("m3", "m³")}` : null)}
+                          {fieldRow("Closed Cell — Residual", d.closedCellResidualVolume != null ? `${d.closedCellResidualVolume.toLocaleString()} ${(d.closedCellResidualUnit || "m³").replace("m3", "m³")}` : null)}
+                          {fieldRow("Closed Cell — Inert", d.closedCellInertVolume != null ? `${d.closedCellInertVolume.toLocaleString()} ${(d.closedCellInertUnit || "m³").replace("m3", "m³")}` : null)}
+                        </Row>
+                      ),
+                    },
+                    {
+                      key: "operations",
+                      label: <Text strong style={{ fontSize: 13 }}><PieChartOutlined style={{ color: "#13c2c2", marginRight: 6 }} />Cell Capacity</Text>,
+                      children: (() => {
+                        const fac = d.slfGenerator || {};
+                        const facilityCapacity = fac.volumeCapacity || 0;
+                        const baselineVol = d.totalVolumeAccepted || 0;
+                        const truckVol = (d.trucks || []).reduce((s, t) => s + (t.actualVolume || 0), 0);
+                        const filledVol = baselineVol + truckVol;
+                        const pct = facilityCapacity > 0 ? Math.min(Math.round((filledVol / facilityCapacity) * 100), 100) : 0;
+                        return (
+                          <div>
+                            <Row gutter={16}>
+                              {fieldRow("Current Cell Volume", d.currentCellVolume != null ? `${d.currentCellVolume.toLocaleString()} ${(d.currentCellVolumeUnit || "m³").replace("m3", "m³")}` : null)}
+                              {fieldRow("Cell Status", <Tag color={d.cellStatus === "Closed" ? "red" : "green"} bordered={false}>{d.cellStatus || "Active"}</Tag>)}
+                              {fieldRow("Number of Cells", fac.numberOfCell || "—")}
+                              {fieldRow("Facility Capacity", facilityCapacity > 0 ? `${facilityCapacity.toLocaleString()} m³` : "—")}
+                            </Row>
+                            <Divider style={{ margin: "4px 0 16px" }} />
+                            <div style={{ display: "flex", alignItems: "center", gap: 24 }}>
+                              <Progress
+                                type="dashboard"
+                                percent={pct}
+                                size={110}
+                                strokeColor={pct >= 90 ? "#ff4d4f" : pct >= 70 ? "#faad14" : "#52c41a"}
+                                format={() => (
+                                  <div style={{ textAlign: "center", lineHeight: 1.3 }}>
+                                    <div style={{ fontSize: 18, fontWeight: 700, color: pct >= 90 ? "#ff4d4f" : pct >= 70 ? "#faad14" : "#52c41a" }}>{pct}%</div>
+                                    <div style={{ fontSize: 10, color: "#8c8c8c" }}>filled</div>
+                                  </div>
+                                )}
+                              />
+                              <div style={{ flex: 1 }}>
+                                <Text strong style={{ fontSize: 13, display: "block", marginBottom: 8 }}>Cell Capacity Usage</Text>
+                                <Row gutter={8}>
+                                  <Col xs={12}>
+                                    <Text type="secondary" style={{ fontSize: 11 }}>Baseline Volume</Text>
+                                    <div><Text style={{ fontSize: 13 }}>{baselineVol > 0 ? `${baselineVol.toLocaleString()} ${(d.totalVolumeAcceptedUnit || "m³").replace("m3", "m³")}` : "0"}</Text></div>
+                                  </Col>
+                                  <Col xs={12}>
+                                    <Text type="secondary" style={{ fontSize: 11 }}>Transport & Disposal</Text>
+                                    <div><Text style={{ fontSize: 13 }}>{truckVol > 0 ? `${truckVol.toLocaleString()} tons` : "0"}</Text></div>
+                                  </Col>
+                                  <Col xs={12}>
+                                    <Text type="secondary" style={{ fontSize: 11, marginTop: 8, display: "block" }}>Total Filled</Text>
+                                    <div><Text strong style={{ fontSize: 14, color: "#1a3353" }}>{filledVol > 0 ? filledVol.toLocaleString() : "0"}</Text></div>
+                                  </Col>
+                                  <Col xs={12}>
+                                    <Text type="secondary" style={{ fontSize: 11, marginTop: 8, display: "block" }}>Remaining</Text>
+                                    <div><Text strong style={{ fontSize: 14, color: facilityCapacity - filledVol <= 0 ? "#ff4d4f" : "#52c41a" }}>{facilityCapacity > 0 ? (facilityCapacity - filledVol).toLocaleString() : "No capacity set"}</Text></div>
+                                  </Col>
+                                </Row>
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })(),
+                    },
+                    ...(d.accreditedHaulers?.length > 0 ? [{
+                      key: "haulers",
+                      label: <Text strong style={{ fontSize: 13 }}><TeamOutlined style={{ color: "#1a3353", marginRight: 6 }} />Accredited Haulers ({d.accreditedHaulers.length})</Text>,
+                      children: (
+                        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                          {d.accreditedHaulers.map((h, i) => {
                             const clients = Array.isArray(h.privateSectorClients)
                               ? h.privateSectorClients
                               : h.privateSectorClients ? [h.privateSectorClients] : [];
+                            const vehicles = h.vehicles?.length > 0
+                              ? h.vehicles
+                              : h.plateNumber || h.vehicleType || h.capacity != null
+                                ? [{ plateNumber: h.plateNumber, vehicleType: h.vehicleType, capacity: h.capacity, capacityUnit: h.capacityUnit }]
+                                : [];
                             return (
-                              <Card
-                                key={i}
-                                size="small"
-                                style={{ background: "#fafafa", borderColor: "#e8e8e8" }}
-                                title={<Text strong style={{ fontSize: 13 }}>Hauler #{i + 1}</Text>}
-                              >
-                                <Row gutter={[16, 8]}>
-                                  <Col xs={24} sm={12}>
-                                    <Text type="secondary" style={{ fontSize: 12 }}>Hauler Name</Text>
-                                    <div><Text strong>{h.haulerName || "—"}</Text></div>
-                                  </Col>
-                                  <Col xs={12} sm={6}>
-                                    <Text type="secondary" style={{ fontSize: 12 }}>No. of Trucks</Text>
-                                    <div><Text strong>{h.numberOfTrucks ?? "—"}</Text></div>
-                                  </Col>
-                                  <Col xs={12} sm={6}>
-                                    <Text type="secondary" style={{ fontSize: 12 }}>Vehicle Type</Text>
-                                    <div><Text strong>{h.vehicleType || "—"}</Text></div>
-                                  </Col>
-                                  <Col xs={12} sm={6}>
-                                    <Text type="secondary" style={{ fontSize: 12 }}>Plate Number</Text>
-                                    <div><Text strong>{h.plateNumber || "—"}</Text></div>
-                                  </Col>
-                                  <Col xs={12} sm={6}>
-                                    <Text type="secondary" style={{ fontSize: 12 }}>Capacity</Text>
-                                    <div><Text strong>{h.capacity != null ? `${h.capacity} ${(h.capacityUnit || "m³").replace("m3", "m³")}` : "—"}</Text></div>
-                                  </Col>
-                                  <Col xs={24} sm={12}>
-                                    <Text type="secondary" style={{ fontSize: 12 }}>Office Address</Text>
-                                    <div><Text strong>{h.officeAddress || "—"}</Text></div>
-                                  </Col>
-                                  <Col xs={24}>
-                                    <Text type="secondary" style={{ fontSize: 12 }}>Private Sector/LGU Clients</Text>
-                                    <div><Text strong>{clients.length > 0 ? clients.join(", ") : "—"}</Text></div>
-                                  </Col>
+                              <div key={i} style={{ background: "#fff", borderRadius: 6, padding: "14px 16px", border: "1px solid #e8e8e8" }}>
+                                <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
+                                  <div style={{ width: 24, height: 24, borderRadius: "50%", background: "#1a3353", color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11, fontWeight: 700 }}>{i + 1}</div>
+                                  <Text strong style={{ fontSize: 13 }}>{h.haulerName || "Unnamed Hauler"}</Text>
+                                </div>
+                                <Row gutter={16}>
+                                  {fieldRow("No. of Trucks", h.numberOfTrucks ?? "—")}
+                                  {fieldRow("Office Address", h.officeAddress || "—", { span: 2 })}
+                                  {fieldRow("Private Sector/LGU Clients", clients.length > 0 ? clients.join(", ") : "—", { span: 2 })}
                                 </Row>
-                              </Card>
+                                {vehicles.length > 0 && (
+                                  <Table
+                                    dataSource={vehicles}
+                                    rowKey={(_, vi) => vi}
+                                    size="small"
+                                    pagination={false}
+                                    style={{ marginTop: 8 }}
+                                    columns={[
+                                      { title: "#", key: "idx", width: 40, render: (_, __, vi) => vi + 1 },
+                                      { title: "Plate Number", dataIndex: "plateNumber", key: "plate", render: (v) => v || "—" },
+                                      { title: "Vehicle Type", dataIndex: "vehicleType", key: "type", render: (v) => v || "—" },
+                                      { title: "Capacity", key: "cap", render: (_, v) => v.capacity != null ? `${v.capacity} ${(v.capacityUnit || "m³").replace("m3", "m³")}` : "—" },
+                                    ]}
+                                  />
+                                )}
+                              </div>
                             );
                           })}
                         </div>
                       ),
+                    }] : []),
+                    {
+                      key: "transport",
+                      label: <Text strong style={{ fontSize: 13 }}><CarOutlined style={{ color: "#1a3353", marginRight: 6 }} />Transport & Disposal ({(d.trucks || []).length} entries)</Text>,
+                      children: (d.trucks || []).length > 0 ? (
+                        <Table
+                          dataSource={d.trucks}
+                          rowKey={(_, i) => i}
+                          size="small"
+                          pagination={false}
+                          columns={[
+                            { title: "#", key: "idx", width: 40, render: (_, __, i) => <Text type="secondary">{i + 1}</Text> },
+                            { title: "Ticket No.", dataIndex: "disposalTicketNo", key: "ticket", render: (v) => v || "—" },
+                            { title: "Hauler", dataIndex: "hauler", key: "hauler", render: (v) => <Text strong>{v || "—"}</Text> },
+                            { title: "Plate No.", dataIndex: "plateNumber", key: "plate", render: (v) => v || "—" },
+                            { title: "Capacity", key: "cap", render: (_, t) => t.truckCapacity ? `${t.truckCapacity} ${(t.truckCapacityUnit || "m³").replace("m3", "m³")}` : "—" },
+                            { title: "Volume", key: "vol", render: (_, t) => t.actualVolume != null ? <Text strong style={{ color: "#52c41a" }}>{t.actualVolume} {t.actualVolumeUnit || "tons"}</Text> : "—" },
+                            { title: "Waste Type", dataIndex: "wasteType", key: "waste", render: (v) => v ? <Tag color={v === "Residual" ? "blue" : "volcano"} bordered={false}>{v}</Tag> : "—" },
+                            { title: "HW Code", key: "hw", render: (_, t) => {
+                              const codes = Array.isArray(t.hazWasteCode) ? t.hazWasteCode : t.hazWasteCode ? [t.hazWasteCode] : [];
+                              return codes.length > 0 ? codes.join(", ") : "—";
+                            }},
+                          ]}
+                        />
+                      ) : (
+                        <div style={{ textAlign: "center", padding: "20px 0" }}>
+                          <Text type="secondary">No transport entries recorded.</Text>
+                        </div>
+                      ),
                     },
-                  ]
-                : []),
-              {
-                key: "transport",
-                label: (
-                  <Text strong style={{ color: "#1a3353" }}>
-                    <CarOutlined /> Transport & Disposal Information (
-                    {(historyDetailModal.trucks || []).length} entries)
-                  </Text>
-                ),
-                children: (
-                  <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-                    {(historyDetailModal.trucks || []).map((t, i) => (
-                      <Card
-                        key={i}
-                        size="small"
-                        style={{ background: "#fafafa", borderColor: "#e8e8e8" }}
-                        title={<Text strong style={{ fontSize: 13 }}>Entry #{i + 1}</Text>}
-                      >
-                        <Row gutter={[16, 8]}>
-                          <Col xs={12} sm={8}>
-                            <Text type="secondary" style={{ fontSize: 12 }}>Ticket No.</Text>
-                            <div><Text strong>{t.disposalTicketNo || "—"}</Text></div>
-                          </Col>
-                          <Col xs={12} sm={8}>
-                            <Text type="secondary" style={{ fontSize: 12 }}>Hauler</Text>
-                            <div><Text strong>{t.hauler || "—"}</Text></div>
-                          </Col>
-                          <Col xs={12} sm={8}>
-                            <Text type="secondary" style={{ fontSize: 12 }}>Plate No.</Text>
-                            <div><Text strong>{t.plateNumber || "—"}</Text></div>
-                          </Col>
-                          <Col xs={12} sm={6}>
-                            <Text type="secondary" style={{ fontSize: 12 }}>Truck Capacity</Text>
-                            <div><Text strong>{t.truckCapacity ? `${t.truckCapacity} ${(t.truckCapacityUnit || "m³").replace("m3", "m³")}` : "—"}</Text></div>
-                          </Col>
-                          <Col xs={12} sm={6}>
-                            <Text type="secondary" style={{ fontSize: 12 }}>Actual Volume</Text>
-                            <div><Text strong>{t.actualVolume != null ? `${t.actualVolume} ${t.actualVolumeUnit || "tons"}` : "—"}</Text></div>
-                          </Col>
-                          <Col xs={12} sm={6}>
-                            <Text type="secondary" style={{ fontSize: 12 }}>Waste Type</Text>
-                            <div><Text strong>{t.wasteType || "—"}</Text></div>
-                          </Col>
-                          <Col xs={12} sm={6}>
-                            <Text type="secondary" style={{ fontSize: 12 }}>Haz. Code</Text>
-                            <div><Text strong>{t.hazWasteCode || "—"}</Text></div>
-                          </Col>
-                        </Row>
-                      </Card>
-                    ))}
-                    {(historyDetailModal.trucks || []).length === 0 && (
-                      <Text type="secondary" style={{ textAlign: "center", padding: 16 }}>
-                        No transport entries recorded.
-                      </Text>
-                    )}
+                  ]}
+                />
+
+                {/* Revert Info Banner */}
+                {d.status === "reverted" && d.revertReason && (
+                  <div style={{ background: "#fff2e8", border: "1px solid #ffbb96", borderRadius: 8, padding: "12px 16px", marginTop: 20 }}>
+                    <Space align="start">
+                      <UndoOutlined style={{ color: "#fa541c", marginTop: 2 }} />
+                      <div>
+                        <Text strong style={{ color: "#fa541c", fontSize: 13 }}>Reverted by Administrator</Text>
+                        <div style={{ marginTop: 4 }}>
+                          <Text style={{ fontSize: 12, color: "#8c8c8c" }}>Reason: {d.revertReason}</Text>
+                        </div>
+                        {d.revertedAt && (
+                          <Text type="secondary" style={{ fontSize: 11 }}>{dayjs(d.revertedAt).format("MMM D, YYYY h:mm A")}</Text>
+                        )}
+                      </div>
+                    </Space>
                   </div>
-                ),
-              },
-            ]}
-          />
-        )}
+                )}
+              </div>
+            </div>
+          );
+        })()}
       </Modal>
 
       {/* ── Review Submission Modal ── */}
@@ -2683,13 +3090,13 @@ export default function SLFPortal() {
         title={
           <Space>
             <EyeOutlined style={{ color: "#1a3353" }} />
-            <span>Review Submission</span>
+            <span>{editingRevertedId ? "Review Resubmission" : "Review Submission"}</span>
           </Space>
         }
         open={reviewModalOpen}
         onCancel={() => setReviewModalOpen(false)}
-        onOk={handleConfirmSubmit}
-        okText="Confirm & Submit"
+        onOk={editingRevertedId ? handleResubmitReverted : handleConfirmSubmit}
+        okText={editingRevertedId ? "Confirm & Resubmit" : "Confirm & Submit"}
         okButtonProps={{
           className: "slf-primary-btn",
           loading,
@@ -2716,6 +3123,23 @@ export default function SLFPortal() {
             submission.
           </Text>
         </div>
+        {editingRevertedId && (
+          <div style={{ marginBottom: 16 }}>
+            <Text strong style={{ display: "block", marginBottom: 6, fontSize: 13 }}>
+              <MessageOutlined style={{ marginRight: 6 }} />
+              Comment / Message (optional)
+            </Text>
+            <Input.TextArea
+              rows={3}
+              maxLength={500}
+              showCount
+              placeholder="Add a comment about the changes you made or any message for the admin..."
+              value={resubmitComment}
+              onChange={(e) => setResubmitComment(e.target.value)}
+              style={{ borderRadius: 6 }}
+            />
+          </div>
+        )}
         <Collapse
           defaultActiveKey={[
             "company",

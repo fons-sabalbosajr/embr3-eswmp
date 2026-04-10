@@ -10,6 +10,7 @@ import {
   Select,
   Space,
   Tag,
+  Descriptions,
   Divider,
   Row,
   Col,
@@ -132,6 +133,8 @@ export default function SwmEquipment() {
   const [loading, setLoading] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
   const [detailModal, setDetailModal] = useState(null);
+  const [detailYearRecords, setDetailYearRecords] = useState([]);
+  const [detailYear, setDetailYear] = useState(null);
   const [editing, setEditing] = useState(null);
   const [searchText, setSearchText] = useState("");
   const [filterProvince, setFilterProvince] = useState(null);
@@ -166,11 +169,26 @@ export default function SwmEquipment() {
     fetchRecords();
   }, [fetchRecords]);
 
-  const openAdd = () => {
-    setEditing(null);
-    form.resetFields();
-    setModalOpen(true);
-  };
+  // Fetch cross-year history when viewing a record
+  useEffect(() => {
+    if (!detailModal) { setDetailYearRecords([]); setDetailYear(null); return; }
+    const name = detailModal.municipality;
+    api.get(`/swm-equipment/history/${encodeURIComponent(name)}`)
+      .then(({ data }) => {
+        const enriched = data.map((r) => ({ ...r, ...computeFields(r) }));
+        setDetailYearRecords(enriched);
+        setDetailYear(detailModal.dataYear || new Date().getFullYear());
+      })
+      .catch(() => { setDetailYearRecords([]); setDetailYear(detailModal.dataYear || new Date().getFullYear()); });
+  }, [detailModal]);
+
+  const detailViewRecord = useMemo(() => {
+    if (detailYearRecords.length === 0) return detailModal;
+    return detailYearRecords.find((r) => (r.dataYear || new Date().getFullYear()) === detailYear) || detailModal;
+  }, [detailModal, detailYearRecords, detailYear]);
+
+
+  const openAdd = (prefill) => { setEditing(null); form.resetFields(); if (prefill) form.setFieldsValue(prefill); setModalOpen(true); };
 
   const openEdit = (record) => {
     setEditing(record);
@@ -315,9 +333,9 @@ export default function SwmEquipment() {
   const columns = [
     {
       title: (
-        <>
+        <span>
           <EnvironmentOutlined style={{ color: "#1a3353" }} /> LGU
-        </>
+        </span>
       ),
       key: "lgu",
       width: 160,
@@ -363,9 +381,9 @@ export default function SwmEquipment() {
     },
     {
       title: (
-        <>
+        <span>
           <CarOutlined style={{ color: "#fa8c16" }} /> Equipment Type
-        </>
+        </span>
       ),
       dataIndex: "typeOfEquipment",
       key: "typeOfEquipment",
@@ -383,9 +401,9 @@ export default function SwmEquipment() {
     },
     {
       title: (
-        <>
+        <span>
           <ExperimentOutlined style={{ color: "#52c41a" }} /> Bio Equipment
-        </>
+        </span>
       ),
       key: "bioEquipment",
       width: 170,
@@ -405,9 +423,9 @@ export default function SwmEquipment() {
     },
     {
       title: (
-        <>
+        <span>
           <BarChartOutlined style={{ color: "#722ed1" }} /> Soil Enhancer
-        </>
+        </span>
       ),
       dataIndex: "weightOfSoilEnhancer",
       key: "soil",
@@ -425,9 +443,9 @@ export default function SwmEquipment() {
     },
     {
       title: (
-        <>
+        <span>
           <VideoCameraOutlined style={{ color: "#eb2f96" }} /> CCTV
-        </>
+        </span>
       ),
       dataIndex: "statusOfCCTV",
       key: "cctv",
@@ -436,9 +454,9 @@ export default function SwmEquipment() {
     },
     {
       title: (
-        <>
+        <span>
           <SafetyCertificateOutlined style={{ color: "#13c2c2" }} /> Chairs
-        </>
+        </span>
       ),
       key: "chairs",
       width: 130,
@@ -462,9 +480,9 @@ export default function SwmEquipment() {
     },
     {
       title: (
-        <>
+        <span>
           <TeamOutlined style={{ color: "#722ed1" }} /> Personnel
-        </>
+        </span>
       ),
       key: "personnel",
       width: 170,
@@ -497,9 +515,9 @@ export default function SwmEquipment() {
     },
     {
       title: (
-        <>
+        <span>
           <CalendarOutlined style={{ color: "#13c2c2" }} /> Target Month
-        </>
+        </span>
       ),
       dataIndex: "targetMonth",
       key: "targetMonth",
@@ -517,9 +535,9 @@ export default function SwmEquipment() {
     },
     {
       title: (
-        <>
+        <span>
           <ClockCircleOutlined style={{ color: "#1890ff" }} /> Monitoring
-        </>
+        </span>
       ),
       dataIndex: "dateOfMonitoring",
       key: "monitoring",
@@ -899,6 +917,7 @@ export default function SwmEquipment() {
           <Space>
             <CarOutlined />
             {detailModal?.municipality}, {detailModal?.province}
+            {detailYearRecords.length >= 1 && <Tag color="blue" bordered={false} style={{ marginLeft: 8 }}>{detailYearRecords.length} year records</Tag>}
           </Space>
         }
         open={!!detailModal}
@@ -908,6 +927,17 @@ export default function SwmEquipment() {
         style={{ maxWidth: "95vw" }}
       >
         {detailModal && (
+          <>
+            {detailYearRecords.length >= 1 && (
+              <div style={{ marginBottom: 12 }}>
+                <Space size={8}>
+                  <Text type="secondary" style={{ fontSize: 12 }}>Data Year:</Text>
+                  {detailYearRecords.map((r) => r.dataYear || new Date().getFullYear()).filter((v, i, a) => a.indexOf(v) === i).sort((a, b) => b - a).map((yr) => (
+                    <Button key={yr} size="small" type={detailYear === yr ? "primary" : "default"} onClick={() => setDetailYear(yr)}>{yr}</Button>
+                  ))}
+                </Space>
+              </div>
+            )}
           <Tabs
             items={[
               {
@@ -919,121 +949,34 @@ export default function SwmEquipment() {
                 ),
                 children: (
                   <>
-                    <Row gutter={[16, 12]}>
-                      <Col xs={24} sm={12}>
-                        <Text type="secondary">
-                          <EnvironmentOutlined /> Province:
-                        </Text>{" "}
-                        <Text strong>{detailModal.province}</Text>
-                      </Col>
-                      <Col xs={24} sm={12}>
-                        <Text type="secondary">
-                          <EnvironmentOutlined /> Municipality:
-                        </Text>{" "}
-                        <Text strong>{detailModal.municipality}</Text>
-                      </Col>
-                      <Col xs={24} sm={12}>
-                        <Text type="secondary">Barangay:</Text>{" "}
-                        <Text>{detailModal.barangay || "—"}</Text>
-                      </Col>
-                      <Col xs={24} sm={12}>
-                        <Text type="secondary">Manila Bay Area:</Text>{" "}
-                        {detailModal.manilaBayArea === "MBA" ? (
-                          <Tag color="blue" bordered={false}>
-                            MBA
-                          </Tag>
+                    <Descriptions column={2} size="small" bordered>
+                      <Descriptions.Item label="Province">{detailViewRecord.province}</Descriptions.Item>
+                      <Descriptions.Item label="Municipality">{detailViewRecord.municipality}</Descriptions.Item>
+                      <Descriptions.Item label="Barangay">{detailViewRecord.barangay || "—"}</Descriptions.Item>
+                      <Descriptions.Item label="Manila Bay Area">{detailViewRecord.manilaBayArea === "MBA" ? (
+                          <Tag color="blue" bordered={false}>MBA</Tag>
                         ) : (
-                          <Tag color="default" bordered={false}>
-                            {detailModal.manilaBayArea || "—"}
-                          </Tag>
-                        )}
-                      </Col>
-                      <Col xs={24} sm={12}>
-                        <Text type="secondary">District:</Text>{" "}
-                        <Text>{detailModal.congressionalDistrict || "—"}</Text>
-                      </Col>
-                      <Col xs={24} sm={12}>
-                        <Text type="secondary">Coordinates:</Text>{" "}
-                        <Text>
-                          {detailModal.latitude}, {detailModal.longitude}
-                        </Text>
-                      </Col>
-                    </Row>
-                    <Divider plain orientation="left">
-                      <CarOutlined /> Equipment Details
-                    </Divider>
-                    <Row gutter={[16, 12]}>
-                      <Col xs={24} sm={12}>
-                        <Text type="secondary">Equipment Type:</Text>{" "}
-                        {detailModal.typeOfEquipment ? (
-                          <Tag color="orange" bordered={false}>
-                            {detailModal.typeOfEquipment}
-                          </Tag>
-                        ) : (
-                          "—"
-                        )}
-                      </Col>
-                      <Col xs={24} sm={12}>
-                        <Text type="secondary">Bio-Shredder:</Text>{" "}
-                        {getStatusTag(detailModal.statusOfBioShredder)}
-                      </Col>
-                      <Col xs={24} sm={12}>
-                        <Text type="secondary">Bio-Composter:</Text>{" "}
-                        {getStatusTag(detailModal.statusOfBioComposter)}
-                      </Col>
-                      <Col xs={24} sm={12}>
-                        <Text type="secondary">Soil Enhancer:</Text>{" "}
-                        <Text strong>
-                          {detailModal.weightOfSoilEnhancer
-                            ? `${Number(detailModal.weightOfSoilEnhancer).toLocaleString()} kg`
-                            : "—"}
-                        </Text>
-                      </Col>
-                      <Col xs={24} sm={12}>
-                        <Text type="secondary">CCTV:</Text>{" "}
-                        {getStatusTag(detailModal.statusOfCCTV)}
-                      </Col>
-                      <Col xs={24} sm={12}>
-                        <Text type="secondary">Chair Factory:</Text>{" "}
-                        {getStatusTag(detailModal.statusOfPlasticChairFactory)}
-                      </Col>
-                      <Col xs={24} sm={12}>
-                        <Text type="secondary">Chairs Produced:</Text>{" "}
-                        <Text strong>
-                          {detailModal.noPlasticChairProduced != null
-                            ? Number(
-                                detailModal.noPlasticChairProduced,
-                              ).toLocaleString()
-                            : "—"}
-                        </Text>
-                      </Col>
-                    </Row>
-                    <Divider plain orientation="left">
-                      <TeamOutlined /> Personnel
-                    </Divider>
-                    <Row gutter={[16, 12]}>
-                      <Col xs={24} sm={8}>
-                        <Text type="secondary">
-                          <UserOutlined /> Focal Person:
-                        </Text>
-                        <br />
-                        <Text strong>{detailModal.focalPerson || "—"}</Text>
-                      </Col>
-                      <Col xs={24} sm={8}>
-                        <Text type="secondary">
-                          <UserOutlined /> ESWM Staff:
-                        </Text>
-                        <br />
-                        <Text strong>{detailModal.eswmStaff || "—"}</Text>
-                      </Col>
-                      <Col xs={24} sm={8}>
-                        <Text type="secondary">
-                          <SolutionOutlined /> ENMO Assigned:
-                        </Text>
-                        <br />
-                        <Text strong>{detailModal.enmoAssigned || "—"}</Text>
-                      </Col>
-                    </Row>
+                          <Tag color="default" bordered={false}>{detailViewRecord.manilaBayArea || "—"}</Tag>
+                        )}</Descriptions.Item>
+                      <Descriptions.Item label="District">{detailViewRecord.congressionalDistrict || "—"}</Descriptions.Item>
+                      <Descriptions.Item label="Coordinates">{detailViewRecord.latitude}, {detailViewRecord.longitude}</Descriptions.Item>
+                    </Descriptions>
+                    <Descriptions column={2} size="small" bordered title="Equipment Details" style={{ marginTop: 16 }}>
+                      <Descriptions.Item label="Equipment Type">{detailViewRecord.typeOfEquipment ? (
+                          <Tag color="orange" bordered={false}>{detailViewRecord.typeOfEquipment}</Tag>
+                        ) : "—"}</Descriptions.Item>
+                      <Descriptions.Item label="Bio-Shredder">{getStatusTag(detailViewRecord.statusOfBioShredder)}</Descriptions.Item>
+                      <Descriptions.Item label="Bio-Composter">{getStatusTag(detailViewRecord.statusOfBioComposter)}</Descriptions.Item>
+                      <Descriptions.Item label="Soil Enhancer">{detailViewRecord.weightOfSoilEnhancer ? `${Number(detailViewRecord.weightOfSoilEnhancer).toLocaleString()} kg` : "—"}</Descriptions.Item>
+                      <Descriptions.Item label="CCTV">{getStatusTag(detailViewRecord.statusOfCCTV)}</Descriptions.Item>
+                      <Descriptions.Item label="Chair Factory">{getStatusTag(detailViewRecord.statusOfPlasticChairFactory)}</Descriptions.Item>
+                      <Descriptions.Item label="Chairs Produced">{detailViewRecord.noPlasticChairProduced != null ? Number(detailViewRecord.noPlasticChairProduced).toLocaleString() : "—"}</Descriptions.Item>
+                    </Descriptions>
+                    <Descriptions column={3} size="small" bordered title="Personnel" style={{ marginTop: 16 }}>
+                      <Descriptions.Item label="Focal Person">{detailViewRecord.focalPerson || "—"}</Descriptions.Item>
+                      <Descriptions.Item label="ESWM Staff">{detailViewRecord.eswmStaff || "—"}</Descriptions.Item>
+                      <Descriptions.Item label="ENMO Assigned">{detailViewRecord.enmoAssigned || "—"}</Descriptions.Item>
+                    </Descriptions>
                   </>
                 ),
               },
@@ -1045,84 +988,22 @@ export default function SwmEquipment() {
                   </>
                 ),
                 children: (
-                  <Row gutter={[16, 12]}>
-                    <Col xs={24} sm={12}>
-                      <Text type="secondary">Target Month:</Text>{" "}
-                      <Text>{detailModal.targetMonth || "—"}</Text>
-                    </Col>
-                    <Col xs={24} sm={12}>
-                      <Text type="secondary">IIS Number:</Text>{" "}
-                      <Text>{detailModal.iisNumber || "—"}</Text>
-                    </Col>
-                    <Col xs={24} sm={12}>
-                      <Text type="secondary">Date of Monitoring:</Text>{" "}
-                      <Text>
-                        {detailModal.dateOfMonitoring
-                          ? dayjs(detailModal.dateOfMonitoring).format(
-                              "MMM D, YYYY",
-                            )
-                          : "—"}
-                      </Text>
-                    </Col>
-                    <Col xs={24} sm={12}>
-                      <Text type="secondary">Report Prepared:</Text>{" "}
-                      <Text>
-                        {detailModal.dateReportPrepared
-                          ? dayjs(detailModal.dateReportPrepared).format(
-                              "MMM D, YYYY",
-                            )
-                          : "—"}
-                      </Text>
-                    </Col>
-                    <Col xs={24} sm={12}>
-                      <Text type="secondary">Reviewed (Staff):</Text>{" "}
-                      <Text>
-                        {detailModal.dateReportReviewedStaff
-                          ? dayjs(detailModal.dateReportReviewedStaff).format(
-                              "MMM D, YYYY",
-                            )
-                          : "—"}
-                      </Text>
-                    </Col>
-                    <Col xs={24} sm={12}>
-                      <Text type="secondary">Reviewed (Focal):</Text>{" "}
-                      <Text>
-                        {detailModal.dateReportReviewedFocal
-                          ? dayjs(detailModal.dateReportReviewedFocal).format(
-                              "MMM D, YYYY",
-                            )
-                          : "—"}
-                      </Text>
-                    </Col>
-                    <Col xs={24} sm={12}>
-                      <Text type="secondary">Report Approved:</Text>{" "}
-                      <Text>
-                        {detailModal.dateReportApproved
-                          ? dayjs(detailModal.dateReportApproved).format(
-                              "MMM D, YYYY",
-                            )
-                          : "—"}
-                      </Text>
-                    </Col>
-                    <Col xs={24} sm={8}>
-                      <Text type="secondary">Days Prepared:</Text>{" "}
-                      <Text strong>
-                        {detailModal.totalDaysReportPrepared ?? "—"}
-                      </Text>
-                    </Col>
-                    <Col xs={24} sm={8}>
-                      <Text type="secondary">Days Staff Review:</Text>{" "}
-                      <Text strong>
-                        {detailModal.totalDaysReviewedStaff ?? "—"}
-                      </Text>
-                    </Col>
-                    <Col xs={24} sm={8}>
-                      <Text type="secondary">Days Focal Review:</Text>{" "}
-                      <Text strong>
-                        {detailModal.totalDaysReviewedFocal ?? "—"}
-                      </Text>
-                    </Col>
-                  </Row>
+                  <>
+                    <Descriptions column={2} size="small" bordered>
+                      <Descriptions.Item label="Target Month">{detailViewRecord.targetMonth || "—"}</Descriptions.Item>
+                      <Descriptions.Item label="IIS Number">{detailViewRecord.iisNumber || "—"}</Descriptions.Item>
+                      <Descriptions.Item label="Date of Monitoring">{detailViewRecord.dateOfMonitoring ? dayjs(detailViewRecord.dateOfMonitoring).format("MMM D, YYYY") : "—"}</Descriptions.Item>
+                      <Descriptions.Item label="Report Prepared">{detailViewRecord.dateReportPrepared ? dayjs(detailViewRecord.dateReportPrepared).format("MMM D, YYYY") : "—"}</Descriptions.Item>
+                      <Descriptions.Item label="Reviewed (Staff)">{detailViewRecord.dateReportReviewedStaff ? dayjs(detailViewRecord.dateReportReviewedStaff).format("MMM D, YYYY") : "—"}</Descriptions.Item>
+                      <Descriptions.Item label="Reviewed (Focal)">{detailViewRecord.dateReportReviewedFocal ? dayjs(detailViewRecord.dateReportReviewedFocal).format("MMM D, YYYY") : "—"}</Descriptions.Item>
+                      <Descriptions.Item label="Report Approved">{detailViewRecord.dateReportApproved ? dayjs(detailViewRecord.dateReportApproved).format("MMM D, YYYY") : "—"}</Descriptions.Item>
+                    </Descriptions>
+                    <Descriptions column={3} size="small" bordered style={{ marginTop: 16 }}>
+                      <Descriptions.Item label="Days Prepared">{detailViewRecord.totalDaysReportPrepared ?? "—"}</Descriptions.Item>
+                      <Descriptions.Item label="Days Staff Review">{detailViewRecord.totalDaysReviewedStaff ?? "—"}</Descriptions.Item>
+                      <Descriptions.Item label="Days Focal Review">{detailViewRecord.totalDaysReviewedFocal ?? "—"}</Descriptions.Item>
+                    </Descriptions>
+                  </>
                 ),
               },
               {
@@ -1133,29 +1014,17 @@ export default function SwmEquipment() {
                   </>
                 ),
                 children: (
-                  <Row gutter={[16, 12]}>
-                    <Col span={24}>
-                      <Text type="secondary">Remarks:</Text>
-                      <br />
-                      <Text>{detailModal.remarksNonOperating || "—"}</Text>
-                    </Col>
-                    <Col xs={24} sm={12}>
-                      <Text type="secondary">Advise Letter:</Text>{" "}
-                      <Text>{detailModal.adviseLetterIssued || "—"}</Text>
-                    </Col>
-                    <Col xs={24} sm={12}>
-                      <Text type="secondary">Compliance:</Text>{" "}
-                      <Text>{detailModal.complianceToAdvise || "—"}</Text>
-                    </Col>
-                    <Col xs={24} sm={12}>
-                      <Text type="secondary">Signed Document:</Text>{" "}
-                      <Text>{detailModal.signedDocument || "—"}</Text>
-                    </Col>
-                  </Row>
+                  <Descriptions column={2} size="small" bordered>
+                    <Descriptions.Item label="Remarks" span={2}>{detailViewRecord.remarksNonOperating || "—"}</Descriptions.Item>
+                    <Descriptions.Item label="Advise Letter">{detailViewRecord.adviseLetterIssued || "—"}</Descriptions.Item>
+                    <Descriptions.Item label="Compliance">{detailViewRecord.complianceToAdvise || "—"}</Descriptions.Item>
+                    <Descriptions.Item label="Signed Document">{detailViewRecord.signedDocument || "—"}</Descriptions.Item>
+                  </Descriptions>
                 ),
               },
             ]}
           />
+          </>
         )}
       </Modal>
 
@@ -1173,6 +1042,9 @@ export default function SwmEquipment() {
         }}
       >
         <Form form={form} layout="vertical" size="small">
+          <Row gutter={16} style={{ marginBottom: 16 }}>
+            <Col xs={24} sm={8}><Form.Item name="dataYear" label="Data Year" rules={[{ required: true }]}><Select options={Array.from({length:7},(_,i)=>{ const y=new Date().getFullYear()-i; return {label:y,value:y}; })} placeholder="Select Year" /></Form.Item></Col>
+          </Row>
           <Collapse
             defaultActiveKey={["location","equipment","personnel","monitoring","compliance"]}
             bordered={false}
@@ -1228,7 +1100,7 @@ export default function SwmEquipment() {
                       <Form.Item name="latitude" label="Latitude">
                         <InputNumber
                           style={{ width: "100%" }}
-                          step={0.000001}
+                          step={0.0001} precision={4}
                         />
                       </Form.Item>
                     </Col>
@@ -1236,7 +1108,7 @@ export default function SwmEquipment() {
                       <Form.Item name="longitude" label="Longitude">
                         <InputNumber
                           style={{ width: "100%" }}
-                          step={0.000001}
+                          step={0.0001} precision={4}
                         />
                       </Form.Item>
                     </Col>

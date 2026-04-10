@@ -17,15 +17,18 @@ router.get("/", async (req, res) => {
 // Dashboard stats
 router.get("/stats", async (req, res) => {
   try {
+    const yearFilter = req.query.year ? { dataYear: Number(req.query.year) } : {};
     const [totalRecords, byProvince, byStatus, byManilaBayArea, operationStats, mapData] =
       await Promise.all([
-        TrashTrap.countDocuments(),
+        TrashTrap.countDocuments(yearFilter),
         TrashTrap.aggregate([
+        ...(Object.keys(yearFilter).length ? [{ $match: yearFilter }] : []),
           { $addFields: { _normProvince: { $replaceAll: { input: "$province", find: "Province of ", replacement: "" } } } },
           { $group: { _id: "$_normProvince", count: { $sum: 1 } } },
           { $sort: { count: -1 } },
         ]),
         TrashTrap.aggregate([
+        ...(Object.keys(yearFilter).length ? [{ $match: yearFilter }] : []),
           {
             $group: {
               _id: {
@@ -46,6 +49,7 @@ router.get("/stats", async (req, res) => {
           },
         ]),
         TrashTrap.aggregate([
+        ...(Object.keys(yearFilter).length ? [{ $match: yearFilter }] : []),
           {
             $group: {
               _id: { $ifNull: ["$manilaBayArea", "Non-MBA"] },
@@ -54,6 +58,7 @@ router.get("/stats", async (req, res) => {
           },
         ]),
         TrashTrap.aggregate([
+        ...(Object.keys(yearFilter).length ? [{ $match: yearFilter }] : []),
           {
             $group: {
               _id: null,
@@ -64,7 +69,7 @@ router.get("/stats", async (req, res) => {
           },
         ]),
         TrashTrap.find(
-          { latitude: { $ne: null }, longitude: { $ne: null } },
+        { ...yearFilter, latitude: { $ne: null }, longitude: { $ne: null } },
           { province: 1, municipality: 1, barangay: 1, manilaBayArea: 1, latitude: 1, longitude: 1, statusOfTrashTraps: 1, noOfTrashTrapsHDPE: 1, estimatedVolumeWasteHauled: 1, focalPerson: 1, enmoAssigned: 1, dateInstalled: 1 }
         ),
       ]);
@@ -128,6 +133,18 @@ router.delete("/:id", async (req, res) => {
     if (!record) return res.status(404).json({ message: "Record not found" });
     res.json({ message: "Record deleted" });
     writeLog("warn", "trashTrap.delete", { message: `Deleted trash trap: ${req.params.id}`, ip: req.ip });
+  } catch (error) {
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+});
+
+// History: all year records for a municipality
+router.get("/history/:municipality", async (req, res) => {
+  try {
+    const records = await TrashTrap.find({
+      municipality: { $regex: new RegExp(`^${req.params.municipality.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "i") },
+    }).sort({ dataYear: -1 });
+    res.json(records);
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });
   }

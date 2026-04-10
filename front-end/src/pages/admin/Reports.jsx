@@ -148,16 +148,17 @@ export default function Reports() {
     {
       title: "Date & Time",
       dataIndex: "createdAt",
-      width: 160,
-      render: (v) => dayjs(v).format("MMM DD, YYYY HH:mm"),
+      width: 140,
+      render: (v) => <span style={{ fontSize: 12 }}>{dayjs(v).format("MMM DD, YYYY hh:mm A")}</span>,
     },
     {
       title: "Submission ID",
       dataIndex: "submissionId",
-      width: 190,
+      width: 180,
+      ellipsis: true,
       render: (v) =>
         v ? (
-          <Button type="link" size="small" onClick={() => openThread(v)} style={{ padding: 0 }}>
+          <Button type="link" size="small" onClick={() => openThread(v)} style={{ padding: 0, fontSize: 12 }}>
             {v}
           </Button>
         ) : (
@@ -167,18 +168,18 @@ export default function Reports() {
     {
       title: "Company",
       dataIndex: "companyName",
-      width: 180,
+      width: 150,
       ellipsis: true,
-      render: (v) => v || "—",
+      render: (v) => <span style={{ fontSize: 12 }}>{v || "—"}</span>,
     },
     {
       title: "Type",
       dataIndex: "type",
-      width: 130,
+      width: 150,
       render: (v) => {
         const cfg = TYPE_CONFIG[v] || {};
         return (
-          <Tag color={cfg.color} icon={cfg.icon}>
+          <Tag color={cfg.color} icon={cfg.icon} style={{ fontSize: 11 }}>
             {cfg.label || v}
           </Tag>
         );
@@ -188,13 +189,14 @@ export default function Reports() {
       title: "Description",
       dataIndex: "description",
       ellipsis: true,
-      render: (v) => v || "—",
+      render: (v) => <span style={{ fontSize: 12 }}>{v || "—"}</span>,
     },
     {
       title: "Performed By",
       dataIndex: "performedBy",
-      width: 120,
-      render: (v) => v || "—",
+      width: 250,
+      ellipsis: true,
+      render: (v) => <span style={{ fontSize: 12 }}>{v || "—"}</span>,
     },
   ];
 
@@ -282,7 +284,8 @@ export default function Reports() {
           rowKey="_id"
           loading={loading}
           size="small"
-          scroll={{ x: 900 }}
+          scroll={{ x: 750 }}
+          style={{ fontSize: 12 }}
           pagination={{
             current: page,
             pageSize,

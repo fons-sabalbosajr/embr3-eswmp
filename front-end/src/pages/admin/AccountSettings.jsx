@@ -16,6 +16,10 @@ import {
   Form,
   Avatar,
   Divider,
+  Collapse,
+  Row,
+  Col,
+  Badge,
 } from "antd";
 import {
   DeleteOutlined,
@@ -26,6 +30,15 @@ import {
   DownloadOutlined,
   SafetyCertificateOutlined,
   EditOutlined,
+  DashboardOutlined,
+  FileTextOutlined,
+  EnvironmentOutlined,
+  BarChartOutlined,
+  SettingOutlined,
+  TeamOutlined,
+  ToolOutlined,
+  ExperimentOutlined,
+  CheckCircleOutlined,
 } from "@ant-design/icons";
 import Swal from "sweetalert2";
 import api from "../../api";
@@ -35,14 +48,34 @@ import secureStorage from "../../utils/secureStorage";
 const { Title, Text } = Typography;
 const { Option } = Select;
 
-const PERMISSION_LABELS = {
-  dashboard: "Dashboard",
-  submissions: "Submissions",
-  slfMonitoring: "SLF Monitoring",
-  reports: "Reports",
-  accountSettings: "Accounts & Roles",
-  portalFields: "Portal Fields",
-};
+const PERMISSION_GROUPS = [
+  { group: "General", icon: <DashboardOutlined />, color: "#1890ff", items: [
+    { key: "dashboard", label: "Dashboard" },
+    { key: "submissions", label: "SLF Submissions" },
+    { key: "slfMonitoring", label: "SLF Monitoring" },
+    { key: "reports", label: "Reports" },
+  ]},
+  { group: "SWM Programs", icon: <ExperimentOutlined />, color: "#13c2c2", items: [
+    { key: "tenYearSwm", label: "10-Year SWM Plan" },
+    { key: "fundedMrf", label: "Funded MRF" },
+    { key: "lguInitiatedMrf", label: "LGU Initiated MRF" },
+    { key: "trashTraps", label: "Trash Traps" },
+    { key: "swmEquipment", label: "SWM Equipment" },
+  ]},
+  { group: "Monitoring & Assistance", icon: <EnvironmentOutlined />, color: "#722ed1", items: [
+    { key: "technicalAssistance", label: "Technical Assistance" },
+    { key: "transferStations", label: "Transfer Stations" },
+    { key: "openDumpsites", label: "Open Dumpsites" },
+    { key: "projectDescScoping", label: "PDS (Scoping)" },
+    { key: "residualContainment", label: "Residual Containment" },
+    { key: "lguAssistDiversion", label: "LGU Assist & Diversion" },
+  ]},
+  { group: "Settings", icon: <SettingOutlined />, color: "#fa8c16", items: [
+    { key: "accountSettings", label: "Accounts & Roles" },
+    { key: "portalFields", label: "Portal Fields" },
+    { key: "dataReferences", label: "Data References" },
+  ]},
+];
 
 export default function AccountSettings() {
   const [users, setUsers] = useState([]);
@@ -314,25 +347,77 @@ export default function AccountSettings() {
         onOk={savePermissions}
         confirmLoading={savingPerms}
         okText="Save Permissions"
+        width={600}
       >
         {accessModal && (
           <>
-            <Descriptions size="small" column={1} style={{ marginBottom: 16 }}>
-              <Descriptions.Item label="Email">{accessModal.email}</Descriptions.Item>
-              <Descriptions.Item label="Role">
-                <Tag color={accessModal.role === "admin" ? "gold" : "blue"}>{accessModal.role}</Tag>
-              </Descriptions.Item>
-            </Descriptions>
-            <Title level={5} style={{ marginBottom: 12 }}>Module Access</Title>
-            {Object.entries(PERMISSION_LABELS).map(([key, label]) => (
-              <div key={key} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 0", borderBottom: "1px solid rgba(128,128,128,0.15)" }}>
-                <Text>{label}</Text>
-                <Switch
-                  checked={permEdits[key] !== false}
-                  onChange={(checked) => setPermEdits((p) => ({ ...p, [key]: checked }))}
-                />
+            <div style={{ textAlign: "center", marginBottom: 16, padding: "12px 0", background: "linear-gradient(135deg, #f6f8fc 0%, #eef2f7 100%)", borderRadius: 8 }}>
+              <Avatar size={48} style={{ backgroundColor: accessModal.role === "admin" ? "#faad14" : "#1a3353" }} icon={<UserOutlined />} />
+              <div style={{ marginTop: 8 }}>
+                <Text strong>{accessModal.firstName} {accessModal.lastName}</Text>
+                <br />
+                <Text type="secondary" style={{ fontSize: 12 }}>{accessModal.email}</Text>
+                <br />
+                <Tag color={accessModal.role === "admin" ? "gold" : "blue"} style={{ marginTop: 4 }}>{accessModal.role}</Tag>
               </div>
-            ))}
+            </div>
+            <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 12 }}>
+              <Text strong>Module Permissions</Text>
+              <Space size={4}>
+                <Button size="small" type="link" onClick={() => {
+                  const all = {};
+                  PERMISSION_GROUPS.forEach(g => g.items.forEach(i => { all[i.key] = true; }));
+                  setPermEdits(all);
+                }}>Enable All</Button>
+                <Button size="small" type="link" danger onClick={() => {
+                  const all = {};
+                  PERMISSION_GROUPS.forEach(g => g.items.forEach(i => { all[i.key] = false; }));
+                  setPermEdits(all);
+                }}>Disable All</Button>
+              </Space>
+            </div>
+            <Collapse
+              defaultActiveKey={PERMISSION_GROUPS.map(g => g.group)}
+              bordered={false}
+              size="small"
+              items={PERMISSION_GROUPS.map(g => {
+                const enabledCount = g.items.filter(i => permEdits[i.key] !== false).length;
+                return {
+                  key: g.group,
+                  label: (
+                    <Space>
+                      <span style={{ color: g.color }}>{g.icon}</span>
+                      <Text strong style={{ fontSize: 13 }}>{g.group}</Text>
+                      <Badge count={`${enabledCount}/${g.items.length}`} style={{ backgroundColor: enabledCount === g.items.length ? "#52c41a" : "#faad14", fontSize: 10 }} />
+                    </Space>
+                  ),
+                  extra: (
+                    <Switch
+                      size="small"
+                      checked={enabledCount === g.items.length}
+                      onClick={(_, e) => e.stopPropagation()}
+                      onChange={(checked) => {
+                        const updates = {};
+                        g.items.forEach(i => { updates[i.key] = checked; });
+                        setPermEdits(p => ({ ...p, ...updates }));
+                      }}
+                    />
+                  ),
+                  children: (
+                    <Row gutter={[8, 4]}>
+                      {g.items.map(i => (
+                        <Col key={i.key} xs={24} sm={12}>
+                          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "6px 8px", borderRadius: 6, background: permEdits[i.key] !== false ? "rgba(82,196,26,0.06)" : "rgba(0,0,0,0.02)" }}>
+                            <Text style={{ fontSize: 12 }}>{i.label}</Text>
+                            <Switch size="small" checked={permEdits[i.key] !== false} onChange={(checked) => setPermEdits(p => ({ ...p, [i.key]: checked }))} />
+                          </div>
+                        </Col>
+                      ))}
+                    </Row>
+                  ),
+                };
+              })}
+            />
           </>
         )}
       </Modal>

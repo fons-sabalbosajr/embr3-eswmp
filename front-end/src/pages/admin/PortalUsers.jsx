@@ -14,14 +14,26 @@ import {
   Badge,
   Card,
   Descriptions,
+  Avatar,
+  Divider,
+  Row,
+  Col,
+  Timeline,
 } from "antd";
 import {
   CheckCircleOutlined,
   CloseCircleOutlined,
   DeleteOutlined,
+  EditOutlined,
   EyeOutlined,
   ReloadOutlined,
   UserOutlined,
+  MailOutlined,
+  PhoneOutlined,
+  BankOutlined,
+  CalendarOutlined,
+  EnvironmentOutlined,
+  ClockCircleOutlined,
 } from "@ant-design/icons";
 import Swal from "sweetalert2";
 import dayjs from "dayjs";
@@ -41,6 +53,9 @@ export default function PortalUsers() {
   const [selectedSlf, setSelectedSlf] = useState(null);
   const [detailModal, setDetailModal] = useState({ open: false, user: null });
   const [approving, setApproving] = useState(false);
+  const [editSlfModal, setEditSlfModal] = useState({ open: false, user: null });
+  const [editSlfValue, setEditSlfValue] = useState(null);
+  const [editingSlfLoading, setEditingSlfLoading] = useState(false);
 
   useEffect(() => {
     fetchData();
@@ -144,6 +159,36 @@ export default function PortalUsers() {
     }
   };
 
+  const handleEditSlf = async () => {
+    if (!editSlfValue) {
+      Swal.fire("Warning", "Please select an SLF to assign.", "warning");
+      return;
+    }
+    setEditingSlfLoading(true);
+    try {
+      await api.patch(`/portal-users/${editSlfModal.user._id}/update-slf`, {
+        assignedSlf: editSlfValue,
+      });
+      Swal.fire({
+        icon: "success",
+        title: "Updated",
+        text: "Assigned SLF has been updated.",
+        confirmButtonColor: "#1a3353",
+      });
+      setEditSlfModal({ open: false, user: null });
+      setEditSlfValue(null);
+      fetchData();
+    } catch (err) {
+      Swal.fire(
+        "Error",
+        err.response?.data?.message || "Failed to update SLF",
+        "error"
+      );
+    } finally {
+      setEditingSlfLoading(false);
+    }
+  };
+
   const statusColor = {
     pending: "orange",
     approved: "green",
@@ -242,6 +287,18 @@ export default function PortalUsers() {
                 />
               </Tooltip>
             </>
+          )}
+          {record.status === "approved" && (
+            <Tooltip title="Edit Assigned SLF">
+              <Button
+                size="small"
+                icon={<EditOutlined />}
+                onClick={() => {
+                  setEditSlfValue(record.assignedSlf || null);
+                  setEditSlfModal({ open: true, user: record });
+                }}
+              />
+            </Tooltip>
           )}
           <Tooltip title="Delete">
             <Button
@@ -350,55 +407,135 @@ export default function PortalUsers() {
         )}
       </Modal>
 
+      {/* Edit Assigned SLF Modal */}
+      <Modal
+        title="Edit Assigned SLF"
+        open={editSlfModal.open}
+        onCancel={() => {
+          setEditSlfModal({ open: false, user: null });
+          setEditSlfValue(null);
+        }}
+        onOk={handleEditSlf}
+        confirmLoading={editingSlfLoading}
+        okText="Update SLF"
+        okButtonProps={{ style: { background: "#1a3353", borderColor: "#1a3353" } }}
+      >
+        {editSlfModal.user && (
+          <div>
+            <Descriptions column={1} size="small" style={{ marginBottom: 16 }}>
+              <Descriptions.Item label="Name">
+                {editSlfModal.user.firstName} {editSlfModal.user.lastName}
+              </Descriptions.Item>
+              <Descriptions.Item label="Email">
+                {editSlfModal.user.email}
+              </Descriptions.Item>
+              <Descriptions.Item label="Current SLF">
+                {editSlfModal.user.assignedSlfName || "Not assigned"}
+              </Descriptions.Item>
+            </Descriptions>
+            <Text strong style={{ display: "block", marginBottom: 8 }}>
+              Assign New SLF:
+            </Text>
+            <Select
+              placeholder="Select SLF to assign"
+              style={{ width: "100%" }}
+              value={editSlfValue}
+              onChange={setEditSlfValue}
+              showSearch
+              optionFilterProp="label"
+              options={generators.map((g) => ({
+                label: `${g.lgu}${g.ownership ? " (" + g.ownership + ")" : ""}`,
+                value: g._id,
+              }))}
+              notFoundContent={<Empty description="No SLF available" />}
+            />
+          </div>
+        )}
+      </Modal>
+
       {/* Detail Modal */}
       <Modal
-        title="Portal User Details"
+        title={null}
         open={detailModal.open}
         onCancel={() => setDetailModal({ open: false, user: null })}
-        footer={null}
-        width={520}
+        footer={<Button onClick={() => setDetailModal({ open: false, user: null })}>Close</Button>}
+        width={560}
       >
-        {detailModal.user && (
-          <Descriptions column={1} bordered size="small">
-            <Descriptions.Item label="Name">
-              {detailModal.user.firstName} {detailModal.user.lastName}
-            </Descriptions.Item>
-            <Descriptions.Item label="Email">
-              {detailModal.user.email}
-            </Descriptions.Item>
-            <Descriptions.Item label="Contact">
-              {detailModal.user.contactNumber || "—"}
-            </Descriptions.Item>
-            <Descriptions.Item label="Company/LGU">
-              {detailModal.user.companyName || "—"}
-            </Descriptions.Item>
-            <Descriptions.Item label="Status">
-              <Tag color={statusColor[detailModal.user.status]}>
-                {detailModal.user.status?.toUpperCase()}
-              </Tag>
-            </Descriptions.Item>
-            <Descriptions.Item label="Assigned SLF">
-              {detailModal.user.assignedSlfName || "Not assigned"}
-            </Descriptions.Item>
-            <Descriptions.Item label="Registered">
-              {dayjs(detailModal.user.createdAt).format(
-                "MMM D, YYYY h:mm A"
+        {detailModal.user && (() => {
+          const u = detailModal.user;
+          const statusConfig = { pending: { color: "#fa8c16", bg: "#fff7e6", text: "Pending Approval" }, approved: { color: "#52c41a", bg: "#f6ffed", text: "Approved" }, rejected: { color: "#ff4d4f", bg: "#fff2f0", text: "Rejected" } };
+          const sc = statusConfig[u.status] || statusConfig.pending;
+          return (
+            <>
+              {/* Header Card */}
+              <div style={{ textAlign: "center", padding: "24px 16px 16px", background: "linear-gradient(135deg, #f0f5ff 0%, #e6f7ff 100%)", borderRadius: 12, marginBottom: 16 }}>
+                <Avatar size={72} style={{ backgroundColor: "#1a3353", fontSize: 28 }} icon={<UserOutlined />} />
+                <div style={{ marginTop: 12 }}>
+                  <Text strong style={{ fontSize: 18 }}>{u.firstName} {u.lastName}</Text>
+                </div>
+                <div style={{ marginTop: 4 }}>
+                  <Tag color={statusColor[u.status]} style={{ fontSize: 12, padding: "2px 12px", borderRadius: 12 }}>{sc.text}</Tag>
+                </div>
+              </div>
+
+              {/* Contact Info */}
+              <Row gutter={[16, 12]} style={{ marginBottom: 16 }}>
+                <Col span={24}>
+                  <Card size="small" style={{ borderRadius: 8 }}>
+                    <Space direction="vertical" size={8} style={{ width: "100%" }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                        <MailOutlined style={{ color: "#1890ff", fontSize: 16 }} />
+                        <div><Text type="secondary" style={{ fontSize: 11 }}>Email</Text><br /><Text>{u.email}</Text></div>
+                      </div>
+                      <Divider style={{ margin: "4px 0" }} />
+                      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                        <PhoneOutlined style={{ color: "#52c41a", fontSize: 16 }} />
+                        <div><Text type="secondary" style={{ fontSize: 11 }}>Contact Number</Text><br /><Text>{u.contactNumber || "—"}</Text></div>
+                      </div>
+                      <Divider style={{ margin: "4px 0" }} />
+                      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                        <BankOutlined style={{ color: "#722ed1", fontSize: 16 }} />
+                        <div><Text type="secondary" style={{ fontSize: 11 }}>Company / LGU</Text><br /><Text>{u.companyName || "—"}</Text></div>
+                      </div>
+                    </Space>
+                  </Card>
+                </Col>
+              </Row>
+
+              {/* Assignment & Details */}
+              <Row gutter={[16, 12]}>
+                <Col xs={24} sm={12}>
+                  <Card size="small" style={{ borderRadius: 8, height: "100%" }}>
+                    <Text type="secondary" style={{ fontSize: 11 }}><EnvironmentOutlined /> Assigned SLF</Text>
+                    <div style={{ marginTop: 4 }}>
+                      <Text strong style={{ fontSize: 13 }}>{u.assignedSlfName || "Not assigned"}</Text>
+                    </div>
+                  </Card>
+                </Col>
+                <Col xs={24} sm={12}>
+                  <Card size="small" style={{ borderRadius: 8, height: "100%" }}>
+                    <Text type="secondary" style={{ fontSize: 11 }}><CalendarOutlined /> Registered</Text>
+                    <div style={{ marginTop: 4 }}>
+                      <Text strong style={{ fontSize: 13 }}>{dayjs(u.createdAt).format("MMM D, YYYY")}</Text>
+                      <br /><Text type="secondary" style={{ fontSize: 11 }}>{dayjs(u.createdAt).format("h:mm A")}</Text>
+                    </div>
+                  </Card>
+                </Col>
+              </Row>
+
+              {/* Activity Timeline */}
+              {(u.approvedAt || u.rejectedReason) && (
+                <Card size="small" style={{ borderRadius: 8, marginTop: 12 }} title={<Text strong style={{ fontSize: 13 }}><ClockCircleOutlined /> Activity</Text>}>
+                  <Timeline items={[
+                    { color: "blue", children: <><Text style={{ fontSize: 12 }}>Registered</Text><br /><Text type="secondary" style={{ fontSize: 11 }}>{dayjs(u.createdAt).format("MMM D, YYYY h:mm A")}</Text></> },
+                    ...(u.approvedAt ? [{ color: "green", children: <><Text style={{ fontSize: 12 }}>Approved</Text><br /><Text type="secondary" style={{ fontSize: 11 }}>{dayjs(u.approvedAt).format("MMM D, YYYY h:mm A")}</Text></> }] : []),
+                    ...(u.rejectedReason ? [{ color: "red", children: <><Text style={{ fontSize: 12 }}>Rejected</Text><br /><Text type="secondary" style={{ fontSize: 11 }}>{u.rejectedReason}</Text></> }] : []),
+                  ]} />
+                </Card>
               )}
-            </Descriptions.Item>
-            {detailModal.user.approvedAt && (
-              <Descriptions.Item label="Approved At">
-                {dayjs(detailModal.user.approvedAt).format(
-                  "MMM D, YYYY h:mm A"
-                )}
-              </Descriptions.Item>
-            )}
-            {detailModal.user.rejectedReason && (
-              <Descriptions.Item label="Rejection Reason">
-                {detailModal.user.rejectedReason}
-              </Descriptions.Item>
-            )}
-          </Descriptions>
-        )}
+            </>
+          );
+        })()}
       </Modal>
     </div>
   );

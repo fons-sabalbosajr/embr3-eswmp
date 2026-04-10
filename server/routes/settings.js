@@ -109,10 +109,31 @@ router.put("/app", async (req, res) => {
     if (!settings) {
       settings = new AppSettings(req.body);
     } else {
+      // Handle dashboardTabs Map specially
+      if (req.body.dashboardTabs) {
+        if (!settings.dashboardTabs) settings.dashboardTabs = new Map();
+        for (const [key, val] of Object.entries(req.body.dashboardTabs)) {
+          settings.dashboardTabs.set(key, val);
+        }
+        delete req.body.dashboardTabs;
+      }
       Object.assign(settings, req.body);
     }
     await settings.save();
     res.json({ message: "Settings updated", data: settings });
+  } catch (error) {
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+});
+
+// Update org chart
+router.put("/org-chart", async (req, res) => {
+  try {
+    let settings = await AppSettings.findOne();
+    if (!settings) settings = new AppSettings();
+    settings.orgChart = req.body.orgChart || [];
+    await settings.save();
+    res.json({ message: "Org chart updated", data: settings.orgChart });
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });
   }

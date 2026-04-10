@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useMemo } from "react";
 import {
   Card, Table, Button, Modal, Form, Input, InputNumber, Select, Space, Tag,
-  Divider, Row, Col, Typography, DatePicker, Tooltip, Collapse, Statistic, Badge,
+  Divider, Row, Col, Typography, DatePicker, Tooltip, Collapse, Statistic, Badge, Descriptions,
 } from "antd";
 import {
   PlusOutlined, EditOutlined, DownloadOutlined, SearchOutlined, EyeOutlined,
@@ -63,6 +63,8 @@ export default function OpenDumpsites() {
   const [loading, setLoading] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
   const [detailModal, setDetailModal] = useState(null);
+  const [detailYearRecords, setDetailYearRecords] = useState([]);
+  const [detailYear, setDetailYear] = useState(null);
   const [editing, setEditing] = useState(null);
   const [searchText, setSearchText] = useState("");
   const [filterProvince, setFilterProvince] = useState(null);
@@ -88,7 +90,26 @@ export default function OpenDumpsites() {
 
   useEffect(() => { fetchRecords(); }, [fetchRecords]);
 
-  const openAdd = () => { setEditing(null); form.resetFields(); setModalOpen(true); };
+  // Fetch cross-year history when viewing a record
+  useEffect(() => {
+    if (!detailModal) { setDetailYearRecords([]); setDetailYear(null); return; }
+    const name = detailModal.municipality;
+    api.get(`/open-dumpsites/history/${encodeURIComponent(name)}`)
+      .then(({ data }) => {
+        const enriched = data.map((r) => ({ ...r, ...computeFields(r) }));
+        setDetailYearRecords(enriched);
+        setDetailYear(detailModal.dataYear || new Date().getFullYear());
+      })
+      .catch(() => { setDetailYearRecords([]); setDetailYear(detailModal.dataYear || new Date().getFullYear()); });
+  }, [detailModal]);
+
+  const detailViewRecord = useMemo(() => {
+    if (detailYearRecords.length === 0) return detailModal;
+    return detailYearRecords.find((r) => (r.dataYear || new Date().getFullYear()) === detailYear) || detailModal;
+  }, [detailModal, detailYearRecords, detailYear]);
+
+
+  const openAdd = (prefill) => { setEditing(null); form.resetFields(); if (prefill) form.setFieldsValue(prefill); setModalOpen(true); };
   const openEdit = (record) => {
     setEditing(record);
     form.setFieldsValue({
@@ -225,6 +246,7 @@ export default function OpenDumpsites() {
         <Space size={4}>
           <Tooltip title="View Details"><Button type="text" size="small" icon={<EyeOutlined style={{ color: "#1890ff" }} />} onClick={() => setDetailModal(record)} /></Tooltip>
           <Tooltip title="Edit"><Button type="text" size="small" icon={<EditOutlined style={{ color: "#52c41a" }} />} onClick={() => openEdit(record)} /></Tooltip>
+          <Tooltip title="Add Record"><Button type="text" size="small" icon={<PlusOutlined style={{ color: "#13c2c2" }} />} onClick={() => openAdd({ municipality: record.municipality, province: record.province, barangay: record.barangay, manilaBayArea: record.manilaBayArea, congressionalDistrict: record.congressionalDistrict, latitude: record.latitude, longitude: record.longitude })} /></Tooltip>
         </Space>
       ),
     },
@@ -321,62 +343,80 @@ export default function OpenDumpsites() {
       </Card>
 
       {/* Detail Modal */}
-      <Modal title={<Space><FileTextOutlined />{detailModal?.municipality}, {detailModal?.province}</Space>} open={!!detailModal} onCancel={() => setDetailModal(null)} footer={<Button onClick={() => setDetailModal(null)}>Close</Button>} width={800} style={{ maxWidth: "95vw" }}>
+      <Modal title={<Space><FileTextOutlined />{detailModal?.municipality}, {detailModal?.province}{detailYearRecords.length >= 1 && <Tag color="blue" bordered={false} style={{ marginLeft: 8 }}>{detailYearRecords.length} year records</Tag>}</Space>} open={!!detailModal} onCancel={() => setDetailModal(null)} footer={<Button onClick={() => setDetailModal(null)}>Close</Button>} width={800} style={{ maxWidth: "95vw" }}>
         {detailModal && (
+          <>
+            {detailYearRecords.length >= 1 && (
+              <div style={{ marginBottom: 12 }}>
+                <Space size={8}>
+                  <Text type="secondary" style={{ fontSize: 12 }}>Data Year:</Text>
+                  {detailYearRecords.map((r) => r.dataYear || new Date().getFullYear()).filter((v, i, a) => a.indexOf(v) === i).sort((a, b) => b - a).map((yr) => (
+                    <Button key={yr} size="small" type={detailYear === yr ? "primary" : "default"} onClick={() => setDetailYear(yr)}>{yr}</Button>
+                  ))}
+                </Space>
+              </div>
+            )}
           <Collapse defaultActiveKey={["general","rehab","monitoring","compliance"]} bordered={false} items={[
             { key: "general", label: <span style={{ color: "#1677ff" }}><EnvironmentOutlined /> General Info</span>, children: (
-              <Row gutter={[16, 12]}>
-                <Col xs={24} sm={12}><Text type="secondary">Province:</Text> <Text strong>{detailModal.province}</Text></Col>
-                <Col xs={24} sm={12}><Text type="secondary">Municipality:</Text> <Text strong>{detailModal.municipality}</Text></Col>
-                <Col xs={24} sm={12}><Text type="secondary">Barangay:</Text> <Text>{detailModal.barangay || "—"}</Text></Col>
-                <Col xs={24} sm={12}><Text type="secondary">MBA:</Text> {detailModal.manilaBayArea === "MBA" ? <Tag color="blue" bordered={false}>MBA</Tag> : <Tag bordered={false}>{detailModal.manilaBayArea || "—"}</Tag>}</Col>
-                <Col xs={24} sm={12}><Text type="secondary">District:</Text> <Text>{detailModal.congressionalDistrict || "—"}</Text></Col>
-                <Col xs={24} sm={12}><Text type="secondary">Coordinates:</Text> <Text>{detailModal.latitude}, {detailModal.longitude}</Text></Col>
-                <Col xs={24} sm={12}><Text type="secondary">Year Started:</Text> <Text>{detailModal.yearStartedOperation || "—"}</Text></Col>
-                <Col xs={24} sm={12}><Text type="secondary">Year End:</Text> <Text>{detailModal.yearEndOperation || "—"}</Text></Col>
-                <Col xs={24} sm={12}><Text type="secondary">Year Rehabilitated:</Text> <Text>{detailModal.yearFullyRehabilitated || "—"}</Text></Col>
-                <Col xs={24} sm={12}><Text type="secondary">Year Granted:</Text> <Text>{detailModal.yearGranted || "—"}</Text></Col>
-                <Col xs={24} sm={12}><Text type="secondary">Amount Granted:</Text> <Text strong>{detailModal.amountGranted != null ? `₱${detailModal.amountGranted.toLocaleString()}` : "—"}</Text></Col>
-                <Col xs={24} sm={12}><Text type="secondary">Status:</Text> {getStatusTag(detailModal.statusOfSiteArea)}</Col>
-              </Row>
+              <Descriptions column={2} size="small" bordered>
+                <Descriptions.Item label="Province"><Text strong>{detailViewRecord.province}</Text></Descriptions.Item>
+                <Descriptions.Item label="Municipality"><Text strong>{detailViewRecord.municipality}</Text></Descriptions.Item>
+                <Descriptions.Item label="Barangay">{detailViewRecord.barangay || "—"}</Descriptions.Item>
+                <Descriptions.Item label="MBA">{detailViewRecord.manilaBayArea === "MBA" ? <Tag color="blue" bordered={false}>MBA</Tag> : <Tag bordered={false}>{detailViewRecord.manilaBayArea || "—"}</Tag>}</Descriptions.Item>
+                <Descriptions.Item label="District">{detailViewRecord.congressionalDistrict || "—"}</Descriptions.Item>
+                <Descriptions.Item label="Coordinates">{detailViewRecord.latitude}, {detailViewRecord.longitude}</Descriptions.Item>
+                <Descriptions.Item label="Year Started">{detailViewRecord.yearStartedOperation || "—"}</Descriptions.Item>
+                <Descriptions.Item label="Year End">{detailViewRecord.yearEndOperation || "—"}</Descriptions.Item>
+                <Descriptions.Item label="Year Rehabilitated">{detailViewRecord.yearFullyRehabilitated || "—"}</Descriptions.Item>
+                <Descriptions.Item label="Year Granted">{detailViewRecord.yearGranted || "—"}</Descriptions.Item>
+                <Descriptions.Item label="Amount Granted"><Text strong>{detailViewRecord.amountGranted != null ? `₱${detailViewRecord.amountGranted.toLocaleString()}` : "—"}</Text></Descriptions.Item>
+                <Descriptions.Item label="Status">{getStatusTag(detailViewRecord.statusOfSiteArea)}</Descriptions.Item>
+              </Descriptions>
             )},
             { key: "rehab", label: <span style={{ color: "#fa8c16" }}><SafetyCertificateOutlined /> Rehabilitation Checklist</span>, children: (
-              <Row gutter={[16, 12]}>
+              <Descriptions column={2} size="small" bordered>
                 {["siteClearing","siteGrading","soilCover","drainageControl","leachateManagement","gasManagement","fencingAndSecurity","signages","burningProhibition"].map((k) => (
-                  <Col xs={24} sm={12} key={k}><Text type="secondary">{k.replace(/([A-Z])/g, " $1").replace(/^./, (s) => s.toUpperCase())}:</Text> <Text>{detailModal[k] || "—"}</Text></Col>
+                  <Descriptions.Item key={k} label={k.replace(/([A-Z])/g, " $1").replace(/^./, (s) => s.toUpperCase())}>{detailModal[k] || "—"}</Descriptions.Item>
                 ))}
-              </Row>
+              </Descriptions>
             )},
             { key: "monitoring", label: <span style={{ color: "#13c2c2" }}><CalendarOutlined /> Monitoring</span>, children: (
-              <Row gutter={[16, 12]}>
-                <Col xs={24} sm={8}><Text type="secondary">Focal:</Text> <Text strong>{detailModal.focalPerson || "—"}</Text></Col>
-                <Col xs={24} sm={8}><Text type="secondary">ESWM Staff:</Text> <Text strong>{detailModal.eswmStaff || "—"}</Text></Col>
-                <Col xs={24} sm={8}><Text type="secondary">ENMO:</Text> <Text strong>{detailModal.enmoAssigned || "—"}</Text></Col>
-                <Col xs={24} sm={12}><Text type="secondary">Target Month:</Text> <Text>{detailModal.targetMonth || "—"}</Text></Col>
-                <Col xs={24} sm={12}><Text type="secondary">Monitoring Date:</Text> <Text>{detailModal.dateOfMonitoring ? dayjs(detailModal.dateOfMonitoring).format("MMM D, YYYY") : "—"}</Text></Col>
-                <Col xs={24} sm={12}><Text type="secondary">Report Prepared:</Text> <Text>{detailModal.dateReportPrepared ? dayjs(detailModal.dateReportPrepared).format("MMM D, YYYY") : "—"}</Text></Col>
-                <Col xs={24} sm={12}><Text type="secondary">Reviewed (Staff):</Text> <Text>{detailModal.dateReportReviewedStaff ? dayjs(detailModal.dateReportReviewedStaff).format("MMM D, YYYY") : "—"}</Text></Col>
-                <Col xs={24} sm={12}><Text type="secondary">Reviewed (Focal):</Text> <Text>{detailModal.dateReportReviewedFocal ? dayjs(detailModal.dateReportReviewedFocal).format("MMM D, YYYY") : "—"}</Text></Col>
-                <Col xs={24} sm={12}><Text type="secondary">Report Approved:</Text> <Text>{detailModal.dateReportApproved ? dayjs(detailModal.dateReportApproved).format("MMM D, YYYY") : "—"}</Text></Col>
-                <Col xs={24} sm={12}><Text type="secondary">Tracking:</Text> <Text>{detailModal.trackingOfReports || "—"}</Text></Col>
-              </Row>
-            )},
+              <>
+              <Descriptions column={3} size="small" bordered>
+                <Descriptions.Item label="Focal"><Text strong>{detailViewRecord.focalPerson || "—"}</Text></Descriptions.Item>
+                <Descriptions.Item label="ESWM Staff"><Text strong>{detailViewRecord.eswmStaff || "—"}</Text></Descriptions.Item>
+                <Descriptions.Item label="ENMO"><Text strong>{detailViewRecord.enmoAssigned || "—"}</Text></Descriptions.Item>
+              </Descriptions>
+              <Descriptions column={2} size="small" bordered style={{ marginTop: 12 }}>
+                <Descriptions.Item label="Target Month">{detailViewRecord.targetMonth || "—"}</Descriptions.Item>
+                <Descriptions.Item label="Monitoring Date">{detailViewRecord.dateOfMonitoring ? dayjs(detailViewRecord.dateOfMonitoring).format("MMM D, YYYY") : "—"}</Descriptions.Item>
+                <Descriptions.Item label="Report Prepared">{detailViewRecord.dateReportPrepared ? dayjs(detailViewRecord.dateReportPrepared).format("MMM D, YYYY") : "—"}</Descriptions.Item>
+                <Descriptions.Item label="Reviewed (Staff)">{detailViewRecord.dateReportReviewedStaff ? dayjs(detailViewRecord.dateReportReviewedStaff).format("MMM D, YYYY") : "—"}</Descriptions.Item>
+                <Descriptions.Item label="Reviewed (Focal)">{detailViewRecord.dateReportReviewedFocal ? dayjs(detailViewRecord.dateReportReviewedFocal).format("MMM D, YYYY") : "—"}</Descriptions.Item>
+                <Descriptions.Item label="Report Approved">{detailViewRecord.dateReportApproved ? dayjs(detailViewRecord.dateReportApproved).format("MMM D, YYYY") : "—"}</Descriptions.Item>
+                <Descriptions.Item label="Tracking">{detailViewRecord.trackingOfReports || "—"}</Descriptions.Item>
+              </Descriptions>
+              </>)},
             { key: "compliance", label: <span style={{ color: "#eb2f96" }}><SafetyCertificateOutlined /> Compliance</span>, children: (
-              <Row gutter={[16, 12]}>
-                <Col span={24}><Text type="secondary">Remarks & Recommendation:</Text><br /><Text>{detailModal.remarksAndRecommendation || "—"}</Text></Col>
-                <Col xs={24} sm={12}><Text type="secondary">Docket No. / NOV:</Text> <Text>{detailModal.docketNoNOV || "—"}</Text></Col>
-                <Col xs={24} sm={12}><Text type="secondary">Date of Issuance NOV:</Text> <Text>{detailModal.dateOfIssuanceNOV || "—"}</Text></Col>
-                <Col xs={24} sm={12}><Text type="secondary">Date of Tech Conference:</Text> <Text>{detailModal.dateOfTechnicalConference || "—"}</Text></Col>
-                <Col span={24}><Text type="secondary">Commitments:</Text><br /><Text>{detailModal.commitments || "—"}</Text></Col>
-              </Row>
+              <Descriptions column={2} size="small" bordered>
+                <Descriptions.Item label="Remarks & Recommendation" span={2}>{detailViewRecord.remarksAndRecommendation || "—"}</Descriptions.Item>
+                <Descriptions.Item label="Docket No. / NOV">{detailViewRecord.docketNoNOV || "—"}</Descriptions.Item>
+                <Descriptions.Item label="Date of Issuance NOV">{detailViewRecord.dateOfIssuanceNOV || "—"}</Descriptions.Item>
+                <Descriptions.Item label="Date of Tech Conference">{detailViewRecord.dateOfTechnicalConference || "—"}</Descriptions.Item>
+                <Descriptions.Item label="Commitments" span={2}>{detailViewRecord.commitments || "—"}</Descriptions.Item>
+              </Descriptions>
             )},
           ]} />
+          </>
         )}
       </Modal>
 
       {/* Add/Edit Modal */}
       <Modal title={editing ? "Edit Open Dumpsite" : "Add Open Dumpsite"} open={modalOpen} onCancel={() => setModalOpen(false)} onOk={handleSave} width={900} style={{ maxWidth: "95vw" }} okText={editing ? "Update" : "Create"}>
         <Form form={form} layout="vertical" size="small">
+          <Row gutter={16} style={{ marginBottom: 16 }}>
+            <Col xs={24} sm={8}><Form.Item name="dataYear" label="Data Year" rules={[{ required: true }]}><Select options={Array.from({length:7},(_,i)=>{ const y=new Date().getFullYear()-i; return {label:y,value:y}; })} placeholder="Select Year" /></Form.Item></Col>
+          </Row>
           <Collapse defaultActiveKey={["location","operations","personnel","monitoring","rehab","compliance"]} bordered={false} items={[
             { key: "location", label: <span style={{ color: "#1677ff" }}><EnvironmentOutlined /> Location</span>, children: (
               <Row gutter={16}>
@@ -385,8 +425,8 @@ export default function OpenDumpsites() {
                 <Col xs={24} sm={12}><Form.Item name="barangay" label="Barangay"><Input /></Form.Item></Col>
                 <Col xs={24} sm={12}><Form.Item name="manilaBayArea" label="Manila Bay Area"><Select options={mbaOptions} allowClear /></Form.Item></Col>
                 <Col xs={24} sm={12}><Form.Item name="congressionalDistrict" label="Congressional District"><Input /></Form.Item></Col>
-                <Col xs={12} sm={6}><Form.Item name="latitude" label="Latitude"><InputNumber style={{ width: "100%" }} step={0.000001} /></Form.Item></Col>
-                <Col xs={12} sm={6}><Form.Item name="longitude" label="Longitude"><InputNumber style={{ width: "100%" }} step={0.000001} /></Form.Item></Col>
+                <Col xs={12} sm={6}><Form.Item name="latitude" label="Latitude"><InputNumber style={{ width: "100%" }} step={0.0001} precision={4} /></Form.Item></Col>
+                <Col xs={12} sm={6}><Form.Item name="longitude" label="Longitude"><InputNumber style={{ width: "100%" }} step={0.0001} precision={4} /></Form.Item></Col>
               </Row>
             )},
             { key: "operations", label: <span style={{ color: "#fa8c16" }}><CalendarOutlined /> Operations</span>, children: (

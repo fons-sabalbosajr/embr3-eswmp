@@ -17,16 +17,20 @@ router.get("/", async (req, res) => {
 // Dashboard stats
 router.get("/stats", async (req, res) => {
   try {
+    const yearFilter = req.query.year ? { dataYear: Number(req.query.year) } : {};
     const [totalRecords, byProvince, byStatus, wasteStats] = await Promise.all([
-      LguAssistDiversion.countDocuments(),
+      LguAssistDiversion.countDocuments(yearFilter),
       LguAssistDiversion.aggregate([
+        ...(Object.keys(yearFilter).length ? [{ $match: yearFilter }] : []),
         { $group: { _id: "$province", count: { $sum: 1 } } },
         { $sort: { count: -1 } },
       ]),
       LguAssistDiversion.aggregate([
+        ...(Object.keys(yearFilter).length ? [{ $match: yearFilter }] : []),
         { $group: { _id: { $ifNull: ["$statusAccomplishment", "Unknown"] }, count: { $sum: 1 } } },
       ]),
       LguAssistDiversion.aggregate([
+        ...(Object.keys(yearFilter).length ? [{ $match: yearFilter }] : []),
         {
           $group: {
             _id: null,
@@ -123,6 +127,18 @@ router.delete("/:id", async (req, res) => {
       message: `LGU Assistance entry deleted: ${record.lgu}, ${record.province}`,
       req,
     });
+  } catch (error) {
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+});
+
+// History: all year records for an LGU
+router.get("/history/:lgu", async (req, res) => {
+  try {
+    const records = await LguAssistDiversion.find({
+      lgu: { $regex: new RegExp(`^${req.params.lgu.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "i") },
+    }).sort({ dataYear: -1 });
+    res.json(records);
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });
   }

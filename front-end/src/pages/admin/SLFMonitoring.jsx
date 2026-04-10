@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef, Suspense, lazy } from "react";
 import {
   Card,
   Table,
@@ -19,9 +19,14 @@ import {
   Tabs,
   Collapse,
   Statistic,
+  Descriptions,
   Badge,
   Popconfirm,
   Switch,
+  Spin,
+  Empty,
+  Progress,
+  Skeleton,
 } from "antd";
 import {
   PlusOutlined,
@@ -51,6 +56,9 @@ import {
   SolutionOutlined,
   UndoOutlined,
   BellOutlined,
+  HistoryOutlined,
+  MailOutlined,
+  SendOutlined,
 } from "@ant-design/icons";
 import Swal from "sweetalert2";
 import api from "../../api";
@@ -319,6 +327,16 @@ function PortalGenerators({
   const [submissions, setSubmissions] = useState([]);
   const [loadingSub, setLoadingSub] = useState(false);
   const [form] = Form.useForm();
+  const [txnHistoryModal, setTxnHistoryModal] = useState({ open: false, submissionId: null });
+  const [txnHistoryData, setTxnHistoryData] = useState([]);
+  const [txnHistoryLoading, setTxnHistoryLoading] = useState(false);
+  const [emailModal, setEmailModal] = useState({ open: false, record: null });
+  const [emailSubject, setEmailSubject] = useState("");
+  const [emailMessage, setEmailMessage] = useState("");
+  const [emailSending, setEmailSending] = useState(false);
+  const [revertModal, setRevertModal] = useState({ open: false, record: null });
+  const [revertReason, setRevertReason] = useState("");
+  const [revertLoading, setRevertLoading] = useState(false);
   const unitOptions = [
     { label: "Tons", value: "tons" },
     { label: <span>m<sup>3</sup></span>, value: "m³" },
@@ -346,6 +364,86 @@ function PortalGenerators({
     const interval = setInterval(fetchSubmissions, 8000);
     return () => clearInterval(interval);
   }, [fetchSubmissions]);
+
+  const openTxnHistory = async (submissionId) => {
+    setTxnHistoryModal({ open: true, submissionId });
+    setTxnHistoryLoading(true);
+    try {
+      const { data } = await api.get(`/transactions/thread/${submissionId}`);
+      setTxnHistoryData(data);
+    } catch {
+      setTxnHistoryData([]);
+    } finally {
+      setTxnHistoryLoading(false);
+    }
+  };
+
+  const openEmailModal = (record) => {
+    setEmailModal({ open: true, record });
+    setEmailSubject("");
+    setEmailMessage("");
+  };
+
+  const handleSendEmail = async () => {
+    if (!emailSubject.trim() || !emailMessage.trim()) {
+      Swal.fire("Warning", "Please fill in both subject and message.", "warning");
+      return;
+    }
+    setEmailSending(true);
+    try {
+      await api.post(`/data-slf/${emailModal.record._id}/send-email`, {
+        subject: emailSubject,
+        message: emailMessage,
+      });
+      Swal.fire({ icon: "success", title: "Email Sent", text: `Email sent to ${emailModal.record.submittedBy}`, confirmButtonColor: ACCENT, timer: 2500 });
+      setEmailModal({ open: false, record: null });
+    } catch (err) {
+      Swal.fire("Error", err.response?.data?.message || "Failed to send email", "error");
+    } finally {
+      setEmailSending(false);
+    }
+  };
+
+  const handleAdminRevert = async () => {
+    if (!revertReason.trim()) {
+      Swal.fire("Warning", "Please provide a reason for reverting.", "warning");
+      return;
+    }
+    const confirm = await Swal.fire({
+      icon: "warning",
+      title: "Are you sure you want to revert this submission?",
+      html: `<div style="text-align:left;font-size:13px;line-height:1.7;">
+        <p>Reverting this submission will:</p>
+        <ul style="margin:8px 0;padding-left:20px;">
+          <li>Change the status to <strong>Reverted</strong></li>
+          <li>Notify the portal user (<strong>${revertModal.record?.submittedBy || "N/A"}</strong>) via email</li>
+          <li>Allow the portal user to edit and resubmit the entry</li>
+          <li>Record this action in the transaction history</li>
+        </ul>
+        <p style="margin-top:8px;"><strong>Reason:</strong> ${revertReason}</p>
+      </div>`,
+      showCancelButton: true,
+      confirmButtonText: "Yes, Revert",
+      confirmButtonColor: "#fa541c",
+      cancelButtonText: "Cancel",
+    });
+    if (!confirm.isConfirmed) return;
+    setRevertLoading(true);
+    try {
+      await api.patch(`/data-slf/${revertModal.record._id}/admin-revert`, {
+        reason: revertReason,
+        performedBy: "admin",
+      });
+      Swal.fire({ icon: "success", title: "Reverted", text: "Submission reverted and the portal user has been notified via email.", confirmButtonColor: ACCENT, timer: 2500 });
+      setRevertModal({ open: false, record: null });
+      setRevertReason("");
+      fetchSubmissions();
+    } catch (err) {
+      Swal.fire("Error", err.response?.data?.message || "Failed to revert", "error");
+    } finally {
+      setRevertLoading(false);
+    }
+  };
 
   const statsMap = useMemo(() => {
     const m = {};
@@ -699,13 +797,16 @@ function PortalGenerators({
                   ? "green"
                   : v === "rejected"
                     ? "red"
-                    : "orange";
+                    : v === "reverted"
+                      ? "volcano"
+                      : "orange";
               return <Tag color={color}>{v}</Tag>;
             },
             filters: [
               { text: "Pending", value: "pending" },
               { text: "Acknowledged", value: "acknowledged" },
               { text: "Rejected", value: "rejected" },
+              { text: "Reverted", value: "reverted" },
             ],
             onFilter: (val, r) => r.status === val,
           },
@@ -722,9 +823,39 @@ function PortalGenerators({
           {
             title: "Actions",
             key: "actions",
-            width: 100,
+            width: 180,
             render: (_, r) => (
               <Space size="small">
+                {r.submissionId && (
+                  <Tooltip title="View Transaction History">
+                    <Button
+                      type="text"
+                      size="small"
+                      icon={<HistoryOutlined style={{ color: ACCENT }} />}
+                      onClick={() => openTxnHistory(r.submissionId)}
+                    />
+                  </Tooltip>
+                )}
+                {r.submittedBy && (
+                  <Tooltip title="Send Email">
+                    <Button
+                      type="text"
+                      size="small"
+                      icon={<MailOutlined style={{ color: "#1677ff" }} />}
+                      onClick={() => openEmailModal(r)}
+                    />
+                  </Tooltip>
+                )}
+                {r.status !== "reverted" && (
+                  <Tooltip title="Revert Submission">
+                    <Button
+                      type="text"
+                      size="small"
+                      icon={<UndoOutlined style={{ color: "#fa541c" }} />}
+                      onClick={() => { setRevertModal({ open: true, record: r }); setRevertReason(""); }}
+                    />
+                  </Tooltip>
+                )}
                 {r.revertRequested && (
                   <Tooltip title={`Revert requested: ${r.revertReason || "No reason"}`}>
                     <Popconfirm
@@ -863,6 +994,245 @@ function PortalGenerators({
           </Form.List>
         </Form>
       </Modal>
+
+      {/* Transaction History Modal */}
+      <Modal
+        title={
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <div
+              style={{
+                width: 32,
+                height: 32,
+                borderRadius: 8,
+                background: "#f0f5ff",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+              }}
+            >
+              <HistoryOutlined style={{ color: "#722ed1", fontSize: 16 }} />
+            </div>
+            <div>
+              <div style={{ fontSize: 15, fontWeight: 600 }}>
+                Transaction History
+              </div>
+              <Text type="secondary" style={{ fontSize: 11 }}>
+                {txnHistoryModal.submissionId}
+              </Text>
+            </div>
+          </div>
+        }
+        open={txnHistoryModal.open}
+        onCancel={() => setTxnHistoryModal({ open: false, submissionId: null })}
+        footer={
+          <Button
+            block
+            onClick={() =>
+              setTxnHistoryModal({ open: false, submissionId: null })
+            }
+          >
+            Close
+          </Button>
+        }
+        width={1200}
+        zIndex={1100}
+      >
+        {txnHistoryLoading ? (
+          <div style={{ textAlign: "center", padding: 40 }}><Spin /></div>
+        ) : txnHistoryData.length === 0 ? (
+          <Empty description="No transactions found" />
+        ) : (
+          <Table
+            dataSource={txnHistoryData}
+            rowKey={(t) => t._id}
+            size="small"
+            pagination={{ pageSize: 10, size: "small", showSizeChanger: true, pageSizeOptions: ["10", "20", "50"] }}
+            scroll={{ y: 400 }}
+            columns={[
+              {
+                title: "#",
+                key: "idx",
+                width: 45,
+                render: (_, __, i) => <Text type="secondary">{i + 1}</Text>,
+              },
+              {
+                title: "Type",
+                dataIndex: "type",
+                key: "type",
+                width: 120,
+                render: (v) => (
+                  <Tag
+                    bordered={false}
+                    color={
+                      v === "submission"
+                        ? "blue"
+                        : v === "email_ack_sent"
+                          ? "green"
+                          : v === "email_ack_failed"
+                            ? "red"
+                            : v === "status_change"
+                              ? "orange"
+                              : v === "revert_approved"
+                                ? "volcano"
+                                : v === "resubmission"
+                                  ? "cyan"
+                                  : "default"
+                    }
+                    style={{ margin: 0, fontSize: 11 }}
+                  >
+                    {v === "submission"
+                      ? "Submission"
+                      : v === "email_ack_sent"
+                        ? "Email Sent"
+                        : v === "email_ack_failed"
+                          ? "Email Failed"
+                          : v === "status_change"
+                            ? "Status Change"
+                            : v === "revert_approved"
+                              ? "Revert Approved"
+                              : v === "resubmission"
+                                ? "Resubmission"
+                                : v === "deleted"
+                                  ? "Deleted"
+                                  : v}
+                  </Tag>
+                ),
+              },
+              {
+                title: "Description",
+                dataIndex: "description",
+                key: "desc",
+                ellipsis: false,
+                render: (v) => <Text style={{ fontSize: 11 }}>{v}</Text>,
+              },
+              {
+                title: "Message",
+                key: "msg",
+                width: 250,
+                ellipsis: false,
+                render: (_, t) => {
+                  const msg = t.meta?.comment || t.meta?.reason || "";
+                  return msg ? (
+                    <Text
+                      style={{
+                        fontSize: 12,
+                        color: t.meta?.comment ? "#1a3353" : "#fa541c",
+                        fontStyle: "italic",
+                        whiteSpace: "pre-wrap",
+                        wordBreak: "break-word",
+                      }}
+                    >
+                      {msg}
+                    </Text>
+                  ) : (
+                    <Text type="secondary" style={{ fontSize: 12 }}>
+                      —
+                    </Text>
+                  );
+                },
+              },
+              {
+                title: "Performed By",
+                dataIndex: "performedBy",
+                key: "by",
+                width: 200,
+                render: (v) => (
+                  <Text type="secondary" style={{ fontSize: 12 }}>
+                    {v || "system"}
+                  </Text>
+                ),
+              },
+              {
+                title: "Date / Time",
+                dataIndex: "createdAt",
+                key: "date",
+                width: 150,
+                render: (v) => (
+                  <Text type="secondary" style={{ fontSize: 12 }}>
+                    {dayjs(v).format("MMM DD, YYYY hh:mm A")}
+                  </Text>
+                ),
+              },
+            ]}
+          />
+        )}
+      </Modal>
+
+      {/* Send Email Modal */}
+      <Modal
+        title={<Space><MailOutlined /> Send Email to Portal User</Space>}
+        open={emailModal.open}
+        onCancel={() => setEmailModal({ open: false, record: null })}
+        onOk={handleSendEmail}
+        confirmLoading={emailSending}
+        okText={<><SendOutlined /> Send Email</>}
+        okButtonProps={{ style: { background: ACCENT, borderColor: ACCENT } }}
+        width={560}
+      >
+        {emailModal.record && (
+          <div>
+            <Descriptions column={1} size="small" style={{ marginBottom: 16 }}>
+              <Descriptions.Item label="To">{emailModal.record.submittedBy}</Descriptions.Item>
+              <Descriptions.Item label="Company">{emailModal.record.lguCompanyName || "—"}</Descriptions.Item>
+              <Descriptions.Item label="Submission">{emailModal.record.submissionId || emailModal.record.idNo}</Descriptions.Item>
+            </Descriptions>
+            <Form layout="vertical" size="small">
+              <Form.Item label="Subject" required>
+                <Input
+                  placeholder="e.g. Missing requirements for your submission"
+                  value={emailSubject}
+                  onChange={(e) => setEmailSubject(e.target.value)}
+                />
+              </Form.Item>
+              <Form.Item label="Message" required>
+                <Input.TextArea
+                  rows={5}
+                  placeholder="Type your message to the portal user..."
+                  value={emailMessage}
+                  onChange={(e) => setEmailMessage(e.target.value)}
+                />
+              </Form.Item>
+            </Form>
+          </div>
+        )}
+      </Modal>
+
+      {/* Admin Revert Modal */}
+      <Modal
+        title={<Space><UndoOutlined style={{ color: "#fa541c" }} /> Revert Submission</Space>}
+        open={revertModal.open}
+        onCancel={() => setRevertModal({ open: false, record: null })}
+        onOk={handleAdminRevert}
+        confirmLoading={revertLoading}
+        okText="Revert Submission"
+        okButtonProps={{ style: { background: "#fa541c", borderColor: "#fa541c" } }}
+        width={520}
+      >
+        {revertModal.record && (
+          <div>
+            <Descriptions column={1} size="small" style={{ marginBottom: 16 }}>
+              <Descriptions.Item label="ID No.">{revertModal.record.idNo || "—"}</Descriptions.Item>
+              <Descriptions.Item label="Company">{revertModal.record.lguCompanyName || "—"}</Descriptions.Item>
+              <Descriptions.Item label="Submitted By">{revertModal.record.submittedBy || "—"}</Descriptions.Item>
+              <Descriptions.Item label="Current Status"><Tag color={revertModal.record.status === "acknowledged" ? "green" : "orange"}>{revertModal.record.status}</Tag></Descriptions.Item>
+            </Descriptions>
+            <Text type="secondary" style={{ fontSize: 12, display: "block", marginBottom: 8 }}>
+              This will revert the submission back to the portal user. The portal user will see this entry
+              on their Submission History and can update and resubmit it.
+            </Text>
+            <Form layout="vertical" size="small">
+              <Form.Item label="Reason for Revert" required>
+                <Input.TextArea
+                  rows={3}
+                  placeholder="e.g. Incorrect data entries, missing truck information..."
+                  value={revertReason}
+                  onChange={(e) => setRevertReason(e.target.value)}
+                />
+              </Form.Item>
+            </Form>
+          </div>
+        )}
+      </Modal>
     </>
   );
 }
@@ -886,14 +1256,19 @@ export default function SLFMonitoring() {
   const [loadingGen, setLoadingGen] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
   const [detailModal, setDetailModal] = useState(null);
+  const [detailYearRecords, setDetailYearRecords] = useState([]);
+  const [detailYear, setDetailYear] = useState(null);
   const [baselineData, setBaselineData] = useState(null);
   const [loadingBaseline, setLoadingBaseline] = useState(false);
   const [editing, setEditing] = useState(null);
+  const [editYear, setEditYear] = useState(null);
+  const [editYearRecords, setEditYearRecords] = useState([]);
   const [searchText, setSearchText] = useState("");
   const [filterProvince, setFilterProvince] = useState(null);
   const [filterStatus, setFilterStatus] = useState(null);
   const [filterCategory, setFilterCategory] = useState(null);
   const [filterMonth, setFilterMonth] = useState(null);
+  const [filterYear, setFilterYear] = useState(null);
   const [form] = Form.useForm();
 
   const fetchRecords = useCallback(async (skipCache = false) => {
@@ -956,50 +1331,93 @@ export default function SLFMonitoring() {
       .finally(() => setLoadingBaseline(false));
   }, [detailModal]);
 
+  // Fetch cross-year history when viewing a facility record
+  useEffect(() => {
+    if (!detailModal) { setDetailYearRecords([]); setDetailYear(null); return; }
+    const lgu = detailModal.lgu;
+    if (!lgu) { setDetailYearRecords([]); setDetailYear(detailModal.dataYear || new Date().getFullYear()); return; }
+    api.get(`/slf-facilities/history/${encodeURIComponent(lgu)}`)
+      .then(({ data }) => {
+        const enriched = data.map((r) => ({ ...r, ...computeFields(r) }));
+        setDetailYearRecords(enriched);
+        setDetailYear(detailModal.dataYear || new Date().getFullYear());
+      })
+      .catch(() => { setDetailYearRecords([]); setDetailYear(detailModal.dataYear || new Date().getFullYear()); });
+  }, [detailModal]);
+
+  const detailViewRecord = useMemo(() => {
+    if (!detailModal) return null;
+    if (detailYearRecords.length === 0) return detailModal;
+    return detailYearRecords.find((r) => (r.dataYear || new Date().getFullYear()) === detailYear) || null;
+  }, [detailModal, detailYearRecords, detailYear]);
+
   const generatorOptions = useMemo(
     () => generators.map((g) => ({ label: g.slfName, value: g._id })),
     [generators],
   );
 
+  const populateForm = (record) => {
+    form.setFieldsValue({
+      ...record,
+      cellCapacities: record.cellCapacities || [],
+      cellStatuses: record.cellStatuses || Array.from({ length: record.numberOfCell || 0 }, () => "Operational"),
+      dateOfMonitoring: record.dateOfMonitoring ? dayjs(record.dateOfMonitoring) : null,
+      dateReportPrepared: record.dateReportPrepared ? dayjs(record.dateReportPrepared) : null,
+      dateReportReviewedStaff: record.dateReportReviewedStaff ? dayjs(record.dateReportReviewedStaff) : null,
+      dateReportReviewedFocal: record.dateReportReviewedFocal ? dayjs(record.dateReportReviewedFocal) : null,
+      dateReportApproved: record.dateReportApproved ? dayjs(record.dateReportApproved) : null,
+    });
+  };
+
   const openAdd = () => {
     setEditing(null);
+    setEditYear(new Date().getFullYear());
+    setEditYearRecords([]);
     form.resetFields();
     setModalOpen(true);
   };
   const openEdit = (record) => {
+    const yr = record.dataYear || new Date().getFullYear();
     setEditing(record);
-    const genId = record.slfGenerator
-      ? typeof record.slfGenerator === "object"
-        ? record.slfGenerator._id
-        : record.slfGenerator
-      : null;
-    form.setFieldsValue({
-      ...record,
-      slfGenerator: genId,
-      dateOfMonitoring: record.dateOfMonitoring
-        ? dayjs(record.dateOfMonitoring)
-        : null,
-      dateReportPrepared: record.dateReportPrepared
-        ? dayjs(record.dateReportPrepared)
-        : null,
-      dateReportReviewedStaff: record.dateReportReviewedStaff
-        ? dayjs(record.dateReportReviewedStaff)
-        : null,
-      dateReportReviewedFocal: record.dateReportReviewedFocal
-        ? dayjs(record.dateReportReviewedFocal)
-        : null,
-      dateReportApproved: record.dateReportApproved
-        ? dayjs(record.dateReportApproved)
-        : null,
-    });
+    setEditYear(yr);
+    populateForm(record);
+    // Fetch all year records for this LGU
+    if (record.lgu) {
+      api.get(`/slf-facilities/history/${encodeURIComponent(record.lgu)}`)
+        .then(({ data }) => setEditYearRecords(data))
+        .catch(() => setEditYearRecords([]));
+    } else {
+      setEditYearRecords([]);
+    }
     setModalOpen(true);
   };
 
+  const handleEditYearChange = (yr) => {
+    setEditYear(yr);
+    const match = editYearRecords.find((r) => (r.dataYear || new Date().getFullYear()) === yr);
+    if (match) {
+      setEditing(match);
+      form.resetFields();
+      populateForm(match);
+    } else {
+      // Blank record for this year — keep location fields from current editing
+      const current = editing || {};
+      setEditing({ _id: null, lgu: current.lgu, province: current.province, barangay: current.barangay, latitude: current.latitude, longitude: current.longitude, eccNo: current.eccNo });
+      form.resetFields();
+      form.setFieldsValue({ province: current.province, lgu: current.lgu, barangay: current.barangay, latitude: current.latitude, longitude: current.longitude, eccNo: current.eccNo });
+    }
+  };
+
   const handleSave = async () => {
+    if (!editYear) {
+      Swal.fire("Year Required", "Please select a year before saving.", "warning");
+      return;
+    }
     try {
       const values = await form.validateFields();
       const payload = {
         ...values,
+        dataYear: editYear,
         dateOfMonitoring: values.dateOfMonitoring?.toISOString(),
         dateReportPrepared: values.dateReportPrepared?.toISOString(),
         dateReportReviewedStaff: values.dateReportReviewedStaff?.toISOString(),
@@ -1007,24 +1425,24 @@ export default function SLFMonitoring() {
         dateReportApproved: values.dateReportApproved?.toISOString(),
       };
       Object.assign(payload, computeFields(payload));
-      if (editing) {
+      if (editing && editing._id) {
         const { data } = await api.put(
           `/slf-facilities/${editing._id}`,
           payload,
         );
-        setRecords((prev) =>
-          prev.map((r) =>
-            r._id === editing._id ? { ...data, ...computeFields(data) } : r,
-          ),
-        );
+        setRecords((prev) => {
+          const exists = prev.some((r) => r._id === data._id);
+          if (exists) return prev.map((r) => r._id === data._id ? { ...data, ...computeFields(data) } : r);
+          return [...prev, { ...data, ...computeFields(data) }];
+        });
         secureStorage.remove(CACHE_KEY);
         secureStorage.invalidateDashboard();
-        Swal.fire("Updated", "Record updated successfully", "success");
+        Swal.fire("Updated", `Record updated for year ${editYear}`, "success");
       } else {
         await api.post("/slf-facilities", payload);
         secureStorage.remove(CACHE_KEY);
         secureStorage.invalidateDashboard();
-        Swal.fire("Created", "Record added successfully", "success");
+        Swal.fire("Created", `Record added for year ${editYear}`, "success");
         fetchRecords();
       }
     } catch (err) {
@@ -1038,8 +1456,17 @@ export default function SLFMonitoring() {
     setModalOpen(false);
   };
 
+  // Available years from data (always include current + previous year)
+  const availableYears = useMemo(() => {
+    const cy = new Date().getFullYear();
+    const years = [...new Set([cy, cy - 1, ...records.map((r) => r.dataYear || cy)])];
+    return years.sort((a, b) => b - a);
+  }, [records]);
+
   const filtered = useMemo(() => {
     let data = records;
+    if (filterYear)
+      data = data.filter((r) => (r.dataYear || new Date().getFullYear()) === filterYear);
     if (searchText) {
       const q = searchText.toLowerCase();
       data = data.filter((r) =>
@@ -1059,7 +1486,17 @@ export default function SLFMonitoring() {
     if (filterCategory)
       data = data.filter((r) => r.category === filterCategory);
     if (filterMonth) data = data.filter((r) => r.targetMonth === filterMonth);
-    return data;
+
+    // Deduplicate by LGU — keep only the latest dataYear record per facility
+    const map = new Map();
+    for (const r of data) {
+      const key = (r.lgu || "").toLowerCase();
+      const existing = map.get(key);
+      if (!existing || (r.dataYear || 0) > (existing.dataYear || 0)) {
+        map.set(key, r);
+      }
+    }
+    return [...map.values()];
   }, [
     records,
     searchText,
@@ -1067,6 +1504,7 @@ export default function SLFMonitoring() {
     filterStatus,
     filterCategory,
     filterMonth,
+    filterYear,
   ]);
 
   const hasFilters =
@@ -1074,13 +1512,15 @@ export default function SLFMonitoring() {
     filterProvince ||
     filterStatus ||
     filterCategory ||
-    filterMonth;
+    filterMonth ||
+    filterYear;
   const clearFilters = () => {
     setSearchText("");
     setFilterProvince(null);
     setFilterStatus(null);
     setFilterCategory(null);
     setFilterMonth(null);
+    setFilterYear(null);
   };
 
   // Summary tiles
@@ -1256,21 +1696,6 @@ export default function SLFMonitoring() {
     },
     { title: "Lifespan", dataIndex: "remainingLifeSpan", width: 100 },
     {
-      title: "Portal Link",
-      key: "portal",
-      width: 100,
-      render: (_, r) => {
-        const g = r.slfGenerator;
-        return g ? (
-          <Tag color="blue" bordered={false}>
-            <LinkOutlined /> {typeof g === "object" ? g.slfName : "Linked"}
-          </Tag>
-        ) : (
-          <Tag color="default">—</Tag>
-        );
-      },
-    },
-    {
       title: (
         <>
           <CalendarOutlined style={{ color: "#13c2c2" }} /> Target Month
@@ -1388,99 +1813,150 @@ export default function SLFMonitoring() {
 
   return (
     <div style={{ padding: 0 }}>
+      {/* Year Selector */}
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
+        <Space size={4} align="center">
+          <CalendarOutlined style={{ color: ACCENT }} />
+          <Text strong style={{ fontSize: 13, color: ACCENT }}>Data Year:</Text>
+          <Button
+            size="small"
+            type={filterYear === null ? "primary" : "default"}
+            onClick={() => setFilterYear(null)}
+            style={filterYear === null ? { background: ACCENT, borderColor: ACCENT } : {}}
+          >
+            All
+          </Button>
+          {availableYears.map((yr) => (
+            <Button
+              key={yr}
+              size="small"
+              type={filterYear === yr ? "primary" : "default"}
+              onClick={() => setFilterYear(yr)}
+              style={filterYear === yr ? { background: ACCENT, borderColor: ACCENT } : {}}
+            >
+              {yr}
+            </Button>
+          ))}
+        </Space>
+        <Tag bordered={false} color={hasFilters ? "blue" : "default"}>
+          {filtered.length} / {records.length} records
+        </Tag>
+      </div>
+
       {/* Summary tiles */}
-      <Row gutter={[12, 12]} style={{ marginBottom: 16 }}>
+      {loading ? (
+        <Row gutter={[8, 8]} style={{ marginBottom: 12 }}>
+          {Array.from({ length: 8 }).map((_, i) => (
+            <Col xs={12} sm={6} md={6} lg={3} key={i}>
+              <Card size="small" style={{ borderRadius: 8, height: "100%", padding: 0 }} bodyStyle={{ padding: "8px 12px" }}>
+                <Skeleton active paragraph={{ rows: 1 }} title={{ width: "60%" }} />
+              </Card>
+            </Col>
+          ))}
+        </Row>
+      ) : (
+      <Row gutter={[8, 8]} style={{ marginBottom: 12 }}>
         {/* Row 1 */}
-        <Col xs={12} sm={6} md={6} lg={6}>
-          <Card size="small" hoverable style={{ borderRadius: 10, borderLeft: `4px solid ${ACCENT}`, height: "100%" }}>
+        <Col xs={12} sm={6} md={6} lg={3}>
+          <Card size="small" hoverable style={{ borderRadius: 8, borderLeft: `3px solid ${ACCENT}`, height: "100%", padding: 0 }} bodyStyle={{ padding: "8px 12px" }}>
             <Statistic
-              title="Total SLF"
+              title={<span style={{ fontSize: 11 }}>Total SLF</span>}
               value={totalRecords}
-              prefix={<BankOutlined style={{ color: ACCENT }} />}
+              valueStyle={{ fontSize: 20 }}
+              prefix={<BankOutlined style={{ color: ACCENT, fontSize: 14 }} />}
             />
-            <Text type="secondary" style={{ fontSize: 11 }}>
-              <CheckCircleOutlined style={{ color: "#52c41a", marginRight: 3 }} />{opCount}/{totalRecords} Operational
+            <Text type="secondary" style={{ fontSize: 10 }}>
+              <CheckCircleOutlined style={{ color: "#52c41a", marginRight: 2 }} />{opCount}/{totalRecords} Operational
             </Text>
           </Card>
         </Col>
-        <Col xs={12} sm={6} md={6} lg={6}>
-          <Card size="small" hoverable style={{ borderRadius: 10, borderLeft: "4px solid #13c2c2", height: "100%" }}>
+        <Col xs={12} sm={6} md={6} lg={3}>
+          <Card size="small" hoverable style={{ borderRadius: 8, borderLeft: "3px solid #13c2c2", height: "100%", padding: 0 }} bodyStyle={{ padding: "8px 12px" }}>
             <Statistic
-              title="Total Cells"
+              title={<span style={{ fontSize: 11 }}>Total Cells</span>}
               value={totalCells}
-              prefix={<ExperimentOutlined style={{ color: "#13c2c2" }} />}
+              valueStyle={{ fontSize: 20 }}
+              prefix={<ExperimentOutlined style={{ color: "#13c2c2", fontSize: 14 }} />}
             />
-            <Text type="secondary" style={{ fontSize: 11 }}>{cellsWithData}/{totalRecords} with cells</Text>
+            <Text type="secondary" style={{ fontSize: 10 }}>{cellsWithData}/{totalRecords} with cells</Text>
           </Card>
         </Col>
-        <Col xs={12} sm={6} md={6} lg={6}>
-          <Card size="small" hoverable style={{ borderRadius: 10, borderLeft: "4px solid #fa8c16", height: "100%" }}>
+        <Col xs={12} sm={6} md={6} lg={3}>
+          <Card size="small" hoverable style={{ borderRadius: 8, borderLeft: "3px solid #fa8c16", height: "100%", padding: 0 }} bodyStyle={{ padding: "8px 12px" }}>
             <Statistic
-              title="LGUs Served"
+              title={<span style={{ fontSize: 11 }}>LGUs Served</span>}
               value={totalLGUs}
-              prefix={<TeamOutlined style={{ color: "#fa8c16" }} />}
+              valueStyle={{ fontSize: 20 }}
+              prefix={<TeamOutlined style={{ color: "#fa8c16", fontSize: 14 }} />}
             />
-            <Text type="secondary" style={{ fontSize: 11 }}>{lgusWithData}/{totalRecords} reporting</Text>
+            <Text type="secondary" style={{ fontSize: 10 }}>{lgusWithData}/{totalRecords} reporting</Text>
           </Card>
         </Col>
-        <Col xs={12} sm={6} md={6} lg={6}>
-          <Card size="small" hoverable style={{ borderRadius: 10, borderLeft: "4px solid #722ed1", height: "100%" }}>
+        <Col xs={12} sm={6} md={6} lg={3}>
+          <Card size="small" hoverable style={{ borderRadius: 8, borderLeft: "3px solid #722ed1", height: "100%", padding: 0 }} bodyStyle={{ padding: "8px 12px" }}>
             <Statistic
-              title="Private Sectors Served"
+              title={<span style={{ fontSize: 11 }}>Private Sectors</span>}
               value={privateSectorCount}
-              prefix={<BankOutlined style={{ color: "#722ed1" }} />}
+              valueStyle={{ fontSize: 20 }}
+              prefix={<BankOutlined style={{ color: "#722ed1", fontSize: 14 }} />}
             />
-            <Text type="secondary" style={{ fontSize: 11 }}>{privateWithData}/{totalRecords} private-owned</Text>
+            <Text type="secondary" style={{ fontSize: 10 }}>{privateWithData}/{totalRecords} private-owned</Text>
           </Card>
         </Col>
         {/* Row 2 */}
-        <Col xs={12} sm={6} md={6} lg={6}>
-          <Card size="small" hoverable style={{ borderRadius: 10, borderLeft: "4px solid #eb2f96", height: "100%" }}>
+        <Col xs={12} sm={6} md={6} lg={3}>
+          <Card size="small" hoverable style={{ borderRadius: 8, borderLeft: "3px solid #eb2f96", height: "100%", padding: 0 }} bodyStyle={{ padding: "8px 12px" }}>
             <Statistic
-              title="Total Capacity"
+              title={<span style={{ fontSize: 11 }}>Total Capacity</span>}
               value={totalCapacity}
-              prefix={<DatabaseOutlined style={{ color: "#eb2f96" }} />}
+              valueStyle={{ fontSize: 20 }}
+              prefix={<DatabaseOutlined style={{ color: "#eb2f96", fontSize: 14 }} />}
               formatter={(v) => Number(v).toLocaleString()}
             />
-            <Text type="secondary" style={{ fontSize: 11 }}>{capacityWithData}/{totalRecords} with data</Text>
+            <Text type="secondary" style={{ fontSize: 10 }}>{capacityWithData}/{totalRecords} with data</Text>
           </Card>
         </Col>
-        <Col xs={12} sm={6} md={6} lg={6}>
-          <Card size="small" hoverable style={{ borderRadius: 10, borderLeft: "4px solid #ff4d4f", height: "100%" }}>
+        <Col xs={12} sm={6} md={6} lg={3}>
+          <Card size="small" hoverable style={{ borderRadius: 8, borderLeft: "3px solid #ff4d4f", height: "100%", padding: 0 }} bodyStyle={{ padding: "8px 12px" }}>
             <Statistic
-              title="Waste Received"
+              title={<span style={{ fontSize: 11 }}>Waste Received</span>}
               value={totalWaste}
               suffix="tons"
-              prefix={<BarChartOutlined style={{ color: "#ff4d4f" }} />}
+              valueStyle={{ fontSize: 20 }}
+              prefix={<BarChartOutlined style={{ color: "#ff4d4f", fontSize: 14 }} />}
               formatter={(v) => Number(v).toLocaleString()}
             />
-            <Text type="secondary" style={{ fontSize: 11 }}>{wasteWithData}/{totalRecords} reporting</Text>
+            <Text type="secondary" style={{ fontSize: 10 }}>{wasteWithData}/{totalRecords} reporting</Text>
           </Card>
         </Col>
-        <Col xs={12} sm={6} md={6} lg={6}>
-          <Card size="small" hoverable style={{ borderRadius: 10, borderLeft: "4px solid #1890ff", height: "100%" }}>
+        <Col xs={12} sm={6} md={6} lg={3}>
+          <Card size="small" hoverable style={{ borderRadius: 8, borderLeft: "3px solid #1890ff", height: "100%", padding: 0 }} bodyStyle={{ padding: "8px 12px" }}>
             <Statistic
-              title="Leachate Ponds"
+              title={<span style={{ fontSize: 11 }}>Leachate Ponds</span>}
               value={totalLeachate}
-              prefix={<AlertOutlined style={{ color: "#1890ff" }} />}
+              valueStyle={{ fontSize: 20 }}
+              prefix={<AlertOutlined style={{ color: "#1890ff", fontSize: 14 }} />}
             />
-            <Text type="secondary" style={{ fontSize: 11 }}>{leachateWithData}/{totalRecords} with ponds</Text>
+            <Text type="secondary" style={{ fontSize: 10 }}>{leachateWithData}/{totalRecords} with ponds</Text>
           </Card>
         </Col>
-        <Col xs={12} sm={6} md={6} lg={6}>
-          <Card size="small" hoverable style={{ borderRadius: 10, borderLeft: "4px solid #52c41a", height: "100%" }}>
+        <Col xs={12} sm={6} md={6} lg={3}>
+          <Card size="small" hoverable style={{ borderRadius: 8, borderLeft: "3px solid #52c41a", height: "100%", padding: 0 }} bodyStyle={{ padding: "8px 12px" }}>
             <Statistic
-              title="Gas Vents"
+              title={<span style={{ fontSize: 11 }}>Gas Vents</span>}
               value={totalGasVents}
-              prefix={<ExperimentOutlined style={{ color: "#52c41a" }} />}
+              valueStyle={{ fontSize: 20 }}
+              prefix={<ExperimentOutlined style={{ color: "#52c41a", fontSize: 14 }} />}
             />
-            <Text type="secondary" style={{ fontSize: 11 }}>{gasVentsWithData}/{totalRecords} with vents</Text>
+            <Text type="secondary" style={{ fontSize: 10 }}>{gasVentsWithData}/{totalRecords} with vents</Text>
           </Card>
         </Col>
       </Row>
+      )}
 
       <Tabs
         defaultActiveKey="facilities"
+        destroyOnHidden
         items={[
           {
             key: "facilities",
@@ -1552,6 +2028,19 @@ export default function SLFMonitoring() {
                     </Col>
                     <Col flex="auto">
                       <Space wrap size={8}>
+                        <Select
+                          placeholder="Year"
+                          value={filterYear}
+                          onChange={setFilterYear}
+                          style={{
+                            width: "100%",
+                            minWidth: 90,
+                            maxWidth: 110,
+                          }}
+                          size="small"
+                          options={availableYears.map((y) => ({ label: y, value: y }))}
+                          suffixIcon={<CalendarOutlined />}
+                        />
                         <Select
                           placeholder="Province"
                           value={filterProvince}
@@ -1635,7 +2124,14 @@ export default function SLFMonitoring() {
 
                 {/* Table */}
                 <Card size="small" style={{ borderRadius: 10 }}>
+                  <style>{`
+                    .slf-table .ant-table-header .ant-table-cell-fix-left,
+                    .slf-table .ant-table-header .ant-table-cell-fix-right {
+                      z-index: 3 !important;
+                    }
+                  `}</style>
                   <Table
+                    className="slf-table"
                     dataSource={filtered}
                     columns={columns}
                     rowKey="_id"
@@ -1673,7 +2169,7 @@ export default function SLFMonitoring() {
 
       {/* Add/Edit Modal */}
       <Modal
-        title={editing ? "Edit SLF Facility" : "Add SLF Facility"}
+        title={editing?._id ? `Edit SLF Facility — ${editYear}` : "Add SLF Facility"}
         open={modalOpen}
         onCancel={() => setModalOpen(false)}
         onOk={handleSave}
@@ -1681,10 +2177,42 @@ export default function SLFMonitoring() {
         okText="Save"
         okButtonProps={{ style: { background: ACCENT, borderColor: ACCENT } }}
       >
+        <div style={{ marginBottom: 12, padding: "8px 12px", background: "#f0f5ff", borderRadius: 6, border: "1px solid #d6e4ff" }}>
+          <Row align="middle" gutter={12}>
+            <Col>
+              <Text strong style={{ fontSize: 13 }}><CalendarOutlined style={{ marginRight: 4 }} /> Data Year:</Text>
+            </Col>
+            <Col>
+              <Select
+                value={editYear}
+                onChange={editing?._id ? handleEditYearChange : setEditYear}
+                style={{ width: 120 }}
+                options={(() => {
+                  const cy = new Date().getFullYear();
+                  const yrs = [...new Set([
+                    cy, cy - 1, cy - 2, cy - 3, cy - 4,
+                    ...(editYearRecords || []).map((r) => r.dataYear || cy),
+                  ])].sort((a, b) => b - a);
+                  return yrs.map((y) => {
+                    const has = (editYearRecords || []).some((r) => r.dataYear === y);
+                    return { label: has ? `${y}` : `${y} (new)`, value: y };
+                  });
+                })()}
+              />
+            </Col>
+            {editing?._id && (
+              <Col>
+                <Tag color={editYearRecords.some((r) => r.dataYear === editYear && r._id) ? "green" : "orange"} bordered={false}>
+                  {editYearRecords.some((r) => r.dataYear === editYear && r._id) ? "Existing record" : "New record for this year"}
+                </Tag>
+              </Col>
+            )}
+          </Row>
+        </div>
         <Form form={form} layout="vertical" size="small">
-          <Collapse
-            defaultActiveKey={["location","facility","permits","personnel","monitoring","portal","compliance"]}
-            bordered={false}
+          <Tabs
+            defaultActiveKey="location"
+            size="small"
             items={[
               {
                 key: "location",
@@ -1730,12 +2258,12 @@ export default function SLFMonitoring() {
             </Col>
             <Col span={6}>
               <Form.Item name="latitude" label="Latitude">
-                <InputNumber style={{ width: "100%" }} step={0.0001} precision={10} />
+                <InputNumber style={{ width: "100%" }} step={0.0001} precision={4} />
               </Form.Item>
             </Col>
             <Col span={6}>
               <Form.Item name="longitude" label="Longitude">
-                <InputNumber style={{ width: "100%" }} step={0.0001} precision={10} />
+                <InputNumber style={{ width: "100%" }} step={0.0001} precision={4} />
               </Form.Item>
             </Col>
           </Row>
@@ -1757,7 +2285,7 @@ export default function SLFMonitoring() {
               </Form.Item>
             </Col>
             <Col span={6}>
-              <Form.Item name="volumeCapacity" label="Volume Capacity">
+              <Form.Item name="volumeCapacity" label="Volume Capacity (m³)">
                 <InputNumber style={{ width: "100%" }} />
               </Form.Item>
             </Col>
@@ -1774,11 +2302,6 @@ export default function SLFMonitoring() {
             <Col span={6}>
               <Form.Item name="remainingLifeSpan" label="Remaining Lifespan">
                 <Input />
-              </Form.Item>
-            </Col>
-            <Col span={6}>
-              <Form.Item name="numberOfCell" label="No. of Cells">
-                <InputNumber style={{ width: "100%" }} />
               </Form.Item>
             </Col>
             <Col span={6}>
@@ -1810,6 +2333,198 @@ export default function SLFMonitoring() {
               </Form.Item>
             </Col>
           </Row>
+                ),
+              },
+              {
+                key: "cell-infra",
+                label: <span style={{ color: "#13c2c2" }}><BarChartOutlined /> Cell Infrastructure</span>,
+                children: (
+          <>
+          <Row gutter={12}>
+            <Col span={8}>
+              <Form.Item name="numberOfCell" label="No. of Cells">
+                <Select
+                  placeholder="Select"
+                  allowClear
+                  options={[1,2,3,4,5,6,7,8,9,10].map(n => ({ label: `${n}`, value: n }))}
+                  onChange={(val) => {
+                    const cur = form.getFieldValue("cellCapacities") || [];
+                    const curSt = form.getFieldValue("cellStatuses") || [];
+                    const next = Array.from({ length: val || 0 }, (_, i) => cur[i] ?? null);
+                    const nextSt = Array.from({ length: val || 0 }, (_, i) => curSt[i] || "Operational");
+                    form.setFieldsValue({ cellCapacities: next, cellStatuses: nextSt });
+                  }}
+                />
+              </Form.Item>
+            </Col>
+          </Row>
+
+          {/* ── Capacity Unit Converter ── */}
+          <Card size="small" style={{ borderRadius: 8, background: "#f6ffed", marginBottom: 12 }}>
+            <Text strong style={{ fontSize: 12, color: "#389e0d" }}>📐 Capacity Converter (m² → m³)</Text>
+            <Row gutter={12} style={{ marginTop: 8 }} align="middle">
+              <Col span={7}>
+                <InputNumber
+                  id="conv-area"
+                  style={{ width: "100%" }}
+                  min={0}
+                  step={0.01}
+                  placeholder="Area (m²)"
+                  addonAfter="m²"
+                  onChange={() => {
+                    const area = document.getElementById("conv-area")?.querySelector("input")?.value;
+                    const depth = document.getElementById("conv-depth")?.querySelector("input")?.value;
+                    const res = document.getElementById("conv-result");
+                    if (area && depth && res) res.textContent = `= ${(Number(area) * Number(depth)).toLocaleString(undefined, { maximumFractionDigits: 2 })} m³`;
+                  }}
+                />
+              </Col>
+              <Col span={1} style={{ textAlign: "center" }}><Text type="secondary">×</Text></Col>
+              <Col span={7}>
+                <InputNumber
+                  id="conv-depth"
+                  style={{ width: "100%" }}
+                  min={0}
+                  step={0.01}
+                  placeholder="Depth (m)"
+                  addonAfter="m"
+                  onChange={() => {
+                    const area = document.getElementById("conv-area")?.querySelector("input")?.value;
+                    const depth = document.getElementById("conv-depth")?.querySelector("input")?.value;
+                    const res = document.getElementById("conv-result");
+                    if (area && depth && res) res.textContent = `= ${(Number(area) * Number(depth)).toLocaleString(undefined, { maximumFractionDigits: 2 })} m³`;
+                  }}
+                />
+              </Col>
+              <Col span={9}>
+                <Text id="conv-result" strong style={{ fontSize: 14, color: "#389e0d" }}>= 0 m³</Text>
+              </Col>
+            </Row>
+          </Card>
+
+          <Form.Item noStyle dependencies={["numberOfCell"]}>
+            {() => {
+              const cellCount = form.getFieldValue("numberOfCell") || 0;
+              if (cellCount < 1) return null;
+              return (
+                <>
+                <Divider plain orientation="left" style={{ fontSize: 12, margin: "8px 0 16px" }}>Cell Capacities &amp; Status</Divider>
+                <Row gutter={12}>
+                  {Array.from({ length: cellCount }, (_, i) => (
+                    <Col span={6} key={i}>
+                      <Form.Item name={["cellCapacities", i]} label={`Cell ${i + 1} Capacity (m³)`}>
+                        <InputNumber style={{ width: "100%" }} min={0} step={0.01} placeholder="Capacity" />
+                      </Form.Item>
+                      <Form.Item name={["cellStatuses", i]} label={`Cell ${i + 1} Status`} initialValue="Operational">
+                        <Select options={[{ label: "Operational", value: "Operational" }, { label: "Closed", value: "Closed" }]} />
+                      </Form.Item>
+                    </Col>
+                  ))}
+                </Row>
+                </>
+              );
+            }}
+          </Form.Item>
+          <Form.Item noStyle dependencies={["numberOfCell", "cellCapacities", "cellStatuses", "volumeCapacity", "actualResidualWasteReceived"]}>
+            {() => {
+              const cellCount = form.getFieldValue("numberOfCell") || 0;
+              const caps = form.getFieldValue("cellCapacities") || [];
+              const statuses = form.getFieldValue("cellStatuses") || [];
+              const totalCap = form.getFieldValue("volumeCapacity") || 0;
+              const waste = form.getFieldValue("actualResidualWasteReceived") || 0;
+              const pct = totalCap > 0 ? Math.min(Math.round((waste / totalCap) * 100), 100) : 0;
+              if (cellCount < 1) return <Empty description="Select number of cells to see infrastructure preview" />;
+              // Per-cell donut data for charts
+              const cellDonutData = Array.from({ length: cellCount }, (_, i) => {
+                const cap = caps[i] || 0;
+                const st = statuses[i] || "Operational";
+                // Distribute waste proportionally across operational cells
+                const opCaps = caps.filter((c, j) => (statuses[j] || "Operational") !== "Closed" && c > 0);
+                const totalOpCap = opCaps.reduce((s, c) => s + c, 0);
+                const cellWaste = st === "Closed" ? cap : (totalOpCap > 0 && cap > 0 ? Math.round((cap / totalOpCap) * waste) : 0);
+                return { index: i, capacity: cap, status: st, waste: Math.min(cellWaste, cap), remaining: Math.max(0, cap - Math.min(cellWaste, cap)) };
+              });
+              return (
+                <Card size="small" style={{ borderRadius: 10, marginTop: 8, background: "#fafafa" }}>
+                  <Row gutter={16} align="middle">
+                    <Col xs={24} md={8} style={{ textAlign: "center" }}>
+                      <Progress
+                        type="dashboard"
+                        percent={pct}
+                        size={110}
+                        strokeColor={pct >= 90 ? "#ff4d4f" : pct >= 70 ? "#faad14" : "#52c41a"}
+                        format={() => (
+                          <div style={{ lineHeight: 1.3 }}>
+                            <div style={{ fontSize: 18, fontWeight: 700, color: pct >= 90 ? "#ff4d4f" : pct >= 70 ? "#faad14" : "#52c41a" }}>{pct}%</div>
+                            <div style={{ fontSize: 10, color: "#8c8c8c" }}>used</div>
+                          </div>
+                        )}
+                      />
+                      <div style={{ fontSize: 11, color: "#8c8c8c", marginTop: 4 }}>
+                        {waste > 0 ? waste.toLocaleString() : "0"} / {totalCap > 0 ? totalCap.toLocaleString() : "—"} m³
+                      </div>
+                    </Col>
+                    <Col xs={24} md={16}>
+                      <Row gutter={[12, 12]} justify="center">
+                        {cellDonutData.map((cell, i) => {
+                          const cellPct = cell.capacity > 0 ? Math.min(Math.round((cell.waste / cell.capacity) * 100), 100) : 0;
+                          const isClosed = cell.status === "Closed";
+                          return (
+                            <Col xs={12} sm={8} key={i} style={{ textAlign: "center" }}>
+                              <Progress
+                                type="dashboard"
+                                percent={isClosed ? 100 : cellPct}
+                                size={70}
+                                strokeColor={isClosed ? "#d9d9d9" : cellPct >= 90 ? "#ff4d4f" : cellPct >= 70 ? "#faad14" : "#52c41a"}
+                                format={() => (
+                                  <div style={{ lineHeight: 1.2 }}>
+                                    <div style={{ fontSize: 13, fontWeight: 700, color: isClosed ? "#8c8c8c" : cellPct >= 90 ? "#ff4d4f" : cellPct >= 70 ? "#faad14" : "#52c41a" }}>
+                                      {isClosed ? "—" : `${cellPct}%`}
+                                    </div>
+                                  </div>
+                                )}
+                              />
+                              <div style={{ fontSize: 11, fontWeight: 600, marginTop: 4 }}>Cell {i + 1}</div>
+                              <Tag color={isClosed ? "default" : "green"} style={{ fontSize: 9, marginTop: 2 }}>{cell.status}</Tag>
+                              <div style={{ fontSize: 10, color: "#8c8c8c" }}>{cell.capacity > 0 ? `${cell.capacity.toLocaleString()} m³` : "Not set"}</div>
+                            </Col>
+                          );
+                        })}
+                      </Row>
+                    </Col>
+                  </Row>
+                  {/* Per-cell donut charts when 2+ cells with capacity */}
+                  {cellCount >= 2 && cellDonutData.some(c => c.capacity > 0) && (
+                    <>
+                      <Divider plain style={{ fontSize: 11, margin: "12px 0 8px" }}>Per-Cell Capacity Donut Charts</Divider>
+                      <Row gutter={[8, 8]} justify="center">
+                        {cellDonutData.filter(c => c.capacity > 0).map((cell) => {
+                          const chartData = cell.status === "Closed"
+                            ? [{ name: "Closed", value: cell.capacity }]
+                            : [{ name: "Used", value: cell.waste }, { name: "Remaining", value: cell.remaining }];
+                          const colors = cell.status === "Closed" ? ["#d9d9d9"] : ["#ff4d4f", "#52c41a"];
+                          return (
+                            <Col xs={12} sm={8} md={6} key={cell.index} style={{ textAlign: "center" }}>
+                              <Text style={{ fontSize: 11, fontWeight: 600 }}>Cell {cell.index + 1}</Text>
+                              <ResponsiveContainer width="100%" height={100}>
+                                <PieChart>
+                                  <Pie data={chartData} cx="50%" cy="50%" innerRadius={25} outerRadius={40} paddingAngle={2} dataKey="value">
+                                    {chartData.map((_, j) => <RCell key={j} fill={colors[j % colors.length]} />)}
+                                  </Pie>
+                                  <RTooltip formatter={(v) => `${v.toLocaleString()} m³`} />
+                                </PieChart>
+                              </ResponsiveContainer>
+                            </Col>
+                          );
+                        })}
+                      </Row>
+                    </>
+                  )}
+                </Card>
+              );
+            }}
+          </Form.Item>
+          </>
                 ),
               },
               {
@@ -1917,25 +2632,6 @@ export default function SLFMonitoring() {
                 ),
               },
               {
-                key: "portal",
-                label: <span style={{ color: "#597ef7" }}><LinkOutlined /> Portal Link</span>,
-                children: (
-          <Row gutter={12}>
-            <Col span={12}>
-              <Form.Item name="slfGenerator" label="Link to Portal Generator">
-                <Select
-                  options={generatorOptions}
-                  placeholder="Select generator (optional)"
-                  allowClear
-                  showSearch
-                  optionFilterProp="label"
-                />
-              </Form.Item>
-            </Col>
-          </Row>
-                ),
-              },
-              {
                 key: "compliance",
                 label: <span style={{ color: "#eb2f96" }}><FileTextOutlined /> Compliance</span>,
                 children: (
@@ -2009,6 +2705,8 @@ export default function SLFMonitoring() {
         title={
           <Space>
             <BankOutlined /> SLF Facility Details
+            {detailModal && <Text type="secondary" style={{ fontSize: 12 }}>— {detailModal.lgu}, {detailModal.province}</Text>}
+            {detailYearRecords.length >= 1 && <Tag color="blue" bordered={false} style={{ marginLeft: 8 }}>{detailYearRecords.length} year record{detailYearRecords.length > 1 ? "s" : ""}</Tag>}
           </Space>
         }
         open={!!detailModal}
@@ -2017,6 +2715,21 @@ export default function SLFMonitoring() {
         width={900}
       >
         {detailModal && (
+          <>
+          {/* Year Selector */}
+          {detailYearRecords.length >= 1 && (
+            <div style={{ marginBottom: 12, display: "flex", alignItems: "center", gap: 8 }}>
+              <Text type="secondary" style={{ fontSize: 12 }}>Year:</Text>
+              <Space size={4}>
+                {detailYearRecords.map((r) => r.dataYear || new Date().getFullYear()).filter((v, i, a) => a.indexOf(v) === i).sort((a, b) => b - a).map((yr) => (
+                  <Button key={yr} size="small" type={detailYear === yr ? "primary" : "default"} onClick={() => setDetailYear(yr)}
+                    style={detailYear === yr ? { background: ACCENT, borderColor: ACCENT } : {}}
+                  >{yr}</Button>
+                ))}
+              </Space>
+            </div>
+          )}
+          {detailViewRecord ? (
           <Tabs
             defaultActiveKey="1"
             items={[
@@ -2024,68 +2737,24 @@ export default function SLFMonitoring() {
                 key: "1",
                 label: "Location & Status",
                 children: (
-                  <Row gutter={[16, 8]}>
-                    <Col span={12}>
-                      <Text type="secondary">Province:</Text>{" "}
-                      <Text strong>{detailModal.province}</Text>
-                    </Col>
-                    <Col span={12}>
-                      <Text type="secondary">LGU:</Text>{" "}
-                      <Text strong>{detailModal.lgu}</Text>
-                    </Col>
-                    <Col span={12}>
-                      <Text type="secondary">Barangay:</Text>{" "}
-                      <Text strong>{detailModal.barangay || "—"}</Text>
-                    </Col>
-                    <Col span={12}>
-                      <Text type="secondary">MBA:</Text>{" "}
-                      <Text strong>{detailModal.manilaBayArea || "—"}</Text>
-                    </Col>
-                    <Col span={12}>
-                      <Text type="secondary">Ownership:</Text>{" "}
-                      <Text strong>{detailModal.ownership || "—"}</Text>
-                    </Col>
-                    <Col span={12}>
-                      <Text type="secondary">District:</Text>{" "}
-                      <Text strong>
-                        {detailModal.congressionalDistrict || "—"}
-                      </Text>
-                    </Col>
-                    <Col span={12}>
-                      <Text type="secondary">Status:</Text>{" "}
-                      {getStatusTag(detailModal.statusOfSLF)}
-                    </Col>
-                    <Col span={12}>
-                      <Text type="secondary">Category:</Text>{" "}
-                      {detailModal.category ? (
-                        <Tag color="blue">{detailModal.category}</Tag>
-                      ) : (
-                        "—"
-                      )}
-                    </Col>
-                    <Col span={12}>
-                      <Text type="secondary">Year Started:</Text>{" "}
-                      <Text strong>
-                        {detailModal.yearStartedOperation || "—"}
-                      </Text>
-                    </Col>
-                    <Col span={12}>
-                      <Text type="secondary">Capacity:</Text>{" "}
-                      <Text strong>
-                        {detailModal.volumeCapacity
-                          ? Number(detailModal.volumeCapacity).toLocaleString()
-                          : "—"}
-                      </Text>
-                    </Col>
-                    <Col span={12}>
-                      <Text type="secondary">LGUs Served:</Text>{" "}
-                      <Text strong>{detailModal.noOfLGUServed || "—"}</Text>
-                    </Col>
-                    <Col span={12}>
-                      <Text type="secondary">Remaining Lifespan:</Text>{" "}
-                      <Text strong>{detailModal.remainingLifeSpan || "—"}</Text>
-                    </Col>
-                  </Row>
+                  <Descriptions column={2} size="small" bordered>
+                    <Descriptions.Item label="Province">{detailViewRecord.province || "—"}</Descriptions.Item>
+                    <Descriptions.Item label="LGU">{detailViewRecord.lgu || "—"}</Descriptions.Item>
+                    <Descriptions.Item label="Barangay">{detailViewRecord.barangay || "—"}</Descriptions.Item>
+                    <Descriptions.Item label="MBA">{detailViewRecord.manilaBayArea || "—"}</Descriptions.Item>
+                    <Descriptions.Item label="Ownership">{detailViewRecord.ownership || "—"}</Descriptions.Item>
+                    <Descriptions.Item label="District">{detailViewRecord.congressionalDistrict || "—"}</Descriptions.Item>
+                    <Descriptions.Item label="Status">{getStatusTag(detailViewRecord.statusOfSLF)}</Descriptions.Item>
+                    <Descriptions.Item label="Category">
+                      {detailViewRecord.category ? <Tag color="blue">{detailViewRecord.category}</Tag> : "—"}
+                    </Descriptions.Item>
+                    <Descriptions.Item label="Year Started">{detailViewRecord.yearStartedOperation || "—"}</Descriptions.Item>
+                    <Descriptions.Item label="Capacity">
+                      {detailViewRecord.volumeCapacity ? Number(detailViewRecord.volumeCapacity).toLocaleString() : "—"}
+                    </Descriptions.Item>
+                    <Descriptions.Item label="LGUs Served">{detailViewRecord.noOfLGUServed || "—"}</Descriptions.Item>
+                    <Descriptions.Item label="Remaining Lifespan">{detailViewRecord.remainingLifeSpan || "—"}</Descriptions.Item>
+                  </Descriptions>
                 ),
               },
               {
@@ -2096,12 +2765,12 @@ export default function SLFMonitoring() {
                   </>
                 ),
                 children: (() => {
-                  const cells = detailModal.numberOfCell || 0;
-                  const leachate = detailModal.noOfLeachatePond || 0;
-                  const gasVents = detailModal.numberOfGasVents || 0;
-                  const wasteReceived = detailModal.actualResidualWasteReceived || 0;
-                  const estVolume = detailModal.estimatedVolumeWaste || 0;
-                  const capacity = detailModal.volumeCapacity || 0;
+                  const cells = detailViewRecord.numberOfCell || 0;
+                  const leachate = detailViewRecord.noOfLeachatePond || 0;
+                  const gasVents = detailViewRecord.numberOfGasVents || 0;
+                  const wasteReceived = detailViewRecord.actualResidualWasteReceived || 0;
+                  const estVolume = detailViewRecord.estimatedVolumeWaste || 0;
+                  const capacity = detailViewRecord.volumeCapacity || 0;
                   const infraData = [
                     { name: "Cells", value: cells },
                     { name: "Leachate Ponds", value: leachate },
@@ -2147,97 +2816,158 @@ export default function SLFMonitoring() {
                       ].filter(Boolean)
                     : [];
                   const hasCharts = infraData.length > 0 || capacityData.length > 0 || cellVolumeData.length > 0;
+                  const pctUsed = capacity > 0 ? Math.min(Math.round((wasteReceived / capacity) * 100), 100) : 0;
+                  const cellCaps = detailViewRecord.cellCapacities || [];
                   return (
                     <>
-                      <Row gutter={[16, 8]} style={{ marginBottom: 16 }}>
-                        <Col span={8}>
-                          <Text type="secondary">Cells:</Text>{" "}
-                          <Text strong>{cells || "—"}</Text>
-                        </Col>
-                        <Col span={8}>
-                          <Text type="secondary">Leachate Ponds:</Text>{" "}
-                          <Text strong>{leachate || "—"}</Text>
-                        </Col>
-                        <Col span={8}>
-                          <Text type="secondary">Gas Vents:</Text>{" "}
-                          <Text strong>{gasVents || "—"}</Text>
-                        </Col>
-                        <Col span={12}>
-                          <Text type="secondary">Waste Received:</Text>{" "}
-                          <Text strong>
-                            {wasteReceived ? `${Number(wasteReceived).toLocaleString()} tons` : "—"}
-                          </Text>
-                        </Col>
-                        <Col span={12}>
-                          <Text type="secondary">Est. Volume:</Text>{" "}
-                          <Text strong>
-                            {estVolume ? Number(estVolume).toLocaleString() : "—"}
-                          </Text>
-                        </Col>
-                        <Col span={12}>
-                          <Text type="secondary">MRF Established:</Text>{" "}
-                          <Text strong>{detailModal.mrfEstablished || "—"}</Text>
-                        </Col>
-                        <Divider plain orientation="left">
-                          Permits
-                        </Divider>
-                        <Col span={12}>
-                          <Text type="secondary">ECC No.:</Text>{" "}
-                          <Text>{detailModal.eccNo || "—"}</Text>
-                        </Col>
-                        <Col span={12}>
-                          <Text type="secondary">Discharge Permit:</Text>{" "}
-                          <Text>{detailModal.dischargePermit || "—"}</Text>
-                        </Col>
-                        <Col span={12}>
-                          <Text type="secondary">Permit to Operate:</Text>{" "}
-                          <Text>{detailModal.permitToOperate || "—"}</Text>
-                        </Col>
-                        <Col span={12}>
-                          <Text type="secondary">Hazwaste Gen. ID:</Text>{" "}
-                          <Text>{detailModal.hazwasteGenerationId || "—"}</Text>
-                        </Col>
-                        {detailModal.slfGenerator && (
-                          <>
-                            <Divider plain orientation="left">
-                              Portal Link
-                            </Divider>
-                            <Col span={24}>
-                              <Tag color="blue" icon={<LinkOutlined />}>
-                                {typeof detailModal.slfGenerator === "object"
-                                  ? detailModal.slfGenerator.slfName
-                                  : "Linked Generator"}
-                              </Tag>
+                      <Descriptions column={3} size="small" bordered style={{ marginBottom: 16 }}>
+                        <Descriptions.Item label="Cells">{cells || "—"}</Descriptions.Item>
+                        <Descriptions.Item label="Leachate Ponds">{leachate || "—"}</Descriptions.Item>
+                        <Descriptions.Item label="Gas Vents">{gasVents || "—"}</Descriptions.Item>
+                        <Descriptions.Item label="Waste Received" span={1}>
+                          {wasteReceived ? `${Number(wasteReceived).toLocaleString()} tons` : "—"}
+                        </Descriptions.Item>
+                        <Descriptions.Item label="Est. Volume" span={1}>
+                          {estVolume ? Number(estVolume).toLocaleString() : "—"}
+                        </Descriptions.Item>
+                        <Descriptions.Item label="MRF Established" span={1}>
+                          {detailViewRecord.mrfEstablished || "—"}
+                        </Descriptions.Item>
+                      </Descriptions>
+
+                      {/* Cell Infrastructure Status */}
+                      {cells > 0 && (() => {
+                        const cellStatuses = detailViewRecord.cellStatuses || [];
+                        const handleCellToggle = async (cellIndex, checked) => {
+                          const newStatus = checked ? "Operational" : "Closed";
+                          try {
+                            const { data } = await api.patch(`/slf-facilities/${detailViewRecord._id}/cell-status`, { cellIndex, status: newStatus });
+                            setDetailModal(data);
+                            setDetailYearRecords(prev => prev.map(r => r._id === data._id ? data : r));
+                            // Refresh list and clear cache
+                            fetchRecords(true);
+                            Swal.fire({ icon: "success", title: `Cell ${cellIndex + 1}`, text: `Set to ${newStatus}`, timer: 1500, showConfirmButton: false });
+                          } catch {
+                            Swal.fire("Error", "Failed to update cell status", "error");
+                          }
+                        };
+                        return (
+                        <>
+                          <Divider plain orientation="left"><BarChartOutlined /> Cell Infrastructure Status</Divider>
+                          <Row gutter={[16, 16]} style={{ marginBottom: 16 }}>
+                            <Col xs={24} md={10}>
+                              <Card size="small" style={{ borderRadius: 10, textAlign: "center" }}>
+                                <Progress
+                                  type="dashboard"
+                                  percent={pctUsed}
+                                  size={140}
+                                  strokeColor={pctUsed >= 90 ? "#ff4d4f" : pctUsed >= 70 ? "#faad14" : "#52c41a"}
+                                  format={() => (
+                                    <div style={{ lineHeight: 1.3 }}>
+                                      <div style={{ fontSize: 22, fontWeight: 700, color: pctUsed >= 90 ? "#ff4d4f" : pctUsed >= 70 ? "#faad14" : "#52c41a" }}>{pctUsed}%</div>
+                                      <div style={{ fontSize: 10, color: "#8c8c8c" }}>capacity used</div>
+                                    </div>
+                                  )}
+                                />
+                                <div style={{ marginTop: 12 }}>
+                                  <Row gutter={8}>
+                                    <Col span={12}>
+                                      <div style={{ fontSize: 11, color: "#8c8c8c" }}>Waste Received</div>
+                                      <div style={{ fontSize: 14, fontWeight: 600 }}>{wasteReceived > 0 ? wasteReceived.toLocaleString() : "0"}</div>
+                                    </Col>
+                                    <Col span={12}>
+                                      <div style={{ fontSize: 11, color: "#8c8c8c" }}>Total Capacity</div>
+                                      <div style={{ fontSize: 14, fontWeight: 600 }}>{capacity > 0 ? capacity.toLocaleString() : "—"}</div>
+                                    </Col>
+                                    <Col span={12} style={{ marginTop: 8 }}>
+                                      <div style={{ fontSize: 11, color: "#8c8c8c" }}>Remaining</div>
+                                      <div style={{ fontSize: 14, fontWeight: 600, color: capacity - wasteReceived <= 0 ? "#ff4d4f" : "#52c41a" }}>
+                                        {capacity > 0 ? (capacity - wasteReceived).toLocaleString() : "—"}
+                                      </div>
+                                    </Col>
+                                    <Col span={12} style={{ marginTop: 8 }}>
+                                      <div style={{ fontSize: 11, color: "#8c8c8c" }}>Status</div>
+                                      <Tag color={detailViewRecord.statusOfSLF?.toLowerCase().includes("non") ? "red" : "green"} style={{ margin: 0 }}>
+                                        {detailViewRecord.statusOfSLF || "—"}
+                                      </Tag>
+                                    </Col>
+                                  </Row>
+                                </div>
+                              </Card>
                             </Col>
-                          </>
-                        )}
-                      </Row>
+                            <Col xs={24} md={14}>
+                              <Card size="small" title={<><BarChartOutlined /> Per-Cell Status &amp; Capacity</>} style={{ borderRadius: 10 }}>
+                                <Row gutter={[16, 16]} justify="center">
+                                  {(cellCaps.length > 0 ? cellCaps : Array.from({ length: cells }, () => 0)).map((cap, i) => {
+                                    const cellFill = capacity > 0 && cap > 0 ? Math.min(Math.round((cap / capacity) * 100 * cells), 100) : 0;
+                                    const cellSt = cellStatuses[i] || "Operational";
+                                    const isClosed = cellSt === "Closed";
+                                    return (
+                                      <Col xs={12} sm={8} key={i} style={{ textAlign: "center" }}>
+                                        <Progress
+                                          type="dashboard"
+                                          percent={isClosed ? 100 : cellFill}
+                                          size={80}
+                                          strokeColor={isClosed ? "#d9d9d9" : cellFill >= 90 ? "#ff4d4f" : cellFill >= 70 ? "#faad14" : "#52c41a"}
+                                          format={() => (
+                                            <div style={{ lineHeight: 1.2 }}>
+                                              <div style={{ fontSize: 14, fontWeight: 700, color: isClosed ? "#8c8c8c" : cellFill >= 90 ? "#ff4d4f" : cellFill >= 70 ? "#faad14" : "#52c41a" }}>
+                                                {isClosed ? "—" : `${cellFill}%`}
+                                              </div>
+                                            </div>
+                                          )}
+                                        />
+                                        <div style={{ marginTop: 6, fontSize: 12, fontWeight: 600 }}>Cell {i + 1}</div>
+                                        <div style={{ fontSize: 10, color: "#8c8c8c" }}>{cap > 0 ? `${cap.toLocaleString()} m³` : "—"}</div>
+                                        <div style={{ marginTop: 6 }}>
+                                          <Tooltip title={isClosed ? "Set to Operational" : "Set to Closed"}>
+                                            <Switch
+                                              size="small"
+                                              checked={!isClosed}
+                                              onChange={(checked) => handleCellToggle(i, checked)}
+                                              checkedChildren="ON"
+                                              unCheckedChildren="OFF"
+                                            />
+                                          </Tooltip>
+                                          <div style={{ fontSize: 9, color: isClosed ? "#ff4d4f" : "#52c41a", marginTop: 2, fontWeight: 600 }}>
+                                            {cellSt}
+                                          </div>
+                                        </div>
+                                      </Col>
+                                    );
+                                  })}
+                                </Row>
+                              </Card>
+                            </Col>
+                          </Row>
+                        </>
+                        );
+                      })()}
+
+                      <Descriptions column={2} size="small" bordered title="Permits" style={{ marginBottom: 16 }}>
+                        <Descriptions.Item label="ECC No.">{detailViewRecord.eccNo || "—"}</Descriptions.Item>
+                        <Descriptions.Item label="Discharge Permit">{detailViewRecord.dischargePermit || "—"}</Descriptions.Item>
+                        <Descriptions.Item label="Permit to Operate">{detailViewRecord.permitToOperate || "—"}</Descriptions.Item>
+                        <Descriptions.Item label="Hazwaste Gen. ID">{detailViewRecord.hazwasteGenerationId || "—"}</Descriptions.Item>
+                      </Descriptions>
+                      {detailViewRecord.slfGenerator && (
+                        <div style={{ marginBottom: 16 }}>
+                          <Divider plain orientation="left">
+                            Portal Link
+                          </Divider>
+                          <Tag color="blue" icon={<LinkOutlined />}>
+                            {typeof detailViewRecord.slfGenerator === "object"
+                              ? detailViewRecord.slfGenerator.slfName
+                              : "Linked Generator"}
+                          </Tag>
+                        </div>
+                      )}
                       {hasCharts && (
                         <>
                           <Divider plain orientation="left">
                             <BarChartOutlined /> Charts
                           </Divider>
                           <Row gutter={[16, 16]}>
-                            {/* Infrastructure Breakdown */}
-                            {infraData.length > 0 && (
-                              <Col xs={24} md={12}>
-                                <Card size="small" title="Infrastructure Count" style={{ borderRadius: 10 }}>
-                                  <ResponsiveContainer width="100%" height={220}>
-                                    <BarChart data={infraData}>
-                                      <CartesianGrid strokeDasharray="3 3" />
-                                      <XAxis dataKey="name" tick={{ fontSize: 12 }} />
-                                      <YAxis allowDecimals={false} />
-                                      <RTooltip />
-                                      <Bar dataKey="value" fill={ACCENT} radius={[4, 4, 0, 0]}>
-                                        {infraData.map((_, i) => (
-                                          <RCell key={i} fill={CHART_COLORS[i % CHART_COLORS.length]} />
-                                        ))}
-                                      </Bar>
-                                    </BarChart>
-                                  </ResponsiveContainer>
-                                </Card>
-                              </Col>
-                            )}
                             {/* Capacity Utilization Pie */}
                             {capacityData.length > 0 && (
                               <Col xs={24} md={12}>
@@ -2352,105 +3082,41 @@ export default function SLFMonitoring() {
                 key: "3",
                 label: "Personnel & Monitoring",
                 children: (
-                  <Row gutter={[16, 8]}>
-                    <Col span={12}>
-                      <Text type="secondary">Target Month:</Text>{" "}
-                      <Text strong>{detailModal.targetMonth || "—"}</Text>
-                    </Col>
-                    <Col span={12}>
-                      <Text type="secondary">ENMO:</Text>{" "}
-                      <Text strong>{detailModal.enmo || "—"}</Text>
-                    </Col>
-                    <Col span={12}>
-                      <Text type="secondary">ESWM Staff:</Text>{" "}
-                      <Text strong>{detailModal.eswmStaff || "—"}</Text>
-                    </Col>
-                    <Col span={12}>
-                      <Text type="secondary">Focal Person:</Text>{" "}
-                      <Text strong>{detailModal.focalPerson || "—"}</Text>
-                    </Col>
-                    <Col span={12}>
-                      <Text type="secondary">IIS Number:</Text>{" "}
-                      <Text strong>{detailModal.iisNumber || "—"}</Text>
-                    </Col>
-                    <Col span={12}>
-                      <Text type="secondary">Monitoring:</Text>{" "}
-                      <Text strong>
-                        {detailModal.dateOfMonitoring
-                          ? dayjs(detailModal.dateOfMonitoring).format(
-                              "MMM DD, YYYY",
-                            )
-                          : "—"}
-                      </Text>
-                    </Col>
-                    <Col span={8}>
-                      <Text type="secondary">Days Prepared:</Text>{" "}
-                      <Text strong>
-                        {detailModal.totalDaysReportPrepared ?? "—"}
-                      </Text>
-                    </Col>
-                    <Col span={8}>
-                      <Text type="secondary">Days Staff Review:</Text>{" "}
-                      <Text strong>
-                        {detailModal.totalDaysReviewedStaff ?? "—"}
-                      </Text>
-                    </Col>
-                    <Col span={8}>
-                      <Text type="secondary">Days Focal Review:</Text>{" "}
-                      <Text strong>
-                        {detailModal.totalDaysReviewedFocal ?? "—"}
-                      </Text>
-                    </Col>
-                  </Row>
+                  <Descriptions column={2} size="small" bordered>
+                    <Descriptions.Item label="Target Month">{detailViewRecord.targetMonth || "—"}</Descriptions.Item>
+                    <Descriptions.Item label="ENMO">{detailViewRecord.enmo || "—"}</Descriptions.Item>
+                    <Descriptions.Item label="ESWM Staff">{detailViewRecord.eswmStaff || "—"}</Descriptions.Item>
+                    <Descriptions.Item label="Focal Person">{detailViewRecord.focalPerson || "—"}</Descriptions.Item>
+                    <Descriptions.Item label="IIS Number">{detailViewRecord.iisNumber || "—"}</Descriptions.Item>
+                    <Descriptions.Item label="Monitoring">
+                      {detailViewRecord.dateOfMonitoring
+                        ? dayjs(detailViewRecord.dateOfMonitoring).format("MMM DD, YYYY")
+                        : "—"}
+                    </Descriptions.Item>
+                    <Descriptions.Item label="Days Prepared">{detailViewRecord.totalDaysReportPrepared ?? "—"}</Descriptions.Item>
+                    <Descriptions.Item label="Days Staff Review">{detailViewRecord.totalDaysReviewedStaff ?? "—"}</Descriptions.Item>
+                    <Descriptions.Item label="Days Focal Review" span={2}>{detailViewRecord.totalDaysReviewedFocal ?? "—"}</Descriptions.Item>
+                  </Descriptions>
                 ),
               },
               {
                 key: "4",
                 label: "Compliance",
                 children: (
-                  <Row gutter={[16, 8]}>
-                    <Col span={24}>
-                      <Text type="secondary">Remarks:</Text>{" "}
-                      <Text>{detailModal.remarksAndRecommendation || "—"}</Text>
-                    </Col>
-                    <Col span={24}>
-                      <Text type="secondary">Findings:</Text>{" "}
-                      <Text>{detailModal.findings || "—"}</Text>
-                    </Col>
-                    <Col span={12}>
-                      <Text type="secondary">Advise Letter:</Text>{" "}
-                      <Text>{detailModal.adviseLetterDateIssued || "—"}</Text>
-                    </Col>
-                    <Col span={12}>
-                      <Text type="secondary">Compliance:</Text>{" "}
-                      <Text>{detailModal.complianceToAdvise || "—"}</Text>
-                    </Col>
-                    <Col span={12}>
-                      <Text type="secondary">Signed Document:</Text>{" "}
-                      <Text>{detailModal.signedDocument || "—"}</Text>
-                    </Col>
-                    <Col span={12}>
-                      <Text type="secondary">Docket (NOV):</Text>{" "}
-                      <Text>{detailModal.docketNoNOV || "—"}</Text>
-                    </Col>
-                    <Col span={12}>
-                      <Text type="secondary">NOV Date:</Text>{" "}
-                      <Text>{detailModal.dateOfIssuanceNOV || "—"}</Text>
-                    </Col>
-                    <Col span={12}>
-                      <Text type="secondary">Tech Conference:</Text>{" "}
-                      <Text>
-                        {detailModal.dateOfTechnicalConference || "—"}
-                      </Text>
-                    </Col>
-                    <Col span={24}>
-                      <Text type="secondary">Commitments:</Text>{" "}
-                      <Text>{detailModal.commitments || "—"}</Text>
-                    </Col>
-                  </Row>
+                  <Descriptions column={2} size="small" bordered>
+                    <Descriptions.Item label="Remarks" span={2}>{detailViewRecord.remarksAndRecommendation || "—"}</Descriptions.Item>
+                    <Descriptions.Item label="Findings" span={2}>{detailViewRecord.findings || "—"}</Descriptions.Item>
+                    <Descriptions.Item label="Advise Letter">{detailViewRecord.adviseLetterDateIssued || "—"}</Descriptions.Item>
+                    <Descriptions.Item label="Compliance">{detailViewRecord.complianceToAdvise || "—"}</Descriptions.Item>
+                    <Descriptions.Item label="Signed Document">{detailViewRecord.signedDocument || "—"}</Descriptions.Item>
+                    <Descriptions.Item label="Docket (NOV)">{detailViewRecord.docketNoNOV || "—"}</Descriptions.Item>
+                    <Descriptions.Item label="NOV Date">{detailViewRecord.dateOfIssuanceNOV || "—"}</Descriptions.Item>
+                    <Descriptions.Item label="Tech Conference">{detailViewRecord.dateOfTechnicalConference || "—"}</Descriptions.Item>
+                    <Descriptions.Item label="Commitments" span={2}>{detailViewRecord.commitments || "—"}</Descriptions.Item>
+                  </Descriptions>
                 ),
               },
-              ...(detailModal.slfGenerator
+              ...(detailViewRecord.slfGenerator
                 ? [
                     {
                       key: "5",
@@ -2565,7 +3231,12 @@ export default function SLFMonitoring() {
                   ]
                 : []),
             ]}
-          />
+          />) : (
+            <div style={{ textAlign: "center", padding: 48 }}>
+              <Empty description="No record found for this year" />
+            </div>
+          )}
+          </>
         )}
       </Modal>
     </div>

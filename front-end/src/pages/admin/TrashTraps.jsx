@@ -10,6 +10,7 @@ import {
   Select,
   Space,
   Tag,
+  Descriptions,
   Divider,
   Row,
   Col,
@@ -108,6 +109,8 @@ export default function TrashTraps() {
   const [loading, setLoading] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
   const [detailModal, setDetailModal] = useState(null);
+  const [detailYearRecords, setDetailYearRecords] = useState([]);
+  const [detailYear, setDetailYear] = useState(null);
   const [editing, setEditing] = useState(null);
   const [searchText, setSearchText] = useState("");
   const [filterProvince, setFilterProvince] = useState(null);
@@ -140,7 +143,27 @@ export default function TrashTraps() {
 
   useEffect(() => { fetchRecords(); }, [fetchRecords]);
 
-  const openAdd = () => { setEditing(null); form.resetFields(); setModalOpen(true); };
+  // Fetch cross-year history when viewing a record
+  useEffect(() => {
+    if (!detailModal) { setDetailYearRecords([]); setDetailYear(null); return; }
+    const name = detailModal.municipality;
+    if (!name) return;
+    api.get(`/trash-traps/history/${encodeURIComponent(name)}`)
+      .then(({ data }) => {
+        const enriched = data.map((r) => ({ ...r, ...computeFields(r) }));
+        setDetailYearRecords(enriched);
+        setDetailYear(detailModal.dataYear || new Date().getFullYear());
+      })
+      .catch(() => { setDetailYearRecords([]); setDetailYear(detailModal.dataYear || new Date().getFullYear()); });
+  }, [detailModal]);
+
+  const detailViewRecord = useMemo(() => {
+    if (!detailModal) return null;
+    if (detailYearRecords.length === 0) return detailModal;
+    return detailYearRecords.find((r) => (r.dataYear || new Date().getFullYear()) === detailYear) || detailModal;
+  }, [detailModal, detailYearRecords, detailYear]);
+
+  const openAdd = (prefill) => { setEditing(null); form.resetFields(); if (prefill) form.setFieldsValue(prefill); setModalOpen(true); };
 
   const openEdit = (record) => {
     setEditing(record);
@@ -327,6 +350,7 @@ export default function TrashTraps() {
         <Space size={4}>
           <Tooltip title="View Details"><Button type="text" size="small" icon={<EyeOutlined style={{ color: "#1890ff" }} />} onClick={() => setDetailModal(r)} /></Tooltip>
           <Tooltip title="Edit"><Button type="text" size="small" icon={<EditOutlined style={{ color: "#52c41a" }} />} onClick={() => openEdit(r)} /></Tooltip>
+          <Tooltip title="Add Record"><Button type="text" size="small" icon={<PlusOutlined style={{ color: "#13c2c2" }} />} onClick={() => openAdd({ municipality: r.municipality, province: r.province, barangay: r.barangay, manilaBayArea: r.manilaBayArea, latitude: r.latitude, longitude: r.longitude })} /></Tooltip>
         </Space>
       ),
     },
@@ -454,7 +478,7 @@ export default function TrashTraps() {
 
       {/* Detail Modal */}
       <Modal
-        title={<Space><ExperimentOutlined />{detailModal?.municipality}, {detailModal?.province}</Space>}
+        title={<Space><FileTextOutlined /> {detailModal?.municipality}, {detailModal?.province}{detailYearRecords.length >= 1 && <Tag color="blue" bordered={false} style={{ marginLeft: 8 }}>{detailYearRecords.length} year records</Tag>}</Space>}
         open={!!detailModal}
         onCancel={() => setDetailModal(null)}
         footer={<Button onClick={() => setDetailModal(null)}>Close</Button>}
@@ -462,60 +486,73 @@ export default function TrashTraps() {
         style={{ maxWidth: "95vw" }}
       >
         {detailModal && (
+          <>
+            {detailYearRecords.length >= 1 && (
+              <div style={{ marginBottom: 12 }}>
+                <Space size={8}>
+                  <Text type="secondary" style={{ fontSize: 12 }}>Data Year:</Text>
+                  {detailYearRecords.map((r) => r.dataYear || new Date().getFullYear()).filter((v, i, a) => a.indexOf(v) === i).sort((a, b) => b - a).map((yr) => (
+                    <Button key={yr} size="small" type={detailYear === yr ? "primary" : "default"} onClick={() => setDetailYear(yr)}>{yr}</Button>
+                  ))}
+                </Space>
+              </div>
+            )}
           <Tabs items={[
             { key: "general", label: <><EnvironmentOutlined /> General Info</>, children: (
               <>
-                <Row gutter={[16, 12]}>
-                  <Col xs={24} sm={12}><Text type="secondary"><EnvironmentOutlined /> Province:</Text> <Text strong>{detailModal.province}</Text></Col>
-                  <Col xs={24} sm={12}><Text type="secondary"><EnvironmentOutlined /> Municipality:</Text> <Text strong>{detailModal.municipality}</Text></Col>
-                  <Col xs={24} sm={12}><Text type="secondary">Barangay:</Text> <Text>{detailModal.barangay || "—"}</Text></Col>
-                  <Col xs={24} sm={12}><Text type="secondary">Manila Bay Area:</Text> {detailModal.manilaBayArea === "MBA" ? <Tag color="blue" bordered={false}>MBA</Tag> : <Tag color="default" bordered={false}>{detailModal.manilaBayArea || "—"}</Tag>}</Col>
-                  <Col xs={24} sm={12}><Text type="secondary">Coordinates:</Text> <Text>{detailModal.latitude}, {detailModal.longitude}</Text></Col>
-                </Row>
-                <Divider plain orientation="left"><ExperimentOutlined /> Trap Details</Divider>
-                <Row gutter={[16, 12]}>
-                  <Col xs={24} sm={12}><Text type="secondary">Date Installed:</Text> <Text strong>{detailModal.dateInstalled ? dayjs(detailModal.dateInstalled).format("MMM DD, YYYY") : "—"}</Text></Col>
-                  <Col xs={24} sm={12}><Text type="secondary">Status:</Text> {getStatusTag(detailModal.statusOfTrashTraps)}</Col>
-                  <Col xs={24} sm={12}><Text type="secondary">HDPE Floaters:</Text> <Text strong>{detailModal.noOfTrashTrapsHDPE || "—"}</Text></Col>
-                  <Col xs={24} sm={12}><Text type="secondary">Waste Hauled:</Text> <Text strong>{detailModal.estimatedVolumeWasteHauled ? `${Number(detailModal.estimatedVolumeWasteHauled).toLocaleString()} kg` : "—"}</Text></Col>
-                  <Col xs={24} sm={12}><Text type="secondary">Last Hauling:</Text> <Text>{detailModal.dateOfLastHauling ? dayjs(detailModal.dateOfLastHauling).format("MMM DD, YYYY") : "—"}</Text></Col>
-                </Row>
-                <Divider plain orientation="left"><SafetyCertificateOutlined /> Accessories</Divider>
-                <Row gutter={[16, 12]}>
-                  <Col xs={24} sm={12}><Text type="secondary">Waste Lifter:</Text> {getStatusTag(detailModal.statusOfWasteLifter)}</Col>
-                  <Col xs={24} sm={12}><Text type="secondary">Plastic Boat:</Text> {getStatusTag(detailModal.statusOfPlasticBoat)}</Col>
-                </Row>
-                <Divider plain orientation="left"><TeamOutlined /> Personnel</Divider>
-                <Row gutter={[16, 12]}>
-                  <Col xs={24} sm={8}><Text type="secondary"><UserOutlined /> Focal Person:</Text><br /><Text strong>{detailModal.focalPerson || "—"}</Text></Col>
-                  <Col xs={24} sm={8}><Text type="secondary"><UserOutlined /> ESWM Staff:</Text><br /><Text strong>{detailModal.eswmStaff || "—"}</Text></Col>
-                  <Col xs={24} sm={8}><Text type="secondary"><SolutionOutlined /> ENMO Assigned:</Text><br /><Text strong>{detailModal.enmoAssigned || "—"}</Text></Col>
-                </Row>
+                <Descriptions column={2} size="small" bordered>
+                  <Descriptions.Item label="Province">{detailModal.province}</Descriptions.Item>
+                  <Descriptions.Item label="Municipality">{detailModal.municipality}</Descriptions.Item>
+                  <Descriptions.Item label="Barangay">{detailModal.barangay || "—"}</Descriptions.Item>
+                  <Descriptions.Item label="Manila Bay Area">{detailModal.manilaBayArea === "MBA" ? <Tag color="blue" bordered={false}>MBA</Tag> : <Tag color="default" bordered={false}>{detailModal.manilaBayArea || "—"}</Tag>}</Descriptions.Item>
+                  <Descriptions.Item label="Coordinates">{detailModal.latitude}, {detailModal.longitude}</Descriptions.Item>
+                </Descriptions>
+                <Descriptions column={2} size="small" bordered title="Trap Details" style={{ marginTop: 16 }}>
+                  <Descriptions.Item label="Date Installed">{detailModal.dateInstalled ? dayjs(detailModal.dateInstalled).format("MMM DD, YYYY") : "—"}</Descriptions.Item>
+                  <Descriptions.Item label="Status">{getStatusTag(detailModal.statusOfTrashTraps)}</Descriptions.Item>
+                  <Descriptions.Item label="HDPE Floaters">{detailModal.noOfTrashTrapsHDPE || "—"}</Descriptions.Item>
+                  <Descriptions.Item label="Waste Hauled">{detailModal.estimatedVolumeWasteHauled ? `${Number(detailModal.estimatedVolumeWasteHauled).toLocaleString()} kg` : "—"}</Descriptions.Item>
+                  <Descriptions.Item label="Last Hauling">{detailModal.dateOfLastHauling ? dayjs(detailModal.dateOfLastHauling).format("MMM DD, YYYY") : "—"}</Descriptions.Item>
+                </Descriptions>
+                <Descriptions column={2} size="small" bordered title="Accessories" style={{ marginTop: 16 }}>
+                  <Descriptions.Item label="Waste Lifter">{getStatusTag(detailModal.statusOfWasteLifter)}</Descriptions.Item>
+                  <Descriptions.Item label="Plastic Boat">{getStatusTag(detailModal.statusOfPlasticBoat)}</Descriptions.Item>
+                </Descriptions>
+                <Descriptions column={3} size="small" bordered title="Personnel" style={{ marginTop: 16 }}>
+                  <Descriptions.Item label="Focal Person">{detailModal.focalPerson || "—"}</Descriptions.Item>
+                  <Descriptions.Item label="ESWM Staff">{detailModal.eswmStaff || "—"}</Descriptions.Item>
+                  <Descriptions.Item label="ENMO Assigned">{detailModal.enmoAssigned || "—"}</Descriptions.Item>
+                </Descriptions>
               </>
             )},
             { key: "monitoring", label: <><ClockCircleOutlined /> Monitoring</>, children: (
-              <Row gutter={[16, 12]}>
-                <Col xs={24} sm={12}><Text type="secondary">Target Month:</Text> <Text>{detailModal.targetMonth || "—"}</Text></Col>
-                <Col xs={24} sm={12}><Text type="secondary">IIS Number:</Text> <Text>{detailModal.iisNumber || "—"}</Text></Col>
-                <Col xs={24} sm={12}><Text type="secondary">Date of Monitoring:</Text> <Text>{detailModal.dateOfMonitoring ? dayjs(detailModal.dateOfMonitoring).format("MMM D, YYYY") : "—"}</Text></Col>
-                <Col xs={24} sm={12}><Text type="secondary">Report Prepared:</Text> <Text>{detailModal.dateReportPrepared ? dayjs(detailModal.dateReportPrepared).format("MMM D, YYYY") : "—"}</Text></Col>
-                <Col xs={24} sm={12}><Text type="secondary">Reviewed (Staff):</Text> <Text>{detailModal.dateReportReviewedStaff ? dayjs(detailModal.dateReportReviewedStaff).format("MMM D, YYYY") : "—"}</Text></Col>
-                <Col xs={24} sm={12}><Text type="secondary">Reviewed (Focal):</Text> <Text>{detailModal.dateReportReviewedFocal ? dayjs(detailModal.dateReportReviewedFocal).format("MMM D, YYYY") : "—"}</Text></Col>
-                <Col xs={24} sm={12}><Text type="secondary">Report Approved:</Text> <Text>{detailModal.dateReportApproved ? dayjs(detailModal.dateReportApproved).format("MMM D, YYYY") : "—"}</Text></Col>
-                <Col xs={24} sm={8}><Text type="secondary">Days Prepared:</Text> <Text strong>{detailModal.totalDaysReportPrepared ?? "—"}</Text></Col>
-                <Col xs={24} sm={8}><Text type="secondary">Days Staff Review:</Text> <Text strong>{detailModal.totalDaysReviewedStaff ?? "—"}</Text></Col>
-                <Col xs={24} sm={8}><Text type="secondary">Days Focal Review:</Text> <Text strong>{detailModal.totalDaysReviewedFocal ?? "—"}</Text></Col>
-              </Row>
+              <>
+                <Descriptions column={2} size="small" bordered>
+                  <Descriptions.Item label="Target Month">{detailViewRecord.targetMonth || "—"}</Descriptions.Item>
+                  <Descriptions.Item label="IIS Number">{detailViewRecord.iisNumber || "—"}</Descriptions.Item>
+                  <Descriptions.Item label="Date of Monitoring">{detailViewRecord.dateOfMonitoring ? dayjs(detailViewRecord.dateOfMonitoring).format("MMM D, YYYY") : "—"}</Descriptions.Item>
+                  <Descriptions.Item label="Report Prepared">{detailViewRecord.dateReportPrepared ? dayjs(detailViewRecord.dateReportPrepared).format("MMM D, YYYY") : "—"}</Descriptions.Item>
+                  <Descriptions.Item label="Reviewed (Staff)">{detailViewRecord.dateReportReviewedStaff ? dayjs(detailViewRecord.dateReportReviewedStaff).format("MMM D, YYYY") : "—"}</Descriptions.Item>
+                  <Descriptions.Item label="Reviewed (Focal)">{detailViewRecord.dateReportReviewedFocal ? dayjs(detailViewRecord.dateReportReviewedFocal).format("MMM D, YYYY") : "—"}</Descriptions.Item>
+                  <Descriptions.Item label="Report Approved">{detailViewRecord.dateReportApproved ? dayjs(detailViewRecord.dateReportApproved).format("MMM D, YYYY") : "—"}</Descriptions.Item>
+                </Descriptions>
+                <Descriptions column={3} size="small" bordered style={{ marginTop: 16 }}>
+                  <Descriptions.Item label="Days Prepared">{detailViewRecord.totalDaysReportPrepared ?? "—"}</Descriptions.Item>
+                  <Descriptions.Item label="Days Staff Review">{detailViewRecord.totalDaysReviewedStaff ?? "—"}</Descriptions.Item>
+                  <Descriptions.Item label="Days Focal Review">{detailViewRecord.totalDaysReviewedFocal ?? "—"}</Descriptions.Item>
+                </Descriptions>
+              </>
             )},
             { key: "compliance", label: <><SafetyCertificateOutlined /> Compliance</>, children: (
-              <Row gutter={[16, 12]}>
-                <Col span={24}><Text type="secondary">Remarks:</Text><br /><Text>{detailModal.remarks || "—"}</Text></Col>
-                <Col xs={24} sm={12}><Text type="secondary">Advise Letter:</Text> <Text>{detailModal.adviseLetterDateIssued || "—"}</Text></Col>
-                <Col xs={24} sm={12}><Text type="secondary">Compliance:</Text> <Text>{detailModal.complianceToAdvise || "—"}</Text></Col>
-                <Col xs={24} sm={12}><Text type="secondary">Signed Report:</Text> <Text>{detailModal.signedReport || "—"}</Text></Col>
-              </Row>
+              <Descriptions column={2} size="small" bordered>
+                <Descriptions.Item label="Remarks" span={2}>{detailViewRecord.remarks || "—"}</Descriptions.Item>
+                <Descriptions.Item label="Advise Letter">{detailViewRecord.adviseLetterDateIssued || "—"}</Descriptions.Item>
+                <Descriptions.Item label="Compliance">{detailViewRecord.complianceToAdvise || "—"}</Descriptions.Item>
+                <Descriptions.Item label="Signed Report">{detailViewRecord.signedReport || "—"}</Descriptions.Item>
+              </Descriptions>
             )},
           ]} />
+          </>
         )}
       </Modal>
 
@@ -531,6 +568,9 @@ export default function TrashTraps() {
         okButtonProps={{ style: { background: "#13c2c2", borderColor: "#13c2c2" } }}
       >
         <Form form={form} layout="vertical" size="small">
+          <Row gutter={16} style={{ marginBottom: 16 }}>
+            <Col xs={24} sm={8}><Form.Item name="dataYear" label="Data Year" rules={[{ required: true }]}><Select options={Array.from({length:7},(_,i)=>{ const y=new Date().getFullYear()-i; return {label:y,value:y}; })} placeholder="Select Year" /></Form.Item></Col>
+          </Row>
           <Collapse defaultActiveKey={["location","details","personnel","monitoring","compliance"]} bordered={false} items={[
             { key: "location", label: <span style={{ color: "#1677ff" }}><EnvironmentOutlined /> Location</span>, children: (
               <Row gutter={16}>
@@ -538,8 +578,8 @@ export default function TrashTraps() {
                 <Col xs={24} sm={12}><Form.Item name="municipality" label="Municipality" rules={[{ required: true }]}><Input /></Form.Item></Col>
                 <Col xs={24} sm={12}><Form.Item name="barangay" label="Barangay"><Input /></Form.Item></Col>
                 <Col xs={24} sm={12}><Form.Item name="manilaBayArea" label="Manila Bay Area"><Select options={mbaOptions} allowClear /></Form.Item></Col>
-                <Col xs={12} sm={6}><Form.Item name="latitude" label="Latitude"><InputNumber style={{ width: "100%" }} step={0.000001} /></Form.Item></Col>
-                <Col xs={12} sm={6}><Form.Item name="longitude" label="Longitude"><InputNumber style={{ width: "100%" }} step={0.000001} /></Form.Item></Col>
+                <Col xs={12} sm={6}><Form.Item name="latitude" label="Latitude"><InputNumber style={{ width: "100%" }} step={0.0001} precision={4} /></Form.Item></Col>
+                <Col xs={12} sm={6}><Form.Item name="longitude" label="Longitude"><InputNumber style={{ width: "100%" }} step={0.0001} precision={4} /></Form.Item></Col>
               </Row>
             )},
             { key: "details", label: <span style={{ color: "#fa8c16" }}><ExperimentOutlined /> Trap Details</span>, children: (

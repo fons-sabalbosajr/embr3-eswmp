@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useMemo } from "react";
 import {
   Card, Table, Button, Modal, Form, Input, InputNumber, Select, Space, Tag,
-  Divider, Row, Col, Typography, DatePicker, Tooltip, Collapse, Statistic,
+  Divider, Row, Col, Typography, DatePicker, Tooltip, Collapse, Statistic, Descriptions,
 } from "antd";
 import {
   PlusOutlined, EditOutlined, DownloadOutlined, SearchOutlined, EyeOutlined,
@@ -60,6 +60,8 @@ export default function ResidualContainment() {
   const [loading, setLoading] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
   const [detailModal, setDetailModal] = useState(null);
+  const [detailYearRecords, setDetailYearRecords] = useState([]);
+  const [detailYear, setDetailYear] = useState(null);
   const [editing, setEditing] = useState(null);
   const [searchText, setSearchText] = useState("");
   const [filterProvince, setFilterProvince] = useState(null);
@@ -85,7 +87,26 @@ export default function ResidualContainment() {
 
   useEffect(() => { fetchRecords(); }, [fetchRecords]);
 
-  const openAdd = () => { setEditing(null); form.resetFields(); setModalOpen(true); };
+  // Fetch cross-year history when viewing a record
+  useEffect(() => {
+    if (!detailModal) { setDetailYearRecords([]); setDetailYear(null); return; }
+    const name = detailModal.municipality;
+    api.get(`/residual-containment/history/${encodeURIComponent(name)}`)
+      .then(({ data }) => {
+        const enriched = data.map((r) => ({ ...r, ...computeFields(r) }));
+        setDetailYearRecords(enriched);
+        setDetailYear(detailModal.dataYear || new Date().getFullYear());
+      })
+      .catch(() => { setDetailYearRecords([]); setDetailYear(detailModal.dataYear || new Date().getFullYear()); });
+  }, [detailModal]);
+
+  const detailViewRecord = useMemo(() => {
+    if (detailYearRecords.length === 0) return detailModal;
+    return detailYearRecords.find((r) => (r.dataYear || new Date().getFullYear()) === detailYear) || detailModal;
+  }, [detailModal, detailYearRecords, detailYear]);
+
+
+  const openAdd = (prefill) => { setEditing(null); form.resetFields(); if (prefill) form.setFieldsValue(prefill); setModalOpen(true); };
   const openEdit = (record) => {
     setEditing(record);
     form.setFieldsValue({ ...record,
@@ -208,6 +229,7 @@ export default function ResidualContainment() {
         <Space size={4}>
           <Tooltip title="View Details"><Button type="text" size="small" icon={<EyeOutlined style={{ color: "#1890ff" }} />} onClick={() => setDetailModal(record)} /></Tooltip>
           <Tooltip title="Edit"><Button type="text" size="small" icon={<EditOutlined style={{ color: "#52c41a" }} />} onClick={() => openEdit(record)} /></Tooltip>
+          <Tooltip title="Add Record"><Button type="text" size="small" icon={<PlusOutlined style={{ color: "#13c2c2" }} />} onClick={() => openAdd({ municipality: record.municipality, province: record.province, barangay: record.barangay, manilaBayArea: record.manilaBayArea, congressionalDistrict: record.congressionalDistrict })} /></Tooltip>
         </Space>
       ),
     },
@@ -297,61 +319,79 @@ export default function ResidualContainment() {
           pagination={{ defaultPageSize: 15, pageSizeOptions: ["10", "15", "25", "50", "100"], showSizeChanger: true, showTotal: (t, r) => `${r[0]}-${r[1]} of ${t}` }} />
       </Card>
 
-      <Modal title={<Space><FileTextOutlined />{detailModal?.municipality}, {detailModal?.province}</Space>} open={!!detailModal} onCancel={() => setDetailModal(null)} footer={<Button onClick={() => setDetailModal(null)}>Close</Button>} width={800} style={{ maxWidth: "95vw" }}>
+      <Modal title={<Space><FileTextOutlined />{detailModal?.municipality}, {detailModal?.province}{detailYearRecords.length >= 1 && <Tag color="blue" bordered={false} style={{ marginLeft: 8 }}>{detailYearRecords.length} year records</Tag>}</Space>} open={!!detailModal} onCancel={() => setDetailModal(null)} footer={<Button onClick={() => setDetailModal(null)}>Close</Button>} width={800} style={{ maxWidth: "95vw" }}>
         {detailModal && (
+          <>
+            {detailYearRecords.length >= 1 && (
+              <div style={{ marginBottom: 12 }}>
+                <Space size={8}>
+                  <Text type="secondary" style={{ fontSize: 12 }}>Data Year:</Text>
+                  {detailYearRecords.map((r) => r.dataYear || new Date().getFullYear()).filter((v, i, a) => a.indexOf(v) === i).sort((a, b) => b - a).map((yr) => (
+                    <Button key={yr} size="small" type={detailYear === yr ? "primary" : "default"} onClick={() => setDetailYear(yr)}>{yr}</Button>
+                  ))}
+                </Space>
+              </div>
+            )}
           <Collapse defaultActiveKey={["general","facility","monitoring","compliance"]} bordered={false} items={[
             { key: "general", label: <span style={{ color: "#1677ff" }}><EnvironmentOutlined /> General Info</span>, children: (
-              <Row gutter={[16, 12]}>
-                <Col xs={24} sm={12}><Text type="secondary">Province:</Text> <Text strong>{detailModal.province}</Text></Col>
-                <Col xs={24} sm={12}><Text type="secondary">Municipality:</Text> <Text strong>{detailModal.municipality}</Text></Col>
-                <Col xs={24} sm={12}><Text type="secondary">Barangay:</Text> <Text>{detailModal.barangay || "—"}</Text></Col>
-                <Col xs={24} sm={12}><Text type="secondary">MBA:</Text> {detailModal.manilaBayArea === "MBA" ? <Tag color="blue" bordered={false}>MBA</Tag> : <Text>{detailModal.manilaBayArea || "—"}</Text>}</Col>
-                <Col xs={24} sm={12}><Text type="secondary">District:</Text> <Text>{detailModal.congressionalDistrict || "—"}</Text></Col>
-                <Col xs={24} sm={12}><Text type="secondary">Status:</Text> {getStatusTag(detailModal.statusOfFacility)}</Col>
-              </Row>
+              <Descriptions column={2} size="small" bordered>
+                <Descriptions.Item label="Province"><Text strong>{detailViewRecord.province}</Text></Descriptions.Item>
+                <Descriptions.Item label="Municipality"><Text strong>{detailViewRecord.municipality}</Text></Descriptions.Item>
+                <Descriptions.Item label="Barangay">{detailViewRecord.barangay || "—"}</Descriptions.Item>
+                <Descriptions.Item label="MBA">{detailViewRecord.manilaBayArea === "MBA" ? <Tag color="blue" bordered={false}>MBA</Tag> : <Text>{detailViewRecord.manilaBayArea || "—"}</Text>}</Descriptions.Item>
+                <Descriptions.Item label="District">{detailViewRecord.congressionalDistrict || "—"}</Descriptions.Item>
+                <Descriptions.Item label="Status">{getStatusTag(detailViewRecord.statusOfFacility)}</Descriptions.Item>
+              </Descriptions>
             )},
             { key: "facility", label: <span style={{ color: "#fa8c16" }}><AlertOutlined /> Facility Details</span>, children: (
-              <Row gutter={[16, 12]}>
-                <Col xs={24} sm={12}><Text type="secondary">Facility/Bin:</Text> <Text>{detailModal.facilityOrBin || "—"}</Text></Col>
-                <Col xs={24} sm={12}><Text type="secondary">No. Bins Used:</Text> <Text>{detailModal.numberOfBinUsed ?? "—"}</Text></Col>
-                <Col xs={24} sm={12}><Text type="secondary">Floor Area (sq.m):</Text> <Text>{detailModal.totalFloorArea ?? "—"}</Text></Col>
-                <Col xs={24} sm={12}><Text type="secondary">Date Operationalized:</Text> <Text>{detailModal.dateOperationalized || "—"}</Text></Col>
-                <Col xs={24} sm={12}><Text type="secondary">Waste Received:</Text> <Text>{detailModal.actualWasteReceived || "—"}</Text></Col>
-                <Col xs={24} sm={12}><Text type="secondary">RCA Capacity:</Text> <Text>{detailModal.rcaStorageCapacity || "—"}</Text></Col>
-                <Col xs={24} sm={12}><Text type="secondary">Volume Residual Waste:</Text> <Text>{detailModal.totalVolumeResidualWaste ?? "—"}</Text></Col>
-                <Col xs={24} sm={12}><Text type="secondary">Hauling Date:</Text> <Text>{detailModal.dateOfHauling ? dayjs(detailModal.dateOfHauling).format("MMM D, YYYY") : "—"}</Text></Col>
-                <Col xs={24} sm={12}><Text type="secondary">Volume Hauled:</Text> <Text>{detailModal.volumeOfWasteHauled || "—"}</Text></Col>
-                <Col xs={24} sm={12}><Text type="secondary">Hauler:</Text> <Text>{detailModal.hauler || "—"}</Text></Col>
-                <Col xs={24} sm={12}><Text type="secondary">Final Disposal:</Text> <Text>{detailModal.finalDisposal || "—"}</Text></Col>
-                <Col xs={24} sm={12}><Text type="secondary">Co-Processing:</Text> <Text>{detailModal.coProcessingFacility || "—"}</Text></Col>
-                <Col xs={24} sm={12}><Text type="secondary">Brgys Served:</Text> <Text>{detailModal.noOfBarangayServed ?? "—"}</Text></Col>
-              </Row>
+              <Descriptions column={2} size="small" bordered>
+                <Descriptions.Item label="Facility/Bin">{detailViewRecord.facilityOrBin || "—"}</Descriptions.Item>
+                <Descriptions.Item label="No. Bins Used">{detailViewRecord.numberOfBinUsed ?? "—"}</Descriptions.Item>
+                <Descriptions.Item label="Floor Area (sq.m)">{detailViewRecord.totalFloorArea ?? "—"}</Descriptions.Item>
+                <Descriptions.Item label="Date Operationalized">{detailViewRecord.dateOperationalized || "—"}</Descriptions.Item>
+                <Descriptions.Item label="Waste Received">{detailViewRecord.actualWasteReceived || "—"}</Descriptions.Item>
+                <Descriptions.Item label="RCA Capacity">{detailViewRecord.rcaStorageCapacity || "—"}</Descriptions.Item>
+                <Descriptions.Item label="Volume Residual Waste">{detailViewRecord.totalVolumeResidualWaste ?? "—"}</Descriptions.Item>
+                <Descriptions.Item label="Hauling Date">{detailViewRecord.dateOfHauling ? dayjs(detailViewRecord.dateOfHauling).format("MMM D, YYYY") : "—"}</Descriptions.Item>
+                <Descriptions.Item label="Volume Hauled">{detailViewRecord.volumeOfWasteHauled || "—"}</Descriptions.Item>
+                <Descriptions.Item label="Hauler">{detailViewRecord.hauler || "—"}</Descriptions.Item>
+                <Descriptions.Item label="Final Disposal">{detailViewRecord.finalDisposal || "—"}</Descriptions.Item>
+                <Descriptions.Item label="Co-Processing">{detailViewRecord.coProcessingFacility || "—"}</Descriptions.Item>
+                <Descriptions.Item label="Brgys Served">{detailViewRecord.noOfBarangayServed ?? "—"}</Descriptions.Item>
+              </Descriptions>
             )},
             { key: "monitoring", label: <span style={{ color: "#13c2c2" }}><CalendarOutlined /> Monitoring</span>, children: (
-              <Row gutter={[16, 12]}>
-                <Col xs={24} sm={8}><Text type="secondary">Focal:</Text> <Text strong>{detailModal.focalPerson || "—"}</Text></Col>
-                <Col xs={24} sm={8}><Text type="secondary">Staff:</Text> <Text strong>{detailModal.eswmStaff || "—"}</Text></Col>
-                <Col xs={24} sm={8}><Text type="secondary">ENMO:</Text> <Text strong>{detailModal.enmoAssigned || "—"}</Text></Col>
-                <Col xs={24} sm={12}><Text type="secondary">Monitoring Date:</Text> <Text>{detailModal.dateOfMonitoring ? dayjs(detailModal.dateOfMonitoring).format("MMM D, YYYY") : "—"}</Text></Col>
-                <Col xs={24} sm={12}><Text type="secondary">Tracking:</Text> <Text>{detailModal.trackingOfReports || "—"}</Text></Col>
-              </Row>
-            )},
+              <>
+              <Descriptions column={3} size="small" bordered>
+                <Descriptions.Item label="Focal"><Text strong>{detailViewRecord.focalPerson || "—"}</Text></Descriptions.Item>
+                <Descriptions.Item label="Staff"><Text strong>{detailViewRecord.eswmStaff || "—"}</Text></Descriptions.Item>
+                <Descriptions.Item label="ENMO"><Text strong>{detailViewRecord.enmoAssigned || "—"}</Text></Descriptions.Item>
+              </Descriptions>
+              <Descriptions column={2} size="small" bordered style={{ marginTop: 12 }}>
+                <Descriptions.Item label="Monitoring Date">{detailViewRecord.dateOfMonitoring ? dayjs(detailViewRecord.dateOfMonitoring).format("MMM D, YYYY") : "—"}</Descriptions.Item>
+                <Descriptions.Item label="Tracking">{detailViewRecord.trackingOfReports || "—"}</Descriptions.Item>
+              </Descriptions>
+            </>)},
             { key: "compliance", label: <span style={{ color: "#eb2f96" }}><SafetyCertificateOutlined /> Compliance</span>, children: (
-              <Row gutter={[16, 12]}>
-                <Col span={24}><Text type="secondary">Remarks (Not Operational):</Text><br /><Text>{detailModal.remarksIfNotOperational || "—"}</Text></Col>
-                <Col span={24}><Text type="secondary">Remarks & Recommendation:</Text><br /><Text>{detailModal.remarksAndRecommendation || "—"}</Text></Col>
-                <Col span={24}><Text type="secondary">Findings:</Text><br /><Text>{detailModal.findings || "—"}</Text></Col>
-                <Col xs={24} sm={12}><Text type="secondary">Docket No. / NOV:</Text> <Text>{detailModal.docketNoNOV || "—"}</Text></Col>
-                <Col xs={24} sm={12}><Text type="secondary">Violation:</Text> <Text>{detailModal.violation || "—"}</Text></Col>
-                <Col span={24}><Text type="secondary">Commitments:</Text><br /><Text>{detailModal.commitments || "—"}</Text></Col>
-              </Row>
+              <Descriptions column={2} size="small" bordered>
+                <Descriptions.Item label="Remarks (Not Operational)" span={2}>{detailViewRecord.remarksIfNotOperational || "—"}</Descriptions.Item>
+                <Descriptions.Item label="Remarks & Recommendation" span={2}>{detailViewRecord.remarksAndRecommendation || "—"}</Descriptions.Item>
+                <Descriptions.Item label="Findings" span={2}>{detailViewRecord.findings || "—"}</Descriptions.Item>
+                <Descriptions.Item label="Docket No. / NOV">{detailViewRecord.docketNoNOV || "—"}</Descriptions.Item>
+                <Descriptions.Item label="Violation">{detailViewRecord.violation || "—"}</Descriptions.Item>
+                <Descriptions.Item label="Commitments" span={2}>{detailViewRecord.commitments || "—"}</Descriptions.Item>
+              </Descriptions>
             )},
           ]} />
+          </>
         )}
       </Modal>
 
       <Modal title={editing ? "Edit RCA" : "Add RCA"} open={modalOpen} onCancel={() => setModalOpen(false)} onOk={handleSave} width={900} style={{ maxWidth: "95vw" }} okText={editing ? "Update" : "Create"}>
         <Form form={form} layout="vertical" size="small">
+          <Row gutter={16} style={{ marginBottom: 16 }}>
+            <Col xs={24} sm={8}><Form.Item name="dataYear" label="Data Year" rules={[{ required: true }]}><Select options={Array.from({length:7},(_,i)=>{ const y=new Date().getFullYear()-i; return {label:y,value:y}; })} placeholder="Select Year" /></Form.Item></Col>
+          </Row>
           <Collapse defaultActiveKey={["location","facility","personnel","monitoring","compliance"]} bordered={false} items={[
             { key: "location", label: <span style={{ color: "#1677ff" }}><EnvironmentOutlined /> Location</span>, children: (
               <Row gutter={16}>
@@ -360,8 +400,8 @@ export default function ResidualContainment() {
                 <Col xs={24} sm={12}><Form.Item name="barangay" label="Barangay"><Input /></Form.Item></Col>
                 <Col xs={24} sm={12}><Form.Item name="manilaBayArea" label="Manila Bay Area"><Select options={mbaOptions} allowClear /></Form.Item></Col>
                 <Col xs={24} sm={12}><Form.Item name="congressionalDistrict" label="Congressional District"><Input /></Form.Item></Col>
-                <Col xs={12} sm={6}><Form.Item name="latitude" label="Latitude"><InputNumber style={{ width: "100%" }} step={0.000001} /></Form.Item></Col>
-                <Col xs={12} sm={6}><Form.Item name="longitude" label="Longitude"><InputNumber style={{ width: "100%" }} step={0.000001} /></Form.Item></Col>
+                <Col xs={12} sm={6}><Form.Item name="latitude" label="Latitude"><InputNumber style={{ width: "100%" }} step={0.0001} precision={4} /></Form.Item></Col>
+                <Col xs={12} sm={6}><Form.Item name="longitude" label="Longitude"><InputNumber style={{ width: "100%" }} step={0.0001} precision={4} /></Form.Item></Col>
               </Row>
             )},
             { key: "facility", label: <span style={{ color: "#fa8c16" }}><AlertOutlined /> Facility Details</span>, children: (

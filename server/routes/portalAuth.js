@@ -36,6 +36,18 @@ router.post("/signup", async (req, res) => {
     // Send signup confirmation email (non-blocking)
     sendPortalSignupEmail(user.email, user.firstName).catch(() => {});
 
+    // Notify admins of new portal user
+    try {
+      const Notification = require("../models/Notification");
+      await Notification.create({
+        recipient: "admin",
+        type: "new_portal_user",
+        title: "New Portal Registration",
+        message: `${firstName} ${lastName} (${email}) registered and is pending approval`,
+        meta: { email, companyName: companyName || "" },
+      });
+    } catch { /* silent */ }
+
     writeLog("info", "portal.signup", {
       message: `Portal signup: ${email}`,
       user: email,
@@ -146,7 +158,11 @@ router.get("/my-submissions", async (req, res) => {
     const DataSLF = require("../models/DataSLF");
     const submissions = await DataSLF.find({
       submittedBy: user.email,
-    }).sort({ createdAt: -1 });
+      deletedAt: null,
+    })
+      .populate("slfGenerator")
+      .sort({ createdAt: -1 })
+      .lean();
 
     res.json(submissions);
   } catch (error) {
@@ -154,7 +170,7 @@ router.get("/my-submissions", async (req, res) => {
   }
 });
 
-// Forgot Password — send reset link
+// Forgot Password — send 6-digit reset code
 router.post("/forgot-password", async (req, res) => {
   try {
     const { email } = req.body;
@@ -163,49 +179,71 @@ router.post("/forgot-password", async (req, res) => {
     const user = await UserPortal.findOne({ email: email.toLowerCase() });
     // Always return success to prevent email enumeration
     if (!user) {
-      return res.json({ message: "If that email exists, a reset link has been sent." });
+      return res.json({ message: "If that email exists, a reset code has been sent." });
     }
 
-    const resetToken = crypto.randomBytes(32).toString("hex");
-    user.resetToken = resetToken;
-    user.resetTokenExpiry = new Date(Date.now() + 60 * 60 * 1000); // 1 hour
+    const resetCode = crypto.randomInt(100000, 999999).toString();
+    user.resetToken = resetCode;
+    user.resetTokenExpiry = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
     await user.save();
 
-    const CLIENT_URL = process.env.CLIENT_URL || "http://localhost:5173/eswm-pipeline";
-    const resetLink = `${CLIENT_URL}/slfportal/reset-password?token=${resetToken}`;
-
-    await sendPortalResetPasswordEmail(user.email, user.firstName, resetLink);
+    await sendPortalResetPasswordEmail(user.email, user.firstName, resetCode);
 
     writeLog("info", "portal.forgot-password", {
-      message: `Password reset requested: ${user.email}`,
+      message: `Password reset code sent: ${user.email}`,
       user: user.email,
       ip: req.ip,
     });
 
-    res.json({ message: "If that email exists, a reset link has been sent." });
+    res.json({ message: "If that email exists, a reset code has been sent." });
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });
   }
 });
 
-// Reset Password — verify token & update password
+// Verify Reset Code
+router.post("/verify-reset-code", async (req, res) => {
+  try {
+    const { email, code } = req.body;
+    if (!email || !code) {
+      return res.status(400).json({ message: "Email and code are required" });
+    }
+
+    const user = await UserPortal.findOne({
+      email: email.toLowerCase(),
+      resetToken: code,
+      resetTokenExpiry: { $gt: new Date() },
+    });
+
+    if (!user) {
+      return res.status(400).json({ message: "Invalid or expired code" });
+    }
+
+    res.json({ message: "Code verified" });
+  } catch (error) {
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+});
+
+// Reset Password — verify code & update password
 router.post("/reset-password", async (req, res) => {
   try {
-    const { token, password } = req.body;
-    if (!token || !password) {
-      return res.status(400).json({ message: "Token and new password are required" });
+    const { email, code, password } = req.body;
+    if (!email || !code || !password) {
+      return res.status(400).json({ message: "Email, code and new password are required" });
     }
     if (password.length < 6) {
       return res.status(400).json({ message: "Password must be at least 6 characters" });
     }
 
     const user = await UserPortal.findOne({
-      resetToken: token,
+      email: email.toLowerCase(),
+      resetToken: code,
       resetTokenExpiry: { $gt: new Date() },
     });
 
     if (!user) {
-      return res.status(400).json({ message: "Invalid or expired reset token" });
+      return res.status(400).json({ message: "Invalid or expired reset code" });
     }
 
     user.password = password;

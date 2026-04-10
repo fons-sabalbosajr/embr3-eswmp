@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useMemo } from "react";
 import {
   Card, Table, Button, Modal, Form, Input, InputNumber, Select, Space, Tag,
-  Row, Col, Typography, DatePicker, Tooltip, Collapse, Statistic,
+  Row, Col, Typography, DatePicker, Tooltip, Collapse, Statistic, Descriptions,
 } from "antd";
 import {
   PlusOutlined, EditOutlined, DownloadOutlined, SearchOutlined, EyeOutlined,
@@ -60,6 +60,8 @@ export default function LguAssistDiversion() {
   const [loading, setLoading] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
   const [detailModal, setDetailModal] = useState(null);
+  const [detailYearRecords, setDetailYearRecords] = useState([]);
+  const [detailYear, setDetailYear] = useState(null);
   const [editing, setEditing] = useState(null);
   const [searchText, setSearchText] = useState("");
   const [filterProvince, setFilterProvince] = useState(null);
@@ -84,7 +86,26 @@ export default function LguAssistDiversion() {
 
   useEffect(() => { fetchRecords(); }, [fetchRecords]);
 
-  const openAdd = () => { setEditing(null); form.resetFields(); setModalOpen(true); };
+  // Fetch cross-year history when viewing a record
+  useEffect(() => {
+    if (!detailModal) { setDetailYearRecords([]); setDetailYear(null); return; }
+    const name = detailModal.lgu;
+    api.get(`/lgu-assist-diversion/history/${encodeURIComponent(name)}`)
+      .then(({ data }) => {
+        const enriched = data.map((r) => ({ ...r, ...computeFields(r) }));
+        setDetailYearRecords(enriched);
+        setDetailYear(detailModal.dataYear || new Date().getFullYear());
+      })
+      .catch(() => { setDetailYearRecords([]); setDetailYear(detailModal.dataYear || new Date().getFullYear()); });
+  }, [detailModal]);
+
+  const detailViewRecord = useMemo(() => {
+    if (detailYearRecords.length === 0) return detailModal;
+    return detailYearRecords.find((r) => (r.dataYear || new Date().getFullYear()) === detailYear) || detailModal;
+  }, [detailModal, detailYearRecords, detailYear]);
+
+
+  const openAdd = (prefill) => { setEditing(null); form.resetFields(); if (prefill) form.setFieldsValue(prefill); setModalOpen(true); };
   const openEdit = (record) => {
     setEditing(record);
     form.setFieldsValue({ ...record,
@@ -196,6 +217,7 @@ export default function LguAssistDiversion() {
         <Space size={4}>
           <Tooltip title="View Details"><Button type="text" size="small" icon={<EyeOutlined style={{ color: "#1890ff" }} />} onClick={() => setDetailModal(record)} /></Tooltip>
           <Tooltip title="Edit"><Button type="text" size="small" icon={<EditOutlined style={{ color: "#52c41a" }} />} onClick={() => openEdit(record)} /></Tooltip>
+          <Tooltip title="Add Record"><Button type="text" size="small" icon={<PlusOutlined style={{ color: "#13c2c2" }} />} onClick={() => openAdd({ lgu: record.lgu, province: record.province })} /></Tooltip>
         </Space>
       ),
     },
@@ -281,47 +303,66 @@ export default function LguAssistDiversion() {
           pagination={{ defaultPageSize: 15, pageSizeOptions: ["10", "15", "25", "50", "100"], showSizeChanger: true, showTotal: (t, r) => `${r[0]}-${r[1]} of ${t}` }} />
       </Card>
 
-      <Modal title={<Space><FileTextOutlined />{detailModal?.lgu}, {detailModal?.province}</Space>} open={!!detailModal} onCancel={() => setDetailModal(null)} footer={<Button onClick={() => setDetailModal(null)}>Close</Button>} width={700} style={{ maxWidth: "95vw" }}>
+      <Modal title={<Space><FileTextOutlined />{detailModal?.lgu}, {detailModal?.province}{detailYearRecords.length >= 1 && <Tag color="blue" bordered={false} style={{ marginLeft: 8 }}>{detailYearRecords.length} year records</Tag>}</Space>} open={!!detailModal} onCancel={() => setDetailModal(null)} footer={<Button onClick={() => setDetailModal(null)}>Close</Button>} width={700} style={{ maxWidth: "95vw" }}>
         {detailModal && (
-          <Collapse defaultActiveKey={["general","waste","monitoring","compliance"]} bordered={false} items={[
+          <>
+            {detailYearRecords.length >= 1 && (
+              <div style={{ marginBottom: 12 }}>
+                <Space size={8}>
+                  <Text type="secondary" style={{ fontSize: 12 }}>Data Year:</Text>
+                  {detailYearRecords.map((r) => r.dataYear || new Date().getFullYear()).filter((v, i, a) => a.indexOf(v) === i).sort((a, b) => b - a).map((yr) => (
+                    <Button key={yr} size="small" type={detailYear === yr ? "primary" : "default"} onClick={() => setDetailYear(yr)}>{yr}</Button>
+                  ))}
+                </Space>
+              </div>
+            )}
+          <Collapse defaultActiveKey={["general","waste","monitoring","monitoring2","compliance"]} bordered={false} items={[
             { key: "general", label: <span style={{ color: "#1677ff" }}><EnvironmentOutlined /> General Info</span>, children: (
-              <Row gutter={[16, 12]}>
-                <Col xs={24} sm={12}><Text type="secondary">Province:</Text> <Text strong>{detailModal.province}</Text></Col>
-                <Col xs={24} sm={12}><Text type="secondary">LGU:</Text> <Text strong>{detailModal.lgu}</Text></Col>
-                <Col xs={24} sm={12}><Text type="secondary">Status:</Text> {getStatusTag(detailModal.statusAccomplishment)}</Col>
-              </Row>
+              <Descriptions column={2} size="small" bordered>
+                <Descriptions.Item label="Province">{detailViewRecord.province}</Descriptions.Item>
+                <Descriptions.Item label="LGU">{detailViewRecord.lgu}</Descriptions.Item>
+                <Descriptions.Item label="Status">{getStatusTag(detailViewRecord.statusAccomplishment)}</Descriptions.Item>
+              </Descriptions>
             )},
             { key: "waste", label: <span style={{ color: "#fa8c16" }}><PieChartOutlined /> Waste Data</span>, children: (
-              <Row gutter={[16, 12]}>
-                <Col xs={24} sm={8}><Text type="secondary">Waste Generated:</Text> <Text strong>{detailModal.totalWasteGeneration?.toLocaleString() ?? "—"}</Text></Col>
-                <Col xs={24} sm={8}><Text type="secondary">Waste Diverted:</Text> <Text strong style={{ color: "#52c41a" }}>{detailModal.totalWasteDiverted?.toLocaleString() ?? "—"}</Text></Col>
-                <Col xs={24} sm={8}><Text type="secondary">Diversion Rate:</Text> <Tag bordered={false} color={detailModal.percentageWasteDiversion >= 25 ? "green" : "red"}>{detailModal.percentageWasteDiversion != null ? `${detailModal.percentageWasteDiversion.toFixed(1)}%` : "—"}</Tag></Col>
-              </Row>
+              <Descriptions column={3} size="small" bordered>
+                <Descriptions.Item label="Waste Generated">{detailViewRecord.totalWasteGeneration?.toLocaleString() ?? "—"}</Descriptions.Item>
+                <Descriptions.Item label="Waste Diverted"><Text strong style={{ color: "#52c41a" }}>{detailViewRecord.totalWasteDiverted?.toLocaleString() ?? "—"}</Text></Descriptions.Item>
+                <Descriptions.Item label="Diversion Rate"><Tag bordered={false} color={detailViewRecord.percentageWasteDiversion >= 25 ? "green" : "red"}>{detailViewRecord.percentageWasteDiversion != null ? `${detailViewRecord.percentageWasteDiversion.toFixed(1)}%` : "—"}</Tag></Descriptions.Item>
+              </Descriptions>
             )},
             { key: "monitoring", label: <span style={{ color: "#13c2c2" }}><CalendarOutlined /> Monitoring</span>, children: (
-              <Row gutter={[16, 12]}>
-                <Col xs={24} sm={8}><Text type="secondary">Focal:</Text> <Text strong>{detailModal.focalPerson || "—"}</Text></Col>
-                <Col xs={24} sm={8}><Text type="secondary">Staff:</Text> <Text strong>{detailModal.eswmStaff || "—"}</Text></Col>
-                <Col xs={24} sm={8}><Text type="secondary">ENMO:</Text> <Text strong>{detailModal.enmoAssigned || "—"}</Text></Col>
-                <Col xs={24} sm={12}><Text type="secondary">Target Month:</Text> <Text>{detailModal.targetMonth || "—"}</Text></Col>
-                <Col xs={24} sm={12}><Text type="secondary">Monitoring Date:</Text> <Text>{detailModal.dateOfMonitoring ? dayjs(detailModal.dateOfMonitoring).format("MMM D, YYYY") : "—"}</Text></Col>
-              </Row>
+              <Descriptions column={3} size="small" bordered>
+                <Descriptions.Item label="Focal">{detailViewRecord.focalPerson || "—"}</Descriptions.Item>
+                <Descriptions.Item label="Staff">{detailViewRecord.eswmStaff || "—"}</Descriptions.Item>
+                <Descriptions.Item label="ENMO">{detailViewRecord.enmoAssigned || "—"}</Descriptions.Item>
+              </Descriptions>
+            )},
+            { key: "monitoring2", label: <span style={{ color: "#13c2c2" }}><CalendarOutlined /> Schedule</span>, children: (
+              <Descriptions column={2} size="small" bordered>
+                <Descriptions.Item label="Target Month">{detailViewRecord.targetMonth || "—"}</Descriptions.Item>
+                <Descriptions.Item label="Monitoring Date">{detailViewRecord.dateOfMonitoring ? dayjs(detailViewRecord.dateOfMonitoring).format("MMM D, YYYY") : "—"}</Descriptions.Item>
+              </Descriptions>
             )},
             { key: "compliance", label: <span style={{ color: "#eb2f96" }}><SafetyCertificateOutlined /> Report Tracking</span>, children: (
-              <Row gutter={[16, 12]}>
-                <Col xs={24} sm={12}><Text type="secondary">Report Prepared:</Text> <Text>{detailModal.dateReportPrepared ? dayjs(detailModal.dateReportPrepared).format("MMM D, YYYY") : "—"}</Text></Col>
-                <Col xs={24} sm={12}><Text type="secondary">Reviewed (Staff):</Text> <Text>{detailModal.dateReportReviewedStaff ? dayjs(detailModal.dateReportReviewedStaff).format("MMM D, YYYY") : "—"}</Text></Col>
-                <Col xs={24} sm={12}><Text type="secondary">Reviewed (Focal):</Text> <Text>{detailModal.dateReportReviewedFocal ? dayjs(detailModal.dateReportReviewedFocal).format("MMM D, YYYY") : "—"}</Text></Col>
-                <Col xs={24} sm={12}><Text type="secondary">Approved:</Text> <Text>{detailModal.dateReportApproved ? dayjs(detailModal.dateReportApproved).format("MMM D, YYYY") : "—"}</Text></Col>
-                <Col xs={24} sm={12}><Text type="secondary">Tracking:</Text> <Text>{detailModal.trackingOfReports || "—"}</Text></Col>
-              </Row>
+              <Descriptions column={2} size="small" bordered>
+                <Descriptions.Item label="Report Prepared">{detailViewRecord.dateReportPrepared ? dayjs(detailViewRecord.dateReportPrepared).format("MMM D, YYYY") : "—"}</Descriptions.Item>
+                <Descriptions.Item label="Reviewed (Staff)">{detailViewRecord.dateReportReviewedStaff ? dayjs(detailViewRecord.dateReportReviewedStaff).format("MMM D, YYYY") : "—"}</Descriptions.Item>
+                <Descriptions.Item label="Reviewed (Focal)">{detailViewRecord.dateReportReviewedFocal ? dayjs(detailViewRecord.dateReportReviewedFocal).format("MMM D, YYYY") : "—"}</Descriptions.Item>
+                <Descriptions.Item label="Approved">{detailViewRecord.dateReportApproved ? dayjs(detailViewRecord.dateReportApproved).format("MMM D, YYYY") : "—"}</Descriptions.Item>
+                <Descriptions.Item label="Tracking">{detailViewRecord.trackingOfReports || "—"}</Descriptions.Item>
+              </Descriptions>
             )},
           ]} />
+          </>
         )}
       </Modal>
 
       <Modal title={editing ? "Edit LGU Record" : "Add LGU Record"} open={modalOpen} onCancel={() => setModalOpen(false)} onOk={handleSave} width={800} style={{ maxWidth: "95vw" }} okText={editing ? "Update" : "Create"}>
         <Form form={form} layout="vertical" size="small">
+          <Row gutter={16} style={{ marginBottom: 16 }}>
+            <Col xs={24} sm={8}><Form.Item name="dataYear" label="Data Year" rules={[{ required: true }]}><Select options={Array.from({length:7},(_,i)=>{ const y=new Date().getFullYear()-i; return {label:y,value:y}; })} placeholder="Select Year" /></Form.Item></Col>
+          </Row>
           <Collapse defaultActiveKey={["location","waste","personnel","monitoring"]} bordered={false} items={[
             { key: "location", label: <span style={{ color: "#1677ff" }}><EnvironmentOutlined /> Location</span>, children: (
               <Row gutter={16}>

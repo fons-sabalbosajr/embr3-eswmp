@@ -21,6 +21,7 @@ import {
   Statistic,
   Progress,
   Badge,
+  Descriptions,
 } from "antd";
 import {
   PlusOutlined,
@@ -219,11 +220,11 @@ export default function TenYearSWMPlan() {
         const enriched = data.map((r) => ({ ...r, ...computeFields(r) }));
         setDetailYearRecords(enriched);
         // Default to the year of the record that was clicked
-        setDetailYear(detailModal.dataYear || 2026);
+        setDetailYear(detailModal.dataYear || new Date().getFullYear());
       })
       .catch(() => {
         setDetailYearRecords([]);
-        setDetailYear(detailModal.dataYear || 2026);
+        setDetailYear(detailModal.dataYear || new Date().getFullYear());
       });
   }, [detailModal]);
 
@@ -232,7 +233,7 @@ export default function TenYearSWMPlan() {
     if (!detailModal) return null;
     if (detailYearRecords.length === 0) return detailModal;
     return (
-      detailYearRecords.find((r) => (r.dataYear || 2026) === detailYear) ||
+      detailYearRecords.find((r) => (r.dataYear || new Date().getFullYear()) === detailYear) ||
       detailModal
     );
   }, [detailModal, detailYearRecords, detailYear]);
@@ -443,18 +444,21 @@ export default function TenYearSWMPlan() {
       key: "dataYear",
       width: 90,
       fixed: "left",
-      filters: [
-        { text: "2026", value: 2026 },
-        { text: "2025", value: 2025 },
-      ],
-      onFilter: (v, r) => (r.dataYear || 2026) === v,
-      defaultFilteredValue: [2026],
-      sorter: (a, b) => (a.dataYear || 2026) - (b.dataYear || 2026),
-      render: (v) => (
-        <Tag bordered={false} color={v === 2025 ? "orange" : "blue"}>
-          {v || 2026}
-        </Tag>
-      ),
+      filters: Array.from({ length: 7 }, (_, i) => {
+        const y = new Date().getFullYear() - i;
+        return { text: String(y), value: y };
+      }),
+      onFilter: (v, r) => (r.dataYear || new Date().getFullYear()) === v,
+      defaultFilteredValue: [new Date().getFullYear()],
+      sorter: (a, b) => (a.dataYear || new Date().getFullYear()) - (b.dataYear || new Date().getFullYear()),
+      render: (v) => {
+        const currYear = new Date().getFullYear();
+        return (
+          <Tag bordered={false} color={v === currYear ? "blue" : v === currYear - 1 ? "orange" : "default"}>
+            {v || currYear}
+          </Tag>
+        );
+      },
     },
     {
       title: (
@@ -1109,7 +1113,7 @@ export default function TenYearSWMPlan() {
           <Space>
             <FileTextOutlined />
             {detailModal?.municipality}, {detailModal?.province}
-            {detailYearRecords.length > 1 && (
+            {detailYearRecords.length >= 1 && (
               <Tag color="blue" bordered={false} style={{ marginLeft: 8 }}>
                 {detailYearRecords.length} year records
               </Tag>
@@ -1125,14 +1129,14 @@ export default function TenYearSWMPlan() {
         {detailModal && (
           <>
             {/* Year selector tabs */}
-            {detailYearRecords.length > 1 && (
+            {detailYearRecords.length >= 1 && (
               <div style={{ marginBottom: 12 }}>
                 <Space size={8}>
                   <Text type="secondary" style={{ fontSize: 12 }}>
                     Data Year:
                   </Text>
                   {detailYearRecords
-                    .map((r) => r.dataYear || 2026)
+                    .map((r) => r.dataYear || new Date().getFullYear())
                     .filter((v, i, a) => a.indexOf(v) === i)
                     .sort((a, b) => b - a)
                     .map((yr) => (
@@ -1159,21 +1163,14 @@ export default function TenYearSWMPlan() {
                   ),
                   children: (
                     <>
-                      <Row gutter={[16, 12]}>
-                        <Col xs={24} sm={12}>
-                          <Text type="secondary">
-                            <EnvironmentOutlined /> Province:
-                          </Text>{" "}
+                      <Descriptions column={2} size="small" bordered>
+                        <Descriptions.Item label="Province">
                           <Text strong>{detailViewRecord.province}</Text>
-                        </Col>
-                        <Col xs={24} sm={12}>
-                          <Text type="secondary">
-                            <EnvironmentOutlined /> Municipality:
-                          </Text>{" "}
+                        </Descriptions.Item>
+                        <Descriptions.Item label="Municipality">
                           <Text strong>{detailViewRecord.municipality}</Text>
-                        </Col>
-                        <Col xs={24} sm={12}>
-                          <Text type="secondary">Manila Bay Area:</Text>{" "}
+                        </Descriptions.Item>
+                        <Descriptions.Item label="Manila Bay Area">
                           {detailViewRecord.manilaBayArea === "MBA" ? (
                             <Tag color="blue" bordered={false}>
                               MBA
@@ -1183,29 +1180,17 @@ export default function TenYearSWMPlan() {
                               {detailViewRecord.manilaBayArea || "—"}
                             </Tag>
                           )}
-                        </Col>
-                        <Col xs={24} sm={12}>
-                          <Text type="secondary">Congressional District:</Text>{" "}
-                          <Text>
-                            {detailViewRecord.congressionalDistrict || "—"}
-                          </Text>
-                        </Col>
-                        <Col xs={24} sm={12}>
-                          <Text type="secondary">Coordinates:</Text>{" "}
-                          <Text>
-                            {detailViewRecord.latitude},{" "}
-                            {detailViewRecord.longitude}
-                          </Text>
-                        </Col>
-                      </Row>
-                      <Divider plain orientation="left">
-                        <AuditOutlined /> Plan Details
-                      </Divider>
-                      <Row gutter={[16, 12]}>
-                        <Col xs={24} sm={12}>
-                          <Text type="secondary">
-                            <FileTextOutlined /> Plan Type:
-                          </Text>{" "}
+                        </Descriptions.Item>
+                        <Descriptions.Item label="Congressional District">
+                          {detailViewRecord.congressionalDistrict || "—"}
+                        </Descriptions.Item>
+                        <Descriptions.Item label="Coordinates">
+                          {detailViewRecord.latitude},{" "}
+                          {detailViewRecord.longitude}
+                        </Descriptions.Item>
+                      </Descriptions>
+                      <Descriptions column={2} size="small" bordered title="Plan Details" style={{ marginTop: 16 }}>
+                        <Descriptions.Item label="Plan Type">
                           {detailViewRecord.typeOfSWMPlan ? (
                             <Tag color="geekblue" bordered={false}>
                               {detailViewRecord.typeOfSWMPlan}
@@ -1213,70 +1198,42 @@ export default function TenYearSWMPlan() {
                           ) : (
                             "—"
                           )}
-                        </Col>
-                        <Col xs={24} sm={12}>
-                          <Text type="secondary">
-                            <FileTextOutlined /> Resolution No.:
-                          </Text>{" "}
-                          <Text>{detailViewRecord.resolutionNo || "—"}</Text>
-                        </Col>
-                        <Col xs={24} sm={12}>
-                          <Text type="secondary">
-                            <CalendarOutlined /> Period Covered:
-                          </Text>{" "}
+                        </Descriptions.Item>
+                        <Descriptions.Item label="Resolution No.">
+                          {detailViewRecord.resolutionNo || "—"}
+                        </Descriptions.Item>
+                        <Descriptions.Item label="Period Covered">
                           <Tag bordered={false}>
                             {detailViewRecord.periodCovered || "—"}
                           </Tag>
-                        </Col>
-                        <Col xs={24} sm={12}>
-                          <Text type="secondary">
-                            <CalendarOutlined /> Year Approved:
-                          </Text>{" "}
-                          <Text>{detailViewRecord.yearApproved || "—"}</Text>
-                        </Col>
-                        <Col xs={24} sm={12}>
-                          <Text type="secondary">
-                            <CalendarOutlined /> End Period:
-                          </Text>{" "}
-                          <Text>{detailViewRecord.endPeriod || "—"}</Text>
-                        </Col>
-                        <Col xs={24} sm={12}>
-                          <Text type="secondary">Status:</Text>{" "}
+                        </Descriptions.Item>
+                        <Descriptions.Item label="Year Approved">
+                          {detailViewRecord.yearApproved || "—"}
+                        </Descriptions.Item>
+                        <Descriptions.Item label="End Period">
+                          {detailViewRecord.endPeriod || "—"}
+                        </Descriptions.Item>
+                        <Descriptions.Item label="Status">
                           {getRenewalTag(detailViewRecord.forRenewal)}
-                        </Col>
-                      </Row>
-                      <Divider plain orientation="left">
-                        <TeamOutlined /> Personnel
-                      </Divider>
-                      <Row gutter={[16, 12]}>
-                        <Col xs={24} sm={8}>
-                          <Text type="secondary">
-                            <UserOutlined /> Focal Person:
-                          </Text>
-                          <br />
+                        </Descriptions.Item>
+                      </Descriptions>
+                      <Descriptions column={3} size="small" bordered title="Personnel" style={{ marginTop: 16 }}>
+                        <Descriptions.Item label="Focal Person">
                           <Text strong>
                             {detailViewRecord.focalPerson || "—"}
                           </Text>
-                        </Col>
-                        <Col xs={24} sm={8}>
-                          <Text type="secondary">
-                            <UserOutlined /> ESWM Staff:
-                          </Text>
-                          <br />
+                        </Descriptions.Item>
+                        <Descriptions.Item label="ESWM Staff">
                           <Text strong>
                             {detailViewRecord.eswmStaff || "—"}
                           </Text>
-                        </Col>
-                        <Col xs={24} sm={8}>
-                          <Text type="secondary">
-                            <SolutionOutlined /> ENMO Assigned:
-                          </Text>
-                          <br />
+                        </Descriptions.Item>
+                        <Descriptions.Item label="ENMO Assigned">
                           <Text strong>
                             {detailViewRecord.enmoAssigned || "—"}
                           </Text>
-                        </Col>
-                      </Row>
+                        </Descriptions.Item>
+                      </Descriptions>
                       {detailViewRecord.latitude &&
                         detailViewRecord.longitude && (
                           <>
@@ -1344,11 +1301,8 @@ export default function TenYearSWMPlan() {
                   ),
                   children: (
                     <>
-                      <Row gutter={[16, 12]}>
-                        <Col xs={24} sm={12}>
-                          <Text type="secondary">
-                            <CalendarOutlined /> Target Month:
-                          </Text>{" "}
+                      <Descriptions column={2} size="small" bordered>
+                        <Descriptions.Item label="Target Month">
                           {detailViewRecord.targetMonth ? (
                             <Tag color="cyan" bordered={false}>
                               {detailViewRecord.targetMonth.replace(
@@ -1359,74 +1313,46 @@ export default function TenYearSWMPlan() {
                           ) : (
                             "—"
                           )}
-                        </Col>
-                        <Col xs={24} sm={12}>
-                          <Text type="secondary">
-                            <FileTextOutlined /> IIS Number:
-                          </Text>{" "}
-                          <Text>{detailViewRecord.iisNumber || "—"}</Text>
-                        </Col>
-                        <Col xs={24} sm={12}>
-                          <Text type="secondary">
-                            <CalendarOutlined /> Date of Monitoring:
-                          </Text>{" "}
-                          <Text>
-                            {detailViewRecord.dateOfMonitoring
-                              ? dayjs(detailViewRecord.dateOfMonitoring).format(
-                                  "MMM DD, YYYY",
-                                )
-                              : "—"}
-                          </Text>
-                        </Col>
-                        <Col xs={24} sm={12}>
-                          <Text type="secondary">
-                            <CalendarOutlined /> Report Prepared:
-                          </Text>{" "}
-                          <Text>
-                            {detailViewRecord.dateReportPrepared
-                              ? dayjs(
-                                  detailViewRecord.dateReportPrepared,
-                                ).format("MMM DD, YYYY")
-                              : "—"}
-                          </Text>
-                        </Col>
-                        <Col xs={24} sm={12}>
-                          <Text type="secondary">
-                            <CalendarOutlined /> Reviewed (Staff):
-                          </Text>{" "}
-                          <Text>
-                            {detailViewRecord.dateReportReviewedStaff
-                              ? dayjs(
-                                  detailViewRecord.dateReportReviewedStaff,
-                                ).format("MMM DD, YYYY")
-                              : "—"}
-                          </Text>
-                        </Col>
-                        <Col xs={24} sm={12}>
-                          <Text type="secondary">
-                            <CalendarOutlined /> Reviewed (Focal):
-                          </Text>{" "}
-                          <Text>
-                            {detailViewRecord.dateReportReviewedFocal
-                              ? dayjs(
-                                  detailViewRecord.dateReportReviewedFocal,
-                                ).format("MMM DD, YYYY")
-                              : "—"}
-                          </Text>
-                        </Col>
-                        <Col xs={24} sm={12}>
-                          <Text type="secondary">
-                            <CheckCircleOutlined /> Report Approved:
-                          </Text>{" "}
-                          <Text>
-                            {detailViewRecord.dateReportApproved
-                              ? dayjs(
-                                  detailViewRecord.dateReportApproved,
-                                ).format("MMM DD, YYYY")
-                              : "—"}
-                          </Text>
-                        </Col>
-                      </Row>
+                        </Descriptions.Item>
+                        <Descriptions.Item label="IIS Number">
+                          {detailViewRecord.iisNumber || "—"}
+                        </Descriptions.Item>
+                        <Descriptions.Item label="Date of Monitoring">
+                          {detailViewRecord.dateOfMonitoring
+                            ? dayjs(detailViewRecord.dateOfMonitoring).format(
+                                "MMM DD, YYYY",
+                              )
+                            : "—"}
+                        </Descriptions.Item>
+                        <Descriptions.Item label="Report Prepared">
+                          {detailViewRecord.dateReportPrepared
+                            ? dayjs(
+                                detailViewRecord.dateReportPrepared,
+                              ).format("MMM DD, YYYY")
+                            : "—"}
+                        </Descriptions.Item>
+                        <Descriptions.Item label="Reviewed (Staff)">
+                          {detailViewRecord.dateReportReviewedStaff
+                            ? dayjs(
+                                detailViewRecord.dateReportReviewedStaff,
+                              ).format("MMM DD, YYYY")
+                            : "—"}
+                        </Descriptions.Item>
+                        <Descriptions.Item label="Reviewed (Focal)">
+                          {detailViewRecord.dateReportReviewedFocal
+                            ? dayjs(
+                                detailViewRecord.dateReportReviewedFocal,
+                              ).format("MMM DD, YYYY")
+                            : "—"}
+                        </Descriptions.Item>
+                        <Descriptions.Item label="Report Approved">
+                          {detailViewRecord.dateReportApproved
+                            ? dayjs(
+                                detailViewRecord.dateReportApproved,
+                              ).format("MMM DD, YYYY")
+                            : "—"}
+                        </Descriptions.Item>
+                      </Descriptions>
                       <Divider plain>
                         <CalendarOutlined /> Processing Days
                       </Divider>
@@ -1474,14 +1400,13 @@ export default function TenYearSWMPlan() {
                   label: "Compliance",
                   children: (
                     <>
-                      <Row gutter={[16, 8]}>
-                        <Col span={24}>
-                          <Text type="secondary">Overall Compliance:</Text>{" "}
+                      <Descriptions column={2} size="small" bordered>
+                        <Descriptions.Item label="Overall Compliance" span={2}>
                           {getComplianceTag(
                             detailViewRecord.remarksAndRecommendation,
                           )}
-                        </Col>
-                      </Row>
+                        </Descriptions.Item>
+                      </Descriptions>
                       <Divider plain>ESWM Components</Divider>
                       <Row gutter={[16, 12]}>
                         {[
@@ -1529,31 +1454,20 @@ export default function TenYearSWMPlan() {
                           </Col>
                         ))}
                       </Row>
-                      <Divider plain>LGU Disposal & Advise</Divider>
-                      <Row gutter={[16, 8]}>
-                        <Col xs={24} sm={12}>
-                          <Text type="secondary">LGU Final Disposal:</Text>{" "}
-                          <Text>
-                            {detailViewRecord.lguFinalDisposal || "—"}
-                          </Text>
-                        </Col>
-                        <Col xs={24} sm={12}>
-                          <Text type="secondary">Advise Letter Date:</Text>{" "}
-                          <Text>
-                            {detailViewRecord.adviseLetterDateIssued || "—"}
-                          </Text>
-                        </Col>
-                        <Col xs={24} sm={12}>
-                          <Text type="secondary">Compliance to Advise:</Text>{" "}
-                          <Text>
-                            {detailViewRecord.complianceToAdvise || "—"}
-                          </Text>
-                        </Col>
-                        <Col xs={24} sm={12}>
-                          <Text type="secondary">Remarks:</Text>{" "}
-                          <Text>{detailViewRecord.remarks || "—"}</Text>
-                        </Col>
-                      </Row>
+                      <Descriptions column={2} size="small" bordered title="LGU Disposal & Advise" style={{ marginTop: 16 }}>
+                        <Descriptions.Item label="LGU Final Disposal">
+                          {detailViewRecord.lguFinalDisposal || "—"}
+                        </Descriptions.Item>
+                        <Descriptions.Item label="Advise Letter Date">
+                          {detailViewRecord.adviseLetterDateIssued || "—"}
+                        </Descriptions.Item>
+                        <Descriptions.Item label="Compliance to Advise">
+                          {detailViewRecord.complianceToAdvise || "—"}
+                        </Descriptions.Item>
+                        <Descriptions.Item label="Remarks">
+                          {detailViewRecord.remarks || "—"}
+                        </Descriptions.Item>
+                      </Descriptions>
                     </>
                   ),
                 },
@@ -1779,7 +1693,7 @@ export default function TenYearSWMPlan() {
                         >
                           <InputNumber
                             style={{ width: "100%" }}
-                            step={0.000001}
+                            step={0.0001} precision={4}
                           />
                         </Form.Item>
                       </Col>
@@ -1794,7 +1708,7 @@ export default function TenYearSWMPlan() {
                         >
                           <InputNumber
                             style={{ width: "100%" }}
-                            step={0.000001}
+                            step={0.0001} precision={4}
                           />
                         </Form.Item>
                       </Col>

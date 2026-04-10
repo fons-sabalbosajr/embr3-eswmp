@@ -458,11 +458,46 @@ sudo cp -r dist/* /var/www/eswm-pipeline/dist/
 pm2 restart embr3-server
 ```
 
+### Quick Redeploy (Copy Pre-built from Local)
+
+If you've already built on your local machine and are uploading via SCP/SFTP:
+
+```bash
+# 1. On your LOCAL machine — upload the built files
+scp -r front-end/dist/* root@72.61.125.232:/var/www/eswm-pipeline/dist/
+scp -r server/* root@72.61.125.232:/home/embr3_eswm/apps/embr3-eswmp/server/
+
+# 2. SSH into VPS
+ssh root@72.61.125.232
+
+# 3. Install server dependencies (if package.json changed)
+cd /home/embr3_eswm/apps/embr3-eswmp/server
+npm install --production
+
+# 4. Re-seed SLF data (IMPORTANT after seed script changes)
+node seeds/seedSlfFacilities.js
+
+# 5. Restart the server
+pm2 restart embr3-server
+
+# 6. Verify
+curl http://localhost:5000/api/health
+pm2 logs embr3-server --lines 20
+```
+
 ### Running Seed Scripts
+
+After reseeding, the SLF portal users' facility references (ObjectIds) become stale.
+The system auto-recovers by falling back to name-based lookup on the next portal login.
+No manual intervention is needed.
 
 ```bash
 cd ~/apps/embr3-eswmp/server
+
+# SLF facilities (reads from per-year Excel files, merges duplicates)
 node seeds/seedSlfFacilities.js
+
+# Other seed scripts
 node seeds/seedDataReferences.js
 # etc.
 ```

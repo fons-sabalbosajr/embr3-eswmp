@@ -9,8 +9,8 @@ const truckSchema = new mongoose.Schema(
     truckCapacityUnit: { type: String, enum: ["tons", "m³", "m3"], default: "m³" },
     actualVolume: { type: Number },
     actualVolumeUnit: { type: String, enum: ["tons", "m³", "m3"], default: "tons" },
-    wasteType: { type: String, enum: ["Residual", "Hazardous Waste"] },
-    hazWasteCode: { type: String, trim: true },
+    wasteType: { type: String, enum: ["Residual", "Hazardous Waste", "Treated Hazardous Waste"] },
+    hazWasteCode: [{ type: String, trim: true }],
   },
   { _id: false }
 );
@@ -46,10 +46,16 @@ const dataSLFSchema = new mongoose.Schema(
   {
     slfGenerator: {
       type: mongoose.Schema.Types.ObjectId,
-      ref: "SLFGenerator",
+      ref: "SlfFacility",
     },
+    slfName: { type: String, trim: true },
     submissionId: { type: String, trim: true },
     idNo: { type: String, trim: true },
+
+    // Cell Operations
+    currentCellVolume: { type: Number },
+    currentCellVolumeUnit: { type: String, enum: ["m³", "tons", "m3"], default: "m³" },
+    cellStatus: { type: String, enum: ["Active", "Closed"], default: "Active" },
 
     // Baseline Information
     totalVolumeAccepted: { type: Number },
@@ -82,13 +88,18 @@ const dataSLFSchema = new mongoose.Schema(
     trucks: [truckSchema],
     status: {
       type: String,
-      enum: ["pending", "acknowledged", "rejected", "revert_requested"],
+      enum: ["pending", "acknowledged", "rejected", "revert_requested", "reverted"],
       default: "pending",
     },
     revertRequested: { type: Boolean, default: false },
     revertReason: { type: String, trim: true },
     revertRequestedAt: { type: Date },
+    revertedBy: { type: String, trim: true },
+    revertedAt: { type: Date },
     submittedBy: { type: String, trim: true },
+    // Soft delete
+    deletedAt: { type: Date, default: null },
+    deletedBy: { type: String, trim: true, default: null },
   },
   { timestamps: true }
 );
@@ -120,20 +131,20 @@ dataSLFSchema.pre("save", async function () {
     // Resolve province from linked SLF facility
     let province = "";
     if (this.slfGenerator) {
-      const facility = await SlfFacility.findOne({ slfGenerator: this.slfGenerator }).select("province");
+      const facility = await SlfFacility.findById(this.slfGenerator).select("province");
       if (facility) province = facility.province;
     }
     const provCode = getProvinceCode(province);
 
     const typeCode =
       this.companyType === "Private"
-        ? "COM"
+        ? "PVT"
         : this.companyType === "LGU"
         ? "LGU"
         : "OTH";
 
     // Count existing docs with same province code and type to get next sequence
-    const pattern = new RegExp(`^SLF-${provCode}-${typeCode}-`);
+    const pattern = new RegExp(`^SLF-${typeCode}-${provCode}-`);
     const lastDoc = await DataSLF.findOne({ idNo: pattern }).sort({ idNo: -1 });
     let seq = 1;
     if (lastDoc && lastDoc.idNo) {
@@ -141,7 +152,7 @@ dataSLFSchema.pre("save", async function () {
       const lastNum = parseInt(parts[3], 10);
       if (!isNaN(lastNum)) seq = lastNum + 1;
     }
-    this.idNo = `SLF-${provCode}-${typeCode}-${String(seq).padStart(4, "0")}`;
+    this.idNo = `SLF-${typeCode}-${provCode}-${String(seq).padStart(4, "0")}`;
   }
 });
 

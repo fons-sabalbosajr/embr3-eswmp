@@ -124,7 +124,7 @@ router.get("/me", async (req, res) => {
   }
 });
 
-// Forgot Password — send reset link
+// Forgot Password — send 6-digit reset code
 router.post("/forgot-password", async (req, res) => {
   try {
     const { email } = req.body;
@@ -133,48 +133,70 @@ router.post("/forgot-password", async (req, res) => {
     const user = await User.findOne({ email: email.toLowerCase() });
     // Always return success to prevent email enumeration
     if (!user) {
-      return res.json({ message: "If that email exists, a reset link has been sent." });
+      return res.json({ message: "If that email exists, a reset code has been sent." });
     }
 
-    const resetToken = crypto.randomBytes(32).toString("hex");
-    user.resetToken = resetToken;
-    user.resetTokenExpiry = new Date(Date.now() + 60 * 60 * 1000); // 1 hour
+    const resetCode = crypto.randomInt(100000, 999999).toString();
+    user.resetToken = resetCode;
+    user.resetTokenExpiry = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
     await user.save();
 
-    const CLIENT_URL = process.env.CLIENT_URL || "http://localhost:5173/eswm-pipeline";
-    const resetLink = `${CLIENT_URL}/admin/reset-password?token=${resetToken}`;
-
-    await sendAdminResetPasswordEmail(user.email, user.firstName, resetLink);
+    await sendAdminResetPasswordEmail(user.email, user.firstName, resetCode);
 
     writeLog("info", "auth.forgot-password", {
-      message: `Admin password reset requested: ${user.email}`,
+      message: `Admin password reset code sent: ${user.email}`,
       user: user.email,
       ip: req.ip,
     });
 
-    res.json({ message: "If that email exists, a reset link has been sent." });
+    res.json({ message: "If that email exists, a reset code has been sent." });
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });
   }
 });
 
-// Reset Password — verify token & update password
+// Verify Reset Code
+router.post("/verify-reset-code", async (req, res) => {
+  try {
+    const { email, code } = req.body;
+    if (!email || !code) {
+      return res.status(400).json({ message: "Email and code are required" });
+    }
+
+    const user = await User.findOne({
+      email: email.toLowerCase(),
+      resetToken: code,
+      resetTokenExpiry: { $gt: new Date() },
+    });
+
+    if (!user) {
+      return res.status(400).json({ message: "Invalid or expired code" });
+    }
+
+    res.json({ message: "Code verified" });
+  } catch (error) {
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+});
+
+// Reset Password — verify code & update password
 router.post("/reset-password", async (req, res) => {
   try {
-    const { token, password } = req.body;
-    if (!token || !password) {
-      return res.status(400).json({ message: "Token and new password are required" });
+    const { email, code, password } = req.body;
+    if (!email || !code || !password) {
+      return res.status(400).json({ message: "Email, code and new password are required" });
     }
     if (password.length < 6) {
       return res.status(400).json({ message: "Password must be at least 6 characters" });
     }
 
     const user = await User.findOne({
-      resetToken: token,
+      email: email.toLowerCase(),
+      resetToken: code,
       resetTokenExpiry: { $gt: new Date() },
     });
     if (!user) {
-      return res.status(400).json({ message: "Invalid or expired reset token" });
+      return res.status(400).json({ message: "Invalid or expired reset code" });
     }
 
     user.password = password;
@@ -188,7 +210,7 @@ router.post("/reset-password", async (req, res) => {
       ip: req.ip,
     });
 
-    res.json({ message: "Password reset successfully. You can now log in." });
+    res.json({ message: "Password has been reset successfully. You can now log in." });
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });
   }
