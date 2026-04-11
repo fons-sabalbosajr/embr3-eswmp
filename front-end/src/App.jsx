@@ -2,6 +2,7 @@ import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import { Suspense, lazy } from "react";
 import { Spin } from "antd";
 
+const Landing = lazy(() => import("./pages/Landing"));
 const Login = lazy(() => import("./pages/Login"));
 const Signup = lazy(() => import("./pages/Signup"));
 const VerifyEmail = lazy(() => import("./pages/VerifyEmail"));
@@ -23,8 +24,10 @@ function App() {
     <BrowserRouter basename="/eswm-pipeline">
       <Suspense fallback={<PageLoader />}>
       <Routes>
+        {/* Landing Page */}
+        <Route path="/" element={<Landing />} />
+
         {/* Portal Side */}
-        <Route path="/" element={<Navigate to="/slfportal/login" replace />} />
         <Route path="/slfportal" element={<SLFPortal />} />
         <Route path="/slfportal/login" element={<PortalLogin />} />
         <Route path="/slfportal/signup" element={<PortalSignup />} />
