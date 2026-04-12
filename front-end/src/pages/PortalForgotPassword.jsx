@@ -6,17 +6,17 @@ import Swal from "sweetalert2";
 import api from "../api";
 import embLogo from "../assets/emblogo.svg";
 import bgEmb from "../assets/bgemb.webp";
+import "./Auth.css";
 
 const { Title, Text } = Typography;
 
 export default function PortalForgotPassword() {
-  const [step, setStep] = useState(1); // 1=email, 2=code, 3=password, 4=done
+  const [step, setStep] = useState(1);
   const [loading, setLoading] = useState(false);
   const [email, setEmail] = useState("");
   const [code, setCode] = useState(["", "", "", "", "", ""]);
   const inputRefs = useRef([]);
 
-  // Step 1: Send code to email
   const onSendCode = async (values) => {
     setLoading(true);
     try {
@@ -30,7 +30,6 @@ export default function PortalForgotPassword() {
     }
   };
 
-  // Handle individual digit input
   const handleCodeChange = (index, value) => {
     if (value && !/^\d$/.test(value)) return;
     const next = [...code];
@@ -56,7 +55,6 @@ export default function PortalForgotPassword() {
 
   const fullCode = code.join("");
 
-  // Step 2: Verify code
   const onVerifyCode = async () => {
     if (fullCode.length !== 6) {
       Swal.fire({ icon: "warning", title: "Invalid Code", text: "Please enter the full 6-digit code." });
@@ -73,15 +71,10 @@ export default function PortalForgotPassword() {
     }
   };
 
-  // Step 3: Reset password
   const onResetPassword = async (values) => {
     setLoading(true);
     try {
-      const { data } = await api.post("/portal-auth/reset-password", {
-        email,
-        code: fullCode,
-        password: values.password,
-      });
+      const { data } = await api.post("/portal-auth/reset-password", { email, code: fullCode, password: values.password });
       setStep(4);
       Swal.fire({ icon: "success", title: "Success", text: data.message, confirmButtonColor: "#1a3353" });
     } catch (err) {
@@ -91,7 +84,6 @@ export default function PortalForgotPassword() {
     }
   };
 
-  // Resend code
   const onResend = async () => {
     setLoading(true);
     try {
@@ -105,11 +97,11 @@ export default function PortalForgotPassword() {
     }
   };
 
-  const brandDesc = {
-    1: "Enter your registered email address and we'll send you a 6-digit code to reset your password.",
-    2: "Check your email for a 6-digit verification code.",
-    3: "Enter your new password below.",
-    4: "Your password has been reset.",
+  const brandSubtitles = {
+    1: "Password Recovery",
+    2: "Verify Your Code",
+    3: "Set New Password",
+    4: "Password Reset Complete",
   };
 
   const renderStep = () => {
@@ -121,7 +113,7 @@ export default function PortalForgotPassword() {
           subTitle="Your password has been updated. You can now log in with your new password."
           extra={
             <Link to="/slfportal/login">
-              <Button type="primary" style={styles.loginBtn}>Go to Login</Button>
+              <Button className="auth-btn-primary" type="primary">Go to Login</Button>
             </Link>
           }
         />
@@ -130,22 +122,21 @@ export default function PortalForgotPassword() {
     if (step === 3) {
       return (
         <>
-          <div style={styles.cardHeader}>
-            <div style={styles.avatarCircle}>
-              <LockOutlined style={{ fontSize: 28, color: "#fff" }} />
-            </div>
-            <Title level={3} style={styles.cardTitle}>New Password</Title>
-            <Text type="secondary" style={{ fontSize: 14 }}>Enter your new password</Text>
+          <div className="auth-card-header">
+            <div className="auth-avatar"><LockOutlined /></div>
+            <Title level={3} className="auth-card-title">New Password</Title>
+            <Text className="auth-card-subtitle">Enter your new password</Text>
+            <div className="auth-card-badge auth-card-badge-portal">SLF Portal</div>
           </div>
-          <Form name="portal-new-pw" size="large" onFinish={onResetPassword} layout="vertical" requiredMark={false} style={{ marginTop: 24 }}>
-            <Form.Item name="password" label={<Text strong style={{ color: "#1a3353" }}>New Password</Text>} rules={[{ required: true, message: "Please enter your new password" }, { min: 6, message: "Password must be at least 6 characters" }]}>
-              <Input.Password prefix={<LockOutlined style={{ color: "#1a3353" }} />} placeholder="Enter new password" style={styles.input} />
+          <Form name="portal-new-pw" size="large" onFinish={onResetPassword} layout="vertical" requiredMark={false} className="auth-form">
+            <Form.Item name="password" label="New Password" rules={[{ required: true, message: "Please enter your new password" }, { min: 6, message: "Password must be at least 6 characters" }]}>
+              <Input.Password prefix={<LockOutlined style={{ color: "#1a3353" }} />} placeholder="Enter new password" />
             </Form.Item>
-            <Form.Item name="confirmPassword" label={<Text strong style={{ color: "#1a3353" }}>Confirm Password</Text>} dependencies={["password"]} rules={[{ required: true, message: "Please confirm your password" }, ({ getFieldValue }) => ({ validator(_, value) { if (!value || getFieldValue("password") === value) return Promise.resolve(); return Promise.reject(new Error("Passwords do not match")); } })]}>
-              <Input.Password prefix={<LockOutlined style={{ color: "#1a3353" }} />} placeholder="Confirm new password" style={styles.input} />
+            <Form.Item name="confirmPassword" label="Confirm Password" dependencies={["password"]} rules={[{ required: true, message: "Please confirm your password" }, ({ getFieldValue }) => ({ validator(_, value) { if (!value || getFieldValue("password") === value) return Promise.resolve(); return Promise.reject(new Error("Passwords do not match")); } })]}>
+              <Input.Password prefix={<LockOutlined style={{ color: "#1a3353" }} />} placeholder="Confirm new password" />
             </Form.Item>
             <Form.Item style={{ marginBottom: 16, marginTop: 8 }}>
-              <Button type="primary" htmlType="submit" loading={loading} block style={styles.loginBtn}>Reset Password</Button>
+              <Button className="auth-btn-primary" type="primary" htmlType="submit" loading={loading} block>Reset Password</Button>
             </Form.Item>
           </Form>
         </>
@@ -154,14 +145,11 @@ export default function PortalForgotPassword() {
     if (step === 2) {
       return (
         <>
-          <div style={styles.cardHeader}>
-            <div style={styles.avatarCircle}>
-              <SafetyOutlined style={{ fontSize: 28, color: "#fff" }} />
-            </div>
-            <Title level={3} style={styles.cardTitle}>Enter Code</Title>
-            <Text type="secondary" style={{ fontSize: 14 }}>
-              We sent a 6-digit code to <strong>{email}</strong>
-            </Text>
+          <div className="auth-card-header">
+            <div className="auth-avatar"><SafetyOutlined /></div>
+            <Title level={3} className="auth-card-title">Enter Code</Title>
+            <Text className="auth-card-subtitle">We sent a 6-digit code to <strong>{email}</strong></Text>
+            <div className="auth-card-badge auth-card-badge-portal">SLF Portal</div>
           </div>
           <div style={{ display: "flex", justifyContent: "center", gap: 8, margin: "28px 0 24px" }} onPaste={handleCodePaste}>
             {code.map((d, i) => (
@@ -176,39 +164,31 @@ export default function PortalForgotPassword() {
               />
             ))}
           </div>
-          <Button type="primary" loading={loading} block style={styles.loginBtn} onClick={onVerifyCode}>
-            Verify Code
-          </Button>
+          <Button className="auth-btn-primary" type="primary" loading={loading} block onClick={onVerifyCode}>Verify Code</Button>
           <div style={{ textAlign: "center", marginTop: 16 }}>
             <Text type="secondary" style={{ fontSize: 13 }}>Didn&#39;t receive the code? </Text>
-            <Button type="link" style={{ padding: 0, color: "#2d5f8a", fontSize: 13 }} onClick={onResend} disabled={loading}>
-              Resend
-            </Button>
+            <Button type="link" style={{ padding: 0, color: "#2d5f8a", fontSize: 13 }} onClick={onResend} disabled={loading}>Resend</Button>
           </div>
           <div style={{ textAlign: "center", marginTop: 8 }}>
-            <Button type="link" icon={<ArrowLeftOutlined />} style={{ color: "#1a3353" }} onClick={() => { setStep(1); setCode(["", "", "", "", "", ""]); }}>
-              Change email
-            </Button>
+            <Button type="link" icon={<ArrowLeftOutlined />} style={{ color: "#1a3353" }} onClick={() => { setStep(1); setCode(["", "", "", "", "", ""]); }}>Change email</Button>
           </div>
         </>
       );
     }
-    // Step 1
     return (
       <>
-        <div style={styles.cardHeader}>
-          <div style={styles.avatarCircle}>
-            <MailOutlined style={{ fontSize: 28, color: "#fff" }} />
-          </div>
-          <Title level={3} style={styles.cardTitle}>Forgot Password</Title>
-          <Text type="secondary" style={{ fontSize: 14 }}>We&#39;ll send a 6-digit code to your email</Text>
+        <div className="auth-card-header">
+          <div className="auth-avatar"><MailOutlined /></div>
+          <Title level={3} className="auth-card-title">Forgot Password</Title>
+          <Text className="auth-card-subtitle">We&#39;ll send a 6-digit code to your email</Text>
+          <div className="auth-card-badge auth-card-badge-portal">SLF Portal</div>
         </div>
-        <Form name="portal-forgot-password" size="large" onFinish={onSendCode} layout="vertical" requiredMark={false} style={{ marginTop: 24 }}>
-          <Form.Item name="email" label={<Text strong style={{ color: "#1a3353" }}>Email Address</Text>} rules={[{ required: true, message: "Please enter your email" }, { type: "email", message: "Please enter a valid email" }]}>
-            <Input prefix={<MailOutlined style={{ color: "#1a3353" }} />} placeholder="you@example.com" style={styles.input} />
+        <Form name="portal-forgot-password" size="large" onFinish={onSendCode} layout="vertical" requiredMark={false} className="auth-form">
+          <Form.Item name="email" label="Email Address" rules={[{ required: true, message: "Please enter your email" }, { type: "email", message: "Please enter a valid email" }]}>
+            <Input prefix={<MailOutlined style={{ color: "#1a3353" }} />} placeholder="you@example.com" />
           </Form.Item>
           <Form.Item style={{ marginBottom: 16, marginTop: 8 }}>
-            <Button type="primary" htmlType="submit" loading={loading} block style={styles.loginBtn}>Send Code</Button>
+            <Button className="auth-btn-primary" type="primary" htmlType="submit" loading={loading} block>Send Code</Button>
           </Form.Item>
         </Form>
         <div style={{ textAlign: "center", marginTop: 8 }}>
@@ -221,125 +201,30 @@ export default function PortalForgotPassword() {
   };
 
   return (
-    <div className="auth-container">
-      <div className="auth-left" style={styles.leftPanel}>
-        <div style={styles.overlay} />
-        <div className="brand-content" style={styles.brandContent}>
-          <img src={embLogo} alt="EMBR3 Logo" style={styles.logo} />
-          <Title level={1} style={styles.brandTitle}>SLF Portal</Title>
-          <Text style={styles.brandSubtitle}>Password Recovery</Text>
-          <div className="brand-divider" style={styles.brandDivider} />
-          <Text className="brand-desc" style={styles.brandDesc}>{brandDesc[step]}</Text>
+    <div className="auth-page">
+      <div className="auth-page-bg" style={{ backgroundImage: `url(${bgEmb})` }} />
+      <div className="auth-page-overlay" />
+      <div className="auth-page-sweep" />
+      <div className="auth-page-grid" />
+      <div className="auth-orb auth-orb-1" />
+      <div className="auth-orb auth-orb-2" />
+      <div className="auth-orb auth-orb-3" />
+
+      <div className="auth-center">
+        <div className="auth-brand-header">
+          <div className="auth-brand-logo-circle">
+            <img src={embLogo} alt="EMBR3 Logo" />
+          </div>
+          <Title level={2} className="auth-brand-title">SLF Portal</Title>
+          <Text className="auth-brand-subtitle">{brandSubtitles[step]}</Text>
         </div>
-        <Text className="left-footer" style={styles.leftFooter}>
-          &copy; 2026 EMBR3 &mdash; Environmental Management Bureau Region III
-        </Text>
-      </div>
-      <div className="auth-right" style={styles.rightPanel}>
-        <div style={styles.cardWrapper}>
-          <Card style={styles.card} variant="borderless">{renderStep()}</Card>
+
+        <div className="auth-card-wrapper auth-card-wrapper-login">
+          <Card className="auth-card" variant="borderless">{renderStep()}</Card>
         </div>
       </div>
+
+      <div className="auth-page-footer">&copy; 2026 EMBR3 &mdash; Environmental Management Bureau Region III</div>
     </div>
   );
 }
-
-const styles = {
-  leftPanel: {
-    background: `url(${bgEmb}) center/cover no-repeat`,
-  },
-  overlay: {
-    position: "absolute",
-    inset: 0,
-    background:
-      "linear-gradient(160deg, rgba(14,30,53,0.93) 0%, rgba(26,51,83,0.88) 40%, rgba(30,80,130,0.82) 100%)",
-    zIndex: 0,
-  },
-  brandContent: {
-    maxWidth: 440,
-    color: "#fff",
-    position: "relative",
-    zIndex: 1,
-  },
-  logo: {
-    width: 72,
-    marginBottom: 20,
-    filter: "drop-shadow(0 2px 8px rgba(0,0,0,0.3))",
-  },
-  brandTitle: {
-    color: "#fff",
-    fontSize: 38,
-    fontWeight: 800,
-    marginBottom: 4,
-    letterSpacing: 2,
-    lineHeight: 1.1,
-  },
-  brandSubtitle: {
-    color: "rgba(255,255,255,0.85)",
-    fontSize: 16,
-    display: "block",
-    fontWeight: 400,
-  },
-  brandDivider: {
-    width: 50,
-    height: 3,
-    background: "linear-gradient(90deg, #4fc3f7, #81d4fa)",
-    borderRadius: 2,
-    margin: "20px 0",
-  },
-  brandDesc: {
-    color: "rgba(255,255,255,0.65)",
-    fontSize: 14,
-    lineHeight: 1.7,
-    display: "block",
-    marginBottom: 28,
-  },
-  leftFooter: {
-    position: "absolute",
-    bottom: 24,
-    color: "rgba(255,255,255,0.35)",
-    fontSize: 11,
-    zIndex: 1,
-    letterSpacing: 0.3,
-  },
-  rightPanel: {
-    background: "linear-gradient(180deg, #f5f7fa 0%, #e8ecf1 100%)",
-  },
-  cardWrapper: { width: "100%", maxWidth: 440 },
-  card: {
-    width: "100%",
-    borderRadius: 16,
-    boxShadow:
-      "0 8px 40px rgba(26,51,83,0.10), 0 2px 8px rgba(0,0,0,0.06)",
-    padding: "24px 16px",
-    border: "1px solid rgba(26,51,83,0.06)",
-  },
-  cardHeader: { textAlign: "center", marginBottom: 8 },
-  avatarCircle: {
-    width: 56,
-    height: 56,
-    borderRadius: "50%",
-    background: "linear-gradient(135deg, #1a3353, #2d5f8a)",
-    display: "inline-flex",
-    alignItems: "center",
-    justifyContent: "center",
-    marginBottom: 16,
-    boxShadow: "0 4px 14px rgba(26,51,83,0.25)",
-  },
-  cardTitle: {
-    margin: "0 0 4px 0",
-    color: "#1a3353",
-    fontWeight: 700,
-    letterSpacing: 0.5,
-  },
-  input: { borderRadius: 8, height: 44 },
-  loginBtn: {
-    height: 48,
-    borderRadius: 10,
-    fontWeight: 600,
-    fontSize: 16,
-    background: "linear-gradient(135deg, #1a3353 0%, #2d5f8a 100%)",
-    border: "none",
-    boxShadow: "0 4px 14px rgba(26,51,83,0.3)",
-  },
-};

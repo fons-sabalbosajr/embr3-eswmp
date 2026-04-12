@@ -47,7 +47,7 @@ function getStatusTag(v) {
   return <Tag bordered={false}>{v}</Tag>;
 }
 
-export default function ResidualContainment() {
+export default function ResidualContainment({canEdit = true, canDelete = true, isDark}) {
   const { getValues } = useDataRef();
   const provinceOptions = getValues("province").map((p) => ({ label: p, value: p }));
   const monthOptions = getValues("target-month").map((m) => ({ label: m.replace(/^\d+\./, ""), value: m }));
@@ -175,7 +175,7 @@ export default function ResidualContainment() {
 
   const columns = [
     {
-      title: <><EnvironmentOutlined style={{ color: "#1a3353" }} /> LGU</>, key: "lgu", width: 150, fixed: "left",
+      title: <><EnvironmentOutlined style={{ color: isDark ? "#7eb8da" : "#1a3353" }} /> LGU</>, key: "lgu", width: 150, fixed: "left",
       filters: filters.province, onFilter: (v, r) => r.province === v,
       sorter: (a, b) => (a.municipality || "").localeCompare(b.municipality || ""),
       render: (_, r) => (
@@ -228,8 +228,8 @@ export default function ResidualContainment() {
       render: (_, record) => (
         <Space size={4}>
           <Tooltip title="View Details"><Button type="text" size="small" icon={<EyeOutlined style={{ color: "#1890ff" }} />} onClick={() => setDetailModal(record)} /></Tooltip>
-          <Tooltip title="Edit"><Button type="text" size="small" icon={<EditOutlined style={{ color: "#52c41a" }} />} onClick={() => openEdit(record)} /></Tooltip>
-          <Tooltip title="Add Record"><Button type="text" size="small" icon={<PlusOutlined style={{ color: "#13c2c2" }} />} onClick={() => openAdd({ municipality: record.municipality, province: record.province, barangay: record.barangay, manilaBayArea: record.manilaBayArea, congressionalDistrict: record.congressionalDistrict })} /></Tooltip>
+          {canEdit && <Tooltip title="Edit"><Button type="text" size="small" icon={<EditOutlined style={{ color: "#52c41a" }} />} onClick={() => openEdit(record)} /></Tooltip>}
+          {canEdit && <Tooltip title="Add Record"><Button type="text" size="small" icon={<PlusOutlined style={{ color: "#13c2c2" }} />} onClick={() => openAdd({ municipality: record.municipality, province: record.province, barangay: record.barangay, manilaBayArea: record.manilaBayArea, congressionalDistrict: record.congressionalDistrict })} /></Tooltip>}
         </Space>
       ),
     },
@@ -252,7 +252,7 @@ export default function ResidualContainment() {
         <Title level={4} style={{ margin: 0 }}><AlertOutlined /> Residual Containment Area</Title>
         <Space wrap>
           <Input placeholder="Search..." prefix={<SearchOutlined />} value={searchText} onChange={(e) => setSearchText(e.target.value)} style={{ width: "100%", maxWidth: 200 }} allowClear />
-          <Button type="primary" icon={<PlusOutlined />} onClick={openAdd}>Add Record</Button>
+          {canEdit && <Button type="primary" icon={<PlusOutlined />} onClick={openAdd}>Add Record</Button>}
           <Button icon={<DownloadOutlined />} onClick={() => {
             exportToExcel(filtered.map((r) => ({
               Province: r.province, Municipality: r.municipality, Barangay: r.barangay,
@@ -285,8 +285,8 @@ export default function ResidualContainment() {
 
       <Row gutter={[12, 12]} style={{ marginBottom: 16 }}>
         <Col xs={24} sm={12} lg={6}>
-          <Card size="small" hoverable className="rca-card" style={{ borderRadius: 10, borderLeft: "3px solid #1a3353", height: "100%" }}>
-            <Statistic title="Total RCAs" value={filtered.length} prefix={<AlertOutlined className="rca-icon-bounce" style={{ color: "#1a3353" }} />} />
+          <Card size="small" hoverable className="rca-card" style={{ borderRadius: 10, borderLeft: isDark ? "3px solid #4a7fb5" : "3px solid #1a3353", height: "100%" }}>
+            <Statistic title="Total RCAs" value={filtered.length} prefix={<AlertOutlined className="rca-icon-bounce" style={{ color: isDark ? "#7eb8da" : "#1a3353" }} />} />
             <div style={{ marginTop: 8, display: "flex", gap: 4, flexWrap: "wrap" }}>
               <Tag color="blue" bordered={false}>MBA {mbaCount}</Tag>
               <Tag color="purple" bordered={false}>{provinceCount} Provinces</Tag>

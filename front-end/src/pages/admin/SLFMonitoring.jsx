@@ -589,14 +589,14 @@ function PortalGenerators({
       width: 120,
       render: (_, r) => (
         <Space>
-          <Button
+          {canEdit && <Button
             type="link"
             icon={<EditOutlined />}
             onClick={() => openEdit(r)}
-          />
-          <Popconfirm title="Delete?" onConfirm={() => handleDelete(r._id)}>
+          />}
+          {canDelete && <Popconfirm title="Delete?" onConfirm={() => handleDelete(r._id)}>
             <Button type="link" danger icon={<DeleteOutlined />} />
-          </Popconfirm>
+          </Popconfirm>}
         </Space>
       ),
     },
@@ -671,7 +671,7 @@ function PortalGenerators({
           Manage portal SLF generators that waste generators submit disposal
           data to.
         </Text>
-        <Button
+        {canEdit && <Button
           type="primary"
           size="small"
           icon={<PlusOutlined />}
@@ -679,7 +679,7 @@ function PortalGenerators({
           style={{ background: ACCENT, borderColor: ACCENT }}
         >
           Add Generator
-        </Button>
+        </Button>}
       </div>
       <Table
         dataSource={generators}
@@ -1004,7 +1004,7 @@ function PortalGenerators({
                 width: 32,
                 height: 32,
                 borderRadius: 8,
-                background: "#f0f5ff",
+                background: isDark ? "rgba(47,84,235,0.1)" : "#f0f5ff",
                 display: "flex",
                 alignItems: "center",
                 justifyContent: "center",
@@ -1116,7 +1116,7 @@ function PortalGenerators({
                     <Text
                       style={{
                         fontSize: 12,
-                        color: t.meta?.comment ? "#1a3353" : "#fa541c",
+                        color: t.meta?.comment ? (isDark ? "#7eb8da" : "#1a3353") : "#fa541c",
                         fontStyle: "italic",
                         whiteSpace: "pre-wrap",
                         wordBreak: "break-word",
@@ -1238,7 +1238,7 @@ function PortalGenerators({
 }
 
 // ── Main Component ──
-export default function SLFMonitoring() {
+export default function SLFMonitoring({canEdit = true, canDelete = true, isDark}) {
   const { getValues } = useDataRef();
   const provinceOptions = getValues("province").map((p) => ({ label: p, value: p }));
   const monthOptions = getValues("target-month").map((m) => ({ label: m.replace(/^\d+\./, ""), value: m }));
@@ -1773,14 +1773,14 @@ export default function SLFMonitoring() {
               onClick={() => setDetailModal(r)}
             />
           </Tooltip>
-          <Tooltip title="Edit">
+          {canEdit && <Tooltip title="Edit">
             <Button
               size="small"
               type="text"
               icon={<EditOutlined />}
               onClick={() => openEdit(r)}
             />
-          </Tooltip>
+          </Tooltip>}
         </Space>
       ),
     },
@@ -1990,14 +1990,14 @@ export default function SLFMonitoring() {
                       style={{ width: "100%", maxWidth: 200 }}
                       allowClear
                     />
-                    <Button
+                    {canEdit && <Button
                       type="primary"
                       icon={<PlusOutlined />}
                       onClick={openAdd}
                       style={{ background: ACCENT, borderColor: ACCENT }}
                     >
                       Add Record
-                    </Button>
+                    </Button>}
                     <Button icon={<DownloadOutlined />} onClick={handleExport}>
                       Export
                     </Button>
@@ -2177,7 +2177,7 @@ export default function SLFMonitoring() {
         okText="Save"
         okButtonProps={{ style: { background: ACCENT, borderColor: ACCENT } }}
       >
-        <div style={{ marginBottom: 12, padding: "8px 12px", background: "#f0f5ff", borderRadius: 6, border: "1px solid #d6e4ff" }}>
+        <div style={{ marginBottom: 12, padding: "8px 12px", background: isDark ? "rgba(47,84,235,0.1)" : "#f0f5ff", borderRadius: 6, border: isDark ? "1px solid rgba(47,84,235,0.3)" : "1px solid #d6e4ff" }}>
           <Row align="middle" gutter={12}>
             <Col>
               <Text strong style={{ fontSize: 13 }}><CalendarOutlined style={{ marginRight: 4 }} /> Data Year:</Text>
@@ -2360,7 +2360,7 @@ export default function SLFMonitoring() {
           </Row>
 
           {/* ── Capacity Unit Converter ── */}
-          <Card size="small" style={{ borderRadius: 8, background: "#f6ffed", marginBottom: 12 }}>
+          <Card size="small" style={{ borderRadius: 8, background: isDark ? "rgba(82,196,26,0.1)" : "#f6ffed", marginBottom: 12 }}>
             <Text strong style={{ fontSize: 12, color: "#389e0d" }}>📐 Capacity Converter (m² → m³)</Text>
             <Row gutter={12} style={{ marginTop: 8 }} align="middle">
               <Col span={7}>
@@ -2445,7 +2445,7 @@ export default function SLFMonitoring() {
                 return { index: i, capacity: cap, status: st, waste: Math.min(cellWaste, cap), remaining: Math.max(0, cap - Math.min(cellWaste, cap)) };
               });
               return (
-                <Card size="small" style={{ borderRadius: 10, marginTop: 8, background: "#fafafa" }}>
+                <Card size="small" style={{ borderRadius: 10, marginTop: 8, background: isDark ? "#1f1f1f" : "#fafafa" }}>
                   <Row gutter={16} align="middle">
                     <Col xs={24} md={8} style={{ textAlign: "center" }}>
                       <Progress

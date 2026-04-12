@@ -1,5 +1,7 @@
 const express = require("express");
 const User = require("../models/User");
+const { sendAdminApprovedEmail, sendAdminRejectedEmail } = require("../utils/email");
+const { writeLog } = require("../utils/logger");
 
 const router = express.Router();
 
@@ -74,6 +76,63 @@ router.delete("/:id", async (req, res) => {
   try {
     await User.findByIdAndDelete(req.params.id);
     res.json({ message: "User deleted" });
+  } catch (error) {
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+});
+
+// Approve user account
+router.patch("/:id/approve", async (req, res) => {
+  try {
+    const user = await User.findByIdAndUpdate(
+      req.params.id,
+      { isApproved: true },
+      { returnDocument: "after" }
+    ).select("-password");
+    if (!user) return res.status(404).json({ message: "User not found" });
+
+    // Send approval notification email
+    try {
+      await sendAdminApprovedEmail(user.email, user.firstName);
+    } catch (emailErr) {
+      console.error("Failed to send approval email:", emailErr.message);
+    }
+
+    writeLog("info", "users.approve", {
+      message: `Account approved: ${user.email}`,
+      user: user.email,
+    });
+
+    res.json({ message: "User approved", data: user });
+  } catch (error) {
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+});
+
+// Reject (revoke approval) user account
+router.patch("/:id/reject", async (req, res) => {
+  try {
+    const { reason } = req.body;
+    const user = await User.findByIdAndUpdate(
+      req.params.id,
+      { isApproved: false },
+      { returnDocument: "after" }
+    ).select("-password");
+    if (!user) return res.status(404).json({ message: "User not found" });
+
+    // Send rejection notification email
+    try {
+      await sendAdminRejectedEmail(user.email, user.firstName, reason);
+    } catch (emailErr) {
+      console.error("Failed to send rejection email:", emailErr.message);
+    }
+
+    writeLog("info", "users.reject", {
+      message: `Account rejected: ${user.email}${reason ? ` — ${reason}` : ""}`,
+      user: user.email,
+    });
+
+    res.json({ message: "User rejected", data: user });
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });
   }

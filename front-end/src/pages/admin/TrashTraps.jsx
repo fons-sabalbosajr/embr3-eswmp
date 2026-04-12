@@ -95,7 +95,7 @@ function getStatusTag(v) {
   return <Tag bordered={false}>{v}</Tag>;
 }
 
-export default function TrashTraps() {
+export default function TrashTraps({canEdit = true, canDelete = true, isDark}) {
   const { getValues } = useDataRef();
   const provinceOptions = getValues("province").map((p) => ({ label: p, value: p }));
   const monthOptions = getValues("target-month").map((m) => ({ label: m.replace(/^\d+\./, ""), value: m }));
@@ -260,7 +260,7 @@ export default function TrashTraps() {
 
   const columns = [
     {
-      title: <><EnvironmentOutlined style={{ color: "#1a3353" }} /> LGU</>,
+      title: <><EnvironmentOutlined style={{ color: isDark ? "#7eb8da" : "#1a3353" }} /> LGU</>,
       key: "lgu", width: 160, fixed: "left",
       filters: filters.province,
       onFilter: (v, r) => r.province === v,
@@ -349,8 +349,8 @@ export default function TrashTraps() {
       render: (_, r) => (
         <Space size={4}>
           <Tooltip title="View Details"><Button type="text" size="small" icon={<EyeOutlined style={{ color: "#1890ff" }} />} onClick={() => setDetailModal(r)} /></Tooltip>
-          <Tooltip title="Edit"><Button type="text" size="small" icon={<EditOutlined style={{ color: "#52c41a" }} />} onClick={() => openEdit(r)} /></Tooltip>
-          <Tooltip title="Add Record"><Button type="text" size="small" icon={<PlusOutlined style={{ color: "#13c2c2" }} />} onClick={() => openAdd({ municipality: r.municipality, province: r.province, barangay: r.barangay, manilaBayArea: r.manilaBayArea, latitude: r.latitude, longitude: r.longitude })} /></Tooltip>
+          {canEdit && <Tooltip title="Edit"><Button type="text" size="small" icon={<EditOutlined style={{ color: "#52c41a" }} />} onClick={() => openEdit(r)} /></Tooltip>}
+          {canEdit && <Tooltip title="Add Record"><Button type="text" size="small" icon={<PlusOutlined style={{ color: "#13c2c2" }} />} onClick={() => openAdd({ municipality: r.municipality, province: r.province, barangay: r.barangay, manilaBayArea: r.manilaBayArea, latitude: r.latitude, longitude: r.longitude })} /></Tooltip>}
         </Space>
       ),
     },
@@ -393,7 +393,7 @@ export default function TrashTraps() {
         <Title level={4} style={{ margin: 0 }}><ExperimentOutlined /> Trash Traps</Title>
         <Space wrap>
           <Input placeholder="Search..." prefix={<SearchOutlined />} value={searchText} onChange={(e) => setSearchText(e.target.value)} style={{ width: "100%", maxWidth: 200 }} allowClear />
-          <Button type="primary" icon={<PlusOutlined />} onClick={openAdd} style={{ background: "#13c2c2", borderColor: "#13c2c2" }}>Add Record</Button>
+          {canEdit && <Button type="primary" icon={<PlusOutlined />} onClick={openAdd} style={{ background: "#13c2c2", borderColor: "#13c2c2" }}>Add Record</Button>}
           <Button icon={<DownloadOutlined />} onClick={handleExport}>Export</Button>
           <Tooltip title="Refresh data"><Button icon={<ReloadOutlined />} onClick={() => fetchRecords(true)} loading={loading} /></Tooltip>
         </Space>

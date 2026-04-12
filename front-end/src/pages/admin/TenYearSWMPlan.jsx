@@ -127,7 +127,7 @@ function computeFields(rec) {
   return computed;
 }
 
-export default function TenYearSWMPlan() {
+export default function TenYearSWMPlan({canEdit = true, canDelete = true, isDark}) {
   const { getValues } = useDataRef();
   const provinceOptions = getValues("province").map((p) => ({
     label: p,
@@ -463,7 +463,7 @@ export default function TenYearSWMPlan() {
     {
       title: (
         <>
-          <EnvironmentOutlined style={{ color: "#1a3353" }} /> LGU
+          <EnvironmentOutlined style={{ color: isDark ? "#7eb8da" : "#1a3353" }} /> LGU
         </>
       ),
       key: "lgu",
@@ -710,14 +710,14 @@ export default function TenYearSWMPlan() {
               onClick={() => setDetailModal(record)}
             />
           </Tooltip>
-          <Tooltip title="Edit">
+          {canEdit && <Tooltip title="Edit">
             <Button
               type="text"
               size="small"
               icon={<EditOutlined style={{ color: "#52c41a" }} />}
               onClick={() => openEdit(record)}
             />
-          </Tooltip>
+          </Tooltip>}
         </Space>
       ),
     },
@@ -787,9 +787,9 @@ export default function TenYearSWMPlan() {
             style={{ width: "100%", maxWidth: 200 }}
             allowClear
           />
-          <Button type="primary" icon={<PlusOutlined />} onClick={openAdd}>
+          {canEdit && <Button type="primary" icon={<PlusOutlined />} onClick={openAdd}>
             Add Record
-          </Button>
+          </Button>}
           <Button
             icon={<DownloadOutlined />}
             onClick={() => {
@@ -928,7 +928,7 @@ export default function TenYearSWMPlan() {
             className="swm-card"
             style={{
               borderRadius: 10,
-              borderLeft: "3px solid #1a3353",
+              borderLeft: isDark ? "3px solid #4a7fb5" : "3px solid #1a3353",
               height: "100%",
             }}
           >
@@ -938,7 +938,7 @@ export default function TenYearSWMPlan() {
               prefix={
                 <EnvironmentOutlined
                   className="swm-icon-bounce"
-                  style={{ color: "#1a3353" }}
+                  style={{ color: isDark ? "#7eb8da" : "#1a3353" }}
                 />
               }
             />

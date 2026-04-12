@@ -46,7 +46,7 @@ export default function VerifyEmail() {
           <Result
             status="success"
             title="Email Verified!"
-            subTitle={message}
+            subTitle={message || "Your account is now pending approval by the developer. You will be notified via email once approved."}
             extra={
               <Button
                 type="primary"

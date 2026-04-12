@@ -59,6 +59,38 @@ body {
   background: #f5f5f5;
   color: #595959;
 }
+
+/* Dark theme overrides for admin layout */
+[data-theme="dark"] .status-badge-compliant {
+  background: rgba(82, 196, 26, 0.15);
+  color: #52c41a;
+}
+[data-theme="dark"] .status-badge-noncompliant {
+  background: rgba(255, 77, 79, 0.15);
+  color: #ff4d4f;
+}
+[data-theme="dark"] .status-badge-pending {
+  background: rgba(250, 173, 20, 0.15);
+  color: #faad14;
+}
+[data-theme="dark"] .status-badge-approved {
+  background: rgba(82, 196, 26, 0.15);
+  color: #52c41a;
+}
+[data-theme="dark"] .status-badge-renewal {
+  background: rgba(250, 173, 20, 0.15);
+  color: #faad14;
+}
+[data-theme="dark"] .status-badge-other {
+  background: #2a2a2a;
+  color: #b3b3b3;
+}
+[data-theme="dark"] .popup-action-btn {
+  background: #2a2a2a;
+  border-color: #434343;
+  color: #b3b3b3;
+}
+
 @keyframes statusFadeIn {
   from { opacity: 0; transform: scale(0.85); }
   to   { opacity: 1; transform: scale(1); }
@@ -150,32 +182,34 @@ body {
   color: #b3b3b3;
 }
 
+/* SweetAlert2 dark theme when admin is in dark mode */
+[data-theme="dark"] ~ .swal2-container .swal2-popup,
+body:has([data-theme="dark"]) .swal2-popup {
+  background: #1f1f1f;
+  color: #e8e8e8;
+}
+body:has([data-theme="dark"]) .swal2-title {
+  color: #e8e8e8;
+}
+body:has([data-theme="dark"]) .swal2-html-container {
+  color: #b3b3b3;
+}
+body:has([data-theme="dark"]) .swal2-input,
+body:has([data-theme="dark"]) .swal2-textarea {
+  background: #2a2a2a;
+  color: #e8e8e8;
+  border-color: #434343;
+}
+body:has([data-theme="dark"]) .swal2-validation-message {
+  background: #2a2a2a;
+  color: #b3b3b3;
+}
+
 /* ═══════════════════════════════════════════
    GLOBAL RESPONSIVE UTILITIES
    ═══════════════════════════════════════════ */
 
-/* ── Auth pages (Login / Signup) ── */
-.auth-container {
-  display: flex;
-  min-height: 100vh;
-}
-.auth-left {
-  flex: 1;
-  position: relative;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  padding: 48px;
-  overflow: hidden;
-}
-.auth-right {
-  flex: 1;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 32px;
-}
+/* ── Auth pages — layout moved to Auth.css ── */
 
 /* ── Admin layout ── */
 .admin-header-right {
@@ -223,30 +257,6 @@ body {
 
 /* ── Tablet (≤ 992px) ── */
 @media (max-width: 992px) {
-  .auth-container {
-    flex-direction: column;
-  }
-  .auth-left {
-    padding: 24px 24px 16px;
-    min-height: auto;
-  }
-  .auth-left .feature-list,
-  .auth-left .brand-desc,
-  .auth-left .brand-divider,
-  .auth-left .left-footer {
-    display: none !important;
-  }
-  .auth-left .brand-content h1 {
-    font-size: 28px !important;
-    margin-bottom: 2px !important;
-  }
-  .auth-left .brand-content img {
-    width: 56px !important;
-    margin-bottom: 12px !important;
-  }
-  .auth-right {
-    padding: 24px 16px;
-  }
   .admin-content {
     padding: 16px 12px;
   }
@@ -258,19 +268,6 @@ body {
 
 /* ── Small tablet / large phone (≤ 768px) ── */
 @media (max-width: 768px) {
-  .auth-left {
-    padding: 20px 20px 12px;
-  }
-  .auth-left .brand-content h1 {
-    font-size: 24px !important;
-  }
-  .auth-left .brand-content img {
-    width: 48px !important;
-    margin-bottom: 10px !important;
-  }
-  .auth-right {
-    padding: 20px 12px;
-  }
   .admin-content {
     padding: 12px 8px;
   }
@@ -282,28 +279,6 @@ body {
 
 /* ── Phone (≤ 576px) ── */
 @media (max-width: 576px) {
-  /* Auth: minimize branding panel on phone */
-  .auth-left {
-    padding: 16px 16px 10px;
-    min-height: unset;
-  }
-  .auth-left .brand-content {
-    text-align: center;
-  }
-  .auth-left .brand-content h1 {
-    font-size: 20px !important;
-  }
-  .auth-left .brand-content img {
-    width: 40px !important;
-    margin-bottom: 8px !important;
-  }
-  .auth-right {
-    padding: 16px 10px;
-  }
-  .auth-right .ant-card {
-    border-radius: 12px;
-    padding: 16px 8px;
-  }
   .admin-content {
     padding: 8px 4px;
   }

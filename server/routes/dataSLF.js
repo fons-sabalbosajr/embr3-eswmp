@@ -123,11 +123,9 @@ router.put("/:id", async (req, res) => {
     let province = "";
     if (entry.slfGenerator) {
       const facility = await SlfFacility.findById(entry.slfGenerator).select("province");
-      console.log("[idNo debug] slfGenerator:", entry.slfGenerator, "| facility:", facility ? { _id: facility._id, province: facility.province } : null);
       if (facility) province = facility.province;
     }
     const provCode = getProvinceCode(province);
-    console.log("[idNo debug] province:", JSON.stringify(province), "| provCode:", provCode);
     const typeCode = entry.companyType === "Private" ? "PVT" : entry.companyType === "LGU" ? "LGU" : "OTH";
     const pattern = new RegExp(`^SLF-${typeCode}-${provCode}-`);
     const lastDoc = await DataSLF.findOne({ idNo: pattern, _id: { $ne: entry._id } }).sort({ idNo: -1 });

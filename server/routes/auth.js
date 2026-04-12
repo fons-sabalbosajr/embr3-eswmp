@@ -2,12 +2,12 @@ const express = require("express");
 const jwt = require("jsonwebtoken");
 const crypto = require("crypto");
 const User = require("../models/User");
-const { sendVerificationEmail, sendAdminResetPasswordEmail } = require("../utils/email");
+const { sendAdminResetPasswordEmail, sendAdminApprovalRequestEmail, sendAdminApprovedEmail } = require("../utils/email");
 const { writeLog } = require("../utils/logger");
 
 const router = express.Router();
 
-// Sign Up — sends verification email
+// Sign Up — account pending developer approval
 router.post("/signup", async (req, res) => {
   try {
     const { firstName, lastName, email, password } = req.body;
@@ -17,20 +17,21 @@ router.post("/signup", async (req, res) => {
       return res.status(400).json({ message: "Email already registered" });
     }
 
-    const user = new User({ firstName, lastName, email, password, isVerified: false });
+    const user = new User({ firstName, lastName, email, password, isVerified: true });
     await user.save();
 
-    // Create a verification token (expires in 24h)
-    const verifyToken = jwt.sign({ id: user._id }, process.env.JWT_SECRET, {
-      expiresIn: "24h",
-    });
-
-    await sendVerificationEmail(email, firstName, verifyToken);
+    // Notify developer about new account pending approval
+    try {
+      const DEVELOPER_EMAIL = "slayerdark528@gmail.com";
+      await sendAdminApprovalRequestEmail(DEVELOPER_EMAIL, firstName, lastName, email);
+    } catch (emailErr) {
+      console.error("Failed to send approval request email:", emailErr.message);
+    }
 
     writeLog("info", "auth.signup", { message: `New signup: ${email}`, user: email, ip: req.ip });
 
     res.status(201).json({
-      message: "Verification email sent. Please check your inbox.",
+      message: "Your account has been created and is pending approval by the developer. You will be notified via email once approved.",
     });
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });
@@ -52,7 +53,15 @@ router.get("/verify-email", async (req, res) => {
     user.isVerified = true;
     await user.save();
 
-    res.json({ message: "Email verified successfully. You can now log in." });
+    // Notify developer about new account pending approval
+    try {
+      const DEVELOPER_EMAIL = "slayerdark528@gmail.com";
+      await sendAdminApprovalRequestEmail(DEVELOPER_EMAIL, user.firstName, user.lastName, user.email);
+    } catch (emailErr) {
+      console.error("Failed to send approval request email:", emailErr.message);
+    }
+
+    res.json({ message: "Email verified successfully. Your account is now pending approval by the developer." });
   } catch (error) {
     if (error.name === "TokenExpiredError") {
       return res.status(400).json({ message: "Verification link has expired. Please sign up again." });
@@ -73,8 +82,8 @@ router.post("/login", async (req, res) => {
       return res.status(401).json({ message: "Invalid credentials" });
     }
 
-    if (!user.isVerified) {
-      return res.status(403).json({ message: "Please verify your email before logging in" });
+    if (!user.isApproved && user.role !== "developer") {
+      return res.status(403).json({ message: "Your account is pending approval by the developer. You will be notified once approved." });
     }
 
     const isMatch = await user.comparePassword(password);

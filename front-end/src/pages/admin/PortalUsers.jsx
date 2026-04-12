@@ -42,7 +42,7 @@ import api from "../../api";
 const { Text, Title } = Typography;
 const { Option } = Select;
 
-export default function PortalUsers() {
+export default function PortalUsers({ isDark }) {
   const [users, setUsers] = useState([]);
   const [generators, setGenerators] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -327,7 +327,7 @@ export default function PortalUsers() {
         }}
       >
         <Space>
-          <Title level={5} style={{ margin: 0, color: "#1a3353" }}>
+          <Title level={5} style={{ margin: 0, color: isDark ? "#7eb8da" : "#1a3353" }}>
             <UserOutlined /> SLF Portal Users
           </Title>
           {pendingCount > 0 && (
@@ -400,7 +400,8 @@ export default function PortalUsers() {
                 .map((g) => ({
                   label: `${g.lgu}${g.ownership ? " (" + g.ownership + ")" : ""}`,
                   value: g._id,
-                }))}
+                }))
+                .filter((opt, idx, arr) => arr.findIndex((o) => o.label === opt.label) === idx)}
               notFoundContent={<Empty description="No SLF available" />}
             />
           </div>
@@ -446,7 +447,7 @@ export default function PortalUsers() {
               options={generators.map((g) => ({
                 label: `${g.lgu}${g.ownership ? " (" + g.ownership + ")" : ""}`,
                 value: g._id,
-              }))}
+              })).filter((opt, idx, arr) => arr.findIndex((o) => o.label === opt.label) === idx)}
               notFoundContent={<Empty description="No SLF available" />}
             />
           </div>
@@ -463,12 +464,12 @@ export default function PortalUsers() {
       >
         {detailModal.user && (() => {
           const u = detailModal.user;
-          const statusConfig = { pending: { color: "#fa8c16", bg: "#fff7e6", text: "Pending Approval" }, approved: { color: "#52c41a", bg: "#f6ffed", text: "Approved" }, rejected: { color: "#ff4d4f", bg: "#fff2f0", text: "Rejected" } };
+          const statusConfig = { pending: { color: "#fa8c16", bg: "#fff7e6", text: "Pending Approval" }, approved: { color: "#52c41a", bg: "#f6ffed", text: "Approved" }, rejected: { color: "#ff4d4f", bg: isDark ? "rgba(255,77,79,0.1)" : "#fff2f0", text: "Rejected" } };
           const sc = statusConfig[u.status] || statusConfig.pending;
           return (
             <>
               {/* Header Card */}
-              <div style={{ textAlign: "center", padding: "24px 16px 16px", background: "linear-gradient(135deg, #f0f5ff 0%, #e6f7ff 100%)", borderRadius: 12, marginBottom: 16 }}>
+              <div style={{ textAlign: "center", padding: "24px 16px 16px", background: isDark ? "linear-gradient(135deg, rgba(47,84,235,0.08) 0%, rgba(22,119,255,0.08) 100%)" : "linear-gradient(135deg, #f0f5ff 0%, #e6f7ff 100%)", borderRadius: 12, marginBottom: 16 }}>
                 <Avatar size={72} style={{ backgroundColor: "#1a3353", fontSize: 28 }} icon={<UserOutlined />} />
                 <div style={{ marginTop: 12 }}>
                   <Text strong style={{ fontSize: 18 }}>{u.firstName} {u.lastName}</Text>

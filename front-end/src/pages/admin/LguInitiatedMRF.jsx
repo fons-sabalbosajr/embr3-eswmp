@@ -100,7 +100,7 @@ function getStatusTag(v) {
   return <Tag bordered={false}>{v}</Tag>;
 }
 
-export default function LguInitiatedMRF() {
+export default function LguInitiatedMRF({canEdit = true, canDelete = true, isDark}) {
   const { getValues } = useDataRef();
   const provinceOptions = getValues("province").map((p) => ({ label: p, value: p }));
   const monthOptions = getValues("target-month").map((m) => ({ label: m.replace(/^\d+\./, ""), value: m }));
@@ -287,7 +287,7 @@ export default function LguInitiatedMRF() {
 
   const columns = [
     {
-      title: <><EnvironmentOutlined style={{ color: "#1a3353" }} /> LGU</>,
+      title: <><EnvironmentOutlined style={{ color: isDark ? "#7eb8da" : "#1a3353" }} /> LGU</>,
       key: "lgu", width: 140, fixed: "left",
       filters: filters.province,
       onFilter: (v, r) => r.province === v,
@@ -377,8 +377,8 @@ export default function LguInitiatedMRF() {
       render: (_, record) => (
         <Space size={4}>
           <Tooltip title="View Details"><Button type="text" size="small" icon={<EyeOutlined style={{ color: "#1890ff" }} />} onClick={() => setDetailModal(record)} /></Tooltip>
-          <Tooltip title="Edit"><Button type="text" size="small" icon={<EditOutlined style={{ color: "#52c41a" }} />} onClick={() => openEdit(record)} /></Tooltip>
-          <Tooltip title="Add Record"><Button type="text" size="small" icon={<PlusOutlined style={{ color: "#13c2c2" }} />} onClick={() => openAdd({ municipality: record.municipality, province: record.province, barangay: record.barangay, manilaBayArea: record.manilaBayArea, congressionalDistrict: record.congressionalDistrict, latitude: record.latitude, longitude: record.longitude })} /></Tooltip>
+          {canEdit && <Tooltip title="Edit"><Button type="text" size="small" icon={<EditOutlined style={{ color: "#52c41a" }} />} onClick={() => openEdit(record)} /></Tooltip>}
+          {canEdit && <Tooltip title="Add Record"><Button type="text" size="small" icon={<PlusOutlined style={{ color: "#13c2c2" }} />} onClick={() => openAdd({ municipality: record.municipality, province: record.province, barangay: record.barangay, manilaBayArea: record.manilaBayArea, congressionalDistrict: record.congressionalDistrict, latitude: record.latitude, longitude: record.longitude })} /></Tooltip>}
         </Space>
       ),
     },
@@ -440,7 +440,7 @@ export default function LguInitiatedMRF() {
         <Title level={4} style={{ margin: 0 }}><ApartmentOutlined /> LGU Initiated MRF</Title>
         <Space wrap>
           <Input placeholder="Search..." prefix={<SearchOutlined />} value={searchText} onChange={(e) => setSearchText(e.target.value)} style={{ width: "100%", maxWidth: 200 }} allowClear />
-          <Button type="primary" icon={<PlusOutlined />} onClick={openAdd}>Add Record</Button>
+          {canEdit && <Button type="primary" icon={<PlusOutlined />} onClick={openAdd}>Add Record</Button>}
           <Button icon={<DownloadOutlined />} onClick={() => {
             const rows = filtered.map((r) => ({
               Province: r.province, Municipality: r.municipality, Barangay: r.barangay,
@@ -582,7 +582,7 @@ export default function LguInitiatedMRF() {
                 </Descriptions>
                 {detailViewRecord.signedDocument && (<>
                   <Divider plain orientation="left"><LinkOutlined /> Document</Divider>
-                  <a href={detailViewRecord.signedDocument} target="_blank" rel="noopener noreferrer" style={{ display: "inline-flex", alignItems: "center", gap: 5, padding: "4px 12px", background: "#e6f7ff", borderRadius: 4, fontSize: 13, color: "#1890ff", textDecoration: "none", fontWeight: 600 }}><LinkOutlined /> View Signed Document</a>
+                  <a href={detailViewRecord.signedDocument} target="_blank" rel="noopener noreferrer" style={{ display: "inline-flex", alignItems: "center", gap: 5, padding: "4px 12px", background: isDark ? "rgba(22,119,255,0.1)" : "#e6f7ff", borderRadius: 4, fontSize: 13, color: "#1890ff", textDecoration: "none", fontWeight: 600 }}><LinkOutlined /> View Signed Document</a>
                 </>)}
               </>
             )},

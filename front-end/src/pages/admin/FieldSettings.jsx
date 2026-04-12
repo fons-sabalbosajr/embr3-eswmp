@@ -37,7 +37,7 @@ const SECTION_LABELS = {
   "compliance-info": "Compliance & Permits",
 };
 
-export default function FieldSettings() {
+export default function FieldSettings({canEdit = true, canDelete = true, isDark}) {
   const [fields, setFields] = useState([]);
   const [loading, setLoading] = useState(true);
   const [modalOpen, setModalOpen] = useState(false);
@@ -183,18 +183,18 @@ export default function FieldSettings() {
       key: "actions",
       render: (_, r) => (
         <Space>
-          <Button
+          {canEdit && <Button
             type="text"
             icon={<EditOutlined />}
             onClick={() => openEdit(r)}
             size="small"
-          />
-          <Popconfirm
+          />}
+          {canDelete && <Popconfirm
             title="Delete this field?"
             onConfirm={() => handleDelete(r._id)}
           >
             <Button type="text" danger icon={<DeleteOutlined />} size="small" />
-          </Popconfirm>
+          </Popconfirm>}
         </Space>
       ),
     },
@@ -216,14 +216,14 @@ export default function FieldSettings() {
           >
             Seed Defaults
           </Button>
-          <Button
+          {canEdit && <Button
             type="primary"
             icon={<PlusOutlined />}
             onClick={openAdd}
             style={{ background: "#1a3353", borderColor: "#1a3353" }}
           >
             Add Field
-          </Button>
+          </Button>}
         </Space>
       </div>
 

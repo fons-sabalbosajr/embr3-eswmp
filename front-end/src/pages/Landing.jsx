@@ -92,6 +92,12 @@ export default function Landing() {
           {menuOpen && <div className="lp-mobile-backdrop" onClick={() => setMenuOpen(false)} />}
 
           <div className={`lp-mobile-menu${menuOpen ? " open" : ""}`}>
+            <div className="lp-mobile-menu-header">
+              <div className="lp-mobile-brand">
+                <img src={emblogo} alt="EMBR3" className="lp-mobile-brand-logo" />
+                <div className="lp-mobile-brand-text">EMBR3 <span>ESWMP</span></div>
+              </div>
+            </div>
             <ul className="lp-nav-links">
               <li><a href="#features" onClick={(e) => { e.preventDefault(); scrollTo("features"); }}>Features</a></li>
               <li><a href="#preview" onClick={(e) => { e.preventDefault(); scrollTo("preview"); }}>Preview</a></li>
@@ -100,7 +106,11 @@ export default function Landing() {
               <li><a href="#contact" onClick={(e) => { e.preventDefault(); scrollTo("contact"); }}>Contact</a></li>
             </ul>
             <div className="lp-mobile-menu-actions">
-              <button className="lp-btn lp-btn-primary lp-btn-sm lp-mobile-cta" onClick={() => { setMenuOpen(false); scrollTo("contact"); }}>Get Started</button>
+              <button className="lp-btn lp-btn-primary lp-btn-sm lp-mobile-cta" onClick={() => { setMenuOpen(false); navigate("/slfportal/login"); }}>Access SLF Portal</button>
+              <button className="lp-btn lp-btn-outline lp-btn-sm lp-mobile-cta" onClick={() => { setMenuOpen(false); navigate("/admin"); }}>Admin Dashboard</button>
+            </div>
+            <div className="lp-mobile-menu-footer">
+              <span>&copy; 2026 EMBR3 &mdash; Environmental Management Bureau Region III</span>
             </div>
           </div>
 

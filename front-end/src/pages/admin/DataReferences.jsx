@@ -51,7 +51,7 @@ const MODULE_COLORS = {
   RCA: "volcano",
 };
 
-export default function DataReferences() {
+export default function DataReferences({canEdit = true, canDelete = true, isDark}) {
   const [refs, setRefs] = useState([]);
   const [loading, setLoading] = useState(true);
   const [modalOpen, setModalOpen] = useState(false);
@@ -197,7 +197,7 @@ export default function DataReferences() {
       style={{
         marginBottom: 10,
         borderRadius: 8,
-        borderLeft: `3px solid ${ref.isActive ? ACCENT : "#d9d9d9"}`,
+        borderLeft: `3px solid ${ref.isActive ? ACCENT : (isDark ? "#434343" : "#d9d9d9")}`,
         opacity: ref.isActive ? 1 : 0.6,
       }}
     >
@@ -251,28 +251,28 @@ export default function DataReferences() {
           </div>
         </div>
         <Space size={4}>
-          <Tooltip title={ref.isActive ? "Deactivate" : "Activate"}>
+          {canEdit && <Tooltip title={ref.isActive ? "Deactivate" : "Activate"}>
             <Switch
               size="small"
               checked={ref.isActive}
               onChange={() => handleToggleActive(ref)}
             />
-          </Tooltip>
-          <Tooltip title="Edit">
+          </Tooltip>}
+          {canEdit && <Tooltip title="Edit">
             <Button
               type="text"
               size="small"
               icon={<EditOutlined />}
               onClick={() => openEdit(ref)}
             />
-          </Tooltip>
-          <Popconfirm
+          </Tooltip>}
+          {canDelete && <Popconfirm
             title="Delete this reference?"
             description="Pages using this reference will lose their dropdown values."
             onConfirm={() => handleDelete(ref._id)}
           >
             <Button type="text" size="small" danger icon={<DeleteOutlined />} />
-          </Popconfirm>
+          </Popconfirm>}
         </Space>
       </div>
     </Card>
@@ -307,14 +307,14 @@ export default function DataReferences() {
           <Button icon={<ReloadOutlined />} onClick={fetchRefs}>
             Refresh
           </Button>
-          <Button
+          {canEdit && <Button
             type="primary"
             icon={<PlusOutlined />}
             onClick={openAdd}
             style={{ background: ACCENT, borderColor: ACCENT }}
           >
             Add Reference
-          </Button>
+          </Button>}
         </Space>
       </div>
 

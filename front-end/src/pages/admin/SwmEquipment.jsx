@@ -119,7 +119,7 @@ function getStatusTag(v) {
   return <Tag bordered={false}>{v}</Tag>;
 }
 
-export default function SwmEquipment() {
+export default function SwmEquipment({canEdit = true, canDelete = true, isDark}) {
   const { getValues } = useDataRef();
   const provinceOptions = getValues("province").map((p) => ({ label: p, value: p }));
   const monthOptions = getValues("target-month").map((m) => ({ label: m.replace(/^\d+\./, ""), value: m }));
@@ -334,7 +334,7 @@ export default function SwmEquipment() {
     {
       title: (
         <span>
-          <EnvironmentOutlined style={{ color: "#1a3353" }} /> LGU
+          <EnvironmentOutlined style={{ color: isDark ? "#7eb8da" : "#1a3353" }} /> LGU
         </span>
       ),
       key: "lgu",
@@ -559,14 +559,14 @@ export default function SwmEquipment() {
               onClick={() => setDetailModal(r)}
             />
           </Tooltip>
-          <Tooltip title="Edit">
+          {canEdit && <Tooltip title="Edit">
             <Button
               type="text"
               size="small"
               icon={<EditOutlined style={{ color: "#52c41a" }} />}
               onClick={() => openEdit(r)}
             />
-          </Tooltip>
+          </Tooltip>}
         </Space>
       ),
     },
@@ -629,14 +629,14 @@ export default function SwmEquipment() {
             style={{ width: "100%", maxWidth: 200 }}
             allowClear
           />
-          <Button
+          {canEdit && <Button
             type="primary"
             icon={<PlusOutlined />}
             onClick={openAdd}
             style={{ background: "#fa8c16", borderColor: "#fa8c16" }}
           >
             Add Record
-          </Button>
+          </Button>}
           <Button icon={<DownloadOutlined />} onClick={handleExport}>
             Export
           </Button>

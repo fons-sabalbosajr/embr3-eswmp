@@ -437,8 +437,7 @@ export default function SLFPortal() {
   }, [isOnline, activeMenu, portalUser, fetchSubmissions]);
 
   const handleLogout = () => {
-    secureStorage.remove("portal_token");
-    secureStorage.remove("portal_user");
+    secureStorage.clearAll();
     navigate("/slfportal/login");
   };
 

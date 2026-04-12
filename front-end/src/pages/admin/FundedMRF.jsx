@@ -98,7 +98,7 @@ function getStatusTag(v) {
   return <Tag bordered={false}>{v}</Tag>;
 }
 
-export default function FundedMRF() {
+export default function FundedMRF({canEdit = true, canDelete = true, isDark}) {
   const { getValues } = useDataRef();
   const provinceOptions = getValues("province").map((p) => ({ label: p, value: p }));
   const monthOptions = getValues("target-month").map((m) => ({ label: m.replace(/^\d+\./, ""), value: m }));
@@ -269,7 +269,7 @@ export default function FundedMRF() {
 
   const columns = [
     {
-      title: <><EnvironmentOutlined style={{ color: "#1a3353" }} /> LGU</>,
+      title: <><EnvironmentOutlined style={{ color: isDark ? "#7eb8da" : "#1a3353" }} /> LGU</>,
       key: "lgu", width: 140, fixed: "left",
       filters: filters.province,
       onFilter: (v, r) => r.province === v,
@@ -353,8 +353,8 @@ export default function FundedMRF() {
       render: (_, record) => (
         <Space size={4}>
           <Tooltip title="View Details"><Button type="text" size="small" icon={<EyeOutlined style={{ color: "#1890ff" }} />} onClick={() => setDetailModal(record)} /></Tooltip>
-          <Tooltip title="Edit"><Button type="text" size="small" icon={<EditOutlined style={{ color: "#52c41a" }} />} onClick={() => openEdit(record)} /></Tooltip>
-          <Tooltip title="Add Record"><Button type="text" size="small" icon={<PlusOutlined style={{ color: "#13c2c2" }} />} onClick={() => openAdd({ municipality: record.municipality, province: record.province, barangay: record.barangay, manilaBayArea: record.manilaBayArea, congressionalDistrict: record.congressionalDistrict, latitude: record.latitude, longitude: record.longitude })} /></Tooltip>
+          {canEdit && <Tooltip title="Edit"><Button type="text" size="small" icon={<EditOutlined style={{ color: "#52c41a" }} />} onClick={() => openEdit(record)} /></Tooltip>}
+          {canEdit && <Tooltip title="Add Record"><Button type="text" size="small" icon={<PlusOutlined style={{ color: "#13c2c2" }} />} onClick={() => openAdd({ municipality: record.municipality, province: record.province, barangay: record.barangay, manilaBayArea: record.manilaBayArea, congressionalDistrict: record.congressionalDistrict, latitude: record.latitude, longitude: record.longitude })} /></Tooltip>}
         </Space>
       ),
     },
@@ -386,7 +386,7 @@ export default function FundedMRF() {
         <Title level={4} style={{ margin: 0 }}><BankOutlined /> Funded MRF</Title>
         <Space wrap>
           <Input placeholder="Search..." prefix={<SearchOutlined />} value={searchText} onChange={(e) => setSearchText(e.target.value)} style={{ width: "100%", maxWidth: 200 }} allowClear />
-          <Button type="primary" icon={<PlusOutlined />} onClick={openAdd}>Add Record</Button>
+          {canEdit && <Button type="primary" icon={<PlusOutlined />} onClick={openAdd}>Add Record</Button>}
           <Button icon={<DownloadOutlined />} onClick={() => {
             const rows = filtered.map((r) => ({
               Province: r.province, Municipality: r.municipality, Barangay: r.barangay,
@@ -430,8 +430,8 @@ export default function FundedMRF() {
       {/* Summary Dashboard Tiles */}
       <Row gutter={[12, 12]} style={{ marginBottom: 16 }}>
         <Col xs={24} sm={12} lg={6}>
-          <Card size="small" hoverable className="mrf-card" style={{ borderRadius: 10, borderLeft: "3px solid #1a3353", height: "100%" }}>
-            <Statistic title="Total MRFs" value={filtered.length} prefix={<BankOutlined className="mrf-icon-bounce" style={{ color: "#1a3353" }} />} />
+          <Card size="small" hoverable className="mrf-card" style={{ borderRadius: 10, borderLeft: isDark ? "3px solid #4a7fb5" : "3px solid #1a3353", height: "100%" }}>
+            <Statistic title="Total MRFs" value={filtered.length} prefix={<BankOutlined className="mrf-icon-bounce" style={{ color: isDark ? "#7eb8da" : "#1a3353" }} />} />
             <div style={{ marginTop: 8, display: "flex", gap: 4, flexWrap: "wrap" }}>
               <Tag color="blue" bordered={false}>MBA {mbaCount}</Tag>
               <Tag bordered={false}>Non-MBA {filtered.length - mbaCount}</Tag>
@@ -527,7 +527,7 @@ export default function FundedMRF() {
                 </Descriptions>
                 {detailViewRecord.signedDocument && (<>
                   <Divider plain orientation="left"><LinkOutlined /> Document</Divider>
-                  <a href={detailViewRecord.signedDocument} target="_blank" rel="noopener noreferrer" style={{ display: "inline-flex", alignItems: "center", gap: 5, padding: "4px 12px", background: "#e6f7ff", borderRadius: 4, fontSize: 13, color: "#1890ff", textDecoration: "none", fontWeight: 600 }}><LinkOutlined /> View Signed Document</a>
+                  <a href={detailViewRecord.signedDocument} target="_blank" rel="noopener noreferrer" style={{ display: "inline-flex", alignItems: "center", gap: 5, padding: "4px 12px", background: isDark ? "rgba(22,119,255,0.1)" : "#e6f7ff", borderRadius: 4, fontSize: 13, color: "#1890ff", textDecoration: "none", fontWeight: 600 }}><LinkOutlined /> View Signed Document</a>
                 </>)}
               </>
             )},

@@ -507,6 +507,111 @@ async function sendSubmissionEmail(email, { subject, message, submissionId, comp
   });
 }
 
+// ─── Admin Account Approval Emails ────────────────────────────────────────────
+
+// Notify developer that a new admin account needs approval
+async function sendAdminApprovalRequestEmail(developerEmail, firstName, lastName, userEmail) {
+  const adminLink = `${getClientUrl()}/admin`;
+  const body = `
+    <h2 style="margin:0 0 8px;color:#1a3353;font-size:22px;">New Account Pending Approval</h2>
+    <p style="margin:0 0 24px;color:#666;font-size:15px;line-height:1.6;">
+      A new user has verified their email and is requesting access to the EMBR3 ESWMP Admin Panel.
+    </p>
+    <div style="padding:16px;background:#f5f7fa;border-radius:8px;border:1px solid #e2e5f0;margin-bottom:24px;">
+      <table width="100%" cellpadding="0" cellspacing="0">
+        <tr><td style="padding:4px 0;color:#666;font-size:14px;font-weight:600;width:80px;">Name:</td><td style="padding:4px 0;color:#333;font-size:14px;">${firstName} ${lastName}</td></tr>
+        <tr><td style="padding:4px 0;color:#666;font-size:14px;font-weight:600;">Email:</td><td style="padding:4px 0;color:#333;font-size:14px;">${userEmail}</td></tr>
+      </table>
+    </div>
+    <p style="margin:0 0 24px;color:#666;font-size:15px;line-height:1.6;">
+      Please log in to the admin panel to review and approve or reject this account.
+    </p>
+    <table width="100%" cellpadding="0" cellspacing="0">
+      <tr><td align="center" style="padding:8px 0 24px;">
+        <a href="${adminLink}" target="_blank" style="display:inline-block;background:#1a3353;color:#fff;text-decoration:none;padding:14px 40px;border-radius:8px;font-size:16px;font-weight:600;letter-spacing:0.5px;">
+          Go to Admin Panel
+        </a>
+      </td></tr>
+    </table>
+    <div style="border-top:1px solid #eee;padding-top:20px;margin-top:8px;">
+      <p style="margin:0;color:#999;font-size:13px;line-height:1.5;">
+        The user will not be able to log in until their account is approved.
+      </p>
+    </div>`;
+
+  await transporter.sendMail({
+    from: `"EMBR3 ESWMP" <${process.env.EMAIL_USER}>`,
+    to: developerEmail,
+    subject: "New Account Pending Approval — EMBR3 ESWMP",
+    html: portalEmailWrapper(body),
+  });
+}
+
+// Notify user that their admin account has been approved
+async function sendAdminApprovedEmail(email, firstName) {
+  const loginLink = `${getClientUrl()}/admin/login`;
+  const body = `
+    <div style="text-align:center;margin-bottom:24px;">
+      <div style="display:inline-block;background:#e6f7ee;border-radius:50%;padding:16px;">
+        <span style="font-size:32px;">&#10003;</span>
+      </div>
+    </div>
+    <h2 style="margin:0 0 8px;color:#1a3353;font-size:22px;text-align:center;">Account Approved!</h2>
+    <p style="margin:0 0 24px;color:#666;font-size:15px;line-height:1.6;">
+      Hi <strong>${firstName}</strong>,
+    </p>
+    <p style="margin:0 0 24px;color:#666;font-size:15px;line-height:1.6;">
+      Your EMBR3 ESWMP admin account has been reviewed and <strong style="color:#52c41a;">approved</strong> by the developer.
+      You can now log in and access the admin panel.
+    </p>
+    <table width="100%" cellpadding="0" cellspacing="0">
+      <tr><td align="center" style="padding:8px 0 24px;">
+        <a href="${loginLink}" target="_blank" style="display:inline-block;background:#1a3353;color:#fff;text-decoration:none;padding:14px 40px;border-radius:8px;font-size:16px;font-weight:600;letter-spacing:0.5px;">
+          Log In Now
+        </a>
+      </td></tr>
+    </table>`;
+
+  await transporter.sendMail({
+    from: `"EMBR3 ESWMP" <${process.env.EMAIL_USER}>`,
+    to: email,
+    subject: "Account Approved — EMBR3 ESWMP",
+    html: portalEmailWrapper(body),
+  });
+}
+
+// Notify user that their admin account has been rejected
+async function sendAdminRejectedEmail(email, firstName, reason) {
+  const body = `
+    <h2 style="margin:0 0 8px;color:#1a3353;font-size:22px;">Account Update</h2>
+    <p style="margin:0 0 24px;color:#666;font-size:15px;line-height:1.6;">
+      Hi <strong>${firstName}</strong>,
+    </p>
+    <p style="margin:0 0 24px;color:#666;font-size:15px;line-height:1.6;">
+      We regret to inform you that your EMBR3 ESWMP admin account registration has been
+      <strong style="color:#ff4d4f;">declined</strong>.
+    </p>
+    ${
+      reason
+        ? `<div style="padding:16px;background:#fff2f0;border-radius:8px;border:1px solid #ffccc7;margin-bottom:24px;">
+            <p style="margin:0;color:#a8071a;font-size:14px;line-height:1.5;">
+              <strong>Reason:</strong> ${reason}
+            </p>
+          </div>`
+        : ""
+    }
+    <p style="margin:0 0 24px;color:#666;font-size:15px;line-height:1.6;">
+      If you believe this was a mistake or have questions, please contact the ESWMP administration for further assistance.
+    </p>`;
+
+  await transporter.sendMail({
+    from: `"EMBR3 ESWMP" <${process.env.EMAIL_USER}>`,
+    to: email,
+    subject: "Account Registration Update — EMBR3 ESWMP",
+    html: portalEmailWrapper(body),
+  });
+}
+
 module.exports = {
   sendVerificationEmail,
   sendAcknowledgementEmail,
@@ -517,4 +622,7 @@ module.exports = {
   sendPortalResetPasswordEmail,
   sendAdminResetPasswordEmail,
   sendSubmissionEmail,
+  sendAdminApprovalRequestEmail,
+  sendAdminApprovedEmail,
+  sendAdminRejectedEmail,
 };

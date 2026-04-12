@@ -56,7 +56,7 @@ const ACCENT = "#2f54eb";
 const CACHE_KEY = "submissions-cache";
 const CACHE_TTL = 10 * 60 * 1000;
 
-export default function SubmissionSettings() {
+export default function SubmissionSettings({canEdit = true, canDelete = true, isDark}) {
   const [data, setData] = useState([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
@@ -556,7 +556,7 @@ export default function SubmissionSettings() {
               />
             </Tooltip>
           )}
-          {r.status === "pending" && (
+          {r.status === "pending" && canEdit && (
             <>
               <Tooltip title="Edit">
                 <Button
@@ -584,7 +584,7 @@ export default function SubmissionSettings() {
               </Tooltip>
             </>
           )}
-          {r.status !== "reverted" && r.status !== "pending" && (
+          {r.status !== "reverted" && r.status !== "pending" && canEdit && (
             <Tooltip title="Revert Submission">
               <Button
                 size="small"
@@ -597,7 +597,7 @@ export default function SubmissionSettings() {
               />
             </Tooltip>
           )}
-          <Popconfirm
+          {canDelete && <Popconfirm
             title="Delete this submission?"
             description="This action cannot be undone."
             onConfirm={() => handleDelete(r._id)}
@@ -607,7 +607,7 @@ export default function SubmissionSettings() {
             <Tooltip title="Delete">
               <Button size="small" danger icon={<DeleteOutlined />} />
             </Tooltip>
-          </Popconfirm>
+          </Popconfirm>}
         </Space>
       ),
     },
@@ -869,10 +869,10 @@ export default function SubmissionSettings() {
                     <Col xs={8}>
                       <div
                         style={{
-                          background: "#f0f5ff",
+                          background: isDark ? "rgba(47,84,235,0.1)" : "#f0f5ff",
                           borderRadius: 8,
                           padding: "12px 14px",
-                          border: "1px solid #d6e4ff",
+                          border: isDark ? "1px solid rgba(47,84,235,0.3)" : "1px solid #d6e4ff",
                           minHeight: 72,
                           display: "flex",
                           flexDirection: "column",
@@ -880,11 +880,11 @@ export default function SubmissionSettings() {
                         }}
                       >
                         <Text
-                          type="secondary"
                           style={{
                             fontSize: 11,
                             textTransform: "uppercase",
                             letterSpacing: 0.5,
+                            color: isDark ? "rgba(255,255,255,0.65)" : "rgba(0,0,0,0.45)",
                           }}
                         >
                           Company Type
@@ -902,10 +902,10 @@ export default function SubmissionSettings() {
                     <Col xs={8}>
                       <div
                         style={{
-                          background: "#f6ffed",
+                          background: isDark ? "rgba(82,196,26,0.1)" : "#f6ffed",
                           borderRadius: 8,
                           padding: "12px 14px",
-                          border: "1px solid #d9f7be",
+                          border: isDark ? "1px solid rgba(82,196,26,0.3)" : "1px solid #d9f7be",
                           minHeight: 72,
                           display: "flex",
                           flexDirection: "column",
@@ -913,11 +913,11 @@ export default function SubmissionSettings() {
                         }}
                       >
                         <Text
-                          type="secondary"
                           style={{
                             fontSize: 11,
                             textTransform: "uppercase",
                             letterSpacing: 0.5,
+                            color: isDark ? "rgba(255,255,255,0.65)" : "rgba(0,0,0,0.45)",
                           }}
                         >
                           Truck Entries
@@ -925,7 +925,7 @@ export default function SubmissionSettings() {
                         <div style={{ marginTop: 4 }}>
                           <Text
                             strong
-                            style={{ fontSize: 18, color: "#52c41a" }}
+                            style={{ fontSize: 18, color: isDark ? "#73d13d" : "#52c41a" }}
                           >
                             {r.trucks?.length || 0}
                           </Text>
@@ -935,10 +935,10 @@ export default function SubmissionSettings() {
                     <Col xs={8}>
                       <div
                         style={{
-                          background: "#fff7e6",
+                          background: isDark ? "rgba(250,173,20,0.1)" : "#fff7e6",
                           borderRadius: 8,
                           padding: "12px 14px",
-                          border: "1px solid #ffe7ba",
+                          border: isDark ? "1px solid rgba(250,173,20,0.3)" : "1px solid #ffe7ba",
                           minHeight: 72,
                           display: "flex",
                           flexDirection: "column",
@@ -946,11 +946,11 @@ export default function SubmissionSettings() {
                         }}
                       >
                         <Text
-                          type="secondary"
                           style={{
                             fontSize: 11,
                             textTransform: "uppercase",
                             letterSpacing: 0.5,
+                            color: isDark ? "rgba(255,255,255,0.65)" : "rgba(0,0,0,0.45)",
                           }}
                         >
                           Total Volume
@@ -958,13 +958,13 @@ export default function SubmissionSettings() {
                         <div style={{ marginTop: 4 }}>
                           <Text
                             strong
-                            style={{ fontSize: 18, color: "#fa8c16" }}
+                            style={{ fontSize: 18, color: isDark ? "#ffc53d" : "#fa8c16" }}
                           >
                             {totalVolume > 0
                               ? totalVolume.toLocaleString()
                               : "0"}
                           </Text>{" "}
-                          <Text type="secondary" style={{ fontSize: 11 }}>
+                          <Text style={{ fontSize: 11, color: isDark ? "rgba(255,255,255,0.45)" : "rgba(0,0,0,0.45)" }}>
                             tons
                           </Text>
                         </div>
@@ -1329,7 +1329,7 @@ export default function SubmissionSettings() {
                                   />
                                   <Text
                                     strong
-                                    style={{ fontSize: 13, color: "#262626" }}
+                                    style={{ fontSize: 13, color: isDark ? "#e8e8e8" : "#262626" }}
                                   >
                                     Accredited Haulers (
                                     {r.accreditedHaulers.length})
@@ -1606,7 +1606,7 @@ export default function SubmissionSettings() {
                                       <div
                                         style={{
                                           fontSize: 10,
-                                          color: "#8c8c8c",
+                                          color: isDark ? "#a0a0a0" : "#8c8c8c",
                                         }}
                                       >
                                         filled
@@ -1894,10 +1894,10 @@ export default function SubmissionSettings() {
                       <Col xs={24} style={{ marginBottom: 12 }}>
                         <div
                           style={{
-                            background: "#f0f5ff",
+                            background: isDark ? "rgba(47,84,235,0.1)" : "#f0f5ff",
                             borderRadius: 6,
                             padding: "8px 14px",
-                            border: "1px solid #d6e4ff",
+                            border: isDark ? "1px solid rgba(47,84,235,0.3)" : "1px solid #d6e4ff",
                           }}
                         >
                           <Text
@@ -2570,7 +2570,7 @@ export default function SubmissionSettings() {
                 width: 32,
                 height: 32,
                 borderRadius: 8,
-                background: "#f0f5ff",
+                background: isDark ? "rgba(47,84,235,0.1)" : "#f0f5ff",
                 display: "flex",
                 alignItems: "center",
                 justifyContent: "center",
@@ -2684,7 +2684,7 @@ export default function SubmissionSettings() {
                     <Text
                       style={{
                         fontSize: 12,
-                        color: t.meta?.comment ? "#1a3353" : "#fa541c",
+                        color: t.meta?.comment ? (isDark ? "#7eb8da" : "#1a3353") : "#fa541c",
                         fontStyle: "italic",
                         whiteSpace: "pre-wrap",
                         wordBreak: "break-word",
@@ -2735,7 +2735,7 @@ export default function SubmissionSettings() {
                 width: 32,
                 height: 32,
                 borderRadius: 8,
-                background: "#fff2e8",
+                background: isDark ? "rgba(250,140,22,0.1)" : "#fff2e8",
                 display: "flex",
                 alignItems: "center",
                 justifyContent: "center",
@@ -2766,8 +2766,8 @@ export default function SubmissionSettings() {
           <div>
             <div
               style={{
-                background: "#fff7e6",
-                border: "1px solid #ffe7ba",
+                background: isDark ? "rgba(250,173,20,0.1)" : "#fff7e6",
+                border: isDark ? "1px solid rgba(250,173,20,0.3)" : "1px solid #ffe7ba",
                 borderRadius: 8,
                 padding: "10px 14px",
                 marginBottom: 16,
@@ -2777,7 +2777,7 @@ export default function SubmissionSettings() {
                 <ExclamationCircleOutlined
                   style={{ color: "#fa8c16", marginTop: 2 }}
                 />
-                <Text style={{ fontSize: 12, color: "#8c6d1f" }}>
+                <Text style={{ fontSize: 12, color: isDark ? "#d4a94b" : "#8c6d1f" }}>
                   This will revert the submission back to the portal user. They
                   will be notified via email and can update and resubmit the
                   entry.
@@ -2786,11 +2786,11 @@ export default function SubmissionSettings() {
             </div>
             <div
               style={{
-                background: "#fafafa",
+                background: isDark ? "#1f1f1f" : "#fafafa",
                 borderRadius: 8,
                 padding: "14px 16px",
                 marginBottom: 16,
-                border: "1px solid #f0f0f0",
+                border: isDark ? "1px solid #303030" : "1px solid #f0f0f0",
               }}
             >
               <Row gutter={16}>

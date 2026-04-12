@@ -11,7 +11,6 @@ import {
   Input,
   Modal,
   Switch,
-  Descriptions,
   Tooltip,
   Form,
   Avatar,
@@ -31,14 +30,14 @@ import {
   SafetyCertificateOutlined,
   EditOutlined,
   DashboardOutlined,
-  FileTextOutlined,
   EnvironmentOutlined,
-  BarChartOutlined,
   SettingOutlined,
-  TeamOutlined,
-  ToolOutlined,
   ExperimentOutlined,
   CheckCircleOutlined,
+  CloseCircleOutlined,
+  ClockCircleOutlined,
+  EyeOutlined,
+  FormOutlined,
 } from "@ant-design/icons";
 import Swal from "sweetalert2";
 import api from "../../api";
@@ -77,7 +76,14 @@ const PERMISSION_GROUPS = [
   ]},
 ];
 
-export default function AccountSettings() {
+// Helper: normalize a permission value (handles old boolean format and new object format)
+function normPerm(val) {
+  if (val === undefined || val === null) return { view: true, edit: true, delete: true };
+  if (typeof val === "boolean") return { view: val, edit: val, delete: val };
+  return { view: val.view !== false, edit: val.edit !== false, delete: val.delete !== false };
+}
+
+export default function AccountSettings({ isDark }) {
   const [users, setUsers] = useState([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
@@ -130,6 +136,41 @@ export default function AccountSettings() {
     }
   };
 
+  const handleApprove = async (userId) => {
+    try {
+      await api.patch(`/users/${userId}/approve`);
+      setUsers((prev) =>
+        prev.map((u) => (u._id === userId ? { ...u, isApproved: true } : u))
+      );
+      Swal.fire({ icon: "success", title: "Account Approved", text: "The user has been notified via email.", timer: 2000, showConfirmButton: false });
+    } catch {
+      Swal.fire("Error", "Could not approve user", "error");
+    }
+  };
+
+  const handleReject = async (userId) => {
+    const { value: reason, isConfirmed } = await Swal.fire({
+      title: "Reject Account",
+      input: "textarea",
+      inputLabel: "Reason for rejection (optional)",
+      inputPlaceholder: "Enter reason...",
+      showCancelButton: true,
+      confirmButtonText: "Reject",
+      confirmButtonColor: "#ff4d4f",
+      cancelButtonText: "Cancel",
+    });
+    if (!isConfirmed) return;
+    try {
+      await api.patch(`/users/${userId}/reject`, { reason: reason || "" });
+      setUsers((prev) =>
+        prev.map((u) => (u._id === userId ? { ...u, isApproved: false } : u))
+      );
+      Swal.fire({ icon: "success", title: "Account Rejected", text: "The user has been notified via email.", timer: 2000, showConfirmButton: false });
+    } catch {
+      Swal.fire("Error", "Could not reject user", "error");
+    }
+  };
+
   const openEditModal = (record) => {
     setEditModal(record);
     setEditValues({ username: record.username || "", position: record.position || "", designation: record.designation || "" });
@@ -153,7 +194,15 @@ export default function AccountSettings() {
 
   const openAccessModal = (record) => {
     setAccessModal(record);
-    setPermEdits(record.permissions || {});
+    // Normalize permissions to new format
+    const raw = record.permissions || {};
+    const normalized = {};
+    PERMISSION_GROUPS.forEach((g) =>
+      g.items.forEach((i) => {
+        normalized[i.key] = normPerm(raw[i.key]);
+      })
+    );
+    setPermEdits(normalized);
   };
 
   const savePermissions = async () => {
@@ -170,6 +219,41 @@ export default function AccountSettings() {
     } finally {
       setSavingPerms(false);
     }
+  };
+
+  const togglePerm = (key, level) => {
+    setPermEdits((prev) => ({
+      ...prev,
+      [key]: { ...prev[key], [level]: !prev[key]?.[level] },
+    }));
+  };
+
+  const setAllPerms = (val) => {
+    const updated = {};
+    PERMISSION_GROUPS.forEach((g) =>
+      g.items.forEach((i) => {
+        updated[i.key] = { view: val, edit: val, delete: val };
+      })
+    );
+    setPermEdits(updated);
+  };
+
+  const setGroupPerms = (group, val) => {
+    const updated = { ...permEdits };
+    group.items.forEach((i) => {
+      updated[i.key] = { view: val, edit: val, delete: val };
+    });
+    setPermEdits(updated);
+  };
+
+  const setViewOnly = () => {
+    const updated = {};
+    PERMISSION_GROUPS.forEach((g) =>
+      g.items.forEach((i) => {
+        updated[i.key] = { view: true, edit: false, delete: false };
+      })
+    );
+    setPermEdits(updated);
   };
 
   const filtered = users.filter(
@@ -208,10 +292,36 @@ export default function AccountSettings() {
       render: (_, r) => <Text>{r.designation || "—"}</Text>,
     },
     {
-      title: "Status",
-      key: "verified",
-      render: (_, r) =>
-        r.isVerified ? <Tag color="green">Verified</Tag> : <Tag color="orange">Pending</Tag>,
+      title: "Approval",
+      key: "approval",
+      render: (_, r) => {
+        if (r.role === "developer") return <Tag icon={<CheckCircleOutlined />} color="purple">Developer</Tag>;
+        if (r.isApproved) return (
+          <Space size={4}>
+            <Tag icon={<CheckCircleOutlined />} color="green">Approved</Tag>
+            {isDeveloper && (
+              <Tooltip title="Revoke / Reject">
+                <Button size="small" danger type="text" icon={<CloseCircleOutlined />} onClick={() => handleReject(r._id)} />
+              </Tooltip>
+            )}
+          </Space>
+        );
+        return (
+          <Space size={4}>
+            <Tag icon={<ClockCircleOutlined />} color="orange">Pending</Tag>
+            {isDeveloper && (
+              <>
+                <Tooltip title="Approve Account">
+                  <Button type="primary" size="small" icon={<CheckCircleOutlined />} onClick={() => handleApprove(r._id)} style={{ fontSize: 11 }}>Approve</Button>
+                </Tooltip>
+                <Tooltip title="Reject">
+                  <Button size="small" danger icon={<CloseCircleOutlined />} onClick={() => handleReject(r._id)} />
+                </Tooltip>
+              </>
+            )}
+          </Space>
+        );
+      },
     },
     {
       title: "Role",
@@ -269,7 +379,7 @@ export default function AccountSettings() {
                 Position: u.position || "",
                 Designation: u.designation || "",
                 Role: u.role,
-                Verified: u.isVerified ? "Yes" : "No",
+                Approved: u.isApproved ? "Yes" : "No",
               }));
               exportToExcel(rows, "Users");
             }}
@@ -347,11 +457,11 @@ export default function AccountSettings() {
         onOk={savePermissions}
         confirmLoading={savingPerms}
         okText="Save Permissions"
-        width={600}
+        width={720}
       >
         {accessModal && (
           <>
-            <div style={{ textAlign: "center", marginBottom: 16, padding: "12px 0", background: "linear-gradient(135deg, #f6f8fc 0%, #eef2f7 100%)", borderRadius: 8 }}>
+            <div style={{ textAlign: "center", marginBottom: 16, padding: "12px 0", background: isDark ? "linear-gradient(135deg, #1f1f1f 0%, #2a2a2a 100%)" : "linear-gradient(135deg, #f6f8fc 0%, #eef2f7 100%)", borderRadius: 8 }}>
               <Avatar size={48} style={{ backgroundColor: accessModal.role === "admin" ? "#faad14" : "#1a3353" }} icon={<UserOutlined />} />
               <div style={{ marginTop: 8 }}>
                 <Text strong>{accessModal.firstName} {accessModal.lastName}</Text>
@@ -361,59 +471,88 @@ export default function AccountSettings() {
                 <Tag color={accessModal.role === "admin" ? "gold" : "blue"} style={{ marginTop: 4 }}>{accessModal.role}</Tag>
               </div>
             </div>
-            <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 12 }}>
+
+            {/* Quick Actions */}
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12, flexWrap: "wrap", gap: 8 }}>
               <Text strong>Module Permissions</Text>
-              <Space size={4}>
-                <Button size="small" type="link" onClick={() => {
-                  const all = {};
-                  PERMISSION_GROUPS.forEach(g => g.items.forEach(i => { all[i.key] = true; }));
-                  setPermEdits(all);
-                }}>Enable All</Button>
-                <Button size="small" type="link" danger onClick={() => {
-                  const all = {};
-                  PERMISSION_GROUPS.forEach(g => g.items.forEach(i => { all[i.key] = false; }));
-                  setPermEdits(all);
-                }}>Disable All</Button>
+              <Space size={4} wrap>
+                <Button size="small" type="link" onClick={() => setAllPerms(true)}>Full Access</Button>
+                <Button size="small" type="link" onClick={setViewOnly} style={{ color: "#faad14" }}>
+                  <EyeOutlined /> View Only
+                </Button>
+                <Button size="small" type="link" danger onClick={() => setAllPerms(false)}>Disable All</Button>
               </Space>
             </div>
+
+            {/* Legend */}
+            <div style={{ display: "flex", gap: 16, marginBottom: 12, fontSize: 11, color: "#888" }}>
+              <span><EyeOutlined style={{ color: "#1890ff" }} /> View — Can see the module</span>
+              <span><FormOutlined style={{ color: "#52c41a" }} /> Edit — Can add/edit data</span>
+              <span><DeleteOutlined style={{ color: "#ff4d4f" }} /> Delete — Can remove data</span>
+            </div>
+
             <Collapse
               defaultActiveKey={PERMISSION_GROUPS.map(g => g.group)}
               bordered={false}
               size="small"
               items={PERMISSION_GROUPS.map(g => {
-                const enabledCount = g.items.filter(i => permEdits[i.key] !== false).length;
+                const totalView = g.items.filter(i => permEdits[i.key]?.view !== false).length;
+                const totalEdit = g.items.filter(i => permEdits[i.key]?.edit !== false).length;
+                const totalDel = g.items.filter(i => permEdits[i.key]?.delete !== false).length;
+                const allFull = totalView === g.items.length && totalEdit === g.items.length && totalDel === g.items.length;
+
                 return {
                   key: g.group,
                   label: (
                     <Space>
                       <span style={{ color: g.color }}>{g.icon}</span>
                       <Text strong style={{ fontSize: 13 }}>{g.group}</Text>
-                      <Badge count={`${enabledCount}/${g.items.length}`} style={{ backgroundColor: enabledCount === g.items.length ? "#52c41a" : "#faad14", fontSize: 10 }} />
+                      <Badge
+                        count={allFull ? "Full" : `${totalView}V/${totalEdit}E/${totalDel}D`}
+                        style={{ backgroundColor: allFull ? "#52c41a" : "#faad14", fontSize: 10 }}
+                      />
                     </Space>
                   ),
                   extra: (
                     <Switch
                       size="small"
-                      checked={enabledCount === g.items.length}
+                      checked={allFull}
                       onClick={(_, e) => e.stopPropagation()}
-                      onChange={(checked) => {
-                        const updates = {};
-                        g.items.forEach(i => { updates[i.key] = checked; });
-                        setPermEdits(p => ({ ...p, ...updates }));
-                      }}
+                      onChange={(checked) => setGroupPerms(g, checked)}
                     />
                   ),
                   children: (
-                    <Row gutter={[8, 4]}>
-                      {g.items.map(i => (
-                        <Col key={i.key} xs={24} sm={12}>
-                          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "6px 8px", borderRadius: 6, background: permEdits[i.key] !== false ? "rgba(82,196,26,0.06)" : "rgba(0,0,0,0.02)" }}>
-                            <Text style={{ fontSize: 12 }}>{i.label}</Text>
-                            <Switch size="small" checked={permEdits[i.key] !== false} onChange={(checked) => setPermEdits(p => ({ ...p, [i.key]: checked }))} />
-                          </div>
-                        </Col>
-                      ))}
-                    </Row>
+                    <div>
+                      {/* Header row */}
+                      <Row style={{ padding: "4px 8px", marginBottom: 4 }}>
+                        <Col flex="auto"><Text type="secondary" style={{ fontSize: 11 }}>Module</Text></Col>
+                        <Col style={{ width: 60, textAlign: "center" }}><Text type="secondary" style={{ fontSize: 11 }}>View</Text></Col>
+                        <Col style={{ width: 60, textAlign: "center" }}><Text type="secondary" style={{ fontSize: 11 }}>Edit</Text></Col>
+                        <Col style={{ width: 60, textAlign: "center" }}><Text type="secondary" style={{ fontSize: 11 }}>Delete</Text></Col>
+                      </Row>
+                      {g.items.map(i => {
+                        const p = permEdits[i.key] || { view: true, edit: true, delete: true };
+                        return (
+                          <Row key={i.key} align="middle" style={{
+                            padding: "6px 8px",
+                            borderRadius: 6,
+                            marginBottom: 2,
+                            background: p.view || p.edit || p.delete ? "rgba(82,196,26,0.04)" : "rgba(0,0,0,0.02)",
+                          }}>
+                            <Col flex="auto"><Text style={{ fontSize: 12 }}>{i.label}</Text></Col>
+                            <Col style={{ width: 60, textAlign: "center" }}>
+                              <Switch size="small" checked={p.view !== false} onChange={() => togglePerm(i.key, "view")} />
+                            </Col>
+                            <Col style={{ width: 60, textAlign: "center" }}>
+                              <Switch size="small" checked={p.edit !== false} onChange={() => togglePerm(i.key, "edit")} />
+                            </Col>
+                            <Col style={{ width: 60, textAlign: "center" }}>
+                              <Switch size="small" checked={p.delete !== false} onChange={() => togglePerm(i.key, "delete")} />
+                            </Col>
+                          </Row>
+                        );
+                      })}
+                    </div>
                   ),
                 };
               })}

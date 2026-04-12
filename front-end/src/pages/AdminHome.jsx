@@ -310,6 +310,44 @@ export default function AdminHome() {
       .catch(() => {});
   }, [navigate]);
 
+  // ── Idle auto-logout (5 minutes of inactivity) ──
+  useEffect(() => {
+    const IDLE_MS = 5 * 60 * 1000;
+    let timer;
+    let idledOut = false;
+
+    const onIdle = () => {
+      if (idledOut) return;
+      idledOut = true;
+      secureStorage.clearAll();
+      Swal.fire({
+        icon: "warning",
+        title: "Session Expired",
+        text: "You have been automatically logged out due to inactivity.",
+        confirmButtonText: "OK",
+        allowOutsideClick: false,
+        allowEscapeKey: false,
+      }).then(() => {
+        window.location.replace("/eswm-pipeline/admin/login");
+      });
+    };
+
+    const resetTimer = () => {
+      if (idledOut) return;
+      clearTimeout(timer);
+      timer = setTimeout(onIdle, IDLE_MS);
+    };
+
+    const events = ["mousemove", "keydown", "mousedown", "scroll", "touchstart"];
+    events.forEach((e) => document.addEventListener(e, resetTimer, { passive: true }));
+    resetTimer();
+
+    return () => {
+      clearTimeout(timer);
+      events.forEach((e) => document.removeEventListener(e, resetTimer));
+    };
+  }, []);
+
   useEffect(() => {
     const timer = setInterval(() => setCurrentTime(dayjs()), 1000);
     return () => clearInterval(timer);
@@ -368,7 +406,15 @@ export default function AdminHome() {
 
   const isDeveloper = user?.role === "developer";
   const perms = user?.permissions || {};
-  const hasAccess = (key) => isDeveloper || perms[key] !== false;
+  const hasAccess = (key, level = "view") => {
+    if (isDeveloper) return true;
+    const p = perms[key];
+    if (p === undefined) return true;
+    if (typeof p === "boolean") return p; // backward compat
+    return p?.[level] !== false;
+  };
+  const canEdit = (key) => hasAccess(key, "edit");
+  const canDelete = (key) => hasAccess(key, "delete");
 
   const menuItems = useMemo(() => {
     const items = [];
@@ -383,30 +429,20 @@ export default function AdminHome() {
     }
 
     // ── SWM Programs ──
-    items.push({
-      key: "swm-programs",
-      icon: <AppstoreOutlined />,
-      label: "SWM Programs",
-      children: [
-        {
-          key: "cs-trash-traps",
-          icon: <ExperimentOutlined />,
-          label: "Trash Traps",
-        },
-        {
-          key: "10yr-plan",
-          icon: <FundProjectionScreenOutlined />,
-          label: "10 Year SWM Plan",
-        },
-        { key: "funded-mrf", icon: <BankOutlined />, label: "Funded MRF" },
-        {
-          key: "cs-lgu-mrf",
-          icon: <ApartmentOutlined />,
-          label: "LGU Initiated MRF",
-        },
-        { key: "cs-swm-equip", icon: <CarOutlined />, label: "SWM Equipments" },
-      ],
-    });
+    const swmChildren = [];
+    if (hasAccess("trashTraps")) swmChildren.push({ key: "cs-trash-traps", icon: <ExperimentOutlined />, label: "Trash Traps" });
+    if (hasAccess("tenYearSwm")) swmChildren.push({ key: "10yr-plan", icon: <FundProjectionScreenOutlined />, label: "10 Year SWM Plan" });
+    if (hasAccess("fundedMrf")) swmChildren.push({ key: "funded-mrf", icon: <BankOutlined />, label: "Funded MRF" });
+    if (hasAccess("lguInitiatedMrf")) swmChildren.push({ key: "cs-lgu-mrf", icon: <ApartmentOutlined />, label: "LGU Initiated MRF" });
+    if (hasAccess("swmEquipment")) swmChildren.push({ key: "cs-swm-equip", icon: <CarOutlined />, label: "SWM Equipments" });
+    if (swmChildren.length > 0) {
+      items.push({
+        key: "swm-programs",
+        icon: <AppstoreOutlined />,
+        label: "SWM Programs",
+        children: swmChildren,
+      });
+    }
 
     // ── Sanitary Landfill Monitoring ──
     const slfChildren = [];
@@ -434,43 +470,21 @@ export default function AdminHome() {
     }
 
     // ── Monitoring & Assistance ──
-    items.push({
-      key: "monitoring-assist",
-      icon: <AuditOutlined />,
-      label: "Monitoring",
-      children: [
-        {
-          key: "cs-tech-assist",
-          icon: <FundOutlined />,
-          label: "Technical Asst. (Brgy)",
-        },
-        {
-          key: "cs-transfer-station",
-          icon: <ContainerOutlined />,
-          label: "Transfer Station",
-        },
-        {
-          key: "cs-open-dump",
-          icon: <DeleteOutlined />,
-          label: "Open Dump Sites",
-        },
-        {
-          key: "cs-pds",
-          icon: <FileDoneOutlined />,
-          label: "PDS (Scoping)",
-        },
-        {
-          key: "cs-rca",
-          icon: <AlertOutlined />,
-          label: "Residual Containment",
-        },
-        {
-          key: "cs-lgu-diversion",
-          icon: <EnvironmentOutlined />,
-          label: "LGU Asst. & Diversion",
-        },
-      ],
-    });
+    const monChildren = [];
+    if (hasAccess("technicalAssistance")) monChildren.push({ key: "cs-tech-assist", icon: <FundOutlined />, label: "Technical Asst. (Brgy)" });
+    if (hasAccess("transferStations")) monChildren.push({ key: "cs-transfer-station", icon: <ContainerOutlined />, label: "Transfer Station" });
+    if (hasAccess("openDumpsites")) monChildren.push({ key: "cs-open-dump", icon: <DeleteOutlined />, label: "Open Dump Sites" });
+    if (hasAccess("projectDescScoping")) monChildren.push({ key: "cs-pds", icon: <FileDoneOutlined />, label: "PDS (Scoping)" });
+    if (hasAccess("residualContainment")) monChildren.push({ key: "cs-rca", icon: <AlertOutlined />, label: "Residual Containment" });
+    if (hasAccess("lguAssistDiversion")) monChildren.push({ key: "cs-lgu-diversion", icon: <EnvironmentOutlined />, label: "LGU Asst. & Diversion" });
+    if (monChildren.length > 0) {
+      items.push({
+        key: "monitoring-assist",
+        icon: <AuditOutlined />,
+        label: "Monitoring",
+        children: monChildren,
+      });
+    }
 
     // ── Settings (Developer only) ──
     if (isDeveloper) {
@@ -521,7 +535,7 @@ export default function AdminHome() {
     }
 
     return items;
-  }, [isDeveloper, user?.permissions]);
+  }, [isDeveloper, user?.permissions, user?.role]);
 
   const userMenuItems = [
     {
@@ -565,44 +579,44 @@ export default function AdminHome() {
 
     switch (activeMenu) {
       case "10yr-plan":
-        return <TenYearSWMPlan />;
+        return <TenYearSWMPlan isDark={isDark} canEdit={canEdit("tenYearSwm")} canDelete={canDelete("tenYearSwm")} />;
       case "funded-mrf":
-        return <FundedMRF />;
+        return <FundedMRF isDark={isDark} canEdit={canEdit("fundedMrf")} canDelete={canDelete("fundedMrf")} />;
       case "cs-lgu-mrf":
-        return <LguInitiatedMRF />;
+        return <LguInitiatedMRF isDark={isDark} canEdit={canEdit("lguInitiatedMrf")} canDelete={canDelete("lguInitiatedMrf")} />;
       case "cs-trash-traps":
-        return <TrashTraps />;
+        return <TrashTraps isDark={isDark} canEdit={canEdit("trashTraps")} canDelete={canDelete("trashTraps")} />;
       case "cs-swm-equip":
-        return <SwmEquipment />;
+        return <SwmEquipment isDark={isDark} canEdit={canEdit("swmEquipment")} canDelete={canDelete("swmEquipment")} />;
       case "cs-open-dump":
-        return <OpenDumpsites />;
+        return <OpenDumpsites isDark={isDark} canEdit={canEdit("openDumpsites")} canDelete={canDelete("openDumpsites")} />;
       case "cs-rca":
-        return <ResidualContainment />;
+        return <ResidualContainment isDark={isDark} canEdit={canEdit("residualContainment")} canDelete={canDelete("residualContainment")} />;
       case "cs-pds":
-        return <ProjectDescScoping />;
+        return <ProjectDescScoping isDark={isDark} canEdit={canEdit("projectDescScoping")} canDelete={canDelete("projectDescScoping")} />;
       case "cs-transfer-station":
-        return <TransferStations />;
+        return <TransferStations isDark={isDark} canEdit={canEdit("transferStations")} canDelete={canDelete("transferStations")} />;
       case "cs-lgu-diversion":
-        return <LguAssistDiversion />;
+        return <LguAssistDiversion isDark={isDark} canEdit={canEdit("lguAssistDiversion")} canDelete={canDelete("lguAssistDiversion")} />;
       case "cs-tech-assist":
-        return <TechnicalAssistance />;
+        return <TechnicalAssistance isDark={isDark} canEdit={canEdit("technicalAssistance")} canDelete={canDelete("technicalAssistance")} />;
       case "settings-accounts":
-        return hasAccess("accountSettings") ? <AccountSettings /> : denied;
+        return hasAccess("accountSettings") ? <AccountSettings isDark={isDark} /> : denied;
       case "settings-fields":
-        return hasAccess("portalFields") ? <FieldSettings /> : denied;
+        return hasAccess("portalFields") ? <FieldSettings isDark={isDark} canEdit={canEdit("portalFields")} canDelete={canDelete("portalFields")} /> : denied;
       case "settings-data-refs":
-        return <DataReferences />;
+        return <DataReferences isDark={isDark} canEdit={canEdit("dataReferences")} canDelete={canDelete("dataReferences")} />;
       case "slf-monitoring":
-        return hasAccess("slfMonitoring") ? <SLFMonitoring /> : denied;
+        return hasAccess("slfMonitoring") ? <SLFMonitoring isDark={isDark} canEdit={canEdit("slfMonitoring")} canDelete={canDelete("slfMonitoring")} /> : denied;
       case "slf-waste-generators":
         return hasAccess("submissions") || hasAccess("reports") ? (
-          <SLFWasteGenerators />
+          <SLFWasteGenerators canEdit={canEdit("submissions")} canDelete={canDelete("submissions")} />
         ) : (
           denied
         );
       case "dev-settings":
         return isDeveloper ? (
-          <DeveloperSettings
+          <DeveloperSettings isDark={isDark}
             onSettingsSaved={(s) => {
               if (s.primaryColor) {
                 setPrimaryColor(s.primaryColor);
@@ -721,7 +735,7 @@ export default function AdminHome() {
         token: { colorPrimary: primaryColor },
       }}
     >
-      <Layout style={{ minHeight: "100vh" }}>
+      <Layout style={{ minHeight: "100vh" }} data-theme={isDark ? "dark" : "light"}>
         {/* Desktop Sider */}
         {!isMobile && (
           <Sider
@@ -829,7 +843,7 @@ export default function AdminHome() {
                 overlayStyle={{ width: 380 }}
                 content={
                   <div>
-                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "14px 16px 10px", borderBottom: "1px solid #f0f0f0" }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "14px 16px 10px", borderBottom: isDark ? "1px solid #303030" : "1px solid #f0f0f0" }}>
                       <Text strong style={{ fontSize: 15 }}>Notifications</Text>
                       {unreadCount > 0 && (
                         <Button type="link" size="small" onClick={markAllRead} style={{ fontSize: 12, padding: 0 }}>Mark all as read</Button>
@@ -851,7 +865,7 @@ export default function AdminHome() {
                                 display: "flex", gap: 12, padding: "12px 16px",
                                 cursor: n.read ? "default" : "pointer",
                                 background: n.read ? "transparent" : (isDark ? "rgba(47,84,235,0.06)" : "#f0f5ff"),
-                                borderBottom: "1px solid #f5f5f5",
+                                borderBottom: isDark ? "1px solid #303030" : "1px solid #f5f5f5",
                                 transition: "background 0.2s",
                               }}
                             >
@@ -874,7 +888,7 @@ export default function AdminHome() {
                   </div>
                 }
               >
-                <Badge count={unreadCount} size="small" offset={[-6, 6]} style={{ backgroundColor: "#ff4d4f", boxShadow: "0 0 0 2px #fff", fontSize: 10, lineHeight: "16px", height: 16, minWidth: 16, padding: "0 4px" }}>
+                <Badge count={unreadCount} size="small" offset={[-6, 6]} style={{ backgroundColor: "#ff4d4f", boxShadow: isDark ? "0 0 0 2px #141414" : "0 0 0 2px #fff", fontSize: 10, lineHeight: "16px", height: 16, minWidth: 16, padding: "0 4px" }}>
                   <Button
                     type="text"
                     icon={<BellOutlined />}
@@ -892,7 +906,7 @@ export default function AdminHome() {
               >
                 <div style={s.userInfo}>
                   <Avatar
-                    style={{ backgroundColor: "#1a3353" }}
+                    style={{ backgroundColor: isDark ? "#2a4060" : "#1a3353" }}
                     icon={<UserOutlined />}
                   />
                   <Text
@@ -1045,7 +1059,7 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
   const [historyData, setHistoryData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [dashTab, setDashTab] = useState(null);
-  const [dashboardTabSettings, setDashboardTabSettings] = useState({});
+  const [dashboardTabSettings, setDashboardTabSettings] = useState(null);
   const [dashYear, setDashYear] = useState("");
   const [tileKey, setTileKey] = useState("street");
   const [mapFilterProvince, setMapFilterProvince] = useState(null);
@@ -1469,10 +1483,8 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
     fetchStats(dashYear);
     // Fetch dashboard tab settings
     api.get("/settings/app").then(({ data }) => {
-      if (data.dashboardTabs) {
-        setDashboardTabSettings(typeof data.dashboardTabs === "object" ? data.dashboardTabs : {});
-      }
-    }).catch(() => {});
+      setDashboardTabSettings(data.dashboardTabs && typeof data.dashboardTabs === "object" ? data.dashboardTabs : {});
+    }).catch(() => { setDashboardTabSettings({}); });
     const interval = setInterval(() => fetchStats(dashYear), 60000);
     return () => clearInterval(interval);
   }, [fetchStats, dashYear]);
@@ -1562,7 +1574,7 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                 <Statistic
                   title="Total LGUs"
                   value={swmStats.totalRecords}
-                  prefix={<EnvironmentOutlined style={{ color: "#1a3353" }} />}
+                  prefix={<EnvironmentOutlined style={{ color: isDark ? "#a0b4c8" : "#1a3353" }} />}
                 />
               </Card>
             </Col>
@@ -2118,8 +2130,8 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                       display: "flex",
                       gap: 6,
                       padding: "8px 10px",
-                      background: "#fafafa",
-                      borderBottom: "1px solid #f0f0f0",
+                      background: isDark ? "#1f1f1f" : "#fafafa",
+                      borderBottom: isDark ? "1px solid #303030" : "1px solid #f0f0f0",
                       flexWrap: "wrap",
                     }}
                   >
@@ -2273,7 +2285,7 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                                     display: "inline-flex",
                                     alignItems: "center",
                                     gap: 3,
-                                    background: "#e6f7ff",
+                                    background: isDark ? "rgba(22,119,255,0.15)" : "#e6f7ff",
                                     color: "#1890ff",
                                     borderRadius: 4,
                                     padding: "1px 6px",
@@ -2288,7 +2300,7 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                                       display: "inline-flex",
                                       alignItems: "center",
                                       gap: 3,
-                                      background: "#f0f0f0",
+                                      background: isDark ? "#303030" : "#f0f0f0",
                                       color: "#595959",
                                       borderRadius: 4,
                                       padding: "1px 6px",
@@ -2306,8 +2318,8 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                                       gap: 3,
                                       background:
                                         pt.record.manilaBayArea === "MBA"
-                                          ? "#e6f7ff"
-                                          : "#f5f5f5",
+                                          ? (isDark ? "rgba(22,119,255,0.15)" : "#e6f7ff")
+                                          : (isDark ? "#303030" : "#f5f5f5"),
                                       color:
                                         pt.record.manilaBayArea === "MBA"
                                           ? "#1890ff"
@@ -2325,7 +2337,7 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                                 style={{
                                   margin: "4px 0 6px",
                                   border: "none",
-                                  borderTop: "1px solid #f0f0f0",
+                                  borderTop: isDark ? "1px solid #303030" : "1px solid #f0f0f0",
                                 }}
                               />
 
@@ -2432,7 +2444,7 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                               {/* Environmental Data */}
                               <div
                                 style={{
-                                  background: "#fafafa",
+                                  background: isDark ? "#1f1f1f" : "#fafafa",
                                   borderRadius: 6,
                                   padding: "6px 8px",
                                   marginBottom: 6,
@@ -2671,7 +2683,7 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                                 style={{
                                   margin: "4px 0 5px",
                                   border: "none",
-                                  borderTop: "1px solid #f0f0f0",
+                                  borderTop: isDark ? "1px solid #303030" : "1px solid #f0f0f0",
                                 }}
                               />
                               <div
@@ -2722,7 +2734,7 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                                 <div
                                   style={{
                                     marginTop: 6,
-                                    background: "#fffbe6",
+                                    background: isDark ? "rgba(250,219,20,0.15)" : "#fffbe6",
                                     borderRadius: 4,
                                     padding: "4px 6px",
                                     fontSize: 11,
@@ -2746,7 +2758,7 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                                     gap: 5,
                                     marginTop: 6,
                                     padding: "4px 8px",
-                                    background: "#e6f7ff",
+                                    background: isDark ? "rgba(22,119,255,0.15)" : "#e6f7ff",
                                     borderRadius: 4,
                                     fontSize: 11,
                                     color: "#1890ff",
@@ -2765,7 +2777,7 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                                   gap: 4,
                                   marginTop: 8,
                                   paddingTop: 6,
-                                  borderTop: "1px solid #f0f0f0",
+                                  borderTop: isDark ? "1px solid #303030" : "1px solid #f0f0f0",
                                 }}
                               >
                                 <button
@@ -2853,7 +2865,7 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                 <Statistic
                   title="Total MRFs"
                   value={mrfStats.totalRecords}
-                  prefix={<BankOutlined style={{ color: "#1a3353" }} />}
+                  prefix={<BankOutlined style={{ color: isDark ? "#a0b4c8" : "#1a3353" }} />}
                 />
               </Card>
             </Col>
@@ -3029,9 +3041,9 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                           gap: 12,
                           padding: "6px 10px",
                           background:
-                            "linear-gradient(135deg, #f6ffed 0%, #fcffe6 100%)",
+                            isDark ? "linear-gradient(135deg, rgba(82,196,26,0.12) 0%, rgba(250,219,20,0.08) 100%)" : "linear-gradient(135deg, #f6ffed 0%, #fcffe6 100%)",
                           borderRadius: 8,
-                          border: "1px solid #d9f7be",
+                          border: isDark ? "1px solid rgba(82,196,26,0.3)" : "1px solid #d9f7be",
                         }}
                       >
                         <Progress
@@ -3066,9 +3078,9 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                           gap: 12,
                           padding: "6px 10px",
                           background:
-                            "linear-gradient(135deg, #e6f7ff 0%, #f0f5ff 100%)",
+                            isDark ? "linear-gradient(135deg, rgba(22,119,255,0.12) 0%, rgba(47,84,235,0.08) 100%)" : "linear-gradient(135deg, #e6f7ff 0%, #f0f5ff 100%)",
                           borderRadius: 8,
-                          border: "1px solid #bae7ff",
+                          border: isDark ? "1px solid rgba(22,119,255,0.3)" : "1px solid #bae7ff",
                         }}
                       >
                         <Progress
@@ -3102,9 +3114,9 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                             style={{
                               textAlign: "center",
                               padding: "6px 4px",
-                              background: "#f9f0ff",
+                              background: isDark ? "rgba(114,46,209,0.15)" : "#f9f0ff",
                               borderRadius: 6,
-                              border: "1px solid #efdbff",
+                              border: isDark ? "1px solid rgba(114,46,209,0.3)" : "1px solid #efdbff",
                             }}
                           >
                             <Text
@@ -3126,9 +3138,9 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                             style={{
                               textAlign: "center",
                               padding: "6px 4px",
-                              background: "#fff7e6",
+                              background: isDark ? "rgba(250,173,20,0.15)" : "#fff7e6",
                               borderRadius: 6,
-                              border: "1px solid #ffe7ba",
+                              border: isDark ? "1px solid rgba(250,173,20,0.3)" : "1px solid #ffe7ba",
                             }}
                           >
                             <Text
@@ -3150,9 +3162,9 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                             style={{
                               textAlign: "center",
                               padding: "6px 4px",
-                              background: "#fff1f0",
+                              background: isDark ? "rgba(255,77,79,0.15)" : "#fff1f0",
                               borderRadius: 6,
-                              border: "1px solid #ffccc7",
+                              border: isDark ? "1px solid rgba(255,77,79,0.3)" : "1px solid #ffccc7",
                             }}
                           >
                             <Text
@@ -3497,8 +3509,8 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                       display: "flex",
                       gap: 6,
                       padding: "8px 10px",
-                      background: "#fafafa",
-                      borderBottom: "1px solid #f0f0f0",
+                      background: isDark ? "#1f1f1f" : "#fafafa",
+                      borderBottom: isDark ? "1px solid #303030" : "1px solid #f0f0f0",
                       flexWrap: "wrap",
                     }}
                   >
@@ -3653,7 +3665,7 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                                     display: "inline-flex",
                                     alignItems: "center",
                                     gap: 3,
-                                    background: "#e6f7ff",
+                                    background: isDark ? "rgba(22,119,255,0.15)" : "#e6f7ff",
                                     color: "#1890ff",
                                     borderRadius: 4,
                                     padding: "1px 6px",
@@ -3668,7 +3680,7 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                                       display: "inline-flex",
                                       alignItems: "center",
                                       gap: 3,
-                                      background: "#f0f0f0",
+                                      background: isDark ? "#303030" : "#f0f0f0",
                                       color: "#595959",
                                       borderRadius: 4,
                                       padding: "1px 6px",
@@ -3686,8 +3698,8 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                                       gap: 3,
                                       background:
                                         pt.record.manilaBayArea === "MBA"
-                                          ? "#e6f7ff"
-                                          : "#f5f5f5",
+                                          ? (isDark ? "rgba(22,119,255,0.15)" : "#e6f7ff")
+                                          : (isDark ? "#303030" : "#f5f5f5"),
                                       color:
                                         pt.record.manilaBayArea === "MBA"
                                           ? "#1890ff"
@@ -3705,7 +3717,7 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                                 style={{
                                   margin: "4px 0 6px",
                                   border: "none",
-                                  borderTop: "1px solid #f0f0f0",
+                                  borderTop: isDark ? "1px solid #303030" : "1px solid #f0f0f0",
                                 }}
                               />
                               {pt.record.typeOfMRF && (
@@ -3746,7 +3758,7 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                               </div>
                               <div
                                 style={{
-                                  background: "#fafafa",
+                                  background: isDark ? "#1f1f1f" : "#fafafa",
                                   borderRadius: 6,
                                   padding: "6px 8px",
                                   marginBottom: 6,
@@ -4090,9 +4102,9 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                           gap: 12,
                           padding: "6px 10px",
                           background:
-                            "linear-gradient(135deg, #f6ffed 0%, #fcffe6 100%)",
+                            isDark ? "linear-gradient(135deg, rgba(82,196,26,0.12) 0%, rgba(250,219,20,0.08) 100%)" : "linear-gradient(135deg, #f6ffed 0%, #fcffe6 100%)",
                           borderRadius: 8,
-                          border: "1px solid #d9f7be",
+                          border: isDark ? "1px solid rgba(82,196,26,0.3)" : "1px solid #d9f7be",
                         }}
                       >
                         <Progress
@@ -4126,9 +4138,9 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                           gap: 12,
                           padding: "6px 10px",
                           background:
-                            "linear-gradient(135deg, #e6f7ff 0%, #f0f5ff 100%)",
+                            isDark ? "linear-gradient(135deg, rgba(22,119,255,0.12) 0%, rgba(47,84,235,0.08) 100%)" : "linear-gradient(135deg, #e6f7ff 0%, #f0f5ff 100%)",
                           borderRadius: 8,
-                          border: "1px solid #bae7ff",
+                          border: isDark ? "1px solid rgba(22,119,255,0.3)" : "1px solid #bae7ff",
                         }}
                       >
                         <Progress
@@ -4161,7 +4173,7 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                             style={{
                               textAlign: "center",
                               padding: "6px 4px",
-                              background: "#e6fffb",
+                              background: isDark ? "rgba(19,194,194,0.15)" : "#e6fffb",
                               borderRadius: 6,
                               border: "1px solid #87e8de",
                             }}
@@ -4185,9 +4197,9 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                             style={{
                               textAlign: "center",
                               padding: "6px 4px",
-                              background: "#f9f0ff",
+                              background: isDark ? "rgba(114,46,209,0.15)" : "#f9f0ff",
                               borderRadius: 6,
-                              border: "1px solid #efdbff",
+                              border: isDark ? "1px solid rgba(114,46,209,0.3)" : "1px solid #efdbff",
                             }}
                           >
                             <Text
@@ -4532,8 +4544,8 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                       display: "flex",
                       gap: 6,
                       padding: "8px 10px",
-                      background: "#fafafa",
-                      borderBottom: "1px solid #f0f0f0",
+                      background: isDark ? "#1f1f1f" : "#fafafa",
+                      borderBottom: isDark ? "1px solid #303030" : "1px solid #f0f0f0",
                       flexWrap: "wrap",
                     }}
                   >
@@ -4688,7 +4700,7 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                                     display: "inline-flex",
                                     alignItems: "center",
                                     gap: 3,
-                                    background: "#e6fffb",
+                                    background: isDark ? "rgba(19,194,194,0.15)" : "#e6fffb",
                                     color: "#13c2c2",
                                     borderRadius: 4,
                                     padding: "1px 6px",
@@ -4703,7 +4715,7 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                                       display: "inline-flex",
                                       alignItems: "center",
                                       gap: 3,
-                                      background: "#f0f0f0",
+                                      background: isDark ? "#303030" : "#f0f0f0",
                                       color: "#595959",
                                       borderRadius: 4,
                                       padding: "1px 6px",
@@ -4721,8 +4733,8 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                                       gap: 3,
                                       background:
                                         pt.record.manilaBayArea === "MBA"
-                                          ? "#e6f7ff"
-                                          : "#f5f5f5",
+                                          ? (isDark ? "rgba(22,119,255,0.15)" : "#e6f7ff")
+                                          : (isDark ? "#303030" : "#f5f5f5"),
                                       color:
                                         pt.record.manilaBayArea === "MBA"
                                           ? "#1890ff"
@@ -4740,7 +4752,7 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                                 style={{
                                   margin: "4px 0 6px",
                                   border: "none",
-                                  borderTop: "1px solid #f0f0f0",
+                                  borderTop: isDark ? "1px solid #303030" : "1px solid #f0f0f0",
                                 }}
                               />
                               {pt.record.typeOfMRF && (
@@ -4783,7 +4795,7 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                               </div>
                               <div
                                 style={{
-                                  background: "#fafafa",
+                                  background: isDark ? "#1f1f1f" : "#fafafa",
                                   borderRadius: 6,
                                   padding: "6px 8px",
                                   marginBottom: 6,
@@ -5159,7 +5171,7 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                           gap: 12,
                           padding: "6px 10px",
                           background:
-                            "linear-gradient(135deg, #e6fffb 0%, #f0f5ff 100%)",
+                            isDark ? "linear-gradient(135deg, rgba(19,194,194,0.12) 0%, rgba(47,84,235,0.08) 100%)" : "linear-gradient(135deg, #e6fffb 0%, #f0f5ff 100%)",
                           borderRadius: 8,
                           border: "1px solid #87e8de",
                         }}
@@ -5194,9 +5206,9 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                             style={{
                               textAlign: "center",
                               padding: "6px 4px",
-                              background: "#e6f7ff",
+                              background: isDark ? "rgba(22,119,255,0.15)" : "#e6f7ff",
                               borderRadius: 6,
-                              border: "1px solid #bae7ff",
+                              border: isDark ? "1px solid rgba(22,119,255,0.3)" : "1px solid #bae7ff",
                             }}
                           >
                             <Text
@@ -5218,9 +5230,9 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                             style={{
                               textAlign: "center",
                               padding: "6px 4px",
-                              background: "#f9f0ff",
+                              background: isDark ? "rgba(114,46,209,0.15)" : "#f9f0ff",
                               borderRadius: 6,
-                              border: "1px solid #efdbff",
+                              border: isDark ? "1px solid rgba(114,46,209,0.3)" : "1px solid #efdbff",
                             }}
                           >
                             <Text
@@ -5243,7 +5255,7 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                         style={{
                           textAlign: "center",
                           padding: "6px 4px",
-                          background: "#fcffe6",
+                          background: isDark ? "rgba(250,219,20,0.12)" : "#fcffe6",
                           borderRadius: 6,
                           border: "1px solid #fffb8f",
                         }}
@@ -5489,8 +5501,8 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                       display: "flex",
                       gap: 6,
                       padding: "8px 10px",
-                      background: "#fafafa",
-                      borderBottom: "1px solid #f0f0f0",
+                      background: isDark ? "#1f1f1f" : "#fafafa",
+                      borderBottom: isDark ? "1px solid #303030" : "1px solid #f0f0f0",
                       flexWrap: "wrap",
                     }}
                   >
@@ -5645,7 +5657,7 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                                     display: "inline-flex",
                                     alignItems: "center",
                                     gap: 3,
-                                    background: "#e6fffb",
+                                    background: isDark ? "rgba(19,194,194,0.15)" : "#e6fffb",
                                     color: "#13c2c2",
                                     borderRadius: 4,
                                     padding: "1px 6px",
@@ -5660,7 +5672,7 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                                       display: "inline-flex",
                                       alignItems: "center",
                                       gap: 3,
-                                      background: "#f0f0f0",
+                                      background: isDark ? "#303030" : "#f0f0f0",
                                       color: "#595959",
                                       borderRadius: 4,
                                       padding: "1px 6px",
@@ -5678,8 +5690,8 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                                       gap: 3,
                                       background:
                                         pt.record.manilaBayArea === "MBA"
-                                          ? "#e6f7ff"
-                                          : "#f5f5f5",
+                                          ? (isDark ? "rgba(22,119,255,0.15)" : "#e6f7ff")
+                                          : (isDark ? "#303030" : "#f5f5f5"),
                                       color:
                                         pt.record.manilaBayArea === "MBA"
                                           ? "#1890ff"
@@ -5697,7 +5709,7 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                                 style={{
                                   margin: "4px 0 6px",
                                   border: "none",
-                                  borderTop: "1px solid #f0f0f0",
+                                  borderTop: isDark ? "1px solid #303030" : "1px solid #f0f0f0",
                                 }}
                               />
                               <div
@@ -5729,7 +5741,7 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                               </div>
                               <div
                                 style={{
-                                  background: "#fafafa",
+                                  background: isDark ? "#1f1f1f" : "#fafafa",
                                   borderRadius: 6,
                                   padding: "6px 8px",
                                   marginBottom: 6,
@@ -5840,7 +5852,7 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                                   gap: 4,
                                   marginTop: 8,
                                   paddingTop: 6,
-                                  borderTop: "1px solid #f0f0f0",
+                                  borderTop: isDark ? "1px solid #303030" : "1px solid #f0f0f0",
                                 }}
                               >
                                 <button
@@ -6224,9 +6236,9 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                             style={{
                               textAlign: "center",
                               padding: "8px 4px",
-                              background: "#f9f0ff",
+                              background: isDark ? "rgba(114,46,209,0.15)" : "#f9f0ff",
                               borderRadius: 6,
-                              border: "1px solid #efdbff",
+                              border: isDark ? "1px solid rgba(114,46,209,0.3)" : "1px solid #efdbff",
                             }}
                           >
                             <Text
@@ -6251,7 +6263,7 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                             style={{
                               textAlign: "center",
                               padding: "8px 4px",
-                              background: "#e6fffb",
+                              background: isDark ? "rgba(19,194,194,0.15)" : "#e6fffb",
                               borderRadius: 6,
                               border: "1px solid #87e8de",
                             }}
@@ -6277,7 +6289,7 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                         style={{
                           textAlign: "center",
                           padding: "8px 4px",
-                          background: "#fff7e6",
+                          background: isDark ? "rgba(250,173,20,0.15)" : "#fff7e6",
                           borderRadius: 6,
                           border: "1px solid #ffd591",
                         }}
@@ -6382,8 +6394,8 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                       display: "flex",
                       gap: 6,
                       padding: "8px 10px",
-                      background: "#fafafa",
-                      borderBottom: "1px solid #f0f0f0",
+                      background: isDark ? "#1f1f1f" : "#fafafa",
+                      borderBottom: isDark ? "1px solid #303030" : "1px solid #f0f0f0",
                       flexWrap: "wrap",
                     }}
                   >
@@ -6532,7 +6544,7 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                                     display: "inline-flex",
                                     alignItems: "center",
                                     gap: 3,
-                                    background: "#fff7e6",
+                                    background: isDark ? "rgba(250,173,20,0.15)" : "#fff7e6",
                                     color: "#fa8c16",
                                     borderRadius: 4,
                                     padding: "1px 6px",
@@ -6547,7 +6559,7 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                                       display: "inline-flex",
                                       alignItems: "center",
                                       gap: 3,
-                                      background: "#f0f0f0",
+                                      background: isDark ? "#303030" : "#f0f0f0",
                                       color: "#595959",
                                       borderRadius: 4,
                                       padding: "1px 6px",
@@ -6565,8 +6577,8 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                                       gap: 3,
                                       background:
                                         pt.record.manilaBayArea === "MBA"
-                                          ? "#e6f7ff"
-                                          : "#f5f5f5",
+                                          ? (isDark ? "rgba(22,119,255,0.15)" : "#e6f7ff")
+                                          : (isDark ? "#303030" : "#f5f5f5"),
                                       color:
                                         pt.record.manilaBayArea === "MBA"
                                           ? "#1890ff"
@@ -6584,7 +6596,7 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                                 style={{
                                   margin: "4px 0 6px",
                                   border: "none",
-                                  borderTop: "1px solid #f0f0f0",
+                                  borderTop: isDark ? "1px solid #303030" : "1px solid #f0f0f0",
                                 }}
                               />
                               {pt.record.typeOfEquipment && (
@@ -6598,7 +6610,7 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                               )}
                               <div
                                 style={{
-                                  background: "#fafafa",
+                                  background: isDark ? "#1f1f1f" : "#fafafa",
                                   borderRadius: 6,
                                   padding: "6px 8px",
                                   marginBottom: 6,
@@ -7169,9 +7181,9 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                                     style={{
                                       textAlign: "center",
                                       padding: "6px 4px",
-                                      background: "#e6f7ff",
+                                      background: isDark ? "rgba(22,119,255,0.15)" : "#e6f7ff",
                                       borderRadius: 6,
-                                      border: "1px solid #bae7ff",
+                                      border: isDark ? "1px solid rgba(22,119,255,0.3)" : "1px solid #bae7ff",
                                     }}
                                   >
                                     <Text
@@ -7193,9 +7205,9 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                                     style={{
                                       textAlign: "center",
                                       padding: "6px 4px",
-                                      background: "#f9f0ff",
+                                      background: isDark ? "rgba(114,46,209,0.15)" : "#f9f0ff",
                                       borderRadius: 6,
-                                      border: "1px solid #efdbff",
+                                      border: isDark ? "1px solid rgba(114,46,209,0.3)" : "1px solid #efdbff",
                                     }}
                                   >
                                     <Text
@@ -7219,7 +7231,7 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                                     style={{
                                       textAlign: "center",
                                       padding: "6px 4px",
-                                      background: "#f6ffed",
+                                      background: isDark ? "rgba(82,196,26,0.15)" : "#f6ffed",
                                       borderRadius: 6,
                                       border: "1px solid #b7eb8f",
                                     }}
@@ -7243,7 +7255,7 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                                     style={{
                                       textAlign: "center",
                                       padding: "6px 4px",
-                                      background: "#fff7e6",
+                                      background: isDark ? "rgba(250,173,20,0.15)" : "#fff7e6",
                                       borderRadius: 6,
                                       border: "1px solid #ffd591",
                                     }}
@@ -7341,8 +7353,8 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                               display: "flex",
                               gap: 6,
                               padding: "8px 10px",
-                              background: "#fafafa",
-                              borderBottom: "1px solid #f0f0f0",
+                              background: isDark ? "#1f1f1f" : "#fafafa",
+                              borderBottom: isDark ? "1px solid #303030" : "1px solid #f0f0f0",
                               flexWrap: "wrap",
                             }}
                           >
@@ -7497,7 +7509,7 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                                             display: "inline-flex",
                                             alignItems: "center",
                                             gap: 3,
-                                            background: "#e6f7ff",
+                                            background: isDark ? "rgba(22,119,255,0.15)" : "#e6f7ff",
                                             color: "#1890ff",
                                             borderRadius: 4,
                                             padding: "1px 6px",
@@ -7512,7 +7524,7 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                                               display: "inline-flex",
                                               alignItems: "center",
                                               gap: 3,
-                                              background: "#f0f0f0",
+                                              background: isDark ? "#303030" : "#f0f0f0",
                                               color: "#595959",
                                               borderRadius: 4,
                                               padding: "1px 6px",
@@ -7530,8 +7542,8 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                                               gap: 3,
                                               background:
                                                 pt.record.manilaBayArea === "MBA"
-                                                  ? "#e6f7ff"
-                                                  : "#f5f5f5",
+                                                  ? (isDark ? "rgba(22,119,255,0.15)" : "#e6f7ff")
+                                          : (isDark ? "#303030" : "#f5f5f5"),
                                               color:
                                                 pt.record.manilaBayArea === "MBA"
                                                   ? "#1890ff"
@@ -7549,7 +7561,7 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                                         style={{
                                           margin: "4px 0 6px",
                                           border: "none",
-                                          borderTop: "1px solid #f0f0f0",
+                                          borderTop: isDark ? "1px solid #303030" : "1px solid #f0f0f0",
                                         }}
                                       />
                                       <div
@@ -7584,7 +7596,7 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                                               display: "inline-flex",
                                               alignItems: "center",
                                               gap: 3,
-                                              background: "#f9f0ff",
+                                              background: isDark ? "rgba(114,46,209,0.15)" : "#f9f0ff",
                                               color: "#722ed1",
                                               borderRadius: 4,
                                               padding: "1px 6px",
@@ -7597,7 +7609,7 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                                       </div>
                                       <div
                                         style={{
-                                          background: "#fafafa",
+                                          background: isDark ? "#1f1f1f" : "#fafafa",
                                           borderRadius: 6,
                                           padding: "6px 8px",
                                           marginBottom: 6,
@@ -8731,7 +8743,7 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                             alignItems: "center",
                             gap: 5,
                             padding: "4px 12px",
-                            background: "#e6f7ff",
+                            background: isDark ? "rgba(22,119,255,0.15)" : "#e6f7ff",
                             borderRadius: 4,
                             fontSize: 13,
                             color: "#1890ff",
@@ -9014,7 +9026,9 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
         </Space>
       </div>
       {/* Filter tabs by dashboard visibility settings, wrap maintenance tabs */}
-      {(() => {
+      {dashboardTabSettings === null ? (
+        <div style={{ textAlign: "center", padding: "60px 0" }}><Spin /></div>
+      ) : (() => {
         const filteredTabs = tabItems
           .filter(t => {
             const cfg = dashboardTabSettings[t.key];

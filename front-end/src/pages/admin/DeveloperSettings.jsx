@@ -68,7 +68,7 @@ const { Option } = Select;
 const { TextArea } = Input;
 
 // ── Org Chart visual node component ──
-function OrgNode({ node, onAdd, onEdit, onDelete, depth = 0 }) {
+function OrgNode({ node, onAdd, onEdit, onDelete, isDark, depth = 0 }) {
   return (
     <div style={{ marginLeft: depth > 0 ? 32 : 0, marginBottom: 4 }}>
       <div style={{
@@ -81,7 +81,7 @@ function OrgNode({ node, onAdd, onEdit, onDelete, depth = 0 }) {
         {depth > 0 && (
           <div style={{
             position: "absolute", left: -20, top: "50%", width: 18, height: 2,
-            background: "#d9d9d9",
+            background: isDark ? "#434343" : "#d9d9d9",
           }} />
         )}
         <Avatar size={32} src={node.avatar || undefined} style={{ background: node.color || "#1677ff" }}>
@@ -89,7 +89,7 @@ function OrgNode({ node, onAdd, onEdit, onDelete, depth = 0 }) {
         </Avatar>
         <div>
           <div style={{ fontWeight: 600, fontSize: 13, lineHeight: "16px" }}>{node.name}</div>
-          {node.title && <div style={{ fontSize: 11, color: "#8c8c8c" }}>{node.title}</div>}
+          {node.title && <div style={{ fontSize: 11, color: isDark ? "#8c8c8c" : "#8c8c8c" }}>{node.title}</div>}
         </div>
         <Space size={2} style={{ marginLeft: 8 }}>
           <Tooltip title="Add sub-position">
@@ -106,9 +106,9 @@ function OrgNode({ node, onAdd, onEdit, onDelete, depth = 0 }) {
         </Space>
       </div>
       {node.children?.length > 0 && (
-        <div style={{ borderLeft: "2px solid #d9d9d9", marginLeft: 16, paddingLeft: 0 }}>
+        <div style={{ borderLeft: isDark ? "2px solid #434343" : "2px solid #d9d9d9", marginLeft: 16, paddingLeft: 0 }}>
           {node.children.map(child => (
-            <OrgNode key={child.id} node={child} onAdd={onAdd} onEdit={onEdit} onDelete={onDelete} depth={depth + 1} />
+            <OrgNode key={child.id} node={child} onAdd={onAdd} onEdit={onEdit} onDelete={onDelete} isDark={isDark} depth={depth + 1} />
           ))}
         </div>
       )}
@@ -116,7 +116,7 @@ function OrgNode({ node, onAdd, onEdit, onDelete, depth = 0 }) {
   );
 }
 
-export default function DeveloperSettings({ onSettingsSaved }) {
+export default function DeveloperSettings({onSettingsSaved, isDark}) {
   const [settings, setSettings] = useState(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -867,7 +867,7 @@ export default function DeveloperSettings({ onSettingsSaved }) {
                 }
               >
                 {deletedEntries.length === 0 && !deletedLoading ? (
-                  <div style={{ textAlign: "center", padding: "40px 0", color: "#999" }}>
+                  <div style={{ textAlign: "center", padding: "40px 0", color: isDark ? "#666" : "#999" }}>
                     <DeleteOutlined style={{ fontSize: 32, marginBottom: 12, opacity: 0.3 }} />
                     <div>No deleted submissions</div>
                     <Button type="link" size="small" onClick={fetchDeletedEntries} style={{ marginTop: 8 }}>Load deleted submissions</Button>
@@ -935,8 +935,8 @@ export default function DeveloperSettings({ onSettingsSaved }) {
                     return (
                       <div key={tab.key} style={{
                         padding: "12px 16px",
-                        borderBottom: idx < DASHBOARD_TABS.length - 1 ? "1px solid #f0f0f0" : "none",
-                        background: !isVisible ? "#fafafa" : isMaint ? "#fffbe6" : "transparent",
+                        borderBottom: idx < DASHBOARD_TABS.length - 1 ? (isDark ? "1px solid #303030" : "1px solid #f0f0f0") : "none",
+                        background: !isVisible ? (isDark ? "#1f1f1f" : "#fafafa") : isMaint ? (isDark ? "rgba(250,219,20,0.1)" : "#fffbe6") : "transparent",
                         borderRadius: 6,
                         opacity: isVisible ? 1 : 0.6,
                       }}>
@@ -1034,7 +1034,7 @@ export default function DeveloperSettings({ onSettingsSaved }) {
                   ) : (
                     <div style={{ overflowX: "auto" }}>
                       {orgTreeData.map(root => (
-                        <OrgNode key={root.id} node={root} onAdd={openOrgAdd} onEdit={openOrgEdit} onDelete={deleteOrgNode} />
+                        <OrgNode key={root.id} node={root} onAdd={openOrgAdd} onEdit={openOrgEdit} onDelete={deleteOrgNode} isDark={isDark} />
                       ))}
                     </div>
                   )}
@@ -1081,7 +1081,7 @@ export default function DeveloperSettings({ onSettingsSaved }) {
           },          {
             key: "portal-users",
             label: <><TeamOutlined /> Portal Users</>,
-            children: <PortalUsers />,
+            children: <PortalUsers isDark={isDark} />,
           },        ]}
       />
     </div>
