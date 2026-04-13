@@ -59,13 +59,15 @@ router.patch("/:id/permissions", async (req, res) => {
     if (!permissions || typeof permissions !== "object") {
       return res.status(400).json({ message: "Invalid permissions" });
     }
-    const user = await User.findByIdAndUpdate(
-      req.params.id,
-      { permissions },
-      { returnDocument: "after" }
-    ).select("-password");
+    // Use findById + save + markModified for Mixed type field
+    const user = await User.findById(req.params.id);
     if (!user) return res.status(404).json({ message: "User not found" });
-    res.json({ message: "Permissions updated", data: user });
+    user.permissions = permissions;
+    user.markModified("permissions");
+    await user.save();
+    const result = user.toObject();
+    delete result.password;
+    res.json({ message: "Permissions updated", data: result });
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });
   }

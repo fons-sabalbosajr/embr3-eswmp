@@ -50,11 +50,11 @@ export default function PortalUsers({ isDark }) {
     open: false,
     user: null,
   });
-  const [selectedSlf, setSelectedSlf] = useState(null);
+  const [selectedSlf, setSelectedSlf] = useState([]);
   const [detailModal, setDetailModal] = useState({ open: false, user: null });
   const [approving, setApproving] = useState(false);
   const [editSlfModal, setEditSlfModal] = useState({ open: false, user: null });
-  const [editSlfValue, setEditSlfValue] = useState(null);
+  const [editSlfValue, setEditSlfValue] = useState([]);
   const [editingSlfLoading, setEditingSlfLoading] = useState(false);
 
   useEffect(() => {
@@ -78,8 +78,8 @@ export default function PortalUsers({ isDark }) {
   };
 
   const handleApprove = async () => {
-    if (!selectedSlf) {
-      Swal.fire("Warning", "Please select an SLF to assign.", "warning");
+    if (!selectedSlf || selectedSlf.length === 0) {
+      Swal.fire("Warning", "Please select at least one SLF to assign.", "warning");
       return;
     }
     setApproving(true);
@@ -94,7 +94,7 @@ export default function PortalUsers({ isDark }) {
         confirmButtonColor: "#1a3353",
       });
       setApproveModal({ open: false, user: null });
-      setSelectedSlf(null);
+      setSelectedSlf([]);
       fetchData();
     } catch (err) {
       Swal.fire(
@@ -160,8 +160,8 @@ export default function PortalUsers({ isDark }) {
   };
 
   const handleEditSlf = async () => {
-    if (!editSlfValue) {
-      Swal.fire("Warning", "Please select an SLF to assign.", "warning");
+    if (!editSlfValue || editSlfValue.length === 0) {
+      Swal.fire("Warning", "Please select at least one SLF to assign.", "warning");
       return;
     }
     setEditingSlfLoading(true);
@@ -176,7 +176,7 @@ export default function PortalUsers({ isDark }) {
         confirmButtonColor: "#1a3353",
       });
       setEditSlfModal({ open: false, user: null });
-      setEditSlfValue(null);
+      setEditSlfValue([]);
       fetchData();
     } catch (err) {
       Swal.fire(
@@ -226,7 +226,12 @@ export default function PortalUsers({ isDark }) {
       title: "Assigned SLF",
       dataIndex: "assignedSlfName",
       key: "assignedSlfName",
-      render: (v) => v || <Text type="secondary">Not assigned</Text>,
+      render: (v) => {
+        const names = Array.isArray(v) ? v : v ? [v] : [];
+        return names.length > 0
+          ? names.map((n, i) => <Tag key={i} color="blue" style={{ marginBottom: 2 }}>{n}</Tag>)
+          : <Text type="secondary">Not assigned</Text>;
+      },
     },
     {
       title: "Status",
@@ -273,7 +278,7 @@ export default function PortalUsers({ isDark }) {
                   style={{ background: "#52c41a", borderColor: "#52c41a" }}
                   icon={<CheckCircleOutlined />}
                   onClick={() => {
-                    setSelectedSlf(null);
+                    setSelectedSlf([]);
                     setApproveModal({ open: true, user: record });
                   }}
                 />
@@ -294,7 +299,8 @@ export default function PortalUsers({ isDark }) {
                 size="small"
                 icon={<EditOutlined />}
                 onClick={() => {
-                  setEditSlfValue(record.assignedSlf || null);
+                  const existing = Array.isArray(record.assignedSlf) ? record.assignedSlf : record.assignedSlf ? [record.assignedSlf] : [];
+                  setEditSlfValue(existing);
                   setEditSlfModal({ open: true, user: record });
                 }}
               />
@@ -365,7 +371,7 @@ export default function PortalUsers({ isDark }) {
         open={approveModal.open}
         onCancel={() => {
           setApproveModal({ open: false, user: null });
-          setSelectedSlf(null);
+          setSelectedSlf([]);
         }}
         onOk={handleApprove}
         confirmLoading={approving}
@@ -390,7 +396,8 @@ export default function PortalUsers({ isDark }) {
               Assign Sanitary Landfill Facility (SLF):
             </Text>
             <Select
-              placeholder="Select SLF to assign"
+              mode="multiple"
+              placeholder="Select SLF(s) to assign"
               style={{ width: "100%" }}
               value={selectedSlf}
               onChange={setSelectedSlf}
@@ -414,7 +421,7 @@ export default function PortalUsers({ isDark }) {
         open={editSlfModal.open}
         onCancel={() => {
           setEditSlfModal({ open: false, user: null });
-          setEditSlfValue(null);
+          setEditSlfValue([]);
         }}
         onOk={handleEditSlf}
         confirmLoading={editingSlfLoading}
@@ -431,14 +438,20 @@ export default function PortalUsers({ isDark }) {
                 {editSlfModal.user.email}
               </Descriptions.Item>
               <Descriptions.Item label="Current SLF">
-                {editSlfModal.user.assignedSlfName || "Not assigned"}
+                {(() => {
+                  const names = Array.isArray(editSlfModal.user.assignedSlfName)
+                    ? editSlfModal.user.assignedSlfName
+                    : editSlfModal.user.assignedSlfName ? [editSlfModal.user.assignedSlfName] : [];
+                  return names.length > 0 ? names.join(", ") : "Not assigned";
+                })()}
               </Descriptions.Item>
             </Descriptions>
             <Text strong style={{ display: "block", marginBottom: 8 }}>
-              Assign New SLF:
+              Assign SLF(s):
             </Text>
             <Select
-              placeholder="Select SLF to assign"
+              mode="multiple"
+              placeholder="Select SLF(s) to assign"
               style={{ width: "100%" }}
               value={editSlfValue}
               onChange={setEditSlfValue}
@@ -509,7 +522,12 @@ export default function PortalUsers({ isDark }) {
                   <Card size="small" style={{ borderRadius: 8, height: "100%" }}>
                     <Text type="secondary" style={{ fontSize: 11 }}><EnvironmentOutlined /> Assigned SLF</Text>
                     <div style={{ marginTop: 4 }}>
-                      <Text strong style={{ fontSize: 13 }}>{u.assignedSlfName || "Not assigned"}</Text>
+                      {(() => {
+                        const names = Array.isArray(u.assignedSlfName) ? u.assignedSlfName : u.assignedSlfName ? [u.assignedSlfName] : [];
+                        return names.length > 0
+                          ? names.map((n, i) => <Tag key={i} color="blue" style={{ marginBottom: 2 }}>{n}</Tag>)
+                          : <Text strong style={{ fontSize: 13 }}>Not assigned</Text>;
+                      })()}
                     </div>
                   </Card>
                 </Col>

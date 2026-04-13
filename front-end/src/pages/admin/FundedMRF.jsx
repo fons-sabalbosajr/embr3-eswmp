@@ -122,6 +122,7 @@ export default function FundedMRF({canEdit = true, canDelete = true, isDark}) {
   const [filterStatus, setFilterStatus] = useState(null);
   const [filterType, setFilterType] = useState(null);
   const [filterMonth, setFilterMonth] = useState(null);
+  const [filterYear, setFilterYear] = useState(null);
   const [form] = Form.useForm();
 
   const fetchRecords = useCallback(async (skipCache = false) => {
@@ -233,11 +234,19 @@ export default function FundedMRF({canEdit = true, canDelete = true, isDark}) {
   };
 
   // Filtering
-  const hasActiveFilters = filterProvince || filterMBA || filterStatus || filterType || filterMonth || searchText;
-  const clearAllFilters = () => { setFilterProvince(null); setFilterMBA(null); setFilterStatus(null); setFilterType(null); setFilterMonth(null); setSearchText(""); };
+  const hasActiveFilters = filterProvince || filterMBA || filterStatus || filterType || filterMonth || filterYear || searchText;
+  const clearAllFilters = () => { setFilterProvince(null); setFilterMBA(null); setFilterStatus(null); setFilterType(null); setFilterMonth(null); setFilterYear(null); setSearchText(""); };
+
+  const availableYears = useMemo(() => {
+    const cy = new Date().getFullYear();
+    const years = [...new Set([cy, cy - 1, ...records.map((r) => r.dataYear || cy)])];
+    return years.sort((a, b) => b - a);
+  }, [records]);
 
   const filtered = useMemo(() => {
     let data = records;
+    if (filterYear)
+      data = data.filter((r) => (r.dataYear || new Date().getFullYear()) === filterYear);
     if (searchText) {
       const s = searchText.toLowerCase();
       data = data.filter((r) =>
@@ -254,8 +263,17 @@ export default function FundedMRF({canEdit = true, canDelete = true, isDark}) {
     }
     if (filterType) data = data.filter((r) => r.typeOfMRF === filterType);
     if (filterMonth) data = data.filter((r) => r.targetMonth === filterMonth);
-    return data;
-  }, [records, searchText, filterProvince, filterMBA, filterStatus, filterType, filterMonth]);
+    // Deduplicate by municipality — keep only latest dataYear per municipality
+    const map = new Map();
+    for (const r of data) {
+      const key = (r.municipality || "").toLowerCase();
+      const existing = map.get(key);
+      if (!existing || (r.dataYear || 0) > (existing.dataYear || 0)) {
+        map.set(key, r);
+      }
+    }
+    return [...map.values()];
+  }, [records, searchText, filterProvince, filterMBA, filterStatus, filterType, filterMonth, filterYear]);
 
   const filters = useMemo(() => ({
     province: buildFilters(records, "province"),
@@ -407,6 +425,29 @@ export default function FundedMRF({canEdit = true, canDelete = true, isDark}) {
           }}>Export</Button>
           <Tooltip title="Refresh data"><Button icon={<ReloadOutlined />} onClick={() => fetchRecords(true)} loading={loading} /></Tooltip>
         </Space>
+      </div>
+
+      {/* Year Selector */}
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
+        <Space size={4} align="center">
+          <CalendarOutlined style={{ color: isDark ? "#7eb8da" : "#1a3353" }} />
+          <Text strong style={{ fontSize: 13, color: isDark ? "#7eb8da" : "#1a3353" }}>Data Year:</Text>
+          <Button size="small" type={filterYear === null ? "primary" : "default"}
+            onClick={() => setFilterYear(null)}
+            style={filterYear === null ? { background: isDark ? "#4a7fb5" : "#1a3353", borderColor: isDark ? "#4a7fb5" : "#1a3353" } : {}}>
+            All
+          </Button>
+          {availableYears.map((yr) => (
+            <Button key={yr} size="small" type={filterYear === yr ? "primary" : "default"}
+              onClick={() => setFilterYear(yr)}
+              style={filterYear === yr ? { background: isDark ? "#4a7fb5" : "#1a3353", borderColor: isDark ? "#4a7fb5" : "#1a3353" } : {}}>
+              {yr}
+            </Button>
+          ))}
+        </Space>
+        <Tag bordered={false} color={hasActiveFilters ? "blue" : "default"}>
+          {filtered.length} / {records.length} records
+        </Tag>
       </div>
 
       {/* Filter Bar */}

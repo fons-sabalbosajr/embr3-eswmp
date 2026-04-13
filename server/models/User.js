@@ -32,6 +32,8 @@ const userSchema = new mongoose.Schema(
         accountSettings: { view: true, edit: true, delete: true },
         portalFields: { view: true, edit: true, delete: true },
         dataReferences: { view: true, edit: true, delete: true },
+        baselineData: { view: true, edit: true, delete: true },
+        orgChart: { view: true, edit: true, delete: true },
       }),
     },
     isVerified: { type: Boolean, default: false },

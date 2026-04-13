@@ -27,6 +27,7 @@ import {
   Empty,
   Progress,
   Skeleton,
+  Alert,
 } from "antd";
 import {
   PlusOutlined,
@@ -320,6 +321,9 @@ function PortalGenerators({
   loadingGen,
   fetchGenerators,
   slfRecords,
+  canEdit = true,
+  canDelete = true,
+  isDark,
 }) {
   const [modalOpen, setModalOpen] = useState(false);
   const [editing, setEditing] = useState(null);
@@ -2161,6 +2165,9 @@ export default function SLFMonitoring({canEdit = true, canDelete = true, isDark}
                 loadingGen={loadingGen}
                 fetchGenerators={fetchGenerators}
                 slfRecords={records}
+                canEdit={canEdit}
+                canDelete={canDelete}
+                isDark={isDark}
               />
             ),
           },
@@ -2838,6 +2845,12 @@ export default function SLFMonitoring({canEdit = true, canDelete = true, isDark}
                       {/* Cell Infrastructure Status */}
                       {cells > 0 && (() => {
                         const cellStatuses = detailViewRecord.cellStatuses || [];
+                        const hasCellBaseline = baselineData && (
+                          baselineData.activeCellResidualVolume > 0 ||
+                          baselineData.activeCellInertVolume > 0 ||
+                          baselineData.closedCellResidualVolume > 0 ||
+                          baselineData.closedCellInertVolume > 0
+                        );
                         const handleCellToggle = async (cellIndex, checked) => {
                           const newStatus = checked ? "Operational" : "Closed";
                           try {
@@ -2940,6 +2953,47 @@ export default function SLFMonitoring({canEdit = true, canDelete = true, isDark}
                               </Card>
                             </Col>
                           </Row>
+
+                          {/* Baseline cell volumes */}
+                          {hasCellBaseline ? (
+                            <Card size="small" title="Baseline Cell Volumes" style={{ borderRadius: 10, marginBottom: 8 }}>
+                              <Descriptions size="small" bordered column={2}>
+                                <Descriptions.Item label="Active Cell (Residual)">
+                                  {baselineData.activeCellResidualVolume > 0
+                                    ? `${Number(baselineData.activeCellResidualVolume).toLocaleString()} ${(baselineData.activeCellResidualUnit || "m³").replace("m3", "m³")}`
+                                    : "—"}
+                                </Descriptions.Item>
+                                <Descriptions.Item label="Active Cell (Inert)">
+                                  {baselineData.activeCellInertVolume > 0
+                                    ? `${Number(baselineData.activeCellInertVolume).toLocaleString()} ${(baselineData.activeCellInertUnit || "m³").replace("m3", "m³")}`
+                                    : "—"}
+                                </Descriptions.Item>
+                                <Descriptions.Item label="Closed Cell (Residual)">
+                                  {baselineData.closedCellResidualVolume > 0
+                                    ? `${Number(baselineData.closedCellResidualVolume).toLocaleString()} ${(baselineData.closedCellResidualUnit || "m³").replace("m3", "m³")}`
+                                    : "—"}
+                                </Descriptions.Item>
+                                <Descriptions.Item label="Closed Cell (Inert)">
+                                  {baselineData.closedCellInertVolume > 0
+                                    ? `${Number(baselineData.closedCellInertVolume).toLocaleString()} ${(baselineData.closedCellInertUnit || "m³").replace("m3", "m³")}`
+                                    : "—"}
+                                </Descriptions.Item>
+                                {baselineData.totalVolumeAccepted > 0 && (
+                                  <Descriptions.Item label="Total Volume Accepted" span={2}>
+                                    {Number(baselineData.totalVolumeAccepted).toLocaleString()} {(baselineData.totalVolumeAcceptedUnit || "m³").replace("m3", "m³")}
+                                  </Descriptions.Item>
+                                )}
+                              </Descriptions>
+                            </Card>
+                          ) : (
+                            <Alert
+                              type="warning"
+                              showIcon
+                              message="Baseline cell information not available"
+                              description="The assigned SLF's baseline cell information (Active/Closed cell volumes) needs to be updated in the Baseline Data tab."
+                              style={{ marginBottom: 8, borderRadius: 8 }}
+                            />
+                          )}
                         </>
                         );
                       })()}

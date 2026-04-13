@@ -15,13 +15,14 @@ const userPortalSchema = new mongoose.Schema(
     password: { type: String, required: true, minlength: 6 },
     contactNumber: { type: String, trim: true, default: "" },
     companyName: { type: String, trim: true, default: "" },
-    // Assigned SLF (set by admin during approval)
-    assignedSlf: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: "SlfFacility",
-      default: null,
-    },
-    assignedSlfName: { type: String, trim: true, default: "" },
+    // Assigned SLF (set by admin during approval) — supports multiple
+    assignedSlf: [
+      {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "SlfFacility",
+      },
+    ],
+    assignedSlfName: [{ type: String, trim: true }],
     // Account status
     status: {
       type: String,

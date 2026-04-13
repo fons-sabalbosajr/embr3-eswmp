@@ -87,6 +87,7 @@ const DeveloperSettings = lazy(() => import("./admin/DeveloperSettings"));
 const DataReferences = lazy(() => import("./admin/DataReferences"));
 const SLFMonitoring = lazy(() => import("./admin/SLFMonitoring"));
 const SLFWasteGenerators = lazy(() => import("./admin/SLFWasteGenerators"));
+const OrgChartSettings = lazy(() => import("./admin/OrgChartSettings"));
 const TenYearSWMPlan = lazy(() => import("./admin/TenYearSWMPlan"));
 const FundedMRF = lazy(() => import("./admin/FundedMRF"));
 const LguInitiatedMRF = lazy(() => import("./admin/LguInitiatedMRF"));
@@ -486,28 +487,37 @@ export default function AdminHome() {
       });
     }
 
-    // ── Settings (Developer only) ──
-    if (isDeveloper) {
+    // ── Settings ──
+    {
       const settingsChildren = [];
-      if (hasAccess("accountSettings")) {
+      if (isDeveloper && hasAccess("accountSettings")) {
         settingsChildren.push({
           key: "settings-accounts",
           icon: <TeamOutlined />,
           label: "Accounts & Roles",
         });
       }
-      if (hasAccess("portalFields")) {
+      if (isDeveloper && hasAccess("portalFields")) {
         settingsChildren.push({
           key: "settings-fields",
           icon: <FormOutlined />,
           label: "Portal Fields",
         });
       }
-      settingsChildren.push({
-        key: "settings-data-refs",
-        icon: <DatabaseOutlined />,
-        label: "Data References",
-      });
+      if (isDeveloper) {
+        settingsChildren.push({
+          key: "settings-data-refs",
+          icon: <DatabaseOutlined />,
+          label: "Data References",
+        });
+      }
+      if (hasAccess("orgChart")) {
+        settingsChildren.push({
+          key: "settings-org-chart",
+          icon: <ApartmentOutlined />,
+          label: "Org Chart",
+        });
+      }
       if (settingsChildren.length > 0) {
         items.push({ type: "divider" });
         items.push({
@@ -606,11 +616,13 @@ export default function AdminHome() {
         return hasAccess("portalFields") ? <FieldSettings isDark={isDark} canEdit={canEdit("portalFields")} canDelete={canDelete("portalFields")} /> : denied;
       case "settings-data-refs":
         return <DataReferences isDark={isDark} canEdit={canEdit("dataReferences")} canDelete={canDelete("dataReferences")} />;
+      case "settings-org-chart":
+        return hasAccess("orgChart") ? <OrgChartSettings isDark={isDark} canEdit={canEdit("orgChart")} canDelete={canDelete("orgChart")} /> : denied;
       case "slf-monitoring":
         return hasAccess("slfMonitoring") ? <SLFMonitoring isDark={isDark} canEdit={canEdit("slfMonitoring")} canDelete={canDelete("slfMonitoring")} /> : denied;
       case "slf-waste-generators":
         return hasAccess("submissions") || hasAccess("reports") ? (
-          <SLFWasteGenerators canEdit={canEdit("submissions")} canDelete={canDelete("submissions")} />
+          <SLFWasteGenerators isDark={isDark} canEdit={canEdit("submissions")} canDelete={canDelete("submissions")} />
         ) : (
           denied
         );

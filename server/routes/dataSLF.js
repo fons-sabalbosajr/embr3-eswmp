@@ -218,35 +218,104 @@ router.get("/baseline/:slfName", async (req, res) => {
 // Get latest baseline info for ALL SLF generators — admin tab
 router.get("/baselines", async (req, res) => {
   try {
-    const generators = await SLFGenerator.find().sort({ slfName: 1 });
-    const results = [];
-    for (const gen of generators) {
-      const latest = await DataSLF.findOne({
-        slfGenerator: gen._id,
-        totalVolumeAccepted: { $ne: null },
-      }).sort({ createdAt: -1 });
-      if (latest) {
-        results.push({
-          _id: gen._id,
-          slfName: gen.slfName,
-          isActive: gen.isActive,
-          totalVolumeAccepted: latest.totalVolumeAccepted,
-          totalVolumeAcceptedUnit: latest.totalVolumeAcceptedUnit || "m³",
-          activeCellResidualVolume: latest.activeCellResidualVolume,
-          activeCellResidualUnit: latest.activeCellResidualUnit || "m³",
-          activeCellInertVolume: latest.activeCellInertVolume,
-          activeCellInertUnit: latest.activeCellInertUnit || "m³",
-          closedCellResidualVolume: latest.closedCellResidualVolume,
-          closedCellResidualUnit: latest.closedCellResidualUnit || "m³",
-          closedCellInertVolume: latest.closedCellInertVolume,
-          closedCellInertUnit: latest.closedCellInertUnit || "m³",
-          accreditedHaulers: latest.accreditedHaulers || [],
-          submittedBy: latest.submittedBy,
-          lastUpdated: latest.createdAt,
-        });
-      }
-    }
+    // Aggregate from DataSLF directly — covers both SLFGenerator and SlfFacility refs
+    // Include soft-deleted records since baseline is facility-level data
+    const latestPerSlf = await DataSLF.aggregate([
+      { $match: { totalVolumeAccepted: { $ne: null } } },
+      { $sort: { createdAt: -1 } },
+      {
+        $group: {
+          _id: { $ifNull: ["$slfGenerator", "$slfName"] },
+          doc: { $first: "$$ROOT" },
+        },
+      },
+      { $replaceRoot: { newRoot: "$doc" } },
+      { $sort: { slfName: 1 } },
+    ]);
+
+    const results = latestPerSlf.map((d) => ({
+      _id: d._id,
+      slfGenerator: d.slfGenerator,
+      slfName: d.slfName || "Unknown",
+      totalVolumeAccepted: d.totalVolumeAccepted,
+      totalVolumeAcceptedUnit: d.totalVolumeAcceptedUnit || "m³",
+      activeCellResidualVolume: d.activeCellResidualVolume,
+      activeCellResidualUnit: d.activeCellResidualUnit || "m³",
+      activeCellInertVolume: d.activeCellInertVolume,
+      activeCellInertUnit: d.activeCellInertUnit || "m³",
+      closedCellResidualVolume: d.closedCellResidualVolume,
+      closedCellResidualUnit: d.closedCellResidualUnit || "m³",
+      closedCellInertVolume: d.closedCellInertVolume,
+      closedCellInertUnit: d.closedCellInertUnit || "m³",
+      accreditedHaulers: d.accreditedHaulers || [],
+      submittedBy: d.submittedBy,
+      lastUpdated: d.createdAt,
+    }));
+
     res.json(results);
+  } catch (error) {
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+});
+
+// Admin update baseline data for a specific DataSLF record
+router.put("/baselines/:id", async (req, res) => {
+  try {
+    const entry = await DataSLF.findById(req.params.id);
+    if (!entry) return res.status(404).json({ message: "Baseline record not found" });
+
+    const fields = [
+      "totalVolumeAccepted", "totalVolumeAcceptedUnit",
+      "activeCellResidualVolume", "activeCellResidualUnit",
+      "activeCellInertVolume", "activeCellInertUnit",
+      "closedCellResidualVolume", "closedCellResidualUnit",
+      "closedCellInertVolume", "closedCellInertUnit",
+      "accreditedHaulers",
+    ];
+    for (const f of fields) {
+      if (req.body[f] !== undefined) entry[f] = req.body[f];
+    }
+    await entry.save();
+
+    writeLog("info", "baseline.admin-update", {
+      message: `Admin updated baseline for ${entry.slfName}`,
+      user: req.body.updatedBy || "admin",
+      meta: { entryId: entry._id, slfName: entry.slfName },
+    });
+
+    res.json({ message: "Baseline updated", data: entry });
+  } catch (error) {
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+});
+
+// Admin delete baseline data for a specific DataSLF record (clears baseline fields)
+router.delete("/baselines/:id", async (req, res) => {
+  try {
+    const entry = await DataSLF.findById(req.params.id);
+    if (!entry) return res.status(404).json({ message: "Baseline record not found" });
+
+    const slfName = entry.slfName;
+    entry.totalVolumeAccepted = undefined;
+    entry.totalVolumeAcceptedUnit = undefined;
+    entry.activeCellResidualVolume = undefined;
+    entry.activeCellResidualUnit = undefined;
+    entry.activeCellInertVolume = undefined;
+    entry.activeCellInertUnit = undefined;
+    entry.closedCellResidualVolume = undefined;
+    entry.closedCellResidualUnit = undefined;
+    entry.closedCellInertVolume = undefined;
+    entry.closedCellInertUnit = undefined;
+    entry.accreditedHaulers = [];
+    await entry.save();
+
+    writeLog("warn", "baseline.admin-delete", {
+      message: `Admin cleared baseline data for ${slfName}`,
+      user: "admin",
+      meta: { entryId: entry._id, slfName },
+    });
+
+    res.json({ message: "Baseline data cleared" });
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });
   }

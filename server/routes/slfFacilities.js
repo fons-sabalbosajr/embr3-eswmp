@@ -46,11 +46,12 @@ router.get("/portal/:id", async (req, res) => {
         }).sort({ dataYear: -1 }).select(selectFields);
       }
 
-      // Update the portal user's stale reference
+      // Update the portal user's stale reference (supports array field)
       if (facility) {
         await UserPortal.updateMany(
           { assignedSlf: req.params.id },
-          { assignedSlf: facility._id }
+          { $set: { "assignedSlf.$[elem]": facility._id } },
+          { arrayFilters: [{ elem: req.params.id }] }
         );
       }
     }

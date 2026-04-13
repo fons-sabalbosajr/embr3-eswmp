@@ -164,6 +164,7 @@ export default function SLFPortal() {
   const [slfInfo, setSlfInfo] = useState(null);
   const [slfInfoLoading, setSlfInfoLoading] = useState(false);
   const [slfCardExpanded, setSlfCardExpanded] = useState(false);
+  const [selectedSlfIdx, setSelectedSlfIdx] = useState(0); // for multi-SLF users
   const [fieldLabels, setFieldLabels] = useState({});
   const [hazWasteCodes, setHazWasteCodes] = useState(["K301", "K302", "K303 (Treated)", "M501"]);
   const [historyDetailModal, setHistoryDetailModal] = useState(null);
@@ -330,26 +331,33 @@ export default function SLFPortal() {
   };
 
   // Fetch SLF facility operational info
+  const activeSlfId = Array.isArray(portalUser?.assignedSlf)
+    ? portalUser.assignedSlf[selectedSlfIdx] || portalUser.assignedSlf[0]
+    : portalUser?.assignedSlf;
+  const activeSlfName = Array.isArray(portalUser?.assignedSlfName)
+    ? portalUser.assignedSlfName[selectedSlfIdx] || portalUser.assignedSlfName[0]
+    : portalUser?.assignedSlfName;
+
   useEffect(() => {
-    if (!portalUser?.assignedSlf) return;
+    if (!activeSlfId) return;
     const ac = new AbortController();
     setSlfInfoLoading(true);
-    const nameParam = portalUser.assignedSlfName ? `?slfName=${encodeURIComponent(portalUser.assignedSlfName)}` : "";
+    const nameParam = activeSlfName ? `?slfName=${encodeURIComponent(activeSlfName)}` : "";
     withRetry(
-      () => api.get(`/slf-facilities/portal/${portalUser.assignedSlf}${nameParam}`, { signal: ac.signal }),
+      () => api.get(`/slf-facilities/portal/${activeSlfId}${nameParam}`, { signal: ac.signal }),
       { retries: 3, signal: ac.signal },
     ).then(({ data }) => setSlfInfo(data))
       .catch(() => {})
       .finally(() => setSlfInfoLoading(false));
     return () => ac.abort();
-  }, [portalUser]);
+  }, [portalUser, selectedSlfIdx]);
 
   // Fetch existing baseline when user is loaded (with retry)
   useEffect(() => {
-    if (!portalUser?.assignedSlfName) return;
+    if (!activeSlfName) return;
     const ac = new AbortController();
     withRetry(
-      () => api.get(`/data-slf/baseline/${encodeURIComponent(portalUser.assignedSlfName)}`, { signal: ac.signal }),
+      () => api.get(`/data-slf/baseline/${encodeURIComponent(activeSlfName)}`, { signal: ac.signal }),
       { retries: 3, signal: ac.signal },
     ).then(({ data }) => {
         if (data && data.totalVolumeAccepted != null) {
@@ -714,7 +722,7 @@ export default function SLFPortal() {
     setBaselineUpdateLoading(true);
     try {
       await api.post("/data-slf/baseline-update-request", {
-        slfName: portalUser?.assignedSlfName,
+        slfName: activeSlfName,
         requestedBy: portalUser?.email,
         fields: ["Volume of Waste Accepted", "Total Volume Disposed in Active Cells", "Accredited Haulers", "Total Volume Disposed in Closed Cells"],
         reason: reason.trim(),
@@ -808,8 +816,8 @@ export default function SLFPortal() {
         ...baselineValues,
         ...companyValues,
         accreditedHaulers: haulers.map(({ key, ...rest }) => rest),
-        slfName: portalUser?.assignedSlfName,
-        slfGenerator: portalUser?.assignedSlf || null,
+        slfName: activeSlfName,
+        slfGenerator: activeSlfId || null,
         dateOfDisposal: disposalValues.dateOfDisposal
           ? disposalValues.dateOfDisposal.format("YYYY-MM-DD")
           : null,
@@ -891,8 +899,8 @@ export default function SLFPortal() {
         ...baselineValues,
         ...companyValues,
         accreditedHaulers: haulers.map(({ key, ...rest }) => rest),
-        slfName: portalUser?.assignedSlfName,
-        slfGenerator: portalUser?.assignedSlf || null,
+        slfName: activeSlfName,
+        slfGenerator: activeSlfId || null,
         dateOfDisposal: disposalValues.dateOfDisposal
           ? disposalValues.dateOfDisposal.format("YYYY-MM-DD")
           : null,
@@ -1332,7 +1340,7 @@ export default function SLFPortal() {
           </Text>
           <br />
           <Tag color="blue" style={{ marginTop: 4 }}>
-            {portalUser?.assignedSlfName}
+            {activeSlfName}
           </Tag>
         </div>
       ),
@@ -1372,6 +1380,26 @@ export default function SLFPortal() {
 
     return (
       <div style={{ maxWidth: 1200, margin: "0 auto" }}>
+        {/* SLF selector for users with multiple assigned SLFs */}
+        {Array.isArray(portalUser?.assignedSlfName) && portalUser.assignedSlfName.length > 1 && (
+          <Card size="small" style={{ marginBottom: 12, borderRadius: 10, border: "1px solid #91caff", background: "#e6f4ff" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+              <EnvironmentOutlined style={{ color: "#1a3353", fontSize: 16 }} />
+              <Text strong style={{ fontSize: 13 }}>Select SLF Facility:</Text>
+              <Select
+                value={selectedSlfIdx}
+                onChange={(val) => {
+                  setSelectedSlfIdx(val);
+                  setBaselineSaved(false);
+                  setSlfInfo(null);
+                  baselineForm.resetFields();
+                }}
+                style={{ minWidth: 280 }}
+                options={portalUser.assignedSlfName.map((name, i) => ({ label: name, value: i }))}
+              />
+            </div>
+          </Card>
+        )}
         {/* SLF Name (read-only, from assigned SLF) */}
         <Card
           className="slf-section slf-facility-card"
@@ -1388,7 +1416,7 @@ export default function SLFPortal() {
                 <Text strong style={{ fontSize: isMobile ? 14 : 16, color: "#fff", display: "block", lineHeight: 1.3 }}>
                   {isMobile ? "Assigned SLF" : "Assigned Sanitary Landfill Facility"}
                 </Text>
-                <Text style={{ fontSize: 12, color: "rgba(255,255,255,0.7)" }}>{portalUser?.assignedSlfName}</Text>
+                <Text style={{ fontSize: 12, color: "rgba(255,255,255,0.7)" }}>{activeSlfName}</Text>
               </div>
             </div>
           }
@@ -1413,7 +1441,10 @@ export default function SLFPortal() {
             </div>
           ) : slfInfo ? (() => {
             const capacity = slfInfo.volumeCapacity || 0;
-            const waste = slfInfo.actualResidualWasteReceived || 0;
+            const facilityWaste = slfInfo.actualResidualWasteReceived || 0;
+            // Use baseline totalVolumeAccepted if available for more accurate utilization
+            const baselineVol = baselineForm.getFieldValue("totalVolumeAccepted");
+            const waste = baselineVol != null && baselineVol > 0 ? baselineVol : facilityWaste;
             const pct = capacity > 0 ? Math.min(Math.round((waste / capacity) * 100), 100) : 0;
             const cells = slfInfo.numberOfCell || 0;
             const cellCaps = slfInfo.cellCapacities || [];
@@ -1421,6 +1452,12 @@ export default function SLFPortal() {
             const capColor = pct >= 90 ? "#ff4d4f" : pct >= 70 ? "#faad14" : "#52c41a";
             const capLabel = pct >= 90 ? "Critical" : pct >= 70 ? "Warning" : "Normal";
             const isOp = !slfInfo.statusOfSLF?.toLowerCase().includes("non");
+            // Baseline cell breakdown
+            const activeCellRes = baselineForm.getFieldValue("activeCellResidualVolume") || 0;
+            const activeCellInert = baselineForm.getFieldValue("activeCellInertVolume") || 0;
+            const closedCellRes = baselineForm.getFieldValue("closedCellResidualVolume") || 0;
+            const closedCellInert = baselineForm.getFieldValue("closedCellInertVolume") || 0;
+            const hasBaselineCell = activeCellRes > 0 || activeCellInert > 0 || closedCellRes > 0 || closedCellInert > 0;
             return (
               <div>
                 {/* Capacity overview banner */}
@@ -1447,8 +1484,8 @@ export default function SLFPortal() {
                         {[
                           { label: "Status", value: slfInfo.statusOfSLF || "—", icon: <CheckCircleOutlined />, color: isOp ? "#52c41a" : "#ff4d4f", bg: isOp ? "#f6ffed" : "#fff2f0", border: isOp ? "#b7eb8f" : "#ffccc7", isTag: true },
                           { label: "Active Cells", value: cells || "—", icon: <ContainerOutlined />, color: "#1890ff", bg: "#e6f7ff", border: "#91d5ff" },
-                          { label: "Waste Received", value: waste > 0 ? `${waste.toLocaleString()} t` : "—", icon: <BarChartOutlined />, color: "#fa8c16", bg: "#fff7e6", border: "#ffd591" },
-                          { label: "Volume Capacity", value: capacity > 0 ? `${capacity.toLocaleString()} m³` : "—", icon: <DatabaseOutlined />, color: "#722ed1", bg: "#f9f0ff", border: "#d3adf7" },
+                          { label: "Waste Filled", value: waste > 0 ? `${waste.toLocaleString()} ${baselineVol != null && baselineVol > 0 ? (baselineForm.getFieldValue("totalVolumeAcceptedUnit") || "m³").replace("m3", "m³") : "t"}` : "—", icon: <BarChartOutlined />, color: "#fa8c16", bg: "#fff7e6", border: "#ffd591", sub: baselineVol != null && baselineVol > 0 ? "From Baseline" : undefined },
+                          { label: "Volume Capacity", value: capacity > 0 ? `${capacity.toLocaleString()} m³` : "—", icon: <DatabaseOutlined />, color: "#722ed1", bg: "#f9f0ff", border: "#d3adf7", sub: capacity > 0 && waste > 0 ? `${Math.max(0, capacity - waste).toLocaleString()} remaining` : undefined },
                         ].map((item, idx) => (
                           <Col xs={12} sm={12} md={6} key={idx}>
                             <div style={{ background: item.bg, borderRadius: 10, padding: "12px 14px", border: `1px solid ${item.border}`, height: "100%", transition: "transform 0.2s", cursor: "default" }}>
@@ -1459,7 +1496,10 @@ export default function SLFPortal() {
                               {item.isTag ? (
                                 <Tag color={isOp ? "success" : "error"} style={{ fontSize: 13, fontWeight: 600, padding: "2px 10px" }}>{item.value}</Tag>
                               ) : (
-                                <div style={{ fontSize: 16, fontWeight: 700, color: item.color }}>{item.value}</div>
+                                <>
+                                  <div style={{ fontSize: 16, fontWeight: 700, color: item.color }}>{item.value}</div>
+                                  {item.sub && <div style={{ fontSize: 10, color: "#8c8c8c", fontWeight: 500, marginTop: 2 }}>{item.sub}</div>}
+                                </>
                               )}
                             </div>
                           </Col>
@@ -1510,6 +1550,44 @@ export default function SLFPortal() {
                         );
                       })}
                     </Row>
+                  </div>
+                )}
+
+                {/* Baseline Utilization Breakdown */}
+                {baselineSaved && (
+                  <div style={{ background: "#fff", borderRadius: 12, padding: isMobile ? 14 : 20, marginBottom: 20, border: "1px solid #e8e8e8", boxShadow: "0 1px 4px rgba(0,0,0,0.04)" }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 16 }}>
+                      <div style={{ width: 28, height: 28, borderRadius: 6, background: "#722ed1", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                        <DatabaseOutlined style={{ color: "#fff", fontSize: 13 }} />
+                      </div>
+                      <Text strong style={{ fontSize: 14, color: "#1a3353" }}>Baseline Utilization</Text>
+                      <Tag color="purple" style={{ marginLeft: "auto", fontWeight: 500 }}>From Baseline Data</Tag>
+                    </div>
+                    {hasBaselineCell ? (
+                      <Row gutter={[12, 12]}>
+                        {[
+                          { label: "Active Cell (Residual)", value: activeCellRes, unit: (baselineForm.getFieldValue("activeCellResidualUnit") || "m³").replace("m3", "m³"), color: "#52c41a" },
+                          { label: "Active Cell (Inert)", value: activeCellInert, unit: (baselineForm.getFieldValue("activeCellInertUnit") || "m³").replace("m3", "m³"), color: "#1890ff" },
+                          { label: "Closed Cell (Residual)", value: closedCellRes, unit: (baselineForm.getFieldValue("closedCellResidualUnit") || "m³").replace("m3", "m³"), color: "#fa8c16" },
+                          { label: "Closed Cell (Inert)", value: closedCellInert, unit: (baselineForm.getFieldValue("closedCellInertUnit") || "m³").replace("m3", "m³"), color: "#8c8c8c" },
+                        ].filter((d) => d.value > 0).map((item, idx) => (
+                          <Col xs={12} sm={12} md={6} key={idx}>
+                            <div style={{ background: `${item.color}08`, borderRadius: 10, padding: "12px 14px", border: `1px solid ${item.color}30`, textAlign: "center" }}>
+                              <div style={{ fontSize: 10, color: "#8c8c8c", textTransform: "uppercase", letterSpacing: 0.5, fontWeight: 600, marginBottom: 4 }}>{item.label}</div>
+                              <div style={{ fontSize: 16, fontWeight: 700, color: item.color }}>{Number(item.value).toLocaleString()}</div>
+                              <div style={{ fontSize: 10, color: "#8c8c8c" }}>{item.unit}</div>
+                            </div>
+                          </Col>
+                        ))}
+                      </Row>
+                    ) : (
+                      <div style={{ background: "#fff7e6", border: "1px solid #ffe58f", borderRadius: 8, padding: "10px 14px", display: "flex", alignItems: "center", gap: 8 }}>
+                        <InfoCircleOutlined style={{ color: "#faad14" }} />
+                        <Text style={{ color: "#ad6800", fontSize: 12 }}>
+                          Cell volume breakdown not yet encoded in baseline data. Request an update to provide active/closed cell volumes.
+                        </Text>
+                      </div>
+                    )}
                   </div>
                 )}
 
@@ -1985,7 +2063,7 @@ export default function SLFPortal() {
                       <EnvironmentOutlined style={{ color: "#1a3353", fontSize: 16 }} />
                       <div>
                         <Text type="secondary" style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: 0.4 }}>Assigned SLF Facility</Text>
-                        <div><Text strong style={{ fontSize: 13 }}>{portalUser?.assignedSlfName || "—"}</Text></div>
+                        <div><Text strong style={{ fontSize: 13 }}>{activeSlfName || "—"}</Text></div>
                       </div>
                     </div>
                     <Row gutter={[12, 0]}>
@@ -3235,47 +3313,58 @@ export default function SLFPortal() {
               label: (
                 <Text strong style={{ color: "#1a3353" }}>
                   <DatabaseOutlined /> Baseline Data
+                  {!baselineSaved && <Tag color="volcano" style={{ marginLeft: 8, fontSize: 10 }}>First-time Entry</Tag>}
                 </Text>
               ),
               children: (
-                <Descriptions
-                  bordered
-                  size="small"
-                  column={{ xs: 1, sm: 2 }}
-                >
-                  <Descriptions.Item label="Total Volume Accepted">
-                    {baselineForm.getFieldValue("totalVolumeAccepted") !=
-                    null
-                      ? `${baselineForm.getFieldValue("totalVolumeAccepted")} ${(baselineForm.getFieldValue("totalVolumeAcceptedUnit") || "m³").replace("m3", "m³")}`
-                      : "—"}
-                  </Descriptions.Item>
-                  <Descriptions.Item label="Active Cell - Residual">
-                    {baselineForm.getFieldValue(
-                      "activeCellResidualVolume",
-                    ) != null
-                      ? `${baselineForm.getFieldValue("activeCellResidualVolume")} ${(baselineForm.getFieldValue("activeCellResidualUnit") || "m³").replace("m3", "m³")}`
-                      : "—"}
-                  </Descriptions.Item>
-                  <Descriptions.Item label="Active Cell - Inert">
-                    {baselineForm.getFieldValue("activeCellInertVolume") !=
-                    null
-                      ? `${baselineForm.getFieldValue("activeCellInertVolume")} ${(baselineForm.getFieldValue("activeCellInertUnit") || "m³").replace("m3", "m³")}`
-                      : "—"}
-                  </Descriptions.Item>
-                  <Descriptions.Item label="Closed Cell - Residual">
-                    {baselineForm.getFieldValue(
-                      "closedCellResidualVolume",
-                    ) != null
-                      ? `${baselineForm.getFieldValue("closedCellResidualVolume")} ${(baselineForm.getFieldValue("closedCellResidualUnit") || "m³").replace("m3", "m³")}`
-                      : "—"}
-                  </Descriptions.Item>
-                  <Descriptions.Item label="Closed Cell - Inert">
-                    {baselineForm.getFieldValue("closedCellInertVolume") !=
-                    null
-                      ? `${baselineForm.getFieldValue("closedCellInertVolume")} ${(baselineForm.getFieldValue("closedCellInertUnit") || "m³").replace("m3", "m³")}`
-                      : "—"}
-                  </Descriptions.Item>
-                </Descriptions>
+                <>
+                  {!baselineSaved && (
+                    <div style={{ background: "#fff7e6", border: "1px solid #ffe58f", borderRadius: 6, padding: "8px 14px", marginBottom: 12 }}>
+                      <InfoCircleOutlined style={{ color: "#fa8c16", marginRight: 8 }} />
+                      <Text style={{ color: "#ad6800", fontSize: 12 }}>
+                        This baseline data will be <Text strong style={{ color: "#ad6800" }}>locked after submission</Text> and cannot be changed without requesting an update. Please verify all details carefully.
+                      </Text>
+                    </div>
+                  )}
+                  <Descriptions
+                    bordered
+                    size="small"
+                    column={{ xs: 1, sm: 2 }}
+                  >
+                    <Descriptions.Item label="Total Volume Accepted">
+                      {baselineForm.getFieldValue("totalVolumeAccepted") !=
+                      null
+                        ? `${Number(baselineForm.getFieldValue("totalVolumeAccepted")).toLocaleString()} ${(baselineForm.getFieldValue("totalVolumeAcceptedUnit") || "m³").replace("m3", "m³")}`
+                        : "—"}
+                    </Descriptions.Item>
+                    <Descriptions.Item label="Active Cell - Residual">
+                      {baselineForm.getFieldValue(
+                        "activeCellResidualVolume",
+                      ) != null
+                        ? `${Number(baselineForm.getFieldValue("activeCellResidualVolume")).toLocaleString()} ${(baselineForm.getFieldValue("activeCellResidualUnit") || "m³").replace("m3", "m³")}`
+                        : "—"}
+                    </Descriptions.Item>
+                    <Descriptions.Item label="Active Cell - Inert">
+                      {baselineForm.getFieldValue("activeCellInertVolume") !=
+                      null
+                        ? `${Number(baselineForm.getFieldValue("activeCellInertVolume")).toLocaleString()} ${(baselineForm.getFieldValue("activeCellInertUnit") || "m³").replace("m3", "m³")}`
+                        : "—"}
+                    </Descriptions.Item>
+                    <Descriptions.Item label="Closed Cell - Residual">
+                      {baselineForm.getFieldValue(
+                        "closedCellResidualVolume",
+                      ) != null
+                        ? `${Number(baselineForm.getFieldValue("closedCellResidualVolume")).toLocaleString()} ${(baselineForm.getFieldValue("closedCellResidualUnit") || "m³").replace("m3", "m³")}`
+                        : "—"}
+                    </Descriptions.Item>
+                    <Descriptions.Item label="Closed Cell - Inert">
+                      {baselineForm.getFieldValue("closedCellInertVolume") !=
+                      null
+                        ? `${Number(baselineForm.getFieldValue("closedCellInertVolume")).toLocaleString()} ${(baselineForm.getFieldValue("closedCellInertUnit") || "m³").replace("m3", "m³")}`
+                        : "—"}
+                    </Descriptions.Item>
+                  </Descriptions>
+                </>
               ),
             },
             ...(haulers.length > 0

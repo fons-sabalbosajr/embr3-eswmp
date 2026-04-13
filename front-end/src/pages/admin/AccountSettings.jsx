@@ -73,6 +73,8 @@ const PERMISSION_GROUPS = [
     { key: "accountSettings", label: "Accounts & Roles" },
     { key: "portalFields", label: "Portal Fields" },
     { key: "dataReferences", label: "Data References" },
+    { key: "orgChart", label: "Org Chart" },
+    { key: "baselineData", label: "Baseline Data" },
   ]},
 ];
 

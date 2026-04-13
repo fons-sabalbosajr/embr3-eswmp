@@ -26,31 +26,34 @@ router.get("/", async (req, res) => {
   }
 });
 
-// Approve a portal user — assign SLF
+// Approve a portal user — assign SLF(s)
 router.patch("/:id/approve", async (req, res) => {
   try {
     const { assignedSlf } = req.body;
+    const slfIds = Array.isArray(assignedSlf) ? assignedSlf : assignedSlf ? [assignedSlf] : [];
 
-    if (!assignedSlf) {
+    if (slfIds.length === 0) {
       return res
         .status(400)
-        .json({ message: "Please assign an SLF facility" });
+        .json({ message: "Please assign at least one SLF facility" });
     }
 
-    // Verify the SLF exists
-    const slf = await SlfFacility.findById(assignedSlf);
-    if (!slf) {
-      return res.status(404).json({ message: "SLF facility not found" });
+    // Verify all SLFs exist
+    const slfs = await SlfFacility.find({ _id: { $in: slfIds } });
+    if (slfs.length !== slfIds.length) {
+      return res.status(404).json({ message: "One or more SLF facilities not found" });
     }
 
-    const slfDisplayName = `${slf.lgu}${slf.ownership ? " (" + slf.ownership + ")" : ""}`;
+    const slfDisplayNames = slfs.map(
+      (slf) => `${slf.lgu}${slf.ownership ? " (" + slf.ownership + ")" : ""}`
+    );
 
     const user = await UserPortal.findByIdAndUpdate(
       req.params.id,
       {
         status: "approved",
-        assignedSlf: slf._id,
-        assignedSlfName: slfDisplayName,
+        assignedSlf: slfs.map((s) => s._id),
+        assignedSlfName: slfDisplayNames,
         approvedBy: req.user.id,
         approvedAt: new Date(),
       },
@@ -60,11 +63,11 @@ router.patch("/:id/approve", async (req, res) => {
     if (!user) return res.status(404).json({ message: "User not found" });
 
     // Send approval notification email (non-blocking)
-    sendPortalApprovalEmail(user.email, user.firstName, slfDisplayName).catch(() => {});
+    sendPortalApprovalEmail(user.email, user.firstName, slfDisplayNames.join(", ")).catch(() => {});
 
     res.json({ message: "User approved successfully", data: user });
     writeLog("info", "portal.approve", {
-      message: `Portal user approved: ${user.email}, assigned SLF: ${slfDisplayName}`,
+      message: `Portal user approved: ${user.email}, assigned SLF: ${slfDisplayNames.join(", ")}`,
       user: req.user.id,
       ip: req.ip,
     });
@@ -73,27 +76,34 @@ router.patch("/:id/approve", async (req, res) => {
   }
 });
 
-// Update assigned SLF for an approved portal user
+// Update assigned SLF(s) for an approved portal user
 router.patch("/:id/update-slf", async (req, res) => {
   try {
     const { assignedSlf } = req.body;
-    if (!assignedSlf) {
-      return res.status(400).json({ message: "Please select an SLF facility" });
+    const slfIds = Array.isArray(assignedSlf) ? assignedSlf : assignedSlf ? [assignedSlf] : [];
+
+    if (slfIds.length === 0) {
+      return res.status(400).json({ message: "Please select at least one SLF facility" });
     }
-    const slf = await SlfFacility.findById(assignedSlf);
-    if (!slf) {
-      return res.status(404).json({ message: "SLF facility not found" });
+
+    const slfs = await SlfFacility.find({ _id: { $in: slfIds } });
+    if (slfs.length !== slfIds.length) {
+      return res.status(404).json({ message: "One or more SLF facilities not found" });
     }
-    const slfDisplayName = `${slf.lgu}${slf.ownership ? " (" + slf.ownership + ")" : ""}`;
+
+    const slfDisplayNames = slfs.map(
+      (slf) => `${slf.lgu}${slf.ownership ? " (" + slf.ownership + ")" : ""}`
+    );
+
     const user = await UserPortal.findByIdAndUpdate(
       req.params.id,
-      { assignedSlf: slf._id, assignedSlfName: slfDisplayName },
+      { assignedSlf: slfs.map((s) => s._id), assignedSlfName: slfDisplayNames },
       { returnDocument: "after" }
     ).select("-password");
     if (!user) return res.status(404).json({ message: "User not found" });
     res.json({ message: "Assigned SLF updated", data: user });
     writeLog("info", "portal.update-slf", {
-      message: `Portal user ${user.email} reassigned to SLF: ${slfDisplayName}`,
+      message: `Portal user ${user.email} reassigned to SLF: ${slfDisplayNames.join(", ")}`,
       user: req.user.id,
       ip: req.ip,
     });

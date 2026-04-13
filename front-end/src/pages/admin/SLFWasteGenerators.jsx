@@ -1,9 +1,10 @@
 import { Tabs } from "antd";
-import { InboxOutlined, BarChartOutlined } from "@ant-design/icons";
+import { InboxOutlined, BarChartOutlined, DatabaseOutlined } from "@ant-design/icons";
 import SubmissionSettings from "./SubmissionSettings";
 import Reports from "./Reports";
+import BaselineData from "./BaselineData";
 
-export default function SLFWasteGenerators({ canEdit = true, canDelete = true }) {
+export default function SLFWasteGenerators({ isDark, canEdit = true, canDelete = true }) {
   return (
     <Tabs
       defaultActiveKey="submissions"
@@ -15,7 +16,7 @@ export default function SLFWasteGenerators({ canEdit = true, canDelete = true })
               <InboxOutlined /> Submissions
             </>
           ),
-          children: <SubmissionSettings canEdit={canEdit} canDelete={canDelete} />,
+          children: <SubmissionSettings isDark={isDark} canEdit={canEdit} canDelete={canDelete} />,
         },
         {
           key: "reports",
@@ -24,7 +25,16 @@ export default function SLFWasteGenerators({ canEdit = true, canDelete = true })
               <BarChartOutlined /> Reports
             </>
           ),
-          children: <Reports />,
+          children: <Reports isDark={isDark} />,
+        },
+        {
+          key: "baseline",
+          label: (
+            <>
+              <DatabaseOutlined /> Baseline Data
+            </>
+          ),
+          children: <BaselineData isDark={isDark} canEdit={canEdit} canDelete={canDelete} />,
         },
       ]}
     />
