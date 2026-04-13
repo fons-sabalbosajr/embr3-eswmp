@@ -277,6 +277,17 @@ router.put("/baselines/:id", async (req, res) => {
     }
     await entry.save();
 
+    await Transaction.create({
+      dataEntry: entry._id,
+      submissionId: entry.submissionId,
+      companyName: entry.slfName,
+      submittedBy: entry.submittedBy,
+      type: "baseline_update",
+      description: `Admin updated baseline data for ${entry.slfName}`,
+      performedBy: req.body.updatedBy || "admin",
+      meta: { entryId: entry._id, slfName: entry.slfName },
+    });
+
     writeLog("info", "baseline.admin-update", {
       message: `Admin updated baseline for ${entry.slfName}`,
       user: req.body.updatedBy || "admin",
@@ -308,6 +319,17 @@ router.delete("/baselines/:id", async (req, res) => {
     entry.closedCellInertUnit = undefined;
     entry.accreditedHaulers = [];
     await entry.save();
+
+    await Transaction.create({
+      dataEntry: entry._id,
+      submissionId: entry.submissionId,
+      companyName: slfName,
+      submittedBy: entry.submittedBy,
+      type: "baseline_delete",
+      description: `Admin cleared baseline data for ${slfName}`,
+      performedBy: "admin",
+      meta: { entryId: entry._id, slfName },
+    });
 
     writeLog("warn", "baseline.admin-delete", {
       message: `Admin cleared baseline data for ${slfName}`,
