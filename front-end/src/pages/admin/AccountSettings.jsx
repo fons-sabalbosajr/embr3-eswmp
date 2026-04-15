@@ -75,6 +75,7 @@ const PERMISSION_GROUPS = [
     { key: "dataReferences", label: "Data References" },
     { key: "orgChart", label: "Org Chart" },
     { key: "baselineData", label: "Baseline Data" },
+    { key: "supportTickets", label: "Support Tickets" },
   ]},
 ];
 

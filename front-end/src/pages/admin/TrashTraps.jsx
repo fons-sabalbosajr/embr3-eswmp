@@ -260,7 +260,7 @@ export default function TrashTraps({canEdit = true, canDelete = true, isDark}) {
 
   const columns = [
     {
-      title: <><EnvironmentOutlined style={{ color: isDark ? "#7eb8da" : "#1a3353" }} /> LGU</>,
+      title: <span><EnvironmentOutlined style={{ color: isDark ? "#7eb8da" : "#1a3353" }} /> LGU</span>,
       key: "lgu", width: 160, fixed: "left",
       filters: filters.province,
       onFilter: (v, r) => r.province === v,
@@ -281,7 +281,7 @@ export default function TrashTraps({canEdit = true, canDelete = true, isDark}) {
       render: (v) => v === "MBA" ? <Tag color="blue" bordered={false}>MBA</Tag> : <Tag color="default" bordered={false}>{v || "—"}</Tag>,
     },
     {
-      title: <><CalendarOutlined style={{ color: "#13c2c2" }} /> Installed</>,
+      title: <span><CalendarOutlined style={{ color: "#13c2c2" }} /> Installed</span>,
       dataIndex: "dateInstalled", key: "dateInstalled", width: 110,
       render: (v) => v ? dayjs(v).format("MMM DD, YYYY") : "—",
       sorter: (a, b) => new Date(a.dateInstalled || 0) - new Date(b.dateInstalled || 0),
@@ -293,19 +293,19 @@ export default function TrashTraps({canEdit = true, canDelete = true, isDark}) {
       render: (v) => getStatusTag(v),
     },
     {
-      title: <><ToolOutlined style={{ color: "#1890ff" }} /> HDPE</>,
+      title: <span><ToolOutlined style={{ color: "#1890ff" }} /> HDPE</span>,
       dataIndex: "noOfTrashTrapsHDPE", key: "hdpe", width: 90,
       sorter: (a, b) => (a.noOfTrashTrapsHDPE || 0) - (b.noOfTrashTrapsHDPE || 0),
       render: (v) => v != null ? <Text strong style={{ color: "#13c2c2" }}>{v}</Text> : "—",
     },
     {
-      title: <><BarChartOutlined style={{ color: "#722ed1" }} /> Waste Hauled</>,
+      title: <span><BarChartOutlined style={{ color: "#722ed1" }} /> Waste Hauled</span>,
       dataIndex: "estimatedVolumeWasteHauled", key: "waste", width: 130,
       sorter: (a, b) => (a.estimatedVolumeWasteHauled || 0) - (b.estimatedVolumeWasteHauled || 0),
       render: (v) => v != null ? <Text strong>{Number(v).toLocaleString()} kg</Text> : "—",
     },
     {
-      title: <><SafetyCertificateOutlined style={{ color: "#faad14" }} /> Accessories</>,
+      title: <span><SafetyCertificateOutlined style={{ color: "#faad14" }} /> Accessories</span>,
       key: "accessories", width: 160,
       filters: [...new Set([
         ...(filters.statusOfWasteLifter || []).map((f) => f.value),
@@ -322,7 +322,7 @@ export default function TrashTraps({canEdit = true, canDelete = true, isDark}) {
       ),
     },
     {
-      title: <><TeamOutlined style={{ color: "#722ed1" }} /> Personnel</>,
+      title: <span><TeamOutlined style={{ color: "#722ed1" }} /> Personnel</span>,
       key: "personnel", width: 170,
       render: (_, r) => (
         <Tooltip title={<div><div><UserOutlined /> Focal: {r.focalPerson || "—"}</div><div><SolutionOutlined /> ENMO: {r.enmoAssigned || "—"}</div></div>}>
@@ -340,7 +340,7 @@ export default function TrashTraps({canEdit = true, canDelete = true, isDark}) {
       render: (v) => v ? <Tag bordered={false} color="cyan">{v.replace(/^\d+\./, "")}</Tag> : "—",
     },
     {
-      title: <><ClockCircleOutlined style={{ color: "#1890ff" }} /> Monitoring</>,
+      title: <span><ClockCircleOutlined style={{ color: "#1890ff" }} /> Monitoring</span>,
       dataIndex: "dateOfMonitoring", key: "monitoring", width: 120,
       render: (v) => v ? dayjs(v).format("MMM DD, YYYY") : "—",
     },
@@ -498,7 +498,7 @@ export default function TrashTraps({canEdit = true, canDelete = true, isDark}) {
               </div>
             )}
           <Tabs items={[
-            { key: "general", label: <><EnvironmentOutlined /> General Info</>, children: (
+            { key: "general", label: <span><EnvironmentOutlined /> General Info</span>, children: (
               <>
                 <Descriptions column={2} size="small" bordered>
                   <Descriptions.Item label="Province">{detailModal.province}</Descriptions.Item>
@@ -525,7 +525,7 @@ export default function TrashTraps({canEdit = true, canDelete = true, isDark}) {
                 </Descriptions>
               </>
             )},
-            { key: "monitoring", label: <><ClockCircleOutlined /> Monitoring</>, children: (
+            { key: "monitoring", label: <span><ClockCircleOutlined /> Monitoring</span>, children: (
               <>
                 <Descriptions column={2} size="small" bordered>
                   <Descriptions.Item label="Target Month">{detailViewRecord.targetMonth || "—"}</Descriptions.Item>
@@ -543,7 +543,7 @@ export default function TrashTraps({canEdit = true, canDelete = true, isDark}) {
                 </Descriptions>
               </>
             )},
-            { key: "compliance", label: <><SafetyCertificateOutlined /> Compliance</>, children: (
+            { key: "compliance", label: <span><SafetyCertificateOutlined /> Compliance</span>, children: (
               <Descriptions column={2} size="small" bordered>
                 <Descriptions.Item label="Remarks" span={2}>{detailViewRecord.remarks || "—"}</Descriptions.Item>
                 <Descriptions.Item label="Advise Letter">{detailViewRecord.adviseLetterDateIssued || "—"}</Descriptions.Item>

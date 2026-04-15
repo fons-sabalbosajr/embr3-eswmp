@@ -34,6 +34,7 @@ const userSchema = new mongoose.Schema(
         dataReferences: { view: true, edit: true, delete: true },
         baselineData: { view: true, edit: true, delete: true },
         orgChart: { view: true, edit: true, delete: true },
+        supportTickets: { view: true, edit: true, delete: true },
       }),
     },
     isVerified: { type: Boolean, default: false },

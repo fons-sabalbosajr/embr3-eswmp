@@ -287,7 +287,7 @@ export default function LguInitiatedMRF({canEdit = true, canDelete = true, isDar
 
   const columns = [
     {
-      title: <><EnvironmentOutlined style={{ color: isDark ? "#7eb8da" : "#1a3353" }} /> LGU</>,
+      title: <span><EnvironmentOutlined style={{ color: isDark ? "#7eb8da" : "#1a3353" }} /> LGU</span>,
       key: "lgu", width: 140, fixed: "left",
       filters: filters.province,
       onFilter: (v, r) => r.province === v,
@@ -308,14 +308,14 @@ export default function LguInitiatedMRF({canEdit = true, canDelete = true, isDar
       render: (v) => v === "MBA" ? <Tag color="blue" bordered={false}>MBA</Tag> : <Tag color="default" bordered={false}>{v || "—"}</Tag>,
     },
     {
-      title: <><ApartmentOutlined style={{ color: "#13c2c2" }} /> MRF Type</>,
+      title: <span><ApartmentOutlined style={{ color: "#13c2c2" }} /> MRF Type</span>,
       dataIndex: "typeOfMRF", key: "typeOfMRF", width: 150,
       filters: filters.typeOfMRF,
       onFilter: (v, r) => r.typeOfMRF === v,
       render: (v) => v ? <Tag color="cyan" bordered={false}>{v}</Tag> : <Text type="secondary">—</Text>,
     },
     {
-      title: <><FundOutlined style={{ color: "#722ed1" }} /> Funding</>,
+      title: <span><FundOutlined style={{ color: "#722ed1" }} /> Funding</span>,
       key: "funding", width: 140,
       sorter: (a, b) => (a.estimatedCost || 0) - (b.estimatedCost || 0),
       render: (_, r) => (
@@ -326,7 +326,7 @@ export default function LguInitiatedMRF({canEdit = true, canDelete = true, isDar
       ),
     },
     {
-      title: <><CalendarOutlined style={{ color: "#1890ff" }} /> Year Est.</>,
+      title: <span><CalendarOutlined style={{ color: "#1890ff" }} /> Year Est.</span>,
       dataIndex: "yearEstablished", key: "yearEstablished", width: 90,
       sorter: (a, b) => (a.yearEstablished || 0) - (b.yearEstablished || 0),
       render: (v) => v || "—",
@@ -338,7 +338,7 @@ export default function LguInitiatedMRF({canEdit = true, canDelete = true, isDar
       render: (v) => getStatusTag(v),
     },
     {
-      title: <><TeamOutlined style={{ color: "#722ed1" }} /> Personnel</>,
+      title: <span><TeamOutlined style={{ color: "#722ed1" }} /> Personnel</span>,
       key: "personnel", width: 190,
       filters: filters.focalPerson, filterSearch: true,
       onFilter: (v, r) => r.focalPerson === v,
@@ -557,7 +557,7 @@ export default function LguInitiatedMRF({canEdit = true, canDelete = true, isDar
               </div>
             )}
           <Tabs items={[
-            { key: "general", label: <><EnvironmentOutlined /> General Info</>, children: (
+            { key: "general", label: <span><EnvironmentOutlined /> General Info</span>, children: (
               <>
                 <Descriptions column={2} size="small" bordered>
                   <Descriptions.Item label="Province"><Text strong>{detailViewRecord.province}</Text></Descriptions.Item>
@@ -586,7 +586,7 @@ export default function LguInitiatedMRF({canEdit = true, canDelete = true, isDar
                 </>)}
               </>
             )},
-            { key: "operations", label: <><ToolOutlined /> Operations</>, children: (
+            { key: "operations", label: <span><ToolOutlined /> Operations</span>, children: (
               <Descriptions column={2} size="small" bordered>
                 <Descriptions.Item label="Equipment Used">{detailViewRecord.equipmentUsed || "—"}</Descriptions.Item>
                 <Descriptions.Item label="Type of Wastes Received">{detailViewRecord.typeOfWastesReceived || "—"}</Descriptions.Item>
@@ -596,7 +596,7 @@ export default function LguInitiatedMRF({canEdit = true, canDelete = true, isDar
                 <Descriptions.Item label="Remarks (If Not Operational)" span={2}>{detailViewRecord.remarksIfNotOperational || "—"}</Descriptions.Item>
               </Descriptions>
             )},
-            { key: "monitoring", label: <><ClockCircleOutlined /> Monitoring</>, children: (
+            { key: "monitoring", label: <span><ClockCircleOutlined /> Monitoring</span>, children: (
               <Descriptions column={2} size="small" bordered>
                 <Descriptions.Item label="Target Month">{detailViewRecord.targetMonth || "—"}</Descriptions.Item>
                 <Descriptions.Item label="IIS Number">{detailViewRecord.iisNumber || "—"}</Descriptions.Item>
@@ -608,7 +608,7 @@ export default function LguInitiatedMRF({canEdit = true, canDelete = true, isDar
                 <Descriptions.Item label="Tracking">{detailViewRecord.trackingOfReports || "—"}</Descriptions.Item>
               </Descriptions>
             )},
-            { key: "compliance", label: <><SafetyCertificateOutlined /> Compliance</>, children: (
+            { key: "compliance", label: <span><SafetyCertificateOutlined /> Compliance</span>, children: (
               <Descriptions column={2} size="small" bordered>
                 <Descriptions.Item label="Remarks & Recommendation" span={2}>{detailViewRecord.remarksAndRecommendation || "—"}</Descriptions.Item>
                 <Descriptions.Item label="Findings" span={2}>{detailViewRecord.findings || "—"}</Descriptions.Item>

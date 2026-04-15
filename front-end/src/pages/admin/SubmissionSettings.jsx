@@ -446,6 +446,44 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, is
     }
   };
 
+  const handleApproveEdit = async (id) => {
+    const result = await Swal.fire({
+      title: "Approve Edit Request?",
+      text: "The portal user will be able to edit and resubmit this entry.",
+      icon: "question",
+      showCancelButton: true,
+      confirmButtonText: "Approve",
+      confirmButtonColor: "#52c41a",
+    });
+    if (!result.isConfirmed) return;
+    try {
+      await api.patch(`/data-slf/${id}/approve-edit`);
+      Swal.fire({ icon: "success", title: "Edit Approved", timer: 1500, showConfirmButton: false });
+      fetchData(true);
+    } catch (err) {
+      Swal.fire("Error", err.response?.data?.message || "Failed to approve edit", "error");
+    }
+  };
+
+  const handleRejectEdit = async (id) => {
+    const { value: reason } = await Swal.fire({
+      title: "Reject Edit Request",
+      input: "textarea",
+      inputPlaceholder: "Reason for rejection (optional)...",
+      showCancelButton: true,
+      confirmButtonText: "Reject",
+      confirmButtonColor: "#ff4d4f",
+    });
+    if (reason === undefined) return; // cancelled
+    try {
+      await api.patch(`/data-slf/${id}/reject-edit`, { reason: reason || "" });
+      Swal.fire({ icon: "success", title: "Edit Rejected", timer: 1500, showConfirmButton: false });
+      fetchData(true);
+    } catch (err) {
+      Swal.fire("Error", err.response?.data?.message || "Failed to reject edit", "error");
+    }
+  };
+
   const filtered = data.filter((d) => {
     const matchSearch =
       d.idNo?.toLowerCase().includes(search.toLowerCase()) ||
@@ -460,14 +498,15 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, is
     acknowledged: "green",
     rejected: "red",
     reverted: "volcano",
+    editApproved: "cyan",
   };
 
   const columns = [
     {
       title: (
-        <>
+        <span>
           <IdcardOutlined /> ID No.
-        </>
+        </span>
       ),
       dataIndex: "idNo",
       key: "idNo",
@@ -480,9 +519,9 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, is
     },
     {
       title: (
-        <>
+        <span>
           <BankOutlined /> LGU/Company
-        </>
+        </span>
       ),
       dataIndex: "lguCompanyName",
       key: "lguCompanyName",
@@ -502,9 +541,9 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, is
     },
     {
       title: (
-        <>
+        <span>
           <CalendarOutlined /> Disposal Date
-        </>
+        </span>
       ),
       dataIndex: "dateOfDisposal",
       key: "dateOfDisposal",
@@ -513,9 +552,9 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, is
     },
     {
       title: (
-        <>
+        <span>
           <CarOutlined /> Trucks
-        </>
+        </span>
       ),
       key: "trucks",
       width: 70,
@@ -525,11 +564,16 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, is
       title: "Status",
       dataIndex: "status",
       key: "status",
-      width: 120,
-      render: (val) => (
-        <Tag color={statusColors[val] || "default"}>
-          {val?.charAt(0).toUpperCase() + val?.slice(1)}
-        </Tag>
+      width: 140,
+      render: (val, r) => (
+        <Space direction="vertical" size={2}>
+          <Tag color={statusColors[val] || "default"}>
+            {val?.charAt(0).toUpperCase() + val?.slice(1)}
+          </Tag>
+          {r.editRequested && val !== "editApproved" && val !== "reverted" && (
+            <Tag color="processing" style={{ fontSize: 10 }}>Edit Requested</Tag>
+          )}
+        </Space>
       ),
     },
     {
@@ -596,6 +640,26 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, is
                 }}
               />
             </Tooltip>
+          )}
+          {r.editRequested && r.status !== "editApproved" && r.status !== "reverted" && canEdit && (
+            <>
+              <Tooltip title="Approve Edit Request">
+                <Button
+                  size="small"
+                  icon={<CheckOutlined />}
+                  style={{ borderColor: "#52c41a", color: "#52c41a" }}
+                  onClick={() => handleApproveEdit(r._id)}
+                />
+              </Tooltip>
+              <Tooltip title="Reject Edit Request">
+                <Button
+                  size="small"
+                  danger
+                  icon={<CloseOutlined />}
+                  onClick={() => handleRejectEdit(r._id)}
+                />
+              </Tooltip>
+            </>
           )}
           {canDelete && <Popconfirm
             title="Delete this submission?"
@@ -683,6 +747,7 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, is
             <Option value="acknowledged">Acknowledged</Option>
             <Option value="rejected">Rejected</Option>
             <Option value="reverted">Reverted</Option>
+            <Option value="editApproved">Edit Approved</Option>
           </Select>
           {selectedRowKeys.length > 0 && (
             <Button

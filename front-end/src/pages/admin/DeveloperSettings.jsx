@@ -250,7 +250,7 @@ export default function DeveloperSettings({onSettingsSaved, isDark}) {
         items={[
           {
             key: "general",
-            label: <><GlobalOutlined /> General</>,
+            label: <span><GlobalOutlined /> General</span>,
             children: (
               <Form form={form} layout="vertical" onFinish={handleSave} initialValues={settings}>
                 {/* General Settings */}
@@ -351,7 +351,7 @@ export default function DeveloperSettings({onSettingsSaved, isDark}) {
           },
           {
             key: "portal-email",
-            label: <><MailOutlined /> Portal &amp; Email</>,
+            label: <span><MailOutlined /> Portal &amp; Email</span>,
             children: (
               <Form form={form} layout="vertical" onFinish={handleSave} initialValues={settings}>
                 {/* Portal Settings */}
@@ -506,7 +506,7 @@ export default function DeveloperSettings({onSettingsSaved, isDark}) {
           },
           {
             key: "security",
-            label: <><LockOutlined /> Security</>,
+            label: <span><LockOutlined /> Security</span>,
             children: (
               <Form form={form} layout="vertical" onFinish={handleSave} initialValues={settings}>
                 {/* Security Settings */}
@@ -585,7 +585,7 @@ export default function DeveloperSettings({onSettingsSaved, isDark}) {
           },
           {
             key: "system",
-            label: <><ToolOutlined /> System &amp; Logs</>,
+            label: <span><ToolOutlined /> System &amp; Logs</span>,
             children: (
               <>
                 {/* System Info (read-only) */}
@@ -728,7 +728,7 @@ export default function DeveloperSettings({onSettingsSaved, isDark}) {
             ),
           },          {
             key: "deleted-submissions",
-            label: <><DeleteOutlined /> Deleted Submissions</>,
+            label: <span><DeleteOutlined /> Deleted Submissions</span>,
             children: (
               <Card
                 style={{ borderRadius: 10 }}
@@ -796,7 +796,7 @@ export default function DeveloperSettings({onSettingsSaved, isDark}) {
             ),
           },          {
             key: "dashboard-display",
-            label: <><DashboardOutlined /> Dashboard Display</>,
+            label: <span><DashboardOutlined /> Dashboard Display</span>,
             children: (
               <Card
                 style={{ borderRadius: 10 }}
@@ -895,9 +895,11 @@ export default function DeveloperSettings({onSettingsSaved, isDark}) {
             ),
           },          {
             key: "portal-users",
-            label: <><TeamOutlined /> Portal Users</>,
+            label: <span><TeamOutlined /> Portal Users</span>,
             children: <PortalUsers isDark={isDark} />,
-          },        ]}
+          },
+
+        ]}
       />
     </div>
   );

@@ -2,6 +2,7 @@ const express = require("express");
 const mongoose = require("mongoose");
 const cors = require("cors");
 const os = require("os");
+const http = require("http");
 require("dotenv").config();
 
 const authRoutes = require("./routes/auth");
@@ -28,8 +29,10 @@ const portalAuthRoutes = require("./routes/portalAuth");
 const portalUsersRoutes = require("./routes/portalUsers");
 const dataHistoryRoutes = require("./routes/dataHistory");
 const notificationRoutes = require("./routes/notifications");
+const supportTicketRoutes = require("./routes/supportTickets");
 
 const app = express();
+const server = http.createServer(app);
 const PORT = process.env.PORT || 5000;
 const MONGODB_URI =
   process.env.MONGODB_URI || "mongodb://127.0.0.1:27017/embr3_eswmp";
@@ -65,6 +68,31 @@ app.use(cors({
   credentials: true,
 }));
 app.use(express.json());
+
+// ── Socket.IO setup ──
+const { Server: SocketIO } = require("socket.io");
+const io = new SocketIO(server, {
+  cors: {
+    origin: allowedOrigins,
+    credentials: true,
+  },
+  path: "/eswm-pipeline/socket.io",
+});
+
+io.on("connection", (socket) => {
+  const { role } = socket.handshake.query || {};
+  if (role === "admin") {
+    socket.join("admin-room");
+  }
+  if (role === "portal") {
+    const email = socket.handshake.query.email;
+    if (email) socket.join(`portal-${email}`);
+  }
+  socket.on("disconnect", () => {});
+});
+
+// Make io accessible to routes via req.app
+app.set("io", io);
 
 // Attach user info from JWT to req for logging
 app.use((req, _res, next) => {
@@ -201,6 +229,7 @@ app.use("/api/portal-auth", portalAuthRoutes);
 app.use("/api/portal-users", portalUsersRoutes);
 app.use("/api/data-history", dataHistoryRoutes);
 app.use("/api/notifications", notificationRoutes);
+app.use("/api/support-tickets", supportTicketRoutes);
 
 // Get local IP address
 function getLocalIP() {
@@ -216,7 +245,7 @@ function getLocalIP() {
 }
 
 // Listen on 0.0.0.0 so the server is accessible over the network
-app.listen(PORT, "0.0.0.0", () => {
+server.listen(PORT, "0.0.0.0", () => {
   const localIP = getLocalIP();
   console.log(`\nServer is running on:`);
   console.log(`  Local:   http://localhost:${PORT}`);

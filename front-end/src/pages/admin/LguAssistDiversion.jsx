@@ -169,7 +169,7 @@ export default function LguAssistDiversion({canEdit = true, canDelete = true, is
 
   const columns = [
     {
-      title: <><EnvironmentOutlined style={{ color: isDark ? "#7eb8da" : "#1a3353" }} /> LGU</>, key: "lgu", width: 180, fixed: "left",
+      title: <span><EnvironmentOutlined style={{ color: isDark ? "#7eb8da" : "#1a3353" }} /> LGU</span>, key: "lgu", width: 180, fixed: "left",
       filters: filters.province, onFilter: (v, r) => r.province === v,
       sorter: (a, b) => (a.lgu || "").localeCompare(b.lgu || ""),
       render: (_, r) => (
@@ -186,7 +186,7 @@ export default function LguAssistDiversion({canEdit = true, canDelete = true, is
       render: (v) => getStatusTag(v),
     },
     {
-      title: <><PieChartOutlined style={{ color: "#2f54eb" }} /> Waste Diversion</>, key: "waste", width: 200,
+      title: <span><PieChartOutlined style={{ color: "#2f54eb" }} /> Waste Diversion</span>, key: "waste", width: 200,
       sorter: (a, b) => (a.percentageWasteDiversion || 0) - (b.percentageWasteDiversion || 0),
       render: (_, r) => (
         <div style={{ lineHeight: 1.3 }}>
@@ -197,7 +197,7 @@ export default function LguAssistDiversion({canEdit = true, canDelete = true, is
       ),
     },
     {
-      title: <><TeamOutlined style={{ color: "#722ed1" }} /> Personnel</>, key: "personnel", width: 160,
+      title: <span><TeamOutlined style={{ color: "#722ed1" }} /> Personnel</span>, key: "personnel", width: 160,
       render: (_, r) => (
         <Tooltip title={<div><div>Focal: {r.focalPerson || "—"}</div><div>Staff: {r.eswmStaff || "—"}</div><div>ENMO: {r.enmoAssigned || "—"}</div></div>}>
           <div style={{ lineHeight: 1.3 }}>

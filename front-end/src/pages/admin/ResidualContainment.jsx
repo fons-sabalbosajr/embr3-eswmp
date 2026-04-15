@@ -175,7 +175,7 @@ export default function ResidualContainment({canEdit = true, canDelete = true, i
 
   const columns = [
     {
-      title: <><EnvironmentOutlined style={{ color: isDark ? "#7eb8da" : "#1a3353" }} /> LGU</>, key: "lgu", width: 150, fixed: "left",
+      title: <span><EnvironmentOutlined style={{ color: isDark ? "#7eb8da" : "#1a3353" }} /> LGU</span>, key: "lgu", width: 150, fixed: "left",
       filters: filters.province, onFilter: (v, r) => r.province === v,
       sorter: (a, b) => (a.municipality || "").localeCompare(b.municipality || ""),
       render: (_, r) => (
@@ -196,7 +196,7 @@ export default function ResidualContainment({canEdit = true, canDelete = true, i
       render: (v) => getStatusTag(v),
     },
     {
-      title: <><AlertOutlined style={{ color: "#fa541c" }} /> Facility</>, key: "facility", width: 160,
+      title: <span><AlertOutlined style={{ color: "#fa541c" }} /> Facility</span>, key: "facility", width: 160,
       render: (_, r) => (
         <div style={{ lineHeight: 1.3 }}>
           <Text style={{ fontSize: 11 }}>{r.facilityOrBin || "—"}</Text><br />
@@ -205,7 +205,7 @@ export default function ResidualContainment({canEdit = true, canDelete = true, i
       ),
     },
     {
-      title: <><TeamOutlined style={{ color: "#722ed1" }} /> Personnel</>, key: "personnel", width: 180,
+      title: <span><TeamOutlined style={{ color: "#722ed1" }} /> Personnel</span>, key: "personnel", width: 180,
       render: (_, r) => (
         <Tooltip title={<div><div>Focal: {r.focalPerson || "—"}</div><div>Staff: {r.eswmStaff || "—"}</div><div>ENMO: {r.enmoAssigned || "—"}</div></div>}>
           <div style={{ lineHeight: 1.3 }}>

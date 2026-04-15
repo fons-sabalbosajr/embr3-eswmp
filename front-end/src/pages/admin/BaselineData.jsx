@@ -30,6 +30,8 @@ import {
   SaveOutlined,
   PlusOutlined,
   DeleteOutlined,
+  UnlockOutlined,
+  LockOutlined,
 } from "@ant-design/icons";
 import Swal from "sweetalert2";
 import api from "../../api";
@@ -137,6 +139,65 @@ export default function BaselineData({ isDark, canEdit = false, canDelete = fals
     }
   };
 
+  const handleApproveBaselineUpdate = async (slfName) => {
+    const result = await Swal.fire({
+      title: "Approve Baseline Update?",
+      text: `This will unlock baseline data for "${slfName}" so the portal user can make changes.`,
+      icon: "question",
+      showCancelButton: true,
+      confirmButtonText: "Approve",
+      confirmButtonColor: "#52c41a",
+    });
+    if (!result.isConfirmed) return;
+    try {
+      await api.patch(`/data-slf/baseline-update-approve/${encodeURIComponent(slfName)}`, {});
+      Swal.fire({ icon: "success", title: "Update Approved", text: "The portal user can now edit their baseline data.", timer: 2000, showConfirmButton: false });
+      fetchBaselines();
+    } catch (err) {
+      Swal.fire("Error", err?.response?.data?.message || "Could not approve baseline update", "error");
+    }
+  };
+
+  const handleLockBaseline = async (slfName) => {
+    const result = await Swal.fire({
+      title: "Lock Baseline?",
+      text: `This will re-lock baseline data for "${slfName}".`,
+      icon: "warning",
+      showCancelButton: true,
+      confirmButtonText: "Lock",
+      confirmButtonColor: "#fa8c16",
+    });
+    if (!result.isConfirmed) return;
+    try {
+      await api.patch(`/data-slf/baseline-update-lock/${encodeURIComponent(slfName)}`, {});
+      Swal.fire({ icon: "success", title: "Baseline Locked", timer: 1500, showConfirmButton: false });
+      fetchBaselines();
+    } catch (err) {
+      Swal.fire("Error", err?.response?.data?.message || "Could not lock baseline", "error");
+    }
+  };
+
+  const handleRejectBaselineUpdate = async (slfName) => {
+    const { value: reason } = await Swal.fire({
+      title: "Reject Baseline Update?",
+      text: `This will deny the update request for "${slfName}".`,
+      icon: "warning",
+      input: "text",
+      inputPlaceholder: "Reason for rejection (optional)",
+      showCancelButton: true,
+      confirmButtonText: "Reject",
+      confirmButtonColor: "#ff4d4f",
+    });
+    if (reason === undefined) return; // cancelled
+    try {
+      await api.patch(`/data-slf/baseline-update-reject/${encodeURIComponent(slfName)}`, { reason });
+      Swal.fire({ icon: "success", title: "Request Rejected", timer: 1500, showConfirmButton: false });
+      fetchBaselines();
+    } catch (err) {
+      Swal.fire("Error", err?.response?.data?.message || "Could not reject baseline update", "error");
+    }
+  };
+
   const addHauler = () => {
     setHaulers((prev) => [
       ...prev,
@@ -214,6 +275,11 @@ export default function BaselineData({ isDark, canEdit = false, canDelete = fals
       render: (_, r) => fmtVol(r.activeCellInertVolume, r.activeCellInertUnit),
     },
     {
+      title: "Active Cell (Hazardous)",
+      key: "activeHaz",
+      render: (_, r) => r.acceptsHazardousWaste ? fmtVol(r.activeCellHazardousVolume, r.activeCellHazardousUnit) : "—",
+    },
+    {
       title: "Closed Cell (Residual)",
       key: "closedRes",
       render: (_, r) => fmtVol(r.closedCellResidualVolume, r.closedCellResidualUnit),
@@ -222,6 +288,11 @@ export default function BaselineData({ isDark, canEdit = false, canDelete = fals
       title: "Closed Cell (Inert)",
       key: "closedInert",
       render: (_, r) => fmtVol(r.closedCellInertVolume, r.closedCellInertUnit),
+    },
+    {
+      title: "Closed Cell (Hazardous)",
+      key: "closedHaz",
+      render: (_, r) => r.acceptsHazardousWaste ? fmtVol(r.closedCellHazardousVolume, r.closedCellHazardousUnit) : "—",
     },
     {
       title: "Haulers",
@@ -263,6 +334,29 @@ export default function BaselineData({ isDark, canEdit = false, canDelete = fals
               onClick={() => { setSelectedRecord(r); setDetailOpen(true); }}
             />
           </Tooltip>
+          {r.baselineUpdateRequested ? (
+            <span style={{ display: "inline-flex", gap: 4 }}>
+              <Tooltip title="Approve Baseline Update Request">
+                <CheckCircleOutlined
+                  style={{ fontSize: 16, cursor: "pointer", color: "#52c41a" }}
+                  onClick={() => handleApproveBaselineUpdate(r.slfName)}
+                />
+              </Tooltip>
+              <Tooltip title="Reject Baseline Update Request">
+                <CloseCircleOutlined
+                  style={{ fontSize: 16, cursor: "pointer", color: "#ff4d4f" }}
+                  onClick={() => handleRejectBaselineUpdate(r.slfName)}
+                />
+              </Tooltip>
+            </span>
+          ) : r.baselineUpdateApproved ? (
+            <Tooltip title="Lock Baseline (re-lock after update)">
+              <LockOutlined
+                style={{ fontSize: 16, cursor: "pointer", color: "#fa8c16" }}
+                onClick={() => handleLockBaseline(r.slfName)}
+              />
+            </Tooltip>
+          ) : null}
           {canEdit && (
             <Tooltip title="Edit Baseline">
               <EditOutlined

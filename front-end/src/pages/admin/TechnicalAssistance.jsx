@@ -174,7 +174,7 @@ export default function TechnicalAssistance({canEdit = true, canDelete = true, i
 
   const columns = [
     {
-      title: <><EnvironmentOutlined style={{ color: isDark ? "#7eb8da" : "#1a3353" }} /> Location</>, key: "location", width: 180, fixed: "left",
+      title: <span><EnvironmentOutlined style={{ color: isDark ? "#7eb8da" : "#1a3353" }} /> Location</span>, key: "location", width: 180, fixed: "left",
       filters: filters.province, onFilter: (v, r) => r.province === v,
       sorter: (a, b) => (a.barangay || "").localeCompare(b.barangay || ""),
       render: (_, r) => (
@@ -190,7 +190,7 @@ export default function TechnicalAssistance({canEdit = true, canDelete = true, i
       filters: filters.manilaBayArea, onFilter: (v, r) => r.manilaBayArea === v,
       render: (v) => v === "MBA" ? <Tag color="blue" bordered={false}>MBA</Tag> : <Tag color="default" bordered={false}>{v || "—"}</Tag>,
     },
-    { title: <><BankOutlined style={{ color: "#2f54eb" }} /> Facility Type</>, dataIndex: "typeOfFacility", key: "facility", width: 140,
+    { title: <span><BankOutlined style={{ color: "#2f54eb" }} /> Facility Type</span>, dataIndex: "typeOfFacility", key: "facility", width: 140,
       filters: filters.typeOfFacility, onFilter: (v, r) => r.typeOfFacility === v,
       render: (v) => v ? <Tag bordered={false} color="geekblue">{v}</Tag> : "—",
     },
@@ -209,7 +209,7 @@ export default function TechnicalAssistance({canEdit = true, canDelete = true, i
       render: (v) => v ? <Tag bordered={false} color={/yes/i.test(v) ? "green" : "default"}>{v}</Tag> : "—",
     },
     {
-      title: <><TeamOutlined style={{ color: "#722ed1" }} /> Personnel</>, key: "personnel", width: 150,
+      title: <span><TeamOutlined style={{ color: "#722ed1" }} /> Personnel</span>, key: "personnel", width: 150,
       render: (_, r) => (
         <Tooltip title={<div><div>Focal: {r.focalPerson || "—"}</div><div>Staff: {r.eswmStaff || "—"}</div><div>ENMO: {r.enmoAssigned || "—"}</div></div>}>
           <div style={{ lineHeight: 1.3 }}>

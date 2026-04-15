@@ -24,8 +24,14 @@ const transactionSchema = new mongoose.Schema(
         "revert_requested",  // portal user requested revert
         "revert_approved",   // admin approved revert
         "baseline_update_request", // portal user requested baseline field update
+        "baseline_update_approved", // admin approved baseline update request
         "baseline_update",   // admin updated baseline data
         "baseline_delete",   // admin cleared baseline data
+        "support_ticket",    // portal user raised a support concern
+        "support_ticket_reply", // admin replied to support ticket
+        "submission_edit_request", // portal user requested edit on approved submission
+        "submission_edit_approved", // admin approved edit request
+        "submission_edit_rejected", // admin rejected edit request
       ],
       required: true,
       index: true,

@@ -7,6 +7,7 @@ const { sendAcknowledgementEmail, sendBulkAcknowledgeEmail, sendSubmissionEmail 
 const { writeLog } = require("../utils/logger");
 const Transaction = require("../models/Transaction");
 const Notification = require("../models/Notification");
+const { notifyAdmin, notifyPortal, refreshAdmin } = require("../utils/socketEmit");
 
 // Province code mapping (mirrors DataSLF model)
 const PROVINCE_CODES = {
@@ -25,7 +26,7 @@ const router = express.Router();
 // Submit SLF data — batch (client portal)
 router.post("/", async (req, res) => {
   try {
-    const { entries, submittedBy } = req.body;
+    const { entries, submittedBy } = req.body || {};
     const items = Array.isArray(entries) ? entries : [req.body];
     const submissionId = `SUB-${Date.now()}-${crypto.randomBytes(3).toString("hex")}`;
 
@@ -80,6 +81,8 @@ router.post("/", async (req, res) => {
         meta: { entryCount: saved.length, companyName: saved[0]?.lguCompanyName, submittedBy },
       });
     } catch { /* silent */ }
+    notifyAdmin(req, { type: "new_submission", title: "New Submission", message: `${submittedBy || "A portal user"} submitted ${saved.length} entries` });
+    refreshAdmin(req, "submissions");
 
     writeLog("info", "submission.create", {
       message: `New submission: ${saved.length} entries by ${submittedBy || "unknown"}`,
@@ -105,11 +108,14 @@ router.put("/:id", async (req, res) => {
       "dateOfDisposal", "lguCompanyName", "companyType", "address",
       "companyRegion", "companyProvince", "companyMunicipality", "companyBarangay",
       "trucks", "accreditedHaulers", "slfGenerator", "slfName",
-      "totalVolumeAccepted", "totalVolumeAcceptedUnit",
+      "baselineUnit", "totalVolumeAccepted", "totalVolumeAcceptedUnit",
       "activeCellResidualVolume", "activeCellResidualUnit",
       "activeCellInertVolume", "activeCellInertUnit",
+      "activeCellHazardousVolume", "activeCellHazardousUnit",
       "closedCellResidualVolume", "closedCellResidualUnit",
       "closedCellInertVolume", "closedCellInertUnit",
+      "closedCellHazardousVolume", "closedCellHazardousUnit",
+      "acceptsHazardousWaste",
     ];
     for (const field of allowedFields) {
       if (req.body[field] !== undefined) entry[field] = req.body[field];
@@ -172,6 +178,8 @@ router.put("/:id", async (req, res) => {
         meta: { idNo: entry.idNo, companyName: entry.lguCompanyName },
       });
     } catch { /* silent */ }
+    notifyAdmin(req, { type: "resubmission", title: "Resubmission", message: `${entry.submittedBy} resubmitted ${entry.idNo}` });
+    refreshAdmin(req, "submissions");
 
     writeLog("info", "submission.resubmit", {
       message: `Entry ${entry.idNo} resubmitted after revert`,
@@ -187,27 +195,35 @@ router.put("/:id", async (req, res) => {
 // Get latest baseline info for an SLF (by assigned name) — portal
 router.get("/baseline/:slfName", async (req, res) => {
   try {
-    const slfName = decodeURIComponent(req.params.slfName);
+    const slfName = req.params.slfName;
 
     const latest = await DataSLF.findOne({
-      slfName,
+      $or: [{ slfName }, { lguCompanyName: slfName }],
       totalVolumeAccepted: { $ne: null },
     }).sort({ createdAt: -1 });
 
     if (!latest) return res.json(null);
 
     res.json({
+      baselineUnit: latest.baselineUnit,
       totalVolumeAccepted: latest.totalVolumeAccepted,
       totalVolumeAcceptedUnit: latest.totalVolumeAcceptedUnit,
       activeCellResidualVolume: latest.activeCellResidualVolume,
       activeCellResidualUnit: latest.activeCellResidualUnit,
       activeCellInertVolume: latest.activeCellInertVolume,
       activeCellInertUnit: latest.activeCellInertUnit,
+      activeCellHazardousVolume: latest.activeCellHazardousVolume,
+      activeCellHazardousUnit: latest.activeCellHazardousUnit,
       closedCellResidualVolume: latest.closedCellResidualVolume,
       closedCellResidualUnit: latest.closedCellResidualUnit,
       closedCellInertVolume: latest.closedCellInertVolume,
       closedCellInertUnit: latest.closedCellInertUnit,
+      closedCellHazardousVolume: latest.closedCellHazardousVolume,
+      closedCellHazardousUnit: latest.closedCellHazardousUnit,
+      acceptsHazardousWaste: latest.acceptsHazardousWaste || false,
       accreditedHaulers: latest.accreditedHaulers || [],
+      baselineUpdateApproved: latest.baselineUpdateApproved || false,
+      baselineUpdateRequested: latest.baselineUpdateRequested || false,
       savedAt: latest.createdAt,
     });
   } catch (error) {
@@ -225,30 +241,49 @@ router.get("/baselines", async (req, res) => {
       { $sort: { createdAt: -1 } },
       {
         $group: {
-          _id: { $ifNull: ["$slfGenerator", "$slfName"] },
+          _id: { $ifNull: ["$slfName", "$lguCompanyName"] },
           doc: { $first: "$$ROOT" },
+          _anyUpdateRequested: { $max: { $ifNull: ["$baselineUpdateRequested", false] } },
+          _anyUpdateApproved: { $max: { $ifNull: ["$baselineUpdateApproved", false] } },
         },
       },
-      { $replaceRoot: { newRoot: "$doc" } },
+      {
+        $replaceRoot: {
+          newRoot: {
+            $mergeObjects: [
+              "$doc",
+              { baselineUpdateRequested: "$_anyUpdateRequested", baselineUpdateApproved: "$_anyUpdateApproved" },
+            ],
+          },
+        },
+      },
       { $sort: { slfName: 1 } },
     ]);
 
     const results = latestPerSlf.map((d) => ({
       _id: d._id,
       slfGenerator: d.slfGenerator,
-      slfName: d.slfName || "Unknown",
+      slfName: d.slfName || d.lguCompanyName || "Unknown",
+      baselineUnit: d.baselineUnit || "m³",
       totalVolumeAccepted: d.totalVolumeAccepted,
       totalVolumeAcceptedUnit: d.totalVolumeAcceptedUnit || "m³",
       activeCellResidualVolume: d.activeCellResidualVolume,
       activeCellResidualUnit: d.activeCellResidualUnit || "m³",
       activeCellInertVolume: d.activeCellInertVolume,
       activeCellInertUnit: d.activeCellInertUnit || "m³",
+      activeCellHazardousVolume: d.activeCellHazardousVolume,
+      activeCellHazardousUnit: d.activeCellHazardousUnit || "m³",
       closedCellResidualVolume: d.closedCellResidualVolume,
       closedCellResidualUnit: d.closedCellResidualUnit || "m³",
       closedCellInertVolume: d.closedCellInertVolume,
       closedCellInertUnit: d.closedCellInertUnit || "m³",
+      closedCellHazardousVolume: d.closedCellHazardousVolume,
+      closedCellHazardousUnit: d.closedCellHazardousUnit || "m³",
+      acceptsHazardousWaste: d.acceptsHazardousWaste || false,
       accreditedHaulers: d.accreditedHaulers || [],
       submittedBy: d.submittedBy,
+      baselineUpdateApproved: d.baselineUpdateApproved || false,
+      baselineUpdateRequested: d.baselineUpdateRequested || false,
       lastUpdated: d.createdAt,
     }));
 
@@ -265,11 +300,15 @@ router.put("/baselines/:id", async (req, res) => {
     if (!entry) return res.status(404).json({ message: "Baseline record not found" });
 
     const fields = [
+      "baselineUnit",
       "totalVolumeAccepted", "totalVolumeAcceptedUnit",
       "activeCellResidualVolume", "activeCellResidualUnit",
       "activeCellInertVolume", "activeCellInertUnit",
+      "activeCellHazardousVolume", "activeCellHazardousUnit",
       "closedCellResidualVolume", "closedCellResidualUnit",
       "closedCellInertVolume", "closedCellInertUnit",
+      "closedCellHazardousVolume", "closedCellHazardousUnit",
+      "acceptsHazardousWaste",
       "accreditedHaulers",
     ];
     for (const f of fields) {
@@ -338,6 +377,324 @@ router.delete("/baselines/:id", async (req, res) => {
     });
 
     res.json({ message: "Baseline data cleared" });
+  } catch (error) {
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+});
+
+// Admin approve baseline update request
+router.patch("/baseline-update-approve/:slfName", async (req, res) => {
+  try {
+    const slfName = req.params.slfName;
+    const { approvedBy } = req.body || {};
+
+    const filter = {
+      $or: [{ slfName }, { lguCompanyName: slfName }],
+      totalVolumeAccepted: { $ne: null },
+    };
+
+    // Update ALL docs for this company so aggregation always picks up the flag
+    await DataSLF.updateMany(filter, {
+      $set: {
+        baselineUpdateApproved: true,
+        baselineUpdateApprovedAt: new Date(),
+        baselineUpdateApprovedBy: approvedBy || "admin",
+        baselineUpdateRequested: false,
+      },
+    });
+
+    const latest = await DataSLF.findOne(filter).sort({ createdAt: -1 });
+    if (!latest) return res.status(404).json({ message: "Baseline not found" });
+
+    // Notify the portal user
+    try {
+      await Notification.create({
+        recipient: latest.submittedBy,
+        type: "baseline_update_approved",
+        title: "Baseline Update Approved",
+        message: `Your baseline update request for ${slfName} has been approved. You may now update your baseline data.`,
+        meta: { slfName },
+      });
+    } catch { /* silent */ }
+    notifyPortal(req, latest.submittedBy, { type: "baseline_update_approved", title: "Baseline Update Approved" });
+
+    // Log transaction
+    try {
+      await Transaction.create({
+        submissionId: latest.submissionId,
+        dataEntry: latest._id,
+        companyName: slfName,
+        submittedBy: latest.submittedBy,
+        type: "baseline_update_approved",
+        description: `Admin approved baseline update request for ${slfName}`,
+        performedBy: approvedBy || "admin",
+        meta: { slfName },
+      });
+    } catch { /* silent */ }
+
+    writeLog("info", "baseline.update-approved", {
+      message: `Baseline update approved for ${slfName}`,
+      user: approvedBy || "admin",
+    });
+
+    res.json({ message: "Baseline update approved", data: latest });
+  } catch (error) {
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+});
+
+// Admin revoke baseline update approval (re-lock)
+router.patch("/baseline-update-lock/:slfName", async (req, res) => {
+  try {
+    const slfName = req.params.slfName;
+    const { lockedBy } = req.body || {};
+
+    const filter = {
+      $or: [{ slfName }, { lguCompanyName: slfName }],
+      totalVolumeAccepted: { $ne: null },
+    };
+
+    const result = await DataSLF.updateMany(filter, {
+      $set: { baselineUpdateApproved: false },
+    });
+
+    if (result.matchedCount === 0) return res.status(404).json({ message: "Baseline not found" });
+
+    const latest = await DataSLF.findOne(filter).sort({ createdAt: -1 });
+
+    // Notify the portal user in real time
+    if (latest?.submittedBy) {
+      try {
+        await Notification.create({
+          recipient: latest.submittedBy,
+          type: "baseline_locked",
+          title: "Baseline Locked",
+          message: `Your baseline data for ${slfName} has been locked by an admin.`,
+          meta: { slfName },
+        });
+      } catch { /* silent */ }
+      notifyPortal(req, latest.submittedBy, { type: "baseline_locked", title: "Baseline Locked" });
+    }
+
+    // Log transaction
+    try {
+      await Transaction.create({
+        submissionId: latest?.submissionId,
+        dataEntry: latest?._id,
+        companyName: slfName,
+        submittedBy: latest?.submittedBy,
+        type: "baseline_locked",
+        description: `Admin locked baseline data for ${slfName}`,
+        performedBy: lockedBy || "admin",
+        meta: { slfName },
+      });
+    } catch { /* silent */ }
+
+    writeLog("info", "baseline.locked", {
+      message: `Baseline locked for ${slfName}`,
+      user: lockedBy || "admin",
+    });
+
+    res.json({ message: "Baseline re-locked" });
+  } catch (error) {
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+});
+
+// Admin reject baseline update request
+router.patch("/baseline-update-reject/:slfName", async (req, res) => {
+  try {
+    const slfName = req.params.slfName;
+    const { rejectedBy, reason } = req.body || {};
+
+    const filter = {
+      $or: [{ slfName }, { lguCompanyName: slfName }],
+      totalVolumeAccepted: { $ne: null },
+    };
+
+    // Clear flags on ALL matching docs
+    await DataSLF.updateMany(filter, {
+      $set: { baselineUpdateRequested: false, baselineUpdateApproved: false },
+    });
+
+    const latest = await DataSLF.findOne(filter).sort({ createdAt: -1 });
+    if (!latest) return res.status(404).json({ message: "Baseline not found" });
+
+    // Notify the portal user
+    try {
+      await Notification.create({
+        recipient: latest.submittedBy,
+        type: "baseline_update_rejected",
+        title: "Baseline Update Request Rejected",
+        message: `Your baseline update request for ${slfName} has been rejected.${reason ? " Reason: " + reason : ""}`,
+        meta: { slfName, reason },
+      });
+    } catch { /* silent */ }
+    notifyPortal(req, latest.submittedBy, { type: "baseline_update_rejected", title: "Baseline Update Rejected" });
+
+    // Log transaction
+    try {
+      await Transaction.create({
+        submissionId: latest.submissionId,
+        dataEntry: latest._id,
+        companyName: slfName,
+        submittedBy: latest.submittedBy,
+        type: "baseline_update_request",
+        description: `Admin rejected baseline update request for ${slfName}${reason ? ": " + reason : ""}`,
+        performedBy: rejectedBy || "admin",
+        meta: { slfName, reason, action: "rejected" },
+      });
+    } catch { /* silent */ }
+
+    res.json({ message: "Baseline update request rejected", data: latest });
+  } catch (error) {
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+});
+
+// Portal: Request submission edit (for acknowledged entries)
+router.patch("/:id/request-edit", async (req, res) => {
+  try {
+    const entry = await DataSLF.findById(req.params.id);
+    if (!entry) return res.status(404).json({ message: "Entry not found" });
+    if (entry.status !== "acknowledged") {
+      return res.status(400).json({ message: "Only approved entries can request edits" });
+    }
+
+    const { reason, requestedBy } = req.body || {};
+    entry.revertRequested = true;
+    entry.revertReason = reason;
+    entry.revertRequestedAt = new Date();
+    await entry.save();
+
+    // Notify admin
+    try {
+      await Notification.create({
+        recipient: "admin",
+        type: "submission_edit_request",
+        title: "Submission Edit Request",
+        message: `${requestedBy || "A portal user"} requested to edit submission ${entry.idNo}`,
+        submissionId: entry.submissionId,
+        dataEntry: entry._id,
+        meta: { idNo: entry.idNo, reason, requestedBy },
+      });
+    } catch { /* silent */ }
+    notifyAdmin(req, { type: "submission_edit_request", title: "Edit Request", message: `${requestedBy} requested edit for ${entry.idNo}` });
+    refreshAdmin(req, "submissions");
+
+    // Log transaction
+    try {
+      await Transaction.create({
+        submissionId: entry.submissionId,
+        dataEntry: entry._id,
+        companyName: entry.lguCompanyName,
+        companyType: entry.companyType,
+        submittedBy: entry.submittedBy,
+        type: "submission_edit_request",
+        description: `Portal user requested edit for ${entry.idNo}: ${reason}`,
+        performedBy: requestedBy || "portal",
+        meta: { idNo: entry.idNo, reason },
+      });
+    } catch { /* silent */ }
+
+    res.json({ message: "Edit request submitted", data: entry });
+  } catch (error) {
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+});
+
+// Admin: Approve submission edit request (revert the entry so portal user can edit)
+router.patch("/:id/approve-edit", async (req, res) => {
+  try {
+    const entry = await DataSLF.findById(req.params.id);
+    if (!entry) return res.status(404).json({ message: "Entry not found" });
+
+    const { approvedBy, reason } = req.body || {};
+    entry.status = "reverted";
+    entry.revertedBy = approvedBy || "admin";
+    entry.revertedAt = new Date();
+    entry.revertReason = reason || entry.revertReason || "Edit request approved by admin";
+    entry.revertRequested = false;
+    await entry.save();
+
+    // Notify portal user
+    try {
+      await Notification.create({
+        recipient: entry.submittedBy,
+        type: "submission_edit_approved",
+        title: "Edit Request Approved",
+        message: `Your edit request for submission ${entry.idNo} has been approved. You may now edit and resubmit.`,
+        submissionId: entry.submissionId,
+        dataEntry: entry._id,
+        meta: { idNo: entry.idNo },
+      });
+    } catch { /* silent */ }
+    notifyPortal(req, entry.submittedBy, { type: "submission_edit_approved", title: "Edit Approved" });
+    refreshAdmin(req, "submissions");
+
+    try {
+      await Transaction.create({
+        submissionId: entry.submissionId,
+        dataEntry: entry._id,
+        companyName: entry.lguCompanyName,
+        companyType: entry.companyType,
+        submittedBy: entry.submittedBy,
+        type: "submission_edit_approved",
+        description: `Admin approved edit request for ${entry.idNo}`,
+        performedBy: approvedBy || "admin",
+        meta: { idNo: entry.idNo },
+      });
+    } catch { /* silent */ }
+
+    const populated = await DataSLF.findById(entry._id).populate("slfGenerator");
+    res.json({ message: "Edit request approved", data: populated });
+  } catch (error) {
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+});
+
+// Admin: Reject submission edit request
+router.patch("/:id/reject-edit", async (req, res) => {
+  try {
+    const entry = await DataSLF.findById(req.params.id);
+    if (!entry) return res.status(404).json({ message: "Entry not found" });
+
+    const { rejectedBy, reason } = req.body || {};
+    entry.revertRequested = false;
+    entry.revertReason = "";
+    await entry.save();
+
+    // Notify portal user
+    try {
+      await Notification.create({
+        recipient: entry.submittedBy,
+        type: "submission_edit_rejected",
+        title: "Edit Request Rejected",
+        message: `Your edit request for submission ${entry.idNo} was rejected. Reason: ${reason || "Not specified"}`,
+        submissionId: entry.submissionId,
+        dataEntry: entry._id,
+        meta: { idNo: entry.idNo, reason },
+      });
+    } catch { /* silent */ }
+    notifyPortal(req, entry.submittedBy, { type: "submission_edit_rejected", title: "Edit Rejected" });
+    refreshAdmin(req, "submissions");
+
+    try {
+      await Transaction.create({
+        submissionId: entry.submissionId,
+        dataEntry: entry._id,
+        companyName: entry.lguCompanyName,
+        companyType: entry.companyType,
+        submittedBy: entry.submittedBy,
+        type: "submission_edit_rejected",
+        description: `Admin rejected edit request for ${entry.idNo}: ${reason || "No reason"}`,
+        performedBy: rejectedBy || "admin",
+        meta: { idNo: entry.idNo, reason },
+      });
+    } catch { /* silent */ }
+
+    const populated = await DataSLF.findById(entry._id).populate("slfGenerator");
+    res.json({ message: "Edit request rejected", data: populated });
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });
   }
@@ -475,11 +832,14 @@ router.patch("/:id/admin-edit", async (req, res) => {
       "dateOfDisposal", "lguCompanyName", "companyType", "address",
       "companyRegion", "companyProvince", "companyMunicipality", "companyBarangay",
       "trucks", "accreditedHaulers", "slfGenerator", "slfName",
-      "totalVolumeAccepted", "totalVolumeAcceptedUnit",
+      "baselineUnit", "totalVolumeAccepted", "totalVolumeAcceptedUnit",
       "activeCellResidualVolume", "activeCellResidualUnit",
       "activeCellInertVolume", "activeCellInertUnit",
+      "activeCellHazardousVolume", "activeCellHazardousUnit",
       "closedCellResidualVolume", "closedCellResidualUnit",
       "closedCellInertVolume", "closedCellInertUnit",
+      "closedCellHazardousVolume", "closedCellHazardousUnit",
+      "acceptsHazardousWaste",
     ];
     for (const key of allowed) {
       if (req.body[key] !== undefined) entry[key] = req.body[key];
@@ -501,7 +861,7 @@ router.patch("/:id/admin-edit", async (req, res) => {
 // Update status (acknowledge/reject)
 router.patch("/:id/status", async (req, res) => {
   try {
-    const { status } = req.body;
+    const { status } = req.body || {};
     const entry = await DataSLF.findByIdAndUpdate(
       req.params.id,
       { status },
@@ -527,7 +887,9 @@ router.patch("/:id/status", async (req, res) => {
           });
         }
       } catch { /* silent */ }
+      notifyPortal(req, entry.submittedBy, { type: "status_change", title: status === "acknowledged" ? "Submission Acknowledged" : "Submission Rejected" });
     }
+    refreshAdmin(req, "submissions");
 
     // Log status change transaction
     try {
@@ -581,7 +943,7 @@ router.patch("/:id/status", async (req, res) => {
 // Bulk update status (acknowledge/reject multiple entries)
 router.patch("/bulk-status", async (req, res) => {
   try {
-    const { ids, status } = req.body;
+    const { ids, status } = req.body || {};
     if (!Array.isArray(ids) || ids.length === 0) {
       return res.status(400).json({ message: "No entries selected" });
     }
@@ -745,7 +1107,7 @@ router.delete("/:id/permanent", async (req, res) => {
 // Request revert (portal user requests edit on approved submission)
 router.patch("/:id/request-revert", async (req, res) => {
   try {
-    const { reason, requestedBy } = req.body;
+    const { reason, requestedBy } = req.body || {};
     const entry = await DataSLF.findById(req.params.id);
     if (!entry) return res.status(404).json({ message: "Entry not found" });
     if (entry.status !== "acknowledged") {
@@ -787,7 +1149,7 @@ router.patch("/:id/request-revert", async (req, res) => {
 // Admin-initiated revert (admin sends submission back to portal user for correction)
 router.patch("/:id/admin-revert", async (req, res) => {
   try {
-    const { reason, performedBy } = req.body;
+    const { reason, performedBy } = req.body || {};
     if (!reason) return res.status(400).json({ message: "Reason is required" });
 
     const entry = await DataSLF.findById(req.params.id);
@@ -833,7 +1195,9 @@ router.patch("/:id/admin-revert", async (req, res) => {
           });
         }
       } catch { /* silent */ }
+      notifyPortal(req, entry.submittedBy, { type: "reverted", title: "Submission Reverted" });
     }
+    refreshAdmin(req, "submissions");
 
     // Send revert notification email to portal user
     if (entry.submittedBy) {
@@ -908,7 +1272,7 @@ router.patch("/:id/approve-revert", async (req, res) => {
 // Send email to portal user regarding a submission
 router.post("/:id/send-email", async (req, res) => {
   try {
-    const { subject, message } = req.body;
+    const { subject, message } = req.body || {};
     if (!subject || !message) {
       return res.status(400).json({ message: "Subject and message are required" });
     }
@@ -952,24 +1316,49 @@ router.post("/:id/send-email", async (req, res) => {
 // Portal user requests baseline field update — notifies admin
 router.post("/baseline-update-request", async (req, res) => {
   try {
-    const { slfName, requestedBy, fields, reason } = req.body;
+    const { slfName, requestedBy, fields, reason } = req.body || {};
     if (!slfName || !requestedBy) {
       return res.status(400).json({ message: "slfName and requestedBy are required" });
     }
 
-    // Create notification for admin
-    await Notification.create({
-      recipient: "admin",
-      type: "baseline_update_request",
-      title: `Baseline Update Request — ${slfName}`,
-      message: reason || `${requestedBy} is requesting to update baseline fields: ${(fields || []).join(", ")}`,
-      meta: { slfName, requestedBy, fields, reason },
+    // Upsert notification — update existing unread one instead of creating duplicates
+    await Notification.findOneAndUpdate(
+      { recipient: "admin", type: "baseline_update_request", "meta.slfName": slfName, read: false },
+      {
+        $set: {
+          title: `Baseline Update Request — ${slfName}`,
+          message: reason || `${requestedBy} is requesting to update baseline fields: ${(fields || []).join(", ")}`,
+          meta: { slfName, requestedBy, fields, reason },
+        },
+        $setOnInsert: { recipient: "admin", type: "baseline_update_request" },
+      },
+      { upsert: true, new: true, timestamps: true }
+    );
+
+    notifyAdmin(req, { type: "baseline_update_request", title: "Baseline Update Request", message: `${requestedBy} requested baseline update for ${slfName}` });
+    refreshAdmin(req, "baselines");
+
+    // Mark ALL baseline entries for this company as having a pending update request
+    // updateMany ensures the aggregation picks up the flag regardless of which doc is $first
+    const filter = {
+      $or: [{ slfName }, { lguCompanyName: slfName }],
+      totalVolumeAccepted: { $ne: null },
+    };
+    await DataSLF.updateMany(filter, {
+      $set: {
+        baselineUpdateRequested: true,
+        baselineUpdateRequestedAt: new Date(),
+        baselineUpdateRequestReason: reason || "",
+        baselineUpdateApproved: false,
+      },
     });
+    const latestEntry = await DataSLF.findOne(filter).sort({ createdAt: -1 });
 
     // Log transaction
     await Transaction.create({
       companyName: slfName,
       submittedBy: requestedBy,
+      submissionId: latestEntry?.submissionId || undefined,
       type: "baseline_update_request",
       description: `Baseline update request: ${(fields || []).join(", ")}`,
       performedBy: requestedBy,

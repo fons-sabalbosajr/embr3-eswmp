@@ -137,4 +137,46 @@ router.get("/thread/:submissionId", async (req, res) => {
   }
 });
 
+// Get single transaction by ID
+router.get("/:id", async (req, res) => {
+  try {
+    const txn = await Transaction.findById(req.params.id);
+    if (!txn) return res.status(404).json({ message: "Transaction not found" });
+    res.json(txn);
+  } catch (error) {
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+});
+
+// Update a transaction (admin edit)
+router.put("/:id", async (req, res) => {
+  try {
+    const { description, companyName, submittedBy, performedBy, meta } = req.body;
+    const txn = await Transaction.findById(req.params.id);
+    if (!txn) return res.status(404).json({ message: "Transaction not found" });
+
+    if (description !== undefined) txn.description = description;
+    if (companyName !== undefined) txn.companyName = companyName;
+    if (submittedBy !== undefined) txn.submittedBy = submittedBy;
+    if (performedBy !== undefined) txn.performedBy = performedBy;
+    if (meta !== undefined) txn.meta = meta;
+    await txn.save();
+
+    res.json({ message: "Transaction updated", data: txn });
+  } catch (error) {
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+});
+
+// Delete a transaction
+router.delete("/:id", async (req, res) => {
+  try {
+    const txn = await Transaction.findByIdAndDelete(req.params.id);
+    if (!txn) return res.status(404).json({ message: "Transaction not found" });
+    res.json({ message: "Transaction deleted" });
+  } catch (error) {
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+});
+
 module.exports = router;

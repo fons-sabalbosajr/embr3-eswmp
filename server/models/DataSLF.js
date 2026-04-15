@@ -1,5 +1,15 @@
 const mongoose = require("mongoose");
 
+const vehicleSchema = new mongoose.Schema(
+  {
+    plateNumber: { type: String, trim: true },
+    vehicleType: { type: String, trim: true },
+    capacity: { type: Number },
+    capacityUnit: { type: String, enum: ["tons", "m³", "m3"], default: "m³" },
+  },
+  { _id: false }
+);
+
 const truckSchema = new mongoose.Schema(
   {
     disposalTicketNo: { type: String, trim: true },
@@ -7,20 +17,11 @@ const truckSchema = new mongoose.Schema(
     plateNumber: { type: String, trim: true },
     truckCapacity: { type: Number },
     truckCapacityUnit: { type: String, enum: ["tons", "m³", "m3"], default: "m³" },
+    vehicles: [vehicleSchema],
     actualVolume: { type: Number },
     actualVolumeUnit: { type: String, enum: ["tons", "m³", "m3"], default: "tons" },
     wasteType: { type: String, enum: ["Residual", "Hazardous Waste", "Treated Hazardous Waste"] },
     hazWasteCode: [{ type: String, trim: true }],
-  },
-  { _id: false }
-);
-
-const vehicleSchema = new mongoose.Schema(
-  {
-    plateNumber: { type: String, trim: true },
-    vehicleType: { type: String, trim: true },
-    capacity: { type: Number },
-    capacityUnit: { type: String, enum: ["tons", "m³", "m3"], default: "m³" },
   },
   { _id: false }
 );
@@ -58,17 +59,30 @@ const dataSLFSchema = new mongoose.Schema(
     cellStatus: { type: String, enum: ["Active", "Closed"], default: "Active" },
 
     // Baseline Information
+    baselineUnit: { type: String, enum: ["m³", "tons", "m3"], default: "m³" },
     totalVolumeAccepted: { type: Number },
     totalVolumeAcceptedUnit: { type: String, enum: ["m³", "tons", "m3"], default: "m³" },
     activeCellResidualVolume: { type: Number },
     activeCellResidualUnit: { type: String, enum: ["m³", "tons", "m3"], default: "m³" },
     activeCellInertVolume: { type: Number },
     activeCellInertUnit: { type: String, enum: ["m³", "tons", "m3"], default: "m³" },
+    activeCellHazardousVolume: { type: Number },
+    activeCellHazardousUnit: { type: String, enum: ["m³", "tons", "m3"], default: "m³" },
     closedCellResidualVolume: { type: Number },
     closedCellResidualUnit: { type: String, enum: ["m³", "tons", "m3"], default: "m³" },
     closedCellInertVolume: { type: Number },
     closedCellInertUnit: { type: String, enum: ["m³", "tons", "m3"], default: "m³" },
+    closedCellHazardousVolume: { type: Number },
+    closedCellHazardousUnit: { type: String, enum: ["m³", "tons", "m3"], default: "m³" },
+    acceptsHazardousWaste: { type: Boolean, default: false },
     accreditedHaulers: [haulerSchema],
+    // Baseline update approval
+    baselineUpdateRequested: { type: Boolean, default: false },
+    baselineUpdateRequestedAt: { type: Date },
+    baselineUpdateRequestReason: { type: String, trim: true },
+    baselineUpdateApproved: { type: Boolean, default: false },
+    baselineUpdateApprovedAt: { type: Date },
+    baselineUpdateApprovedBy: { type: String, trim: true },
 
     dateOfDisposal: { type: Date, required: true },
     lguCompanyName: { type: String, required: true, trim: true },

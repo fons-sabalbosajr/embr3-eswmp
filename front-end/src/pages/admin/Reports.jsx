@@ -14,6 +14,11 @@ import {
   Row,
   Col,
   Spin,
+  Tooltip,
+  Popconfirm,
+  Form,
+  Descriptions,
+  message,
 } from "antd";
 import {
   BarChartOutlined,
@@ -26,9 +31,15 @@ import {
   DeleteOutlined,
   HistoryOutlined,
   ExclamationCircleOutlined,
+  EditOutlined,
+  CustomerServiceOutlined,
+  MessageOutlined,
+  EyeOutlined,
+  LockOutlined,
 } from "@ant-design/icons";
 import dayjs from "dayjs";
 import api from "../../api";
+import { connectSocket } from "../../utils/socket";
 import { exportToExcel } from "../../utils/exportExcel";
 import secureStorage from "../../utils/secureStorage";
 
@@ -39,10 +50,23 @@ const CACHE_TTL = 5 * 60 * 1000;
 
 const TYPE_CONFIG = {
   submission: { color: "blue", icon: <SendOutlined />, label: "Submission" },
+  resubmission: { color: "geekblue", icon: <HistoryOutlined />, label: "Resubmission" },
   email_ack_sent: { color: "green", icon: <MailOutlined />, label: "Email Sent" },
   email_ack_failed: { color: "red", icon: <ExclamationCircleOutlined />, label: "Email Failed" },
   status_change: { color: "orange", icon: <CheckCircleOutlined />, label: "Status Change" },
   deleted: { color: "default", icon: <DeleteOutlined />, label: "Deleted" },
+  revert_requested: { color: "volcano", icon: <HistoryOutlined />, label: "Revert Requested" },
+  revert_approved: { color: "lime", icon: <CheckCircleOutlined />, label: "Revert Approved" },
+  baseline_update_request: { color: "gold", icon: <EditOutlined />, label: "Baseline Update Request" },
+  baseline_update_approved: { color: "cyan", icon: <CheckCircleOutlined />, label: "Baseline Update Approved" },
+  baseline_locked: { color: "orange", icon: <LockOutlined />, label: "Baseline Locked" },
+  baseline_update: { color: "cyan", icon: <EditOutlined />, label: "Baseline Update" },
+  baseline_delete: { color: "red", icon: <DeleteOutlined />, label: "Baseline Delete" },
+  support_ticket: { color: "purple", icon: <CustomerServiceOutlined />, label: "Support Ticket" },
+  support_ticket_reply: { color: "purple", icon: <MessageOutlined />, label: "Support Reply" },
+  submission_edit_request: { color: "gold", icon: <EditOutlined />, label: "Edit Request" },
+  submission_edit_approved: { color: "green", icon: <CheckCircleOutlined />, label: "Edit Approved" },
+  submission_edit_rejected: { color: "red", icon: <CloseCircleOutlined />, label: "Edit Rejected" },
 };
 
 export default function Reports() {
@@ -61,6 +85,16 @@ export default function Reports() {
   const [threadData, setThreadData] = useState([]);
   const [threadLoading, setThreadLoading] = useState(false);
   const [threadSubId, setThreadSubId] = useState("");
+
+  // View detail modal
+  const [detailVisible, setDetailVisible] = useState(false);
+  const [detailRecord, setDetailRecord] = useState(null);
+
+  // Edit modal
+  const [editVisible, setEditVisible] = useState(false);
+  const [editRecord, setEditRecord] = useState(null);
+  const [editSaving, setEditSaving] = useState(false);
+  const [editForm] = Form.useForm();
 
   const fetchTransactions = useCallback(async (skipCache = false) => {
     const cacheSubKey = `${CACHE_KEY}-${page}-${pageSize}-${filterCompany || ""}-${filterType || ""}-${search || ""}`;
@@ -112,8 +146,10 @@ export default function Reports() {
 
   useEffect(() => {
     fetchTransactions();
-    const interval = setInterval(fetchTransactions, 10000);
-    return () => clearInterval(interval);
+    const socket = connectSocket("admin");
+    const handler = () => fetchTransactions(true);
+    socket.on("data-refresh", handler);
+    return () => { socket.off("data-refresh", handler); };
   }, [fetchTransactions]);
 
   const openThread = async (submissionId) => {
@@ -142,6 +178,47 @@ export default function Reports() {
       "Submitted By": t.submittedBy || "—",
     }));
     exportToExcel(rows, "Transaction_History", "Transactions");
+  };
+
+  // CRUD handlers
+  const handleView = (record) => {
+    setDetailRecord(record);
+    setDetailVisible(true);
+  };
+
+  const handleEdit = (record) => {
+    setEditRecord(record);
+    editForm.setFieldsValue({
+      description: record.description || "",
+      companyName: record.companyName || "",
+      performedBy: record.performedBy || "",
+    });
+    setEditVisible(true);
+  };
+
+  const handleEditSave = async () => {
+    try {
+      const values = await editForm.validateFields();
+      setEditSaving(true);
+      await api.put(`/transactions/${editRecord._id}`, values);
+      message.success("Transaction updated");
+      setEditVisible(false);
+      fetchTransactions(true);
+    } catch {
+      message.error("Failed to update transaction");
+    } finally {
+      setEditSaving(false);
+    }
+  };
+
+  const handleDelete = async (id) => {
+    try {
+      await api.delete(`/transactions/${id}`);
+      message.success("Transaction deleted");
+      fetchTransactions(true);
+    } catch {
+      message.error("Failed to delete transaction");
+    }
   };
 
   const columns = [
@@ -175,7 +252,7 @@ export default function Reports() {
     {
       title: "Type",
       dataIndex: "type",
-      width: 150,
+      width: 200,
       render: (v) => {
         const cfg = TYPE_CONFIG[v] || {};
         return (
@@ -188,7 +265,7 @@ export default function Reports() {
     {
       title: "Description",
       dataIndex: "description",
-      ellipsis: true,
+      ellipsis: false,
       render: (v) => <span style={{ fontSize: 12 }}>{v || "—"}</span>,
     },
     {
@@ -197,6 +274,40 @@ export default function Reports() {
       width: 250,
       ellipsis: true,
       render: (v) => <span style={{ fontSize: 12 }}>{v || "—"}</span>,
+    },
+    {
+      title: "Action",
+      key: "action",
+      width: 120,
+      align: "center",
+      render: (_, record) => (
+        <Space size={4}>
+          <Tooltip title="View Details">
+            <EyeOutlined
+              style={{ fontSize: 15, cursor: "pointer", color: "#1677ff" }}
+              onClick={() => handleView(record)}
+            />
+          </Tooltip>
+          <Tooltip title="Edit">
+            <EditOutlined
+              style={{ fontSize: 15, cursor: "pointer", color: "#722ed1" }}
+              onClick={() => handleEdit(record)}
+            />
+          </Tooltip>
+          <Popconfirm
+            title="Delete this transaction log?"
+            onConfirm={() => handleDelete(record._id)}
+            okText="Yes"
+            cancelText="No"
+          >
+            <Tooltip title="Delete">
+              <DeleteOutlined
+                style={{ fontSize: 15, cursor: "pointer", color: "#ff4d4f" }}
+              />
+            </Tooltip>
+          </Popconfirm>
+        </Space>
+      ),
     },
   ];
 
@@ -251,10 +362,21 @@ export default function Reports() {
               style={{ width: "100%" }}
             >
               <Option value="submission">Submission</Option>
+              <Option value="resubmission">Resubmission</Option>
               <Option value="email_ack_sent">Email Sent</Option>
               <Option value="email_ack_failed">Email Failed</Option>
               <Option value="status_change">Status Change</Option>
               <Option value="deleted">Deleted</Option>
+              <Option value="baseline_update_request">Baseline Update Request</Option>
+              <Option value="baseline_update_approved">Baseline Update Approved</Option>
+              <Option value="baseline_locked">Baseline Locked</Option>
+              <Option value="baseline_update">Baseline Update</Option>
+              <Option value="baseline_delete">Baseline Delete</Option>
+              <Option value="support_ticket">Support Ticket</Option>
+              <Option value="support_ticket_reply">Support Reply</Option>
+              <Option value="submission_edit_request">Edit Request</Option>
+              <Option value="submission_edit_approved">Edit Approved</Option>
+              <Option value="submission_edit_rejected">Edit Rejected</Option>
             </Select>
           </Col>
           <Col xs={24} sm={8} md={6}>
@@ -338,6 +460,62 @@ export default function Reports() {
             }))}
           />
         )}
+      </Modal>
+
+      {/* View Detail Modal */}
+      <Modal
+        title={<Space><EyeOutlined /><span>Transaction Details</span></Space>}
+        open={detailVisible}
+        onCancel={() => setDetailVisible(false)}
+        footer={null}
+        width={600}
+        style={{ maxWidth: "95vw" }}
+      >
+        {detailRecord && (
+          <Descriptions column={1} bordered size="small">
+            <Descriptions.Item label="Date">{dayjs(detailRecord.createdAt).format("MMM DD, YYYY hh:mm:ss A")}</Descriptions.Item>
+            <Descriptions.Item label="Submission ID">{detailRecord.submissionId || "—"}</Descriptions.Item>
+            <Descriptions.Item label="Company">{detailRecord.companyName || "—"}</Descriptions.Item>
+            <Descriptions.Item label="Company Type">{detailRecord.companyType || "—"}</Descriptions.Item>
+            <Descriptions.Item label="Type">
+              <Tag color={TYPE_CONFIG[detailRecord.type]?.color} icon={TYPE_CONFIG[detailRecord.type]?.icon}>
+                {TYPE_CONFIG[detailRecord.type]?.label || detailRecord.type}
+              </Tag>
+            </Descriptions.Item>
+            <Descriptions.Item label="Description">{detailRecord.description || "—"}</Descriptions.Item>
+            <Descriptions.Item label="Performed By">{detailRecord.performedBy || "—"}</Descriptions.Item>
+            <Descriptions.Item label="Submitted By">{detailRecord.submittedBy || "—"}</Descriptions.Item>
+            {detailRecord.meta && (
+              <Descriptions.Item label="Meta">
+                <pre style={{ margin: 0, fontSize: 12, whiteSpace: "pre-wrap" }}>{JSON.stringify(detailRecord.meta, null, 2)}</pre>
+              </Descriptions.Item>
+            )}
+          </Descriptions>
+        )}
+      </Modal>
+
+      {/* Edit Modal */}
+      <Modal
+        title={<Space><EditOutlined /><span>Edit Transaction</span></Space>}
+        open={editVisible}
+        onCancel={() => setEditVisible(false)}
+        onOk={handleEditSave}
+        confirmLoading={editSaving}
+        okText="Save"
+        width={500}
+        style={{ maxWidth: "95vw" }}
+      >
+        <Form form={editForm} layout="vertical" style={{ marginTop: 16 }}>
+          <Form.Item name="description" label="Description" rules={[{ required: true }]}>
+            <Input.TextArea rows={3} />
+          </Form.Item>
+          <Form.Item name="companyName" label="Company Name">
+            <Input />
+          </Form.Item>
+          <Form.Item name="performedBy" label="Performed By">
+            <Input />
+          </Form.Item>
+        </Form>
       </Modal>
     </div>
   );

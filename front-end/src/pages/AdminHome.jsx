@@ -77,6 +77,7 @@ import {
   DatabaseOutlined,
   HistoryOutlined,
   SwapOutlined,
+  CustomerServiceOutlined,
 } from "@ant-design/icons";
 import { useNavigate } from "react-router-dom";
 import Swal from "sweetalert2";
@@ -100,6 +101,8 @@ const TransferStations = lazy(() => import("./admin/TransferStations"));
 const LguAssistDiversion = lazy(() => import("./admin/LguAssistDiversion"));
 const TechnicalAssistance = lazy(() => import("./admin/TechnicalAssistance"));
 const Reports = lazy(() => import("./admin/Reports"));
+const SupportTab = lazy(() => import("./admin/SupportTab"));
+const NotificationManagement = lazy(() => import("./admin/NotificationManagement"));
 import api from "../api";
 import secureStorage from "../utils/secureStorage";
 import { DataRefProvider } from "../utils/dataRef";
@@ -116,6 +119,7 @@ import L from "leaflet";
 import "leaflet/dist/leaflet.css";
 import dayjs from "dayjs";
 import relativeTime from "dayjs/plugin/relativeTime";
+import { connectSocket, disconnectSocket } from "../utils/socket";
 dayjs.extend(relativeTime);
 
 // Fix default Leaflet marker icons
@@ -367,8 +371,14 @@ export default function AdminHome() {
 
   useEffect(() => {
     fetchNotifications();
-    const interval = setInterval(fetchNotifications, 30000);
-    return () => clearInterval(interval);
+    const socket = connectSocket("admin");
+    socket.on("notification", () => fetchNotifications());
+    socket.on("data-refresh", () => fetchNotifications());
+    return () => {
+      socket.off("notification");
+      socket.off("data-refresh");
+      disconnectSocket();
+    };
   }, [fetchNotifications]);
 
   const markNotifRead = async (id) => {
@@ -530,17 +540,36 @@ export default function AdminHome() {
     }
 
     if (isDeveloper) {
+      const devChildren = [
+        {
+          key: "dev-settings",
+          icon: <ToolOutlined />,
+          label: "App Settings",
+        },
+        {
+          key: "dev-support",
+          icon: <CustomerServiceOutlined />,
+          label: "Support & Tickets",
+        },
+        {
+          key: "dev-notifications",
+          icon: <BellOutlined />,
+          label: "Notification Management",
+        },
+      ];
       items.push({
         key: "developer",
         icon: <CodeOutlined />,
         label: "Developer",
-        children: [
-          {
-            key: "dev-settings",
-            icon: <ToolOutlined />,
-            label: "App Settings",
-          },
-        ],
+        children: devChildren,
+      });
+    } else if (hasAccess("supportTickets")) {
+      // Non-developer with support access
+      items.push({ type: "divider" });
+      items.push({
+        key: "dev-support",
+        icon: <CustomerServiceOutlined />,
+        label: "Support & Tickets",
       });
     }
 
@@ -626,6 +655,10 @@ export default function AdminHome() {
         ) : (
           denied
         );
+      case "dev-support":
+        return (isDeveloper || hasAccess("supportTickets")) ? <SupportTab isDark={isDark} /> : denied;
+      case "dev-notifications":
+        return isDeveloper ? <NotificationManagement isDark={isDark} /> : denied;
       case "dev-settings":
         return isDeveloper ? (
           <DeveloperSettings isDark={isDark}
@@ -1569,9 +1602,9 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
     tabItems.push({
       key: "swm-plan",
       label: (
-        <>
+        <span>
           <FundProjectionScreenOutlined /> 10-Year SWM Plan
-        </>
+        </span>
       ),
       children: (
         <>
@@ -2860,9 +2893,9 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
     tabItems.push({
       key: "funded-mrf",
       label: (
-        <>
+        <span>
           <BankOutlined /> Funded MRF
-        </>
+        </span>
       ),
       children: (
         <>
@@ -3920,9 +3953,9 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
     tabItems.push({
       key: "lgu-mrf",
       label: (
-        <>
+        <span>
           <ApartmentOutlined /> LGU Initiated MRF
-        </>
+        </span>
       ),
       children: (
         <>
@@ -4914,9 +4947,9 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
     tabItems.push({
       key: "trash-traps",
       label: (
-        <>
+        <span>
           <DeleteOutlined /> Trash Traps
-        </>
+        </span>
       ),
       children: (
         <>
@@ -5929,9 +5962,9 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
     tabItems.push({
       key: "swm-equip",
       label: (
-        <>
+        <span>
           <CarOutlined /> SWM Equipment
-        </>
+        </span>
       ),
       children: (
         <>
@@ -6798,9 +6831,9 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
     tabItems.push({
       key: "slf-monitoring",
       label: (
-        <>
+        <span>
           <BankOutlined /> SLF Monitoring
-        </>
+        </span>
       ),
       children: (
         <Tabs
@@ -6810,9 +6843,9 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
             {
               key: "slf-facilities",
               label: (
-                <>
+                <span>
                   <BankOutlined /> SLF Monitoring
-                </>
+                </span>
               ),
               children: (
                 <>
@@ -7742,9 +7775,9 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
             {
               key: "waste-generators",
               label: (
-                <>
+                <span>
                   <DatabaseOutlined /> Waste Generators
-                </>
+                </span>
               ),
               children: (
                 <>
@@ -8105,7 +8138,7 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
     const odMaxProv = Math.max(...odProvList.map(p => p.count), 1);
     tabItems.push({
       key: "open-dumpsites",
-      label: <><EnvironmentOutlined /> Open Dumpsites</>,
+      label: <span><EnvironmentOutlined /> Open Dumpsites</span>,
       children: (<>
         <Row gutter={[16, 16]} style={{ marginBottom: 16 }}>
           <Col xs={12} sm={12} md={6}><Card hoverable style={{ borderRadius: 10, height: 110 }} loading={loading}><Statistic title="Total Sites" value={openDumpStats.totalRecords} prefix={<EnvironmentOutlined style={{ color: "#ff4d4f" }} />} /></Card></Col>
@@ -8142,7 +8175,7 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
     const rcaMaxProv = Math.max(...rcaProvList.map(p => p.count), 1);
     tabItems.push({
       key: "residual-containment",
-      label: <><SafetyCertificateOutlined /> Residual Containment</>,
+      label: <span><SafetyCertificateOutlined /> Residual Containment</span>,
       children: (<>
         <Row gutter={[16, 16]} style={{ marginBottom: 16 }}>
           <Col xs={12} sm={12} md={6}><Card hoverable style={{ borderRadius: 10, height: 110 }} loading={loading}><Statistic title="Total Facilities" value={rcaStats.totalRecords} prefix={<SafetyCertificateOutlined style={{ color: "#722ed1" }} />} /></Card></Col>
@@ -8179,7 +8212,7 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
     const tsMaxProv = Math.max(...tsProvList.map(p => p.count), 1);
     tabItems.push({
       key: "transfer-stations",
-      label: <><SwapOutlined /> Transfer Stations</>,
+      label: <span><SwapOutlined /> Transfer Stations</span>,
       children: (<>
         <Row gutter={[16, 16]} style={{ marginBottom: 16 }}>
           <Col xs={12} sm={12} md={6}><Card hoverable style={{ borderRadius: 10, height: 110 }} loading={loading}><Statistic title="Total Stations" value={tsStats.totalRecords} prefix={<SwapOutlined style={{ color: "#13c2c2" }} />} /></Card></Col>
@@ -8216,7 +8249,7 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
     const pdsMaxProv = Math.max(...pdsProvList.map(p => p.count), 1);
     tabItems.push({
       key: "pds-scoping",
-      label: <><FileTextOutlined /> PDS (Scoping)</>,
+      label: <span><FileTextOutlined /> PDS (Scoping)</span>,
       children: (<>
         <Row gutter={[16, 16]} style={{ marginBottom: 16 }}>
           <Col xs={12} sm={12} md={6}><Card hoverable style={{ borderRadius: 10, height: 110 }} loading={loading}><Statistic title="Total Records" value={pdsStats.totalRecords} prefix={<FileTextOutlined style={{ color: "#1890ff" }} />} /></Card></Col>
@@ -8254,7 +8287,7 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
     const taMaxProv = Math.max(...taProvList.map(p => p.count), 1);
     tabItems.push({
       key: "tech-assist",
-      label: <><ToolOutlined /> Technical Assistance</>,
+      label: <span><ToolOutlined /> Technical Assistance</span>,
       children: (<>
         <Row gutter={[16, 16]} style={{ marginBottom: 16 }}>
           <Col xs={12} sm={12} md={6}><Card hoverable style={{ borderRadius: 10, height: 110 }} loading={loading}><Statistic title="Total Records" value={techAssistStats.totalRecords} prefix={<ToolOutlined style={{ color: "#fa8c16" }} />} /></Card></Col>
@@ -8299,7 +8332,7 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
     const ldMaxProv = Math.max(...ldProvList.map(p => p.count), 1);
     tabItems.push({
       key: "lgu-diversion",
-      label: <><TeamOutlined /> LGU Assist & Diversion</>,
+      label: <span><TeamOutlined /> LGU Assist & Diversion</span>,
       children: (<>
         <Row gutter={[16, 16]} style={{ marginBottom: 16 }}>
           <Col xs={12} sm={12} md={6}><Card hoverable style={{ borderRadius: 10, height: 110 }} loading={loading}><Statistic title="Total LGUs" value={lguDivStats.totalRecords} prefix={<TeamOutlined style={{ color: "#52c41a" }} />} /></Card></Col>
@@ -8330,18 +8363,18 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
 
     // Ensure all expected tabs exist even when they have no data for the selected year
     const ALL_DASH_TABS = [
-      { key: "swm-plan", label: <><FundProjectionScreenOutlined /> 10-Year SWM Plan</> },
-      { key: "funded-mrf", label: <><BankOutlined /> Funded MRF</> },
-      { key: "lgu-mrf", label: <><ApartmentOutlined /> LGU Initiated MRF</> },
-      { key: "trash-traps", label: <><DeleteOutlined /> Trash Traps</> },
-      { key: "swm-equip", label: <><CarOutlined /> SWM Equipment</> },
-      { key: "slf-monitoring", label: <><BankOutlined /> SLF Monitoring</> },
-      { key: "open-dumpsites", label: <><EnvironmentOutlined /> Open Dumpsites</> },
-      { key: "residual-containment", label: <><SafetyCertificateOutlined /> Residual Containment</> },
-      { key: "transfer-stations", label: <><SwapOutlined /> Transfer Stations</> },
-      { key: "pds-scoping", label: <><FileTextOutlined /> PDS (Scoping)</> },
-      { key: "tech-assist", label: <><ToolOutlined /> Technical Assistance</> },
-      { key: "lgu-diversion", label: <><TeamOutlined /> LGU Assist & Diversion</> },
+      { key: "swm-plan", label: <span><FundProjectionScreenOutlined /> 10-Year SWM Plan</span> },
+      { key: "funded-mrf", label: <span><BankOutlined /> Funded MRF</span> },
+      { key: "lgu-mrf", label: <span><ApartmentOutlined /> LGU Initiated MRF</span> },
+      { key: "trash-traps", label: <span><DeleteOutlined /> Trash Traps</span> },
+      { key: "swm-equip", label: <span><CarOutlined /> SWM Equipment</span> },
+      { key: "slf-monitoring", label: <span><BankOutlined /> SLF Monitoring</span> },
+      { key: "open-dumpsites", label: <span><EnvironmentOutlined /> Open Dumpsites</span> },
+      { key: "residual-containment", label: <span><SafetyCertificateOutlined /> Residual Containment</span> },
+      { key: "transfer-stations", label: <span><SwapOutlined /> Transfer Stations</span> },
+      { key: "pds-scoping", label: <span><FileTextOutlined /> PDS (Scoping)</span> },
+      { key: "tech-assist", label: <span><ToolOutlined /> Technical Assistance</span> },
+      { key: "lgu-diversion", label: <span><TeamOutlined /> LGU Assist & Diversion</span> },
     ];
     const existingKeys = new Set(tabItems.map(t => t.key));
     for (const tab of ALL_DASH_TABS) {
@@ -8361,9 +8394,9 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
     tabItems.push({
       key: "data-history",
       label: (
-        <>
+        <span>
           <HistoryOutlined /> Data History
-        </>
+        </span>
       ),
       children: (
         <div style={{ padding: "0 4px" }}>
@@ -8521,7 +8554,7 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
             items={[
               {
                 key: "general",
-                label: (<><EnvironmentOutlined /> General Info</>),
+                label: (<span><EnvironmentOutlined /> General Info</span>),
                 children: (
                   <>
                     <Row gutter={[16, 12]}>
@@ -8555,7 +8588,7 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
               },
               {
                 key: "monitoring",
-                label: (<><CalendarOutlined /> Monitoring</>),
+                label: (<span><CalendarOutlined /> Monitoring</span>),
                 children: (
                   <Row gutter={[16, 12]}>
                     <Col span={12}><Text type="secondary">Target Month:</Text>{" "}<Text>{trapViewRecord.targetMonth || "\u2014"}</Text></Col>
@@ -8573,7 +8606,7 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
               },
               {
                 key: "compliance",
-                label: (<><SafetyCertificateOutlined /> Compliance</>),
+                label: (<span><SafetyCertificateOutlined /> Compliance</span>),
                 children: (
                   <Row gutter={[16, 12]}>
                     <Col span={24}><Text type="secondary">Remarks:</Text><br /><Text>{trapViewRecord.remarks || "\u2014"}</Text></Col>
@@ -8606,9 +8639,9 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
               {
                 key: "general",
                 label: (
-                  <>
+                  <span>
                     <EnvironmentOutlined /> General Info
-                  </>
+                  </span>
                 ),
                 children: (
                   <>
@@ -8773,9 +8806,9 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
               {
                 key: "monitoring",
                 label: (
-                  <>
+                  <span>
                     <ClockCircleOutlined /> Monitoring
-                  </>
+                  </span>
                 ),
                 children: (
                   <Row gutter={[16, 12]}>
@@ -8847,9 +8880,9 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
               {
                 key: "compliance",
                 label: (
-                  <>
+                  <span>
                     <SafetyCertificateOutlined /> Compliance
-                  </>
+                  </span>
                 ),
                 children: (
                   <>
@@ -8920,9 +8953,9 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
               {
                 key: "waste",
                 label: (
-                  <>
+                  <span>
                     <BarChartOutlined /> Waste Data
-                  </>
+                  </span>
                 ),
                 children: (
                   <Row gutter={[16, 12]}>
@@ -9051,7 +9084,7 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
             if (cfg && cfg.maintenance) {
               return {
                 ...t,
-                label: <>{t.label} <Tag color="warning" style={{ marginLeft: 4, fontSize: 10 }}>Maintenance</Tag></>,
+                label: <span>{t.label} <Tag color="warning" style={{ marginLeft: 4, fontSize: 10 }}>Maintenance</Tag></span>,
                 children: (
                   <div style={{ textAlign: "center", padding: "80px 20px" }}>
                     <ToolOutlined style={{ fontSize: 48, color: "#faad14", marginBottom: 16 }} />
