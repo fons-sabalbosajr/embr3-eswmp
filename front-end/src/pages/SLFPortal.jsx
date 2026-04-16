@@ -590,6 +590,8 @@ export default function SLFPortal() {
 
   const validateTruck = () => {
     const errs = {};
+    if (!truckDraft.disposalTicketNo?.trim())
+      errs.disposalTicketNo = "Required";
     if (isRequired("hauler", true) && !truckDraft.hauler?.trim())
       errs.hauler = "Required";
     if (isRequired("plateNumber", true) && !(truckDraft.vehicles || []).some(v => v.plateNumber?.trim()))
@@ -3131,6 +3133,7 @@ export default function SLFPortal() {
                         "disposalTicketNo",
                         "Disposal/Trip Ticket No.",
                       )}
+                      required
                       {...fieldErr("disposalTicketNo")}
                     >
                       <Input

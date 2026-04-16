@@ -21,6 +21,7 @@ import {
   Collapse,
   Statistic,
   Progress,
+  Popconfirm,
 } from "antd";
 import {
   PlusOutlined,
@@ -47,6 +48,7 @@ import {
   VideoCameraOutlined,
   ScissorOutlined,
   ExperimentOutlined,
+  DeleteOutlined,
 } from "@ant-design/icons";
 import Swal from "sweetalert2";
 import api from "../../api";
@@ -254,6 +256,11 @@ export default function SwmEquipment({canEdit = true, canDelete = true, isDark})
         );
     }
     setModalOpen(false);
+  };
+
+  const handleDelete = (record) => {
+    Swal.fire({ title: "Delete this record?", text: `${record.municipality}, ${record.province}`, icon: "warning", showCancelButton: true, confirmButtonColor: "#ff4d4f", confirmButtonText: "Delete" })
+      .then(async (result) => { if (result.isConfirmed) { await api.delete(`/swm-equipment/${record._id}`); secureStorage.remove(CACHE_KEY); setRecords((prev) => prev.filter((r) => r._id !== record._id)); Swal.fire("Deleted", "Record deleted", "success"); } });
   };
 
   const hasActiveFilters =
@@ -567,6 +574,7 @@ export default function SwmEquipment({canEdit = true, canDelete = true, isDark})
               onClick={() => openEdit(r)}
             />
           </Tooltip>}
+          {canDelete && <Popconfirm title="Delete this record?" onConfirm={() => handleDelete(r)} okText="Delete" okButtonProps={{ danger: true }}><Tooltip title="Delete"><Button type="text" size="small" danger icon={<DeleteOutlined />} /></Tooltip></Popconfirm>}
         </Space>
       ),
     },

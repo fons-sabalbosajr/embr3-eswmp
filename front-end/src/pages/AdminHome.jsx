@@ -425,7 +425,7 @@ export default function AdminHome() {
     return p?.[level] !== false;
   };
   const canEdit = (key) => hasAccess(key, "edit");
-  const canDelete = (key) => hasAccess(key, "delete");
+  const canDelete = () => isDeveloper;
 
   const menuItems = useMemo(() => {
     const items = [];

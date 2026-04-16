@@ -21,6 +21,7 @@ import {
   Collapse,
   Statistic,
   Progress,
+  Popconfirm,
 } from "antd";
 import {
   PlusOutlined,
@@ -46,6 +47,7 @@ import {
   SafetyCertificateOutlined,
   ThunderboltOutlined,
   CompassOutlined,
+  DeleteOutlined,
 } from "@ant-design/icons";
 import Swal from "sweetalert2";
 import api from "../../api";
@@ -213,6 +215,11 @@ export default function TrashTraps({canEdit = true, canDelete = true, isDark}) {
     setModalOpen(false);
   };
 
+  const handleDelete = (record) => {
+    Swal.fire({ title: "Delete this record?", text: `${record.municipality}, ${record.province}`, icon: "warning", showCancelButton: true, confirmButtonColor: "#ff4d4f", confirmButtonText: "Delete" })
+      .then(async (result) => { if (result.isConfirmed) { await api.delete(`/trash-traps/${record._id}`); secureStorage.remove(CACHE_KEY); setRecords((prev) => prev.filter((r) => r._id !== record._id)); Swal.fire("Deleted", "Record deleted", "success"); } });
+  };
+
   const hasActiveFilters = filterProvince || filterMBA || filterStatus || filterMonth || searchText;
   const clearAllFilters = () => { setFilterProvince(null); setFilterMBA(null); setFilterStatus(null); setFilterMonth(null); setSearchText(""); };
 
@@ -351,6 +358,7 @@ export default function TrashTraps({canEdit = true, canDelete = true, isDark}) {
           <Tooltip title="View Details"><Button type="text" size="small" icon={<EyeOutlined style={{ color: "#1890ff" }} />} onClick={() => setDetailModal(r)} /></Tooltip>
           {canEdit && <Tooltip title="Edit"><Button type="text" size="small" icon={<EditOutlined style={{ color: "#52c41a" }} />} onClick={() => openEdit(r)} /></Tooltip>}
           {canEdit && <Tooltip title="Add Record"><Button type="text" size="small" icon={<PlusOutlined style={{ color: "#13c2c2" }} />} onClick={() => openAdd({ municipality: r.municipality, province: r.province, barangay: r.barangay, manilaBayArea: r.manilaBayArea, latitude: r.latitude, longitude: r.longitude })} /></Tooltip>}
+          {canDelete && <Popconfirm title="Delete this record?" onConfirm={() => handleDelete(r)} okText="Delete" okButtonProps={{ danger: true }}><Tooltip title="Delete"><Button type="text" size="small" danger icon={<DeleteOutlined />} /></Tooltip></Popconfirm>}
         </Space>
       ),
     },

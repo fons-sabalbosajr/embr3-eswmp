@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useMemo } from "react";
 import {
   Card, Table, Button, Modal, Form, Input, InputNumber, Select, Space, Tag,
-  Divider, Row, Col, Typography, DatePicker, Tooltip, Collapse, Statistic, Badge, Descriptions,
+  Divider, Row, Col, Typography, DatePicker, Tooltip, Collapse, Statistic, Badge, Descriptions, Popconfirm,
 } from "antd";
 import {
   PlusOutlined, EditOutlined, DownloadOutlined, SearchOutlined, EyeOutlined,
@@ -247,6 +247,7 @@ export default function OpenDumpsites({canEdit = true, canDelete = true, isDark}
           <Tooltip title="View Details"><Button type="text" size="small" icon={<EyeOutlined style={{ color: "#1890ff" }} />} onClick={() => setDetailModal(record)} /></Tooltip>
           {canEdit && <Tooltip title="Edit"><Button type="text" size="small" icon={<EditOutlined style={{ color: "#52c41a" }} />} onClick={() => openEdit(record)} /></Tooltip>}
           {canEdit && <Tooltip title="Add Record"><Button type="text" size="small" icon={<PlusOutlined style={{ color: "#13c2c2" }} />} onClick={() => openAdd({ municipality: record.municipality, province: record.province, barangay: record.barangay, manilaBayArea: record.manilaBayArea, congressionalDistrict: record.congressionalDistrict, latitude: record.latitude, longitude: record.longitude })} /></Tooltip>}
+          {canDelete && <Popconfirm title="Delete this record?" onConfirm={() => handleDelete(record)} okText="Delete" okButtonProps={{ danger: true }}><Tooltip title="Delete"><Button type="text" size="small" danger icon={<DeleteOutlined />} /></Tooltip></Popconfirm>}
         </Space>
       ),
     },

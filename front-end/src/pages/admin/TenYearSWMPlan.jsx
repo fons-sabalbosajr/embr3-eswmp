@@ -22,6 +22,7 @@ import {
   Progress,
   Badge,
   Descriptions,
+  Popconfirm,
 } from "antd";
 import {
   PlusOutlined,
@@ -47,6 +48,7 @@ import {
   BarChartOutlined,
   FilterOutlined,
   ClearOutlined,
+  DeleteOutlined,
 } from "@ant-design/icons";
 import Swal from "sweetalert2";
 import api from "../../api";
@@ -307,6 +309,11 @@ export default function TenYearSWMPlan({canEdit = true, canDelete = true, isDark
         );
       }
     }
+  };
+
+  const handleDelete = (record) => {
+    Swal.fire({ title: "Delete this record?", text: `${record.municipality}, ${record.province}`, icon: "warning", showCancelButton: true, confirmButtonColor: "#ff4d4f", confirmButtonText: "Delete" })
+      .then(async (result) => { if (result.isConfirmed) { await api.delete(`/ten-year-swm/${record._id}`); secureStorage.remove(CACHE_KEY); setRecords((prev) => prev.filter((r) => r._id !== record._id)); Swal.fire("Deleted", "Record deleted", "success"); } });
   };
 
   const getComplianceTag = (val) => {
@@ -718,6 +725,7 @@ export default function TenYearSWMPlan({canEdit = true, canDelete = true, isDark
               onClick={() => openEdit(record)}
             />
           </Tooltip>}
+          {canDelete && <Popconfirm title="Delete this record?" onConfirm={() => handleDelete(record)} okText="Delete" okButtonProps={{ danger: true }}><Tooltip title="Delete"><Button type="text" size="small" danger icon={<DeleteOutlined />} /></Tooltip></Popconfirm>}
         </Space>
       ),
     },

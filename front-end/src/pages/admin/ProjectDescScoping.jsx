@@ -1,13 +1,13 @@
 import { useState, useEffect, useCallback, useMemo } from "react";
 import {
   Card, Table, Button, Modal, Form, Input, InputNumber, Select, Space, Tag,
-  Row, Col, Typography, DatePicker, Tooltip, Collapse, Statistic, Descriptions,
+  Row, Col, Typography, DatePicker, Tooltip, Collapse, Statistic, Descriptions, Popconfirm,
 } from "antd";
 import {
   PlusOutlined, EditOutlined, DownloadOutlined, SearchOutlined, EyeOutlined,
   CheckCircleOutlined, CloseCircleOutlined, EnvironmentOutlined, FileTextOutlined,
   ReloadOutlined, TeamOutlined, CalendarOutlined, UserOutlined, SolutionOutlined,
-  SafetyCertificateOutlined, FilterOutlined, ClearOutlined, FileDoneOutlined,
+  SafetyCertificateOutlined, FilterOutlined, ClearOutlined, FileDoneOutlined, DeleteOutlined,
 } from "@ant-design/icons";
 import Swal from "sweetalert2";
 import api from "../../api";
@@ -224,6 +224,7 @@ export default function ProjectDescScoping({canEdit = true, canDelete = true, is
           <Tooltip title="View Details"><Button type="text" size="small" icon={<EyeOutlined style={{ color: "#1890ff" }} />} onClick={() => setDetailModal(record)} /></Tooltip>
           {canEdit && <Tooltip title="Edit"><Button type="text" size="small" icon={<EditOutlined style={{ color: "#52c41a" }} />} onClick={() => openEdit(record)} /></Tooltip>}
           {canEdit && <Tooltip title="Add Record"><Button type="text" size="small" icon={<PlusOutlined style={{ color: "#13c2c2" }} />} onClick={() => openAdd({ municipality: record.municipality, province: record.province, mailingAddress: record.mailingAddress, manilaBayArea: record.manilaBayArea })} /></Tooltip>}
+          {canDelete && <Popconfirm title="Delete this record?" onConfirm={() => handleDelete(record)} okText="Delete" okButtonProps={{ danger: true }}><Tooltip title="Delete"><Button type="text" size="small" danger icon={<DeleteOutlined />} /></Tooltip></Popconfirm>}
         </Space>
       ),
     },

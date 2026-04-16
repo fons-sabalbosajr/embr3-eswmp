@@ -32,6 +32,7 @@ import {
   DeleteOutlined,
   UnlockOutlined,
   LockOutlined,
+  ReloadOutlined,
 } from "@ant-design/icons";
 import Swal from "sweetalert2";
 import api from "../../api";
@@ -408,6 +409,11 @@ export default function BaselineData({ isDark, canEdit = false, canDelete = fals
             <Text strong>Company Baseline Data</Text>
             <Badge count={baselines.length} style={{ backgroundColor: "#722ed1" }} />
           </Space>
+        }
+        extra={
+          <Tooltip title="Refresh">
+            <Button type="text" icon={<ReloadOutlined spin={loading} />} onClick={fetchBaselines} />
+          </Tooltip>
         }
       >
         {baselines.length === 0 && !loading ? (
