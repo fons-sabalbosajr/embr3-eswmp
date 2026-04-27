@@ -11,6 +11,7 @@ const SLFPortal = lazy(() => import("./pages/SLFPortal"));
 const PortalLogin = lazy(() => import("./pages/PortalLogin"));
 const PortalSignup = lazy(() => import("./pages/PortalSignup"));
 const PortalForgotPassword = lazy(() => import("./pages/PortalForgotPassword"));
+const PortalVerificationUpdate = lazy(() => import("./pages/PortalVerificationUpdate"));
 const AdminForgotPassword = lazy(() => import("./pages/AdminForgotPassword"));
 
 const PageLoader = () => (
@@ -32,6 +33,7 @@ function App() {
         <Route path="/slfportal/login" element={<PortalLogin />} />
         <Route path="/slfportal/signup" element={<PortalSignup />} />
         <Route path="/slfportal/forgot-password" element={<PortalForgotPassword />} />
+        <Route path="/slfportal/verify-update" element={<PortalVerificationUpdate />} />
 
         {/* Admin Side */}
         <Route path="/admin" element={<AdminHome />} />

@@ -1,39 +1,16 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
 import {
-  Table,
-  Tag,
-  Button,
-  Space,
-  Modal,
-  Select,
-  Typography,
-  Input,
-  Spin,
-  Empty,
-  Tooltip,
-  Badge,
-  Card,
-  Descriptions,
-  Avatar,
-  Divider,
-  Row,
-  Col,
-  Timeline,
+  Table, Tag, Button, Space, Modal, Select, Typography,
+  Empty, Tooltip, Badge, Card, Descriptions, Avatar,
+  Divider, Row, Col, Timeline, Alert,
 } from "antd";
 import {
-  CheckCircleOutlined,
-  CloseCircleOutlined,
-  DeleteOutlined,
-  EditOutlined,
-  EyeOutlined,
-  ReloadOutlined,
-  UserOutlined,
-  MailOutlined,
-  PhoneOutlined,
-  BankOutlined,
-  CalendarOutlined,
-  EnvironmentOutlined,
-  ClockCircleOutlined,
+  CheckCircleOutlined, CloseCircleOutlined, DeleteOutlined,
+  EditOutlined, EyeOutlined, ReloadOutlined, UserOutlined,
+  MailOutlined, PhoneOutlined, BankOutlined, CalendarOutlined,
+  EnvironmentOutlined, ClockCircleOutlined, LockOutlined,
+  UnlockOutlined, BellOutlined, FileDoneOutlined, LinkOutlined,
+  FileTextOutlined, FileImageOutlined, SafetyCertificateOutlined,
 } from "@ant-design/icons";
 import Swal from "sweetalert2";
 import dayjs from "dayjs";
@@ -56,10 +33,28 @@ export default function PortalUsers({ isDark }) {
   const [editSlfModal, setEditSlfModal] = useState({ open: false, user: null });
   const [editSlfValue, setEditSlfValue] = useState([]);
   const [editingSlfLoading, setEditingSlfLoading] = useState(false);
+  const [holdLoading, setHoldLoading] = useState(false);
+  const [reminderLoading, setReminderLoading] = useState(false);
 
   useEffect(() => {
     fetchData();
   }, []);
+
+  // Deduplicated SLF options: one entry per unique lgu+ownership label,
+  // keeping the record with the highest dataYear so IDs are always current.
+  const slfOptions = useMemo(() => {
+    const labelMap = new Map();
+    for (const g of generators) {
+      const label = `${g.lgu || ""}${g.ownership ? " (" + g.ownership + ")" : ""}`.trim();
+      const prev = labelMap.get(label);
+      if (!prev || (g.dataYear || 0) > (prev.dataYear || 0)) {
+        labelMap.set(label, g);
+      }
+    }
+    return Array.from(labelMap.entries())
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([label, g]) => ({ label, value: g._id }));
+  }, [generators]);
 
   const fetchData = async () => {
     setLoading(true);
@@ -195,6 +190,88 @@ export default function PortalUsers({ isDark }) {
     rejected: "red",
   };
 
+  const handleHold = async (record) => {
+    const result = await Swal.fire({
+      title: "Put Account On Hold?",
+      html: `This will require <strong>${record.firstName} ${record.lastName}</strong> to re-upload their verification documents the next time they log in.`,
+      icon: "warning",
+      showCancelButton: true,
+      confirmButtonColor: "#fa8c16",
+      confirmButtonText: "Yes, Hold Account",
+    });
+    if (!result.isConfirmed) return;
+    setHoldLoading(true);
+    try {
+      await api.patch(`/portal-users/${record._id}/hold`);
+      Swal.fire({ icon: "success", title: "Account On Hold", text: "The user will be prompted to verify on next login.", confirmButtonColor: "#1a3353" });
+      fetchData();
+    } catch (err) {
+      Swal.fire("Error", err.response?.data?.message || "Failed to hold account", "error");
+    } finally {
+      setHoldLoading(false);
+    }
+  };
+
+  const handleUnhold = async (record) => {
+    const result = await Swal.fire({
+      title: "Remove Hold?",
+      text: `${record.firstName} ${record.lastName} will no longer be prompted for re-verification.`,
+      icon: "question",
+      showCancelButton: true,
+      confirmButtonColor: "#52c41a",
+      confirmButtonText: "Yes, Remove Hold",
+    });
+    if (!result.isConfirmed) return;
+    try {
+      await api.patch(`/portal-users/${record._id}/unhold`);
+      Swal.fire({ icon: "success", title: "Hold Removed", confirmButtonColor: "#1a3353" });
+      fetchData();
+    } catch (err) {
+      Swal.fire("Error", err.response?.data?.message || "Failed to remove hold", "error");
+    }
+  };
+
+  const handleSendReminder = async (record) => {
+    const result = await Swal.fire({
+      title: "Send Verification Reminder?",
+      html: `An email reminder will be sent to <strong>${record.email}</strong> asking them to update their verification information.`,
+      icon: "info",
+      showCancelButton: true,
+      confirmButtonColor: "#1a3353",
+      confirmButtonText: "Send Email",
+    });
+    if (!result.isConfirmed) return;
+    setReminderLoading(true);
+    try {
+      await api.post(`/portal-users/${record._id}/send-reminder`);
+      Swal.fire({ icon: "success", title: "Reminder Sent", text: `Email sent to ${record.email}.`, confirmButtonColor: "#1a3353" });
+    } catch (err) {
+      Swal.fire("Error", err.response?.data?.message || "Failed to send reminder", "error");
+    } finally {
+      setReminderLoading(false);
+    }
+  };
+
+  const handleReviewVerification = async (record) => {
+    const result = await Swal.fire({
+      title: "Mark Verification as Reviewed?",
+      text: "This will clear the verification hold and the user can continue using the portal normally.",
+      icon: "question",
+      showCancelButton: true,
+      confirmButtonColor: "#52c41a",
+      confirmButtonText: "Mark Reviewed",
+    });
+    if (!result.isConfirmed) return;
+    try {
+      await api.patch(`/portal-users/${record._id}/review-verification`);
+      Swal.fire({ icon: "success", title: "Verification Reviewed", confirmButtonColor: "#1a3353" });
+      fetchData();
+      setDetailModal({ open: false, user: null });
+    } catch (err) {
+      Swal.fire("Error", err.response?.data?.message || "Failed to review", "error");
+    }
+  };
+
   const columns = [
     {
       title: "#",
@@ -243,8 +320,16 @@ export default function PortalUsers({ isDark }) {
         { text: "Rejected", value: "rejected" },
       ],
       onFilter: (value, record) => record.status === value,
-      render: (v) => (
-        <Tag color={statusColor[v]}>{v?.toUpperCase()}</Tag>
+      render: (v, record) => (
+        <Space size={4} wrap>
+          <Tag color={statusColor[v]}>{v?.toUpperCase()}</Tag>
+          {record.verificationRequired && !record.verificationSubmitted && (
+            <Tag color="orange" icon={<LockOutlined />}>HELD</Tag>
+          )}
+          {record.verificationSubmitted && (
+            <Tag color="blue" icon={<FileDoneOutlined />}>DOCS SUBMITTED</Tag>
+          )}
+        </Space>
       ),
     },
     {
@@ -294,17 +379,72 @@ export default function PortalUsers({ isDark }) {
             </>
           )}
           {record.status === "approved" && (
-            <Tooltip title="Edit Assigned SLF">
-              <Button
-                size="small"
-                icon={<EditOutlined />}
-                onClick={() => {
-                  const existing = Array.isArray(record.assignedSlf) ? record.assignedSlf : record.assignedSlf ? [record.assignedSlf] : [];
-                  setEditSlfValue(existing);
-                  setEditSlfModal({ open: true, user: record });
-                }}
-              />
-            </Tooltip>
+            <>
+              <Tooltip title="Edit Assigned SLF">
+                <Button
+                  size="small"
+                  icon={<EditOutlined />}
+                  onClick={() => {
+                    const raw = Array.isArray(record.assignedSlf)
+                      ? record.assignedSlf
+                      : record.assignedSlf ? [record.assignedSlf] : [];
+                    // Map potentially stale IDs to canonical (latest-year) IDs
+                    const idToLabel = new Map(
+                      generators.map((g) => [
+                        g._id,
+                        `${g.lgu || ""}${g.ownership ? " (" + g.ownership + ")" : ""}`.trim(),
+                      ])
+                    );
+                    const labelToId = new Map(slfOptions.map((o) => [o.label, o.value]));
+                    const normalized = raw.map((id) => {
+                      const lbl = idToLabel.get(id);
+                      return lbl && labelToId.has(lbl) ? labelToId.get(lbl) : id;
+                    });
+                    setEditSlfValue(normalized);
+                    setEditSlfModal({ open: true, user: record });
+                  }}
+                />
+              </Tooltip>
+              {!record.verificationRequired ? (
+                <Tooltip title="Hold Account (require re-verification)">
+                  <Button
+                    size="small"
+                    icon={<LockOutlined />}
+                    style={{ color: "#fa8c16", borderColor: "#fa8c16" }}
+                    loading={holdLoading}
+                    onClick={() => handleHold(record)}
+                  />
+                </Tooltip>
+              ) : (
+                <Tooltip title="Remove Hold">
+                  <Button
+                    size="small"
+                    icon={<UnlockOutlined />}
+                    style={{ color: "#52c41a", borderColor: "#52c41a" }}
+                    onClick={() => handleUnhold(record)}
+                  />
+                </Tooltip>
+              )}
+              <Tooltip title="Send Verification Reminder Email">
+                <Button
+                  size="small"
+                  icon={<BellOutlined />}
+                  loading={reminderLoading}
+                  onClick={() => handleSendReminder(record)}
+                />
+              </Tooltip>
+              {record.verificationSubmitted && (
+                <Tooltip title="Mark Verification as Reviewed">
+                  <Button
+                    size="small"
+                    type="primary"
+                    icon={<FileDoneOutlined />}
+                    style={{ background: "#52c41a", borderColor: "#52c41a" }}
+                    onClick={() => handleReviewVerification(record)}
+                  />
+                </Tooltip>
+              )}
+            </>
           )}
           <Tooltip title="Delete">
             <Button
@@ -403,12 +543,7 @@ export default function PortalUsers({ isDark }) {
               onChange={setSelectedSlf}
               showSearch
               optionFilterProp="label"
-              options={generators
-                .map((g) => ({
-                  label: `${g.lgu}${g.ownership ? " (" + g.ownership + ")" : ""}`,
-                  value: g._id,
-                }))
-                .filter((opt, idx, arr) => arr.findIndex((o) => o.label === opt.label) === idx)}
+              options={slfOptions}
               notFoundContent={<Empty description="No SLF available" />}
             />
           </div>
@@ -457,101 +592,316 @@ export default function PortalUsers({ isDark }) {
               onChange={setEditSlfValue}
               showSearch
               optionFilterProp="label"
-              options={generators.map((g) => ({
-                label: `${g.lgu}${g.ownership ? " (" + g.ownership + ")" : ""}`,
-                value: g._id,
-              })).filter((opt, idx, arr) => arr.findIndex((o) => o.label === opt.label) === idx)}
+              options={slfOptions}
               notFoundContent={<Empty description="No SLF available" />}
             />
           </div>
         )}
       </Modal>
 
-      {/* Detail Modal */}
+      {/* ─────────────────────────────────────────────────
+           Detail Modal — redesigned
+          ───────────────────────────────────────────────── */}
       <Modal
         title={null}
         open={detailModal.open}
         onCancel={() => setDetailModal({ open: false, user: null })}
-        footer={<Button onClick={() => setDetailModal({ open: false, user: null })}>Close</Button>}
-        width={560}
+        footer={
+          <Button block onClick={() => setDetailModal({ open: false, user: null })}>
+            Close
+          </Button>
+        }
+        width={660}
+        styles={{ body: { padding: "0 0 8px" } }}
       >
         {detailModal.user && (() => {
           const u = detailModal.user;
-          const statusConfig = { pending: { color: "#fa8c16", bg: "#fff7e6", text: "Pending Approval" }, approved: { color: "#52c41a", bg: "#f6ffed", text: "Approved" }, rejected: { color: "#ff4d4f", bg: isDark ? "rgba(255,77,79,0.1)" : "#fff2f0", text: "Rejected" } };
-          const sc = statusConfig[u.status] || statusConfig.pending;
+          const statusMeta = {
+            pending:  { color: "orange", label: "Pending Approval" },
+            approved: { color: "green",  label: "Approved" },
+            rejected: { color: "red",    label: "Rejected" },
+          };
+          const sm = statusMeta[u.status] || statusMeta.pending;
+
+          const slfNames = Array.isArray(u.assignedSlfName)
+            ? u.assignedSlfName
+            : u.assignedSlfName ? [u.assignedSlfName] : [];
+
+          const isImage = u.verificationFileType === "image";
+
           return (
             <>
-              {/* Header Card */}
-              <div style={{ textAlign: "center", padding: "24px 16px 16px", background: isDark ? "linear-gradient(135deg, rgba(47,84,235,0.08) 0%, rgba(22,119,255,0.08) 100%)" : "linear-gradient(135deg, #f0f5ff 0%, #e6f7ff 100%)", borderRadius: 12, marginBottom: 16 }}>
-                <Avatar size={72} style={{ backgroundColor: "#1a3353", fontSize: 28 }} icon={<UserOutlined />} />
-                <div style={{ marginTop: 12 }}>
-                  <Text strong style={{ fontSize: 18 }}>{u.firstName} {u.lastName}</Text>
+              {/* ── Hero header ── */}
+              <div style={{
+                background: isDark
+                  ? "linear-gradient(135deg,#1a2a4a 0%,#1e3a5f 100%)"
+                  : "linear-gradient(135deg,#1a3353 0%,#2563a8 100%)",
+                borderRadius: "8px 8px 0 0",
+                padding: "28px 24px 20px",
+                textAlign: "center",
+              }}>
+                <Avatar
+                  size={68}
+                  icon={<UserOutlined />}
+                  style={{ background: "rgba(255,255,255,0.18)", fontSize: 28, border: "3px solid rgba(255,255,255,0.4)" }}
+                />
+                <div style={{ marginTop: 10 }}>
+                  <Text style={{ fontSize: 20, fontWeight: 700, color: "#fff", display: "block" }}>
+                    {u.firstName} {u.lastName}
+                  </Text>
+                  <Text style={{ fontSize: 13, color: "rgba(255,255,255,0.72)" }}>
+                    {u.companyName || "No company / LGU"}
+                  </Text>
                 </div>
-                <div style={{ marginTop: 4 }}>
-                  <Tag color={statusColor[u.status]} style={{ fontSize: 12, padding: "2px 12px", borderRadius: 12 }}>{sc.text}</Tag>
+                {/* Status tags row */}
+                <div style={{ marginTop: 12, display: "flex", justifyContent: "center", flexWrap: "wrap", gap: 6 }}>
+                  <Tag color={sm.color} style={{ borderRadius: 12, padding: "2px 12px", fontWeight: 600 }}>
+                    {sm.label}
+                  </Tag>
+                  {u.verificationRequired && !u.verificationSubmitted && (
+                    <Tag color="orange" icon={<LockOutlined />} style={{ borderRadius: 12, padding: "2px 10px" }}>
+                      HELD
+                    </Tag>
+                  )}
+                  {u.verificationSubmitted && (
+                    <Tag color="cyan" icon={<FileDoneOutlined />} style={{ borderRadius: 12, padding: "2px 10px" }}>
+                      DOCS SUBMITTED
+                    </Tag>
+                  )}
                 </div>
               </div>
 
-              {/* Contact Info */}
-              <Row gutter={[16, 12]} style={{ marginBottom: 16 }}>
-                <Col span={24}>
-                  <Card size="small" style={{ borderRadius: 8 }}>
-                    <Space direction="vertical" size={8} style={{ width: "100%" }}>
-                      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                        <MailOutlined style={{ color: "#1890ff", fontSize: 16 }} />
-                        <div><Text type="secondary" style={{ fontSize: 11 }}>Email</Text><br /><Text>{u.email}</Text></div>
-                      </div>
-                      <Divider style={{ margin: "4px 0" }} />
-                      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                        <PhoneOutlined style={{ color: "#52c41a", fontSize: 16 }} />
-                        <div><Text type="secondary" style={{ fontSize: 11 }}>Contact Number</Text><br /><Text>{u.contactNumber || "—"}</Text></div>
-                      </div>
-                      <Divider style={{ margin: "4px 0" }} />
-                      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                        <BankOutlined style={{ color: "#722ed1", fontSize: 16 }} />
-                        <div><Text type="secondary" style={{ fontSize: 11 }}>Company / LGU</Text><br /><Text>{u.companyName || "—"}</Text></div>
-                      </div>
-                    </Space>
-                  </Card>
-                </Col>
-              </Row>
+              {/* ── Body ── */}
+              <div style={{ padding: "16px 20px 0" }}>
 
-              {/* Assignment & Details */}
-              <Row gutter={[16, 12]}>
-                <Col xs={24} sm={12}>
-                  <Card size="small" style={{ borderRadius: 8, height: "100%" }}>
-                    <Text type="secondary" style={{ fontSize: 11 }}><EnvironmentOutlined /> Assigned SLF</Text>
-                    <div style={{ marginTop: 4 }}>
-                      {(() => {
-                        const names = Array.isArray(u.assignedSlfName) ? u.assignedSlfName : u.assignedSlfName ? [u.assignedSlfName] : [];
-                        return names.length > 0
-                          ? names.map((n, i) => <Tag key={i} color="blue" style={{ marginBottom: 2 }}>{n}</Tag>)
-                          : <Text strong style={{ fontSize: 13 }}>Not assigned</Text>;
-                      })()}
-                    </div>
-                  </Card>
-                </Col>
-                <Col xs={24} sm={12}>
-                  <Card size="small" style={{ borderRadius: 8, height: "100%" }}>
-                    <Text type="secondary" style={{ fontSize: 11 }}><CalendarOutlined /> Registered</Text>
-                    <div style={{ marginTop: 4 }}>
-                      <Text strong style={{ fontSize: 13 }}>{dayjs(u.createdAt).format("MMM D, YYYY")}</Text>
-                      <br /><Text type="secondary" style={{ fontSize: 11 }}>{dayjs(u.createdAt).format("h:mm A")}</Text>
-                    </div>
-                  </Card>
-                </Col>
-              </Row>
+                {/* Verification hold alert */}
+                {u.status === "approved" && u.verificationRequired && (
+                  <Alert
+                    style={{ marginBottom: 14, borderRadius: 8 }}
+                    type={u.verificationSubmitted ? "info" : "warning"}
+                    showIcon
+                    message={
+                      u.verificationSubmitted
+                        ? "Documents submitted — pending admin review"
+                        : "Account on hold — user must re-submit verification before they can access the portal"
+                    }
+                    action={
+                      u.verificationSubmitted
+                        ? <Button size="small" type="primary" style={{ background: "#52c41a", borderColor: "#52c41a" }} onClick={() => handleReviewVerification(u)}>
+                            Mark Reviewed
+                          </Button>
+                        : null
+                    }
+                  />
+                )}
 
-              {/* Activity Timeline */}
-              {(u.approvedAt || u.rejectedReason) && (
-                <Card size="small" style={{ borderRadius: 8, marginTop: 12 }} title={<Text strong style={{ fontSize: 13 }}><ClockCircleOutlined /> Activity</Text>}>
-                  <Timeline items={[
-                    { color: "blue", children: <><Text style={{ fontSize: 12 }}>Registered</Text><br /><Text type="secondary" style={{ fontSize: 11 }}>{dayjs(u.createdAt).format("MMM D, YYYY h:mm A")}</Text></> },
-                    ...(u.approvedAt ? [{ color: "green", children: <><Text style={{ fontSize: 12 }}>Approved</Text><br /><Text type="secondary" style={{ fontSize: 11 }}>{dayjs(u.approvedAt).format("MMM D, YYYY h:mm A")}</Text></> }] : []),
-                    ...(u.rejectedReason ? [{ color: "red", children: <><Text style={{ fontSize: 12 }}>Rejected</Text><br /><Text type="secondary" style={{ fontSize: 11 }}>{u.rejectedReason}</Text></> }] : []),
-                  ]} />
-                </Card>
-              )}
+                {/* Section: Contact & Emails */}
+                <div style={{ marginBottom: 14 }}>
+                  <Text type="secondary" style={{ fontSize: 11, fontWeight: 600, letterSpacing: 0.8, textTransform: "uppercase" }}>
+                    Contact Information
+                  </Text>
+                  <Card size="small" style={{ borderRadius: 8, marginTop: 6 }} bodyStyle={{ padding: "10px 14px" }}>
+                    <Row gutter={[12, 10]}>
+                      <Col xs={24} sm={12}>
+                        <div style={{ display: "flex", gap: 10, alignItems: "flex-start" }}>
+                          <MailOutlined style={{ color: "#1677ff", marginTop: 2 }} />
+                          <div>
+                            <Text type="secondary" style={{ fontSize: 11 }}>Personal Email</Text>
+                            <div><Text style={{ fontSize: 13 }}>{u.email}</Text></div>
+                          </div>
+                        </div>
+                      </Col>
+                      <Col xs={24} sm={12}>
+                        <div style={{ display: "flex", gap: 10, alignItems: "flex-start" }}>
+                          <PhoneOutlined style={{ color: "#52c41a", marginTop: 2 }} />
+                          <div>
+                            <Text type="secondary" style={{ fontSize: 11 }}>Contact Number</Text>
+                            <div><Text style={{ fontSize: 13 }}>{u.contactNumber || "—"}</Text></div>
+                          </div>
+                        </div>
+                      </Col>
+                      {(u.officeEmail || u.pcoEmail) && (
+                        <>
+                          <Col span={24}><Divider style={{ margin: "2px 0 4px" }} /></Col>
+                          {u.officeEmail && (
+                            <Col xs={24} sm={12}>
+                              <div style={{ display: "flex", gap: 10, alignItems: "flex-start" }}>
+                                <MailOutlined style={{ color: "#13c2c2", marginTop: 2 }} />
+                                <div>
+                                  <Text type="secondary" style={{ fontSize: 11 }}>Office Email</Text>
+                                  <div><Text style={{ fontSize: 13 }}>{u.officeEmail}</Text></div>
+                                </div>
+                              </div>
+                            </Col>
+                          )}
+                          {u.pcoEmail && (
+                            <Col xs={24} sm={12}>
+                              <div style={{ display: "flex", gap: 10, alignItems: "flex-start" }}>
+                                <MailOutlined style={{ color: "#722ed1", marginTop: 2 }} />
+                                <div>
+                                  <Text type="secondary" style={{ fontSize: 11 }}>PCO Email</Text>
+                                  <div><Text style={{ fontSize: 13 }}>{u.pcoEmail}</Text></div>
+                                </div>
+                              </div>
+                            </Col>
+                          )}
+                        </>
+                      )}
+                    </Row>
+                  </Card>
+                </div>
+
+                {/* Section: Assigned SLF */}
+                <div style={{ marginBottom: 14 }}>
+                  <Text type="secondary" style={{ fontSize: 11, fontWeight: 600, letterSpacing: 0.8, textTransform: "uppercase" }}>
+                    <EnvironmentOutlined style={{ marginRight: 4 }} />Assigned SLF Facilit{slfNames.length === 1 ? "y" : "ies"}
+                  </Text>
+                  <Card size="small" style={{ borderRadius: 8, marginTop: 6 }} bodyStyle={{ padding: "10px 14px" }}>
+                    {slfNames.length > 0 ? (
+                      <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                        {slfNames.map((n, i) => (
+                          <Tag key={i} color="blue" style={{ margin: 0, fontSize: 12, padding: "2px 10px" }}>{n}</Tag>
+                        ))}
+                      </div>
+                    ) : (
+                      <Text type="secondary" style={{ fontSize: 13 }}>Not yet assigned</Text>
+                    )}
+                  </Card>
+                </div>
+
+                {/* Section: Verification Attachment */}
+                <div style={{ marginBottom: 14 }}>
+                  <Text type="secondary" style={{ fontSize: 11, fontWeight: 600, letterSpacing: 0.8, textTransform: "uppercase" }}>
+                    <SafetyCertificateOutlined style={{ marginRight: 4 }} />Verification Attachment
+                  </Text>
+                  {u.verificationFileUrl ? (
+                    <Card
+                      size="small"
+                      style={{ borderRadius: 8, marginTop: 6, border: "1px solid #d9d9d9", overflow: "hidden" }}
+                      bodyStyle={{ padding: 0 }}
+                    >
+                      {/* Image preview */}
+                      {isImage && (
+                        <div style={{
+                          background: "#000",
+                          textAlign: "center",
+                          maxHeight: 240,
+                          overflow: "hidden",
+                          borderRadius: "8px 8px 0 0",
+                        }}>
+                          <img
+                            src={u.verificationFileUrl}
+                            alt="Verification attachment"
+                            style={{ maxWidth: "100%", maxHeight: 240, objectFit: "contain", display: "block", margin: "0 auto" }}
+                            onError={(e) => { e.target.style.display = "none"; }}
+                          />
+                        </div>
+                      )}
+                      {/* File info row */}
+                      <div style={{
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "space-between",
+                        padding: "10px 14px",
+                        background: isDark ? "rgba(255,255,255,0.04)" : "#fafafa",
+                        borderTop: isImage ? "1px solid #f0f0f0" : "none",
+                        borderRadius: isImage ? 0 : 8,
+                        gap: 10,
+                      }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                          {isImage
+                            ? <FileImageOutlined style={{ fontSize: 22, color: "#1677ff" }} />
+                            : <FileTextOutlined style={{ fontSize: 22, color: "#52c41a" }} />
+                          }
+                          <div>
+                            <Text style={{ fontSize: 13, fontWeight: 500 }}>
+                              {isImage ? "Image File" : "Document File"}
+                            </Text>
+                            <div>
+                              <Tag color={isImage ? "cyan" : "green"} style={{ fontSize: 11, margin: 0 }}>
+                                {u.verificationFileType?.toUpperCase() || "FILE"}
+                              </Tag>
+                            </div>
+                          </div>
+                        </div>
+                        <a
+                          href={u.verificationFileUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                        >
+                          <Button size="small" icon={<LinkOutlined />} type="primary" ghost>
+                            Open in Drive
+                          </Button>
+                        </a>
+                      </div>
+                    </Card>
+                  ) : (
+                    <Card size="small" style={{ borderRadius: 8, marginTop: 6 }} bodyStyle={{ padding: "10px 14px" }}>
+                      <Text type="secondary" style={{ fontSize: 13 }}>No attachment uploaded</Text>
+                    </Card>
+                  )}
+                </div>
+
+                {/* Section: Timeline */}
+                <div style={{ marginBottom: 4 }}>
+                  <Text type="secondary" style={{ fontSize: 11, fontWeight: 600, letterSpacing: 0.8, textTransform: "uppercase" }}>
+                    <ClockCircleOutlined style={{ marginRight: 4 }} />Activity
+                  </Text>
+                  <Card size="small" style={{ borderRadius: 8, marginTop: 6 }} bodyStyle={{ padding: "12px 14px 4px" }}>
+                    <Timeline
+                      size="small"
+                      items={[
+                        {
+                          color: "blue",
+                          children: (
+                            <>
+                              <Text style={{ fontSize: 12, fontWeight: 500 }}>Registered</Text>
+                              <div><Text type="secondary" style={{ fontSize: 11 }}>{dayjs(u.createdAt).format("MMM D, YYYY h:mm A")}</Text></div>
+                            </>
+                          ),
+                        },
+                        ...(u.approvedAt ? [{
+                          color: "green",
+                          children: (
+                            <>
+                              <Text style={{ fontSize: 12, fontWeight: 500 }}>Approved</Text>
+                              <div><Text type="secondary" style={{ fontSize: 11 }}>{dayjs(u.approvedAt).format("MMM D, YYYY h:mm A")}</Text></div>
+                            </>
+                          ),
+                        }] : []),
+                        ...(u.rejectedReason ? [{
+                          color: "red",
+                          children: (
+                            <>
+                              <Text style={{ fontSize: 12, fontWeight: 500 }}>Rejected</Text>
+                              <div><Text type="secondary" style={{ fontSize: 11 }}>{u.rejectedReason}</Text></div>
+                            </>
+                          ),
+                        }] : []),
+                        ...(u.verificationRequired ? [{
+                          color: "orange",
+                          children: (
+                            <>
+                              <Text style={{ fontSize: 12, fontWeight: 500 }}>Put On Hold</Text>
+                              <div><Text type="secondary" style={{ fontSize: 11 }}>Admin required re-verification</Text></div>
+                            </>
+                          ),
+                        }] : []),
+                        ...(u.verificationSubmitted ? [{
+                          color: "cyan",
+                          children: (
+                            <>
+                              <Text style={{ fontSize: 12, fontWeight: 500 }}>Docs Submitted</Text>
+                              <div><Text type="secondary" style={{ fontSize: 11 }}>Awaiting admin review</Text></div>
+                            </>
+                          ),
+                        }] : []),
+                      ]}
+                    />
+                  </Card>
+                </div>
+
+              </div>{/* /body */}
             </>
           );
         })()}

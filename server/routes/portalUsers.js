@@ -6,6 +6,7 @@ const { writeLog } = require("../utils/logger");
 const {
   sendPortalApprovalEmail,
   sendPortalRejectionEmail,
+  sendPortalVerificationReminderEmail,
 } = require("../utils/email");
 
 const router = express.Router();
@@ -150,6 +151,94 @@ router.delete("/:id", async (req, res) => {
     res.json({ message: "Portal user deleted" });
     writeLog("warn", "portal.delete", {
       message: `Portal user deleted: ${user.email}`,
+      user: req.user.id,
+      ip: req.ip,
+    });
+  } catch (error) {
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+});
+
+// Hold an approved account — require the user to re-upload verification docs
+router.patch("/:id/hold", async (req, res) => {
+  try {
+    const user = await UserPortal.findById(req.params.id).select("-password");
+    if (!user) return res.status(404).json({ message: "User not found" });
+    if (user.status !== "approved") {
+      return res.status(400).json({ message: "Only approved accounts can be put on hold." });
+    }
+
+    user.verificationRequired = true;
+    user.verificationSubmitted = false;
+    await user.save();
+
+    res.json({ message: "Account put on hold. User will be prompted to re-verify on next login.", data: user });
+    writeLog("info", "portal.hold", {
+      message: `Portal user held for re-verification: ${user.email}`,
+      user: req.user.id,
+      ip: req.ip,
+    });
+  } catch (error) {
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+});
+
+// Unhold an account — clear the verification requirement
+router.patch("/:id/unhold", async (req, res) => {
+  try {
+    const user = await UserPortal.findByIdAndUpdate(
+      req.params.id,
+      { verificationRequired: false, verificationSubmitted: false },
+      { returnDocument: "after" }
+    ).select("-password");
+    if (!user) return res.status(404).json({ message: "User not found" });
+
+    res.json({ message: "Account hold removed.", data: user });
+    writeLog("info", "portal.unhold", {
+      message: `Portal user hold removed: ${user.email}`,
+      user: req.user.id,
+      ip: req.ip,
+    });
+  } catch (error) {
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+});
+
+// Mark verification as reviewed (admin acknowledges the re-submitted docs)
+router.patch("/:id/review-verification", async (req, res) => {
+  try {
+    const user = await UserPortal.findByIdAndUpdate(
+      req.params.id,
+      { verificationRequired: false, verificationSubmitted: false },
+      { returnDocument: "after" }
+    ).select("-password");
+    if (!user) return res.status(404).json({ message: "User not found" });
+
+    res.json({ message: "Verification reviewed. Account hold cleared.", data: user });
+    writeLog("info", "portal.review-verification", {
+      message: `Verification reviewed for portal user: ${user.email}`,
+      user: req.user.id,
+      ip: req.ip,
+    });
+  } catch (error) {
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+});
+
+// Send a verification reminder email to an approved user
+router.post("/:id/send-reminder", async (req, res) => {
+  try {
+    const user = await UserPortal.findById(req.params.id).select("-password");
+    if (!user) return res.status(404).json({ message: "User not found" });
+    if (user.status !== "approved") {
+      return res.status(400).json({ message: "Reminder can only be sent to approved accounts." });
+    }
+
+    await sendPortalVerificationReminderEmail(user.email, user.firstName);
+
+    res.json({ message: `Reminder email sent to ${user.email}.` });
+    writeLog("info", "portal.send-reminder", {
+      message: `Verification reminder sent to portal user: ${user.email}`,
       user: req.user.id,
       ip: req.ip,
     });

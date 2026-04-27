@@ -612,6 +612,56 @@ async function sendAdminRejectedEmail(email, firstName, reason) {
   });
 }
 
+// 5. Verification reminder — sent by admin to held approved accounts
+async function sendPortalVerificationReminderEmail(email, firstName) {
+  const loginLink = `${getClientUrl()}/slfportal/login`;
+
+  const body = `
+    <div style="text-align:center;margin-bottom:24px;">
+      <div style="display:inline-block;background:#fff7e6;border-radius:50%;padding:16px;">
+        <span style="font-size:32px;">&#9888;</span>
+      </div>
+    </div>
+    <h2 style="margin:0 0 8px;color:#1a3353;font-size:22px;text-align:center;">Action Required: Update Your Verification</h2>
+    <p style="margin:0 0 24px;color:#666;font-size:15px;line-height:1.6;">
+      Hi <strong>${firstName}</strong>,
+    </p>
+    <p style="margin:0 0 16px;color:#666;font-size:15px;line-height:1.6;">
+      The Environmental Management Bureau Region III (EMB R3) requires you to update your account
+      verification information. This is necessary to continue using the SLF Generators Portal.
+    </p>
+    <div style="padding:16px;background:#fff7e6;border-radius:8px;border:1px solid #ffd591;margin-bottom:24px;">
+      <p style="margin:0 0 8px;color:#ad4e00;font-size:14px;font-weight:700;">What you need to do:</p>
+      <ul style="margin:0;padding-left:18px;color:#ad4e00;font-size:13px;line-height:1.8;">
+        <li>Log in to the SLF Generators Portal</li>
+        <li>Complete the verification form with your updated office email and PCO email address</li>
+        <li>Upload a valid proof document — a copy of the letter you received from the office confirming your authorization to register on this portal</li>
+      </ul>
+    </div>
+    <p style="margin:0 0 16px;color:#666;font-size:14px;line-height:1.6;">
+      Access to the portal will be restricted until you complete this verification step.
+    </p>
+    <table width="100%" cellpadding="0" cellspacing="0">
+      <tr><td align="center" style="padding:8px 0 24px;">
+        <a href="${loginLink}" target="_blank" style="display:inline-block;background:#1a3353;color:#fff;text-decoration:none;padding:14px 40px;border-radius:8px;font-size:16px;font-weight:600;letter-spacing:0.5px;">
+          Log In &amp; Complete Verification
+        </a>
+      </td></tr>
+    </table>
+    <div style="padding:16px;background:#f0f5ff;border-radius:8px;border:1px solid #adc6ff;">
+      <p style="margin:0;color:#1d39c4;font-size:13px;line-height:1.5;">
+        If you have questions or need assistance, please contact the EMB R3 ESWMP office directly.
+      </p>
+    </div>`;
+
+  await transporter.sendMail({
+    from: `"EMBR3 ESWMP" <${process.env.EMAIL_USER}>`,
+    to: email,
+    subject: "Action Required: Update Your Verification — SLF Generators Portal",
+    html: portalEmailWrapper(body),
+  });
+}
+
 module.exports = {
   sendVerificationEmail,
   sendAcknowledgementEmail,
@@ -620,6 +670,7 @@ module.exports = {
   sendPortalApprovalEmail,
   sendPortalRejectionEmail,
   sendPortalResetPasswordEmail,
+  sendPortalVerificationReminderEmail,
   sendAdminResetPasswordEmail,
   sendSubmissionEmail,
   sendAdminApprovalRequestEmail,

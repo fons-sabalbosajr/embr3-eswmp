@@ -13,6 +13,9 @@ node_modules
 # Environment variables
 .env
 
+# Service account credentials (Google Drive / GCP)
+secrets/
+
 # Build output
 dist
 

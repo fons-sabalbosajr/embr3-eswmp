@@ -22,7 +22,12 @@ export default function PortalLogin() {
       const { data } = await api.post("/portal-auth/login", values);
       secureStorage.set("portal_token", data.token);
       secureStorage.setJSON("portal_user", data.user);
-      navigate("/slfportal");
+      // Redirect held users to the verification update form
+      if (data.needsVerification) {
+        navigate("/slfportal/verify-update");
+      } else {
+        navigate("/slfportal");
+      }
     } catch (err) {
       if (!navigator.onLine) {
         showError({ type: "offline", title: "You're Offline", message: "It seems you are not connected to the internet. Please check your connection and try again." });

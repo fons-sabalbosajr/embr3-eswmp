@@ -37,6 +37,16 @@ const userPortalSchema = new mongoose.Schema(
     approvedAt: { type: Date, default: null },
     rejectedReason: { type: String, trim: true, default: "" },
     isVerified: { type: Boolean, default: false },
+    // Additional contact info
+    officeEmail: { type: String, trim: true, lowercase: true, default: "" },
+    pcoEmail: { type: String, trim: true, lowercase: true, default: "" },
+    // Verification document (uploaded to Google Drive)
+    verificationFileUrl: { type: String, default: "" },
+    verificationFileDriveId: { type: String, default: "" },
+    verificationFileType: { type: String, default: "" }, // "image" | "document"
+    // Admin-triggered re-verification flow
+    verificationRequired: { type: Boolean, default: false },
+    verificationSubmitted: { type: Boolean, default: false }, // user has re-submitted docs
     // Password reset
     resetToken: { type: String, default: null },
     resetTokenExpiry: { type: Date, default: null },

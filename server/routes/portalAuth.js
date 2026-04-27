@@ -1,8 +1,10 @@
 const express = require("express");
 const jwt = require("jsonwebtoken");
 const crypto = require("crypto");
+const multer = require("multer");
 const UserPortal = require("../models/UserPortal");
 const { writeLog } = require("../utils/logger");
+const { uploadFileToDrive } = require("../utils/googleDrive");
 const {
   sendPortalSignupEmail,
   sendPortalResetPasswordEmail,
@@ -10,15 +12,68 @@ const {
 
 const router = express.Router();
 
-// Portal Sign Up — register as SLF portal user (pending approval)
-router.post("/signup", async (req, res) => {
-  try {
-    const { firstName, lastName, email, password, contactNumber, companyName } =
-      req.body;
+// Multer: memory storage — files stay in RAM as Buffer for Drive upload
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 20 * 1024 * 1024 }, // 20 MB max
+  fileFilter(req, file, cb) {
+    const allowed = [
+      "image/jpeg", "image/png", "image/gif", "image/webp",
+      "application/pdf",
+      "application/msword",
+      "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ];
+    if (allowed.includes(file.mimetype)) return cb(null, true);
+    cb(new Error("Unsupported file type. Please upload an image or PDF/DOC/DOCX."));
+  },
+});
 
-    const existing = await UserPortal.findOne({ email });
+// Portal Sign Up — register as SLF portal user (pending approval)
+// Accepts multipart/form-data with an optional verificationFile field.
+router.post("/signup", upload.single("verificationFile"), async (req, res) => {
+  try {
+    const {
+      firstName,
+      lastName,
+      email,
+      password,
+      contactNumber,
+      companyName,
+      officeEmail,
+      pcoEmail,
+    } = req.body;
+
+    const existing = await UserPortal.findOne({ email: email?.toLowerCase() });
     if (existing) {
       return res.status(400).json({ message: "Email already registered" });
+    }
+
+    // Upload verification file to Google Drive if provided
+    let verificationFileUrl = "";
+    let verificationFileDriveId = "";
+    let verificationFileType = "";
+
+    if (req.file) {
+      const isImage = req.file.mimetype.startsWith("image/");
+      verificationFileType = isImage ? "image" : "document";
+      try {
+        const driveResult = await uploadFileToDrive(
+          req.file.buffer,
+          req.file.mimetype,
+          req.file.originalname,
+          isImage
+        );
+        verificationFileUrl = driveResult.viewUrl;
+        verificationFileDriveId = driveResult.fileId;
+      } catch (driveErr) {
+        // Log but do not block registration
+        writeLog("warn", "portal.signup.drive", {
+          message: `Drive upload failed for ${email}: ${driveErr.message}`,
+          user: email,
+          ip: req.ip,
+        });
+        // Non-blocking — registration continues even if Drive upload fails
+      }
     }
 
     const user = new UserPortal({
@@ -28,8 +83,13 @@ router.post("/signup", async (req, res) => {
       password,
       contactNumber: contactNumber || "",
       companyName: companyName || "",
+      officeEmail: officeEmail || "",
+      pcoEmail: pcoEmail || "",
+      verificationFileUrl,
+      verificationFileDriveId,
+      verificationFileType,
       status: "pending",
-      isVerified: true, // auto-verified, admin approval is the gate
+      isVerified: true, // auto-verified; admin approval is the gate
     });
     await user.save();
 
@@ -54,13 +114,13 @@ router.post("/signup", async (req, res) => {
       ip: req.ip,
     });
 
-    res
-      .status(201)
-      .json({
-        message:
-          "Registration submitted successfully. Please wait for admin approval.",
-      });
+    res.status(201).json({
+      message: "Registration submitted successfully. Please wait for admin approval.",
+    });
   } catch (error) {
+    if (error.message?.includes("Unsupported file type")) {
+      return res.status(400).json({ message: error.message });
+    }
     res.status(500).json({ message: "Server error", error: error.message });
   }
 });
@@ -76,20 +136,14 @@ router.post("/login", async (req, res) => {
     }
 
     if (user.status === "pending") {
-      return res
-        .status(403)
-        .json({
-          message:
-            "Your account is still pending approval. Please wait for admin approval.",
-        });
+      return res.status(403).json({
+        message: "Your account is still pending approval. Please wait for admin approval.",
+      });
     }
     if (user.status === "rejected") {
-      return res
-        .status(403)
-        .json({
-          message:
-            "Your account registration has been rejected. Please contact the administrator.",
-        });
+      return res.status(403).json({
+        message: "Your account registration has been rejected. Please contact the administrator.",
+      });
     }
 
     const isMatch = await user.comparePassword(password);
@@ -106,6 +160,8 @@ router.post("/login", async (req, res) => {
     res.json({
       message: "Login successful",
       token,
+      // Flag so the front-end can redirect held users to the verification form
+      needsVerification: user.verificationRequired && !user.verificationSubmitted,
       user: {
         id: user._id,
         firstName: user.firstName,
@@ -113,8 +169,12 @@ router.post("/login", async (req, res) => {
         email: user.email,
         contactNumber: user.contactNumber,
         companyName: user.companyName,
+        officeEmail: user.officeEmail,
+        pcoEmail: user.pcoEmail,
         assignedSlf: user.assignedSlf,
         assignedSlfName: user.assignedSlfName,
+        verificationRequired: user.verificationRequired,
+        verificationSubmitted: user.verificationSubmitted,
         role: "portal_user",
       },
     });
@@ -259,6 +319,67 @@ router.post("/reset-password", async (req, res) => {
 
     res.json({ message: "Password has been reset successfully. You can now log in." });
   } catch (error) {
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+});
+
+// Submit Verification Update — for held accounts to re-upload docs + update info
+// Requires a valid portal JWT token.
+router.post("/submit-verification", upload.single("verificationFile"), async (req, res) => {
+  try {
+    const token = req.headers.authorization?.split(" ")[1];
+    if (!token) return res.status(401).json({ message: "No token provided" });
+
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    const user = await UserPortal.findById(decoded.id);
+    if (!user) return res.status(404).json({ message: "User not found" });
+
+    if (!user.verificationRequired) {
+      return res.status(400).json({ message: "No verification update is required for this account." });
+    }
+
+    const { officeEmail, pcoEmail } = req.body;
+
+    // Upload new verification file if provided
+    if (req.file) {
+      const isImage = req.file.mimetype.startsWith("image/");
+      try {
+        const driveResult = await uploadFileToDrive(
+          req.file.buffer,
+          req.file.mimetype,
+          req.file.originalname,
+          isImage
+        );
+        user.verificationFileUrl = driveResult.viewUrl;
+        user.verificationFileDriveId = driveResult.fileId;
+        user.verificationFileType = isImage ? "image" : "document";
+      } catch (driveErr) {
+        writeLog("warn", "portal.verification.drive", {
+          message: `Drive upload failed for ${user.email}: ${driveErr.message}`,
+          user: user.email,
+          ip: req.ip,
+        });
+        return res.status(502).json({ message: `File upload to Drive failed: ${driveErr.message}` });
+      }
+    }
+
+    if (officeEmail) user.officeEmail = officeEmail.trim().toLowerCase();
+    if (pcoEmail) user.pcoEmail = pcoEmail.trim().toLowerCase();
+    user.verificationSubmitted = true;
+
+    await user.save();
+
+    writeLog("info", "portal.verification.submit", {
+      message: `Verification update submitted: ${user.email}`,
+      user: user.email,
+      ip: req.ip,
+    });
+
+    res.json({ message: "Verification information submitted. The admin will review your update." });
+  } catch (error) {
+    if (error.message?.includes("Unsupported file type")) {
+      return res.status(400).json({ message: error.message });
+    }
     res.status(500).json({ message: "Server error", error: error.message });
   }
 });
