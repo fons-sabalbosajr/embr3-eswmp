@@ -1,4 +1,5 @@
 const mongoose = require("mongoose");
+const { dataYearVisibilityPlugin } = require("../utils/yearVisibility");
 
 const transferStationSchema = new mongoose.Schema(
   {
@@ -57,6 +58,8 @@ const transferStationSchema = new mongoose.Schema(
   },
   { timestamps: true },
 );
+
+transferStationSchema.plugin(dataYearVisibilityPlugin);
 
 module.exports = mongoose.model(
   "TransferStation",

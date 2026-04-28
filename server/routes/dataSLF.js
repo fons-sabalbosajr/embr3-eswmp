@@ -163,7 +163,9 @@ router.put("/:id", async (req, res) => {
       });
     } catch { /* silent */ }
 
-    const populated = await DataSLF.findById(entry._id).populate("slfGenerator");
+    const populated = await DataSLF.findById(entry._id)
+      .setOptions({ includeHiddenYears: true })
+      .populate("slfGenerator");
     res.json(populated);
 
     // Notify admins of resubmission
@@ -200,7 +202,9 @@ router.get("/baseline/:slfName", async (req, res) => {
     const latest = await DataSLF.findOne({
       $or: [{ slfName }, { lguCompanyName: slfName }],
       totalVolumeAccepted: { $ne: null },
-    }).sort({ createdAt: -1 });
+    })
+      .setOptions({ includeHiddenYears: true })
+      .sort({ createdAt: -1 });
 
     if (!latest) return res.json(null);
 
@@ -221,10 +225,12 @@ router.get("/baseline/:slfName", async (req, res) => {
       closedCellHazardousVolume: latest.closedCellHazardousVolume,
       closedCellHazardousUnit: latest.closedCellHazardousUnit,
       acceptsHazardousWaste: latest.acceptsHazardousWaste || false,
+      activeCellEntries: latest.activeCellEntries || [],
+      closedCellEntries: latest.closedCellEntries || [],
       accreditedHaulers: latest.accreditedHaulers || [],
       baselineUpdateApproved: latest.baselineUpdateApproved || false,
       baselineUpdateRequested: latest.baselineUpdateRequested || false,
-      savedAt: latest.createdAt,
+      savedAt: latest.updatedAt || latest.createdAt,
     });
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });
@@ -281,10 +287,12 @@ router.get("/baselines", async (req, res) => {
       closedCellHazardousUnit: d.closedCellHazardousUnit || "m³",
       acceptsHazardousWaste: d.acceptsHazardousWaste || false,
       accreditedHaulers: d.accreditedHaulers || [],
+      activeCellEntries: d.activeCellEntries || [],
+      closedCellEntries: d.closedCellEntries || [],
       submittedBy: d.submittedBy,
       baselineUpdateApproved: d.baselineUpdateApproved || false,
       baselineUpdateRequested: d.baselineUpdateRequested || false,
-      lastUpdated: d.createdAt,
+      lastUpdated: d.updatedAt || d.createdAt,
     }));
 
     res.json(results);
@@ -310,6 +318,8 @@ router.put("/baselines/:id", async (req, res) => {
       "closedCellHazardousVolume", "closedCellHazardousUnit",
       "acceptsHazardousWaste",
       "accreditedHaulers",
+      "activeCellEntries",
+      "closedCellEntries",
     ];
     for (const f of fields) {
       if (req.body[f] !== undefined) entry[f] = req.body[f];
@@ -813,6 +823,7 @@ router.get("/generator-summary", async (req, res) => {
 // Get all SLF data entries (admin) — excludes soft-deleted
 router.get("/", async (req, res) => {
   try {
+    // Admin management view — respects App Settings year visibility filter
     const entries = await DataSLF.find({ deletedAt: null })
       .populate("slfGenerator")
       .sort({ createdAt: -1 })
@@ -1053,6 +1064,7 @@ router.delete("/:id", async (req, res) => {
 router.get("/trash/list", async (req, res) => {
   try {
     const entries = await DataSLF.find({ deletedAt: { $ne: null } })
+      .setOptions({ includeHiddenYears: true })
       .populate("slfGenerator")
       .sort({ deletedAt: -1 });
     res.json(entries);
@@ -1064,7 +1076,7 @@ router.get("/trash/list", async (req, res) => {
 // Restore a soft-deleted submission
 router.patch("/:id/restore", async (req, res) => {
   try {
-    const entry = await DataSLF.findById(req.params.id);
+    const entry = await DataSLF.findById(req.params.id).setOptions({ includeHiddenYears: true });
     if (!entry) return res.status(404).json({ message: "Entry not found" });
     if (!entry.deletedAt) return res.status(400).json({ message: "Entry is not deleted" });
     entry.deletedAt = null;
@@ -1093,10 +1105,10 @@ router.patch("/:id/restore", async (req, res) => {
 // Permanently delete a submission
 router.delete("/:id/permanent", async (req, res) => {
   try {
-    const entry = await DataSLF.findById(req.params.id);
+    const entry = await DataSLF.findById(req.params.id).setOptions({ includeHiddenYears: true });
     if (!entry) return res.status(404).json({ message: "Entry not found" });
     if (!entry.deletedAt) return res.status(400).json({ message: "Entry must be soft-deleted first" });
-    await DataSLF.findByIdAndDelete(req.params.id);
+    await DataSLF.findByIdAndDelete(req.params.id).setOptions({ includeHiddenYears: true });
     res.json({ message: "Entry permanently deleted" });
     writeLog("warn", "submission.permanent-delete", { message: `Submission permanently deleted: ${entry.idNo}`, user: req.logUser || "admin", ip: req.ip });
   } catch (error) {
@@ -1313,6 +1325,103 @@ router.post("/:id/send-email", async (req, res) => {
   }
 });
 
+// Portal user saves updated baseline data (after admin approval) — re-locks the record
+router.patch("/portal-save-baseline/:slfName", async (req, res) => {
+  try {
+    const slfName = decodeURIComponent(req.params.slfName);
+    const {
+      submittedBy,
+      baselineUnit,
+      totalVolumeAccepted, totalVolumeAcceptedUnit,
+      activeCellResidualVolume, activeCellResidualUnit,
+      activeCellInertVolume, activeCellInertUnit,
+      activeCellHazardousVolume, activeCellHazardousUnit,
+      closedCellResidualVolume, closedCellResidualUnit,
+      closedCellInertVolume, closedCellInertUnit,
+      closedCellHazardousVolume, closedCellHazardousUnit,
+      activeCellEntries, closedCellEntries,
+      accreditedHaulers,
+      acceptsHazardousWaste,
+    } = req.body || {};
+
+    if (!slfName) return res.status(400).json({ message: "slfName is required" });
+
+    const filter = {
+      $or: [{ slfName }, { lguCompanyName: slfName }],
+      totalVolumeAccepted: { $ne: null },
+    };
+
+    const updateFields = {
+      baselineUpdateApproved: false,
+      baselineUpdateRequested: false,
+      baselineUpdateApprovedAt: null,
+    };
+
+    const fieldMap = {
+      baselineUnit,
+      totalVolumeAccepted, totalVolumeAcceptedUnit,
+      activeCellResidualVolume, activeCellResidualUnit,
+      activeCellInertVolume, activeCellInertUnit,
+      activeCellHazardousVolume, activeCellHazardousUnit,
+      closedCellResidualVolume, closedCellResidualUnit,
+      closedCellInertVolume, closedCellInertUnit,
+      closedCellHazardousVolume, closedCellHazardousUnit,
+      activeCellEntries, closedCellEntries,
+      accreditedHaulers,
+      acceptsHazardousWaste,
+    };
+    for (const [k, v] of Object.entries(fieldMap)) {
+      if (v !== undefined) updateFields[k] = v;
+    }
+
+    await DataSLF.updateMany(filter, { $set: updateFields });
+
+    const latest = await DataSLF.findOne(filter).setOptions({ includeHiddenYears: true }).sort({ createdAt: -1 });
+
+    // Log transaction
+    await Transaction.create({
+      dataEntry: latest?._id,
+      submissionId: latest?.submissionId,
+      companyName: slfName,
+      submittedBy: submittedBy || slfName,
+      type: "baseline_update",
+      description: `Portal user saved updated baseline data for ${slfName}`,
+      performedBy: submittedBy || slfName,
+      meta: { slfName },
+    });
+
+    writeLog("info", "baseline.portal-save", {
+      message: `Portal user saved baseline update for ${slfName}`,
+      user: submittedBy || slfName,
+      ip: req.ip,
+    });
+
+    try {
+      await Notification.create({
+        recipient: "admin",
+        type: "baseline_update",
+        title: "Baseline Data Updated",
+        message: `${submittedBy || slfName} has saved updated baseline data for ${slfName}.`,
+        submissionId: latest?.submissionId,
+        dataEntry: latest?._id,
+        meta: { slfName, submittedBy: submittedBy || slfName },
+      });
+    } catch { /* silent */ }
+
+    // Notify admin of the update
+    notifyAdmin(req, {
+      type: "baseline_update",
+      title: "Baseline Data Updated",
+      message: `${submittedBy || slfName} has saved updated baseline data for ${slfName}.`,
+    });
+    refreshAdmin(req, "baselines");
+
+    res.json({ message: "Baseline saved and locked" });
+  } catch (error) {
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+});
+
 // Portal user requests baseline field update — notifies admin
 router.post("/baseline-update-request", async (req, res) => {
   try {
@@ -1352,7 +1461,7 @@ router.post("/baseline-update-request", async (req, res) => {
         baselineUpdateApproved: false,
       },
     });
-    const latestEntry = await DataSLF.findOne(filter).sort({ createdAt: -1 });
+    const latestEntry = await DataSLF.findOne(filter).setOptions({ includeHiddenYears: true }).sort({ createdAt: -1 });
 
     // Log transaction
     await Transaction.create({
@@ -1371,6 +1480,67 @@ router.post("/baseline-update-request", async (req, res) => {
     });
 
     res.json({ message: "Request sent to admin" });
+  } catch (error) {
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+});
+
+// Portal: Get waste received breakdown (LGU R3 / LGU outside R3 / Private) for dashboard
+// Region 3 Central Luzon: PSGC region code starts with "03"
+router.get("/waste-received-summary/:slfName", async (req, res) => {
+  try {
+    const slfName = decodeURIComponent(req.params.slfName);
+    const { year } = req.query;
+    const match = {
+      slfName: { $regex: new RegExp(`^${slfName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`, "i") },
+      deletedAt: null,
+      status: { $ne: "rejected" },
+    };
+    if (year) {
+      const y = Number(year);
+      match.dateOfDisposal = { $gte: new Date(`${y}-01-01`), $lte: new Date(`${y}-12-31`) };
+    }
+
+    const records = await DataSLF.find(match).select(
+      "companyType companyRegion lguCompanyName trucks dateOfDisposal"
+    ).lean();
+
+    const summary = { lguR3: [], lguOutside: [], privateIndustry: [] };
+
+    for (const r of records) {
+      const totalVol = (r.trucks || []).reduce((s, t) => s + (t.actualVolume || 0), 0);
+      const isR3 = (r.companyRegion || "").startsWith("03");
+      const item = {
+        company: r.lguCompanyName || "—",
+        region: r.companyRegion || "",
+        totalVolume: totalVol,
+        date: r.dateOfDisposal,
+        entries: r.trucks?.length || 0,
+      };
+      if (r.companyType === "LGU") {
+        if (isR3) summary.lguR3.push(item);
+        else summary.lguOutside.push(item);
+      } else {
+        summary.privateIndustry.push(item);
+      }
+    }
+
+    // Aggregate duplicates per company
+    const agg = (arr) => {
+      const map = {};
+      for (const i of arr) {
+        if (!map[i.company]) map[i.company] = { company: i.company, region: i.region, totalVolume: 0, entries: 0 };
+        map[i.company].totalVolume += i.totalVolume;
+        map[i.company].entries += i.entries;
+      }
+      return Object.values(map).sort((a, b) => b.totalVolume - a.totalVolume);
+    };
+
+    res.json({
+      lguR3: agg(summary.lguR3),
+      lguOutside: agg(summary.lguOutside),
+      privateIndustry: agg(summary.privateIndustry),
+    });
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });
   }

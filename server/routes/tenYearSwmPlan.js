@@ -17,9 +17,8 @@ router.get("/", async (req, res) => {
 // Dashboard stats
 router.get("/stats", async (req, res) => {
   try {
-    // Latest year filter for summary cards
-    const latestYear = req.query.year ? Number(req.query.year) : new Date().getFullYear();
-    const latestFilter = { dataYear: latestYear };
+    // Year filter: when a year is explicitly passed filter by it, otherwise show all years
+    const latestFilter = req.query.year ? { dataYear: Number(req.query.year) } : {};
 
     // Helper: build compliance $cond
     const complianceCond = {
@@ -65,30 +64,30 @@ router.get("/stats", async (req, res) => {
     ] = await Promise.all([
       TenYearSWMPlan.countDocuments(latestFilter),
       TenYearSWMPlan.aggregate([
-        { $match: latestFilter },
+        ...(Object.keys(latestFilter).length ? [{ $match: latestFilter }] : []),
         { $addFields: { _normProvince: { $replaceAll: { input: "$province", find: "Province of ", replacement: "" } } } },
         { $group: { _id: "$_normProvince", count: { $sum: 1 } } },
         { $sort: { count: -1 } },
       ]),
       TenYearSWMPlan.aggregate([
-        { $match: latestFilter },
+        ...(Object.keys(latestFilter).length ? [{ $match: latestFilter }] : []),
         { $group: { _id: complianceCond, count: { $sum: 1 } } },
       ]),
       TenYearSWMPlan.aggregate([
-        { $match: latestFilter },
+        ...(Object.keys(latestFilter).length ? [{ $match: latestFilter }] : []),
         { $group: { _id: "$manilaBayArea", count: { $sum: 1 } } },
         { $sort: { count: -1 } },
       ]),
       TenYearSWMPlan.aggregate([
-        { $match: latestFilter },
+        ...(Object.keys(latestFilter).length ? [{ $match: latestFilter }] : []),
         { $group: { _id: "$typeOfSWMPlan", count: { $sum: 1 } } },
       ]),
       TenYearSWMPlan.aggregate([
-        { $match: latestFilter },
+        ...(Object.keys(latestFilter).length ? [{ $match: latestFilter }] : []),
         { $group: { _id: renewalCond, count: { $sum: 1 } } },
       ]),
       TenYearSWMPlan.aggregate([
-        { $match: latestFilter },
+        ...(Object.keys(latestFilter).length ? [{ $match: latestFilter }] : []),
         {
           $group: {
             _id: null,
@@ -102,7 +101,7 @@ router.get("/stats", async (req, res) => {
         },
       ]),
       TenYearSWMPlan.aggregate([
-        { $match: latestFilter },
+        ...(Object.keys(latestFilter).length ? [{ $match: latestFilter }] : []),
         {
           $group: {
             _id: "$province",
@@ -114,7 +113,7 @@ router.get("/stats", async (req, res) => {
         { $sort: { avgDiversion: -1 } },
       ]),
       TenYearSWMPlan.find(
-        { dataYear: latestYear, latitude: { $ne: null }, longitude: { $ne: null } },
+        { ...latestFilter, latitude: { $ne: null }, longitude: { $ne: null } },
         {
           municipality: 1, province: 1, latitude: 1, longitude: 1,
           manilaBayArea: 1, congressionalDistrict: 1,
@@ -132,7 +131,7 @@ router.get("/stats", async (req, res) => {
       TenYearSWMPlan.aggregate([
         {
           $group: {
-            _id: { $ifNull: ["$dataYear", 2026] },
+            _id: { $ifNull: ["$dataYear", new Date().getFullYear()] },
             totalRecords: { $sum: 1 },
             compliant: {
               $sum: {

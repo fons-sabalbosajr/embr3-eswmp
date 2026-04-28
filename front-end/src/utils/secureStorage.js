@@ -141,6 +141,15 @@ const secureStorage = {
   /** Remove dashboard stats cache so next load fetches fresh data */
   invalidateDashboard() {
     secureStorage.remove("dashboard-stats-cache");
+    secureStorage.remove("dashboard-stats-cache-all");
+  },
+  /**
+   * Remove ALL page-level data caches so that every page re-fetches fresh
+   * data on next load.  Call this whenever year-visibility settings change.
+   * Auth tokens live in sessionStorage so they are unaffected.
+   */
+  invalidateAllDataCaches() {
+    localStorage.clear();
   },
 };
 

@@ -204,10 +204,6 @@ export default function FieldSettings({canEdit = true, canDelete = true, isDark}
     <div>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4, flexWrap: "wrap", gap: 12 }}>
         <div>
-          <Title level={4} style={{ margin: 0 }}>
-            Portal Field Settings
-          </Title>
-          <Text type="secondary">Configure the fields shown on the client portal</Text>
         </div>
         <Space>
           <Button

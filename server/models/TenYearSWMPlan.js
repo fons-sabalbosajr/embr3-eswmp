@@ -1,4 +1,5 @@
 const mongoose = require("mongoose");
+const { dataYearVisibilityPlugin } = require("../utils/yearVisibility");
 
 const tenYearSWMPlanSchema = new mongoose.Schema(
   {
@@ -85,5 +86,7 @@ const tenYearSWMPlanSchema = new mongoose.Schema(
   },
   { timestamps: true }
 );
+
+tenYearSWMPlanSchema.plugin(dataYearVisibilityPlugin);
 
 module.exports = mongoose.model("TenYearSWMPlan", tenYearSWMPlanSchema, "10_year_swm");

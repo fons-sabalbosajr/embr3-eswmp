@@ -32,6 +32,9 @@ const transactionSchema = new mongoose.Schema(
         "submission_edit_request", // portal user requested edit on approved submission
         "submission_edit_approved", // admin approved edit request
         "submission_edit_rejected", // admin rejected edit request
+        "hauler_delete_request",  // portal user submitted hauler deletion request
+        "hauler_delete_approved", // admin approved hauler deletion request
+        "hauler_delete_rejected", // admin rejected hauler deletion request
       ],
       required: true,
       index: true,

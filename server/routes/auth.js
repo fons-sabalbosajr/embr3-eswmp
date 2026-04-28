@@ -150,7 +150,9 @@ router.post("/forgot-password", async (req, res) => {
     user.resetTokenExpiry = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
     await user.save();
 
-    await sendAdminResetPasswordEmail(user.email, user.firstName, resetCode);
+    sendAdminResetPasswordEmail(user.email, user.firstName, resetCode).catch((emailErr) => {
+      console.error("Failed to send admin reset password email:", emailErr.message);
+    });
 
     writeLog("info", "auth.forgot-password", {
       message: `Admin password reset code sent: ${user.email}`,

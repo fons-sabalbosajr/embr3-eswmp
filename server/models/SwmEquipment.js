@@ -1,4 +1,5 @@
 const mongoose = require("mongoose");
+const { dataYearVisibilityPlugin } = require("../utils/yearVisibility");
 
 const swmEquipmentSchema = new mongoose.Schema(
   {
@@ -55,5 +56,7 @@ const swmEquipmentSchema = new mongoose.Schema(
   },
   { timestamps: true }
 );
+
+swmEquipmentSchema.plugin(dataYearVisibilityPlugin);
 
 module.exports = mongoose.model("SwmEquipment", swmEquipmentSchema, "swm_equipment");

@@ -1,6 +1,7 @@
 const express = require("express");
 const PortalField = require("../models/PortalField");
 const AppSettings = require("../models/AppSettings");
+const { clearYearVisibilityCache } = require("../utils/yearVisibility");
 
 const router = express.Router();
 
@@ -120,6 +121,7 @@ router.put("/app", async (req, res) => {
       Object.assign(settings, req.body);
     }
     await settings.save();
+    clearYearVisibilityCache();
     res.json({ message: "Settings updated", data: settings });
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });
@@ -139,12 +141,22 @@ router.put("/org-chart", async (req, res) => {
   }
 });
 
-// ── Philippine Address API Proxy (PSGC) ──
+// ── Philippine Address API Proxy (PSGC) — with 24-hour in-memory cache ──
+const _psgcCache = new Map(); // key → { data, expiresAt }
+const PSGC_TTL = 24 * 60 * 60 * 1000; // 24 hours
+async function fetchPsgc(url) {
+  const now = Date.now();
+  const cached = _psgcCache.get(url);
+  if (cached && cached.expiresAt > now) return cached.data;
+  const resp = await fetch(url);
+  const data = await resp.json();
+  _psgcCache.set(url, { data, expiresAt: now + PSGC_TTL });
+  return data;
+}
 
 router.get("/address/regions", async (_req, res) => {
   try {
-    const resp = await fetch("https://psgc.gitlab.io/api/regions/");
-    const data = await resp.json();
+    const data = await fetchPsgc("https://psgc.gitlab.io/api/regions/");
     res.json(data);
   } catch (error) {
     res.status(500).json({ message: "Failed to fetch regions", error: error.message });
@@ -153,8 +165,7 @@ router.get("/address/regions", async (_req, res) => {
 
 router.get("/address/provinces/:regionCode", async (req, res) => {
   try {
-    const resp = await fetch(`https://psgc.gitlab.io/api/regions/${encodeURIComponent(req.params.regionCode)}/provinces/`);
-    const data = await resp.json();
+    const data = await fetchPsgc(`https://psgc.gitlab.io/api/regions/${encodeURIComponent(req.params.regionCode)}/provinces/`);
     res.json(data);
   } catch (error) {
     res.status(500).json({ message: "Failed to fetch provinces", error: error.message });
@@ -163,8 +174,7 @@ router.get("/address/provinces/:regionCode", async (req, res) => {
 
 router.get("/address/municipalities/:provinceCode", async (req, res) => {
   try {
-    const resp = await fetch(`https://psgc.gitlab.io/api/provinces/${encodeURIComponent(req.params.provinceCode)}/cities-municipalities/`);
-    const data = await resp.json();
+    const data = await fetchPsgc(`https://psgc.gitlab.io/api/provinces/${encodeURIComponent(req.params.provinceCode)}/cities-municipalities/`);
     res.json(data);
   } catch (error) {
     res.status(500).json({ message: "Failed to fetch municipalities", error: error.message });
@@ -173,8 +183,7 @@ router.get("/address/municipalities/:provinceCode", async (req, res) => {
 
 router.get("/address/barangays/:municipalityCode", async (req, res) => {
   try {
-    const resp = await fetch(`https://psgc.gitlab.io/api/cities-municipalities/${encodeURIComponent(req.params.municipalityCode)}/barangays/`);
-    const data = await resp.json();
+    const data = await fetchPsgc(`https://psgc.gitlab.io/api/cities-municipalities/${encodeURIComponent(req.params.municipalityCode)}/barangays/`);
     res.json(data);
   } catch (error) {
     res.status(500).json({ message: "Failed to fetch barangays", error: error.message });

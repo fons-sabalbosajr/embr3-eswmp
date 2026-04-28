@@ -16,6 +16,9 @@ node_modules
 # Service account credentials (Google Drive / GCP)
 secrets/
 
+# One-time OAuth token generation utility (contains env-only credentials)
+utils/generateDriveToken.js
+
 # Build output
 dist
 

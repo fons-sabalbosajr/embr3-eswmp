@@ -23,8 +23,8 @@ export default function AdminForgotPassword() {
       await api.post("/auth/forgot-password", { email: values.email });
       setEmail(values.email);
       setStep(2);
-    } catch {
-      Swal.fire({ icon: "error", title: "Error", text: "Something went wrong. Please try again later." });
+    } catch (err) {
+      Swal.fire({ icon: "error", title: "Error", text: err.response?.data?.message || "Something went wrong. Please try again later." });
     } finally {
       setLoading(false);
     }
@@ -90,8 +90,8 @@ export default function AdminForgotPassword() {
       await api.post("/auth/forgot-password", { email });
       Swal.fire({ icon: "success", title: "Code Resent", text: "A new code has been sent to your email.", confirmButtonColor: "#1a3353" });
       setCode(["", "", "", "", "", ""]);
-    } catch {
-      Swal.fire({ icon: "error", title: "Error", text: "Failed to resend code." });
+    } catch (err) {
+      Swal.fire({ icon: "error", title: "Error", text: err.response?.data?.message || "Failed to resend code." });
     } finally {
       setLoading(false);
     }
@@ -150,6 +150,9 @@ export default function AdminForgotPassword() {
             <Title level={3} className="auth-card-title">Enter Code</Title>
             <Text className="auth-card-subtitle">We sent a 6-digit code to <strong>{email}</strong></Text>
             <div className="auth-card-badge auth-card-badge-admin">Admin Account</div>
+          </div>
+          <div style={{ background: "#fffbe6", border: "1px solid #ffe58f", borderRadius: 8, padding: "8px 12px", margin: "16px 0 8px", fontSize: 12, color: "#ad6800" }}>
+            ⏱ The code may take 1–2 minutes to arrive. If you don&apos;t see it, check your <strong>Spam / Junk</strong> folder.
           </div>
           <div style={{ display: "flex", justifyContent: "center", gap: 8, margin: "28px 0 24px" }} onPaste={handleCodePaste}>
             {code.map((d, i) => (

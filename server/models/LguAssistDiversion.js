@@ -1,4 +1,5 @@
 const mongoose = require("mongoose");
+const { dataYearVisibilityPlugin } = require("../utils/yearVisibility");
 
 const lguAssistDiversionSchema = new mongoose.Schema(
   {
@@ -39,5 +40,7 @@ const lguAssistDiversionSchema = new mongoose.Schema(
   },
   { timestamps: true }
 );
+
+lguAssistDiversionSchema.plugin(dataYearVisibilityPlugin);
 
 module.exports = mongoose.model("LguAssistDiversion", lguAssistDiversionSchema, "lgu_assist_diversion");

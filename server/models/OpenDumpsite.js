@@ -1,4 +1,5 @@
 const mongoose = require("mongoose");
+const { dataYearVisibilityPlugin } = require("../utils/yearVisibility");
 
 const openDumpsiteSchema = new mongoose.Schema(
   {
@@ -64,5 +65,7 @@ const openDumpsiteSchema = new mongoose.Schema(
   },
   { timestamps: true }
 );
+
+openDumpsiteSchema.plugin(dataYearVisibilityPlugin);
 
 module.exports = mongoose.model("OpenDumpsite", openDumpsiteSchema, "open_dumpsites");

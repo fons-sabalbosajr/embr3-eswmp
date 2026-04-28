@@ -1,4 +1,5 @@
 const mongoose = require("mongoose");
+const { dataYearVisibilityPlugin } = require("../utils/yearVisibility");
 
 const trashTrapSchema = new mongoose.Schema(
   {
@@ -55,5 +56,7 @@ const trashTrapSchema = new mongoose.Schema(
   },
   { timestamps: true }
 );
+
+trashTrapSchema.plugin(dataYearVisibilityPlugin);
 
 module.exports = mongoose.model("TrashTrap", trashTrapSchema, "trash_traps");

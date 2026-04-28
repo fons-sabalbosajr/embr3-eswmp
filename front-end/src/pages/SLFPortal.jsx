@@ -44,6 +44,7 @@ import {
   HistoryOutlined,
   LogoutOutlined,
   MenuOutlined,
+  UserOutlined,
   DatabaseOutlined,
   InfoCircleOutlined,
   CloseCircleOutlined,
@@ -71,6 +72,7 @@ import {
   FileExcelOutlined,
   AuditOutlined,
   ClockCircleOutlined,
+  SaveOutlined,
 } from "@ant-design/icons";
 import { useNavigate } from "react-router-dom";
 import Swal from "sweetalert2";
@@ -78,6 +80,14 @@ import dayjs from "dayjs";
 import relativeTime from "dayjs/plugin/relativeTime";
 dayjs.extend(relativeTime);
 import * as XLSX from "xlsx";
+import {
+  PieChart,
+  Pie,
+  Cell as RCell,
+  Tooltip as RTooltip,
+  Legend,
+  ResponsiveContainer,
+} from "recharts";
 import api from "../api";
 import { useErrorCard } from "../utils/ErrorHandler";
 import secureStorage from "../utils/secureStorage";
@@ -119,6 +129,10 @@ const EMPTY_HAULER = {
   haulerName: "",
   numberOfTrucks: null,
   officeAddress: "",
+  officeRegion: "",
+  officeProvince: "",
+  officeCity: "",
+  officeBarangay: "",
   vehicles: [],
   privateSectorClients: [],
 };
@@ -172,18 +186,46 @@ export default function SLFPortal() {
   const [baselineSaved, setBaselineSaved] = useState(false);
   const [baselineUpdatePending, setBaselineUpdatePending] = useState(false);
   const [baselineUpdateLoading, setBaselineUpdateLoading] = useState(false);
+  const [baselineSavingLoading, setBaselineSavingLoading] = useState(false);
   const [slfInfo, setSlfInfo] = useState(null);
   const [slfInfoLoading, setSlfInfoLoading] = useState(false);
   const [slfCardExpanded, setSlfCardExpanded] = useState(false);
   const [selectedSlfIdx, setSelectedSlfIdx] = useState(0); // for multi-SLF users
   const [fieldLabels, setFieldLabels] = useState({});
-  const [hazWasteCodes, setHazWasteCodes] = useState(["K301", "K302", "K303 (Treated)", "M501"]);
+  const [hazWasteCodes, setHazWasteCodes] = useState(["K301", "K302", "K303", "M501"]);
   const [historyDetailModal, setHistoryDetailModal] = useState(null);
   const [revertModalOpen, setRevertModalOpen] = useState(false);
   const [revertRecord, setRevertRecord] = useState(null);
   const [revertReason, setRevertReason] = useState("");
   const [revertLoading, setRevertLoading] = useState(false);
   const [reviewModalOpen, setReviewModalOpen] = useState(false);
+  // Active cell entries (table-based)
+  const [activeCellEntries, setActiveCellEntries] = useState([]);
+  const [activeCellModalOpen, setActiveCellModalOpen] = useState(false);
+  const [activeCellDraft, setActiveCellDraft] = useState({ cellName: "", wasteType: "Residual", volume: null });
+  const [editingActiveCellKey, setEditingActiveCellKey] = useState(null);
+  // Closed cell entries (table-based)
+  const [closedCellEntries, setClosedCellEntries] = useState([]);
+  const [closedCellModalOpen, setClosedCellModalOpen] = useState(false);
+  const [closedCellDraft, setClosedCellDraft] = useState({ cellName: "", wasteType: "Residual", volume: null });
+  const [editingClosedCellKey, setEditingClosedCellKey] = useState(null);
+  // Hauler delete request modal
+  const [haulerDeleteModal, setHaulerDeleteModal] = useState({ open: false, hauler: null });
+  const [haulerDeleteReason, setHaulerDeleteReason] = useState("");
+  const [haulerDeleteFile, setHaulerDeleteFile] = useState(null);
+  const [haulerDeleteLoading, setHaulerDeleteLoading] = useState(false);
+  // Hauler address dropdowns
+  const [haulerProvinces, setHaulerProvinces] = useState([]);
+  const [haulerCities, setHaulerCities] = useState([]);
+  const [haulerBarangayList, setHaulerBarangayList] = useState([]);
+  const [loadingHaulerAddress, setLoadingHaulerAddress] = useState("");
+  // Hauler client modal
+  const [clientModalOpen, setClientModalOpen] = useState(false);
+  const [editingClientKey, setEditingClientKey] = useState(null);
+  const [clientDraft, setClientDraft] = useState({ clientName: "", clientType: "Private", region: "", province: "", municipality: "" });
+  const [clientProvinces, setClientProvinces] = useState([]);
+  const [clientMunicipalities, setClientMunicipalities] = useState([]);
+  const [loadingClientAddress, setLoadingClientAddress] = useState("");
   const [extraTransportFields, setExtraTransportFields] = useState([]);
   // Address cascading dropdowns
   const [regions, setRegions] = useState([]);
@@ -204,6 +246,8 @@ export default function SLFPortal() {
   // Excel/CSV upload states
   const [uploadModalOpen, setUploadModalOpen] = useState(false);
   const [uploadType, setUploadType] = useState("truck"); // "truck" or "hauler"
+  const [uploadGuideOpen, setUploadGuideOpen] = useState(false);
+  const [uploadGuideType, setUploadGuideType] = useState(null); // pending type for guide → pick
   const [uploadPreviewData, setUploadPreviewData] = useState([]);
   const [uploadPreviewColumns, setUploadPreviewColumns] = useState([]);
   // My Requests / Activity Log states
@@ -211,6 +255,23 @@ export default function SLFPortal() {
   const [myRequestsLoading, setMyRequestsLoading] = useState(false);
   // FAQ collapsed keys
   const [faqActiveKey, setFaqActiveKey] = useState([]);
+  // Profile modal
+  const [profileModalOpen, setProfileModalOpen] = useState(false);
+  // Facility management modals (Leachate, Gas Vents, Trash Slide, Fire Prevention)
+  const [leachateModalOpen, setLeachateModalOpen] = useState(false);
+  const [gasVentModalOpen, setGasVentModalOpen] = useState(false);
+  const [trashSlideModalOpen, setTrashSlideModalOpen] = useState(false);
+  const [firePrevModalOpen, setFirePrevModalOpen] = useState(false);
+  const [facilityMgmtSaving, setFacilityMgmtSaving] = useState(false);
+  // Local editable copies of facility detail arrays
+  const [leachateDetails, setLeachateDetails] = useState([]);
+  const [gasVentDetails, setGasVentDetails] = useState([]);
+  const [trashSlideDetails, setTrashSlideDetails] = useState([]);
+  const [firePrevDetails, setFirePrevDetails] = useState([]);
+  // Waste Received modal
+  const [wasteReceivedModalOpen, setWasteReceivedModalOpen] = useState(false);
+  const [wasteReceivedData, setWasteReceivedData] = useState({ lguR3: [], lguOutside: [], privateIndustry: [] });
+  const [wasteReceivedLoading, setWasteReceivedLoading] = useState(false);
 
   const isMobile = !screens.md;
 
@@ -335,6 +396,44 @@ export default function SLFPortal() {
       .finally(() => setLoadingAddress(""));
   };
 
+  // ── Hauler address fetch helpers ──
+  // Helper to update multiple address fields in haulerDraft at once
+  const updateHaulerDraftAddr = (fields) => {
+    setHaulerDraft(prev => ({ ...prev, ...fields }));
+  };
+  const fetchHaulerProvinces = (regionCode) => {
+    setHaulerProvinces([]);
+    setHaulerCities([]);
+    setHaulerBarangayList([]);
+    updateHaulerDraftAddr({ officeProvince: "", officeCity: "", officeBarangay: "" });
+    if (!regionCode) return;
+    setLoadingHaulerAddress("province");
+    withRetry(() => api.get(`/settings/address/provinces/${regionCode}`), { retries: 2 })
+      .then(({ data }) => setHaulerProvinces(data || []))
+      .catch(() => showError({ type: "error", title: "Load Failed", message: "Could not load provinces." }))
+      .finally(() => setLoadingHaulerAddress(""));
+  };
+  const fetchHaulerCities = (provinceCode) => {
+    setHaulerCities([]);
+    setHaulerBarangayList([]);
+    updateHaulerDraftAddr({ officeCity: "", officeBarangay: "" });
+    if (!provinceCode) return;
+    setLoadingHaulerAddress("city");
+    withRetry(() => api.get(`/settings/address/municipalities/${provinceCode}`), { retries: 2 })
+      .then(({ data }) => setHaulerCities(data || []))
+      .catch(() => showError({ type: "error", title: "Load Failed", message: "Could not load cities/municipalities." }))
+      .finally(() => setLoadingHaulerAddress(""));
+  };
+  const fetchHaulerBarangays = (cityCode) => {
+    setHaulerBarangayList([]);
+    updateHaulerDraftAddr({ officeBarangay: "" });
+    if (!cityCode) return;
+    setLoadingHaulerAddress("barangay");
+    withRetry(() => api.get(`/settings/address/barangays/${cityCode}`), { retries: 2 })
+      .then(({ data }) => setHaulerBarangayList(data || []))
+      .catch(() => showError({ type: "error", title: "Load Failed", message: "Could not load barangays." }))
+      .finally(() => setLoadingHaulerAddress(""));
+  };
   // Helper to get field label from settings, fallback to default
   const fl = (key, fallback) => fieldLabels[key]?.label || fallback;
   // Helper: is field required per admin settings? Falls back to defaultReq.
@@ -344,7 +443,7 @@ export default function SLFPortal() {
   const opts = (key, fallback = []) =>
     fieldLabels[key]?.options?.length > 0 ? fieldLabels[key].options : fallback;
 
-  // Load portal user from storage
+  // Load portal user from storage, then refresh from server for latest status/isVerified
   useEffect(() => {
     const token = secureStorage.get("portal_token");
     const user = secureStorage.getJSON("portal_user");
@@ -354,6 +453,15 @@ export default function SLFPortal() {
     }
     setPortalUser(user);
     setLoadingUser(false);
+
+    // Refresh user data from server to pick up latest status & isVerified
+    api.get("/portal-auth/me", { headers: { Authorization: `Bearer ${token}` } })
+      .then(({ data }) => {
+        const refreshed = { ...user, status: data.status, isVerified: data.isVerified };
+        secureStorage.setJSON("portal_user", refreshed);
+        setPortalUser(refreshed);
+      })
+      .catch(() => {});
 
     // Connect socket for real-time notifications
     const sock = connectSocket("portal", user.email);
@@ -382,7 +490,13 @@ export default function SLFPortal() {
     withRetry(
       () => api.get(`/slf-facilities/portal/${activeSlfId}${nameParam}`, { signal: ac.signal }),
       { retries: 3, signal: ac.signal },
-    ).then(({ data }) => setSlfInfo(data))
+    ).then(({ data }) => {
+        setSlfInfo(data);
+        setLeachateDetails((data.leachatePondDetails || []).map((p, i) => ({ ...p, _key: i })));
+        setGasVentDetails((data.gasVentDetails || []).map((v, i) => ({ ...v, _key: i })));
+        setTrashSlideDetails((data.trashSlideMeasures || []).map((m, i) => ({ ...m, _key: i })));
+        setFirePrevDetails((data.firePrevMeasures || []).map((m, i) => ({ ...m, _key: i })));
+      })
       .catch(() => {})
       .finally(() => setSlfInfoLoading(false));
     return () => ac.abort();
@@ -425,18 +539,41 @@ export default function SLFPortal() {
                 if (vehicles.length === 0 && (h.plateNumber || h.vehicleType || h.capacity != null)) {
                   vehicles = [{ plateNumber: h.plateNumber || "", vehicleType: h.vehicleType || "", capacity: h.capacity, capacityUnit: h.capacityUnit || "m³" }];
                 }
+                // Normalize privateSectorClients to array of objects
+                let clients = Array.isArray(h.privateSectorClients) ? h.privateSectorClients : h.privateSectorClients ? [h.privateSectorClients] : [];
+                clients = clients.map((c, ci) =>
+                  typeof c === "string"
+                    ? { key: ci, clientName: c, clientType: "Private", region: "", province: "", municipality: "" }
+                    : { key: ci, ...c }
+                );
                 return {
                   key: Date.now() + i,
                   ...h,
                   vehicles,
-                  privateSectorClients: Array.isArray(h.privateSectorClients)
-                    ? h.privateSectorClients
-                    : h.privateSectorClients
-                      ? [h.privateSectorClients]
-                      : [],
+                  privateSectorClients: clients,
                 };
               }),
             );
+          }
+          // Load activeCellEntries from saved data (or migrate from flat fields)
+          if (data.activeCellEntries?.length) {
+            setActiveCellEntries(data.activeCellEntries.map((e, i) => ({ ...e, key: i })));
+          } else {
+            const entries = [];
+            let k = 1;
+            if (data.activeCellResidualVolume) entries.push({ key: k++, cellName: "", wasteType: "Residual", volume: data.activeCellResidualVolume });
+            if (data.activeCellInertVolume) entries.push({ key: k++, cellName: "", wasteType: "Inert/Hazardous Waste", volume: data.activeCellInertVolume });
+            setActiveCellEntries(entries);
+          }
+          // Load closedCellEntries from saved data (or migrate from flat fields)
+          if (data.closedCellEntries?.length) {
+            setClosedCellEntries(data.closedCellEntries.map((e, i) => ({ ...e, key: i })));
+          } else {
+            const cEntries = [];
+            let ck = 1;
+            if (data.closedCellResidualVolume) cEntries.push({ key: ck++, cellName: "", wasteType: "Residual", volume: data.closedCellResidualVolume });
+            if (data.closedCellInertVolume) cEntries.push({ key: ck++, cellName: "", wasteType: "Inert/Hazardous Waste", volume: data.closedCellInertVolume });
+            setClosedCellEntries(cEntries);
           }
           setBaselineSaved(true);
           setBaselineUpdatePending(!!data.baselineUpdateRequested);
@@ -681,6 +818,9 @@ export default function SLFPortal() {
   };
 
   const openHaulerModal = (record) => {
+    setHaulerProvinces([]);
+    setHaulerCities([]);
+    setHaulerBarangayList([]);
     if (record) {
       setEditingHaulerKey(record.key);
       // Migrate legacy single-vehicle data to vehicles array
@@ -701,6 +841,10 @@ export default function SLFPortal() {
         haulerName: record.haulerName || "",
         numberOfTrucks: count || null,
         officeAddress: record.officeAddress || "",
+        officeRegion: record.officeRegion || "",
+        officeProvince: record.officeProvince || "",
+        officeCity: record.officeCity || "",
+        officeBarangay: record.officeBarangay || "",
         vehicles,
         privateSectorClients: Array.isArray(record.privateSectorClients)
           ? record.privateSectorClients
@@ -708,6 +852,26 @@ export default function SLFPortal() {
             ? [record.privateSectorClients]
             : [],
       });
+      // Pre-load cascading address lists
+      if (record.officeRegion) {
+        withRetry(() => api.get(`/settings/address/provinces/${record.officeRegion}`), { retries: 2 })
+          .then(({ data }) => {
+            setHaulerProvinces(data || []);
+            if (record.officeProvince) {
+              withRetry(() => api.get(`/settings/address/municipalities/${record.officeProvince}`), { retries: 2 })
+                .then(({ data: d2 }) => {
+                  setHaulerCities(d2 || []);
+                  if (record.officeCity) {
+                    withRetry(() => api.get(`/settings/address/barangays/${record.officeCity}`), { retries: 2 })
+                      .then(({ data: d3 }) => setHaulerBarangayList(d3 || []))
+                      .catch(() => {});
+                  }
+                })
+                .catch(() => {});
+            }
+          })
+          .catch(() => {});
+      }
     } else {
       setEditingHaulerKey(null);
       setHaulerDraft({ ...EMPTY_HAULER });
@@ -718,14 +882,22 @@ export default function SLFPortal() {
 
   const handleSaveHauler = () => {
     if (!validateHauler()) return;
+    // Build a human-readable officeAddress from selected codes
+    const regionName = regions.find(r => r.code === haulerDraft.officeRegion)?.name || haulerDraft.officeRegion || "";
+    const provinceName = haulerProvinces.find(p => p.code === haulerDraft.officeProvince)?.name || haulerDraft.officeProvince || "";
+    const cityName = haulerCities.find(c => c.code === haulerDraft.officeCity)?.name || haulerDraft.officeCity || "";
+    const barangayName = haulerBarangayList.find(b => b.code === haulerDraft.officeBarangay)?.name || haulerDraft.officeBarangay || "";
+    const addressParts = [barangayName, cityName, provinceName, regionName].filter(Boolean);
+    const resolvedAddress = addressParts.join(", ");
+    const finalDraft = { ...haulerDraft, officeAddress: resolvedAddress };
     if (editingHaulerKey) {
       setHaulers((prev) =>
         prev.map((h) =>
-          h.key === editingHaulerKey ? { ...h, ...haulerDraft } : h,
+          h.key === editingHaulerKey ? { ...h, ...finalDraft } : h,
         ),
       );
     } else {
-      setHaulers((prev) => [...prev, { key: Date.now(), ...haulerDraft }]);
+      setHaulers((prev) => [...prev, { key: Date.now(), ...finalDraft }]);
     }
     setHaulerModalOpen(false);
     setEditingHaulerKey(null);
@@ -779,6 +951,49 @@ export default function SLFPortal() {
     }
     setTruckErrors({});
     setTruckModalOpen(true);
+  };
+
+  // ── Active Cell Entry helpers ──
+  const handleSaveActiveCellEntry = () => {
+    if (!activeCellDraft.cellName || !activeCellDraft.wasteType || activeCellDraft.volume == null) {
+      return;
+    }
+    if (editingActiveCellKey != null) {
+      setActiveCellEntries(prev => prev.map(e => e.key === editingActiveCellKey ? { ...activeCellDraft, key: editingActiveCellKey } : e));
+    } else {
+      setActiveCellEntries(prev => [...prev, { ...activeCellDraft, key: Date.now() }]);
+    }
+    setActiveCellModalOpen(false);
+  };
+
+  // ── Closed Cell Entry helpers ──
+  const handleSaveClosedCellEntry = () => {
+    if (!closedCellDraft.cellName || !closedCellDraft.wasteType || closedCellDraft.volume == null) {
+      return;
+    }
+    if (editingClosedCellKey != null) {
+      setClosedCellEntries(prev => prev.map(e => e.key === editingClosedCellKey ? { ...closedCellDraft, key: editingClosedCellKey } : e));
+    } else {
+      setClosedCellEntries(prev => [...prev, { ...closedCellDraft, key: Date.now() }]);
+    }
+    setClosedCellModalOpen(false);
+  };
+
+  // ── Hauler Client helpers ──
+  const handleSaveClient = () => {
+    if (!clientDraft.clientName || !clientDraft.clientType) return;
+    // Resolve PSGC codes to human-readable names for LGU type
+    const regionName = (regions || []).find(r => String(r.code) === clientDraft.region)?.name || "";
+    const provinceName = (clientProvinces || []).find(p => String(p.code) === clientDraft.province)?.name || "";
+    const municipalityName = (clientMunicipalities || []).find(m => String(m.code) === clientDraft.municipality)?.name || "";
+    const toSave = { ...clientDraft, regionName, provinceName, municipalityName };
+    const existing = haulerDraft.privateSectorClients || [];
+    if (editingClientKey != null) {
+      updateHaulerDraft("privateSectorClients", existing.map(c => c.key === editingClientKey ? { ...toSave, key: editingClientKey } : c));
+    } else {
+      updateHaulerDraft("privateSectorClients", [...existing, { ...toSave, key: Date.now() }]);
+    }
+    setClientModalOpen(false);
   };
 
   const handleSaveTruck = () => {
@@ -888,6 +1103,110 @@ export default function SLFPortal() {
     }
   };
 
+  // ── Save Portal Baseline Update (after admin approval) ──
+  const handleSaveBaselinePortal = async () => {
+    const confirm = await Swal.fire({
+      title: "Save Baseline Update?",
+      html: "<p style='font-size:13px'>This will save your updated baseline data and re-lock the baseline for future edits. You will need to submit another update request if further changes are needed.</p>",
+      icon: "question",
+      showCancelButton: true,
+      confirmButtonText: "Save & Lock",
+      confirmButtonColor: "#1a3353",
+      cancelButtonText: "Continue Editing",
+    });
+    if (!confirm.isConfirmed) return;
+
+    setBaselineSavingLoading(true);
+    try {
+      const baselineValues = baselineForm.getFieldsValue();
+      // Compute legacy totals from entries for backward compat
+      const activeCellResidualVolume = activeCellEntries
+        .filter(e => e.wasteType === "Residual")
+        .reduce((s, e) => s + (e.volume || 0), 0) || baselineValues.activeCellResidualVolume || undefined;
+      const activeCellInertVolume = activeCellEntries
+        .filter(e => e.wasteType === "Inert/Hazardous Waste")
+        .reduce((s, e) => s + (e.volume || 0), 0) || baselineValues.activeCellInertVolume || undefined;
+      const closedCellResidualVolume = closedCellEntries
+        .filter(e => e.wasteType === "Residual")
+        .reduce((s, e) => s + (e.volume || 0), 0) || baselineValues.closedCellResidualVolume || undefined;
+      const closedCellInertVolume = closedCellEntries
+        .filter(e => e.wasteType === "Inert/Hazardous Waste")
+        .reduce((s, e) => s + (e.volume || 0), 0) || baselineValues.closedCellInertVolume || undefined;
+
+      await api.patch(`/data-slf/portal-save-baseline/${encodeURIComponent(activeSlfName)}`, {
+        submittedBy: portalUser?.email,
+        baselineUnit,
+        totalVolumeAccepted: baselineValues.totalVolumeAccepted,
+        totalVolumeAcceptedUnit: baselineUnit,
+        activeCellResidualVolume,
+        activeCellResidualUnit: baselineUnit,
+        activeCellInertVolume,
+        activeCellInertUnit: baselineUnit,
+        closedCellResidualVolume,
+        closedCellResidualUnit: baselineUnit,
+        closedCellInertVolume,
+        closedCellInertUnit: baselineUnit,
+        activeCellEntries: activeCellEntries.map(({ key, ...rest }) => rest),
+        closedCellEntries: closedCellEntries.map(({ key, ...rest }) => rest),
+        accreditedHaulers: haulers.map(({ key, ...rest }) => ({
+          ...rest,
+          privateSectorClients: (rest.privateSectorClients || []).map(({ key: ck, ...cr }) => cr),
+        })),
+      });
+
+      setBaselineSaved(true);
+      setBaselineUpdatePending(false);
+
+      Swal.fire({
+        icon: "success",
+        title: "Baseline Updated!",
+        text: "Your baseline data has been saved and locked successfully.",
+        confirmButtonColor: "#1a3353",
+        timer: 2500,
+        showConfirmButton: false,
+      });
+    } catch (err) {
+      Swal.fire({ icon: "error", title: "Save Failed", text: err.response?.data?.message || "Could not save baseline. Please try again." });
+    } finally {
+      setBaselineSavingLoading(false);
+    }
+  };
+
+  // ── Save facility management details (leachate ponds, gas vents, etc.) ──
+  const handleSaveFacilityDetails = async (type, data) => {
+    if (!activeSlfId) return;
+    setFacilityMgmtSaving(true);
+    try {
+      const payload = {};
+      if (type === "leachate") payload.leachatePondDetails = data.map(({ _key, ...r }) => r);
+      if (type === "gasVent") payload.gasVentDetails = data.map(({ _key, ...r }) => r);
+      if (type === "trashSlide") payload.trashSlideMeasures = data.map(({ _key, ...r }) => r);
+      if (type === "firePrev") payload.firePrevMeasures = data.map(({ _key, ...r }) => r);
+      const { data: updated } = await api.patch(`/slf-facilities/portal/${activeSlfId}/facility-details`, payload);
+      setSlfInfo(prev => ({ ...prev, ...updated }));
+      Swal.fire({ icon: "success", title: "Saved!", timer: 1500, showConfirmButton: false });
+    } catch (err) {
+      Swal.fire({ icon: "error", title: "Save Failed", text: err.response?.data?.message || "Could not save details." });
+    } finally {
+      setFacilityMgmtSaving(false);
+    }
+  };
+
+  // ── Fetch waste received summary ──
+  const handleOpenWasteReceived = async () => {
+    setWasteReceivedModalOpen(true);
+    if (!activeSlfName) return;
+    setWasteReceivedLoading(true);
+    try {
+      const { data } = await api.get(`/data-slf/waste-received-summary/${encodeURIComponent(activeSlfName)}`);
+      setWasteReceivedData(data);
+    } catch {
+      setWasteReceivedData({ lguR3: [], lguOutside: [], privateIndustry: [] });
+    } finally {
+      setWasteReceivedLoading(false);
+    }
+  };
+
   // ── Support Ticket Functions ──
   const fetchSupportTickets = useCallback(async () => {
     if (!portalUser?.email) return;
@@ -938,7 +1257,8 @@ export default function SLFPortal() {
   };
 
   // ── Excel/CSV Upload Handlers ──
-  const handleExcelUpload = (file) => {
+  const handleExcelUpload = (file, type) => {
+    if (type) setUploadType(type);
     const reader = new FileReader();
     reader.onload = (e) => {
       try {
@@ -1013,6 +1333,20 @@ export default function SLFPortal() {
     };
     reader.readAsArrayBuffer(file);
     return false; // prevent auto upload
+  };
+
+  // ── Open upload guide modal first, then trigger file picker on proceed ──
+  const openUploadGuide = (type) => {
+    setUploadGuideType(type);
+    setUploadGuideOpen(true);
+  };
+  const proceedToFilePicker = () => {
+    setUploadGuideOpen(false);
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = ".xlsx,.xls,.csv";
+    input.onchange = (e) => { if (e.target.files[0]) handleExcelUpload(e.target.files[0], uploadGuideType); };
+    input.click();
   };
 
   const handleConfirmUpload = () => {
@@ -1231,6 +1565,12 @@ export default function SLFPortal() {
       setActiveTab("disposal");
       return;
     }
+    const firstTruck = trucks[0];
+    if (!firstTruck?.lguCompanyName || !firstTruck?.companyType) {
+      showError({ type: "warning", title: "Incomplete Waste Generator Info", message: "Please fill in Company Name and Company Type in the first transport entry." });
+      setActiveTab("disposal");
+      return;
+    }
     setReviewModalOpen(true);
   };
 
@@ -1244,18 +1584,48 @@ export default function SLFPortal() {
       const baselineValues = baselineForm.getFieldsValue();
       const companyValues = companyForm.getFieldsValue();
       const disposalValues = entryForm.getFieldsValue();
+      const firstTruck = trucks[0] || {};
+      // Compute active cell totals from entries for backward compat
+      const activeCellResidualVolume = activeCellEntries
+        .filter(e => e.wasteType === "Residual")
+        .reduce((s, e) => s + (e.volume || 0), 0) || baselineValues.activeCellResidualVolume || 0;
+      const activeCellInertVolume = activeCellEntries
+        .filter(e => e.wasteType === "Inert/Hazardous Waste")
+        .reduce((s, e) => s + (e.volume || 0), 0) || baselineValues.activeCellInertVolume || 0;
+      // Compute closed cell totals from entries for backward compat
+      const closedCellResidualVolume = closedCellEntries
+        .filter(e => e.wasteType === "Residual")
+        .reduce((s, e) => s + (e.volume || 0), 0) || baselineValues.closedCellResidualVolume || 0;
+      const closedCellInertVolume = closedCellEntries
+        .filter(e => e.wasteType === "Inert/Hazardous Waste")
+        .reduce((s, e) => s + (e.volume || 0), 0) || baselineValues.closedCellInertVolume || 0;
       const entry = {
         ...disposalValues,
         ...baselineValues,
         ...companyValues,
-        accreditedHaulers: haulers.map(({ key, ...rest }) => rest),
+        // Company info comes from first transport entry
+        lguCompanyName: firstTruck.lguCompanyName || disposalValues.lguCompanyName || "",
+        companyType: firstTruck.companyType || disposalValues.companyType || "",
+        address: firstTruck.address || disposalValues.address || "",
+        // Active cell entries
+        activeCellEntries: activeCellEntries.map(({ key, ...rest }) => rest),
+        activeCellResidualVolume,
+        activeCellInertVolume,
+        // Closed cell entries
+        closedCellEntries: closedCellEntries.map(({ key, ...rest }) => rest),
+        closedCellResidualVolume,
+        closedCellInertVolume,
+        accreditedHaulers: haulers.map(({ key, ...rest }) => ({
+          ...rest,
+          privateSectorClients: (rest.privateSectorClients || []).map(({ key: ck, ...cr }) => cr),
+        })),
         slfName: activeSlfName,
         slfGenerator: activeSlfId || null,
         dateOfDisposal: disposalValues.dateOfDisposal
           ? disposalValues.dateOfDisposal.format("YYYY-MM-DD")
           : null,
         trucks: trucks.map(({ key, vehicles, ...rest }) => ({ ...rest, vehicles: (vehicles || []).map(({ key: vk, ...vr }) => vr) })),
-        acceptsHazardousWaste,
+        acceptsHazardousWaste: false,
         baselineUnit,
       };
       await api.post("/data-slf", {
@@ -1407,7 +1777,16 @@ export default function SLFPortal() {
       key: "privateSectorClients",
       render: (v) => {
         const arr = Array.isArray(v) ? v : v ? [v] : [];
-        return arr.length > 0 ? arr.join(", ") : "—";
+        if (arr.length === 0) return "—";
+        return arr.map((c, i) => {
+          const name = typeof c === "string" ? c : c.clientName;
+          const type = typeof c === "string" ? null : c.clientType;
+          return (
+            <div key={i} style={{ fontSize: 12, lineHeight: "18px" }}>
+              {name}{type ? <Tag color={type === "LGU" ? "blue" : "green"} style={{ marginLeft: 4, fontSize: 10 }}>{type}</Tag> : null}
+            </div>
+          );
+        });
       },
     },
     {
@@ -1423,13 +1802,17 @@ export default function SLFPortal() {
             onClick={() => openHaulerModal(h)}
             style={{ color: "#1a3353" }}
           />
-          <Tooltip title="To delete a hauler, please email EMB Region 3 for justification.">
+          <Tooltip title="Request hauler deletion">
             <Button
               type="text"
               danger
               size="small"
               icon={<DeleteOutlined />}
-              disabled
+              onClick={() => {
+                setHaulerDeleteReason("");
+                setHaulerDeleteFile(null);
+                setHaulerDeleteModal({ open: true, hauler: h });
+              }}
             />
           </Tooltip>
         </Space>
@@ -1714,6 +2097,7 @@ export default function SLFPortal() {
       disabled: true,
     },
     { type: "divider" },
+    { key: "profile", icon: <UserOutlined />, label: "View Profile" },
     { key: "logout", icon: <LogoutOutlined />, label: "Logout", danger: true },
   ];
 
@@ -1816,6 +2200,11 @@ export default function SLFPortal() {
             const cells = slfInfo.numberOfCell || 0;
             const cellCaps = slfInfo.cellCapacities || [];
             const cellStatuses = slfInfo.cellStatuses || [];
+            const cellTypes = slfInfo.cellTypes || [];
+            const operationalCells = cellStatuses.filter(s => s !== "Closed").length;
+            const closedCells = cellStatuses.filter(s => s === "Closed").length;
+            const residualCells = cellTypes.filter(t => t !== "Treated Haz Waste").length || cells;
+            const hazCells = cellTypes.filter(t => t === "Treated Haz Waste").length;
             const capColor = pct >= 90 ? "#ff4d4f" : pct >= 70 ? "#faad14" : "#52c41a";
             const capLabel = pct >= 90 ? "Critical" : pct >= 70 ? "Warning" : "Normal";
             const isOp = !slfInfo.statusOfSLF?.toLowerCase().includes("non");
@@ -1825,6 +2214,10 @@ export default function SLFPortal() {
             const closedCellRes = baselineForm.getFieldValue("closedCellResidualVolume") || 0;
             const closedCellInert = baselineForm.getFieldValue("closedCellInertVolume") || 0;
             const hasBaselineCell = activeCellRes > 0 || activeCellInert > 0 || closedCellRes > 0 || closedCellInert > 0;
+            // LGU served split (from baseline hauler clients)
+            const allClients = haulers.flatMap(h => h.privateSectorClients || []).filter(c => c.clientType === "LGU");
+            const lguR3Clients = allClients.filter(c => (c.region || "").startsWith("03") || (c.regionName || "").toLowerCase().includes("iii") || (c.regionName || "").toLowerCase().includes("central luzon"));
+            const lguOutsideClients = allClients.filter(c => !((c.region || "").startsWith("03") || (c.regionName || "").toLowerCase().includes("iii") || (c.regionName || "").toLowerCase().includes("central luzon")));
             return (
               <div>
                 {/* Capacity overview banner */}
@@ -1848,50 +2241,106 @@ export default function SLFPortal() {
                     </Col>
                     <Col xs={24} sm={18}>
                       <Row gutter={[12, 12]}>
-                        {[
-                          { label: "Status", value: slfInfo.statusOfSLF || "—", icon: <CheckCircleOutlined />, color: isOp ? "#52c41a" : "#ff4d4f", bg: isOp ? "#f6ffed" : "#fff2f0", border: isOp ? "#b7eb8f" : "#ffccc7", isTag: true },
-                          { label: "Active Cells", value: cells || "—", icon: <ContainerOutlined />, color: "#1890ff", bg: "#e6f7ff", border: "#91d5ff" },
-                          { label: "Waste Filled", value: waste > 0 ? `${waste.toLocaleString()} ${baselineUnit || "m³"}` : "—", icon: <BarChartOutlined />, color: "#fa8c16", bg: "#fff7e6", border: "#ffd591", sub: baselineVol != null && baselineVol > 0 ? "From Baseline" : undefined },
-                          { label: "Volume Capacity", value: capacity > 0 ? `${capacity.toLocaleString()} ${baselineUnit || "m³"}` : "—", icon: <DatabaseOutlined />, color: "#722ed1", bg: "#f9f0ff", border: "#d3adf7", sub: capacity > 0 && waste > 0 ? `${Math.max(0, capacity - waste).toLocaleString()} remaining` : undefined },
-                        ].map((item, idx) => (
-                          <Col xs={12} sm={12} md={6} key={idx}>
-                            <div style={{ background: item.bg, borderRadius: 10, padding: "12px 14px", border: `1px solid ${item.border}`, height: "100%", transition: "transform 0.2s", cursor: "default" }}>
-                              <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 6 }}>
-                                <span style={{ color: item.color, fontSize: 13 }}>{item.icon}</span>
-                                <span style={{ fontSize: 10, color: "#8c8c8c", textTransform: "uppercase", letterSpacing: 0.6, fontWeight: 600 }}>{item.label}</span>
-                              </div>
-                              {item.isTag ? (
-                                <Tag color={isOp ? "success" : "error"} style={{ fontSize: 13, fontWeight: 600, padding: "2px 10px" }}>{item.value}</Tag>
-                              ) : (
-                                <>
-                                  <div style={{ fontSize: 16, fontWeight: 700, color: item.color }}>{item.value}</div>
-                                  {item.sub && <div style={{ fontSize: 10, color: "#8c8c8c", fontWeight: 500, marginTop: 2 }}>{item.sub}</div>}
-                                </>
-                              )}
+                        {/* Status */}
+                        <Col xs={12} sm={12} md={6}>
+                          <div style={{ background: isOp ? "#f6ffed" : "#fff2f0", borderRadius: 10, padding: "12px 14px", border: `1px solid ${isOp ? "#b7eb8f" : "#ffccc7"}`, height: "100%" }}>
+                            <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 6 }}>
+                              <CheckCircleOutlined style={{ color: isOp ? "#52c41a" : "#ff4d4f", fontSize: 13 }} />
+                              <span style={{ fontSize: 10, color: "#8c8c8c", textTransform: "uppercase", letterSpacing: 0.6, fontWeight: 600 }}>Status</span>
                             </div>
-                          </Col>
-                        ))}
+                            <Tag color={isOp ? "success" : "error"} style={{ fontSize: 12, fontWeight: 600, padding: "2px 10px" }}>{slfInfo.statusOfSLF || "—"}</Tag>
+                          </div>
+                        </Col>
+                        {/* Cells: Operational / Closed */}
+                        <Col xs={12} sm={12} md={6}>
+                          <div style={{ background: "#e6f7ff", borderRadius: 10, padding: "12px 14px", border: "1px solid #91d5ff", height: "100%" }}>
+                            <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 6 }}>
+                              <ContainerOutlined style={{ color: "#1890ff", fontSize: 13 }} />
+                              <span style={{ fontSize: 10, color: "#8c8c8c", textTransform: "uppercase", letterSpacing: 0.6, fontWeight: 600 }}>Cells</span>
+                            </div>
+                            {cells > 0 ? (
+                              <div>
+                                <Tag color="success" style={{ fontSize: 11, marginBottom: 2 }}>Op: {operationalCells}</Tag>
+                                {closedCells > 0 && <Tag color="default" style={{ fontSize: 11 }}>Closed: {closedCells}</Tag>}
+                              </div>
+                            ) : <div style={{ fontSize: 16, fontWeight: 700, color: "#1890ff" }}>—</div>}
+                            {cells > 0 && cellTypes.length > 0 && (
+                              <div style={{ marginTop: 4 }}>
+                                <Tag color="blue" style={{ fontSize: 10 }}>Res: {residualCells}</Tag>
+                                {hazCells > 0 && <Tag color="red" style={{ fontSize: 10 }}>THW: {hazCells}</Tag>}
+                              </div>
+                            )}
+                          </div>
+                        </Col>
+                        {/* Waste Filled — clickable */}
+                        <Col xs={12} sm={12} md={6}>
+                          <div
+                            style={{ background: "#fff7e6", borderRadius: 10, padding: "12px 14px", border: "1px solid #ffd591", height: "100%", cursor: "pointer", transition: "box-shadow 0.2s" }}
+                            onClick={handleOpenWasteReceived}
+                            title="Click to view waste received breakdown"
+                          >
+                            <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 6 }}>
+                              <BarChartOutlined style={{ color: "#fa8c16", fontSize: 13 }} />
+                              <span style={{ fontSize: 10, color: "#8c8c8c", textTransform: "uppercase", letterSpacing: 0.6, fontWeight: 600 }}>Waste Filled</span>
+                              <EyeOutlined style={{ marginLeft: "auto", color: "#fa8c16", fontSize: 11 }} />
+                            </div>
+                            <div style={{ fontSize: 16, fontWeight: 700, color: "#fa8c16" }}>{waste > 0 ? `${waste.toLocaleString()} ${baselineUnit || "m³"}` : "—"}</div>
+                            {baselineVol != null && baselineVol > 0 && <div style={{ fontSize: 10, color: "#8c8c8c", fontWeight: 500, marginTop: 2 }}>From Baseline • Tap for breakdown</div>}
+                          </div>
+                        </Col>
+                        {/* Volume Capacity + LGUs Served */}
+                        <Col xs={12} sm={12} md={6}>
+                          <div style={{ background: "#f9f0ff", borderRadius: 10, padding: "12px 14px", border: "1px solid #d3adf7", height: "100%" }}>
+                            <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 6 }}>
+                              <DatabaseOutlined style={{ color: "#722ed1", fontSize: 13 }} />
+                              <span style={{ fontSize: 10, color: "#8c8c8c", textTransform: "uppercase", letterSpacing: 0.6, fontWeight: 600 }}>Capacity</span>
+                            </div>
+                            <div style={{ fontSize: 16, fontWeight: 700, color: "#722ed1" }}>{capacity > 0 ? `${capacity.toLocaleString()} ${baselineUnit || "m³"}` : "—"}</div>
+                            {capacity > 0 && waste > 0 && <div style={{ fontSize: 10, color: "#8c8c8c", fontWeight: 500, marginTop: 2 }}>{Math.max(0, capacity - waste).toLocaleString()} remaining</div>}
+                          </div>
+                        </Col>
                       </Row>
+                      {/* LGUs Served split */}
+                      {allClients.length > 0 && (
+                        <div style={{ marginTop: 12, background: "#f0f5ff", borderRadius: 10, padding: "10px 14px", border: "1px solid #adc6ff" }}>
+                          <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 6 }}>
+                            <TeamOutlined style={{ color: "#2f54eb", fontSize: 13 }} />
+                            <span style={{ fontSize: 10, color: "#2f54eb", textTransform: "uppercase", letterSpacing: 0.6, fontWeight: 600 }}>LGUs Served</span>
+                          </div>
+                          <Space size={8} wrap>
+                            <Tag color="geekblue">Region III: {lguR3Clients.length}</Tag>
+                            <Tag color="cyan">Outside R3: {lguOutsideClients.length}</Tag>
+                            <Text style={{ fontSize: 11, color: "#8c8c8c" }}>Total: {allClients.length}</Text>
+                          </Space>
+                        </div>
+                      )}
                     </Col>
                   </Row>
                 </div>
 
-                {/* Cell Infrastructure */}
-                {cells > 0 && cellCaps.length > 0 && (
-                  <div style={{ background: "#fff", borderRadius: 12, padding: isMobile ? 14 : 20, marginBottom: 20, border: "1px solid #e8e8e8", boxShadow: "0 1px 4px rgba(0,0,0,0.04)" }}>
+                {/* Cell Infrastructure & Baseline Utilization — side by side */}
+                <Row gutter={[16, 16]} style={{ marginBottom: 20 }}>
+                  {cells > 0 && cellCaps.length > 0 && (
+                    <Col xs={24} md={baselineSaved ? 14 : 24}>
+                  <div style={{ background: "#fff", borderRadius: 12, padding: isMobile ? 14 : 20, border: "1px solid #e8e8e8", boxShadow: "0 1px 4px rgba(0,0,0,0.04)", height: "100%" }}>
                     <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 16 }}>
                       <div style={{ width: 28, height: 28, borderRadius: 6, background: "#1a3353", display: "flex", alignItems: "center", justifyContent: "center" }}>
                         <PieChartOutlined style={{ color: "#fff", fontSize: 13 }} />
                       </div>
                       <Text strong style={{ fontSize: 14, color: "#1a3353" }}>Cell Infrastructure</Text>
-                      <Tag style={{ marginLeft: "auto", fontWeight: 500 }}>{cells} Cell{cells > 1 ? "s" : ""}</Tag>
+                      <Space size={4} style={{ marginLeft: "auto" }}>
+                        <Tag color="success">Operational: {operationalCells}</Tag>
+                        {closedCells > 0 && <Tag color="default">Closed: {closedCells}</Tag>}
+                      </Space>
                     </div>
                     <Row gutter={[12, 12]}>
                       {cellCaps.map((cap, i) => {
                         const cellPct = capacity > 0 && cap > 0 ? Math.min(Math.round((cap / capacity) * 100 * cells), 100) : 0;
                         const cellSt = cellStatuses[i] || "Operational";
+                        const cellT = cellTypes[i] || "Residual";
                         const isClosed = cellSt === "Closed";
-                        const cellColor = isClosed ? "#d9d9d9" : cellPct >= 90 ? "#ff4d4f" : cellPct >= 70 ? "#faad14" : "#52c41a";
+                        const isHaz = cellT === "Treated Haz Waste";
+                        const cellColor = isClosed ? "#d9d9d9" : isHaz ? "#f5222d" : cellPct >= 90 ? "#ff4d4f" : cellPct >= 70 ? "#faad14" : "#52c41a";
                         return (
                           <Col xs={12} sm={8} md={Math.min(8, Math.floor(24 / cells))} key={i}>
                             <div style={{ background: isClosed ? "#fafafa" : "#fff", borderRadius: 10, padding: "14px 12px", border: `1px solid ${isClosed ? "#e8e8e8" : cellColor}30`, textAlign: "center", opacity: isClosed ? 0.7 : 1 }}>
@@ -1909,6 +2358,7 @@ export default function SLFPortal() {
                               />
                               <div style={{ fontWeight: 700, fontSize: 13, color: "#1a3353", marginTop: 6 }}>Cell {i + 1}</div>
                               <Tag color={isClosed ? "default" : "success"} style={{ fontSize: 10, marginTop: 4 }}>{cellSt}</Tag>
+                              <Tag color={isHaz ? "red" : "blue"} style={{ fontSize: 10, marginTop: 2 }}>{cellT}</Tag>
                               <div style={{ fontSize: 11, color: "#8c8c8c", marginTop: 4, fontWeight: 500 }}>
                                 {cap > 0 ? `${cap.toLocaleString()} ${baselineUnit || "m³"}` : "—"}
                               </div>
@@ -1918,11 +2368,13 @@ export default function SLFPortal() {
                       })}
                     </Row>
                   </div>
-                )}
+                    </Col>
+                  )}
 
-                {/* Baseline Utilization Breakdown */}
-                {baselineSaved && (
-                  <div style={{ background: "#fff", borderRadius: 12, padding: isMobile ? 14 : 20, marginBottom: 20, border: "1px solid #e8e8e8", boxShadow: "0 1px 4px rgba(0,0,0,0.04)" }}>
+                  {/* Baseline Utilization Breakdown */}
+                  {baselineSaved && (
+                    <Col xs={24} md={cells > 0 ? 10 : 24}>
+                  <div style={{ background: "#fff", borderRadius: 12, padding: isMobile ? 14 : 20, border: "1px solid #e8e8e8", boxShadow: "0 1px 4px rgba(0,0,0,0.04)", height: "100%" }}>
                     <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 16 }}>
                       <div style={{ width: 28, height: 28, borderRadius: 6, background: "#722ed1", display: "flex", alignItems: "center", justifyContent: "center" }}>
                         <DatabaseOutlined style={{ color: "#fff", fontSize: 13 }} />
@@ -1956,7 +2408,9 @@ export default function SLFPortal() {
                       </div>
                     )}
                   </div>
-                )}
+                    </Col>
+                  )}
+                </Row>
 
                 {/* Facility Details */}
                 <div style={{ background: "#fff", borderRadius: 12, border: "1px solid #e8e8e8", boxShadow: "0 1px 4px rgba(0,0,0,0.04)", overflow: "hidden" }}>
@@ -1992,6 +2446,7 @@ export default function SLFPortal() {
                     </Row>
                   </div>
                 </div>
+
               </div>
             );
           })() : (
@@ -2211,246 +2666,232 @@ export default function SLFPortal() {
                       requiredMark={false}
                       disabled={baselineSaved}
                     >
-                      {/* Global Unit of Measurement Selector */}
-                      <div
-                        style={{
-                          background: "#f0f5ff",
-                          border: "1px solid #adc6ff",
-                          borderRadius: 8,
-                          padding: "12px 16px",
-                          marginBottom: 16,
-                          display: "flex",
-                          alignItems: "center",
-                          gap: 12,
-                          flexWrap: "wrap",
-                        }}
-                      >
-                        <Text strong style={{ fontSize: 13 }}>
-                          Unit of Measurement:
-                        </Text>
-                        <Select
-                          value={baselineUnit}
-                          onChange={handleBaselineUnitChange}
-                          disabled={baselineSaved}
-                          style={{ width: 140 }}
-                        >
-                          <Option value="m³">m<sup>3</sup></Option>
+                      {/* ── Unit of Measurement ── */}
+                      <div style={{ background: "linear-gradient(135deg, #e6f4ff 0%, #f0f5ff 100%)", border: "1px solid #91caff", borderRadius: 10, padding: "12px 16px", marginBottom: 16, display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+                        <div style={{ width: 32, height: 32, borderRadius: 8, background: "#1677ff", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                          <DatabaseOutlined style={{ color: "#fff", fontSize: 15 }} />
+                        </div>
+                        <div style={{ flex: 1, minWidth: 120 }}>
+                          <Text strong style={{ fontSize: 13, color: "#003eb3", display: "block" }}>Unit of Measurement</Text>
+                          <Text type="secondary" style={{ fontSize: 11 }}>Applies to all volume fields below</Text>
+                        </div>
+                        <Select value={baselineUnit} onChange={handleBaselineUnitChange} disabled={baselineSaved} style={{ width: 200 }}>
+                          <Option value="m³">m³ (cubic meters)</Option>
                           <Option value="tons">tons</Option>
                         </Select>
-                        <Text type="secondary" style={{ fontSize: 12 }}>
-                          This sets the unit for all volume fields below.
-                        </Text>
                       </div>
 
-                      {/* Accepts Hazardous Waste Toggle */}
-                      <div
-                        style={{
-                          background: acceptsHazardousWaste ? "#fff1f0" : "#f6ffed",
-                          border: `1px solid ${acceptsHazardousWaste ? "#ffa39e" : "#b7eb8f"}`,
-                          borderRadius: 8,
-                          padding: "10px 16px",
-                          marginBottom: 16,
-                          display: "flex",
-                          alignItems: "center",
-                          gap: 12,
-                        }}
-                      >
-                        <Checkbox
-                          checked={acceptsHazardousWaste}
-                          onChange={(e) => setAcceptsHazardousWaste(e.target.checked)}
-                          disabled={baselineSaved}
-                        >
-                          <Text strong style={{ fontSize: 13 }}>
-                            This facility accepts Treated Hazardous Waste
-                          </Text>
-                        </Checkbox>
+                      {/* ── Volume of Waste Accepted ── */}
+                      <div style={{ background: "#fff", border: "1px solid #e8e8e8", borderRadius: 10, overflow: "hidden", marginBottom: 14 }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "10px 16px", background: "linear-gradient(90deg, #1a3353 0%, #244b7a 100%)" }}>
+                          <BarChartOutlined style={{ color: "#fff", fontSize: 13 }} />
+                          <Text strong style={{ color: "#fff", fontSize: 13 }}>Volume of Waste Accepted</Text>
+                          <Text style={{ color: "rgba(255,255,255,0.55)", fontSize: 11, marginLeft: 2 }}>(since start of operation)</Text>
+                        </div>
+                        <div style={{ padding: "14px 16px 8px" }}>
+                          <Row gutter={[12, 0]}>
+                            <Col xs={24} sm={14} md={10}>
+                              <Form.Item
+                                name="totalVolumeAccepted"
+                                label="Total Volume Accepted"
+                                required
+                                rules={[{ required: true, message: "Required" }]}
+                              >
+                                <InputNumber
+                                  placeholder="0.00"
+                                  style={{ width: "100%" }}
+                                  min={0}
+                                  step={0.01}
+                                  precision={2}
+                                  addonAfter={baselineUnit === "m³" ? "m³" : "tons"}
+                                  formatter={(v) => v ? Number(v).toLocaleString(undefined, { maximumFractionDigits: 2 }) : ""}
+                                  parser={(v) => v?.replace(/,/g, "")}
+                                />
+                              </Form.Item>
+                            </Col>
+                          </Row>
+                        </div>
                       </div>
 
-                      <Divider
-                        titlePlacement="left"
-                        className="slf-category-divider"
-                      >
-                        Volume of Waste Accepted
-                      </Divider>
-                      <Row gutter={[12, 0]}>
-                        <Col xs={16} sm={10} md={8}>
-                          <Form.Item
-                            name="totalVolumeAccepted"
-                            label={
-                              isMobile
-                                ? "Total Volume Accepted"
-                                : "Total Volume of Waste Accepted (since start of operation)"
-                            }
-                            rules={[{ required: true, message: "Required" }]}
-                          >
-                            <InputNumber
-                              placeholder="Volume"
-                              style={{ width: "100%" }}
-                              min={0}
-                              step={0.01}
-                              addonAfter={baselineUnit === "m³" ? <>m<sup>3</sup></> : "tons"}
-                            />
-                          </Form.Item>
-                        </Col>
-                      </Row>
-
-                      <Divider
-                        titlePlacement="left"
-                        className="slf-category-divider"
-                      >
-                        Total Volume Disposed in Active Cells
-                      </Divider>
-                      <Row gutter={[12, 0]}>
-                        <Col xs={24} sm={12} md={6}>
-                          <Form.Item
-                            name="activeCellResidualVolume"
-                            label="Residual"
-                            rules={[{ required: true, message: "Required" }]}
-                          >
-                            <InputNumber
-                              placeholder="Volume"
-                              style={{ width: "100%" }}
-                              min={0}
-                              step={0.01}
-                              addonAfter={baselineUnit === "m³" ? <>m<sup>3</sup></> : "tons"}
-                            />
-                          </Form.Item>
-                        </Col>
-                        <Col xs={24} sm={12} md={6}>
-                          <Form.Item
-                            name="activeCellInertVolume"
-                            label="Inert"
-                            rules={[{ required: true, message: "Required" }]}
-                          >
-                            <InputNumber
-                              placeholder="Volume"
-                              style={{ width: "100%" }}
-                              min={0}
-                              step={0.01}
-                              addonAfter={baselineUnit === "m³" ? <>m<sup>3</sup></> : "tons"}
-                            />
-                          </Form.Item>
-                        </Col>
-                        {acceptsHazardousWaste && (
-                          <Col xs={24} sm={12} md={6}>
-                            <Form.Item
-                              name="activeCellHazardousVolume"
-                              label="Treated Hazardous"
-                              rules={[{ required: true, message: "Required" }]}
-                            >
-                              <InputNumber
-                                placeholder="Volume"
-                                style={{ width: "100%" }}
-                                min={0}
-                                step={0.01}
-                                addonAfter={baselineUnit === "m³" ? <>m<sup>3</sup></> : "tons"}
+                      <Collapse
+                        defaultActiveKey={["active", "closed", "haulers"]}
+                        bordered={false}
+                        style={{ background: "transparent", marginBottom: 14 }}
+                        items={[
+                          {
+                            key: "active",
+                            label: (
+                              <Space>
+                                <CheckCircleOutlined style={{ color: "#52c41a" }} />
+                                <Text strong style={{ color: "#135200" }}>
+                                  Active Cells{activeCellEntries.length > 0 ? ` (${activeCellEntries.length})` : ""}
+                                </Text>
+                                {activeCellEntries.length > 0 && (
+                                  <Text type="secondary" style={{ fontSize: 11 }}>
+                                    Total: {activeCellEntries.reduce((s, e) => s + (e.volume || 0), 0).toLocaleString()} {baselineUnit || "m³"}
+                                  </Text>
+                                )}
+                              </Space>
+                            ),
+                            extra: !baselineSaved && (
+                              <Button size="small" icon={<PlusOutlined />} onClick={(e) => { e.stopPropagation(); setEditingActiveCellKey(null); setActiveCellDraft({ cellName: "", wasteType: "Residual", volume: null }); setActiveCellModalOpen(true); }}>
+                                Add Entry
+                              </Button>
+                            ),
+                            children: (
+                              <Table
+                                dataSource={activeCellEntries}
+                                rowKey="key"
+                                size="small"
+                                pagination={false}
+                                style={{ marginBottom: 0 }}
+                                locale={{ emptyText: <Text type="secondary" style={{ fontSize: 12 }}>No entries yet.{!baselineSaved && " Click \"Add Entry\" above to add cell data."}</Text> }}
+                                columns={[
+                                  { title: "#", key: "idx", width: 42, render: (_, __, i) => <Text style={{ fontSize: 12, color: "#8c8c8c" }}>{i + 1}</Text> },
+                                  { title: "Cell Name", dataIndex: "cellName", key: "cellName", render: v => v || <Text type="secondary" style={{ fontSize: 12 }}>Unnamed Cell</Text> },
+                                  { title: "Waste Type", dataIndex: "wasteType", key: "wasteType", width: 160,
+                                    render: v => {
+                                      const isHaz = v?.toLowerCase().includes("hazardous"); const isInert = v === "Inert";
+                                      return <Tag color={isHaz ? "red" : isInert ? "blue" : "green"} style={{ fontSize: 11 }}>{v}</Tag>;
+                                    }
+                                  },
+                                  { title: `Volume (${baselineUnit || "m³"})`, key: "vol", width: 140,
+                                    render: (_, r) => <Text strong style={{ color: "#52c41a" }}>{r.volume != null ? r.volume.toLocaleString() : "—"}</Text>
+                                  },
+                                  !baselineSaved && { title: "", key: "act", width: 72,
+                                    render: (_, r) => (
+                                      <Space size={0}>
+                                        <Button type="text" size="small" icon={<EditOutlined />} style={{ color: "#1a3353" }}
+                                          onClick={() => { setEditingActiveCellKey(r.key); setActiveCellDraft({ cellName: r.cellName, wasteType: r.wasteType, volume: r.volume }); setActiveCellModalOpen(true); }} />
+                                        <Button type="text" danger size="small" icon={<DeleteOutlined />}
+                                          onClick={() => setActiveCellEntries(prev => prev.filter(e => e.key !== r.key))} />
+                                      </Space>
+                                    ),
+                                  },
+                                ].filter(Boolean)}
                               />
-                            </Form.Item>
-                          </Col>
-                        )}
-                      </Row>
-
-                      <Divider
-                        titlePlacement="left"
-                        className="slf-category-divider"
-                      >
-                        Total Volume Disposed in Closed Cells
-                      </Divider>
-                      <Row gutter={[12, 0]}>
-                        <Col xs={24} sm={12} md={6}>
-                          <Form.Item
-                            name="closedCellResidualVolume"
-                            label="Residual"
-                            rules={[{ required: true, message: "Required" }]}
-                          >
-                            <InputNumber
-                              placeholder="Volume"
-                              style={{ width: "100%" }}
-                              min={0}
-                              step={0.01}
-                              addonAfter={baselineUnit === "m³" ? <>m<sup>3</sup></> : "tons"}
-                            />
-                          </Form.Item>
-                        </Col>
-                        <Col xs={24} sm={12} md={6}>
-                          <Form.Item
-                            name="closedCellInertVolume"
-                            label="Inert"
-                            rules={[{ required: true, message: "Required" }]}
-                          >
-                            <InputNumber
-                              placeholder="Volume"
-                              style={{ width: "100%" }}
-                              min={0}
-                              step={0.01}
-                              addonAfter={baselineUnit === "m³" ? <>m<sup>3</sup></> : "tons"}
-                            />
-                          </Form.Item>
-                        </Col>
-                        {acceptsHazardousWaste && (
-                          <Col xs={24} sm={12} md={6}>
-                            <Form.Item
-                              name="closedCellHazardousVolume"
-                              label="Treated Hazardous"
-                              rules={[{ required: true, message: "Required" }]}
-                            >
-                              <InputNumber
-                                placeholder="Volume"
-                                style={{ width: "100%" }}
-                                min={0}
-                                step={0.01}
-                                addonAfter={baselineUnit === "m³" ? <>m<sup>3</sup></> : "tons"}
+                            ),
+                          },
+                          {
+                            key: "closed",
+                            label: (
+                              <Space>
+                                <CloseCircleOutlined style={{ color: "#722ed1" }} />
+                                <Text strong style={{ color: "#391085" }}>
+                                  Closed Cells{closedCellEntries.length > 0 ? ` (${closedCellEntries.length})` : ""}
+                                </Text>
+                                {closedCellEntries.length > 0 && (
+                                  <Text type="secondary" style={{ fontSize: 11 }}>
+                                    Total: {closedCellEntries.reduce((s, e) => s + (e.volume || 0), 0).toLocaleString()} {baselineUnit || "m³"}
+                                  </Text>
+                                )}
+                              </Space>
+                            ),
+                            extra: !baselineSaved && (
+                              <Button size="small" icon={<PlusOutlined />} onClick={(e) => { e.stopPropagation(); setEditingClosedCellKey(null); setClosedCellDraft({ cellName: "", wasteType: "Residual", volume: null }); setClosedCellModalOpen(true); }}>
+                                Add Entry
+                              </Button>
+                            ),
+                            children: (
+                              <Table
+                                dataSource={closedCellEntries}
+                                rowKey="key"
+                                size="small"
+                                pagination={false}
+                                style={{ marginBottom: 0 }}
+                                locale={{ emptyText: <Text type="secondary" style={{ fontSize: 12 }}>No entries yet.{!baselineSaved && " Click \"Add Entry\" above to add cell data."}</Text> }}
+                                columns={[
+                                  { title: "#", key: "idx", width: 42, render: (_, __, i) => <Text style={{ fontSize: 12, color: "#8c8c8c" }}>{i + 1}</Text> },
+                                  { title: "Cell Name", dataIndex: "cellName", key: "cellName", render: v => v || <Text type="secondary" style={{ fontSize: 12 }}>Unnamed Cell</Text> },
+                                  { title: "Waste Type", dataIndex: "wasteType", key: "wasteType", width: 160,
+                                    render: v => {
+                                      const isHaz = v?.toLowerCase().includes("hazardous"); const isInert = v === "Inert";
+                                      return <Tag color={isHaz ? "red" : isInert ? "purple" : "orange"} style={{ fontSize: 11 }}>{v}</Tag>;
+                                    }
+                                  },
+                                  { title: `Volume (${baselineUnit || "m³"})`, key: "vol", width: 140,
+                                    render: (_, r) => <Text strong style={{ color: "#722ed1" }}>{r.volume != null ? r.volume.toLocaleString() : "—"}</Text>
+                                  },
+                                  !baselineSaved && { title: "", key: "act", width: 72,
+                                    render: (_, r) => (
+                                      <Space size={0}>
+                                        <Button type="text" size="small" icon={<EditOutlined />} style={{ color: "#1a3353" }}
+                                          onClick={() => { setEditingClosedCellKey(r.key); setClosedCellDraft({ cellName: r.cellName, wasteType: r.wasteType, volume: r.volume }); setClosedCellModalOpen(true); }} />
+                                        <Button type="text" danger size="small" icon={<DeleteOutlined />}
+                                          onClick={() => setClosedCellEntries(prev => prev.filter(e => e.key !== r.key))} />
+                                      </Space>
+                                    ),
+                                  },
+                                ].filter(Boolean)}
                               />
-                            </Form.Item>
-                          </Col>
-                        )}
-                      </Row>
-
-                      <Divider
-                        titlePlacement="left"
-                        className="slf-category-divider"
-                      >
-                        <TeamOutlined /> Accredited Haulers
-                      </Divider>
-                      <div style={{ marginBottom: 12, display: "flex", gap: 8, flexWrap: "wrap" }}>
-                        <Button
-                          type="primary"
-                          icon={<PlusOutlined />}
-                          className="slf-primary-btn"
-                          onClick={() => openHaulerModal(null)}
-                          disabled={baselineSaved}
-                        >
-                          Add Hauler
-                        </Button>
-                        <Button
-                          icon={<UploadOutlined />}
-                          onClick={() => {
-                            const input = document.createElement("input");
-                            input.type = "file";
-                            input.accept = ".xlsx,.xls,.csv";
-                            input.onchange = (e) => handleExcelUpload(e.target.files[0], "hauler");
-                            input.click();
-                          }}
-                          disabled={baselineSaved}
-                        >
-                          Upload Excel/CSV
-                        </Button>
-                      </div>
-                      <Table
-                        dataSource={haulers}
-                        columns={haulerColumns}
-                        rowKey="key"
-                        size="small"
-                        pagination={false}
-                        scroll={{ x: 700 }}
-                        locale={{
-                          emptyText: (
-                            <Text type="secondary" style={{ fontSize: 13 }}>
-                              No haulers added.
-                            </Text>
-                          ),
-                        }}
+                            ),
+                          },
+                          {
+                            key: "haulers",
+                            label: (
+                              <Space>
+                                <TeamOutlined style={{ color: "#614700" }} />
+                                <Text strong style={{ color: "#614700" }}>
+                                  Accredited Haulers{haulers.length > 0 ? ` (${haulers.length})` : ""}
+                                </Text>
+                              </Space>
+                            ),
+                            children: (
+                              <div>
+                                <div style={{ marginBottom: 12, display: "flex", gap: 8, flexWrap: "wrap" }}>
+                                  <Button
+                                    type="primary"
+                                    icon={<PlusOutlined />}
+                                    className="slf-primary-btn"
+                                    onClick={() => openHaulerModal(null)}
+                                    disabled={baselineSaved}
+                                  >
+                                    Add Hauler
+                                  </Button>
+                                  <Button
+                                    icon={<UploadOutlined />}
+                                    onClick={() => openUploadGuide("hauler")}
+                                    disabled={baselineSaved}
+                                  >
+                                    Upload Excel/CSV
+                                  </Button>
+                                </div>
+                                <Table
+                                  dataSource={haulers}
+                                  columns={haulerColumns}
+                                  rowKey="key"
+                                  size="small"
+                                  pagination={false}
+                                  scroll={{ x: 700 }}
+                                  locale={{
+                                    emptyText: (
+                                      <Text type="secondary" style={{ fontSize: 13 }}>
+                                        No haulers added.
+                                      </Text>
+                                    ),
+                                  }}
+                                />
+                              </div>
+                            ),
+                          },
+                        ]}
                       />
+
+                      {/* ── Save Baseline Update Button (visible when admin approved editing) ── */}
+                      {!baselineSaved && (
+                        <div style={{ marginTop: 24, paddingTop: 16, borderTop: "1px solid #e8e8e8", display: "flex", justifyContent: "flex-end" }}>
+                          <Button
+                            type="primary"
+                            size="large"
+                            icon={<SaveOutlined />}
+                            loading={baselineSavingLoading}
+                            onClick={handleSaveBaselinePortal}
+                            style={{ background: "#1a3353", borderColor: "#1a3353", paddingLeft: 28, paddingRight: 28 }}
+                          >
+                            Save Baseline Update
+                          </Button>
+                        </div>
+                      )}
                     </Form>
                   </>
                 ),
@@ -2469,14 +2910,6 @@ export default function SLFPortal() {
                     layout="vertical"
                     requiredMark={false}
                   >
-                    {/* Assigned SLF Facility */}
-                    <div style={{ background: "#e6f4ff", border: "1px solid #91caff", borderRadius: 8, padding: "10px 16px", marginBottom: 16, display: "flex", alignItems: "center", gap: 10 }}>
-                      <EnvironmentOutlined style={{ color: "#1a3353", fontSize: 16 }} />
-                      <div>
-                        <Text type="secondary" style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: 0.4 }}>Assigned SLF Facility</Text>
-                        <div><Text strong style={{ fontSize: 13 }}>{activeSlfName || "—"}</Text></div>
-                      </div>
-                    </div>
                     <Row gutter={[12, 0]}>
                       <Col xs={24} sm={12} md={8}>
                         <Form.Item
@@ -2493,105 +2926,143 @@ export default function SLFPortal() {
                         </Form.Item>
                       </Col>
                     </Row>
-                    <Row gutter={[12, 0]}>
-                      <Col xs={24} sm={14} md={12}>
-                        <Form.Item
-                          name="lguCompanyName"
-                          label={fl("lguCompanyName", "LGU/Company Name")}
-                          rules={[
-                            {
-                              required: isRequired("lguCompanyName", true),
-                              message: "Required",
-                            },
-                          ]}
-                        >
-                          <Input placeholder="e.g. Dela Cruz, Juan" />
-                        </Form.Item>
-                      </Col>
-                      <Col xs={24} sm={10} md={6}>
-                        <Form.Item
-                          name="companyType"
-                          label={fl("companyType", "Company Type")}
-                          rules={[
-                            {
-                              required: isRequired("companyType", true),
-                              message: "Required",
-                            },
-                          ]}
-                        >
-                          <Select placeholder="Select type">
-                            {opts("companyType", ["LGU", "Private"]).map(
-                              (o) => (
-                                <Option key={o} value={o}>
-                                  {o}
-                                </Option>
-                              ),
-                            )}
-                          </Select>
-                        </Form.Item>
-                      </Col>
-                    </Row>
-                    <Row gutter={[12, 0]}>
-                      <Col xs={24}>
-                        <Form.Item
-                          name="address"
-                          label={fl("address", "Address")}
-                          rules={[
-                            {
-                              required: isRequired("address", false),
-                              message: "Required",
-                            },
-                          ]}
-                        >
-                          <Input placeholder="Complete address" />
-                        </Form.Item>
-                      </Col>
-                    </Row>
 
-                    <Divider
-                      titlePlacement="left"
-                      className="slf-category-divider"
-                    >
-                      <CarOutlined /> Transport and Disposal Information
-                    </Divider>
-
-                    <Table
-                      dataSource={trucks}
-                      columns={truckColumns}
-                      rowKey="key"
-                      size="small"
-                      pagination={false}
-                      scroll={{ x: 900 }}
-                      locale={{
-                        emptyText: (
-                          <Text type="secondary" style={{ fontSize: 13 }}>
-                            No entries added. Click "Add Entry" below to add
-                            transport data.
+                    {/* ── Transport & Disposal Information ── */}
+                    <div style={{ background: "#fff", border: "1px solid #e8e8e8", borderRadius: 10, overflow: "hidden", marginTop: 4 }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "10px 16px", background: "linear-gradient(90deg, #1a3353 0%, #244b7a 100%)", flexWrap: "wrap" }}>
+                        <div style={{ width: 28, height: 28, borderRadius: 7, background: "rgba(255,255,255,0.15)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                          <CarOutlined style={{ color: "#fff", fontSize: 14 }} />
+                        </div>
+                        <Text strong style={{ color: "#fff", fontSize: 13 }}>Transport &amp; Disposal Information</Text>
+                        <Badge count={trucks.length} showZero style={{ backgroundColor: trucks.length > 0 ? "rgba(255,255,255,0.25)" : "rgba(255,255,255,0.12)", color: "#fff", border: "none", boxShadow: "none" }} />
+                        {trucks.length > 0 && (
+                          <Text style={{ color: "rgba(255,255,255,0.65)", fontSize: 11, marginLeft: 2 }}>
+                            · Total: <strong style={{ color: "#fff" }}>{trucks.reduce((s, t) => s + (t.actualVolume || 0), 0).toLocaleString()}</strong> {trucks[0]?.actualVolumeUnit || "tons"}
                           </Text>
-                        ),
-                      }}
-                    />
-                    <div style={{ marginTop: 12, marginBottom: 16, display: "flex", gap: 8, flexWrap: "wrap" }}>
-                      <Button
-                        type="primary"
-                        icon={<PlusOutlined />}
-                        className="slf-primary-btn"
-                        onClick={() => openTruckModal(null)}
-                      >
-                        Add Entry
-                      </Button>
-                      <Button
-                        icon={<UploadOutlined />}
-                        onClick={() => {
-                          const input = document.createElement("input");
-                          input.type = "file";
-                          input.accept = ".xlsx,.xls,.csv";
-                          input.onchange = (e) => handleExcelUpload(e.target.files[0], "truck");
-                          input.click();
-                        }}
-                      >
-                        Upload Excel/CSV
-                      </Button>
+                        )}
+                        <Space style={{ marginLeft: "auto" }} wrap>
+                          <Button size="small" type="primary" icon={<PlusOutlined />} className="slf-primary-btn" onClick={() => openTruckModal(null)}>
+                            Add Entry
+                          </Button>
+                          <Button size="small" icon={<UploadOutlined />} style={{ background: "rgba(255,255,255,0.12)", border: "1px solid rgba(255,255,255,0.3)", color: "#fff" }} onClick={() => openUploadGuide("truck")}>
+                            Upload Excel/CSV
+                          </Button>
+                        </Space>
+                      </div>
+                      <div style={{ padding: trucks.length === 0 ? 0 : "10px 12px" }}>
+                        {trucks.length === 0 ? (
+                          <div style={{ textAlign: "center", padding: "28px 16px", background: "#fafafa" }}>
+                            <CarOutlined style={{ fontSize: 28, color: "#d9d9d9", display: "block", marginBottom: 8 }} />
+                            <Text type="secondary" style={{ fontSize: 13 }}>No entries added. Click &quot;Add Entry&quot; to add transport data.</Text>
+                          </div>
+                        ) : (
+                          <Collapse
+                            bordered={false}
+                            style={{ background: "transparent" }}
+                            expandIconPlacement="start"
+                            items={trucks.map((t, i) => {
+                              const vehs = t.vehicles || [];
+                              const plateNos = vehs.map(v => v.plateNumber).filter(Boolean).join(", ") || t.plateNumber || "—";
+                              const capacities = vehs.length > 0
+                                ? vehs.filter(v => v.capacity != null).map(v => `${v.capacity} ${(v.capacityUnit || "m³").replace("m3", "m³")}`).join(", ")
+                                : t.truckCapacity != null ? `${t.truckCapacity} ${(t.truckCapacityUnit || "m³").replace("m3", "m³")}` : "—";
+                              const isHaz = t.wasteType?.toLowerCase().includes("hazardous");
+                              const allClients = vehs.flatMap(v => v.selectedClients || []);
+                              return {
+                                key: t.key,
+                                style: { marginBottom: 6, borderRadius: 8, border: "1px solid #e8e8e8", background: "#fff", overflow: "hidden" },
+                                label: (
+                                  <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", width: "100%", paddingRight: 4 }}>
+                                    <div style={{ width: 22, height: 22, borderRadius: 5, background: "#1a3353", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                                      <Text style={{ color: "#fff", fontSize: 10, fontWeight: 700 }}>{i + 1}</Text>
+                                    </div>
+                                    <Text strong style={{ fontSize: 13, color: "#1a3353", flexShrink: 0, maxWidth: 160, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                                      {t.disposalTicketNo || <Text type="secondary" style={{ fontWeight: 400, fontSize: 12 }}>No Ticket No.</Text>}
+                                    </Text>
+                                    {t.hauler && <Tag color="blue" style={{ margin: 0, fontSize: 11 }}>{t.hauler}</Tag>}
+                                    {t.wasteType && <Tag color={isHaz ? "red" : "green"} style={{ margin: 0, fontSize: 11 }}>{t.wasteType}</Tag>}
+                                    {t.actualVolume != null && (
+                                      <Tag color="orange" style={{ margin: 0, fontSize: 11, marginLeft: "auto" }}>
+                                        {t.actualVolume} {t.actualVolumeUnit || "tons"}
+                                      </Tag>
+                                    )}
+                                  </div>
+                                ),
+                                extra: (
+                                  <Space size={0} onClick={e => e.stopPropagation()}>
+                                    <Button type="text" size="small" icon={<EditOutlined />} onClick={() => openTruckModal(t)} style={{ color: "#1a3353" }} />
+                                    <Button type="text" danger size="small" icon={<DeleteOutlined />} onClick={() => removeTruck(t.key)} />
+                                  </Space>
+                                ),
+                                children: (
+                                  <div style={{ padding: "4px 4px 8px" }}>
+                                    <Row gutter={[10, 8]}>
+                                      {t.lguCompanyName && (
+                                        <Col xs={24} sm={12} md={8}>
+                                          <div style={{ background: "#f8faff", borderRadius: 6, padding: "6px 10px" }}>
+                                            <div style={{ fontSize: 10, color: "#8c8c8c", textTransform: "uppercase", letterSpacing: 0.5, fontWeight: 600 }}>LGU / Company</div>
+                                            <div style={{ fontSize: 13, fontWeight: 600, color: "#262626", marginTop: 2 }}>{t.lguCompanyName}</div>
+                                          </div>
+                                        </Col>
+                                      )}
+                                      {t.companyType && (
+                                        <Col xs={12} sm={6} md={4}>
+                                          <div style={{ background: "#f8faff", borderRadius: 6, padding: "6px 10px" }}>
+                                            <div style={{ fontSize: 10, color: "#8c8c8c", textTransform: "uppercase", letterSpacing: 0.5, fontWeight: 600 }}>Type</div>
+                                            <Tag color={t.companyType === "LGU" ? "blue" : "green"} style={{ margin: "4px 0 0", fontWeight: 600 }}>{t.companyType}</Tag>
+                                          </div>
+                                        </Col>
+                                      )}
+                                      <Col xs={12} sm={6} md={4}>
+                                        <div style={{ background: "#f8faff", borderRadius: 6, padding: "6px 10px" }}>
+                                          <div style={{ fontSize: 10, color: "#8c8c8c", textTransform: "uppercase", letterSpacing: 0.5, fontWeight: 600 }}>Plate No.</div>
+                                          <div style={{ fontSize: 12, fontWeight: 600, color: "#262626", marginTop: 2 }}>{plateNos}</div>
+                                        </div>
+                                      </Col>
+                                      <Col xs={12} sm={6} md={4}>
+                                        <div style={{ background: "#f8faff", borderRadius: 6, padding: "6px 10px" }}>
+                                          <div style={{ fontSize: 10, color: "#8c8c8c", textTransform: "uppercase", letterSpacing: 0.5, fontWeight: 600 }}>Capacity</div>
+                                          <div style={{ fontSize: 12, fontWeight: 600, color: "#262626", marginTop: 2 }}>{capacities}</div>
+                                        </div>
+                                      </Col>
+                                      <Col xs={12} sm={6} md={4}>
+                                        <div style={{ background: "#fff7e6", borderRadius: 6, padding: "6px 10px", border: "1px solid #ffe7ba" }}>
+                                          <div style={{ fontSize: 10, color: "#8c8c8c", textTransform: "uppercase", letterSpacing: 0.5, fontWeight: 600 }}>Actual Volume</div>
+                                          <div style={{ fontSize: 14, fontWeight: 700, color: "#fa8c16", marginTop: 2 }}>
+                                            {t.actualVolume != null ? `${t.actualVolume} ${t.actualVolumeUnit || "tons"}` : "—"}
+                                          </div>
+                                        </div>
+                                      </Col>
+                                      {isHaz && t.hazWasteCode && (Array.isArray(t.hazWasteCode) ? t.hazWasteCode : [t.hazWasteCode]).length > 0 && (
+                                        <Col xs={24}>
+                                          <div style={{ background: "#fff1f0", borderRadius: 6, padding: "6px 10px", border: "1px solid #ffa39e" }}>
+                                            <div style={{ fontSize: 10, color: "#8c8c8c", textTransform: "uppercase", letterSpacing: 0.5, fontWeight: 600, marginBottom: 4 }}>Haz. Waste Code(s)</div>
+                                            {(Array.isArray(t.hazWasteCode) ? t.hazWasteCode : [t.hazWasteCode]).map(code => (
+                                              <Tag key={code} color="red" style={{ fontSize: 11, marginBottom: 2 }}>{code}</Tag>
+                                            ))}
+                                          </div>
+                                        </Col>
+                                      )}
+                                      {allClients.length > 0 && (
+                                        <Col xs={24}>
+                                          <div style={{ background: "#f6ffed", borderRadius: 6, padding: "6px 10px", border: "1px solid #b7eb8f" }}>
+                                            <div style={{ fontSize: 10, color: "#8c8c8c", textTransform: "uppercase", letterSpacing: 0.5, fontWeight: 600, marginBottom: 4 }}>Clients ({allClients.length})</div>
+                                            {allClients.map((c, ci) => {
+                                              const name = typeof c === "string" ? c : c.clientName;
+                                              const type = typeof c === "string" ? null : c.clientType;
+                                              return <Tag key={ci} color={type === "LGU" ? "blue" : "green"} style={{ fontSize: 11, marginBottom: 2 }}>{name}{type ? ` (${type})` : ""}</Tag>;
+                                            })}
+                                          </div>
+                                        </Col>
+                                      )}
+                                    </Row>
+                                  </div>
+                                ),
+                              };
+                            })}
+                          />
+                        )}
+                      </div>
                     </div>
                   </Form>
                 ),
@@ -2776,7 +3247,7 @@ export default function SLFPortal() {
           placement="left"
           open={mobileDrawer}
           onClose={() => setMobileDrawer(false)}
-          width={240}
+          size={240}
           styles={{
             body: {
               padding: 0,
@@ -2828,6 +3299,7 @@ export default function SLFPortal() {
             menu={{
               items: userMenuItems,
               onClick: ({ key }) => {
+                if (key === "profile") setProfileModalOpen(true);
                 if (key === "logout") handleLogout();
               },
             }}
@@ -2910,7 +3382,7 @@ export default function SLFPortal() {
         <Collapse
           defaultActiveKey={["basic", "vehicle", "clients"]}
           bordered={false}
-          expandIconPosition="end"
+          expandIconPlacement="end"
           style={{ background: "transparent" }}
           items={[
             {
@@ -2957,14 +3429,74 @@ export default function SLFPortal() {
                     </Col>
                   </Row>
                   <Row gutter={[12, 0]}>
-                    <Col xs={24}>
-                      <Form.Item label="Office Address">
-                        <Input
-                          placeholder="Office address"
-                          value={haulerDraft.officeAddress}
-                          onChange={(e) =>
-                            updateHaulerDraft("officeAddress", e.target.value)
-                          }
+                    <Col xs={24} sm={12}>
+                      <Form.Item label="Region">
+                        <Select
+                          showSearch
+                          placeholder="Select region"
+                          value={haulerDraft.officeRegion || undefined}
+                          onChange={(code) => {
+                            updateHaulerDraft("officeRegion", code);
+                            fetchHaulerProvinces(code);
+                          }}
+                          filterOption={(input, opt) => opt?.label?.toLowerCase().includes(input.toLowerCase())}
+                          options={regions.map(r => ({ value: r.code, label: r.name }))}
+                          allowClear
+                          style={{ width: "100%" }}
+                        />
+                      </Form.Item>
+                    </Col>
+                    <Col xs={24} sm={12}>
+                      <Form.Item label="Province">
+                        <Select
+                          showSearch
+                          placeholder="Select province"
+                          value={haulerDraft.officeProvince || undefined}
+                          loading={loadingHaulerAddress === "province"}
+                          disabled={!haulerDraft.officeRegion}
+                          onChange={(code) => {
+                            updateHaulerDraft("officeProvince", code);
+                            fetchHaulerCities(code);
+                          }}
+                          filterOption={(input, opt) => opt?.label?.toLowerCase().includes(input.toLowerCase())}
+                          options={haulerProvinces.map(p => ({ value: p.code, label: p.name }))}
+                          allowClear
+                          style={{ width: "100%" }}
+                        />
+                      </Form.Item>
+                    </Col>
+                    <Col xs={24} sm={12}>
+                      <Form.Item label="City / Municipality">
+                        <Select
+                          showSearch
+                          placeholder="Select city/municipality"
+                          value={haulerDraft.officeCity || undefined}
+                          loading={loadingHaulerAddress === "city"}
+                          disabled={!haulerDraft.officeProvince}
+                          onChange={(code) => {
+                            updateHaulerDraft("officeCity", code);
+                            fetchHaulerBarangays(code);
+                          }}
+                          filterOption={(input, opt) => opt?.label?.toLowerCase().includes(input.toLowerCase())}
+                          options={haulerCities.map(c => ({ value: c.code, label: c.name }))}
+                          allowClear
+                          style={{ width: "100%" }}
+                        />
+                      </Form.Item>
+                    </Col>
+                    <Col xs={24} sm={12}>
+                      <Form.Item label="Barangay">
+                        <Select
+                          showSearch
+                          placeholder="Select barangay"
+                          value={haulerDraft.officeBarangay || undefined}
+                          loading={loadingHaulerAddress === "barangay"}
+                          disabled={!haulerDraft.officeCity}
+                          onChange={(code) => updateHaulerDraft("officeBarangay", code)}
+                          filterOption={(input, opt) => opt?.label?.toLowerCase().includes(input.toLowerCase())}
+                          options={haulerBarangayList.map(b => ({ value: b.code, label: b.name }))}
+                          allowClear
+                          style={{ width: "100%" }}
                         />
                       </Form.Item>
                     </Col>
@@ -3077,21 +3609,83 @@ export default function SLFPortal() {
                 </Text>
               ),
               children: (
-                <Row gutter={[12, 0]}>
-                  <Col xs={24}>
-                    <Form.Item label="Private Sector/LGU Clients">
-                      <Select
-                        mode="tags"
-                        placeholder="Type and press Enter to add clients"
-                        value={haulerDraft.privateSectorClients}
-                        onChange={(v) =>
-                          updateHaulerDraft("privateSectorClients", v)
-                        }
-                        tokenSeparators={[","]}
-                      />
-                    </Form.Item>
-                  </Col>
-                </Row>
+                <div>
+                  <div style={{ marginBottom: 8 }}>
+                    <Button
+                      type="primary"
+                      icon={<PlusOutlined />}
+                      className="slf-primary-btn"
+                      size="small"
+                      onClick={() => {
+                        setEditingClientKey(null);
+                        setClientDraft({ clientName: "", clientType: "Private", region: "", province: "", municipality: "" });
+                        setClientProvinces([]);
+                        setClientMunicipalities([]);
+                        setClientModalOpen(true);
+                      }}
+                    >
+                      Add Client
+                    </Button>
+                  </div>
+                  <Table
+                    dataSource={haulerDraft.privateSectorClients || []}
+                    rowKey="key"
+                    size="small"
+                    pagination={false}
+                    locale={{ emptyText: <Text type="secondary" style={{ fontSize: 12 }}>No clients added yet.</Text> }}
+                    columns={[
+                      { title: "Client Name", dataIndex: "clientName", key: "clientName", render: v => v || "—" },
+                      {
+                        title: "Type", dataIndex: "clientType", key: "clientType", width: 80,
+                        render: v => <Tag color={v === "LGU" ? "blue" : "green"}>{v}</Tag>
+                      },
+                      {
+                        title: "Location", key: "location",
+                        render: (_, r) => [
+                          r.regionName || r.region,
+                          r.provinceName || r.province,
+                          r.municipalityName || r.municipality,
+                        ].filter(Boolean).join(" / ") || "—"
+                      },
+                      {
+                        title: "Actions", key: "act", width: 80,
+                        render: (_, r) => (
+                          <Space size="small">
+                            <Button type="text" size="small" icon={<EditOutlined />}
+                              onClick={async () => {
+                                setEditingClientKey(r.key);
+                                setClientDraft({ clientName: r.clientName, clientType: r.clientType, region: r.region, province: r.province, municipality: r.municipality });
+                                setClientProvinces([]);
+                                setClientMunicipalities([]);
+                                if (r.region) {
+                                  setLoadingClientAddress("province");
+                                  try {
+                                    const res = await fetch(`https://psgc.gitlab.io/api/regions/${r.region}/provinces/`);
+                                    setClientProvinces(await res.json());
+                                  } catch (_) {}
+                                  setLoadingClientAddress("");
+                                }
+                                if (r.province) {
+                                  setLoadingClientAddress("municipality");
+                                  try {
+                                    const res = await fetch(`https://psgc.gitlab.io/api/provinces/${r.province}/cities-municipalities/`);
+                                    setClientMunicipalities(await res.json());
+                                  } catch (_) {}
+                                  setLoadingClientAddress("");
+                                }
+                                setClientModalOpen(true);
+                              }}
+                              style={{ color: "#1a3353" }}
+                            />
+                            <Button type="text" danger size="small" icon={<DeleteOutlined />}
+                              onClick={() => updateHaulerDraft("privateSectorClients", (haulerDraft.privateSectorClients || []).filter(c => c.key !== r.key))}
+                            />
+                          </Space>
+                        ),
+                      },
+                    ]}
+                  />
+                </div>
               ),
             },
           ]}
@@ -3100,388 +3694,422 @@ export default function SLFPortal() {
 
       {/* ── Truck Entry Modal ── */}
       <Modal
-        title={editingTruckKey ? "Edit Transport Entry" : "Add Transport Entry"}
+        title={
+          <div style={{ display: "flex", alignItems: "center", gap: 12, paddingRight: 32 }}>
+            <div style={{ background: "linear-gradient(135deg, #1a3353 0%, #1e4a7a 100%)", borderRadius: 10, width: 42, height: 42, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, boxShadow: "0 2px 8px rgba(26,51,83,0.35)" }}>
+              <CarOutlined style={{ color: "#fff", fontSize: 20 }} />
+            </div>
+            <div>
+              <div style={{ fontSize: 15, fontWeight: 700, color: "#1a3353", lineHeight: 1.3, letterSpacing: 0.2 }}>
+                {editingTruckKey ? "Edit Transport Entry" : "Add Transport Entry"}
+              </div>
+              <div style={{ fontSize: 11, color: "#8c8c8c", fontWeight: 400, marginTop: 2 }}>
+                Complete all sections below for this transport trip
+              </div>
+            </div>
+          </div>
+        }
         open={truckModalOpen}
         onCancel={() => {
           setTruckModalOpen(false);
           setTruckErrors({});
         }}
         onOk={handleSaveTruck}
-        okText={editingTruckKey ? "Update" : "Add"}
-        okButtonProps={{ className: "slf-primary-btn" }}
+        okText={editingTruckKey ? "Update Entry" : "Add Entry"}
+        okButtonProps={{ className: "slf-primary-btn", icon: editingTruckKey ? <EditOutlined /> : <PlusOutlined /> }}
+        cancelButtonProps={{ icon: <CloseCircleOutlined /> }}
         destroyOnHidden
-        width={900}
+        width={880}
+        styles={{ body: { paddingTop: 16, maxHeight: "72vh", overflowY: "auto" } }}
       >
-        <Collapse
-          defaultActiveKey={["trip", "vehicle", "waste"]}
-          bordered={false}
-          expandIconPosition="end"
-          style={{ background: "transparent" }}
-          items={[
-            {
-              key: "trip",
-              label: (
-                <Text strong style={{ color: "#1a3353" }}>
-                  <FileTextOutlined /> Trip Information
-                </Text>
-              ),
-              children: (
-                <Row gutter={[12, 0]}>
-                  <Col xs={24} sm={12}>
-                    <Form.Item
-                      label={fl(
-                        "disposalTicketNo",
-                        "Disposal/Trip Ticket No.",
-                      )}
-                      required
-                      {...fieldErr("disposalTicketNo")}
-                    >
-                      <Input
-                        placeholder="Ticket number"
-                        value={truckDraft.disposalTicketNo}
-                        onChange={(e) =>
-                          updateTruckDraft(
-                            "disposalTicketNo",
-                            e.target.value,
-                          )
-                        }
-                      />
-                    </Form.Item>
-                  </Col>
-                  <Col xs={24} sm={12}>
-                    <Form.Item
-                      label={fl("hauler", "Hauler")}
-                      required={isRequired("hauler", true)}
-                      {...fieldErr("hauler")}
-                    >
+        {/* ── Section 1: Company Information ── */}
+        <div style={{ display: "flex", alignItems: "center", gap: 8, background: "linear-gradient(90deg, #1a3353 0%, #244b7a 100%)", borderRadius: "8px 8px 0 0", padding: "9px 16px" }}>
+          <BankOutlined style={{ color: "#fff", fontSize: 14 }} />
+          <Text strong style={{ color: "#fff", fontSize: 13, letterSpacing: 0.3 }}>Company Information</Text>
+        </div>
+        <div style={{ background: "#f8faff", border: "1px solid #d6e4ff", borderTop: "none", borderRadius: "0 0 8px 8px", padding: "16px 16px 4px", marginBottom: 14 }}>
+          <Row gutter={[12, 0]}>
+            <Col xs={24} sm={13} md={11}>
+              <Form.Item label="LGU/Company Name" required>
+                <Input
+                  placeholder="e.g. City of Manila LGU"
+                  value={truckDraft.lguCompanyName}
+                  onChange={e => updateTruckDraft("lguCompanyName", e.target.value)}
+                  prefix={<BankOutlined style={{ color: "#bfbfbf" }} />}
+                />
+              </Form.Item>
+            </Col>
+            <Col xs={24} sm={11} md={8}>
+              <Form.Item label="Company Type" required>
+                <Select
+                  placeholder="Select type"
+                  style={{ width: "100%" }}
+                  value={truckDraft.companyType || undefined}
+                  onChange={v => updateTruckDraft("companyType", v)}
+                  options={[
+                    { label: "🏛 LGU", value: "LGU" },
+                    { label: "🏢 Private", value: "Private" },
+                  ]}
+                />
+              </Form.Item>
+            </Col>
+            <Col xs={24}>
+              <Form.Item label="Address">
+                <Input
+                  placeholder="Complete business address"
+                  value={truckDraft.address}
+                  onChange={e => updateTruckDraft("address", e.target.value)}
+                  prefix={<EnvironmentOutlined style={{ color: "#bfbfbf" }} />}
+                />
+              </Form.Item>
+            </Col>
+          </Row>
+        </div>
+
+        {/* ── Section 2: Trip Information ── */}
+        <div style={{ display: "flex", alignItems: "center", gap: 8, background: "linear-gradient(90deg, #135200 0%, #237804 100%)", borderRadius: "8px 8px 0 0", padding: "9px 16px" }}>
+          <AuditOutlined style={{ color: "#fff", fontSize: 14 }} />
+          <Text strong style={{ color: "#fff", fontSize: 13, letterSpacing: 0.3 }}>Trip Information</Text>
+        </div>
+        <div style={{ background: "#f6ffed", border: "1px solid #b7eb8f", borderTop: "none", borderRadius: "0 0 8px 8px", padding: "16px 16px 4px", marginBottom: 14 }}>
+          <Row gutter={[12, 0]}>
+            <Col xs={24} sm={12}>
+              <Form.Item
+                label={fl("disposalTicketNo", "Disposal/Trip Ticket No.")}
+                required
+                {...fieldErr("disposalTicketNo")}
+              >
+                <Input
+                  placeholder="e.g. TK-2024-001"
+                  value={truckDraft.disposalTicketNo}
+                  onChange={(e) => updateTruckDraft("disposalTicketNo", e.target.value)}
+                  prefix={<FileTextOutlined style={{ color: "#bfbfbf" }} />}
+                />
+              </Form.Item>
+            </Col>
+            <Col xs={24} sm={12}>
+              <Form.Item
+                label={fl("hauler", "Hauler")}
+                required={isRequired("hauler", true)}
+                {...fieldErr("hauler")}
+              >
+                <Select
+                  showSearch
+                  allowClear
+                  placeholder="Select accredited hauler"
+                  value={truckDraft.hauler || undefined}
+                  onChange={(v) => {
+                    updateTruckDraft("hauler", v || "");
+                    updateTruckDraft("plateNumber", "");
+                    updateTruckDraft("truckCapacity", null);
+                    updateTruckDraft("vehicles", [{ ...EMPTY_VEHICLE, key: Date.now(), capacityUnit: baselineUnit || "m³" }]);
+                  }}
+                  filterOption={(input, option) =>
+                    (option?.children ?? "").toLowerCase().includes(input.toLowerCase())
+                  }
+                  notFoundContent={<Text type="secondary" style={{ fontSize: 12 }}>No haulers registered in baseline</Text>}
+                >
+                  {haulers.map((h) => (
+                    <Option key={h.key || h.haulerName} value={h.haulerName}>
+                      {h.haulerName}
+                    </Option>
+                  ))}
+                </Select>
+              </Form.Item>
+            </Col>
+          </Row>
+        </div>
+
+        {/* ── Section 3: Vehicle & Capacity ── */}
+        <div style={{ display: "flex", alignItems: "center", gap: 8, background: "linear-gradient(90deg, #612500 0%, #873800 100%)", borderRadius: "8px 8px 0 0", padding: "9px 16px" }}>
+          <CarOutlined style={{ color: "#fff", fontSize: 14 }} />
+          <Text strong style={{ color: "#fff", fontSize: 13, letterSpacing: 0.3 }}>Vehicle & Capacity</Text>
+        </div>
+        <div style={{ background: "#fff7e6", border: "1px solid #ffd591", borderTop: "none", borderRadius: "0 0 8px 8px", padding: "16px 16px 4px", marginBottom: 14 }}>
+          {truckErrors.plateNumber && (
+            <Text type="danger" style={{ fontSize: 12, display: "block", marginBottom: 8 }}>{truckErrors.plateNumber}</Text>
+          )}
+          {(truckDraft.vehicles || []).map((veh, vi) => {
+            const selectedHauler = haulers.find((h) => h.haulerName === truckDraft.hauler);
+            const haulerVehicles = selectedHauler?.vehicles || [];
+            return (
+              <div key={veh.key || vi} style={{ background: "#fff", borderRadius: 8, padding: "12px 14px", marginBottom: 10, border: "1px solid #ffd591", boxShadow: "0 1px 4px rgba(0,0,0,0.06)" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+                  <Text type="secondary" style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: 0.5 }}>
+                    Vehicle {vi + 1}
+                  </Text>
+                  {(truckDraft.vehicles || []).length > 1 && (
+                    <Button
+                      type="text"
+                      danger
+                      size="small"
+                      icon={<DeleteOutlined />}
+                      onClick={() => {
+                        const updated = (truckDraft.vehicles || []).filter((_, idx) => idx !== vi);
+                        updateTruckDraft("vehicles", updated);
+                      }}
+                    />
+                  )}
+                </div>
+                <Row gutter={[12, 0]} align="middle">
+                  <Col xs={24} sm={10}>
+                    <Form.Item label={fl("plateNumber", "Plate Number")} style={{ marginBottom: 4 }}>
                       <Select
                         showSearch
                         allowClear
-                        placeholder="Select or type hauler name"
-                        value={truckDraft.hauler || undefined}
-                        onChange={(v) => {
-                          updateTruckDraft("hauler", v || "");
-                          updateTruckDraft("plateNumber", "");
-                          updateTruckDraft("truckCapacity", null);
-                          updateTruckDraft("vehicles", [{ ...EMPTY_VEHICLE, key: Date.now(), capacityUnit: baselineUnit || "m³" }]);
+                        placeholder="Select or type plate number"
+                        value={veh.plateNumber || undefined}
+                        onChange={(val) => {
+                          const updated = [...(truckDraft.vehicles || [])];
+                          updated[vi] = { ...updated[vi], plateNumber: val || "", selectedClients: [] };
+                          const match = haulerVehicles.find((hv) => hv.plateNumber === val);
+                          if (match) {
+                            updated[vi].capacity = match.capacity || null;
+                            updated[vi].capacityUnit = match.capacityUnit || baselineUnit || "m³";
+                          }
+                          updateTruckDraft("vehicles", updated);
                         }}
                         filterOption={(input, option) =>
                           (option?.children ?? "").toLowerCase().includes(input.toLowerCase())
                         }
-                        notFoundContent="No haulers in baseline"
+                        notFoundContent={truckDraft.hauler ? "No vehicles for this hauler" : "Select a hauler first"}
                       >
-                        {haulers.map((h) => (
-                          <Option key={h.key || h.haulerName} value={h.haulerName}>
-                            {h.haulerName}
+                        {haulerVehicles.map((hv) => (
+                          <Option key={hv.plateNumber} value={hv.plateNumber}>
+                            {hv.plateNumber}
                           </Option>
                         ))}
                       </Select>
                     </Form.Item>
                   </Col>
-                </Row>
-              ),
-            },
-            {
-              key: "vehicle",
-              label: (
-                <Text strong style={{ color: "#1a3353" }}>
-                  <CarOutlined /> Vehicle & Capacity
-                </Text>
-              ),
-              children: (
-                <>
-                  {truckErrors.plateNumber && (
-                    <Text type="danger" style={{ fontSize: 12, display: "block", marginBottom: 8 }}>{truckErrors.plateNumber}</Text>
-                  )}
-                  {(truckDraft.vehicles || []).map((veh, vi) => {
-                    const selectedHauler = haulers.find((h) => h.haulerName === truckDraft.hauler);
-                    const haulerVehicles = selectedHauler?.vehicles || [];
-                    return (
-                      <div key={veh.key || vi} style={{ background: "#fafafa", borderRadius: 8, padding: "10px 12px", marginBottom: 10, border: "1px solid #f0f0f0" }}>
-                        <Row gutter={[12, 0]} align="middle">
-                          <Col xs={24} sm={8}>
-                            <Form.Item label={vi === 0 ? fl("plateNumber", "Plate Number") : `Plate #${vi + 1}`} style={{ marginBottom: 4 }}>
-                              <Select
-                                showSearch
-                                allowClear
-                                placeholder="Select or type plate number"
-                                value={veh.plateNumber || undefined}
-                                onChange={(val) => {
-                                  const updated = [...(truckDraft.vehicles || [])];
-                                  updated[vi] = { ...updated[vi], plateNumber: val || "" };
-                                  const match = haulerVehicles.find((hv) => hv.plateNumber === val);
-                                  if (match) {
-                                    updated[vi].capacity = match.capacity || null;
-                                    updated[vi].capacityUnit = match.capacityUnit || baselineUnit || "m³";
-                                  }
-                                  updateTruckDraft("vehicles", updated);
-                                }}
-                                filterOption={(input, option) =>
-                                  (option?.children ?? "").toLowerCase().includes(input.toLowerCase())
-                                }
-                                notFoundContent={truckDraft.hauler ? "No vehicles for this hauler" : "Select a hauler first"}
-                              >
-                                {haulerVehicles.map((hv) => (
-                                  <Option key={hv.plateNumber} value={hv.plateNumber}>
-                                    {hv.plateNumber}
-                                  </Option>
-                                ))}
-                              </Select>
-                            </Form.Item>
-                          </Col>
-                          <Col xs={12} sm={7}>
-                            <Form.Item label="Truck Capacity" style={{ marginBottom: 4 }}>
-                              <InputNumber
-                                placeholder="Capacity"
-                                style={{ width: "100%" }}
-                                min={0}
-                                step={0.1}
-                                value={veh.capacity}
-                                onChange={(val) => {
-                                  const updated = [...(truckDraft.vehicles || [])];
-                                  updated[vi] = { ...updated[vi], capacity: val };
-                                  updateTruckDraft("vehicles", updated);
-                                }}
-                              />
-                            </Form.Item>
-                          </Col>
-                          <Col xs={8} sm={5}>
-                            <Form.Item label="Unit" style={{ marginBottom: 4 }}>
-                              <Select
-                                value={veh.capacityUnit || baselineUnit || "m³"}
-                                onChange={(val) => {
-                                  const updated = [...(truckDraft.vehicles || [])];
-                                  updated[vi] = { ...updated[vi], capacityUnit: val };
-                                  updateTruckDraft("vehicles", updated);
-                                }}
-                              >
-                                <Option value="m³">m<sup>3</sup></Option>
-                                <Option value="tons">tons</Option>
-                              </Select>
-                            </Form.Item>
-                          </Col>
-                          <Col xs={4} sm={4} style={{ textAlign: "center" }}>
-                            {(truckDraft.vehicles || []).length > 1 && (
-                              <Button
-                                type="text"
-                                danger
-                                size="small"
-                                icon={<DeleteOutlined />}
-                                onClick={() => {
-                                  const updated = (truckDraft.vehicles || []).filter((_, idx) => idx !== vi);
-                                  updateTruckDraft("vehicles", updated);
-                                }}
-                                style={{ marginTop: 22 }}
-                              />
-                            )}
-                          </Col>
-                        </Row>
-                      </div>
-                    );
-                  })}
-                  <Button
-                    type="dashed"
-                    size="small"
-                    icon={<PlusOutlined />}
-                    onClick={() => {
-                      const updated = [...(truckDraft.vehicles || []), { ...EMPTY_VEHICLE, key: Date.now(), capacityUnit: baselineUnit || "m³" }];
-                      updateTruckDraft("vehicles", updated);
-                    }}
-                    style={{ marginTop: 4 }}
-                  >
-                    Add Vehicle
-                  </Button>
-                </>
-              ),
-            },
-            {
-              key: "waste",
-              label: (
-                <Text strong style={{ color: "#1a3353" }}>
-                  <DatabaseOutlined /> Waste Details
-                </Text>
-              ),
-              children: (
-                <>
-                  <Row gutter={[12, 0]}>
-                    <Col xs={12} sm={8}>
-                      <Form.Item
-                        label={fl("actualVolume", "Actual Waste Volume")}
-                        required={isRequired("actualVolume", true)}
-                        {...fieldErr("actualVolume")}
+                  <Col xs={14} sm={9}>
+                    <Form.Item label="Truck Capacity" style={{ marginBottom: 4 }}>
+                      <InputNumber
+                        placeholder="Capacity"
+                        style={{ width: "100%" }}
+                        min={0}
+                        step={0.1}
+                        value={veh.capacity}
+                        onChange={(val) => {
+                          const updated = [...(truckDraft.vehicles || [])];
+                          updated[vi] = { ...updated[vi], capacity: val };
+                          updateTruckDraft("vehicles", updated);
+                        }}
+                      />
+                    </Form.Item>
+                  </Col>
+                  <Col xs={10} sm={5}>
+                    <Form.Item label="Unit" style={{ marginBottom: 4 }}>
+                      <Select
+                        value={veh.capacityUnit || baselineUnit || "m³"}
+                        onChange={(val) => {
+                          const updated = [...(truckDraft.vehicles || [])];
+                          updated[vi] = { ...updated[vi], capacityUnit: val };
+                          updateTruckDraft("vehicles", updated);
+                        }}
                       >
+                        <Option value="m³">m³</Option>
+                        <Option value="tons">tons</Option>
+                      </Select>
+                    </Form.Item>
+                  </Col>
+                  {(() => {
+                    const selectedHauler = haulers.find(h => h.haulerName === truckDraft.hauler);
+                    const haulerClients = selectedHauler?.privateSectorClients || [];
+                    if (!haulerClients.length || !veh.plateNumber) return null;
+                    return (
+                      <Col xs={24}>
+                        <Form.Item
+                          label={<Text style={{ fontSize: 12 }}><TeamOutlined style={{ marginRight: 4 }} />Clients for this Vehicle</Text>}
+                          style={{ marginBottom: 4, marginTop: 4 }}
+                        >
+                          <Select
+                            mode="multiple"
+                            placeholder="Select clients for this vehicle"
+                            value={(veh.selectedClients || []).map(c => typeof c === "object" ? c.clientName : c)}
+                            onChange={vals => {
+                              const selected = vals.map(name => {
+                                const found = haulerClients.find(c => (c.clientName || c) === name);
+                                if (found && typeof found === "object") return { ...found, key: found.key || name };
+                                return { clientName: name, clientType: "Private", region: "", province: "", municipality: "", key: name };
+                              });
+                              const updated = [...(truckDraft.vehicles || [])];
+                              updated[vi] = { ...updated[vi], selectedClients: selected };
+                              updateTruckDraft("vehicles", updated);
+                            }}
+                            options={haulerClients.map(c => ({
+                              label: typeof c === "object"
+                                ? <span>{c.clientName} <Tag color={c.clientType === "LGU" ? "blue" : "green"} style={{ fontSize: 10, marginLeft: 4 }}>{c.clientType}</Tag></span>
+                                : c,
+                              value: typeof c === "object" ? c.clientName : c,
+                            }))}
+                          />
+                        </Form.Item>
+                      </Col>
+                    );
+                  })()}
+                </Row>
+              </div>
+            );
+          })}
+          <Button
+            type="dashed"
+            size="small"
+            icon={<PlusOutlined />}
+            onClick={() => {
+              const updated = [...(truckDraft.vehicles || []), { ...EMPTY_VEHICLE, key: Date.now(), capacityUnit: baselineUnit || "m³", selectedClients: [] }];
+              updateTruckDraft("vehicles", updated);
+            }}
+            style={{ marginTop: 4, borderColor: "#fa8c16", color: "#fa8c16" }}
+          >
+            Add Vehicle
+          </Button>
+        </div>
+
+        {/* ── Section 4: Waste Details ── */}
+        <div style={{ display: "flex", alignItems: "center", gap: 8, background: "linear-gradient(90deg, #391085 0%, #531dab 100%)", borderRadius: "8px 8px 0 0", padding: "9px 16px" }}>
+          <DatabaseOutlined style={{ color: "#fff", fontSize: 14 }} />
+          <Text strong style={{ color: "#fff", fontSize: 13, letterSpacing: 0.3 }}>Waste Details</Text>
+        </div>
+        <div style={{ background: "#f9f0ff", border: "1px solid #d3adf7", borderTop: "none", borderRadius: "0 0 8px 8px", padding: "16px 16px 4px", marginBottom: extraTransportFields.length > 0 ? 14 : 0 }}>
+          <Row gutter={[12, 0]}>
+            <Col xs={12} sm={8}>
+              <Form.Item
+                label={fl("actualVolume", "Actual Waste Volume")}
+                required={isRequired("actualVolume", true)}
+                {...fieldErr("actualVolume")}
+              >
+                <InputNumber
+                  placeholder="Volume"
+                  style={{ width: "100%" }}
+                  min={0}
+                  step={0.01}
+                  value={truckDraft.actualVolume}
+                  onChange={(v) => updateTruckDraft("actualVolume", v)}
+                />
+              </Form.Item>
+            </Col>
+            <Col xs={12} sm={4}>
+              <Form.Item label="Unit">
+                <Select
+                  value={truckDraft.actualVolumeUnit}
+                  onChange={(v) => updateTruckDraft("actualVolumeUnit", v)}
+                >
+                  <Option value="tons">tons</Option>
+                  <Option value="m³">m³</Option>
+                </Select>
+              </Form.Item>
+            </Col>
+            <Col xs={24} sm={12}>
+              <Form.Item
+                label={fl("wasteType", "Waste Type")}
+                required={isRequired("wasteType", true)}
+                {...fieldErr("wasteType")}
+              >
+                <Select
+                  placeholder="Select waste classification"
+                  value={truckDraft.wasteType}
+                  onChange={(v) => updateTruckDraft("wasteType", v)}
+                >
+                  {opts("wasteType", ["Residual", "Treated Hazardous Waste"]).map((o) => (
+                    <Option key={o} value={o}>{o}</Option>
+                  ))}
+                </Select>
+              </Form.Item>
+            </Col>
+          </Row>
+          <Row gutter={[12, 0]}>
+            <Col xs={24} sm={14}>
+              <Form.Item
+                label="Hazardous Waste Code (DENR EMB)"
+                tooltip="Applicable only for Treated Hazardous Waste"
+              >
+                <Select
+                  mode="multiple"
+                  placeholder="Select DENR EMB hazardous waste code(s)"
+                  value={truckDraft.hazWasteCode}
+                  onChange={(v) => updateTruckDraft("hazWasteCode", v)}
+                  disabled={!truckDraft.wasteType?.toLowerCase().includes("hazardous")}
+                  showSearch
+                  allowClear
+                >
+                  {hazWasteCodes.map((code) => (
+                    <Option key={code} value={code}>{code}</Option>
+                  ))}
+                </Select>
+                {!truckDraft.wasteType?.toLowerCase().includes("hazardous") && (
+                  <Text type="secondary" style={{ fontSize: 11 }}>
+                    Select &quot;Treated Hazardous Waste&quot; as Waste Type to enable this field.
+                  </Text>
+                )}
+              </Form.Item>
+            </Col>
+          </Row>
+        </div>
+
+        {/* ── Section 5: Additional Fields (if any) ── */}
+        {extraTransportFields.length > 0 && (
+          <>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, background: "linear-gradient(90deg, #003a8c 0%, #0050b3 100%)", borderRadius: "8px 8px 0 0", padding: "9px 16px" }}>
+              <ContainerOutlined style={{ color: "#fff", fontSize: 14 }} />
+              <Text strong style={{ color: "#fff", fontSize: 13, letterSpacing: 0.3 }}>Additional Fields</Text>
+            </div>
+            <div style={{ background: "#f0f5ff", border: "1px solid #adc6ff", borderTop: "none", borderRadius: "0 0 8px 8px", padding: "16px 16px 4px" }}>
+              <Row gutter={[12, 0]}>
+                {extraTransportFields.map((f) => (
+                  <Col xs={24} sm={12} key={f.fieldKey}>
+                    <Form.Item
+                      label={f.fieldName}
+                      required={f.required}
+                      {...fieldErr(f.fieldKey)}
+                    >
+                      {f.fieldType === "number" ? (
                         <InputNumber
-                          placeholder="Volume"
+                          placeholder={f.fieldName}
                           style={{ width: "100%" }}
                           min={0}
                           step={0.01}
-                          value={truckDraft.actualVolume}
-                          onChange={(v) =>
-                            updateTruckDraft("actualVolume", v)
-                          }
+                          value={truckDraft[f.fieldKey]}
+                          onChange={(v) => updateTruckDraft(f.fieldKey, v)}
                         />
-                      </Form.Item>
-                    </Col>
-                    <Col xs={12} sm={4}>
-                      <Form.Item label="Unit">
+                      ) : f.fieldType === "select" ? (
                         <Select
-                          value={truckDraft.actualVolumeUnit}
-                          onChange={(v) =>
-                            updateTruckDraft("actualVolumeUnit", v)
-                          }
-                        >
-                          <Option value="tons">tons</Option>
-                          <Option value="m³">
-                            m<sup>3</sup>
-                          </Option>
-                        </Select>
-                      </Form.Item>
-                    </Col>
-                    <Col xs={24} sm={12}>
-                      <Form.Item
-                        label={fl("wasteType", "Waste Type")}
-                        required={isRequired("wasteType", true)}
-                        {...fieldErr("wasteType")}
-                      >
-                        <Select
-                          placeholder="Select"
-                          value={truckDraft.wasteType}
-                          onChange={(v) =>
-                            updateTruckDraft("wasteType", v)
-                          }
-                        >
-                          {opts("wasteType", [
-                            "Residual",
-                            "Treated Hazardous Waste",
-                          ]).map((o) => (
-                            <Option key={o} value={o}>
-                              {o}
-                            </Option>
-                          ))}
-                        </Select>
-                      </Form.Item>
-                    </Col>
-                  </Row>
-                  <Row gutter={[12, 0]}>
-                    <Col xs={24} sm={12}>
-                      <Form.Item
-                        label="Hazardous Waste Code (DENR EMB)"
-                        tooltip="Applicable only for Treated Hazardous Waste"
-                      >
-                        <Select
-                          mode="multiple"
-                          placeholder="Select code(s) (e.g. M501)"
-                          value={truckDraft.hazWasteCode}
-                          onChange={(v) =>
-                            updateTruckDraft("hazWasteCode", v)
-                          }
-                          disabled={!truckDraft.wasteType?.toLowerCase().includes("hazardous")}
-                          showSearch
+                          placeholder={`Select ${f.fieldName}`}
+                          value={truckDraft[f.fieldKey] || undefined}
+                          onChange={(v) => updateTruckDraft(f.fieldKey, v)}
                           allowClear
                         >
-                          {hazWasteCodes.map((code) => (
-                            <Option key={code} value={code}>
-                              {code}
-                            </Option>
+                          {(f.options || []).map((o) => (
+                            <Option key={o} value={o}>{o}</Option>
                           ))}
                         </Select>
-                        {!truckDraft.wasteType?.toLowerCase().includes("hazardous") && (
-                          <Text type="secondary" style={{ fontSize: 11 }}>
-                            Select &quot;Treated Hazardous Waste&quot; as Waste Type to enable this field.
-                          </Text>
-                        )}
-                      </Form.Item>
-                    </Col>
-                  </Row>
-                </>
-              ),
-            },
-            ...(extraTransportFields.length > 0
-              ? [
-                  {
-                    key: "additional",
-                    label: (
-                      <Text strong style={{ color: "#1a3353" }}>
-                        <PlusOutlined /> Additional Fields
-                      </Text>
-                    ),
-                    children: (
-                      <Row gutter={[12, 0]}>
-                        {extraTransportFields.map((f) => (
-                          <Col xs={24} sm={12} key={f.fieldKey}>
-                            <Form.Item
-                              label={f.fieldName}
-                              required={f.required}
-                              {...fieldErr(f.fieldKey)}
-                            >
-                              {f.fieldType === "number" ? (
-                                <InputNumber
-                                  placeholder={f.fieldName}
-                                  style={{ width: "100%" }}
-                                  min={0}
-                                  step={0.01}
-                                  value={truckDraft[f.fieldKey]}
-                                  onChange={(v) =>
-                                    updateTruckDraft(f.fieldKey, v)
-                                  }
-                                />
-                              ) : f.fieldType === "select" ? (
-                                <Select
-                                  placeholder={`Select ${f.fieldName}`}
-                                  value={truckDraft[f.fieldKey] || undefined}
-                                  onChange={(v) =>
-                                    updateTruckDraft(f.fieldKey, v)
-                                  }
-                                  allowClear
-                                >
-                                  {(f.options || []).map((o) => (
-                                    <Option key={o} value={o}>
-                                      {o}
-                                    </Option>
-                                  ))}
-                                </Select>
-                              ) : f.fieldType === "date" ? (
-                                <DatePicker
-                                  style={{ width: "100%" }}
-                                  value={truckDraft[f.fieldKey]}
-                                  onChange={(v) =>
-                                    updateTruckDraft(f.fieldKey, v)
-                                  }
-                                />
-                              ) : f.fieldType === "textarea" ? (
-                                <TextArea
-                                  rows={2}
-                                  placeholder={f.fieldName}
-                                  value={truckDraft[f.fieldKey]}
-                                  onChange={(e) =>
-                                    updateTruckDraft(
-                                      f.fieldKey,
-                                      e.target.value,
-                                    )
-                                  }
-                                />
-                              ) : (
-                                <Input
-                                  placeholder={f.fieldName}
-                                  value={truckDraft[f.fieldKey]}
-                                  onChange={(e) =>
-                                    updateTruckDraft(
-                                      f.fieldKey,
-                                      e.target.value,
-                                    )
-                                  }
-                                />
-                              )}
-                            </Form.Item>
-                          </Col>
-                        ))}
-                      </Row>
-                    ),
-                  },
-                ]
-              : []),
-          ]}
-        />
+                      ) : f.fieldType === "date" ? (
+                        <DatePicker
+                          style={{ width: "100%" }}
+                          value={truckDraft[f.fieldKey]}
+                          onChange={(v) => updateTruckDraft(f.fieldKey, v)}
+                        />
+                      ) : f.fieldType === "textarea" ? (
+                        <TextArea
+                          rows={2}
+                          placeholder={f.fieldName}
+                          value={truckDraft[f.fieldKey]}
+                          onChange={(e) => updateTruckDraft(f.fieldKey, e.target.value)}
+                        />
+                      ) : (
+                        <Input
+                          placeholder={f.fieldName}
+                          value={truckDraft[f.fieldKey]}
+                          onChange={(e) => updateTruckDraft(f.fieldKey, e.target.value)}
+                        />
+                      )}
+                    </Form.Item>
+                  </Col>
+                ))}
+              </Row>
+            </div>
+          </>
+        )}
       </Modal>
 
       {/* ── Submission Detail Modal ── */}
@@ -3819,7 +4447,7 @@ export default function SLFPortal() {
             "transport",
           ]}
           bordered={false}
-          expandIconPosition="end"
+          expandIconPlacement="end"
           style={{ background: "transparent" }}
           items={[
             {
@@ -3890,13 +4518,13 @@ export default function SLFPortal() {
                       : "—"}
                   </Descriptions.Item>
                   <Descriptions.Item label="LGU/Company Name">
-                    {entryForm.getFieldValue("lguCompanyName") || "—"}
+                    {trucks[0]?.lguCompanyName || "—"}
                   </Descriptions.Item>
                   <Descriptions.Item label="Company Type">
-                    {entryForm.getFieldValue("companyType") || "—"}
+                    {trucks[0]?.companyType || "—"}
                   </Descriptions.Item>
                   <Descriptions.Item label="Address">
-                    {entryForm.getFieldValue("address") || "—"}
+                    {trucks[0]?.address || "—"}
                   </Descriptions.Item>
                 </Descriptions>
               ),
@@ -3930,46 +4558,38 @@ export default function SLFPortal() {
                         ? `${Number(baselineForm.getFieldValue("totalVolumeAccepted")).toLocaleString()} ${(baselineForm.getFieldValue("totalVolumeAcceptedUnit") || "m³").replace("m3", "m³")}`
                         : "—"}
                     </Descriptions.Item>
-                    <Descriptions.Item label="Active Cell - Residual">
-                      {baselineForm.getFieldValue(
-                        "activeCellResidualVolume",
-                      ) != null
-                        ? `${Number(baselineForm.getFieldValue("activeCellResidualVolume")).toLocaleString()} ${(baselineForm.getFieldValue("activeCellResidualUnit") || "m³").replace("m3", "m³")}`
-                        : "—"}
+                    <Descriptions.Item label="Active Cell Entries" span={2}>
+                      {activeCellEntries.length === 0 ? "—" : (
+                        <Table
+                          dataSource={activeCellEntries}
+                          rowKey="key"
+                          size="small"
+                          pagination={false}
+                          style={{ marginTop: 4 }}
+                          columns={[
+                            { title: "Cell Name", dataIndex: "cellName", key: "cellName", render: v => v || "—" },
+                            { title: "Waste Type", dataIndex: "wasteType", key: "wasteType" },
+                            { title: "Volume", key: "vol", render: (_, r) => r.volume != null ? `${r.volume} ${baselineUnit || "m³"}` : "—" },
+                          ]}
+                        />
+                      )}
                     </Descriptions.Item>
-                    <Descriptions.Item label="Active Cell - Inert">
-                      {baselineForm.getFieldValue("activeCellInertVolume") !=
-                      null
-                        ? `${Number(baselineForm.getFieldValue("activeCellInertVolume")).toLocaleString()} ${(baselineForm.getFieldValue("activeCellInertUnit") || "m³").replace("m3", "m³")}`
-                        : "—"}
+                    <Descriptions.Item label="Closed Cell Entries" span={2}>
+                      {closedCellEntries.length === 0 ? "—" : (
+                        <Table
+                          dataSource={closedCellEntries}
+                          rowKey="key"
+                          size="small"
+                          pagination={false}
+                          style={{ marginTop: 4 }}
+                          columns={[
+                            { title: "Cell Name", dataIndex: "cellName", key: "cellName", render: v => v || "—" },
+                            { title: "Waste Type", dataIndex: "wasteType", key: "wasteType" },
+                            { title: "Volume", key: "vol", render: (_, r) => r.volume != null ? `${r.volume} ${baselineUnit || "m³"}` : "—" },
+                          ]}
+                        />
+                      )}
                     </Descriptions.Item>
-                    {acceptsHazardousWaste && (
-                      <Descriptions.Item label="Active Cell - Hazardous">
-                        {baselineForm.getFieldValue("activeCellHazardousVolume") != null
-                          ? `${Number(baselineForm.getFieldValue("activeCellHazardousVolume")).toLocaleString()} ${(baselineForm.getFieldValue("activeCellHazardousUnit") || "m³").replace("m3", "m³")}`
-                          : "—"}
-                      </Descriptions.Item>
-                    )}
-                    <Descriptions.Item label="Closed Cell - Residual">
-                      {baselineForm.getFieldValue(
-                        "closedCellResidualVolume",
-                      ) != null
-                        ? `${Number(baselineForm.getFieldValue("closedCellResidualVolume")).toLocaleString()} ${(baselineForm.getFieldValue("closedCellResidualUnit") || "m³").replace("m3", "m³")}`
-                        : "—"}
-                    </Descriptions.Item>
-                    <Descriptions.Item label="Closed Cell - Inert">
-                      {baselineForm.getFieldValue("closedCellInertVolume") !=
-                      null
-                        ? `${Number(baselineForm.getFieldValue("closedCellInertVolume")).toLocaleString()} ${(baselineForm.getFieldValue("closedCellInertUnit") || "m³").replace("m3", "m³")}`
-                        : "—"}
-                    </Descriptions.Item>
-                    {acceptsHazardousWaste && (
-                      <Descriptions.Item label="Closed Cell - Hazardous">
-                        {baselineForm.getFieldValue("closedCellHazardousVolume") != null
-                          ? `${Number(baselineForm.getFieldValue("closedCellHazardousVolume")).toLocaleString()} ${(baselineForm.getFieldValue("closedCellHazardousUnit") || "m³").replace("m3", "m³")}`
-                          : "—"}
-                      </Descriptions.Item>
-                    )}
                   </Descriptions>
                 </>
               ),
@@ -4099,6 +4719,20 @@ export default function SLFPortal() {
                       dataIndex: "hazWasteCode",
                       render: (v) => v || "—",
                     },
+                    {
+                      title: "Clients",
+                      key: "clients",
+                      render: (_, t) => {
+                        const vehs = t.vehicles || [];
+                        const allClients = vehs.flatMap(v => v.selectedClients || []);
+                        if (!allClients.length) return "—";
+                        return allClients.map((c, i) => (
+                          <Tag key={i} color={c.clientType === "LGU" ? "blue" : "green"} style={{ marginBottom: 2, fontSize: 11 }}>
+                            {typeof c === "object" ? c.clientName : c}
+                          </Tag>
+                        ));
+                      },
+                    },
                   ]}
                 />
               ),
@@ -4157,6 +4791,65 @@ export default function SLFPortal() {
         </div>
       </Modal>
 
+      {/* ── Profile Modal ── */}
+      <Modal
+        title={
+          <Space>
+            <UserOutlined style={{ color: "#1a3353" }} />
+            <span>My Profile</span>
+          </Space>
+        }
+        open={profileModalOpen}
+        onCancel={() => setProfileModalOpen(false)}
+        footer={<Button onClick={() => setProfileModalOpen(false)}>Close</Button>}
+        width={480}
+        destroyOnHidden
+      >
+        <div style={{ textAlign: "center", marginBottom: 20 }}>
+          <Avatar
+            size={72}
+            style={{ background: "linear-gradient(135deg, #1a3353, #2d5f8a)", fontSize: 28, marginBottom: 10 }}
+          >
+            {portalUser?.firstName?.[0]?.toUpperCase()}
+          </Avatar>
+          <div>
+            <Text strong style={{ fontSize: 18 }}>
+              {portalUser?.firstName} {portalUser?.lastName}
+            </Text>
+          </div>
+        </div>
+        <Descriptions bordered column={1} size="small">
+          <Descriptions.Item label="Email">{portalUser?.email || "—"}</Descriptions.Item>
+          {portalUser?.officeEmail && (
+            <Descriptions.Item label="Office Email">{portalUser.officeEmail}</Descriptions.Item>
+          )}
+          {portalUser?.pcoEmail && (
+            <Descriptions.Item label="PCO Email">{portalUser.pcoEmail}</Descriptions.Item>
+          )}
+          <Descriptions.Item label="Contact No.">{portalUser?.contactNumber || "—"}</Descriptions.Item>
+          {portalUser?.companyName && (
+            <Descriptions.Item label="Company">{portalUser.companyName}</Descriptions.Item>
+          )}
+          <Descriptions.Item label="Assigned SLF">
+            {Array.isArray(portalUser?.assignedSlfName) && portalUser.assignedSlfName.length > 0
+              ? portalUser.assignedSlfName.map((name, i) => (
+                  <Tag key={i} color="blue" style={{ marginBottom: 2 }}>{name}</Tag>
+                ))
+              : portalUser?.assignedSlfName
+              ? <Tag color="blue">{portalUser.assignedSlfName}</Tag>
+              : "—"}
+          </Descriptions.Item>
+          <Descriptions.Item label="Account Status">
+            <Tag color={portalUser?.status === "approved" ? "green" : portalUser?.status === "pending" ? "orange" : "red"}>
+              {portalUser?.status?.charAt(0).toUpperCase() + portalUser?.status?.slice(1) || "—"}
+            </Tag>
+          </Descriptions.Item>
+          <Descriptions.Item label="Email Verified">
+            {portalUser?.isVerified ? <Tag color="green">Verified</Tag> : <Tag color="red">Not Verified</Tag>}
+          </Descriptions.Item>
+        </Descriptions>
+      </Modal>
+
       {/* ── Support & FAQ Floating Button ── */}
       <Button
         type="primary"
@@ -4190,7 +4883,7 @@ export default function SLFPortal() {
       <Drawer
         title="Support & FAQ"
         placement="right"
-        width={isMobile ? "100%" : 520}
+        size={isMobile ? "100%" : 520}
         onClose={() => setSupportDrawerOpen(false)}
         open={supportDrawerOpen}
         styles={{ body: { padding: 0 } }}
@@ -4414,6 +5107,79 @@ export default function SLFPortal() {
         )}
       </Modal>
 
+      {/* ── Upload Format Guide Modal ── */}
+      <Modal
+        title={<Space><InfoCircleOutlined style={{ color: "#1677ff" }} /><Text strong>{uploadGuideType === "hauler" ? "Hauler Upload — Format Guide" : "Disposal Entry Upload — Format Guide"}</Text></Space>}
+        open={uploadGuideOpen}
+        onCancel={() => setUploadGuideOpen(false)}
+        onOk={proceedToFilePicker}
+        okText={<Space><UploadOutlined /> Proceed to Upload</Space>}
+        okButtonProps={{ className: "slf-primary-btn" }}
+        cancelText="Cancel"
+        width={600}
+        destroyOnHidden
+      >
+        {uploadGuideType === "hauler" ? (
+          <div>
+            <Text type="secondary" style={{ display: "block", marginBottom: 12 }}>
+              Your Excel or CSV file must contain the following columns (in any order):
+            </Text>
+            <Table
+              size="small"
+              pagination={false}
+              dataSource={[
+                { col: "Hauler Name", desc: "Full name of the accredited hauler", required: true },
+                { col: "Number of Trucks", desc: "Total number of registered trucks", required: true },
+                { col: "Office Address", desc: "Office address of the hauler", required: false },
+                { col: "Plate Number", desc: "Plate number of the vehicle", required: false },
+                { col: "Vehicle Type", desc: "e.g. Dump Truck, Compactor", required: false },
+                { col: "Capacity", desc: "Vehicle capacity in m³ or tons", required: false },
+              ]}
+              columns={[
+                { title: "Column Header", dataIndex: "col", width: 180, render: v => <Text code>{v}</Text> },
+                { title: "Description", dataIndex: "desc" },
+                { title: "Required", dataIndex: "required", width: 80, align: "center", render: v => v ? <Tag color="red">Yes</Tag> : <Tag>No</Tag> },
+              ]}
+              rowKey="col"
+            />
+            <div style={{ marginTop: 12, padding: "8px 12px", background: "#fffbe6", borderRadius: 6, border: "1px solid #ffe58f" }}>
+              <Text style={{ fontSize: 12 }}><InfoCircleOutlined style={{ color: "#faad14", marginRight: 6 }} />
+                Each row represents one vehicle entry under a hauler. Rows sharing the same Hauler Name will be grouped.
+              </Text>
+            </div>
+          </div>
+        ) : (
+          <div>
+            <Text type="secondary" style={{ display: "block", marginBottom: 12 }}>
+              Your Excel or CSV file must contain the following columns (in any order):
+            </Text>
+            <Table
+              size="small"
+              pagination={false}
+              dataSource={[
+                { col: "Disposal Ticket No", desc: "Unique ticket/reference number", required: true },
+                { col: "Hauler Name", desc: "Name of the hauler who transported the waste", required: true },
+                { col: "Plate Number", desc: "Plate number of the truck", required: true },
+                { col: "Truck Capacity", desc: "Truck capacity in m³ or tons", required: false },
+                { col: "Actual Volume", desc: "Actual volume of waste transported", required: true },
+                { col: "Waste Type", desc: "e.g. Residual, Hazardous, Mixed", required: true },
+              ]}
+              columns={[
+                { title: "Column Header", dataIndex: "col", width: 180, render: v => <Text code>{v}</Text> },
+                { title: "Description", dataIndex: "desc" },
+                { title: "Required", dataIndex: "required", width: 80, align: "center", render: v => v ? <Tag color="red">Yes</Tag> : <Tag>No</Tag> },
+              ]}
+              rowKey="col"
+            />
+            <div style={{ marginTop: 12, padding: "8px 12px", background: "#fffbe6", borderRadius: 6, border: "1px solid #ffe58f" }}>
+              <Text style={{ fontSize: 12 }}><InfoCircleOutlined style={{ color: "#faad14", marginRight: 6 }} />
+                Each row in the file represents one disposal trip. Volume unit defaults to <Text code>m³</Text> unless specified.
+              </Text>
+            </div>
+          </div>
+        )}
+      </Modal>
+
       {/* ── Upload Preview Modal ── */}
       <Modal
         title="Preview Uploaded Data"
@@ -4436,23 +5202,701 @@ export default function SLFPortal() {
         </div>
         <Table
           dataSource={uploadPreviewData}
-          columns={(uploadPreviewColumns || []).map((col) => ({
-            ...col,
-            render: (text, record, index) => (
-              <Input
-                size="small"
-                value={text}
-                onChange={(e) => updateUploadCell(index, col.dataIndex, e.target.value)}
-                style={{ border: "none", background: "transparent", padding: "2px 4px" }}
-              />
-            ),
-          }))}
+          columns={(uploadPreviewColumns || []).map((col) => {
+            // keep the row-number (#) and actions columns as-is
+            if (!col.dataIndex || col.key === "actions" || col.title === "#") return col;
+            return {
+              ...col,
+              render: (text, record) => (
+                <Input
+                  size="small"
+                  value={text ?? ""}
+                  onChange={(e) => updateUploadCell(record.key, col.dataIndex, e.target.value)}
+                  style={{ border: "none", background: "transparent", padding: "2px 4px" }}
+                />
+              ),
+            };
+          })}
           rowKey={(_, i) => i}
           size="small"
           pagination={false}
           scroll={{ x: 700 }}
         />
       </Modal>
+
+      {/* ── Active Cell Entry Modal ── */}
+      <Modal
+        title={editingActiveCellKey != null ? "Edit Cell Entry" : "Add Cell Entry"}
+        open={activeCellModalOpen}
+        onCancel={() => setActiveCellModalOpen(false)}
+        onOk={handleSaveActiveCellEntry}
+        okText={editingActiveCellKey != null ? "Update" : "Add"}
+        okButtonProps={{ className: "slf-primary-btn" }}
+        destroyOnHidden
+        width={420}
+      >
+        <Form layout="vertical" requiredMark={false}>
+          <Form.Item label="Cell Name" required>
+            <Input
+              placeholder="e.g. Cell 1"
+              value={activeCellDraft.cellName}
+              onChange={e => setActiveCellDraft(d => ({ ...d, cellName: e.target.value }))}
+            />
+          </Form.Item>
+          <Form.Item label="Waste Type" required>
+            <Select
+              value={activeCellDraft.wasteType}
+              onChange={v => setActiveCellDraft(d => ({ ...d, wasteType: v }))}
+              options={[
+                { label: "Residual", value: "Residual" },
+                { label: "Inert/Hazardous Waste", value: "Inert/Hazardous Waste" },
+              ]}
+            />
+          </Form.Item>
+          <Form.Item label="Volume" required>
+            <Space.Compact style={{ width: "100%" }}>
+              <InputNumber
+                placeholder="Volume"
+                style={{ width: "100%" }}
+                min={0}
+                step={0.01}
+                value={activeCellDraft.volume}
+                onChange={v => setActiveCellDraft(d => ({ ...d, volume: v }))}
+              />
+              <span className="ant-input-group-addon">{baselineUnit === "m³" ? <>m<sup>3</sup></> : "tons"}</span>
+            </Space.Compact>
+          </Form.Item>
+        </Form>
+      </Modal>
+
+      {/* ── Closed Cell Entry Modal ── */}
+      <Modal
+        title={editingClosedCellKey != null ? "Edit Closed Cell Entry" : "Add Closed Cell Entry"}
+        open={closedCellModalOpen}
+        onCancel={() => setClosedCellModalOpen(false)}
+        onOk={handleSaveClosedCellEntry}
+        okText={editingClosedCellKey != null ? "Update" : "Add"}
+        okButtonProps={{ className: "slf-primary-btn" }}
+        destroyOnHidden
+        width={420}
+      >
+        <Form layout="vertical" requiredMark={false}>
+          <Form.Item label="Cell Name" required>
+            <Input
+              placeholder="e.g. Cell 3"
+              value={closedCellDraft.cellName}
+              onChange={e => setClosedCellDraft(d => ({ ...d, cellName: e.target.value }))}
+            />
+          </Form.Item>
+          <Form.Item label="Waste Type" required>
+            <Select
+              value={closedCellDraft.wasteType}
+              onChange={v => setClosedCellDraft(d => ({ ...d, wasteType: v }))}
+              options={[
+                { label: "Residual", value: "Residual" },
+                { label: "Inert/Hazardous Waste", value: "Inert/Hazardous Waste" },
+              ]}
+            />
+          </Form.Item>
+          <Form.Item label="Volume" required>
+            <Space.Compact style={{ width: "100%" }}>
+              <InputNumber
+                placeholder="Volume"
+                style={{ width: "100%" }}
+                min={0}
+                step={0.01}
+                value={closedCellDraft.volume}
+                onChange={v => setClosedCellDraft(d => ({ ...d, volume: v }))}
+              />
+              <span className="ant-input-group-addon">{baselineUnit === "m³" ? <>m<sup>3</sup></> : "tons"}</span>
+            </Space.Compact>
+          </Form.Item>
+        </Form>
+      </Modal>
+
+      {/* ── Hauler Client Modal ── */}
+      <Modal
+        title={editingClientKey != null ? "Edit Client" : "Add Client"}
+        open={clientModalOpen}
+        onCancel={() => setClientModalOpen(false)}
+        onOk={handleSaveClient}
+        okText={editingClientKey != null ? "Update" : "Add"}
+        okButtonProps={{ className: "slf-primary-btn" }}
+        destroyOnHidden
+        width={480}
+      >
+        <Form layout="vertical" requiredMark={false}>
+          <Form.Item label="Client Name" required>
+            <Input
+              placeholder="Name of LGU / company"
+              value={clientDraft.clientName}
+              onChange={e => setClientDraft(d => ({ ...d, clientName: e.target.value }))}
+            />
+          </Form.Item>
+          <Form.Item label="Client Type" required>
+            <Select
+              value={clientDraft.clientType}
+              onChange={v => setClientDraft(d => ({ ...d, clientType: v, region: "", province: "", municipality: "" }))}
+              options={[
+                { label: "Private", value: "Private" },
+                { label: "LGU", value: "LGU" },
+              ]}
+            />
+          </Form.Item>
+          {clientDraft.clientType === "LGU" && (
+            <>
+              <Form.Item label="Region">
+                <Select
+                  placeholder="Select region"
+                  value={clientDraft.region || undefined}
+                  loading={loadingClientAddress === "region"}
+                  showSearch
+                  optionFilterProp="label"
+                  options={(regions || []).map(r => ({ label: r.name, value: String(r.code) }))}
+                  onChange={async v => {
+                    setClientDraft(d => ({ ...d, region: v, province: "", municipality: "" }));
+                    setClientProvinces([]);
+                    setClientMunicipalities([]);
+                    setLoadingClientAddress("province");
+                    try {
+                      const res = await fetch(`https://psgc.gitlab.io/api/regions/${v}/provinces/`);
+                      setClientProvinces(await res.json());
+                    } catch (_) {}
+                    setLoadingClientAddress("");
+                  }}
+                />
+              </Form.Item>
+              <Form.Item label="Province">
+                <Select
+                  placeholder="Select province"
+                  value={clientDraft.province || undefined}
+                  loading={loadingClientAddress === "province"}
+                  showSearch
+                  optionFilterProp="label"
+                  options={(clientProvinces || []).map(p => ({ label: p.name, value: String(p.code) }))}
+                  onChange={async v => {
+                    setClientDraft(d => ({ ...d, province: v, municipality: "" }));
+                    setClientMunicipalities([]);
+                    setLoadingClientAddress("municipality");
+                    try {
+                      const res = await fetch(`https://psgc.gitlab.io/api/provinces/${v}/cities-municipalities/`);
+                      setClientMunicipalities(await res.json());
+                    } catch (_) {}
+                    setLoadingClientAddress("");
+                  }}
+                />
+              </Form.Item>
+              <Form.Item label="Municipality/City">
+                <Select
+                  placeholder="Select municipality"
+                  value={clientDraft.municipality || undefined}
+                  loading={loadingClientAddress === "municipality"}
+                  showSearch
+                  optionFilterProp="label"
+                  options={(clientMunicipalities || []).map(m => ({ label: m.name, value: String(m.code) }))}
+                  onChange={v => setClientDraft(d => ({ ...d, municipality: v }))}
+                />
+              </Form.Item>
+            </>
+          )}
+        </Form>
+      </Modal>
+
+      {/* ── Hauler Deletion Request Modal ── */}
+      <Modal
+        title={
+          <Space>
+            <DeleteOutlined style={{ color: "#ff4d4f" }} />
+            <span>Request Hauler Deletion</span>
+          </Space>
+        }
+        open={haulerDeleteModal.open}
+        onCancel={() => { setHaulerDeleteModal({ open: false, hauler: null }); setHaulerDeleteReason(""); setHaulerDeleteFile(null); }}
+        onOk={async () => {
+          if (!haulerDeleteReason.trim()) {
+            return;
+          }
+          setHaulerDeleteLoading(true);
+          try {
+            const h = haulerDeleteModal.hauler;
+            const fd = new FormData();
+            fd.append("portalUserEmail", portalUser?.email || "");
+            fd.append("portalUserName", portalUser ? `${portalUser.firstName || ""} ${portalUser.lastName || ""}`.trim() : "");
+            fd.append("companyName", portalUser?.companyName || "");
+            fd.append("slfName", activeSlfName || "");
+            fd.append("haulerKey", String(h?.key || ""));
+            fd.append("haulerName", h?.haulerName || "");
+            fd.append("officeAddress", h?.officeAddress || "");
+            fd.append("reason", haulerDeleteReason.trim());
+            if (haulerDeleteFile) fd.append("letterOfIntent", haulerDeleteFile);
+            await api.post("/hauler-delete-requests", fd, {
+              headers: { "Content-Type": "multipart/form-data" },
+            });
+            setHaulerDeleteModal({ open: false, hauler: null });
+            setHaulerDeleteReason("");
+            setHaulerDeleteFile(null);
+            Modal.success({
+              title: "Request Submitted",
+              content: "Your hauler deletion request has been submitted. EMB Region 3 will review it and you will be notified of the decision.",
+            });
+          } catch (err) {
+            Modal.error({
+              title: "Submission Failed",
+              content: err?.response?.data?.message || "Could not submit the request. Please try again.",
+            });
+          } finally {
+            setHaulerDeleteLoading(false);
+          }
+        }}
+        okText="Submit Request"
+        okButtonProps={{ danger: true, loading: haulerDeleteLoading, disabled: !haulerDeleteReason.trim() }}
+        cancelText="Cancel"
+        destroyOnHidden
+        width={520}
+      >
+        <div style={{ background: "#fff2f0", border: "1px solid #ffccc7", borderRadius: 8, padding: "10px 14px", marginBottom: 16 }}>
+          <Text style={{ fontSize: 12, color: "#cf1322" }}>
+            <strong>Note:</strong> Hauler deletion requires EMB Region 3 approval. Please provide a valid justification and attach a Letter of Intent.
+          </Text>
+        </div>
+        <Form layout="vertical" requiredMark={false}>
+          <Form.Item label="Hauler to be Deleted">
+            <Input value={haulerDeleteModal.hauler?.haulerName || ""} disabled />
+          </Form.Item>
+          <Form.Item label="Reason / Justification" required validateStatus={haulerDeleteReason.trim() ? "" : "error"} help={!haulerDeleteReason.trim() ? "Please provide a reason." : ""}>
+            <Input.TextArea
+              rows={4}
+              placeholder="Explain the reason for requesting this hauler to be deleted..."
+              value={haulerDeleteReason}
+              onChange={e => setHaulerDeleteReason(e.target.value)}
+              maxLength={1000}
+              showCount
+            />
+          </Form.Item>
+          <Form.Item label="Letter of Intent (PDF, DOC, DOCX, JPG, PNG)" extra="Maximum 20 MB">
+            <input
+              type="file"
+              accept=".pdf,.doc,.docx,.jpg,.jpeg,.png"
+              style={{ display: "none" }}
+              id="hauler-loi-file-input"
+              onChange={e => setHaulerDeleteFile(e.target.files[0] || null)}
+            />
+            <Space>
+              <Button icon={<UploadOutlined />} onClick={() => document.getElementById("hauler-loi-file-input").click()}>
+                {haulerDeleteFile ? "Change File" : "Attach File"}
+              </Button>
+              {haulerDeleteFile && (
+                <Space size={4}>
+                  <Text style={{ fontSize: 12 }}>{haulerDeleteFile.name}</Text>
+                  <Button type="text" danger size="small" icon={<DeleteOutlined />} onClick={() => { setHaulerDeleteFile(null); document.getElementById("hauler-loi-file-input").value = ""; }} />
+                </Space>
+              )}
+            </Space>
+          </Form.Item>
+        </Form>
+      </Modal>
+
+      {/* ══════════════════════ WASTE RECEIVED MODAL ══════════════════════ */}
+      <Modal
+        title={
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <div style={{ width: 32, height: 32, borderRadius: 8, background: "linear-gradient(135deg, #fa8c16, #d46b08)", display: "flex", alignItems: "center", justifyContent: "center" }}>
+              <BarChartOutlined style={{ color: "#fff", fontSize: 16 }} />
+            </div>
+            <div>
+              <div style={{ fontWeight: 700, fontSize: 15, color: "#1a3353" }}>Waste Received Breakdown</div>
+              <div style={{ fontSize: 11, color: "#8c8c8c", fontWeight: 400 }}>{activeSlfName}</div>
+            </div>
+          </div>
+        }
+        open={wasteReceivedModalOpen}
+        onCancel={() => setWasteReceivedModalOpen(false)}
+        footer={<Button onClick={() => setWasteReceivedModalOpen(false)}>Close</Button>}
+        width={800}
+        destroyOnHidden
+      >
+        <Spin spinning={wasteReceivedLoading}>
+          {[
+            { key: "lguR3", label: "LGU Waste — Region III (Central Luzon)", color: "#1890ff", bg: "#e6f7ff", icon: <TeamOutlined /> },
+            { key: "lguOutside", label: "LGU Waste — Outside Region III", color: "#722ed1", bg: "#f9f0ff", icon: <TeamOutlined /> },
+            { key: "privateIndustry", label: "Waste from Private Industries", color: "#52c41a", bg: "#f6ffed", icon: <BankOutlined /> },
+          ].map(({ key, label, color, bg, icon }) => {
+            const rows = wasteReceivedData[key] || [];
+            const total = rows.reduce((s, r) => s + (r.totalVolume || 0), 0);
+            return (
+              <div key={key} style={{ marginBottom: 20 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10, padding: "8px 12px", background: bg, borderRadius: 8, border: `1px solid ${color}30` }}>
+                  <span style={{ color, fontSize: 14 }}>{icon}</span>
+                  <Text strong style={{ color, fontSize: 13 }}>{label}</Text>
+                  <Tag color={color === "#1890ff" ? "blue" : color === "#722ed1" ? "purple" : "green"} style={{ marginLeft: "auto" }}>
+                    {rows.length} company{rows.length !== 1 ? "ies" : "y"}
+                  </Tag>
+                  <Text style={{ fontSize: 12, color: "#8c8c8c" }}>Total: {total.toLocaleString()} m³</Text>
+                </div>
+                {rows.length === 0 ? (
+                  <Empty description="No data" image={Empty.PRESENTED_IMAGE_SIMPLE} style={{ margin: "8px 0" }} />
+                ) : (
+                  <Table
+                    size="small"
+                    dataSource={rows}
+                    rowKey="company"
+                    pagination={false}
+                    columns={[
+                      { title: "#", render: (_, __, i) => i + 1, width: 40 },
+                      { title: "Company", dataIndex: "company", key: "company" },
+                      { title: "Entries", dataIndex: "entries", key: "entries", align: "center", width: 80 },
+                      { title: "Total Volume", dataIndex: "totalVolume", key: "totalVolume", align: "right", width: 140,
+                        render: v => <Text strong style={{ color }}>{(v || 0).toLocaleString()} m³</Text> },
+                    ]}
+                    style={{ marginBottom: 4 }}
+                  />
+                )}
+              </div>
+            );
+          })}
+        </Spin>
+      </Modal>
+
+      {/* ══════════════════════ LEACHATE PONDS MODAL ══════════════════════ */}
+      <Modal
+        title={
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <div style={{ width: 32, height: 32, borderRadius: 8, background: "linear-gradient(135deg, #1890ff, #096dd9)", display: "flex", alignItems: "center", justifyContent: "center" }}>
+              <WifiOutlined style={{ color: "#fff", fontSize: 16 }} />
+            </div>
+            <div>
+              <div style={{ fontWeight: 700, fontSize: 15, color: "#1a3353" }}>Leachate Ponds Management</div>
+              <div style={{ fontSize: 11, color: "#8c8c8c" }}>Count registered: {slfInfo?.noOfLeachatePond ?? "—"}</div>
+            </div>
+          </div>
+        }
+        open={leachateModalOpen}
+        onCancel={() => setLeachateModalOpen(false)}
+        footer={[
+          <Button key="add" type="dashed" icon={<PlusOutlined />}
+            onClick={() => setLeachateDetails(prev => [...prev, { _key: Date.now(), pondNo: prev.length + 1, description: "", status: "Active", attachments: [] }])}>
+            Add Pond
+          </Button>,
+          <Button key="save" type="primary" loading={facilityMgmtSaving} icon={<SaveOutlined />}
+            onClick={() => handleSaveFacilityDetails("leachate", leachateDetails)} style={{ background: "#1890ff" }}>
+            Save
+          </Button>,
+          <Button key="close" onClick={() => setLeachateModalOpen(false)}>Close</Button>,
+        ]}
+        width={750}
+        destroyOnHidden
+      >
+        {leachateDetails.length === 0 ? (
+          <Empty description="No leachate pond records yet. Click 'Add Pond' to start." image={Empty.PRESENTED_IMAGE_SIMPLE} />
+        ) : (
+          leachateDetails.map((pond, idx) => (
+            <div key={pond._key} style={{ background: "#f8f9fb", borderRadius: 10, padding: 16, marginBottom: 12, border: "1px solid #e8e8e8" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12 }}>
+                <Tag color="blue" style={{ fontWeight: 700 }}>Pond {idx + 1}</Tag>
+                <Select
+                  size="small"
+                  value={pond.status || "Active"}
+                  onChange={v => setLeachateDetails(p => p.map((x, i) => i === idx ? { ...x, status: v } : x))}
+                  options={[{ label: "Active", value: "Active" }, { label: "Inactive", value: "Inactive" }, { label: "Under Maintenance", value: "Under Maintenance" }]}
+                  style={{ width: 160 }}
+                />
+                <Button type="text" danger size="small" icon={<DeleteOutlined />} style={{ marginLeft: "auto" }}
+                  onClick={() => setLeachateDetails(p => p.filter((_, i) => i !== idx))} />
+              </div>
+              <Row gutter={[12, 8]}>
+                <Col xs={24} sm={8}>
+                  <div style={{ fontSize: 11, color: "#8c8c8c", marginBottom: 4 }}>Pond No.</div>
+                  <InputNumber
+                    size="small"
+                    min={1}
+                    value={pond.pondNo}
+                    onChange={v => setLeachateDetails(p => p.map((x, i) => i === idx ? { ...x, pondNo: v } : x))}
+                    style={{ width: "100%" }}
+                  />
+                </Col>
+                <Col xs={24} sm={16}>
+                  <div style={{ fontSize: 11, color: "#8c8c8c", marginBottom: 4 }}>Description</div>
+                  <Input
+                    size="small"
+                    value={pond.description}
+                    placeholder="Pond description, dimensions, type..."
+                    onChange={e => setLeachateDetails(p => p.map((x, i) => i === idx ? { ...x, description: e.target.value } : x))}
+                  />
+                </Col>
+              </Row>
+              {/* Attachments */}
+              <div style={{ marginTop: 10 }}>
+                <div style={{ fontSize: 11, color: "#8c8c8c", marginBottom: 4 }}>Attachments / Document Links</div>
+                {(pond.attachments || []).map((url, ai) => (
+                  <div key={ai} style={{ display: "flex", gap: 6, marginBottom: 6 }}>
+                    <Input
+                      size="small"
+                      value={url}
+                      placeholder="Google Drive link or URL"
+                      onChange={e => setLeachateDetails(p => p.map((x, i) => i === idx ? { ...x, attachments: x.attachments.map((a, j) => j === ai ? e.target.value : a) } : x))}
+                      addonBefore={<FileTextOutlined />}
+                    />
+                    {url && <Button size="small" type="link" icon={<EyeOutlined />} href={url} target="_blank" style={{ padding: 0 }} />}
+                    <Button size="small" danger type="text" icon={<DeleteOutlined />}
+                      onClick={() => setLeachateDetails(p => p.map((x, i) => i === idx ? { ...x, attachments: x.attachments.filter((_, j) => j !== ai) } : x))} />
+                  </div>
+                ))}
+                <Button size="small" type="dashed" icon={<PlusOutlined />}
+                  onClick={() => setLeachateDetails(p => p.map((x, i) => i === idx ? { ...x, attachments: [...(x.attachments || []), ""] } : x))}>
+                  Add Link
+                </Button>
+              </div>
+            </div>
+          ))
+        )}
+      </Modal>
+
+      {/* ══════════════════════ GAS VENTS MODAL ══════════════════════ */}
+      <Modal
+        title={
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <div style={{ width: 32, height: 32, borderRadius: 8, background: "linear-gradient(135deg, #52c41a, #389e0d)", display: "flex", alignItems: "center", justifyContent: "center" }}>
+              <EnvironmentOutlined style={{ color: "#fff", fontSize: 16 }} />
+            </div>
+            <div>
+              <div style={{ fontWeight: 700, fontSize: 15, color: "#1a3353" }}>Gas Vents Management</div>
+              <div style={{ fontSize: 11, color: "#8c8c8c" }}>Count registered: {slfInfo?.numberOfGasVents ?? "—"}</div>
+            </div>
+          </div>
+        }
+        open={gasVentModalOpen}
+        onCancel={() => setGasVentModalOpen(false)}
+        footer={[
+          <Button key="add" type="dashed" icon={<PlusOutlined />}
+            onClick={() => setGasVentDetails(prev => [...prev, { _key: Date.now(), ventNo: prev.length + 1, ventType: "", description: "", status: "Active", attachments: [] }])}>
+            Add Vent
+          </Button>,
+          <Button key="save" type="primary" loading={facilityMgmtSaving} icon={<SaveOutlined />}
+            onClick={() => handleSaveFacilityDetails("gasVent", gasVentDetails)} style={{ background: "#52c41a", borderColor: "#52c41a" }}>
+            Save
+          </Button>,
+          <Button key="close" onClick={() => setGasVentModalOpen(false)}>Close</Button>,
+        ]}
+        width={750}
+        destroyOnHidden
+      >
+        {gasVentDetails.length === 0 ? (
+          <Empty description="No gas vent records yet. Click 'Add Vent' to start." image={Empty.PRESENTED_IMAGE_SIMPLE} />
+        ) : (
+          gasVentDetails.map((vent, idx) => (
+            <div key={vent._key} style={{ background: "#f6ffed", borderRadius: 10, padding: 16, marginBottom: 12, border: "1px solid #b7eb8f" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12 }}>
+                <Tag color="green" style={{ fontWeight: 700 }}>Vent {idx + 1}</Tag>
+                <Select
+                  size="small"
+                  value={vent.status || "Active"}
+                  onChange={v => setGasVentDetails(p => p.map((x, i) => i === idx ? { ...x, status: v } : x))}
+                  options={[{ label: "Active", value: "Active" }, { label: "Inactive", value: "Inactive" }, { label: "Under Maintenance", value: "Under Maintenance" }]}
+                  style={{ width: 160 }}
+                />
+                <Button type="text" danger size="small" icon={<DeleteOutlined />} style={{ marginLeft: "auto" }}
+                  onClick={() => setGasVentDetails(p => p.filter((_, i) => i !== idx))} />
+              </div>
+              <Row gutter={[12, 8]}>
+                <Col xs={24} sm={8}>
+                  <div style={{ fontSize: 11, color: "#8c8c8c", marginBottom: 4 }}>Vent No.</div>
+                  <InputNumber size="small" min={1} value={vent.ventNo}
+                    onChange={v => setGasVentDetails(p => p.map((x, i) => i === idx ? { ...x, ventNo: v } : x))}
+                    style={{ width: "100%" }} />
+                </Col>
+                <Col xs={24} sm={8}>
+                  <div style={{ fontSize: 11, color: "#8c8c8c", marginBottom: 4 }}>Vent Type</div>
+                  <Input size="small" value={vent.ventType} placeholder="e.g. Passive, Active"
+                    onChange={e => setGasVentDetails(p => p.map((x, i) => i === idx ? { ...x, ventType: e.target.value } : x))} />
+                </Col>
+                <Col xs={24} sm={8}>
+                  <div style={{ fontSize: 11, color: "#8c8c8c", marginBottom: 4 }}>Description</div>
+                  <Input size="small" value={vent.description} placeholder="Location, specs..."
+                    onChange={e => setGasVentDetails(p => p.map((x, i) => i === idx ? { ...x, description: e.target.value } : x))} />
+                </Col>
+              </Row>
+              <div style={{ marginTop: 10 }}>
+                <div style={{ fontSize: 11, color: "#8c8c8c", marginBottom: 4 }}>Attachments / Document Links</div>
+                {(vent.attachments || []).map((url, ai) => (
+                  <div key={ai} style={{ display: "flex", gap: 6, marginBottom: 6 }}>
+                    <Input size="small" value={url} placeholder="Google Drive link or URL"
+                      onChange={e => setGasVentDetails(p => p.map((x, i) => i === idx ? { ...x, attachments: x.attachments.map((a, j) => j === ai ? e.target.value : a) } : x))}
+                      addonBefore={<FileTextOutlined />} />
+                    {url && <Button size="small" type="link" icon={<EyeOutlined />} href={url} target="_blank" style={{ padding: 0 }} />}
+                    <Button size="small" danger type="text" icon={<DeleteOutlined />}
+                      onClick={() => setGasVentDetails(p => p.map((x, i) => i === idx ? { ...x, attachments: x.attachments.filter((_, j) => j !== ai) } : x))} />
+                  </div>
+                ))}
+                <Button size="small" type="dashed" icon={<PlusOutlined />}
+                  onClick={() => setGasVentDetails(p => p.map((x, i) => i === idx ? { ...x, attachments: [...(x.attachments || []), ""] } : x))}>
+                  Add Link
+                </Button>
+              </div>
+            </div>
+          ))
+        )}
+      </Modal>
+
+      {/* ══════════════════════ TRASH SLIDE PREVENTION MODAL ══════════════════════ */}
+      <Modal
+        title={
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <div style={{ width: 32, height: 32, borderRadius: 8, background: "linear-gradient(135deg, #fa8c16, #d46b08)", display: "flex", alignItems: "center", justifyContent: "center" }}>
+              <AuditOutlined style={{ color: "#fff", fontSize: 16 }} />
+            </div>
+            <div>
+              <div style={{ fontWeight: 700, fontSize: 15, color: "#1a3353" }}>Trash Slide Prevention Measures</div>
+              <div style={{ fontSize: 11, color: "#8c8c8c" }}>{trashSlideDetails.length} measure(s) recorded</div>
+            </div>
+          </div>
+        }
+        open={trashSlideModalOpen}
+        onCancel={() => setTrashSlideModalOpen(false)}
+        footer={[
+          <Button key="add" type="dashed" icon={<PlusOutlined />}
+            onClick={() => setTrashSlideDetails(prev => [...prev, { _key: Date.now(), measure: "", description: "", status: "Implemented", attachments: [] }])}>
+            Add Measure
+          </Button>,
+          <Button key="save" type="primary" loading={facilityMgmtSaving} icon={<SaveOutlined />}
+            onClick={() => handleSaveFacilityDetails("trashSlide", trashSlideDetails)} style={{ background: "#fa8c16", borderColor: "#fa8c16" }}>
+            Save
+          </Button>,
+          <Button key="close" onClick={() => setTrashSlideModalOpen(false)}>Close</Button>,
+        ]}
+        width={750}
+        destroyOnHidden
+      >
+        {trashSlideDetails.length === 0 ? (
+          <Empty description="No trash slide prevention measures yet. Click 'Add Measure' to start." image={Empty.PRESENTED_IMAGE_SIMPLE} />
+        ) : (
+          trashSlideDetails.map((item, idx) => (
+            <div key={item._key} style={{ background: "#fff7e6", borderRadius: 10, padding: 16, marginBottom: 12, border: "1px solid #ffd591" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12 }}>
+                <Tag color="orange" style={{ fontWeight: 700 }}>Measure {idx + 1}</Tag>
+                <Select
+                  size="small"
+                  value={item.status || "Implemented"}
+                  onChange={v => setTrashSlideDetails(p => p.map((x, i) => i === idx ? { ...x, status: v } : x))}
+                  options={[{ label: "Implemented", value: "Implemented" }, { label: "Planned", value: "Planned" }, { label: "Not Applicable", value: "Not Applicable" }]}
+                  style={{ width: 160 }}
+                />
+                <Button type="text" danger size="small" icon={<DeleteOutlined />} style={{ marginLeft: "auto" }}
+                  onClick={() => setTrashSlideDetails(p => p.filter((_, i) => i !== idx))} />
+              </div>
+              <Row gutter={[12, 8]}>
+                <Col xs={24} sm={12}>
+                  <div style={{ fontSize: 11, color: "#8c8c8c", marginBottom: 4 }}>Measure Name</div>
+                  <Input size="small" value={item.measure} placeholder="e.g. Slope stabilization, Retaining wall..."
+                    onChange={e => setTrashSlideDetails(p => p.map((x, i) => i === idx ? { ...x, measure: e.target.value } : x))} />
+                </Col>
+                <Col xs={24} sm={12}>
+                  <div style={{ fontSize: 11, color: "#8c8c8c", marginBottom: 4 }}>Description</div>
+                  <Input size="small" value={item.description} placeholder="Details, specifications..."
+                    onChange={e => setTrashSlideDetails(p => p.map((x, i) => i === idx ? { ...x, description: e.target.value } : x))} />
+                </Col>
+              </Row>
+              <div style={{ marginTop: 10 }}>
+                <div style={{ fontSize: 11, color: "#8c8c8c", marginBottom: 4 }}>Attachments / Document Links</div>
+                {(item.attachments || []).map((url, ai) => (
+                  <div key={ai} style={{ display: "flex", gap: 6, marginBottom: 6 }}>
+                    <Input size="small" value={url} placeholder="Google Drive link or URL"
+                      onChange={e => setTrashSlideDetails(p => p.map((x, i) => i === idx ? { ...x, attachments: x.attachments.map((a, j) => j === ai ? e.target.value : a) } : x))}
+                      addonBefore={<FileTextOutlined />} />
+                    {url && <Button size="small" type="link" icon={<EyeOutlined />} href={url} target="_blank" style={{ padding: 0 }} />}
+                    <Button size="small" danger type="text" icon={<DeleteOutlined />}
+                      onClick={() => setTrashSlideDetails(p => p.map((x, i) => i === idx ? { ...x, attachments: x.attachments.filter((_, j) => j !== ai) } : x))} />
+                  </div>
+                ))}
+                <Button size="small" type="dashed" icon={<PlusOutlined />}
+                  onClick={() => setTrashSlideDetails(p => p.map((x, i) => i === idx ? { ...x, attachments: [...(x.attachments || []), ""] } : x))}>
+                  Add Link
+                </Button>
+              </div>
+            </div>
+          ))
+        )}
+      </Modal>
+
+      {/* ══════════════════════ FIRE PREVENTION MODAL ══════════════════════ */}
+      <Modal
+        title={
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <div style={{ width: 32, height: 32, borderRadius: 8, background: "linear-gradient(135deg, #ff4d4f, #cf1322)", display: "flex", alignItems: "center", justifyContent: "center" }}>
+              <CloseCircleOutlined style={{ color: "#fff", fontSize: 16 }} />
+            </div>
+            <div>
+              <div style={{ fontWeight: 700, fontSize: 15, color: "#1a3353" }}>Fire Prevention Measures</div>
+              <div style={{ fontSize: 11, color: "#8c8c8c" }}>{firePrevDetails.length} measure(s) recorded</div>
+            </div>
+          </div>
+        }
+        open={firePrevModalOpen}
+        onCancel={() => setFirePrevModalOpen(false)}
+        footer={[
+          <Button key="add" type="dashed" icon={<PlusOutlined />}
+            onClick={() => setFirePrevDetails(prev => [...prev, { _key: Date.now(), measure: "", description: "", status: "Implemented", attachments: [] }])}>
+            Add Measure
+          </Button>,
+          <Button key="save" type="primary" danger loading={facilityMgmtSaving} icon={<SaveOutlined />}
+            onClick={() => handleSaveFacilityDetails("firePrev", firePrevDetails)}>
+            Save
+          </Button>,
+          <Button key="close" onClick={() => setFirePrevModalOpen(false)}>Close</Button>,
+        ]}
+        width={750}
+        destroyOnHidden
+      >
+        {firePrevDetails.length === 0 ? (
+          <Empty description="No fire prevention measures yet. Click 'Add Measure' to start." image={Empty.PRESENTED_IMAGE_SIMPLE} />
+        ) : (
+          firePrevDetails.map((item, idx) => (
+            <div key={item._key} style={{ background: "#fff2f0", borderRadius: 10, padding: 16, marginBottom: 12, border: "1px solid #ffccc7" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12 }}>
+                <Tag color="red" style={{ fontWeight: 700 }}>Measure {idx + 1}</Tag>
+                <Select
+                  size="small"
+                  value={item.status || "Implemented"}
+                  onChange={v => setFirePrevDetails(p => p.map((x, i) => i === idx ? { ...x, status: v } : x))}
+                  options={[{ label: "Implemented", value: "Implemented" }, { label: "Planned", value: "Planned" }, { label: "Not Applicable", value: "Not Applicable" }]}
+                  style={{ width: 160 }}
+                />
+                <Button type="text" danger size="small" icon={<DeleteOutlined />} style={{ marginLeft: "auto" }}
+                  onClick={() => setFirePrevDetails(p => p.filter((_, i) => i !== idx))} />
+              </div>
+              <Row gutter={[12, 8]}>
+                <Col xs={24} sm={12}>
+                  <div style={{ fontSize: 11, color: "#8c8c8c", marginBottom: 4 }}>Measure Name</div>
+                  <Input size="small" value={item.measure} placeholder="e.g. Fire suppression system, Firebreak..."
+                    onChange={e => setFirePrevDetails(p => p.map((x, i) => i === idx ? { ...x, measure: e.target.value } : x))} />
+                </Col>
+                <Col xs={24} sm={12}>
+                  <div style={{ fontSize: 11, color: "#8c8c8c", marginBottom: 4 }}>Description</div>
+                  <Input size="small" value={item.description} placeholder="Details, specifications..."
+                    onChange={e => setFirePrevDetails(p => p.map((x, i) => i === idx ? { ...x, description: e.target.value } : x))} />
+                </Col>
+              </Row>
+              <div style={{ marginTop: 10 }}>
+                <div style={{ fontSize: 11, color: "#8c8c8c", marginBottom: 4 }}>Attachments / Document Links</div>
+                {(item.attachments || []).map((url, ai) => (
+                  <div key={ai} style={{ display: "flex", gap: 6, marginBottom: 6 }}>
+                    <Input size="small" value={url} placeholder="Google Drive link or URL"
+                      onChange={e => setFirePrevDetails(p => p.map((x, i) => i === idx ? { ...x, attachments: x.attachments.map((a, j) => j === ai ? e.target.value : a) } : x))}
+                      addonBefore={<FileTextOutlined />} />
+                    {url && <Button size="small" type="link" icon={<EyeOutlined />} href={url} target="_blank" style={{ padding: 0 }} />}
+                    <Button size="small" danger type="text" icon={<DeleteOutlined />}
+                      onClick={() => setFirePrevDetails(p => p.map((x, i) => i === idx ? { ...x, attachments: x.attachments.filter((_, j) => j !== ai) } : x))} />
+                  </div>
+                ))}
+                <Button size="small" type="dashed" icon={<PlusOutlined />}
+                  onClick={() => setFirePrevDetails(p => p.map((x, i) => i === idx ? { ...x, attachments: [...(x.attachments || []), ""] } : x))}>
+                  Add Link
+                </Button>
+              </div>
+            </div>
+          ))
+        )}
+      </Modal>
+
     </Layout>
   );
 }

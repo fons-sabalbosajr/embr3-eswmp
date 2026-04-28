@@ -1,3 +1,8 @@
+// Force IPv4-first DNS resolution — fixes ENOTFOUND for googleapis.com on
+// Windows/Node 17+ where IPv6 is preferred but may be unreachable on LAN.
+const dns = require("dns");
+dns.setDefaultResultOrder("ipv4first");
+
 const express = require("express");
 const mongoose = require("mongoose");
 const cors = require("cors");
@@ -30,6 +35,8 @@ const portalUsersRoutes = require("./routes/portalUsers");
 const dataHistoryRoutes = require("./routes/dataHistory");
 const notificationRoutes = require("./routes/notifications");
 const supportTicketRoutes = require("./routes/supportTickets");
+const haulerDeleteRequestRoutes = require("./routes/haulerDeleteRequests");
+const uploadRoutes = require("./routes/upload");
 
 const app = express();
 const server = http.createServer(app);
@@ -205,6 +212,15 @@ mongoose
 app.get("/api/health", (req, res) => {
   res.json({ status: "ok", message: "Server is running" });
 });
+app.get("/api/health/email", async (req, res) => {
+  try {
+    const { verifyTransporter } = require("./utils/email");
+    await verifyTransporter();
+    res.json({ status: "ok", message: "SMTP connected", user: process.env.EMAIL_USER || "(not set)" });
+  } catch (err) {
+    res.status(500).json({ status: "error", message: err.message, user: process.env.EMAIL_USER || "(not set)" });
+  }
+});
 app.use("/api/auth", authRoutes);
 app.use("/api/slf-generators", slfGeneratorRoutes);
 app.use("/api/data-slf", dataSLFRoutes);
@@ -230,6 +246,8 @@ app.use("/api/portal-users", portalUsersRoutes);
 app.use("/api/data-history", dataHistoryRoutes);
 app.use("/api/notifications", notificationRoutes);
 app.use("/api/support-tickets", supportTicketRoutes);
+app.use("/api/hauler-delete-requests", haulerDeleteRequestRoutes);
+app.use("/api/upload", uploadRoutes);
 
 // Get local IP address
 function getLocalIP() {

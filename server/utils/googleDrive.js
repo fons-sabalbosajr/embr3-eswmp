@@ -1,28 +1,24 @@
 const { google } = require("googleapis");
 const { Readable } = require("stream");
-const path = require("path");
-const fs = require("fs");
-
-// Path to the service account key file — lives in server/secrets/ (git-ignored)
-const KEY_PATH = path.join(__dirname, "..", "secrets", "embr3-eswm-account.json");
 
 /**
- * Build an authenticated Google Drive client using the service account
- * JSON key file at server/secrets/embr3-eswm-account.json.
+ * Build an authenticated Google Drive client using OAuth2 with a refresh token.
+ * Files are owned by the real Google account — no service-account quota issues.
+ * Required env vars: GDRIVE_CLIENT_ID, GDRIVE_CLIENT_SECRET, GDRIVE_REFRESH_TOKEN
  */
 function getDriveClient() {
-  if (!fs.existsSync(KEY_PATH)) {
+  const { GDRIVE_CLIENT_ID, GDRIVE_CLIENT_SECRET, GDRIVE_REFRESH_TOKEN } = process.env;
+  const missing = ["GDRIVE_CLIENT_ID", "GDRIVE_CLIENT_SECRET", "GDRIVE_REFRESH_TOKEN"].filter(
+    (k) => !process.env[k] || process.env[k].trim() === ""
+  );
+  if (missing.length > 0) {
     throw new Error(
-      `Service account key file not found at ${KEY_PATH}. ` +
-      `Place embr3-eswm-account.json inside server/secrets/.`
+      `Google Drive OAuth2 credentials not configured. Missing env vars: ${missing.join(", ")}. ` +
+      `Run server/utils/generateDriveToken.js once to obtain a refresh token.`
     );
   }
-  const key = JSON.parse(fs.readFileSync(KEY_PATH, "utf8"));
-  const auth = new google.auth.JWT({
-    email: key.client_email,
-    key: key.private_key,
-    scopes: ["https://www.googleapis.com/auth/drive.file"],
-  });
+  const auth = new google.auth.OAuth2(GDRIVE_CLIENT_ID, GDRIVE_CLIENT_SECRET);
+  auth.setCredentials({ refresh_token: GDRIVE_REFRESH_TOKEN });
   return google.drive({ version: "v3", auth });
 }
 
@@ -35,12 +31,12 @@ function getDriveClient() {
  * @param {boolean} isImage     - true → images folder, false → documents folder
  * @returns {{ fileId: string, viewUrl: string }}
  */
-async function uploadFileToDrive(fileBuffer, mimeType, originalName, isImage) {
+async function uploadFileToDrive(fileBuffer, mimeType, originalName, isImage, overrideFolderId) {
   // Validate folder IDs are still configured in .env
   const missing = ["GDRIVE_IMAGE_FOLDER_ID", "GDRIVE_DOCS_FOLDER_ID"].filter(
     (k) => !process.env[k] || process.env[k].trim() === ""
   );
-  if (missing.length > 0) {
+  if (missing.length > 0 && !overrideFolderId) {
     throw new Error(
       `Google Drive folder IDs not configured. Missing env vars: ${missing.join(", ")}.`
     );
@@ -48,29 +44,34 @@ async function uploadFileToDrive(fileBuffer, mimeType, originalName, isImage) {
 
   const drive = getDriveClient();
 
-  const folderId = isImage
+  const folderId = overrideFolderId
+    ? overrideFolderId
+    : isImage
     ? process.env.GDRIVE_IMAGE_FOLDER_ID
     : process.env.GDRIVE_DOCS_FOLDER_ID;
 
   const readable = Readable.from(fileBuffer);
 
-  const response = await drive.files.create({
-    supportsAllDrives: true,
-    requestBody: {
-      name: originalName,
-      parents: [folderId],
-    },
-    media: {
-      mimeType,
-      body: readable,
-    },
-    fields: "id,webViewLink",
-  });
+  let response;
+  try {
+    response = await drive.files.create({
+      requestBody: {
+        name: originalName,
+        parents: [folderId],
+      },
+      media: {
+        mimeType,
+        body: readable,
+      },
+      fields: "id,webViewLink",
+    });
+  } catch (createErr) {
+    throw createErr;
+  }
 
   // Make the file viewable by anyone with the link
   await drive.permissions.create({
     fileId: response.data.id,
-    supportsAllDrives: true,
     requestBody: {
       role: "reader",
       type: "anyone",

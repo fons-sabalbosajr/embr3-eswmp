@@ -175,6 +175,8 @@ router.post("/login", async (req, res) => {
         assignedSlfName: user.assignedSlfName,
         verificationRequired: user.verificationRequired,
         verificationSubmitted: user.verificationSubmitted,
+        status: user.status,
+        isVerified: user.isVerified,
         role: "portal_user",
       },
     });
@@ -247,7 +249,9 @@ router.post("/forgot-password", async (req, res) => {
     user.resetTokenExpiry = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
     await user.save();
 
-    await sendPortalResetPasswordEmail(user.email, user.firstName, resetCode);
+    sendPortalResetPasswordEmail(user.email, user.firstName, resetCode).catch((emailErr) => {
+      console.error("Failed to send portal reset password email:", emailErr.message);
+    });
 
     writeLog("info", "portal.forgot-password", {
       message: `Password reset code sent: ${user.email}`,

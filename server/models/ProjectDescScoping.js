@@ -1,4 +1,5 @@
 const mongoose = require("mongoose");
+const { dataYearVisibilityPlugin } = require("../utils/yearVisibility");
 
 const projectDescScopingSchema = new mongoose.Schema(
   {
@@ -55,5 +56,7 @@ const projectDescScopingSchema = new mongoose.Schema(
   },
   { timestamps: true }
 );
+
+projectDescScopingSchema.plugin(dataYearVisibilityPlugin);
 
 module.exports = mongoose.model("ProjectDescScoping", projectDescScopingSchema, "project_desc_scoping");

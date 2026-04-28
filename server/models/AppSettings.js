@@ -46,6 +46,11 @@ const appSettingsSchema = new mongoose.Schema(
     maintenanceMode: { type: Boolean, default: false },
     maintenanceMessage: { type: String, default: "System is under maintenance. Please try again later." },
 
+    // Historical data visibility
+    hideHistoricalRecordsEnabled: { type: Boolean, default: false },
+    hideRecordsBeforeOrEqualYear: { type: Number, default: null },
+    hiddenRecordYears: { type: [Number], default: [] },
+
     // Dashboard Visibility & Maintenance (per-tab)
     dashboardTabs: {
       type: Map,

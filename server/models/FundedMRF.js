@@ -1,4 +1,5 @@
 const mongoose = require("mongoose");
+const { dataYearVisibilityPlugin } = require("../utils/yearVisibility");
 
 const fundedMRFSchema = new mongoose.Schema(
   {
@@ -70,5 +71,7 @@ const fundedMRFSchema = new mongoose.Schema(
   },
   { timestamps: true }
 );
+
+fundedMRFSchema.plugin(dataYearVisibilityPlugin);
 
 module.exports = mongoose.model("FundedMRF", fundedMRFSchema, "funded_mrf");

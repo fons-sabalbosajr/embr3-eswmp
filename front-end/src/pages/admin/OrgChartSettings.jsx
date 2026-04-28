@@ -170,15 +170,6 @@ export default function OrgChartSettings({ isDark, canEdit = true, canDelete = t
 
   return (
     <div>
-      <div style={{ marginBottom: 16 }}>
-        <Title level={4} style={{ marginBottom: 4 }}>
-          <ApartmentOutlined /> Organizational Chart
-        </Title>
-        <Text type="secondary">
-          Manage the ESWM organizational structure
-        </Text>
-      </div>
-
       <Card
         style={{ borderRadius: 10 }}
         title={<Space><ApartmentOutlined style={{ color: "#722ed1" }} /><Text strong>Organizational Chart Maker</Text></Space>}

@@ -1,4 +1,5 @@
 const mongoose = require("mongoose");
+const { dataYearVisibilityPlugin } = require("../utils/yearVisibility");
 
 const slfFacilitySchema = new mongoose.Schema(
   {
@@ -56,10 +57,44 @@ const slfFacilitySchema = new mongoose.Schema(
     numberOfCell: { type: Number },
     cellCapacities: [{ type: Number }],
     cellStatuses: [{ type: String, enum: ["Operational", "Closed"], default: "Operational" }],
+    cellTypes: [{ type: String, trim: true, default: "Residual" }], // per-cell: "Residual" or "Treated Haz Waste"
     estimatedVolumeWaste: { type: Number },
     noOfLeachatePond: { type: Number },
     numberOfGasVents: { type: Number },
     mrfEstablished: { type: String, trim: true },
+
+    // Leachate Pond Details
+    leachatePondDetails: [{
+      pondNo: { type: Number },
+      description: { type: String, trim: true },
+      status: { type: String, trim: true, default: "Active" },
+      attachments: [{ type: String, trim: true }],
+    }],
+
+    // Gas Vent Details
+    gasVentDetails: [{
+      ventNo: { type: Number },
+      ventType: { type: String, trim: true },
+      status: { type: String, trim: true, default: "Active" },
+      description: { type: String, trim: true },
+      attachments: [{ type: String, trim: true }],
+    }],
+
+    // Trash Slide Prevention Measures
+    trashSlideMeasures: [{
+      measure: { type: String, trim: true },
+      description: { type: String, trim: true },
+      status: { type: String, trim: true, default: "Implemented" },
+      attachments: [{ type: String, trim: true }],
+    }],
+
+    // Fire Prevention Measures
+    firePrevMeasures: [{
+      measure: { type: String, trim: true },
+      description: { type: String, trim: true },
+      status: { type: String, trim: true, default: "Implemented" },
+      attachments: [{ type: String, trim: true }],
+    }],
 
     // Remarks & Compliance
     remarksAndRecommendation: { type: String, trim: true },
@@ -75,8 +110,14 @@ const slfFacilitySchema = new mongoose.Schema(
 
     // Link to SLF Generator (portal)
     slfGenerator: { type: mongoose.Schema.Types.ObjectId, ref: "SLFGenerator" },
+
+    // Soft delete
+    deletedAt: { type: Date, default: null },
+    deletedBy: { type: String, trim: true, default: null },
   },
   { timestamps: true }
 );
+
+slfFacilitySchema.plugin(dataYearVisibilityPlugin);
 
 module.exports = mongoose.model("SlfFacility", slfFacilitySchema, "slf_facilities");

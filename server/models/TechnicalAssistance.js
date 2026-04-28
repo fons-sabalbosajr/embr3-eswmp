@@ -1,4 +1,5 @@
 const mongoose = require("mongoose");
+const { dataYearVisibilityPlugin } = require("../utils/yearVisibility");
 
 const technicalAssistanceSchema = new mongoose.Schema(
   {
@@ -40,5 +41,7 @@ const technicalAssistanceSchema = new mongoose.Schema(
   },
   { timestamps: true }
 );
+
+technicalAssistanceSchema.plugin(dataYearVisibilityPlugin);
 
 module.exports = mongoose.model("TechnicalAssistance", technicalAssistanceSchema, "technical_assistance");

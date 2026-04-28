@@ -688,12 +688,6 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, is
         }}
       >
         <div>
-          <Title level={4} style={{ marginBottom: 4 }}>
-            <InboxOutlined /> Submission Management
-          </Title>
-          <Text type="secondary">
-            View, edit, acknowledge, or reject client portal submissions
-          </Text>
         </div>
         <Button
           icon={<ReloadOutlined />}
@@ -1269,21 +1263,21 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, is
                             Baseline Information
                           </Text>
                         ),
-                        children: (
-                          <div>
-                            <Row gutter={16}>
-                              <Col xs={12}>
-                                <div style={{ marginBottom: 12 }}>
-                                  <Text
-                                    type="secondary"
-                                    style={{
-                                      fontSize: 11,
-                                      textTransform: "uppercase",
-                                      letterSpacing: 0.4,
-                                      display: "block",
-                                      marginBottom: 2,
-                                    }}
-                                  >
+                        children: (() => {
+                          const hasAC = (r.activeCellEntries || []).length > 0;
+                          const hasCC = (r.closedCellEntries || []).length > 0;
+                          const cellTableCols = [
+                            { title: "#", key: "i", width: 40, render: (_, __, i) => <Text type="secondary" style={{ fontSize: 12 }}>{i + 1}</Text> },
+                            { title: "Cell Name", dataIndex: "cellName", render: (v) => <Text style={{ fontSize: 12 }}>{v || "—"}</Text> },
+                            { title: "Waste Type", dataIndex: "wasteType", width: 110, render: (v) => <Tag color={v === "Residual" ? "blue" : v === "Inert" ? "green" : v === "Hazardous" ? "red" : "default"} bordered={false} style={{ fontSize: 11 }}>{v || "—"}</Tag> },
+                            { title: "Volume", dataIndex: "volume", width: 140, render: (v) => <Text strong style={{ fontSize: 12 }}>{v != null ? v.toLocaleString() + " m³" : "—"}</Text> },
+                          ];
+                          return (
+                            <div>
+                              {/* Total Volume */}
+                              <Row gutter={16} style={{ marginBottom: 8 }}>
+                                <Col xs={12}>
+                                  <Text type="secondary" style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: 0.4, display: "block", marginBottom: 2 }}>
                                     Total Volume Accepted
                                   </Text>
                                   <Text strong style={{ fontSize: 13 }}>
@@ -1291,221 +1285,116 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, is
                                       ? `${r.totalVolumeAccepted.toLocaleString()} ${(r.totalVolumeAcceptedUnit || "m³").replace("m3", "m³")}`
                                       : "—"}
                                   </Text>
+                                </Col>
+                              </Row>
+
+                              {/* Active Cell Entries */}
+                              <div style={{ marginBottom: 14 }}>
+                                <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 6 }}>
+                                  <div style={{ width: 3, height: 13, background: "#52c41a", borderRadius: 2 }} />
+                                  <Text strong style={{ fontSize: 12, color: "#52c41a" }}>Active Cell{hasAC ? ` Entries (${r.activeCellEntries.length})` : " — Legacy"}</Text>
                                 </div>
-                              </Col>
-                              <Col xs={12}>
-                                <div style={{ marginBottom: 12 }}>
-                                  <Text
-                                    type="secondary"
-                                    style={{
-                                      fontSize: 11,
-                                      textTransform: "uppercase",
-                                      letterSpacing: 0.4,
-                                      display: "block",
-                                      marginBottom: 2,
-                                    }}
-                                  >
-                                    Active Cell — Residual
-                                  </Text>
-                                  <Text strong style={{ fontSize: 13 }}>
-                                    {r.activeCellResidualVolume != null
-                                      ? `${r.activeCellResidualVolume.toLocaleString()} ${(r.activeCellResidualUnit || "m³").replace("m3", "m³")}`
-                                      : "—"}
-                                  </Text>
-                                </div>
-                              </Col>
-                              <Col xs={12}>
-                                <div style={{ marginBottom: 12 }}>
-                                  <Text
-                                    type="secondary"
-                                    style={{
-                                      fontSize: 11,
-                                      textTransform: "uppercase",
-                                      letterSpacing: 0.4,
-                                      display: "block",
-                                      marginBottom: 2,
-                                    }}
-                                  >
-                                    Active Cell — Inert
-                                  </Text>
-                                  <Text strong style={{ fontSize: 13 }}>
-                                    {r.activeCellInertVolume != null
-                                      ? `${r.activeCellInertVolume.toLocaleString()} ${(r.activeCellInertUnit || "m³").replace("m3", "m³")}`
-                                      : "—"}
-                                  </Text>
-                                </div>
-                              </Col>
-                              <Col xs={12}>
-                                <div style={{ marginBottom: 12 }}>
-                                  <Text
-                                    type="secondary"
-                                    style={{
-                                      fontSize: 11,
-                                      textTransform: "uppercase",
-                                      letterSpacing: 0.4,
-                                      display: "block",
-                                      marginBottom: 2,
-                                    }}
-                                  >
-                                    Closed Cell — Residual
-                                  </Text>
-                                  <Text strong style={{ fontSize: 13 }}>
-                                    {r.closedCellResidualVolume != null
-                                      ? `${r.closedCellResidualVolume.toLocaleString()} ${(r.closedCellResidualUnit || "m³").replace("m3", "m³")}`
-                                      : "—"}
-                                  </Text>
-                                </div>
-                              </Col>
-                              <Col xs={24}>
-                                <div style={{ marginBottom: 12 }}>
-                                  <Text
-                                    type="secondary"
-                                    style={{
-                                      fontSize: 11,
-                                      textTransform: "uppercase",
-                                      letterSpacing: 0.4,
-                                      display: "block",
-                                      marginBottom: 2,
-                                    }}
-                                  >
-                                    Closed Cell — Inert
-                                  </Text>
-                                  <Text strong style={{ fontSize: 13 }}>
-                                    {r.closedCellInertVolume != null
-                                      ? `${r.closedCellInertVolume.toLocaleString()} ${(r.closedCellInertUnit || "m³").replace("m3", "m³")}`
-                                      : "—"}
-                                  </Text>
-                                </div>
-                              </Col>
-                            </Row>
-                            {r.accreditedHaulers?.length > 0 && (
-                              <>
-                                <Divider style={{ margin: "4px 0 12px" }} />
-                                <div
-                                  style={{
-                                    display: "flex",
-                                    alignItems: "center",
-                                    gap: 8,
-                                    marginBottom: 10,
-                                  }}
-                                >
-                                  <TeamOutlined
-                                    style={{ color: "#52c41a", fontSize: 14 }}
-                                  />
-                                  <Text
-                                    strong
-                                    style={{ fontSize: 13, color: isDark ? "#e8e8e8" : "#262626" }}
-                                  >
-                                    Accredited Haulers (
-                                    {r.accreditedHaulers.length})
-                                  </Text>
-                                </div>
-                                <Table
-                                  dataSource={r.accreditedHaulers}
-                                  rowKey={(_, i) => i}
-                                  size="small"
-                                  pagination={false}
-                                  expandable={{
-                                    expandedRowRender: (h) => {
-                                      const vehicles =
-                                        h.vehicles?.length > 0
-                                          ? h.vehicles
-                                          : h.plateNumber ||
-                                              h.vehicleType ||
-                                              h.capacity != null
-                                            ? [
-                                                {
-                                                  plateNumber: h.plateNumber,
-                                                  vehicleType: h.vehicleType,
-                                                  capacity: h.capacity,
-                                                  capacityUnit: h.capacityUnit,
-                                                },
-                                              ]
-                                            : [];
-                                      return vehicles.length > 0 ? (
-                                        <Table
-                                          dataSource={vehicles}
-                                          rowKey={(_, vi) => vi}
-                                          size="small"
-                                          pagination={false}
-                                          columns={[
-                                            {
-                                              title: "#",
-                                              key: "idx",
-                                              width: 40,
-                                              render: (_, __, vi) => vi + 1,
-                                            },
-                                            {
-                                              title: "Plate Number",
-                                              dataIndex: "plateNumber",
-                                              key: "plate",
-                                              render: (v) => v || "—",
-                                            },
-                                            {
-                                              title: "Vehicle Type",
-                                              dataIndex: "vehicleType",
-                                              key: "type",
-                                              render: (v) => v || "—",
-                                            },
-                                            {
-                                              title: "Capacity",
-                                              key: "cap",
-                                              render: (_, v) =>
-                                                v.capacity != null
-                                                  ? `${v.capacity} ${(v.capacityUnit || "m³").replace("m3", "m³")}`
-                                                  : "—",
-                                            },
-                                          ]}
-                                        />
-                                      ) : (
-                                        <Text type="secondary">
-                                          No vehicle details
+                                {hasAC ? (
+                                  <Table dataSource={r.activeCellEntries} rowKey={(_, i) => i} size="small" pagination={false} columns={cellTableCols} />
+                                ) : (
+                                  <Row gutter={8}>
+                                    {[["Residual", r.activeCellResidualVolume, r.activeCellResidualUnit], ["Inert", r.activeCellInertVolume, r.activeCellInertUnit]].map(([label, val, unit]) => (
+                                      <Col key={label} xs={12}>
+                                        <Text type="secondary" style={{ fontSize: 11, display: "block" }}>{label}</Text>
+                                        <Text strong style={{ fontSize: 13 }}>
+                                          {val != null ? `${val.toLocaleString()} ${(unit || "m³").replace("m3", "m³")}` : "—"}
                                         </Text>
-                                      );
-                                    },
-                                    rowExpandable: () => true,
-                                  }}
-                                  columns={[
-                                    {
-                                      title: "Hauler Name",
-                                      dataIndex: "haulerName",
-                                      key: "haulerName",
-                                      render: (v) => <Text strong>{v}</Text>,
-                                    },
-                                    {
-                                      title: "No. of Trucks",
-                                      dataIndex: "numberOfTrucks",
-                                      key: "numberOfTrucks",
-                                      width: 110,
-                                      render: (v) => v ?? "—",
-                                    },
-                                    {
-                                      title: "Office Address",
-                                      dataIndex: "officeAddress",
-                                      key: "officeAddress",
-                                      render: (v) => v || "—",
-                                    },
-                                    {
-                                      title: "Private Sector Clients",
-                                      dataIndex: "privateSectorClients",
-                                      key: "privateSectorClients",
-                                      render: (v) => {
-                                        const arr = Array.isArray(v)
-                                          ? v
-                                          : v
-                                            ? [v]
-                                            : [];
-                                        return arr.length > 0
-                                          ? arr.join(", ")
-                                          : "—";
+                                      </Col>
+                                    ))}
+                                  </Row>
+                                )}
+                              </div>
+
+                              {/* Closed Cell Entries */}
+                              <div style={{ marginBottom: 14 }}>
+                                <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 6 }}>
+                                  <div style={{ width: 3, height: 13, background: "#fa8c16", borderRadius: 2 }} />
+                                  <Text strong style={{ fontSize: 12, color: "#fa8c16" }}>Closed Cell{hasCC ? ` Entries (${r.closedCellEntries.length})` : " — Legacy"}</Text>
+                                </div>
+                                {hasCC ? (
+                                  <Table dataSource={r.closedCellEntries} rowKey={(_, i) => i} size="small" pagination={false} columns={cellTableCols} />
+                                ) : (
+                                  <Row gutter={8}>
+                                    {[["Residual", r.closedCellResidualVolume, r.closedCellResidualUnit], ["Inert", r.closedCellInertVolume, r.closedCellInertUnit]].map(([label, val, unit]) => (
+                                      <Col key={label} xs={12}>
+                                        <Text type="secondary" style={{ fontSize: 11, display: "block" }}>{label}</Text>
+                                        <Text strong style={{ fontSize: 13 }}>
+                                          {val != null ? `${val.toLocaleString()} ${(unit || "m³").replace("m3", "m³")}` : "—"}
+                                        </Text>
+                                      </Col>
+                                    ))}
+                                  </Row>
+                                )}
+                              </div>
+
+                              {/* Haulers */}
+                              {r.accreditedHaulers?.length > 0 && (
+                                <>
+                                  <Divider style={{ margin: "4px 0 12px" }} />
+                                  <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
+                                    <TeamOutlined style={{ color: "#52c41a", fontSize: 14 }} />
+                                    <Text strong style={{ fontSize: 13, color: isDark ? "#e8e8e8" : "#262626" }}>
+                                      Accredited Haulers ({r.accreditedHaulers.length})
+                                    </Text>
+                                  </div>
+                                  <Table
+                                    dataSource={r.accreditedHaulers}
+                                    rowKey={(_, i) => i}
+                                    size="small"
+                                    pagination={false}
+                                    expandable={{
+                                      expandedRowRender: (h) => {
+                                        const vehicles =
+                                          h.vehicles?.length > 0
+                                            ? h.vehicles
+                                            : h.plateNumber || h.vehicleType || h.capacity != null
+                                              ? [{ plateNumber: h.plateNumber, vehicleType: h.vehicleType, capacity: h.capacity, capacityUnit: h.capacityUnit }]
+                                              : [];
+                                        return vehicles.length > 0 ? (
+                                          <Table
+                                            dataSource={vehicles}
+                                            rowKey={(_, vi) => vi}
+                                            size="small"
+                                            pagination={false}
+                                            columns={[
+                                              { title: "#", key: "idx", width: 40, render: (_, __, vi) => vi + 1 },
+                                              { title: "Plate Number", dataIndex: "plateNumber", key: "plate", render: (v) => v || "—" },
+                                              { title: "Vehicle Type", dataIndex: "vehicleType", key: "type", render: (v) => v || "—" },
+                                              { title: "Capacity", key: "cap", render: (_, v) => v.capacity != null ? `${v.capacity} ${(v.capacityUnit || "m³").replace("m3", "m³")}` : "—" },
+                                            ]}
+                                          />
+                                        ) : (
+                                          <Text type="secondary">No vehicle details</Text>
+                                        );
                                       },
-                                    },
-                                  ]}
-                                />
-                              </>
-                            )}
-                          </div>
-                        ),
+                                      rowExpandable: () => true,
+                                    }}
+                                    columns={[
+                                      { title: "Hauler Name", dataIndex: "haulerName", key: "haulerName", render: (v) => <Text strong>{v}</Text> },
+                                      { title: "No. of Trucks", dataIndex: "numberOfTrucks", key: "numberOfTrucks", width: 110, render: (v) => v ?? "—" },
+                                      { title: "Office Address", dataIndex: "officeAddress", key: "officeAddress", render: (v) => v || "—" },
+                                      {
+                                        title: "Private Sector Clients",
+                                        dataIndex: "privateSectorClients",
+                                        key: "privateSectorClients",
+                                        render: (v) => {
+                                          const arr = Array.isArray(v) ? v : v ? [v] : [];
+                                          if (arr.length === 0) return "—";
+                                          return arr.map(c => typeof c === "string" ? c : c.clientName || "—").join(", ");
+                                        },
+                                      },
+                                    ]}
+                                  />
+                                </>
+                              )}
+                            </div>
+                          );
+                        })(),
                       },
                       {
                         key: "operations",
@@ -2628,167 +2517,144 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, is
 
       {/* ── Transaction History Modal ── */}
       <Modal
-        title={
-          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-            <div
-              style={{
-                width: 32,
-                height: 32,
-                borderRadius: 8,
-                background: isDark ? "rgba(47,84,235,0.1)" : "#f0f5ff",
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-              }}
-            >
-              <HistoryOutlined style={{ color: "#722ed1", fontSize: 16 }} />
-            </div>
-            <div>
-              <div style={{ fontSize: 15, fontWeight: 600 }}>
-                Transaction History
-              </div>
-              <Text type="secondary" style={{ fontSize: 11 }}>
-                {txnHistoryModal.submissionId}
-              </Text>
-            </div>
-          </div>
-        }
+        title={null}
         open={txnHistoryModal.open}
         onCancel={() => setTxnHistoryModal({ open: false, submissionId: null })}
         footer={
-          <Button
-            block
-            onClick={() =>
-              setTxnHistoryModal({ open: false, submissionId: null })
-            }
-          >
+          <Button block onClick={() => setTxnHistoryModal({ open: false, submissionId: null })}>
             Close
           </Button>
         }
-        width={1200}
+        width={900}
         zIndex={1100}
+        styles={{ body: { padding: 0 } }}
+        destroyOnHidden
       >
-        {txnHistoryLoading ? (
-          <div style={{ textAlign: "center", padding: 40 }}>
-            <Spin />
+        {/* Gradient header */}
+        <div style={{ background: `linear-gradient(135deg, #722ed1 0%, #531dab 100%)`, padding: "18px 24px", borderRadius: "8px 8px 0 0" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+            <div style={{ width: 36, height: 36, borderRadius: 8, background: "rgba(255,255,255,0.15)", display: "flex", alignItems: "center", justifyContent: "center" }}>
+              <HistoryOutlined style={{ color: "#fff", fontSize: 18 }} />
+            </div>
+            <div>
+              <Text style={{ color: "#fff", fontSize: 16, fontWeight: 700, display: "block" }}>Transaction History</Text>
+              <Text style={{ color: "rgba(255,255,255,0.65)", fontSize: 12 }}>{txnHistoryModal.submissionId}</Text>
+            </div>
+            {txnHistoryData.length > 0 && (
+              <div style={{ marginLeft: "auto", textAlign: "right" }}>
+                <Text style={{ color: "rgba(255,255,255,0.55)", fontSize: 11, display: "block" }}>{txnHistoryData.length} event{txnHistoryData.length !== 1 ? "s" : ""}</Text>
+                {txnHistoryData[0]?.createdAt && (
+                  <Text style={{ color: "rgba(255,255,255,0.4)", fontSize: 11 }}>
+                    {dayjs(txnHistoryData[txnHistoryData.length - 1]?.createdAt).format("MMM D")} → {dayjs(txnHistoryData[0]?.createdAt).format("MMM D, YYYY")}
+                  </Text>
+                )}
+              </div>
+            )}
           </div>
-        ) : txnHistoryData.length === 0 ? (
-          <Empty description="No transactions found" />
-        ) : (
-          <Table
-            dataSource={txnHistoryData}
-            rowKey={(t) => t._id}
-            size="small"
-            pagination={{ pageSize: 10, size: "small", showSizeChanger: true, pageSizeOptions: ["10", "20", "50"] }}
-            scroll={{ y: 400 }}
-            columns={[
-              {
-                title: "#",
-                key: "idx",
-                width: 45,
-                render: (_, __, i) => <Text type="secondary">{i + 1}</Text>,
-              },
-              {
-                title: "Type",
-                dataIndex: "type",
-                key: "type",
-                width: 120,
-                render: (v) => (
-                  <Tag
-                    bordered={false}
-                    color={
-                      v === "submission"
-                        ? "blue"
-                        : v === "email_ack_sent"
-                          ? "green"
-                          : v === "email_ack_failed"
-                            ? "red"
-                            : v === "status_change"
-                              ? "orange"
-                              : v === "revert_approved"
-                                ? "volcano"
-                                : v === "resubmission"
-                                  ? "cyan"
-                                  : "default"
-                    }
-                    style={{ margin: 0, fontSize: 11 }}
-                  >
-                    {v === "submission"
-                      ? "Submission"
-                      : v === "email_ack_sent"
-                        ? "Email Sent"
-                        : v === "email_ack_failed"
-                          ? "Email Failed"
-                          : v === "status_change"
-                            ? "Status Change"
-                            : v === "revert_approved"
-                              ? "Revert Approved"
-                              : v === "resubmission"
-                                ? "Resubmission"
-                                : v === "deleted"
-                                  ? "Deleted"
-                                  : v}
-                  </Tag>
-                ),
-              },
-              {
-                title: "Description",
-                dataIndex: "description",
-                key: "desc",
-                ellipsis: false,
-                render: (v) => <Text style={{ fontSize: 11 }}>{v}</Text>,
-              },
-              {
-                title: "Message",
-                key: "msg",
-                width: 250,
-                ellipsis: false,
-                render: (_, t) => {
-                  const msg = t.meta?.comment || t.meta?.reason || "";
-                  return msg ? (
-                    <Text
-                      style={{
-                        fontSize: 12,
-                        color: t.meta?.comment ? (isDark ? "#7eb8da" : "#1a3353") : "#fa541c",
-                        fontStyle: "italic",
-                        whiteSpace: "pre-wrap",
-                        wordBreak: "break-word",
-                      }}
-                    >
-                      {msg}
-                    </Text>
-                  ) : (
-                    <Text type="secondary" style={{ fontSize: 12 }}>
-                      —
-                    </Text>
-                  );
-                },
-              },
-              {
-                title: "Performed By",
-                dataIndex: "performedBy",
-                key: "by",
-                width: 200,
-                render: (v) => (
-                  <Text type="secondary" style={{ fontSize: 12 }}>
-                    {v || "system"}
-                  </Text>
-                ),
-              },
-              {
-                title: "Date / Time",
-                dataIndex: "createdAt",
-                key: "date",
-                width: 150,
-                render: (v) => (
-                  <Text type="secondary" style={{ fontSize: 12 }}>
-                    {dayjs(v).format("MMM DD, YYYY hh:mm A")}
-                  </Text>
-                ),
-              },
-            ]}
-          />
-        )}
+        </div>
+
+        <div style={{ padding: "16px 20px" }}>
+          {txnHistoryLoading ? (
+            <div style={{ textAlign: "center", padding: 40 }}><Spin /></div>
+          ) : txnHistoryData.length === 0 ? (
+            <Empty description="No transactions found" />
+          ) : (() => {
+            const getTxnMeta = (type) => {
+              const map = {
+                submission:            { color: "#1677ff", bg: "#f0f5ff", label: "Submission" },
+                resubmission:          { color: "#13c2c2", bg: "#e6fffb", label: "Resubmission" },
+                email_ack_sent:        { color: "#52c41a", bg: "#f6ffed", label: "Email Sent" },
+                email_ack_failed:      { color: "#ff4d4f", bg: "#fff1f0", label: "Email Failed" },
+                status_change:         { color: "#fa8c16", bg: "#fff7e6", label: "Status Change" },
+                revert_approved:       { color: "#fa541c", bg: "#fff2e8", label: "Reverted" },
+                baseline_update:       { color: "#722ed1", bg: "#f9f0ff", label: "Baseline Update" },
+                admin_edit:            { color: "#2f54eb", bg: "#f0f5ff", label: "Admin Edit" },
+                edit_approved:         { color: "#52c41a", bg: "#f6ffed", label: "Edit Approved" },
+                edit_rejected:         { color: "#ff4d4f", bg: "#fff1f0", label: "Edit Rejected" },
+                hauler_delete_request: { color: "#fa8c16", bg: "#fff7e6", label: "Hauler Delete Req." },
+                hauler_delete_approved:{ color: "#52c41a", bg: "#f6ffed", label: "Hauler Deleted" },
+                hauler_delete_rejected:{ color: "#ff4d4f", bg: "#fff1f0", label: "Hauler Delete Rej." },
+                deleted:               { color: "#ff4d4f", bg: "#fff1f0", label: "Deleted" },
+              };
+              return map[type] || { color: "#8c8c8c", bg: "#f5f5f5", label: type };
+            };
+            return (
+              <Table
+                dataSource={[...txnHistoryData].reverse()}
+                rowKey={(t) => t._id}
+                size="small"
+                pagination={{ pageSize: 15, size: "small", showSizeChanger: true, showTotal: (t) => `${t} event(s)` }}
+                scroll={{ y: 480 }}
+                columns={[
+                  {
+                    title: "#",
+                    key: "idx",
+                    width: 40,
+                    render: (_, __, i) => (
+                      <div style={{ width: 24, height: 24, borderRadius: "50%", background: isDark ? "#262626" : "#f5f5f5", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                        <Text type="secondary" style={{ fontSize: 11, lineHeight: 1 }}>{txnHistoryData.length - i}</Text>
+                      </div>
+                    ),
+                  },
+                  {
+                    title: "Event",
+                    dataIndex: "type",
+                    key: "type",
+                    width: 170,
+                    render: (v) => {
+                      const meta = getTxnMeta(v);
+                      return (
+                        <div style={{ background: meta.bg, border: `1px solid ${meta.color}22`, borderRadius: 6, padding: "3px 8px", display: "inline-block" }}>
+                          <Text style={{ fontSize: 11, color: meta.color, fontWeight: 600 }}>{meta.label}</Text>
+                        </div>
+                      );
+                    },
+                  },
+                  {
+                    title: "Details",
+                    key: "details",
+                    render: (_, t) => (
+                      <div>
+                        <Text style={{ fontSize: 12, display: "block" }}>{t.description}</Text>
+                        {(t.meta?.comment || t.meta?.reason) && (
+                          <Text type="secondary" style={{ fontSize: 11, fontStyle: "italic", display: "block", marginTop: 2 }}>
+                            &ldquo;{t.meta.comment || t.meta.reason}&rdquo;
+                          </Text>
+                        )}
+                      </div>
+                    ),
+                  },
+                  {
+                    title: "By",
+                    dataIndex: "performedBy",
+                    key: "by",
+                    width: 150,
+                    render: (v) => (
+                      <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                        <div style={{ width: 22, height: 22, borderRadius: "50%", background: isDark ? "rgba(47,84,235,0.15)" : "#f0f5ff", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 10, color: ACCENT, fontWeight: 600, flexShrink: 0 }}>
+                          {(v || "S").charAt(0).toUpperCase()}
+                        </div>
+                        <Text type="secondary" style={{ fontSize: 12 }}>{v || "system"}</Text>
+                      </div>
+                    ),
+                  },
+                  {
+                    title: "Date / Time",
+                    dataIndex: "createdAt",
+                    key: "date",
+                    width: 130,
+                    render: (v) => (
+                      <div>
+                        <Text style={{ fontSize: 12, display: "block" }}>{dayjs(v).format("MMM D, YYYY")}</Text>
+                        <Text type="secondary" style={{ fontSize: 11 }}>{dayjs(v).format("h:mm A")}</Text>
+                      </div>
+                    ),
+                  },
+                ]}
+              />
+            );
+          })()}
+        </div>
       </Modal>
 
       {/* ── Admin Revert Modal ── */}

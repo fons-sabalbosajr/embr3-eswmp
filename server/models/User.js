@@ -30,6 +30,7 @@ const userSchema = new mongoose.Schema(
         residualContainment: { view: true, edit: true, delete: true },
         lguAssistDiversion: { view: true, edit: true, delete: true },
         accountSettings: { view: true, edit: true, delete: true },
+        portalUsers: { view: true, edit: true, delete: true },
         portalFields: { view: true, edit: true, delete: true },
         dataReferences: { view: true, edit: true, delete: true },
         baselineData: { view: true, edit: true, delete: true },

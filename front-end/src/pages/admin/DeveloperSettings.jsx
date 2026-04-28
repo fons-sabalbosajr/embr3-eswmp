@@ -52,9 +52,10 @@ import {
   EnvironmentOutlined,
   HistoryOutlined,
 } from "@ant-design/icons";
-import PortalUsers from "./PortalUsers";
+import AccountSettings from "./AccountSettings";
 import Swal from "sweetalert2";
 import api from "../../api";
+import secureStorage from "../../utils/secureStorage";
 import dayjs from "dayjs";
 
 const { Title, Text } = Typography;
@@ -77,6 +78,8 @@ export default function DeveloperSettings({onSettingsSaved, isDark}) {
   // Deleted submissions state
   const [deletedEntries, setDeletedEntries] = useState([]);
   const [deletedLoading, setDeletedLoading] = useState(false);
+  const [deletedSlfEntries, setDeletedSlfEntries] = useState([]);
+  const [deletedSlfLoading, setDeletedSlfLoading] = useState(false);
 
   // Dashboard display settings
   const DASHBOARD_TABS = [
@@ -96,6 +99,13 @@ export default function DeveloperSettings({onSettingsSaved, isDark}) {
   ];
   const [dashboardTabs, setDashboardTabs] = useState({});
   const [dashSaving, setDashSaving] = useState(false);
+  const historicalYearOptions = Array.from(
+    { length: new Date().getFullYear() - 1999 },
+    (_, i) => {
+      const year = new Date().getFullYear() - i;
+      return { label: String(year), value: year };
+    }
+  );
 
   useEffect(() => {
     fetchSettings();
@@ -178,6 +188,39 @@ export default function DeveloperSettings({onSettingsSaved, isDark}) {
     }
   };
 
+  // ── Deleted SLF Data ──
+  const fetchDeletedSlfEntries = async () => {
+    setDeletedSlfLoading(true);
+    try {
+      const { data } = await api.get("/slf-facilities/trash/list");
+      setDeletedSlfEntries(data);
+    } catch {
+      /* silent */
+    } finally {
+      setDeletedSlfLoading(false);
+    }
+  };
+
+  const restoreSlfEntry = async (id) => {
+    try {
+      await api.patch(`/slf-facilities/${id}/restore`);
+      setDeletedSlfEntries((prev) => prev.filter((d) => d._id !== id));
+      Swal.fire({ icon: "success", title: "Restored", text: "SLF data restored successfully", timer: 1200, showConfirmButton: false });
+    } catch {
+      Swal.fire("Error", "Could not restore SLF data", "error");
+    }
+  };
+
+  const permanentDeleteSlfEntry = async (id) => {
+    try {
+      await api.delete(`/slf-facilities/${id}/permanent`);
+      setDeletedSlfEntries((prev) => prev.filter((d) => d._id !== id));
+      Swal.fire({ icon: "success", title: "Permanently Deleted", timer: 1000, showConfirmButton: false });
+    } catch {
+      Swal.fire("Error", "Could not delete SLF data", "error");
+    }
+  };
+
   const writeClientLog = (action) => {
     fetchLogs();
   };
@@ -208,6 +251,9 @@ export default function DeveloperSettings({onSettingsSaved, isDark}) {
       const { data } = await api.put("/settings/app", values);
       setSettings(data.data);
       if (onSettingsSaved) onSettingsSaved(data.data);
+      // Invalidate ALL data caches so every page re-fetches fresh data
+      // with the updated year-visibility settings applied.
+      secureStorage.invalidateAllDataCaches();
       writeClientLog("settings.update");
       Swal.fire({
         icon: "success",
@@ -232,21 +278,14 @@ export default function DeveloperSettings({onSettingsSaved, isDark}) {
 
   return (
     <div>
-      <div style={{ marginBottom: 4 }}>
-        <Title level={4} style={{ margin: 0 }}>
-          <ToolOutlined style={{ marginRight: 8 }} />
-          Developer Settings
-        </Title>
-        <Text type="secondary">
-          Advanced application configuration — developer access only
-        </Text>
-      </div>
-
       <Tabs
         defaultActiveKey="general"
         size="large"
         style={{ marginTop: 8 }}
-        onChange={(key) => { if (key === "deleted-submissions" && deletedEntries.length === 0) fetchDeletedEntries(); }}
+        onChange={(key) => {
+          if (key === "deleted-submissions" && deletedEntries.length === 0) fetchDeletedEntries();
+          if (key === "deleted-slf-data" && deletedSlfEntries.length === 0) fetchDeletedSlfEntries();
+        }}
         items={[
           {
             key: "general",
@@ -335,6 +374,45 @@ export default function DeveloperSettings({onSettingsSaved, isDark}) {
                     <Col xs={24} md={8}>
                       <Form.Item name="headerColorDark" label="Header Color (Dark)">
                         <Input type="color" style={{ width: 80, height: 36, padding: 2, cursor: "pointer" }} />
+                      </Form.Item>
+                    </Col>
+                  </Row>
+                </Card>
+
+                <Card
+                  style={{ marginTop: 16, borderRadius: 10 }}
+                  title={
+                    <Space>
+                      <HistoryOutlined style={{ color: "#fa8c16" }} />
+                      <Text strong>Historical Data Visibility</Text>
+                    </Space>
+                  }
+                >
+                  <Text type="secondary" style={{ display: "block", marginBottom: 12 }}>
+                    Hide records on the whole system using either a cutoff year, specific years, or both.
+                    Hidden records are excluded from dashboards, lists, and portal views across the entire app.
+                    Clear all values to make all records visible again.
+                  </Text>
+                  <Row gutter={[16, 0]}>
+                    <Col xs={24} md={12}>
+                      <Form.Item name="hideHistoricalRecordsEnabled" label="Hide Historical Records" valuePropName="checked">
+                        <Switch checkedChildren="On" unCheckedChildren="Off" />
+                      </Form.Item>
+                    </Col>
+                    <Col xs={24} md={12}>
+                      <Form.Item name="hideRecordsBeforeOrEqualYear" label="Hide records for year <=">
+                        <InputNumber min={1900} max={3000} style={{ width: "100%" }} placeholder="e.g. 2025" />
+                      </Form.Item>
+                    </Col>
+                    <Col xs={24}>
+                      <Form.Item name="hiddenRecordYears" label="Hide specific years (multiple)">
+                        <Select
+                          mode="multiple"
+                          allowClear
+                          placeholder="Select year(s) to hide, e.g. 2022, 2024"
+                          options={historicalYearOptions}
+                          optionFilterProp="label"
+                        />
                       </Form.Item>
                     </Col>
                   </Row>
@@ -893,12 +971,82 @@ export default function DeveloperSettings({onSettingsSaved, isDark}) {
                 </Row>
               </Card>
             ),
-          },          {
-            key: "portal-users",
-            label: <span><TeamOutlined /> Portal Users</span>,
-            children: <PortalUsers isDark={isDark} />,
           },
-
+          {
+            key: "deleted-slf-data",
+            label: <span><DatabaseOutlined /> Deleted SLF Data</span>,
+            children: (
+              <Card
+                style={{ borderRadius: 10 }}
+                title={
+                  <Space>
+                    <DeleteOutlined style={{ color: "#ff4d4f" }} />
+                    <span>Deleted SLF Data</span>
+                    <Tag>{deletedSlfEntries.length}</Tag>
+                  </Space>
+                }
+                extra={
+                  <Button icon={<ReloadOutlined />} size="small" onClick={fetchDeletedSlfEntries} loading={deletedSlfLoading}>
+                    Refresh
+                  </Button>
+                }
+              >
+                {deletedSlfEntries.length === 0 && !deletedSlfLoading ? (
+                  <div style={{ textAlign: "center", padding: "40px 0", color: isDark ? "#666" : "#999" }}>
+                    <DeleteOutlined style={{ fontSize: 32, marginBottom: 12, opacity: 0.3 }} />
+                    <div>No deleted SLF data</div>
+                    <Button type="link" size="small" onClick={fetchDeletedSlfEntries} style={{ marginTop: 8 }}>Load deleted SLF data</Button>
+                  </div>
+                ) : (
+                  <Table
+                    dataSource={deletedSlfEntries}
+                    rowKey="_id"
+                    size="small"
+                    loading={deletedSlfLoading}
+                    pagination={{ pageSize: 15, size: "small" }}
+                    scroll={{ x: 900 }}
+                    columns={[
+                      { title: "Data Year", dataIndex: "dataYear", key: "dataYear", width: 90, render: (v) => <Tag color="blue">{v || "—"}</Tag> },
+                      { title: "Province", dataIndex: "province", key: "province", width: 160 },
+                      { title: "LGU", dataIndex: "lgu", key: "lgu", width: 180, ellipsis: true, render: (v) => <Text strong>{v || "—"}</Text> },
+                      { title: "Category", dataIndex: "category", key: "category", width: 120, render: (v) => v ? <Tag>{v}</Tag> : "—" },
+                      { title: "Status", dataIndex: "statusOfSLF", key: "statusOfSLF", width: 150, render: (v) => <Tag color={/operational/i.test(v || "") && !/non/i.test(v || "") ? "green" : /non/i.test(v || "") ? "red" : "default"}>{v || "—"}</Tag> },
+                      { title: "Deleted At", dataIndex: "deletedAt", key: "deletedAt", width: 170, render: (v) => <Text type="secondary" style={{ fontSize: 12 }}>{v ? dayjs(v).format("MMM DD, YYYY hh:mm A") : "—"}</Text> },
+                      { title: "Deleted By", dataIndex: "deletedBy", key: "deletedBy", width: 120, render: (v) => <Text type="secondary" style={{ fontSize: 12 }}>{v || "—"}</Text> },
+                      {
+                        title: "Actions", key: "actions", width: 200,
+                        render: (_, r) => (
+                          <Space size={4}>
+                            <Tooltip title="Restore SLF data">
+                              <Button size="small" icon={<UndoOutlined />} style={{ borderColor: "#52c41a", color: "#52c41a" }} onClick={() => restoreSlfEntry(r._id)}>
+                                Restore
+                              </Button>
+                            </Tooltip>
+                            <Popconfirm
+                              title="Permanently delete?"
+                              description="This cannot be undone."
+                              onConfirm={() => permanentDeleteSlfEntry(r._id)}
+                              okText="Delete Forever"
+                              okButtonProps={{ danger: true }}
+                            >
+                              <Tooltip title="Delete forever">
+                                <Button size="small" danger icon={<DeleteOutlined />}>Delete</Button>
+                              </Tooltip>
+                            </Popconfirm>
+                          </Space>
+                        ),
+                      },
+                    ]}
+                  />
+                )}
+              </Card>
+            ),
+          },
+          // {
+          //   key: "accounts",
+          //   label: <span><TeamOutlined /> Accounts &amp; Roles</span>,
+          //   children: <AccountSettings isDark={isDark} />,
+          // },
         ]}
       />
     </div>

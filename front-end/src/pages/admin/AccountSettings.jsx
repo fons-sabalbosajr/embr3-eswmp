@@ -71,6 +71,7 @@ const PERMISSION_GROUPS = [
   ]},
   { group: "Settings", icon: <SettingOutlined />, color: "#fa8c16", items: [
     { key: "accountSettings", label: "Accounts & Roles" },
+    { key: "portalUsers", label: "Portal User Management" },
     { key: "portalFields", label: "Portal Fields" },
     { key: "dataReferences", label: "Data References" },
     { key: "orgChart", label: "Org Chart" },
@@ -360,9 +361,6 @@ export default function AccountSettings({ isDark }) {
 
   return (
     <div>
-      <Title level={4} style={{ marginBottom: 4 }}>Account Management</Title>
-      <Text type="secondary">Manage user accounts, roles, and access permissions</Text>
-
       <Card style={{ marginTop: 16, borderRadius: 10 }}>
         <Space style={{ marginBottom: 16, flexWrap: "wrap", width: "100%" }}>
           <Input

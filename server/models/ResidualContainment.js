@@ -1,4 +1,5 @@
 const mongoose = require("mongoose");
+const { dataYearVisibilityPlugin } = require("../utils/yearVisibility");
 
 const residualContainmentSchema = new mongoose.Schema(
   {
@@ -65,5 +66,7 @@ const residualContainmentSchema = new mongoose.Schema(
   },
   { timestamps: true }
 );
+
+residualContainmentSchema.plugin(dataYearVisibilityPlugin);
 
 module.exports = mongoose.model("ResidualContainment", residualContainmentSchema, "residual_containment");

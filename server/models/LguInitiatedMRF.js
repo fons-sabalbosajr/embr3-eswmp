@@ -1,4 +1,5 @@
 const mongoose = require("mongoose");
+const { dataYearVisibilityPlugin } = require("../utils/yearVisibility");
 
 const lguInitiatedMRFSchema = new mongoose.Schema(
   {
@@ -70,5 +71,7 @@ const lguInitiatedMRFSchema = new mongoose.Schema(
   },
   { timestamps: true }
 );
+
+lguInitiatedMRFSchema.plugin(dataYearVisibilityPlugin);
 
 module.exports = mongoose.model("LguInitiatedMRF", lguInitiatedMRFSchema, "lgu_initiated_mrf");

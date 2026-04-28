@@ -1,4 +1,16 @@
 const mongoose = require("mongoose");
+const { dateFieldYearVisibilityPlugin } = require("../utils/yearVisibility");
+
+const clientSchema = new mongoose.Schema(
+  {
+    clientName: { type: String, trim: true },
+    clientType: { type: String, enum: ["Private", "LGU"], default: "Private" },
+    region: { type: String, trim: true },
+    province: { type: String, trim: true },
+    municipality: { type: String, trim: true },
+  },
+  { _id: false }
+);
 
 const vehicleSchema = new mongoose.Schema(
   {
@@ -22,6 +34,10 @@ const truckSchema = new mongoose.Schema(
     actualVolumeUnit: { type: String, enum: ["tons", "m³", "m3"], default: "tons" },
     wasteType: { type: String, enum: ["Residual", "Hazardous Waste", "Treated Hazardous Waste"] },
     hazWasteCode: [{ type: String, trim: true }],
+    lguCompanyName: { type: String, trim: true },
+    companyType: { type: String, trim: true },
+    address: { type: String, trim: true },
+    selectedClients: [clientSchema],
   },
   { _id: false }
 );
@@ -38,7 +54,8 @@ const haulerSchema = new mongoose.Schema(
     capacityUnit: { type: String, enum: ["tons", "m³", "m3"], default: "m³" },
     // Multi-vehicle entries
     vehicles: [vehicleSchema],
-    privateSectorClients: [{ type: String, trim: true }],
+    privateSectorClients: [{ type: mongoose.Schema.Types.Mixed }],
+    clients: [clientSchema],
   },
   { _id: false }
 );
@@ -75,6 +92,16 @@ const dataSLFSchema = new mongoose.Schema(
     closedCellHazardousVolume: { type: Number },
     closedCellHazardousUnit: { type: String, enum: ["m³", "tons", "m3"], default: "m³" },
     acceptsHazardousWaste: { type: Boolean, default: false },
+    activeCellEntries: [{
+      cellName: { type: String, trim: true },
+      wasteType: { type: String, trim: true },
+      volume: { type: Number },
+    }],
+    closedCellEntries: [{
+      cellName: { type: String, trim: true },
+      wasteType: { type: String, trim: true },
+      volume: { type: Number },
+    }],
     accreditedHaulers: [haulerSchema],
     // Baseline update approval
     baselineUpdateRequested: { type: Boolean, default: false },
@@ -159,7 +186,9 @@ dataSLFSchema.pre("save", async function () {
 
     // Count existing docs with same province code and type to get next sequence
     const pattern = new RegExp(`^SLF-${typeCode}-${provCode}-`);
-    const lastDoc = await DataSLF.findOne({ idNo: pattern }).sort({ idNo: -1 });
+    const lastDoc = await DataSLF.findOne({ idNo: pattern })
+      .setOptions({ includeHiddenYears: true })
+      .sort({ idNo: -1 });
     let seq = 1;
     if (lastDoc && lastDoc.idNo) {
       const parts = lastDoc.idNo.split("-");
@@ -169,5 +198,7 @@ dataSLFSchema.pre("save", async function () {
     this.idNo = `SLF-${typeCode}-${provCode}-${String(seq).padStart(4, "0")}`;
   }
 });
+
+dataSLFSchema.plugin(dateFieldYearVisibilityPlugin("dateOfDisposal"));
 
 module.exports = mongoose.model("DataSLF", dataSLFSchema, "data-slf");

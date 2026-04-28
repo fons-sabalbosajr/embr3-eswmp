@@ -30,6 +30,7 @@ import {
   Empty,
   Spin,
   List,
+  Collapse,
 } from "antd";
 import {
   DashboardOutlined,
@@ -78,6 +79,9 @@ import {
   HistoryOutlined,
   SwapOutlined,
   CustomerServiceOutlined,
+  WarningOutlined,
+  FireOutlined,
+  TableOutlined,
 } from "@ant-design/icons";
 import { useNavigate } from "react-router-dom";
 import Swal from "sweetalert2";
@@ -103,6 +107,7 @@ const TechnicalAssistance = lazy(() => import("./admin/TechnicalAssistance"));
 const Reports = lazy(() => import("./admin/Reports"));
 const SupportTab = lazy(() => import("./admin/SupportTab"));
 const NotificationManagement = lazy(() => import("./admin/NotificationManagement"));
+const PortalUsers = lazy(() => import("./admin/PortalUsers"));
 import api from "../api";
 import secureStorage from "../utils/secureStorage";
 import { DataRefProvider } from "../utils/dataRef";
@@ -500,13 +505,6 @@ export default function AdminHome() {
     // ── Settings ──
     {
       const settingsChildren = [];
-      if (isDeveloper && hasAccess("accountSettings")) {
-        settingsChildren.push({
-          key: "settings-accounts",
-          icon: <TeamOutlined />,
-          label: "Accounts & Roles",
-        });
-      }
       if (isDeveloper && hasAccess("portalFields")) {
         settingsChildren.push({
           key: "settings-fields",
@@ -528,6 +526,19 @@ export default function AdminHome() {
           label: "Org Chart",
         });
       }
+      if (isDeveloper) {
+        settingsChildren.push({
+          key: "settings-portal-users",
+          icon: <TeamOutlined />,
+          label: "Portal User Management",
+        });
+      } else if (hasAccess("portalUsers")) {
+        settingsChildren.push({
+          key: "settings-portal-users",
+          icon: <TeamOutlined />,
+          label: "Portal User Management",
+        });
+      }
       if (settingsChildren.length > 0) {
         items.push({ type: "divider" });
         items.push({
@@ -545,6 +556,11 @@ export default function AdminHome() {
           key: "dev-settings",
           icon: <ToolOutlined />,
           label: "App Settings",
+        },
+        {
+          key: "settings-accounts",
+          icon: <TeamOutlined />,
+          label: "Accounts & Roles",
         },
         {
           key: "dev-support",
@@ -640,7 +656,9 @@ export default function AdminHome() {
       case "cs-tech-assist":
         return <TechnicalAssistance isDark={isDark} canEdit={canEdit("technicalAssistance")} canDelete={canDelete("technicalAssistance")} />;
       case "settings-accounts":
-        return hasAccess("accountSettings") ? <AccountSettings isDark={isDark} /> : denied;
+        return isDeveloper && hasAccess("accountSettings") ? <AccountSettings isDark={isDark} /> : denied;
+      case "settings-portal-users":
+        return (isDeveloper || hasAccess("portalUsers")) ? <PortalUsers isDark={isDark} /> : denied;
       case "settings-fields":
         return hasAccess("portalFields") ? <FieldSettings isDark={isDark} canEdit={canEdit("portalFields")} canDelete={canDelete("portalFields")} /> : denied;
       case "settings-data-refs":
@@ -800,7 +818,7 @@ export default function AdminHome() {
             placement="left"
             open={drawerOpen}
             onClose={() => setDrawerOpen(false)}
-            width={260}
+            size={260}
             styles={{
               body: {
                 padding: 0,
@@ -1105,7 +1123,6 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
   const [loading, setLoading] = useState(true);
   const [dashTab, setDashTab] = useState(null);
   const [dashboardTabSettings, setDashboardTabSettings] = useState(null);
-  const [dashYear, setDashYear] = useState("");
   const [tileKey, setTileKey] = useState("street");
   const [mapFilterProvince, setMapFilterProvince] = useState(null);
   const [mapFilterStatus, setMapFilterStatus] = useState(null);
@@ -1126,6 +1143,7 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
   const [slfTileKey, setSlfTileKey] = useState("street");
   const [slfFilterProvince, setSlfFilterProvince] = useState(null);
   const [slfFilterStatus, setSlfFilterStatus] = useState(null);
+  const [slfDashModal, setSlfDashModal] = useState(null); // { type: 'leachate'|'gas'|'trashSlide'|'firePrev' }
 
   const mapPts = useMemo(
     () =>
@@ -1470,11 +1488,10 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
     setLguDivStats((prev) => { const n = lguDivData; return JSON.stringify(prev) === JSON.stringify(n) ? prev : n; });
   }, []);
 
-  const fetchStats = useCallback(async (year) => {
+  const fetchStats = useCallback(async () => {
     try {
-      const yp = year ? `?year=${year}` : "";
       // Show cached data immediately for instant rendering
-      const cacheKey = `${DASH_CACHE_KEY}-${year || "all"}`;
+      const cacheKey = `${DASH_CACHE_KEY}-all`;
       const cached = secureStorage.getJSON(cacheKey);
       if (cached) {
         applyStats(cached.stats, cached.swmStats, cached.mrfStats, cached.lguMrfStats, cached.trapStats, cached.equipStats, cached.slfFacStats, cached.openDumpStats, cached.rcaStats, cached.pdsStats, cached.techAssistStats, cached.tsStats, cached.lguDivStats);
@@ -1484,19 +1501,19 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
       const [slfRes, swmRes, mrfRes, lguMrfRes, trapRes, equipRes, slfFacRes, histRes, openDumpRes, rcaRes, pdsRes, techAssistRes, tsRes, lguDivRes] =
         await Promise.all([
           api.get("/data-slf/stats"),
-          api.get(`/ten-year-swm/stats${yp}`).catch(() => ({ data: null })),
-          api.get(`/funded-mrf/stats${yp}`).catch(() => ({ data: null })),
-          api.get(`/lgu-initiated-mrf/stats${yp}`).catch(() => ({ data: null })),
-          api.get(`/trash-traps/stats${yp}`).catch(() => ({ data: null })),
-          api.get(`/swm-equipment/stats${yp}`).catch(() => ({ data: null })),
-          api.get(`/slf-facilities/stats${yp}`).catch(() => ({ data: null })),
+          api.get("/ten-year-swm/stats").catch(() => ({ data: null })),
+          api.get("/funded-mrf/stats").catch(() => ({ data: null })),
+          api.get("/lgu-initiated-mrf/stats").catch(() => ({ data: null })),
+          api.get("/trash-traps/stats").catch(() => ({ data: null })),
+          api.get("/swm-equipment/stats").catch(() => ({ data: null })),
+          api.get("/slf-facilities/stats").catch(() => ({ data: null })),
           api.get("/data-history/summary").catch(() => ({ data: null })),
-          api.get(`/open-dumpsites/stats${yp}`).catch(() => ({ data: null })),
-          api.get(`/residual-containment/stats${yp}`).catch(() => ({ data: null })),
-          api.get(`/project-desc-scoping/stats${yp}`).catch(() => ({ data: null })),
-          api.get(`/technical-assistance/stats${yp}`).catch(() => ({ data: null })),
-          api.get(`/transfer-stations/stats${yp}`).catch(() => ({ data: null })),
-          api.get(`/lgu-assist-diversion/stats${yp}`).catch(() => ({ data: null })),
+          api.get("/open-dumpsites/stats").catch(() => ({ data: null })),
+          api.get("/residual-containment/stats").catch(() => ({ data: null })),
+          api.get("/project-desc-scoping/stats").catch(() => ({ data: null })),
+          api.get("/technical-assistance/stats").catch(() => ({ data: null })),
+          api.get("/transfer-stations/stats").catch(() => ({ data: null })),
+          api.get("/lgu-assist-diversion/stats").catch(() => ({ data: null })),
         ]);
       applyStats(slfRes.data, swmRes.data, mrfRes.data, lguMrfRes.data, trapRes.data, equipRes.data, slfFacRes.data, openDumpRes.data, rcaRes.data, pdsRes.data, techAssistRes.data, tsRes.data, lguDivRes.data);
       if (histRes.data) setHistoryData(histRes.data);
@@ -1525,14 +1542,14 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
 
   useEffect(() => {
     setLoading(true);
-    fetchStats(dashYear);
+    fetchStats();
     // Fetch dashboard tab settings
     api.get("/settings/app").then(({ data }) => {
       setDashboardTabSettings(data.dashboardTabs && typeof data.dashboardTabs === "object" ? data.dashboardTabs : {});
     }).catch(() => { setDashboardTabSettings({}); });
-    const interval = setInterval(() => fetchStats(dashYear), 60000);
+    const interval = setInterval(() => fetchStats(), 60000);
     return () => clearInterval(interval);
-  }, [fetchStats, dashYear]);
+  }, [fetchStats]);
 
   const statusColors = {
     pending: "#faad14",
@@ -6872,9 +6889,10 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                     <Col xs={12} sm={12} md={6}>
                       <Card
                         hoverable
-                        style={{ borderRadius: 10, height: 110, borderLeft: "4px solid #13c2c2" }}
+                        style={{ borderRadius: 10, height: 110, borderLeft: "4px solid #13c2c2", cursor: "pointer" }}
                         loading={loading}
                         styles={{ body: { padding: "10px 14px" } }}
+                        onClick={() => setSlfDashModal({ type: "cells" })}
                       >
                         <Statistic
                           title="Total Cells"
@@ -6887,9 +6905,10 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                     <Col xs={12} sm={12} md={6}>
                       <Card
                         hoverable
-                        style={{ borderRadius: 10, height: 110, borderLeft: "4px solid #fa8c16" }}
+                        style={{ borderRadius: 10, height: 110, borderLeft: "4px solid #fa8c16", cursor: "pointer" }}
                         loading={loading}
                         styles={{ body: { padding: "10px 14px" } }}
+                        onClick={() => setSlfDashModal({ type: "lgu" })}
                       >
                         <Statistic
                           title="LGUs Served"
@@ -6916,14 +6935,15 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                     </Col>
                   </Row>
 
-                  {/* Row 2: Total Capacity | Waste Received | Leachate Ponds | Gas Vents */}
+                  {/* Row 2: Total Capacity | Waste Received | Leachate Management | Gas Management */}
                   <Row gutter={[16, 16]} style={{ marginBottom: 16 }}>
                     <Col xs={12} sm={12} md={6}>
                       <Card
                         hoverable
-                        style={{ borderRadius: 10, height: 110, borderLeft: "4px solid #eb2f96" }}
+                        style={{ borderRadius: 10, height: 110, borderLeft: "4px solid #eb2f96", cursor: "pointer" }}
                         loading={loading}
                         styles={{ body: { padding: "10px 14px" } }}
+                        onClick={() => setSlfDashModal({ type: "capacity" })}
                       >
                         <Statistic
                           title="Total Capacity"
@@ -6937,9 +6957,10 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                     <Col xs={12} sm={12} md={6}>
                       <Card
                         hoverable
-                        style={{ borderRadius: 10, height: 110, borderLeft: "4px solid #ff4d4f" }}
+                        style={{ borderRadius: 10, height: 110, borderLeft: "4px solid #ff4d4f", cursor: "pointer" }}
                         loading={loading}
                         styles={{ body: { padding: "10px 14px" } }}
+                        onClick={() => setSlfDashModal({ type: "waste" })}
                       >
                         <Statistic
                           title="Waste Received"
@@ -6954,31 +6975,33 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                     <Col xs={12} sm={12} md={6}>
                       <Card
                         hoverable
-                        style={{ borderRadius: 10, height: 110, borderLeft: "4px solid #1890ff" }}
+                        onClick={() => setSlfDashModal({ type: "leachate" })}
+                        style={{ borderRadius: 10, height: 110, borderLeft: "4px solid #1890ff", cursor: "pointer" }}
                         loading={loading}
                         styles={{ body: { padding: "10px 14px" } }}
                       >
                         <Statistic
-                          title="Leachate Ponds"
+                          title="Leachate Management"
                           value={slfOps.totalLeachatePonds || 0}
                           prefix={<AlertOutlined style={{ color: "#1890ff" }} />}
                         />
-                        <Text type="secondary" style={{ fontSize: 11 }}>across facilities</Text>
+                        <Text type="secondary" style={{ fontSize: 11 }}>Click to view leachate ponds</Text>
                       </Card>
                     </Col>
                     <Col xs={12} sm={12} md={6}>
                       <Card
                         hoverable
-                        style={{ borderRadius: 10, height: 110, borderLeft: "4px solid #52c41a" }}
+                        onClick={() => setSlfDashModal({ type: "gas" })}
+                        style={{ borderRadius: 10, height: 110, borderLeft: "4px solid #52c41a", cursor: "pointer" }}
                         loading={loading}
                         styles={{ body: { padding: "10px 14px" } }}
                       >
                         <Statistic
-                          title="Gas Vents"
+                          title="Gas Management"
                           value={slfOps.totalGasVents || 0}
                           prefix={<SafetyCertificateOutlined style={{ color: "#52c41a" }} />}
                         />
-                        <Text type="secondary" style={{ fontSize: 11 }}>across facilities</Text>
+                        <Text type="secondary" style={{ fontSize: 11 }}>Click to view gas vents</Text>
                       </Card>
                     </Col>
                   </Row>
@@ -7112,214 +7135,62 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                           </Card>
                         </Col>
 
-                        {/* By Province */}
+                        {/* Trash Slide Prevention Measures */}
                         <Col xs={24} sm={12}>
                           <Card
-                            title={
-                              <>
-                                <EnvironmentOutlined /> SLFs per Province
-                              </>
-                            }
-                            style={{ borderRadius: 10, height: SLF_CARD_H }}
+                            title={<><WarningOutlined /> Trash Slide Prevention</>}
+                            hoverable
+                            onClick={() => setSlfDashModal({ type: "trashSlide" })}
+                            style={{ borderRadius: 10, height: SLF_CARD_H, cursor: "pointer", borderTop: "3px solid #fa8c16" }}
                             loading={loading}
-                            styles={{
-                              body: { overflow: "auto", height: SLF_CARD_H - 57 },
-                            }}
+                            styles={{ body: { overflow: "auto", height: SLF_CARD_H - 57, padding: "12px 16px" } }}
                           >
-                            <div
-                              style={{
-                                display: "flex",
-                                flexDirection: "column",
-                                gap: 5,
-                                maxHeight: 170,
-                                overflowY: "auto",
-                                padding: "0 2px",
-                              }}
-                            >
-                              {slfProvList.map((p, i) => (
-                                <div
-                                  key={i}
-                                  style={{
-                                    display: "flex",
-                                    alignItems: "center",
-                                    gap: 6,
-                                  }}
-                                >
-                                  <Text
-                                    style={{
-                                      fontSize: 10,
-                                      color: isDark ? "#aaa" : "#999",
-                                      minWidth: 70,
-                                      textAlign: "right",
-                                      whiteSpace: "nowrap",
-                                      overflow: "hidden",
-                                      textOverflow: "ellipsis",
-                                    }}
-                                  >
-                                    {p._id}
-                                  </Text>
-                                  <div
-                                    style={{
-                                      flex: 1,
-                                      height: 16,
-                                      background: isDark ? "#2a2a2a" : "#f5f5f5",
-                                      borderRadius: 3,
-                                      overflow: "hidden",
-                                    }}
-                                  >
-                                    <div
-                                      style={{
-                                        width: `${Math.max((p.count / slfMaxProv) * 100, 4)}%`,
-                                        height: "100%",
-                                        background:
-                                          "linear-gradient(90deg, #2f54eb 0%, #85a5ff 100%)",
-                                        borderRadius: "3px 0 0 3px",
-                                        transition: "width 0.5s ease",
-                                      }}
-                                    />
-                                  </div>
-                                  <Text
-                                    style={{
-                                      fontSize: 10,
-                                      color: isDark ? "#ccc" : "#666",
-                                      minWidth: 20,
-                                      textAlign: "right",
-                                      fontWeight: 600,
-                                    }}
-                                  >
-                                    {p.count}
-                                  </Text>
+                            <Row gutter={[8, 8]}>
+                              <Col span={12}>
+                                <div style={{ textAlign: "center", padding: "6px 4px", background: isDark ? "rgba(250,140,22,0.15)" : "#fff7e6", borderRadius: 6, border: "1px solid #ffd591" }}>
+                                  <Text type="secondary" style={{ fontSize: 10, display: "block" }}>Total Measures</Text>
+                                  <Text strong style={{ fontSize: 22, color: "#fa8c16" }}>{(slfOps.totalTrashSlideMeasures || 0).toLocaleString()}</Text>
                                 </div>
-                              ))}
+                              </Col>
+                              <Col span={12}>
+                                <div style={{ textAlign: "center", padding: "6px 4px", background: isDark ? "rgba(250,140,22,0.1)" : "#fffbe6", borderRadius: 6, border: "1px solid #ffe58f" }}>
+                                  <Text type="secondary" style={{ fontSize: 10, display: "block" }}>Facilities w/ Measures</Text>
+                                  <Text strong style={{ fontSize: 22, color: "#d46b08" }}>{(slfOps.trashSlideFacilities || 0).toLocaleString()}</Text>
+                                </div>
+                              </Col>
+                            </Row>
+                            <div style={{ marginTop: 10, textAlign: "center" }}>
+                              <Text type="secondary" style={{ fontSize: 11 }}>Click to view details per SLF</Text>
                             </div>
                           </Card>
                         </Col>
 
-                        {/* Key Metrics */}
+                        {/* Fire Prevention Measures */}
                         <Col xs={24} sm={12}>
                           <Card
-                            title={
-                              <>
-                                <BarChartOutlined /> Key Metrics
-                              </>
-                            }
-                            style={{ borderRadius: 10, height: SLF_CARD_H }}
+                            title={<><FireOutlined /> Fire Prevention Measures</>}
+                            hoverable
+                            onClick={() => setSlfDashModal({ type: "firePrev" })}
+                            style={{ borderRadius: 10, height: SLF_CARD_H, cursor: "pointer", borderTop: "3px solid #ff4d4f" }}
                             loading={loading}
-                            styles={{
-                              body: {
-                                overflow: "auto",
-                                height: SLF_CARD_H - 57,
-                                padding: "12px 16px",
-                              },
-                            }}
+                            styles={{ body: { overflow: "auto", height: SLF_CARD_H - 57, padding: "12px 16px" } }}
                           >
-                            <div
-                              style={{
-                                display: "flex",
-                                flexDirection: "column",
-                                gap: 10,
-                              }}
-                            >
-                              <Row gutter={8}>
-                                <Col span={12}>
-                                  <div
-                                    style={{
-                                      textAlign: "center",
-                                      padding: "6px 4px",
-                                      background: isDark ? "rgba(22,119,255,0.15)" : "#e6f7ff",
-                                      borderRadius: 6,
-                                      border: isDark ? "1px solid rgba(22,119,255,0.3)" : "1px solid #bae7ff",
-                                    }}
-                                  >
-                                    <Text
-                                      type="secondary"
-                                      style={{ fontSize: 10, display: "block" }}
-                                    >
-                                      Total Cells
-                                    </Text>
-                                    <Text
-                                      strong
-                                      style={{ fontSize: 16, color: "#13c2c2" }}
-                                    >
-                                      {(slfOps.totalCells || 0).toLocaleString()}
-                                    </Text>
-                                  </div>
-                                </Col>
-                                <Col span={12}>
-                                  <div
-                                    style={{
-                                      textAlign: "center",
-                                      padding: "6px 4px",
-                                      background: isDark ? "rgba(114,46,209,0.15)" : "#f9f0ff",
-                                      borderRadius: 6,
-                                      border: isDark ? "1px solid rgba(114,46,209,0.3)" : "1px solid #efdbff",
-                                    }}
-                                  >
-                                    <Text
-                                      type="secondary"
-                                      style={{ fontSize: 10, display: "block" }}
-                                    >
-                                      Leachate Ponds
-                                    </Text>
-                                    <Text
-                                      strong
-                                      style={{ fontSize: 16, color: "#722ed1" }}
-                                    >
-                                      {(slfOps.totalLeachatePonds || 0).toLocaleString()}
-                                    </Text>
-                                  </div>
-                                </Col>
-                              </Row>
-                              <Row gutter={8}>
-                                <Col span={12}>
-                                  <div
-                                    style={{
-                                      textAlign: "center",
-                                      padding: "6px 4px",
-                                      background: isDark ? "rgba(82,196,26,0.15)" : "#f6ffed",
-                                      borderRadius: 6,
-                                      border: "1px solid #b7eb8f",
-                                    }}
-                                  >
-                                    <Text
-                                      type="secondary"
-                                      style={{ fontSize: 10, display: "block" }}
-                                    >
-                                      Gas Vents
-                                    </Text>
-                                    <Text
-                                      strong
-                                      style={{ fontSize: 16, color: "#52c41a" }}
-                                    >
-                                      {(slfOps.totalGasVents || 0).toLocaleString()}
-                                    </Text>
-                                  </div>
-                                </Col>
-                                <Col span={12}>
-                                  <div
-                                    style={{
-                                      textAlign: "center",
-                                      padding: "6px 4px",
-                                      background: isDark ? "rgba(250,173,20,0.15)" : "#fff7e6",
-                                      borderRadius: 6,
-                                      border: "1px solid #ffd591",
-                                    }}
-                                  >
-                                    <Text
-                                      type="secondary"
-                                      style={{ fontSize: 10, display: "block" }}
-                                    >
-                                      LGUs Served
-                                    </Text>
-                                    <Text
-                                      strong
-                                      style={{ fontSize: 16, color: "#fa8c16" }}
-                                    >
-                                      {(slfOps.totalLGUsServed || 0).toLocaleString()}
-                                    </Text>
-                                  </div>
-                                </Col>
-                              </Row>
+                            <Row gutter={[8, 8]}>
+                              <Col span={12}>
+                                <div style={{ textAlign: "center", padding: "6px 4px", background: isDark ? "rgba(255,77,79,0.15)" : "#fff1f0", borderRadius: 6, border: "1px solid #ffa39e" }}>
+                                  <Text type="secondary" style={{ fontSize: 10, display: "block" }}>Total Measures</Text>
+                                  <Text strong style={{ fontSize: 22, color: "#ff4d4f" }}>{(slfOps.totalFirePrevMeasures || 0).toLocaleString()}</Text>
+                                </div>
+                              </Col>
+                              <Col span={12}>
+                                <div style={{ textAlign: "center", padding: "6px 4px", background: isDark ? "rgba(255,77,79,0.1)" : "#fff2f0", borderRadius: 6, border: "1px solid #ffccc7" }}>
+                                  <Text type="secondary" style={{ fontSize: 10, display: "block" }}>Facilities w/ Measures</Text>
+                                  <Text strong style={{ fontSize: 22, color: "#cf1322" }}>{(slfOps.firePreventionFacilities || 0).toLocaleString()}</Text>
+                                </div>
+                              </Col>
+                            </Row>
+                            <div style={{ marginTop: 10, textAlign: "center" }}>
+                              <Text type="secondary" style={{ fontSize: 11 }}>Click to view details per SLF</Text>
                             </div>
                           </Card>
                         </Col>
@@ -7769,6 +7640,178 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                       </div>
                     </Col>
                   </Row>
+
+                  {/* ── SLF Dashboard Drill-Down Modals ── */}
+                  {slfDashModal && (() => {
+                    const mgmtData = (slfFacStats.managementData || []);
+                    const PAG = { pageSize: 15, showSizeChanger: true, pageSizeOptions: ["10", "15", "25", "50"], showTotal: (t) => `${t} total entries` };
+                    const slfCol = { title: "LGU / SLF", dataIndex: "slfName", width: 180, fixed: "left", render: (v) => <Text strong style={{ fontSize: 12 }}>{v}</Text> };
+                    const provCol = { title: "Province", dataIndex: "province", width: 160, render: (v) => <Text type="secondary" style={{ fontSize: 12 }}>{v || "—"}</Text> };
+
+                    const modalConfig = {
+                      leachate: {
+                        title: <Space><AlertOutlined style={{ color: "#1890ff" }} /> Leachate Management — All Pond Details</Space>,
+                        filter: (r) => (r.noOfLeachatePond || 0) > 0,
+                        flatten: (r) => (r.leachatePondDetails || []).length > 0
+                          ? r.leachatePondDetails.map((p, i) => ({ key: `${r.lgu}_${i}`, slfName: r.lgu, province: r.province, pondNo: p.pondNo ?? i + 1, description: p.description, status: p.status, attachments: p.attachments || [] }))
+                          : [{ key: r.lgu, slfName: r.lgu, province: r.province, pondNo: "—", description: `${r.noOfLeachatePond} pond(s) — no details entered`, status: "—", attachments: [] }],
+                        columns: [
+                          slfCol, provCol,
+                          { title: "Pond No.", dataIndex: "pondNo", width: 90, align: "center" },
+                          { title: "Description", dataIndex: "description", ellipsis: true, render: (v) => v || <Text type="secondary">—</Text> },
+                          { title: "Status", dataIndex: "status", width: 150, render: (v) => v && v !== "—" ? <Tag color={v === "Active" ? "blue" : v === "Under Maintenance" ? "orange" : "default"}>{v}</Tag> : "—" },
+                          { title: "Attachments", dataIndex: "attachments", width: 110, align: "center", render: (v) => (v || []).length ? <Tag color="geekblue">{v.length} file(s)</Tag> : <Text type="secondary" style={{ fontSize: 11 }}>—</Text> },
+                        ],
+                      },
+                      gas: {
+                        title: <Space><SafetyCertificateOutlined style={{ color: "#52c41a" }} /> Gas Management — All Vent Details</Space>,
+                        filter: (r) => (r.numberOfGasVents || 0) > 0,
+                        flatten: (r) => (r.gasVentDetails || []).length > 0
+                          ? r.gasVentDetails.map((g, i) => ({ key: `${r.lgu}_${i}`, slfName: r.lgu, province: r.province, ventNo: g.ventNo ?? i + 1, ventType: g.ventType, description: g.description, status: g.status, attachments: g.attachments || [] }))
+                          : [{ key: r.lgu, slfName: r.lgu, province: r.province, ventNo: "—", ventType: "—", description: `${r.numberOfGasVents} vent(s) — no details entered`, status: "—", attachments: [] }],
+                        columns: [
+                          slfCol, provCol,
+                          { title: "Vent No.", dataIndex: "ventNo", width: 90, align: "center" },
+                          { title: "Type", dataIndex: "ventType", width: 130, render: (v) => v || "—" },
+                          { title: "Description", dataIndex: "description", ellipsis: true, render: (v) => v || <Text type="secondary">—</Text> },
+                          { title: "Status", dataIndex: "status", width: 150, render: (v) => v && v !== "—" ? <Tag color={v === "Active" ? "green" : v === "Under Maintenance" ? "orange" : "default"}>{v}</Tag> : "—" },
+                          { title: "Attachments", dataIndex: "attachments", width: 110, align: "center", render: (v) => (v || []).length ? <Tag color="cyan">{v.length} file(s)</Tag> : <Text type="secondary" style={{ fontSize: 11 }}>—</Text> },
+                        ],
+                      },
+                      trashSlide: {
+                        title: <Space><WarningOutlined style={{ color: "#fa8c16" }} /> Trash Slide Prevention — All Measures</Space>,
+                        filter: (r) => (r.trashSlideMeasures?.length || 0) > 0,
+                        flatten: (r) => (r.trashSlideMeasures || []).map((m, i) => ({ key: `${r.lgu}_${i}`, slfName: r.lgu, province: r.province, measure: m.measure, description: m.description, status: m.status, attachments: m.attachments || [] })),
+                        columns: [
+                          slfCol, provCol,
+                          { title: "Measure", dataIndex: "measure", width: 200, render: (v) => v || "—" },
+                          { title: "Description", dataIndex: "description", ellipsis: true, render: (v) => v || <Text type="secondary">—</Text> },
+                          { title: "Status", dataIndex: "status", width: 150, render: (v) => v ? <Tag color={v === "Implemented" ? "green" : v === "Pending" ? "orange" : "default"}>{v}</Tag> : "—" },
+                          { title: "Attachments", dataIndex: "attachments", width: 110, align: "center", render: (v) => (v || []).length ? <Tag color="orange">{v.length} file(s)</Tag> : <Text type="secondary" style={{ fontSize: 11 }}>—</Text> },
+                        ],
+                      },
+                      firePrev: {
+                        title: <Space><FireOutlined style={{ color: "#ff4d4f" }} /> Fire Prevention — All Measures</Space>,
+                        filter: (r) => (r.firePrevMeasures?.length || 0) > 0,
+                        flatten: (r) => (r.firePrevMeasures || []).map((m, i) => ({ key: `${r.lgu}_${i}`, slfName: r.lgu, province: r.province, measure: m.measure, description: m.description, status: m.status, attachments: m.attachments || [] })),
+                        columns: [
+                          slfCol, provCol,
+                          { title: "Measure", dataIndex: "measure", width: 200, render: (v) => v || "—" },
+                          { title: "Description", dataIndex: "description", ellipsis: true, render: (v) => v || <Text type="secondary">—</Text> },
+                          { title: "Status", dataIndex: "status", width: 150, render: (v) => v ? <Tag color={v === "Implemented" ? "green" : v === "Pending" ? "orange" : "default"}>{v}</Tag> : "—" },
+                          { title: "Attachments", dataIndex: "attachments", width: 110, align: "center", render: (v) => (v || []).length ? <Tag color="red">{v.length} file(s)</Tag> : <Text type="secondary" style={{ fontSize: 11 }}>—</Text> },
+                        ],
+                      },
+                      cells: {
+                        title: <Space><ContainerOutlined style={{ color: "#13c2c2" }} /> Cell Infrastructure — All Facilities</Space>,
+                        filter: (r) => (r.numberOfCell || 0) > 0,
+                        flatten: (r) => {
+                          const caps = r.cellCapacities || [];
+                          const maxCap = Math.max(...caps.filter(c => c != null), 1);
+                          return Array.from({ length: r.numberOfCell || 0 }, (_, i) => ({
+                            key: `${r.lgu}_${i}`,
+                            slfName: r.lgu,
+                            province: r.province,
+                            cellNo: i + 1,
+                            type: (r.cellTypes || [])[i] || "—",
+                            capacity: caps[i] ?? null,
+                            maxCap,
+                            status: (r.cellStatuses || [])[i] || "—",
+                          }));
+                        },
+                        columns: [
+                          slfCol, provCol,
+                          { title: "Cell No.", dataIndex: "cellNo", width: 90, align: "center", render: (v) => <Tag color="cyan" style={{ fontWeight: 700, minWidth: 42, textAlign: "center" }}>Cell {v}</Tag> },
+                          { title: "Type", dataIndex: "type", width: 140, render: (v) => {
+                            if (!v || v === "—") return "—";
+                            const color = v.toLowerCase().includes("hazard") ? "red" : v.toLowerCase().includes("resid") ? "geekblue" : "blue";
+                            return <Tag color={color}>{v}</Tag>;
+                          }},
+                          { title: "Capacity (m³)", key: "capacityViz", width: 200, render: (_, row) => {
+                            if (row.capacity == null) return <Text type="secondary">—</Text>;
+                            const pct = Math.round((row.capacity / (row.maxCap || 1)) * 100);
+                            return (
+                              <div>
+                                <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 2 }}>
+                                  <Text style={{ fontSize: 11 }}>{Number(row.capacity).toLocaleString()} m³</Text>
+                                  <Text type="secondary" style={{ fontSize: 10 }}>{pct}%</Text>
+                                </div>
+                                <Progress percent={pct} size="small" showInfo={false} strokeColor={pct > 75 ? "#ff4d4f" : pct > 40 ? "#fa8c16" : "#52c41a"} trailColor="#f0f0f0" />
+                              </div>
+                            );
+                          }},
+                          { title: "Status", dataIndex: "status", width: 150, render: (v) => v && v !== "—" ? <Tag color={v === "Operational" ? "green" : v === "Closed" ? "default" : "orange"}>{v}</Tag> : "—" },
+                        ],
+                      },
+                      capacity: {
+                        title: <Space><BarChartOutlined style={{ color: "#eb2f96" }} /> Total Capacity — Per SLF</Space>,
+                        filter: (r) => (r.volumeCapacity || 0) > 0,
+                        flatten: (r) => [{ key: r.lgu, slfName: r.lgu, province: r.province, volumeCapacity: r.volumeCapacity, status: r.statusOfSLF, ownership: r.ownership, category: r.category }],
+                        columns: [
+                          slfCol, provCol,
+                          { title: "Volume Capacity (m³)", dataIndex: "volumeCapacity", width: 190, align: "right", render: (v) => v ? <Text strong style={{ color: "#eb2f96" }}>{Number(v).toLocaleString()}</Text> : "—" },
+                          { title: "Ownership", dataIndex: "ownership", width: 130, render: (v) => v || "—" },
+                          { title: "Category", dataIndex: "category", width: 90, render: (v) => v ? <Tag color="purple">{v}</Tag> : "—" },
+                          { title: "Status", dataIndex: "status", width: 150, render: (v) => v ? <Tag color={v.toLowerCase().includes("non") ? "red" : "green"}>{v}</Tag> : "—" },
+                        ],
+                      },
+                      lgu: {
+                        title: <Space><TeamOutlined style={{ color: "#fa8c16" }} /> LGUs Served — Per SLF</Space>,
+                        filter: (r) => (r.noOfLGUServed || 0) > 0,
+                        flatten: (r) => [{ key: r.lgu, slfName: r.lgu, province: r.province, lguCount: r.noOfLGUServed, status: r.statusOfSLF, ownership: r.ownership, category: r.category }],
+                        columns: [
+                          slfCol, provCol,
+                          { title: "LGUs Served", dataIndex: "lguCount", width: 120, align: "center", render: (v) => <Tag color="orange" style={{ fontWeight: 700 }}>{v ?? "—"}</Tag> },
+                          { title: "Status", dataIndex: "status", width: 150, render: (v) => v ? <Tag color={v.toLowerCase().includes("non") ? "red" : "green"}>{v}</Tag> : "—" },
+                          { title: "Ownership", dataIndex: "ownership", width: 130, render: (v) => v || "—" },
+                          { title: "Category", dataIndex: "category", width: 90, render: (v) => v ? <Tag color="purple">{v}</Tag> : "—" },
+                        ],
+                      },
+                      waste: {
+                        title: <Space><BarChartOutlined style={{ color: "#ff4d4f" }} /> Waste Received — Per SLF</Space>,
+                        filter: (r) => (r.actualResidualWasteReceived || 0) > 0,
+                        flatten: (r) => [{ key: r.lgu, slfName: r.lgu, province: r.province, wasteReceived: r.actualResidualWasteReceived, status: r.statusOfSLF, ownership: r.ownership }],
+                        columns: [
+                          slfCol, provCol,
+                          { title: "Waste Received (tons)", dataIndex: "wasteReceived", width: 180, align: "right", render: (v) => v ? Number(v).toLocaleString() : "—" },
+                          { title: "Ownership", dataIndex: "ownership", width: 130, render: (v) => v || "—" },
+                          { title: "Status", dataIndex: "status", width: 150, render: (v) => v ? <Tag color={v.toLowerCase().includes("non") ? "red" : "green"}>{v}</Tag> : "—" },
+                        ],
+                      },
+                    };
+                    const cfg = modalConfig[slfDashModal.type];
+                    const flatData = mgmtData.filter(cfg.filter).flatMap(cfg.flatten);
+                    return (
+                      <Modal
+                        open
+                        title={cfg.title}
+                        onCancel={() => setSlfDashModal(null)}
+                        footer={
+                          <div style={{ display: "flex", justifyContent: "space-between" }}>
+                            <Button onClick={() => setSlfDashModal(null)}>Close</Button>
+                            <Button type="primary" icon={<TableOutlined />} onClick={() => { setSlfDashModal(null); setActiveMenu("slf-monitoring"); }}>
+                              View in SLF Monitoring
+                            </Button>
+                          </div>
+                        }
+                        width={1050}
+                        destroyOnHidden
+                      >
+                        {flatData.length === 0 ? (
+                          <Empty description="No data available for this category." />
+                        ) : (
+                          <Table
+                            dataSource={flatData}
+                            columns={cfg.columns}
+                            size="small"
+                            pagination={PAG}
+                            scroll={{ x: "max-content" }}
+                            bordered
+                          />
+                        )}
+                      </Modal>
+                    );
+                  })()}
                 </>
               ),
             },
@@ -8384,7 +8427,7 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
           label: tab.label,
           children: (
             <div style={{ textAlign: "center", padding: "60px 20px" }}>
-              <Empty description={<Text type="secondary">No data available{dashYear ? ` for ${dashYear}` : ""}. Records may exist in other years.</Text>} />
+              <Empty description={<Text type="secondary">No data available. Records may exist in hidden years.</Text>} />
             </div>
           ),
         });
@@ -9045,28 +9088,8 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
           />
         )}
       </Modal>
-      <div style={{ marginBottom: 16, display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 8 }}>
-        <div>
-          <Title level={3} style={{ margin: 0, color: textColor }}>
-            Dashboard
-          </Title>
-          <Text type="secondary">
-            Here&apos;s a real-time overview of the system.
-          </Text>
-        </div>
+      <div style={{ marginBottom: 16, display: "flex", alignItems: "center", justifyContent: "flex-end", flexWrap: "wrap", gap: 8 }}>
         <Space size="middle">
-          <Select
-            value={dashYear}
-            onChange={(v) => setDashYear(v)}
-            style={{ width: 130 }}
-            options={[
-              { label: "All Years", value: "" },
-              ...Array.from({ length: 7 }, (_, i) => {
-                const y = new Date().getFullYear() - i;
-                return { label: `Year ${y}`, value: y };
-              }),
-            ]}
-          />
           {loading && <Spin size="small" />}
         </Space>
       </div>
