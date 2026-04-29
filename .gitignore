@@ -1,0 +1,13 @@
+# Windows artifact
+nul
+
+# macOS
+.DS_Store
+
+# Editor
+.vscode/*
+!.vscode/extensions.json
+.idea
+
+# Misc
+*.local

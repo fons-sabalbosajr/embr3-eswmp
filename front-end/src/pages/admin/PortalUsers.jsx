@@ -336,7 +336,7 @@ export default function PortalUsers({ isDark }) {
       title: "Registered",
       dataIndex: "createdAt",
       key: "createdAt",
-      render: (v) => dayjs(v).format("MMM D, YYYY"),
+      render: (v) => dayjs(v).format("MM/DD/YYYY"),
       sorter: (a, b) => new Date(a.createdAt) - new Date(b.createdAt),
     },
     {

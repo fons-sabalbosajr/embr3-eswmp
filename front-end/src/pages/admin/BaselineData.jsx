@@ -377,7 +377,7 @@ export default function BaselineData({ isDark, canEdit = false, canDelete = fals
       dataIndex: "lastUpdated",
       key: "lastUpdated",
       width: 120,
-      render: (v) => v ? dayjs(v).format("MMM D, YYYY") : "—",
+      render: (v) => v ? dayjs(v).format("MM/DD/YYYY") : "—",
     },
     {
       title: "Total Volume",
@@ -615,7 +615,7 @@ export default function BaselineData({ isDark, canEdit = false, canDelete = fals
                     {r.baselineUpdateRequested && <Tag color="processing" style={{ marginBottom: 4, display: "block" }}>Update Requested</Tag>}
                     {r.baselineUpdateApproved && <Tag color="success" style={{ display: "block" }}>Edit Unlocked</Tag>}
                     <Text style={{ color: "rgba(255,255,255,0.5)", fontSize: 11, display: "block", marginTop: 4 }}>
-                      {r.lastUpdated ? dayjs(r.lastUpdated).format("MMM D, YYYY") : "—"}
+                      {r.lastUpdated ? dayjs(r.lastUpdated).format("MM/DD/YYYY") : "—"}
                     </Text>
                   </div>
                 </div>

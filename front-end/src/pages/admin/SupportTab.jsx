@@ -242,7 +242,7 @@ export default function SupportTab({ isDark }) {
       defaultSortOrder: "descend",
       render: (v) => (
         <div>
-          <Text style={{ fontSize: 12 }}>{v ? dayjs(v).format("MMM D, YYYY") : "—"}</Text>
+          <Text style={{ fontSize: 12 }}>{v ? dayjs(v).format("MM/DD/YYYY") : "—"}</Text>
           <br />
           <Text type="secondary" style={{ fontSize: 11 }}>{v ? dayjs(v).format("h:mm A") : ""}</Text>
         </div>

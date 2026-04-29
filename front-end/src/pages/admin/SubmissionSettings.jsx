@@ -48,6 +48,7 @@ import { exportToExcel } from "../../utils/exportExcel";
 import Swal from "sweetalert2";
 import api from "../../api";
 import secureStorage from "../../utils/secureStorage";
+import { fetchWithCache, invalidateCache } from "../../utils/pageCache";
 import dayjs from "dayjs";
 
 const { Title, Text } = Typography;
@@ -106,22 +107,16 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, is
     if (fetchingRef.current) return;
     fetchingRef.current = true;
     try {
-      if (!skipCache) {
-        const cached = secureStorage.getJSON(CACHE_KEY);
-        if (cached && Date.now() - cached.ts < CACHE_TTL) {
-          setData(cached.data);
-          setLoading(false);
-          return;
-        }
-      }
-      const { data: result } = await api.get("/data-slf");
-      setData(result);
-      secureStorage.setJSON(CACHE_KEY, { data: result, ts: Date.now() });
-    } catch {
-      Swal.fire("Error", "Could not load submissions", "error");
+      await fetchWithCache(CACHE_KEY, () => api.get("/data-slf").then(({ data }) => data), {
+        ttl: CACHE_TTL,
+        force: skipCache,
+        onData:  (data) => { setData(data); setLoading(false); },
+        onError: ()     => Swal.fire("Error", "Could not load submissions", "error"),
+        onStart: ()     => setLoading(true),
+        onEnd:   ()     => setLoading(false),
+      });
     } finally {
       fetchingRef.current = false;
-      setLoading(false);
     }
   };
 
@@ -548,7 +543,7 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, is
       dataIndex: "dateOfDisposal",
       key: "dateOfDisposal",
       width: 130,
-      render: (val) => (val ? dayjs(val).format("MMM DD, YYYY") : "—"),
+      render: (val) => (val ? dayjs(val).format("MM/DD/YYYY") : "—"),
     },
     {
       title: (
@@ -891,7 +886,7 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, is
                       >
                         {r.lguCompanyName} &middot;{" "}
                         {r.dateOfDisposal
-                          ? dayjs(r.dateOfDisposal).format("MMM DD, YYYY")
+                          ? dayjs(r.dateOfDisposal).format("MM/DD/YYYY")
                           : "No date"}
                       </Text>
                     </div>
@@ -914,7 +909,7 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, is
                           }}
                         >
                           {r.createdAt
-                            ? dayjs(r.createdAt).format("MMM DD, YYYY hh:mm A")
+                            ? dayjs(r.createdAt).format("MM/DD/YYYY hh:mm A")
                             : ""}
                         </Text>
                       </div>
@@ -1883,7 +1878,7 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, is
                         }
                         rules={[{ required: true }]}
                       >
-                        <DatePicker style={{ width: "100%" }} />
+                        <DatePicker format="MM/DD/YYYY" style={{ width: "100%" }} />
                       </Form.Item>
                     </Col>
                     <Col xs={24} sm={12}>
@@ -2545,7 +2540,7 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, is
                 <Text style={{ color: "rgba(255,255,255,0.55)", fontSize: 11, display: "block" }}>{txnHistoryData.length} event{txnHistoryData.length !== 1 ? "s" : ""}</Text>
                 {txnHistoryData[0]?.createdAt && (
                   <Text style={{ color: "rgba(255,255,255,0.4)", fontSize: 11 }}>
-                    {dayjs(txnHistoryData[txnHistoryData.length - 1]?.createdAt).format("MMM D")} → {dayjs(txnHistoryData[0]?.createdAt).format("MMM D, YYYY")}
+                    {dayjs(txnHistoryData[txnHistoryData.length - 1]?.createdAt).format("MMM D")} → {dayjs(txnHistoryData[0]?.createdAt).format("MM/DD/YYYY")}
                   </Text>
                 )}
               </div>
@@ -2645,7 +2640,7 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, is
                     width: 130,
                     render: (v) => (
                       <div>
-                        <Text style={{ fontSize: 12, display: "block" }}>{dayjs(v).format("MMM D, YYYY")}</Text>
+                        <Text style={{ fontSize: 12, display: "block" }}>{dayjs(v).format("MM/DD/YYYY")}</Text>
                         <Text type="secondary" style={{ fontSize: 11 }}>{dayjs(v).format("h:mm A")}</Text>
                       </div>
                     ),

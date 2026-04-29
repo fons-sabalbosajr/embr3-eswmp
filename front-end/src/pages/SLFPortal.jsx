@@ -1828,7 +1828,7 @@ export default function SLFPortal() {
       title: "Date of Disposal",
       dataIndex: "dateOfDisposal",
       key: "dateOfDisposal",
-      render: (v) => (v ? dayjs(v).format("MMM D, YYYY") : "—"),
+      render: (v) => (v ? dayjs(v).format("MM/DD/YYYY") : "—"),
     },
     {
       title: "Company / Address",
@@ -2922,7 +2922,7 @@ export default function SLFPortal() {
                             },
                           ]}
                         >
-                          <DatePicker style={{ width: "100%" }} />
+                          <DatePicker format="MM/DD/YYYY" style={{ width: "100%" }} />
                         </Form.Item>
                       </Col>
                     </Row>
@@ -4514,7 +4514,7 @@ export default function SLFPortal() {
                     {entryForm.getFieldValue("dateOfDisposal")
                       ? dayjs(
                           entryForm.getFieldValue("dateOfDisposal"),
-                        ).format("MMM D, YYYY")
+                        ).format("MM/DD/YYYY")
                       : "—"}
                   </Descriptions.Item>
                   <Descriptions.Item label="LGU/Company Name">

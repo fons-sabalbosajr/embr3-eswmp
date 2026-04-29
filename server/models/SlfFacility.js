@@ -19,12 +19,19 @@ const slfFacilitySchema = new mongoose.Schema(
     yearStartedOperation: { type: Number },
     category: { type: String, trim: true },
     volumeCapacity: { type: Number },
+    volumeCapacityUnit: { type: String, trim: true, default: 'm³' },
     noOfLGUServed: { type: Number },
+    lguServedList: [{ type: String, trim: true }],
+    privateCompaniesServed: [{ type: String, trim: true }],
 
     // Permits
     eccNo: { type: String, trim: true },
     dischargePermit: { type: String, trim: true },
+    dischargePermitValidity: { type: Date },
+    dischargePermitStatus: { type: String, trim: true }, // "New" | "Renewal"
     permitToOperate: { type: String, trim: true },
+    permitToOperateValidity: { type: Date },
+    permitToOperateStatus: { type: String, trim: true }, // "New" | "Renewal"
     hazwasteGenerationId: { type: String, trim: true },
 
     // Personnel
@@ -37,8 +44,8 @@ const slfFacilitySchema = new mongoose.Schema(
     iisNumber: { type: String, trim: true },
     dateOfMonitoring: { type: Date },
     dateReportPrepared: { type: Date },
-    dateReportReviewedStaff: { type: Date },
-    dateReportReviewedFocal: { type: Date },
+    dateReportReviewedStaff: { type: String, trim: true },
+    dateReportReviewedFocal: { type: String, trim: true },
     dateReportApproved: { type: Date },
 
     // Processing Days
@@ -54,14 +61,25 @@ const slfFacilitySchema = new mongoose.Schema(
     statusOfSLF: { type: String, trim: true },
     remainingLifeSpan: { type: String, trim: true },
     actualResidualWasteReceived: { type: Number },
+    wasteReceivedUnit: { type: String, trim: true, default: 'm³' },
+    estimatedVolumeWasteUnit: { type: String, trim: true, default: 'm³' },
     numberOfCell: { type: Number },
     cellCapacities: [{ type: Number }],
-    cellStatuses: [{ type: String, enum: ["Operational", "Closed"], default: "Operational" }],
+    cellStatuses: [{ type: String, enum: ["Operational", "Closed", "Under Construction", "Reserved Cell"], default: "Operational" }],
     cellTypes: [{ type: String, trim: true, default: "Residual" }], // per-cell: "Residual" or "Treated Haz Waste"
+    cellNotes: [{ type: String, trim: true }], // per-cell notes (used for Under Construction / Reserved Cell status)
+    cellFillValues: [{ type: Number }], // per-cell waste volume (m³)
     estimatedVolumeWaste: { type: Number },
     noOfLeachatePond: { type: Number },
     numberOfGasVents: { type: Number },
-    mrfEstablished: { type: String, trim: true },
+    mrfEstablished: { type: String, trim: true }, // legacy — kept for backward compat
+    hasMRF: { type: Boolean, default: false },
+    mrfDetails: [{
+      name: { type: String, trim: true },
+      type: { type: String, trim: true },
+      status: { type: String, trim: true, default: "Active" },
+      notes: { type: String, trim: true },
+    }],
 
     // Leachate Pond Details
     leachatePondDetails: [{
@@ -107,6 +125,15 @@ const slfFacilitySchema = new mongoose.Schema(
     dateOfTechnicalConference: { type: String, trim: true },
     commitments: { type: String, trim: true },
     signedDocument: { type: String, trim: true },
+
+    // Gallery & Documents
+    galleryPhotos: [{ type: String, trim: true }], // array of photo URLs
+    slfDocuments: [{
+      title: { type: String, trim: true },
+      url: { type: String, trim: true },
+      description: { type: String, trim: true },
+      docType: { type: String, trim: true },
+    }],
 
     // Link to SLF Generator (portal)
     slfGenerator: { type: mongoose.Schema.Types.ObjectId, ref: "SLFGenerator" },

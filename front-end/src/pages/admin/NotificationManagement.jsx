@@ -196,7 +196,7 @@ export default function NotificationManagement({ isDark }) {
       defaultSortOrder: "descend",
       render: (v) => (
         <div>
-          <Text style={{ fontSize: 12 }}>{v ? dayjs(v).format("MMM D, YYYY") : "—"}</Text>
+          <Text style={{ fontSize: 12 }}>{v ? dayjs(v).format("MM/DD/YYYY") : "—"}</Text>
           <br />
           <Text type="secondary" style={{ fontSize: 11 }}>{v ? dayjs(v).format("h:mm A") : ""}</Text>
         </div>
@@ -397,7 +397,7 @@ export default function NotificationManagement({ isDark }) {
                 : <Tag color="blue">Unread</Tag>}
             </Descriptions.Item>
             <Descriptions.Item label="Date">
-              {dayjs(selectedNotif.createdAt).format("MMM D, YYYY h:mm:ss A")}
+              {dayjs(selectedNotif.createdAt).format("MM/DD/YYYY h:mm:ss A")}
             </Descriptions.Item>
             {selectedNotif.meta && (
               <Descriptions.Item label="Meta Data">

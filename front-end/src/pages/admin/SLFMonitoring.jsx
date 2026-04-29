@@ -29,7 +29,9 @@ import {
   Skeleton,
   Alert,
   Upload,
+  Image,
   message,
+  Checkbox,
 } from "antd";
 import {
   PlusOutlined,
@@ -67,11 +69,15 @@ import {
   PaperClipOutlined,
   TableOutlined,
   PieChartOutlined,
+  FileImageOutlined,
+  FolderOutlined,
+  FilePdfOutlined,
 } from "@ant-design/icons";
 import Swal from "sweetalert2";
 import api from "../../api";
 import { exportToExcel } from "../../utils/exportExcel";
 import secureStorage from "../../utils/secureStorage";
+import { fetchWithCache, invalidateCache } from "../../utils/pageCache";
 import { useDataRef } from "../../utils/dataRef";
 import dayjs from "dayjs";
 import {
@@ -244,7 +250,7 @@ function WasteBaselineInfo() {
       dataIndex: "lastUpdated",
       key: "lastUpdated",
       width: 140,
-      render: (v) => (v ? dayjs(v).format("MMM DD, YYYY") : "—"),
+      render: (v) => (v ? dayjs(v).format("MM/DD/YYYY") : "—"),
     },
   ];
 
@@ -724,7 +730,7 @@ function PortalGenerators({
       title: "Date",
       dataIndex: "dateOfDisposal",
       width: 100,
-      render: (v) => v ? <Text style={{ fontSize: 11 }}>{dayjs(v).format("MMM DD, YYYY")}</Text> : "—",
+      render: (v) => v ? <Text style={{ fontSize: 11 }}>{dayjs(v).format("MM/DD/YYYY")}</Text> : "—",
       sorter: (a, b) => new Date(a.dateOfDisposal || 0) - new Date(b.dateOfDisposal || 0),
     },
     {
@@ -790,7 +796,7 @@ function PortalGenerators({
       title: "Submitted",
       dataIndex: "createdAt",
       width: 110,
-      render: (v) => v ? <Text type="secondary" style={{ fontSize: 11 }}>{dayjs(v).format("MMM DD, YYYY")}</Text> : "—",
+      render: (v) => v ? <Text type="secondary" style={{ fontSize: 11 }}>{dayjs(v).format("MM/DD/YYYY")}</Text> : "—",
       sorter: (a, b) => new Date(a.createdAt || 0) - new Date(b.createdAt || 0),
       defaultSortOrder: "descend",
     },
@@ -1355,7 +1361,7 @@ function PortalGenerators({
                 width: 150,
                 render: (v) => (
                   <Text type="secondary" style={{ fontSize: 12 }}>
-                    {dayjs(v).format("MMM DD, YYYY hh:mm A")}
+                    {dayjs(v).format("MM/DD/YYYY hh:mm A")}
                   </Text>
                 ),
               },
@@ -1455,6 +1461,24 @@ export default function SLFMonitoring({canEdit = true, canDelete = true, isDark}
   const enmoOptions = getValues("enmo").map((v) => ({ label: v, value: v }));
   const eswmStaffOptions = getValues("eswm-staff").map((v) => ({ label: v, value: v }));
   const focalOptions = getValues("eswm-focal").map((v) => ({ label: v, value: v }));
+  const districtDefaults = ["Lone", "1st", "2nd", "3rd", "4th", "5th"];
+  const districtRefValues = getValues("congressional-district");
+  const districtOptions = (() => {
+    const merged = [...districtDefaults, ...districtRefValues.filter((v) => !districtDefaults.includes(v))];
+    return merged.map((v) => ({ label: v === "Lone" ? "Lone District" : `${v} District`, value: v }));
+  })();
+  const categoryDefaults = [
+    { label: "Category 1 \u2014 < 15 TPD", value: "Cat 1" },
+    { label: "Category 2 \u2014 15\u201375 TPD", value: "Cat 2" },
+    { label: "Category 3 \u2014 75\u2013150 TPD", value: "Cat 3" },
+    { label: "Category 4 \u2014 > 150 TPD", value: "Cat 4" },
+  ];
+  const categoryRefValues = getValues("slf-category");
+  const categoryOptions = (() => {
+    const defaultVals = categoryDefaults.map((d) => d.value);
+    const extra = categoryRefValues.filter((v) => !defaultVals.includes(v)).map((v) => ({ label: v, value: v }));
+    return [...categoryDefaults, ...extra];
+  })();
 
   const [records, setRecords] = useState([]);
   const [generators, setGenerators] = useState([]);
@@ -1477,28 +1501,23 @@ export default function SLFMonitoring({canEdit = true, canDelete = true, isDark}
   const [quickFilter, setQuickFilter] = useState(null);
   const [slfLguModal, setSlfLguModal] = useState(false);
   const [slfWasteModal, setSlfWasteModal] = useState(false);
+  const [convArea, setConvArea] = useState(null);
+  const [convDepth, setConvDepth] = useState(null);
+  const [convVol, setConvVol] = useState(null);
+  const [convDensity, setConvDensity] = useState(0.2);
+  const [convM3ToTons, setConvM3ToTons] = useState(null);
+  const [convModalOpen, setConvModalOpen] = useState(false);
   const [form] = Form.useForm();
 
   const fetchRecords = useCallback(async (skipCache = false) => {
-    setLoading(true);
-    try {
-      if (!skipCache) {
-        const cached = secureStorage.getJSON(CACHE_KEY);
-        if (cached && Date.now() - cached.ts < CACHE_TTL) {
-          setRecords(cached.data.map((r) => ({ ...r, ...computeFields(r) })));
-          setLoading(false);
-          return;
-        }
-      }
-      const { data } = await api.get("/slf-facilities");
-      const enriched = data.map((r) => ({ ...r, ...computeFields(r) }));
-      setRecords(enriched);
-      secureStorage.setJSON(CACHE_KEY, { data, ts: Date.now() });
-    } catch {
-      Swal.fire("Error", "Failed to load records", "error");
-    } finally {
-      setLoading(false);
-    }
+    await fetchWithCache(CACHE_KEY, () => api.get("/slf-facilities").then(({ data }) => data), {
+      ttl: CACHE_TTL,
+      force: skipCache,
+      onData:  (data) => setRecords(data.map((r) => ({ ...r, ...computeFields(r) }))),
+      onError: ()     => Swal.fire("Error", "Failed to load records", "error"),
+      onStart: ()     => setLoading(true),
+      onEnd:   ()     => setLoading(false),
+    });
   }, []);
 
   const fetchGenerators = useCallback(async () => {
@@ -1577,13 +1596,29 @@ export default function SLFMonitoring({canEdit = true, canDelete = true, isDark}
       cellCapacities: record.cellCapacities || [],
       cellStatuses: record.cellStatuses || Array.from({ length: record.numberOfCell || 0 }, () => "Operational"),
       cellTypes: record.cellTypes || Array.from({ length: record.numberOfCell || 0 }, () => "Residual"),
+      cellNotes: record.cellNotes || Array.from({ length: record.numberOfCell || 0 }, () => ""),
+      cellFillValues: record.cellFillValues || Array.from({ length: record.numberOfCell || 0 }, () => null),
+      hasMRF: record.hasMRF || false,
+      mrfDetails: record.mrfDetails || [],
+      lguServedList: record.lguServedList || [],
+      privateCompaniesServed: record.privateCompaniesServed || [],
+      volumeCapacityUnit: record.volumeCapacityUnit || "m³",
       leachatePondDetails: (record.leachatePondDetails || []).map((p) => ({ ...p, attachments: toFileList(p.attachments) })),
       gasVentDetails: (record.gasVentDetails || []).map((v) => ({ ...v, attachments: toFileList(v.attachments) })),
       dateOfMonitoring: record.dateOfMonitoring ? dayjs(record.dateOfMonitoring) : null,
       dateReportPrepared: record.dateReportPrepared ? dayjs(record.dateReportPrepared) : null,
       dateReportReviewedStaff: record.dateReportReviewedStaff ? dayjs(record.dateReportReviewedStaff) : null,
       dateReportReviewedFocal: record.dateReportReviewedFocal ? dayjs(record.dateReportReviewedFocal) : null,
+      wasteReceivedUnit: record.wasteReceivedUnit || "m³",
+      estimatedVolumeWasteUnit: record.estimatedVolumeWasteUnit || "m³",
       dateReportApproved: record.dateReportApproved ? dayjs(record.dateReportApproved) : null,
+      dischargePermitValidity: record.dischargePermitValidity ? dayjs(record.dischargePermitValidity) : null,
+      permitToOperateValidity: record.permitToOperateValidity ? dayjs(record.permitToOperateValidity) : null,
+      galleryPhotos: toFileList(record.galleryPhotos || []),
+      slfDocuments: (record.slfDocuments || []).map((d) => ({
+        ...d,
+        url: d.url ? [{ uid: `doc-${d.url}`, name: d.url.split("/").pop() || d.title || "file", status: "done", url: d.url }] : [],
+      })),
     });
   };
 
@@ -1592,6 +1627,17 @@ export default function SLFMonitoring({canEdit = true, canDelete = true, isDark}
     setEditYear(new Date().getFullYear());
     setEditYearRecords([]);
     form.resetFields();
+    form.setFieldsValue({
+      volumeCapacityUnit: "m³",
+      wasteReceivedUnit: "m³",
+      estimatedVolumeWasteUnit: "m³",
+      lguServedList: [],
+      privateCompaniesServed: [],
+      cellNotes: [],
+      cellFillValues: [],
+      hasMRF: false,
+      mrfDetails: [],
+    });
     setModalOpen(true);
   };
   const openEdit = (record) => {
@@ -1622,7 +1668,23 @@ export default function SLFMonitoring({canEdit = true, canDelete = true, isDark}
       const current = editing || {};
       setEditing({ _id: null, lgu: current.lgu, province: current.province, barangay: current.barangay, latitude: current.latitude, longitude: current.longitude, eccNo: current.eccNo });
       form.resetFields();
-      form.setFieldsValue({ province: current.province, lgu: current.lgu, barangay: current.barangay, latitude: current.latitude, longitude: current.longitude, eccNo: current.eccNo });
+      form.setFieldsValue({
+        province: current.province,
+        lgu: current.lgu,
+        barangay: current.barangay,
+        latitude: current.latitude,
+        longitude: current.longitude,
+        eccNo: current.eccNo,
+        volumeCapacityUnit: "m³",
+        wasteReceivedUnit: "m³",
+        estimatedVolumeWasteUnit: "m³",
+        lguServedList: [],
+        privateCompaniesServed: [],
+        cellNotes: [],
+        cellFillValues: [],
+        hasMRF: false,
+        mrfDetails: [],
+      });
     }
   };
 
@@ -1641,13 +1703,28 @@ export default function SLFMonitoring({canEdit = true, canDelete = true, isDark}
       const payload = {
         ...values,
         dataYear: editYear,
+        // Auto-compute noOfLGUServed from the multi-select lists
+        noOfLGUServed: /private/i.test(values.ownership || "")
+          ? (values.privateCompaniesServed || []).length
+          : (values.lguServedList || []).length,
         leachatePondDetails: (values.leachatePondDetails || []).map((p) => ({ ...p, attachments: fromFileList(p.attachments) })),
         gasVentDetails: (values.gasVentDetails || []).map((v) => ({ ...v, attachments: fromFileList(v.attachments) })),
         dateOfMonitoring: values.dateOfMonitoring?.toISOString(),
         dateReportPrepared: values.dateReportPrepared?.toISOString(),
-        dateReportReviewedStaff: values.dateReportReviewedStaff?.toISOString(),
-        dateReportReviewedFocal: values.dateReportReviewedFocal?.toISOString(),
+        dateReportReviewedStaff: values.dateReportReviewedStaff?.toISOString?.() ?? null,
+        dateReportReviewedFocal: values.dateReportReviewedFocal?.toISOString?.() ?? null,
+        noOfLeachatePond: (values.leachatePondDetails || []).length,
+        numberOfGasVents: (values.gasVentDetails || []).length,
         dateReportApproved: values.dateReportApproved?.toISOString(),
+        dischargePermitValidity: values.dischargePermitValidity?.toISOString?.() ?? null,
+        permitToOperateValidity: values.permitToOperateValidity?.toISOString?.() ?? null,
+        galleryPhotos: fromFileList(values.galleryPhotos),
+        slfDocuments: (values.slfDocuments || []).map((d) => ({
+          ...d,
+          url: Array.isArray(d.url)
+            ? (d.url[0]?.response?.url || d.url[0]?.url || "")
+            : (d.url || ""),
+        })),
       };
       Object.assign(payload, computeFields(payload));
       if (editing && editing._id) {
@@ -1660,12 +1737,12 @@ export default function SLFMonitoring({canEdit = true, canDelete = true, isDark}
           if (exists) return prev.map((r) => r._id === data._id ? { ...data, ...computeFields(data) } : r);
           return [...prev, { ...data, ...computeFields(data) }];
         });
-        secureStorage.remove(CACHE_KEY);
+        invalidateCache(CACHE_KEY);
         secureStorage.invalidateDashboard();
         Swal.fire("Updated", `Record updated for year ${editYear}`, "success");
       } else {
         await api.post("/slf-facilities", payload);
-        secureStorage.remove(CACHE_KEY);
+        invalidateCache(CACHE_KEY);
         secureStorage.invalidateDashboard();
         Swal.fire("Created", `Record added for year ${editYear}`, "success");
         fetchRecords();
@@ -1679,6 +1756,12 @@ export default function SLFMonitoring({canEdit = true, canDelete = true, isDark}
         );
     }
     setModalOpen(false);
+    setConvArea(null);
+    setConvDepth(null);
+    setConvVol(null);
+    setConvDensity(0.2);
+    setConvM3ToTons(null);
+    setConvModalOpen(false);
   };
 
   const reviewAndDeleteRecord = async (record) => {
@@ -1707,7 +1790,7 @@ export default function SLFMonitoring({canEdit = true, canDelete = true, isDark}
     try {
       await api.delete(`/slf-facilities/${record._id}`);
       setRecords((prev) => prev.filter((r) => r._id !== record._id));
-      secureStorage.remove(CACHE_KEY);
+      invalidateCache(CACHE_KEY);
       secureStorage.invalidateDashboard();
       Swal.fire({ icon: "success", title: "Moved to Trash", timer: 1100, showConfirmButton: false });
     } catch {
@@ -2424,77 +2507,85 @@ export default function SLFMonitoring({canEdit = true, canDelete = true, isDark}
 
       {/* Add/Edit Modal */}
       <Modal
-        title={editing?._id ? `Edit SLF Facility — ${editYear}` : "Add SLF Facility"}
+        title={
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", paddingRight: 36 }}>
+            <Space size={6}>
+              {editing?._id ? (
+                <>
+                  <EditOutlined style={{ color: ACCENT }} />
+                  <span>Edit SLF Facility</span>
+                  <Text type="secondary" style={{ fontWeight: 400, fontSize: 13 }}>—</Text>
+                  <Text strong style={{ color: ACCENT, fontSize: 14 }}>{editing.lgu || ""}</Text>
+                  {editing.province && <Text type="secondary" style={{ fontSize: 12, fontWeight: 400 }}>{editing.province}</Text>}
+                </>
+              ) : (
+                <span>Add SLF Facility</span>
+              )}
+            </Space>
+            <Button
+              size="small"
+              icon={<span style={{ fontWeight: 700 }}>📐</span>}
+              onClick={() => setConvModalOpen(true)}
+              style={{ fontSize: 11, borderRadius: 6, background: isDark ? "rgba(82,196,26,0.15)" : "#f6ffed", borderColor: "#b7eb8f", color: "#389e0d" }}
+            >
+              Converter
+            </Button>
+          </div>
+        }
         open={modalOpen}
-        onCancel={() => setModalOpen(false)}
+        onCancel={() => { setModalOpen(false); form.resetFields(); setConvArea(null); setConvDepth(null); setConvVol(null); setConvDensity(0.2); setConvM3ToTons(null); setConvModalOpen(false); }}
         onOk={handleSave}
         width={1400}
         okText="Save"
         okButtonProps={{ style: { background: ACCENT, borderColor: ACCENT } }}
+        destroyOnHidden
       >
-        <div style={{ marginBottom: 12, padding: "8px 12px", background: isDark ? "rgba(47,84,235,0.1)" : "#f0f5ff", borderRadius: 6, border: isDark ? "1px solid rgba(47,84,235,0.3)" : "1px solid #d6e4ff" }}>
-          <Row align="middle" gutter={12}>
-            <Col>
-              <Text strong style={{ fontSize: 13 }}><CalendarOutlined style={{ marginRight: 4 }} /> Data Year:</Text>
-            </Col>
-            <Col>
-              <Select
-                value={editYear}
-                onChange={editing?._id ? handleEditYearChange : setEditYear}
-                style={{ width: 120 }}
-                options={(() => {
-                  const cy = new Date().getFullYear();
-                  const yrs = [...new Set([
-                    cy, cy - 1, cy - 2, cy - 3, cy - 4,
-                    ...(editYearRecords || []).map((r) => r.dataYear || cy),
-                  ])].sort((a, b) => b - a);
-                  return yrs.map((y) => {
-                    const has = (editYearRecords || []).some((r) => r.dataYear === y);
-                    return { label: has ? `${y}` : `${y} (new)`, value: y };
-                  });
-                })()}
-              />
-            </Col>
-            {editing?._id && (
-              <Col>
-                <Tag color={editYearRecords.some((r) => r.dataYear === editYear && r._id) ? "green" : "orange"} bordered={false}>
-                  {editYearRecords.some((r) => r.dataYear === editYear && r._id) ? "Existing record" : "New record for this year"}
-                </Tag>
-              </Col>
-            )}
-          </Row>
-        </div>
+
         <Form form={form} layout="vertical" size="small">
           <Tabs
             defaultActiveKey="location"
             tabPosition="left"
             size="small"
             style={{ minHeight: 400 }}
+            tabBarStyle={{
+              background: isDark ? "rgba(22,119,255,0.08)" : "#f0f5ff",
+              borderRight: `1px solid ${isDark ? "#1d3a6b" : "#d6e4ff"}`,
+              borderRadius: "8px 0 0 8px",
+              padding: "8px 0",
+            }}
             items={[
               {
                 key: "location",
                 label: <span style={{ color: "#1677ff" }}><EnvironmentOutlined /> Location</span>,
                 children: (
-          <Row gutter={12}>
-            <Col span={8}>
+          <Row gutter={[12, 0]}>
+            {/* Province and Barangay side by side */}
+            <Col span={12}>
               <Form.Item
                 name="province"
                 label="Province"
                 rules={[{ required: true }]}
               >
-                <Select options={provinceOptions} placeholder="Select" />
+                <Select options={provinceOptions} placeholder="Select Province" />
               </Form.Item>
             </Col>
-            <Col span={8}>
-              <Form.Item name="lgu" label="LGU" rules={[{ required: true }]}>
-                <Input />
-              </Form.Item>
-            </Col>
-            <Col span={8}>
+            <Col span={12}>
               <Form.Item name="barangay" label="Barangay">
-                <Input />
+                <Input placeholder="Enter barangay name" />
               </Form.Item>
             </Col>
+            {/* LGU full-width textarea */}
+            <Col span={24}>
+              <Form.Item name="lgu" label="LGU Name" rules={[{ required: true }]}>
+                <Input.TextArea
+                  rows={2}
+                  placeholder="Enter full LGU name"
+                  autoSize={{ minRows: 2, maxRows: 3 }}
+                  style={{ resize: "none" }}
+                />
+              </Form.Item>
+            </Col>
+            {/* Manila Bay Area | Congressional District | Ownership */}
             <Col span={8}>
               <Form.Item name="manilaBayArea" label="Manila Bay Area">
                 <Select options={mbaOptions} allowClear placeholder="Select" />
@@ -2505,20 +2596,30 @@ export default function SLFMonitoring({canEdit = true, canDelete = true, isDark}
                 name="congressionalDistrict"
                 label="Congressional District"
               >
-                <Input />
+                <Select allowClear showSearch placeholder="Select District" options={districtOptions} />
               </Form.Item>
             </Col>
             <Col span={8}>
               <Form.Item name="ownership" label="Ownership">
-                <Select options={ownershipOptions} allowClear placeholder="Select" />
+                <Select
+                  allowClear
+                  placeholder="Select Ownership"
+                  options={(() => {
+                    const defaults = ["Public", "Private"];
+                    const existing = ownershipOptions.map((o) => o.value);
+                    const merged = [...defaults, ...existing.filter((v) => !defaults.includes(v))];
+                    return merged.map((v) => ({ label: v, value: v }));
+                  })()}
+                />
               </Form.Item>
             </Col>
-            <Col span={6}>
+            {/* Coordinates */}
+            <Col span={12}>
               <Form.Item name="latitude" label="Latitude">
                 <InputNumber style={{ width: "100%" }} step={0.0001} precision={4} />
               </Form.Item>
             </Col>
-            <Col span={6}>
+            <Col span={12}>
               <Form.Item name="longitude" label="Longitude">
                 <InputNumber style={{ width: "100%" }} step={0.0001} precision={4} />
               </Form.Item>
@@ -2530,6 +2631,7 @@ export default function SLFMonitoring({canEdit = true, canDelete = true, isDark}
                 key: "facility",
                 label: <span style={{ color: "#fa8c16" }}><BankOutlined /> Facility Details</span>,
                 children: (
+          <>
           <Row gutter={12}>
             <Col span={6}>
               <Form.Item name="yearStartedOperation" label="Year Started">
@@ -2538,17 +2640,39 @@ export default function SLFMonitoring({canEdit = true, canDelete = true, isDark}
             </Col>
             <Col span={6}>
               <Form.Item name="category" label="Category">
-                <Select options={wasteTypeOptions} allowClear placeholder="Select" />
+                <Select allowClear showSearch placeholder="Select Category" options={categoryOptions} />
               </Form.Item>
             </Col>
             <Col span={6}>
-              <Form.Item name="volumeCapacity" label="Volume Capacity (m³)">
-                <InputNumber style={{ width: "100%" }} />
+              <Form.Item label="Volume Capacity" style={{ marginBottom: 0 }}>
+                <Space.Compact style={{ width: "100%" }}>
+                  <Form.Item name="volumeCapacity" noStyle>
+                    <InputNumber style={{ width: "calc(100% - 80px)" }} min={0} placeholder="Capacity" />
+                  </Form.Item>
+                  <Form.Item name="volumeCapacityUnit" noStyle>
+                    <Select style={{ width: 80 }} options={[
+                      { label: "m³", value: "m³" },
+                      { label: "tons", value: "tons" },
+                    ]} defaultValue="m³" />
+                  </Form.Item>
+                </Space.Compact>
               </Form.Item>
             </Col>
             <Col span={6}>
-              <Form.Item name="noOfLGUServed" label="LGUs Served">
-                <InputNumber style={{ width: "100%" }} />
+              <Form.Item noStyle dependencies={["ownership"]}>
+                {() => {
+                  const own = form.getFieldValue("ownership") || "";
+                  const isPrivate = /private/i.test(own);
+                  return isPrivate ? (
+                    <Form.Item name="privateCompaniesServed" label="Private Companies Served">
+                      <Select mode="tags" placeholder="Type & press Enter to add companies" style={{ width: "100%" }} tokenSeparators={[","]} />
+                    </Form.Item>
+                  ) : (
+                    <Form.Item name="lguServedList" label="LGUs Served">
+                      <Select mode="tags" placeholder="Type & press Enter to add LGUs" style={{ width: "100%" }} tokenSeparators={[","]} />
+                    </Form.Item>
+                  );
+                }}
               </Form.Item>
             </Col>
             <Col span={6}>
@@ -2561,35 +2685,99 @@ export default function SLFMonitoring({canEdit = true, canDelete = true, isDark}
                 <Input />
               </Form.Item>
             </Col>
-            <Col span={6}>
-              <Form.Item name="noOfLeachatePond" label="Leachate Ponds">
-                <InputNumber style={{ width: "100%" }} />
+            <Col span={12}>
+              <Form.Item label="Waste Received" style={{ marginBottom: 0 }}>
+                <Space.Compact style={{ width: "100%" }}>
+                  <Form.Item name="actualResidualWasteReceived" noStyle>
+                    <InputNumber style={{ width: "calc(100% - 90px)" }} min={0} placeholder="Amount received" />
+                  </Form.Item>
+                  <Form.Item name="wasteReceivedUnit" noStyle>
+                    <Select style={{ width: 90 }} options={[
+                      { label: "m³", value: "m³" },
+                      { label: "tons", value: "tons" },
+                    ]} defaultValue="m³" />
+                  </Form.Item>
+                </Space.Compact>
               </Form.Item>
             </Col>
-            <Col span={6}>
-              <Form.Item name="numberOfGasVents" label="Gas Vents">
-                <InputNumber style={{ width: "100%" }} />
-              </Form.Item>
-            </Col>
-            <Col span={6}>
-              <Form.Item
-                name="actualResidualWasteReceived"
-                label="Waste Received"
-              >
-                <InputNumber style={{ width: "100%" }} />
-              </Form.Item>
-            </Col>
-            <Col span={6}>
-              <Form.Item name="estimatedVolumeWaste" label="Est. Volume Waste">
-                <InputNumber style={{ width: "100%" }} />
-              </Form.Item>
-            </Col>
-            <Col span={6}>
-              <Form.Item name="mrfEstablished" label="MRF Established">
-                <Input />
+            <Col span={12}>
+              <Form.Item name="hasMRF" valuePropName="checked" style={{ marginBottom: 4 }}>
+                <Checkbox><strong>MRF Established</strong></Checkbox>
               </Form.Item>
             </Col>
           </Row>
+          <Form.Item noStyle dependencies={["hasMRF"]}>
+            {() => form.getFieldValue("hasMRF") && (
+              <Form.List name="mrfDetails">
+                {(fields, { add, remove }) => (
+                  <>
+                    <Divider plain orientation="left" style={{ fontSize: 12, margin: "8px 0 8px" }}>MRF Details</Divider>
+                    <Table
+                      size="small"
+                      pagination={false}
+                      dataSource={fields}
+                      rowKey="key"
+                      locale={{ emptyText: "No MRF added yet" }}
+                      style={{ marginBottom: 8 }}
+                      columns={[
+                        {
+                          title: "MRF Name", dataIndex: "name", width: "28%",
+                          render: (_, f) => (
+                            <Form.Item name={[f.name, "name"]} style={{ margin: 0 }}>
+                              <Input placeholder="MRF name" size="small" />
+                            </Form.Item>
+                          ),
+                        },
+                        {
+                          title: "Type", dataIndex: "type", width: "22%",
+                          render: (_, f) => (
+                            <Form.Item name={[f.name, "type"]} style={{ margin: 0 }}>
+                              <Select size="small" allowClear placeholder="Type" options={[
+                                { label: "Materials Recovery Facility", value: "Materials Recovery Facility" },
+                                { label: "Recycling Center", value: "Recycling Center" },
+                                { label: "Composting Facility", value: "Composting Facility" },
+                                { label: "Eco-Center", value: "Eco-Center" },
+                              ]} />
+                            </Form.Item>
+                          ),
+                        },
+                        {
+                          title: "Status", dataIndex: "status", width: "18%",
+                          render: (_, f) => (
+                            <Form.Item name={[f.name, "status"]} initialValue="Active" style={{ margin: 0 }}>
+                              <Select size="small" options={[
+                                { label: "Active", value: "Active" },
+                                { label: "Inactive", value: "Inactive" },
+                                { label: "Under Construction", value: "Under Construction" },
+                              ]} />
+                            </Form.Item>
+                          ),
+                        },
+                        {
+                          title: "Notes", dataIndex: "notes", width: "22%",
+                          render: (_, f) => (
+                            <Form.Item name={[f.name, "notes"]} style={{ margin: 0 }}>
+                              <Input placeholder="Notes" size="small" />
+                            </Form.Item>
+                          ),
+                        },
+                        {
+                          title: "", dataIndex: "action", width: "10%",
+                          render: (_, f) => (
+                            <Button danger size="small" type="text" icon={<MinusCircleOutlined />} onClick={() => remove(f.name)} />
+                          ),
+                        },
+                      ]}
+                    />
+                    <Button type="dashed" onClick={() => add({ status: "Active" })} block icon={<PlusOutlined />} size="small">
+                      Add MRF
+                    </Button>
+                  </>
+                )}
+              </Form.List>
+            )}
+          </Form.Item>
+          </>
                 ),
               },
               {
@@ -2597,6 +2785,124 @@ export default function SLFMonitoring({canEdit = true, canDelete = true, isDark}
                 label: <span style={{ color: "#1677ff" }}><AlertOutlined /> Leachate &amp; Gas Management</span>,
                 children: (
                   <>
+                    {/* Counts summary — auto-synced from form list entries */}
+                    <Form.Item noStyle dependencies={["leachatePondDetails", "gasVentDetails"]}>
+                      {() => {
+                        const ponds = form.getFieldValue("leachatePondDetails") || [];
+                        const vents = form.getFieldValue("gasVentDetails") || [];
+                        const savedPondCount = editing?.noOfLeachatePond ?? null;
+                        const savedVentCount = editing?.numberOfGasVents ?? null;
+                        const pondStatusMap = ponds.reduce((acc, p) => { const s = p?.status || "Active"; acc[s] = (acc[s] || 0) + 1; return acc; }, {});
+                        const ventStatusMap = vents.reduce((acc, v) => { const s = v?.status || "Active"; acc[s] = (acc[s] || 0) + 1; return acc; }, {});
+                        const statusColor = { "Active": "#52c41a", "Inactive": "#8c8c8c", "Under Maintenance": "#fa8c16", "Decommissioned": "#ff4d4f" };
+                        return (
+                          <Row gutter={12} style={{ marginBottom: 16 }}>
+                            <Col span={12}>
+                              <Card
+                                size="small"
+                                style={{ borderRadius: 8, border: `1px solid ${isDark ? "#1d3a6b" : "#bae0ff"}`, background: isDark ? "rgba(23,119,255,0.06)" : "#e6f4ff" }}
+                                title={
+                                  <Space size={6}>
+                                    <AlertOutlined style={{ color: "#1677ff" }} />
+                                    <Text strong style={{ fontSize: 12, color: isDark ? "#69b1ff" : "#0958d9" }}>Leachate Ponds</Text>
+                                    <Tag color="blue" style={{ fontSize: 11, borderRadius: 10 }}>{ponds.length} in list</Tag>
+                                    {savedPondCount !== null && savedPondCount !== ponds.length && (
+                                      <Tag color="orange" style={{ fontSize: 11, borderRadius: 10 }}>{savedPondCount} saved</Tag>
+                                    )}
+                                    {savedPondCount !== null && savedPondCount === ponds.length && (
+                                      <Tag color="green" style={{ fontSize: 11, borderRadius: 10 }}>✓ matches saved</Tag>
+                                    )}
+                                  </Space>
+                                }
+                              >
+                                {ponds.length === 0 ? (
+                                  <Text type="secondary" style={{ fontSize: 11 }}>No leachate ponds added yet.</Text>
+                                ) : (
+                                  <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11 }}>
+                                    <thead>
+                                      <tr style={{ background: isDark ? "rgba(255,255,255,0.04)" : "#f0f5ff" }}>
+                                        <th style={{ padding: "4px 8px", textAlign: "left", fontWeight: 600, borderBottom: "1px solid #d9d9d9" }}>No.</th>
+                                        <th style={{ padding: "4px 8px", textAlign: "left", fontWeight: 600, borderBottom: "1px solid #d9d9d9" }}>Status</th>
+                                        <th style={{ padding: "4px 8px", textAlign: "left", fontWeight: 600, borderBottom: "1px solid #d9d9d9" }}>Notes</th>
+                                      </tr>
+                                    </thead>
+                                    <tbody>
+                                      {ponds.map((p, idx) => (
+                                        <tr key={idx} style={{ borderBottom: "1px solid #f0f0f0" }}>
+                                          <td style={{ padding: "3px 8px" }}>Pond {p?.pondNo || idx + 1}</td>
+                                          <td style={{ padding: "3px 8px" }}>
+                                            <Tag color={statusColor[p?.status] ? undefined : "default"} style={{ fontSize: 10, color: statusColor[p?.status], borderColor: statusColor[p?.status], background: "transparent" }}>{p?.status || "Active"}</Tag>
+                                          </td>
+                                          <td style={{ padding: "3px 8px", color: "#8c8c8c", maxWidth: 120, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p?.description || "—"}</td>
+                                        </tr>
+                                      ))}
+                                    </tbody>
+                                  </table>
+                                )}
+                                {Object.keys(pondStatusMap).length > 0 && (
+                                  <div style={{ marginTop: 6, display: "flex", gap: 6, flexWrap: "wrap" }}>
+                                    {Object.entries(pondStatusMap).map(([s, c]) => (
+                                      <Tag key={s} style={{ fontSize: 10, color: statusColor[s], borderColor: statusColor[s], background: "transparent" }}>{c} {s}</Tag>
+                                    ))}
+                                  </div>
+                                )}
+                              </Card>
+                            </Col>
+                            <Col span={12}>
+                              <Card
+                                size="small"
+                                style={{ borderRadius: 8, border: `1px solid ${isDark ? "#1a3d20" : "#b7eb8f"}`, background: isDark ? "rgba(82,196,26,0.06)" : "#f6ffed" }}
+                                title={
+                                  <Space size={6}>
+                                    <ExperimentOutlined style={{ color: "#52c41a" }} />
+                                    <Text strong style={{ fontSize: 12, color: isDark ? "#95de64" : "#389e0d" }}>Gas Vents</Text>
+                                    <Tag color="green" style={{ fontSize: 11, borderRadius: 10 }}>{vents.length} in list</Tag>
+                                    {savedVentCount !== null && savedVentCount !== vents.length && (
+                                      <Tag color="orange" style={{ fontSize: 11, borderRadius: 10 }}>{savedVentCount} saved</Tag>
+                                    )}
+                                    {savedVentCount !== null && savedVentCount === vents.length && (
+                                      <Tag color="green" style={{ fontSize: 11, borderRadius: 10 }}>✓ matches saved</Tag>
+                                    )}
+                                  </Space>
+                                }
+                              >
+                                {vents.length === 0 ? (
+                                  <Text type="secondary" style={{ fontSize: 11 }}>No gas vents added yet.</Text>
+                                ) : (
+                                  <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11 }}>
+                                    <thead>
+                                      <tr style={{ background: isDark ? "rgba(255,255,255,0.04)" : "#f6ffed" }}>
+                                        <th style={{ padding: "4px 8px", textAlign: "left", fontWeight: 600, borderBottom: "1px solid #d9d9d9" }}>No.</th>
+                                        <th style={{ padding: "4px 8px", textAlign: "left", fontWeight: 600, borderBottom: "1px solid #d9d9d9" }}>Type</th>
+                                        <th style={{ padding: "4px 8px", textAlign: "left", fontWeight: 600, borderBottom: "1px solid #d9d9d9" }}>Status</th>
+                                      </tr>
+                                    </thead>
+                                    <tbody>
+                                      {vents.map((v, idx) => (
+                                        <tr key={idx} style={{ borderBottom: "1px solid #f0f0f0" }}>
+                                          <td style={{ padding: "3px 8px" }}>Vent {v?.ventNo || idx + 1}</td>
+                                          <td style={{ padding: "3px 8px" }}>{v?.ventType || "—"}</td>
+                                          <td style={{ padding: "3px 8px" }}>
+                                            <Tag color={statusColor[v?.status] ? undefined : "default"} style={{ fontSize: 10, color: statusColor[v?.status], borderColor: statusColor[v?.status], background: "transparent" }}>{v?.status || "Active"}</Tag>
+                                          </td>
+                                        </tr>
+                                      ))}
+                                    </tbody>
+                                  </table>
+                                )}
+                                {Object.keys(ventStatusMap).length > 0 && (
+                                  <div style={{ marginTop: 6, display: "flex", gap: 6, flexWrap: "wrap" }}>
+                                    {Object.entries(ventStatusMap).map(([s, c]) => (
+                                      <Tag key={s} style={{ fontSize: 10, color: statusColor[s], borderColor: statusColor[s], background: "transparent" }}>{c} {s}</Tag>
+                                    ))}
+                                  </div>
+                                )}
+                              </Card>
+                            </Col>
+                          </Row>
+                        );
+                      }}
+                    </Form.Item>
                     <Divider orientation="left" style={{ fontSize: 13, color: "#1677ff", marginTop: 0 }}>
                       <AlertOutlined style={{ marginRight: 6 }} />Leachate Ponds
                     </Divider>
@@ -2786,185 +3092,265 @@ export default function SLFMonitoring({canEdit = true, canDelete = true, isDark}
                     const cur = form.getFieldValue("cellCapacities") || [];
                     const curSt = form.getFieldValue("cellStatuses") || [];
                     const curTy = form.getFieldValue("cellTypes") || [];
+                    const curNotes = form.getFieldValue("cellNotes") || [];
                     const next = Array.from({ length: val || 0 }, (_, i) => cur[i] ?? null);
                     const nextSt = Array.from({ length: val || 0 }, (_, i) => curSt[i] || "Operational");
                     const nextTy = Array.from({ length: val || 0 }, (_, i) => curTy[i] || "Residual");
-                    form.setFieldsValue({ cellCapacities: next, cellStatuses: nextSt, cellTypes: nextTy });
+                    const nextNotes = Array.from({ length: val || 0 }, (_, i) => curNotes[i] || "");
+                    form.setFieldsValue({ cellCapacities: next, cellStatuses: nextSt, cellTypes: nextTy, cellNotes: nextNotes });
                   }}
                 />
               </Form.Item>
             </Col>
+            <Col span={16}>
+              <Form.Item label="Est. Volume of Waste" style={{ marginBottom: 0 }}>
+                <Space.Compact style={{ width: "100%" }}>
+                  <Form.Item name="estimatedVolumeWaste" noStyle>
+                    <InputNumber style={{ width: "calc(100% - 90px)" }} min={0} placeholder="Estimated volume" />
+                  </Form.Item>
+                  <Form.Item name="estimatedVolumeWasteUnit" noStyle>
+                    <Select style={{ width: 90 }} options={[
+                      { label: "m³", value: "m³" },
+                      { label: "tons", value: "tons" },
+                    ]} defaultValue="m³" />
+                  </Form.Item>
+                </Space.Compact>
+              </Form.Item>
+            </Col>
           </Row>
 
-          {/* ── Capacity Unit Converter ── */}
-          <Card size="small" style={{ borderRadius: 8, background: isDark ? "rgba(82,196,26,0.1)" : "#f6ffed", marginBottom: 12 }}>
-            <Text strong style={{ fontSize: 12, color: "#389e0d" }}>📐 Capacity Converter (m² → m³)</Text>
-            <Row gutter={12} style={{ marginTop: 8 }} align="middle">
-              <Col span={7}>
-                <Space.Compact style={{ width: "100%" }}>
-                  <InputNumber
-                    id="conv-area"
-                    style={{ width: "100%" }}
-                    min={0}
-                    step={0.01}
-                    placeholder="Area (m²)"
-                    onChange={() => {
-                      const area = document.getElementById("conv-area")?.querySelector("input")?.value;
-                      const depth = document.getElementById("conv-depth")?.querySelector("input")?.value;
-                      const res = document.getElementById("conv-result");
-                      if (area && depth && res) res.textContent = `= ${(Number(area) * Number(depth)).toLocaleString(undefined, { maximumFractionDigits: 2 })} m³`;
-                    }}
-                  />
-                  <span className="ant-input-group-addon">m²</span>
-                </Space.Compact>
-              </Col>
-              <Col span={1} style={{ textAlign: "center" }}><Text type="secondary">×</Text></Col>
-              <Col span={7}>
-                <Space.Compact style={{ width: "100%" }}>
-                  <InputNumber
-                    id="conv-depth"
-                    style={{ width: "100%" }}
-                    min={0}
-                    step={0.01}
-                    placeholder="Depth (m)"
-                    onChange={() => {
-                      const area = document.getElementById("conv-area")?.querySelector("input")?.value;
-                      const depth = document.getElementById("conv-depth")?.querySelector("input")?.value;
-                      const res = document.getElementById("conv-result");
-                      if (area && depth && res) res.textContent = `= ${(Number(area) * Number(depth)).toLocaleString(undefined, { maximumFractionDigits: 2 })} m³`;
-                    }}
-                  />
-                  <span className="ant-input-group-addon">m</span>
-                </Space.Compact>
-              </Col>
-              <Col span={9}>
-                <Text id="conv-result" strong style={{ fontSize: 14, color: "#389e0d" }}>= 0 m³</Text>
-              </Col>
-            </Row>
-          </Card>
-
-          <Form.Item noStyle dependencies={["numberOfCell"]}>
+          <Form.Item noStyle dependencies={["numberOfCell", "cellStatuses", "cellFillValues"]}>
             {() => {
               const cellCount = form.getFieldValue("numberOfCell") || 0;
               if (cellCount < 1) return null;
+              const STATUS_COLORS = {
+                "Operational":        { border: "#52c41a", bg: "#f6ffed", dark: "rgba(82,196,26,0.08)",  tag: "success" },
+                "Closed":             { border: "#8c8c8c", bg: "#f5f5f5", dark: "rgba(140,140,140,0.08)", tag: "default" },
+                "Under Construction": { border: "#fa8c16", bg: "#fff7e6", dark: "rgba(250,140,22,0.08)",  tag: "warning" },
+                "Reserved Cell":      { border: "#722ed1", bg: "#f9f0ff", dark: "rgba(114,46,209,0.08)",  tag: "purple"  },
+              };
               return (
                 <>
-                <Divider plain orientation="left" style={{ fontSize: 12, margin: "8px 0 16px" }}>Cell Capacities, Status &amp; Type</Divider>
-                <Row gutter={12}>
-                  {Array.from({ length: cellCount }, (_, i) => (
+                <Divider plain orientation="left" style={{ fontSize: 12, margin: "8px 0 12px" }}>Cell Capacities, Status &amp; Type</Divider>
+                <Row gutter={[12, 12]}>
+                  {Array.from({ length: cellCount }, (_, i) => {
+                    const cellStatus = form.getFieldValue(["cellStatuses", i]) || "Operational";
+                    const needsNote = cellStatus === "Under Construction" || cellStatus === "Reserved Cell";
+                    const sc = STATUS_COLORS[cellStatus] || STATUS_COLORS["Operational"];
+                    return (
                     <Col span={8} key={i}>
-                      <Form.Item name={["cellCapacities", i]} label={`Cell ${i + 1} Capacity (m³)`}>
-                        <InputNumber style={{ width: "100%" }} min={0} step={0.01} placeholder="Capacity" />
-                      </Form.Item>
-                      <Form.Item name={["cellStatuses", i]} label={`Cell ${i + 1} Status`} initialValue="Operational">
-                        <Select options={[{ label: "Operational", value: "Operational" }, { label: "Closed", value: "Closed" }]} />
-                      </Form.Item>
-                      <Form.Item name={["cellTypes", i]} label={`Cell ${i + 1} Type`} initialValue="Residual">
-                        <Select options={[
-                          { label: "Residual Cell", value: "Residual" },
-                          { label: "Treated Haz Waste Cell", value: "Treated Haz Waste" },
-                        ]} />
-                      </Form.Item>
+                      <Card
+                        size="small"
+                        style={{ borderRadius: 8, borderLeft: `4px solid ${sc.border}`, background: isDark ? sc.dark : sc.bg }}
+                        bodyStyle={{ padding: "10px 12px" }}
+                        title={
+                          <Space size={6}>
+                            <div style={{ width: 10, height: 10, borderRadius: "50%", background: sc.border, flexShrink: 0 }} />
+                            <Text strong style={{ fontSize: 12 }}>Cell {i + 1}</Text>
+                            <Tag color={sc.tag} style={{ fontSize: 10, margin: 0 }}>{cellStatus}</Tag>
+                          </Space>
+                        }
+                      >
+                        <Form.Item name={["cellCapacities", i]} label="Capacity (m³)" style={{ marginBottom: 8 }}>
+                          <InputNumber style={{ width: "100%" }} min={0} step={0.01} placeholder="Capacity" />
+                        </Form.Item>
+                        <Form.Item name={["cellStatuses", i]} label="Status" initialValue="Operational" style={{ marginBottom: 8 }}>
+                          <Select options={[
+                            { label: "Operational", value: "Operational" },
+                            { label: "Closed", value: "Closed" },
+                            { label: "Under Construction", value: "Under Construction" },
+                            { label: "Reserved Cell", value: "Reserved Cell" },
+                          ]} />
+                        </Form.Item>
+                        {needsNote && (
+                          <Form.Item name={["cellNotes", i]} label="Notes" style={{ marginBottom: 8 }}>
+                            <Input.TextArea
+                              rows={2}
+                              placeholder={cellStatus === "Under Construction"
+                                ? "Target completion date, contractor, current progress..."
+                                : "Planned use, estimated activation date, reserved for..."}
+                              style={{ resize: "none" }}
+                            />
+                          </Form.Item>
+                        )}
+                        <Form.Item name={["cellTypes", i]} label="Type" initialValue="Residual" style={{ marginBottom: 0 }}>
+                          <Select options={[
+                            { label: "Residual Cell", value: "Residual" },
+                            { label: "Treated Haz Waste Cell", value: "Treated Haz Waste" },
+                          ]} />
+                        </Form.Item>
+                        <Form.Item name={["cellFillValues", i]} label="Waste in Cell (m³)" style={{ marginBottom: 0, marginTop: 8 }}>
+                          <InputNumber style={{ width: "100%" }} min={0} step={0.01} placeholder="Volume deposited" />
+                        </Form.Item>
+                      </Card>
                     </Col>
-                  ))}
+                    );
+                  })}
                 </Row>
                 </>
               );
             }}
           </Form.Item>
-          <Form.Item noStyle dependencies={["numberOfCell", "cellCapacities", "cellStatuses", "cellTypes", "volumeCapacity", "actualResidualWasteReceived"]}>
+          <Form.Item noStyle dependencies={["numberOfCell", "cellCapacities", "cellStatuses", "cellTypes", "cellNotes", "cellFillValues", "volumeCapacity", "actualResidualWasteReceived", "wasteReceivedUnit"]}>
             {() => {
               const cellCount = form.getFieldValue("numberOfCell") || 0;
               const caps = form.getFieldValue("cellCapacities") || [];
               const statuses = form.getFieldValue("cellStatuses") || [];
               const types = form.getFieldValue("cellTypes") || [];
+              const cellNotes = form.getFieldValue("cellNotes") || [];
+              const fills = form.getFieldValue("cellFillValues") || [];
               const totalCap = form.getFieldValue("volumeCapacity") || 0;
-              const waste = form.getFieldValue("actualResidualWasteReceived") || 0;
+              const wasteRaw = form.getFieldValue("actualResidualWasteReceived") || 0;
+              const wasteUnit = form.getFieldValue("wasteReceivedUnit") || "m³";
+              // Normalise waste to m³ for capacity comparison (tons ÷ 0.2 t/m³ default density)
+              const DENSITY = 0.2;
+              const wasteM3 = wasteUnit === "tons" ? wasteRaw / DENSITY : wasteRaw;
+              const waste = wasteM3;
+              // Overall facility fill % (based on total received vs total capacity)
               const pct = totalCap > 0 ? Math.min(Math.round((waste / totalCap) * 100), 100) : 0;
               if (cellCount < 1) return <Empty description="Select number of cells to see infrastructure preview" />;
-              // Per-cell donut data for charts
+
+              const STATUS_STROKE = {
+                "Operational":        (p) => p >= 90 ? "#ff4d4f" : p >= 70 ? "#faad14" : "#52c41a",
+                "Closed":             () => "#8c8c8c",
+                "Under Construction": () => "#fa8c16",
+                "Reserved Cell":      () => "#722ed1",
+              };
+              const STATUS_TAG = {
+                "Operational": "success", "Closed": "default",
+                "Under Construction": "warning", "Reserved Cell": "purple",
+              };
+
+              // Use per-cell fill values; fall back to overall pct if no fill entered for the cell
               const cellDonutData = Array.from({ length: cellCount }, (_, i) => {
                 const cap = caps[i] || 0;
                 const st = statuses[i] || "Operational";
                 const ty = types[i] || "Residual";
-                // Distribute waste proportionally across operational cells
-                const opCaps = caps.filter((c, j) => (statuses[j] || "Operational") !== "Closed" && c > 0);
-                const totalOpCap = opCaps.reduce((s, c) => s + c, 0);
-                const cellWaste = st === "Closed" ? cap : (totalOpCap > 0 && cap > 0 ? Math.round((cap / totalOpCap) * waste) : 0);
-                return { index: i, capacity: cap, status: st, cellType: ty, waste: Math.min(cellWaste, cap), remaining: Math.max(0, cap - Math.min(cellWaste, cap)) };
+                const note = cellNotes[i] || "";
+                const isInactive = st !== "Operational";
+                const fillRaw = fills[i] != null ? fills[i] : null;
+                let displayPct = 0;
+                let usedM3 = 0;
+                if (!isInactive) {
+                  if (fillRaw != null && cap > 0) {
+                    // User entered per-cell fill
+                    usedM3 = fillRaw;
+                    displayPct = Math.min(Math.round((fillRaw / cap) * 100), 100);
+                  } else if (cap > 0) {
+                    // Fall back to overall facility pct
+                    displayPct = pct;
+                    usedM3 = Math.round((pct / 100) * cap);
+                  }
+                }
+                return {
+                  index: i, capacity: cap, status: st, cellType: ty, note,
+                  pct: displayPct,
+                  used: Math.min(usedM3, cap),
+                  remaining: Math.max(0, cap - Math.min(usedM3, cap)),
+                  hasCellFill: fillRaw != null,
+                };
               });
+
               return (
                 <Card size="small" style={{ borderRadius: 10, marginTop: 8, background: isDark ? "#1f1f1f" : "#fafafa" }}>
+                  {/* Overall facility gauge + per-cell gauges */}
                   <Row gutter={16} align="middle">
-                    <Col xs={24} md={8} style={{ textAlign: "center" }}>
+                    <Col xs={24} md={6} style={{ textAlign: "center" }}>
                       <Progress
                         type="dashboard"
                         percent={pct}
                         size={110}
+                        strokeLinecap="butt"
                         strokeColor={pct >= 90 ? "#ff4d4f" : pct >= 70 ? "#faad14" : "#52c41a"}
                         format={() => (
                           <div style={{ lineHeight: 1.3 }}>
                             <div style={{ fontSize: 18, fontWeight: 700, color: pct >= 90 ? "#ff4d4f" : pct >= 70 ? "#faad14" : "#52c41a" }}>{pct}%</div>
-                            <div style={{ fontSize: 10, color: "#8c8c8c" }}>used</div>
+                            <div style={{ fontSize: 10, color: "#8c8c8c" }}>overall</div>
                           </div>
                         )}
                       />
                       <div style={{ fontSize: 11, color: "#8c8c8c", marginTop: 4 }}>
-                        {waste > 0 ? waste.toLocaleString() : "0"} / {totalCap > 0 ? totalCap.toLocaleString() : "—"} m³
+                        {wasteRaw > 0 ? wasteRaw.toLocaleString() : "0"} {wasteUnit} / {totalCap > 0 ? totalCap.toLocaleString() : "—"} m³
+                        {wasteUnit === "tons" && wasteRaw > 0 && (
+                          <div style={{ fontSize: 10, color: "#8c8c8c" }}>≈ {wasteM3.toLocaleString(undefined, { maximumFractionDigits: 0 })} m³ (at 0.20 t/m³)</div>
+                        )}
                       </div>
                     </Col>
-                    <Col xs={24} md={16}>
-                      <Row gutter={[12, 12]} justify="center">
+                    <Col xs={24} md={18}>
+                      <Row gutter={[8, 8]} justify="start">
                         {cellDonutData.map((cell, i) => {
-                          const cellPct = cell.capacity > 0 ? Math.min(Math.round((cell.waste / cell.capacity) * 100), 100) : 0;
-                          const isClosed = cell.status === "Closed";
+                          const isInactive = cell.status !== "Operational";
                           const isHaz = cell.cellType === "Treated Haz Waste";
+                          const strokeFn = STATUS_STROKE[cell.status] || STATUS_STROKE["Operational"];
+                          const strokeColor = isInactive ? strokeFn(0) : (isHaz ? "#f5222d" : strokeFn(cell.pct));
+                          const tagColor = STATUS_TAG[cell.status] || "default";
                           return (
-                            <Col xs={12} sm={8} key={i} style={{ textAlign: "center" }}>
+                            <Col xs={12} sm={8} md={6} key={i} style={{ textAlign: "center" }}>
                               <Progress
                                 type="dashboard"
-                                percent={isClosed ? 100 : cellPct}
-                                size={70}
-                                strokeColor={isClosed ? "#d9d9d9" : isHaz ? "#f5222d" : cellPct >= 90 ? "#ff4d4f" : cellPct >= 70 ? "#faad14" : "#52c41a"}
+                                percent={isInactive ? 0 : cell.pct}
+                                size={65}
+                                strokeLinecap="butt"
+                                strokeColor={strokeColor}
+                                trailColor={cell.status === "Closed" ? "#bfbfbf" : undefined}
                                 format={() => (
                                   <div style={{ lineHeight: 1.2 }}>
-                                    <div style={{ fontSize: 13, fontWeight: 700, color: isClosed ? "#8c8c8c" : isHaz ? "#f5222d" : cellPct >= 90 ? "#ff4d4f" : cellPct >= 70 ? "#faad14" : "#52c41a" }}>
-                                      {isClosed ? "—" : `${cellPct}%`}
+                                    <div style={{ fontSize: 11, fontWeight: 700, color: strokeColor }}>
+                                      {cell.status === "Closed" ? "✕" : isInactive ? "—" : `${cell.pct}%`}
                                     </div>
                                   </div>
                                 )}
                               />
-                              <div style={{ fontSize: 11, fontWeight: 600, marginTop: 4 }}>Cell {i + 1}</div>
-                              <Tag color={isClosed ? "default" : "green"} style={{ fontSize: 9, marginTop: 2 }}>{cell.status}</Tag>
-                              <Tag color={isHaz ? "red" : "blue"} style={{ fontSize: 9, marginTop: 2 }}>{isHaz ? "Haz Waste" : "Residual"}</Tag>
-                              <div style={{ fontSize: 10, color: "#8c8c8c" }}>{cell.capacity > 0 ? `${cell.capacity.toLocaleString()} m³` : "Not set"}</div>
+                              <div style={{ fontSize: 11, fontWeight: 600, marginTop: 2 }}>Cell {i + 1}</div>
+                              <Tag color={tagColor} style={{ fontSize: 9, marginTop: 2, marginBottom: 2 }}>{cell.status.replace(" Cell", "")}</Tag>
+                              <Tag color={isHaz ? "red" : "blue"} style={{ fontSize: 9, marginBottom: 2 }}>{isHaz ? "Haz" : "Res"}</Tag>
+                              <div style={{ fontSize: 10, color: "#8c8c8c" }}>{cell.capacity > 0 ? `${cell.capacity.toLocaleString()} m³` : "—"}</div>
+                              {cell.hasCellFill && cell.used > 0 && (
+                                <div style={{ fontSize: 9, color: "#1677ff" }}>{cell.used.toLocaleString()} m³ filled</div>
+                              )}
+                              {cell.note && (
+                                <Tooltip title={cell.note}>
+                                  <div style={{ fontSize: 9, color: "#595959", fontStyle: "italic", marginTop: 2, maxWidth: 80, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{cell.note}</div>
+                                </Tooltip>
+                              )}
                             </Col>
                           );
                         })}
                       </Row>
                     </Col>
                   </Row>
-                  {/* Per-cell donut charts when 2+ cells with capacity */}
+
+                  {/* Per-cell donut breakdown — fixed pixel sizes to avoid ResizeObserver lag in modal */}
                   {cellCount >= 2 && cellDonutData.some(c => c.capacity > 0) && (
                     <>
-                      <Divider plain style={{ fontSize: 11, margin: "12px 0 8px" }}>Per-Cell Capacity Donut Charts</Divider>
-                      <Row gutter={[8, 8]} justify="center">
+                      <Divider plain style={{ fontSize: 11, margin: "10px 0 6px" }}>Per-Cell Capacity Breakdown</Divider>
+                      <Row gutter={[4, 4]} justify="center">
                         {cellDonutData.filter(c => c.capacity > 0).map((cell) => {
-                          const chartData = cell.status === "Closed"
-                            ? [{ name: "Closed", value: cell.capacity }]
-                            : [{ name: "Used", value: cell.waste }, { name: "Remaining", value: cell.remaining }];
-                          const colors = cell.status === "Closed" ? ["#d9d9d9"] : ["#ff4d4f", "#52c41a"];
+                          const isInactive = cell.status !== "Operational";
+                          const isHaz = cell.cellType === "Treated Haz Waste";
+                          const chartData = isInactive
+                            ? [{ name: cell.status, value: cell.capacity }]
+                            : cell.used > 0
+                              ? [{ name: "Used", value: cell.used }, { name: "Remaining", value: cell.remaining }]
+                              : [{ name: "Empty", value: cell.capacity }];
+                          const inactiveColor = cell.status === "Closed" ? "#d9d9d9" : cell.status === "Under Construction" ? "#fa8c16" : "#722ed1";
+                          const colors = isInactive ? [inactiveColor] : isHaz ? ["#f5222d", "#d9d9d9"] : ["#ff4d4f", "#52c41a"];
                           return (
                             <Col xs={12} sm={8} md={6} key={cell.index} style={{ textAlign: "center" }}>
                               <Text style={{ fontSize: 11, fontWeight: 600 }}>Cell {cell.index + 1}</Text>
-                              <ResponsiveContainer width="100%" height={100}>
-                                <PieChart>
-                                  <Pie data={chartData} cx="50%" cy="50%" innerRadius={25} outerRadius={40} paddingAngle={2} dataKey="value">
-                                    {chartData.map((_, j) => <RCell key={j} fill={colors[j % colors.length]} />)}
-                                  </Pie>
-                                  <RTooltip formatter={(v) => `${v.toLocaleString()} m³`} />
-                                </PieChart>
-                              </ResponsiveContainer>
+                              <PieChart width={110} height={88}>
+                                <Pie
+                                  data={chartData}
+                                  cx={55} cy={44}
+                                  innerRadius={20} outerRadius={36}
+                                  paddingAngle={chartData.length > 1 ? 2 : 0}
+                                  dataKey="value"
+                                  isAnimationActive={false}
+                                >
+                                  {chartData.map((_, j) => <RCell key={j} fill={colors[j % colors.length]} />)}
+                                </Pie>
+                                <RTooltip formatter={(v) => `${Number(v).toLocaleString()} m³`} />
+                              </PieChart>
                             </Col>
                           );
                         })}
@@ -2982,25 +3368,68 @@ export default function SLFMonitoring({canEdit = true, canDelete = true, isDark}
                 key: "permits",
                 label: <span style={{ color: "#faad14" }}><SafetyCertificateOutlined /> Permits</span>,
                 children: (
-          <Row gutter={12}>
-            <Col span={6}>
+          <Row gutter={[12, 0]}>
+            {/* ECC + Hazwaste IDs */}
+            <Col span={12}>
               <Form.Item name="eccNo" label="ECC No.">
-                <Input />
+                <Input placeholder="Environmental Compliance Certificate number" />
               </Form.Item>
             </Col>
-            <Col span={6}>
-              <Form.Item name="dischargePermit" label="Discharge Permit">
-                <Input />
-              </Form.Item>
-            </Col>
-            <Col span={6}>
-              <Form.Item name="permitToOperate" label="Permit to Operate">
-                <Input />
-              </Form.Item>
-            </Col>
-            <Col span={6}>
+            <Col span={12}>
               <Form.Item name="hazwasteGenerationId" label="Hazwaste Gen. ID">
-                <Input />
+                <Input placeholder="Hazardous Waste Generation ID" />
+              </Form.Item>
+            </Col>
+
+            {/* Discharge Permit group */}
+            <Col span={24}>
+              <Divider orientation="left" plain style={{ margin: "4px 0 12px", fontSize: 12 }}>
+                <SafetyCertificateOutlined style={{ color: "#1677ff", marginRight: 6 }} />
+                Discharge Permit
+              </Divider>
+            </Col>
+            <Col span={8}>
+              <Form.Item name="dischargePermit" label="Permit No.">
+                <Input placeholder="Permit number" />
+              </Form.Item>
+            </Col>
+            <Col span={8}>
+              <Form.Item name="dischargePermitValidity" label="Validity Date">
+                <DatePicker format="MM/DD/YYYY" style={{ width: "100%" }} />
+              </Form.Item>
+            </Col>
+            <Col span={8}>
+              <Form.Item name="dischargePermitStatus" label="Status">
+                <Select placeholder="New or Renewal" allowClear options={[
+                  { label: "New", value: "New" },
+                  { label: "Renewal", value: "Renewal" },
+                ]} />
+              </Form.Item>
+            </Col>
+
+            {/* Permit to Operate group */}
+            <Col span={24}>
+              <Divider orientation="left" plain style={{ margin: "4px 0 12px", fontSize: 12 }}>
+                <SafetyCertificateOutlined style={{ color: "#52c41a", marginRight: 6 }} />
+                Permit to Operate
+              </Divider>
+            </Col>
+            <Col span={8}>
+              <Form.Item name="permitToOperate" label="Permit No.">
+                <Input placeholder="Permit number" />
+              </Form.Item>
+            </Col>
+            <Col span={8}>
+              <Form.Item name="permitToOperateValidity" label="Validity Date">
+                <DatePicker format="MM/DD/YYYY" style={{ width: "100%" }} />
+              </Form.Item>
+            </Col>
+            <Col span={8}>
+              <Form.Item name="permitToOperateStatus" label="Status">
+                <Select placeholder="New or Renewal" allowClear options={[
+                  { label: "New", value: "New" },
+                  { label: "Renewal", value: "Renewal" },
+                ]} />
               </Form.Item>
             </Col>
           </Row>
@@ -3050,33 +3479,33 @@ export default function SLFMonitoring({canEdit = true, canDelete = true, isDark}
           <Row gutter={12}>
             <Col span={8}>
               <Form.Item name="dateOfMonitoring" label="Monitoring">
-                <DatePicker style={{ width: "100%" }} />
+                <DatePicker format="MM/DD/YYYY" style={{ width: "100%" }} />
               </Form.Item>
             </Col>
             <Col span={8}>
               <Form.Item name="dateReportPrepared" label="Report Prepared">
-                <DatePicker style={{ width: "100%" }} />
+                <DatePicker format="MM/DD/YYYY" style={{ width: "100%" }} />
               </Form.Item>
             </Col>
             <Col span={8}>
               <Form.Item
                 name="dateReportReviewedStaff"
-                label="Reviewed (Staff)"
+                label="Reviewed By (Staff)"
               >
-                <DatePicker style={{ width: "100%" }} />
+                <DatePicker format="MM/DD/YYYY" style={{ width: "100%" }} />
               </Form.Item>
             </Col>
             <Col span={8}>
               <Form.Item
                 name="dateReportReviewedFocal"
-                label="Reviewed (Focal)"
+                label="Reviewed By (Focal Person)"
               >
-                <DatePicker style={{ width: "100%" }} />
+                <DatePicker format="MM/DD/YYYY" style={{ width: "100%" }} />
               </Form.Item>
             </Col>
             <Col span={8}>
               <Form.Item name="dateReportApproved" label="Approved">
-                <DatePicker style={{ width: "100%" }} />
+                <DatePicker format="MM/DD/YYYY" style={{ width: "100%" }} />
               </Form.Item>
             </Col>
           </Row>
@@ -3238,18 +3667,262 @@ export default function SLFMonitoring({canEdit = true, canDelete = true, isDark}
                   </>
                 ),
               },
+              {
+                key: "gallery",
+                label: <span style={{ color: "#1677ff" }}><FileImageOutlined /> Gallery</span>,
+                children: (
+                  <>
+                    <Divider orientation="left" plain>SLF Photos</Divider>
+                    <Form.Item
+                      name="galleryPhotos"
+                      valuePropName="fileList"
+                      getValueFromEvent={(e) => (Array.isArray(e) ? e : e?.fileList)}
+                    >
+                      <Upload
+                        listType="picture-card"
+                        accept="image/*"
+                        multiple
+                        action="/eswm-pipeline/api/upload"
+                        headers={{ Authorization: `Bearer ${secureStorage.get("token")}` }}
+                        onChange={({ fileList }) => {
+                          form.setFieldValue("galleryPhotos", fileList);
+                        }}
+                      >
+                        <div>
+                          <PlusOutlined />
+                          <div style={{ marginTop: 8, fontSize: 12 }}>Upload Photo</div>
+                        </div>
+                      </Upload>
+                    </Form.Item>
+                    <Image.PreviewGroup>
+                      <Form.Item noStyle dependencies={["galleryPhotos"]}>
+                        {() => {
+                          const photos = form.getFieldValue("galleryPhotos") || [];
+                          const urls = photos.map((f) => f?.response?.url || f?.url).filter(Boolean);
+                          if (!urls.length) return null;
+                          return (
+                            <Row gutter={[8, 8]}>
+                              {urls.map((url, i) => (
+                                <Col key={i} xs={8} sm={6} md={4}>
+                                  <Image src={url} style={{ width: "100%", borderRadius: 6, objectFit: "cover", height: 80 }} />
+                                </Col>
+                              ))}
+                            </Row>
+                          );
+                        }}
+                      </Form.Item>
+                    </Image.PreviewGroup>
+                  </>
+                ),
+              },
+              {
+                key: "documents",
+                label: <span style={{ color: "#722ed1" }}><FolderOutlined /> Documents</span>,
+                children: (
+                  <>
+                    <Divider orientation="left" plain>SLF Documents</Divider>
+                    <Form.List name="slfDocuments">
+                      {(fields, { add, remove }) => (
+                        <>
+                          {fields.map(({ key, name, ...rest }) => (
+                            <Card
+                              key={key}
+                              size="small"
+                              style={{ marginBottom: 10, borderRadius: 8 }}
+                              extra={
+                                <MinusCircleOutlined
+                                  style={{ color: "#ff4d4f", cursor: "pointer" }}
+                                  onClick={() => remove(name)}
+                                />
+                              }
+                            >
+                              <Row gutter={[12, 0]}>
+                                <Col xs={24} sm={10}>
+                                  <Form.Item {...rest} name={[name, "title"]} label="Title" rules={[{ required: true, message: "Title required" }]}>
+                                    <Input placeholder="Document title" />
+                                  </Form.Item>
+                                </Col>
+                                <Col xs={24} sm={14}>
+                                  <Form.Item {...rest} name={[name, "docType"]} label="Document Type">
+                                    <Select
+                                      allowClear
+                                      placeholder="Select type"
+                                      options={[
+                                        { label: "ECC", value: "ECC" },
+                                        { label: "Permit", value: "Permit" },
+                                        { label: "Monitoring Report", value: "Monitoring Report" },
+                                        { label: "Compliance Certificate", value: "Compliance Certificate" },
+                                        { label: "Site Plan", value: "Site Plan" },
+                                        { label: "Other", value: "Other" },
+                                      ]}
+                                    />
+                                  </Form.Item>
+                                </Col>
+                                <Col xs={24}>
+                                  <Form.Item {...rest} name={[name, "description"]} label="Description">
+                                    <Input placeholder="Brief description of the document" />
+                                  </Form.Item>
+                                </Col>
+                                <Col xs={24}>
+                                  <Form.Item
+                                    {...rest}
+                                    name={[name, "url"]}
+                                    label="File"
+                                    valuePropName="fileList"
+                                    getValueFromEvent={(e) => (Array.isArray(e) ? e : e?.fileList)}
+                                  >
+                                    <Upload
+                                      maxCount={1}
+                                      accept=".pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx"
+                                      action="/eswm-pipeline/api/upload"
+                                      headers={{ Authorization: `Bearer ${secureStorage.get("token")}` }}
+                                    >
+                                      <Button icon={<FilePdfOutlined />}>Upload Document</Button>
+                                    </Upload>
+                                  </Form.Item>
+                                </Col>
+                              </Row>
+                            </Card>
+                          ))}
+                          <Button type="dashed" onClick={() => add({ docType: "Monitoring Report" })} block icon={<PlusOutlined />}>
+                            Add Document
+                          </Button>
+                        </>
+                      )}
+                    </Form.List>
+                  </>
+                ),
+              },
             ]}
           />
         </Form>
       </Modal>
 
+      {/* ── Capacity Converter Modal ── */}
+      <Modal
+        title={<Space><span style={{ fontSize: 16 }}>📐</span><span>Capacity Converter</span></Space>}
+        open={convModalOpen}
+        onCancel={() => setConvModalOpen(false)}
+        footer={<Button onClick={() => setConvModalOpen(false)}>Close</Button>}
+        width={600}
+        destroyOnHidden={false}
+      >
+        <div style={{ display: "flex", flexDirection: "column", gap: 0 }}>
+          {/* Row 1: Area × Depth → m³ */}
+          <Divider plain style={{ margin: "4px 0 10px", fontSize: 12, color: "#8c8c8c" }}>Area × Depth → Volume (m³)</Divider>
+          <Row gutter={12} align="middle">
+            <Col span={7}>
+              <Space.Compact style={{ width: "100%" }}>
+                <InputNumber style={{ width: "100%" }} min={0} step={0.01} placeholder="Area" value={convArea} onChange={setConvArea} />
+                <span className="ant-input-group-addon">m²</span>
+              </Space.Compact>
+            </Col>
+            <Col span={1} style={{ textAlign: "center" }}><Text type="secondary">×</Text></Col>
+            <Col span={7}>
+              <Space.Compact style={{ width: "100%" }}>
+                <InputNumber style={{ width: "100%" }} min={0} step={0.01} placeholder="Depth" value={convDepth} onChange={setConvDepth} />
+                <span className="ant-input-group-addon">m</span>
+              </Space.Compact>
+            </Col>
+            <Col span={1} style={{ textAlign: "center" }}><Text type="secondary">=</Text></Col>
+            <Col span={8}>
+              <Input
+                readOnly
+                value={(convArea != null && convDepth != null) ? `${(convArea * convDepth).toLocaleString(undefined, { maximumFractionDigits: 2 })} m³` : ""}
+                placeholder="Result"
+                addonAfter={
+                  <Button size="small" type="link" style={{ padding: 0, height: "auto", color: "#389e0d" }}
+                    disabled={convArea == null || convDepth == null}
+                    onClick={() => { navigator.clipboard.writeText((convArea * convDepth).toLocaleString(undefined, { maximumFractionDigits: 2 })); message.success("Copied!"); }}
+                  >Copy</Button>
+                }
+                style={{ fontWeight: 600, color: "#389e0d" }}
+              />
+            </Col>
+          </Row>
+
+          {/* Row 2: Volume (m³) × Density → tons */}
+          <Divider plain style={{ margin: "14px 0 10px", fontSize: 12, color: "#8c8c8c" }}>Volume × Density → Weight (tons)</Divider>
+          <Row gutter={12} align="middle">
+            <Col span={7}>
+              <Space.Compact style={{ width: "100%" }}>
+                <InputNumber style={{ width: "100%" }} min={0} step={0.01} placeholder="Volume" value={convVol} onChange={setConvVol} />
+                <span className="ant-input-group-addon">m³</span>
+              </Space.Compact>
+            </Col>
+            <Col span={1} style={{ textAlign: "center" }}><Text type="secondary">×</Text></Col>
+            <Col span={7}>
+              <Space.Compact style={{ width: "100%" }}>
+                <InputNumber style={{ width: "100%" }} min={0} step={0.001} placeholder="Density" value={convDensity} onChange={setConvDensity} />
+                <span className="ant-input-group-addon">t/m³</span>
+              </Space.Compact>
+            </Col>
+            <Col span={1} style={{ textAlign: "center" }}><Text type="secondary">=</Text></Col>
+            <Col span={8}>
+              <Input
+                readOnly
+                value={(convVol != null && convDensity != null) ? `${(convVol * convDensity).toLocaleString(undefined, { maximumFractionDigits: 3 })} tons` : ""}
+                placeholder="Result"
+                addonAfter={
+                  <Button size="small" type="link" style={{ padding: 0, height: "auto", color: "#1677ff" }}
+                    disabled={convVol == null || convDensity == null}
+                    onClick={() => { navigator.clipboard.writeText((convVol * convDensity).toLocaleString(undefined, { maximumFractionDigits: 3 })); message.success("Copied!"); }}
+                  >Copy</Button>
+                }
+                style={{ fontWeight: 600, color: "#1677ff" }}
+              />
+              <div style={{ fontSize: 10, color: "#8c8c8c", marginTop: 2 }}>Default: 0.20 t/m³ (MSW)</div>
+            </Col>
+          </Row>
+
+          {/* Row 3: m³ → tons (direct, using stored density) */}
+          <Divider plain style={{ margin: "14px 0 10px", fontSize: 12, color: "#8c8c8c" }}>m³ → tons (using density above)</Divider>
+          <Row gutter={12} align="middle">
+            <Col span={7}>
+              <Space.Compact style={{ width: "100%" }}>
+                <InputNumber style={{ width: "100%" }} min={0} step={0.01} placeholder="Volume" value={convM3ToTons} onChange={setConvM3ToTons} />
+                <span className="ant-input-group-addon">m³</span>
+              </Space.Compact>
+            </Col>
+            <Col span={1} style={{ textAlign: "center" }}><Text type="secondary">×</Text></Col>
+            <Col span={7}>
+              <Input readOnly value={`${convDensity ?? 0.2} t/m³`} style={{ color: "#8c8c8c", textAlign: "center" }} />
+            </Col>
+            <Col span={1} style={{ textAlign: "center" }}><Text type="secondary">=</Text></Col>
+            <Col span={8}>
+              <Input
+                readOnly
+                value={(convM3ToTons != null && convDensity != null) ? `${(convM3ToTons * (convDensity ?? 0.2)).toLocaleString(undefined, { maximumFractionDigits: 3 })} tons` : ""}
+                placeholder="Result (tons)"
+                addonAfter={
+                  <Button size="small" type="link" style={{ padding: 0, height: "auto", color: "#fa8c16" }}
+                    disabled={convM3ToTons == null}
+                    onClick={() => { navigator.clipboard.writeText((convM3ToTons * (convDensity ?? 0.2)).toLocaleString(undefined, { maximumFractionDigits: 3 })); message.success("Copied!"); }}
+                  >Copy</Button>
+                }
+                style={{ fontWeight: 600, color: "#fa8c16" }}
+              />
+            </Col>
+          </Row>
+          <div style={{ marginTop: 8, fontSize: 11, color: "#8c8c8c" }}>
+            💡 Change the density in Row 2 above to affect the m³ → tons conversion here.
+          </div>
+        </div>
+      </Modal>
+
       {/* Detail Modal */}
       <Modal
         title={
-          <Space>
-            <BankOutlined /> SLF Facility Details
-            {detailModal && <Text type="secondary" style={{ fontSize: 12 }}>— {detailModal.lgu}, {detailModal.province}</Text>}
-            {detailYearRecords.length >= 1 && <Tag color="blue" bordered={false} style={{ marginLeft: 8 }}>{detailYearRecords.length} year record{detailYearRecords.length > 1 ? "s" : ""}</Tag>}
+          <Space size={6}>
+            <BankOutlined style={{ color: ACCENT }} />
+            <span>SLF Facility Details</span>
+            {detailModal && (
+              <>
+                <Text type="secondary" style={{ fontWeight: 400, fontSize: 13 }}>—</Text>
+                <Text strong style={{ color: ACCENT, fontSize: 14 }}>{detailModal.lgu || ""}</Text>
+                {detailModal.province && <Text type="secondary" style={{ fontSize: 12, fontWeight: 400 }}>{detailModal.province}</Text>}
+              </>
+            )}
           </Space>
         }
         open={!!detailModal}
@@ -3259,28 +3932,22 @@ export default function SLFMonitoring({canEdit = true, canDelete = true, isDark}
       >
         {detailModal && (
           <>
-          {/* Year Selector */}
-          {detailYearRecords.length >= 1 && (
-            <div style={{ marginBottom: 12, display: "flex", alignItems: "center", gap: 8 }}>
-              <Text type="secondary" style={{ fontSize: 12 }}>Year:</Text>
-              <Space size={4}>
-                {detailYearRecords.map((r) => r.dataYear || new Date().getFullYear()).filter((v, i, a) => a.indexOf(v) === i).sort((a, b) => b - a).map((yr) => (
-                  <Button key={yr} size="small" type={detailYear === yr ? "primary" : "default"} onClick={() => setDetailYear(yr)}
-                    style={detailYear === yr ? { background: ACCENT, borderColor: ACCENT } : {}}
-                  >{yr}</Button>
-                ))}
-              </Space>
-            </div>
-          )}
+
           {detailViewRecord ? (
           <Tabs
             defaultActiveKey="1"
             tabPosition="left"
             style={{ minHeight: 400 }}
+            tabBarStyle={{
+              background: isDark ? "rgba(22,119,255,0.08)" : "#f0f5ff",
+              borderRight: `1px solid ${isDark ? "#1d3a6b" : "#d6e4ff"}`,
+              borderRadius: "8px 0 0 8px",
+              padding: "8px 0",
+            }}
             items={[
               {
                 key: "1",
-                label: "Location & Status",
+                label: <span style={{ color: "#1677ff" }}><EnvironmentOutlined /> Location &amp; Status</span>,
                 children: (
                   <Descriptions column={2} size="small" bordered>
                     <Descriptions.Item label="Province">{detailViewRecord.province || "—"}</Descriptions.Item>
@@ -3304,11 +3971,7 @@ export default function SLFMonitoring({canEdit = true, canDelete = true, isDark}
               },
               {
                 key: "2",
-                label: (
-                  <>
-                    <BarChartOutlined /> Operations
-                  </>
-                ),
+                label: <span style={{ color: "#fa8c16" }}><BankOutlined /> Facility &amp; Operations</span>,
                 children: (() => {
                   const cells = detailViewRecord.numberOfCell || 0;
                   const leachate = detailViewRecord.noOfLeachatePond || 0;
@@ -3392,9 +4055,29 @@ export default function SLFMonitoring({canEdit = true, canDelete = true, isDark}
                           {estVolume ? Number(estVolume).toLocaleString() : "—"}
                         </Descriptions.Item>
                         <Descriptions.Item label="MRF Established" span={1}>
-                          {detailViewRecord.mrfEstablished || "—"}
+                          {detailViewRecord.hasMRF
+                            ? <Tag color="success">Yes</Tag>
+                            : detailViewRecord.mrfEstablished || <Tag color="default">No</Tag>}
                         </Descriptions.Item>
                       </Descriptions>
+                      {detailViewRecord.hasMRF && (detailViewRecord.mrfDetails || []).length > 0 && (
+                        <>
+                          <Divider plain orientation="left" style={{ fontSize: 12, margin: "8px 0 8px" }}>MRF Details</Divider>
+                          <Table
+                            size="small"
+                            pagination={false}
+                            dataSource={detailViewRecord.mrfDetails}
+                            rowKey={(r, i) => i}
+                            columns={[
+                              { title: "MRF Name", dataIndex: "name", key: "name", render: v => v || "—" },
+                              { title: "Type", dataIndex: "type", key: "type", render: v => v || "—" },
+                              { title: "Status", dataIndex: "status", key: "status", render: v => v ? <Tag color={v === "Active" ? "success" : v === "Inactive" ? "default" : "warning"}>{v}</Tag> : "—" },
+                              { title: "Notes", dataIndex: "notes", key: "notes", render: v => v || "—" },
+                            ]}
+                            style={{ marginBottom: 12 }}
+                          />
+                        </>
+                      )}
 
                       {/* Cell Infrastructure Status */}
                       {cells > 0 && (() => {
@@ -3658,18 +4341,6 @@ export default function SLFMonitoring({canEdit = true, canDelete = true, isDark}
                         <Descriptions.Item label="Permit to Operate">{detailViewRecord.permitToOperate || "—"}</Descriptions.Item>
                         <Descriptions.Item label="Hazwaste Gen. ID">{detailViewRecord.hazwasteGenerationId || "—"}</Descriptions.Item>
                       </Descriptions>
-                      {detailViewRecord.slfGenerator && (
-                        <div style={{ marginBottom: 16 }}>
-                          <Divider plain orientation="left">
-                            Portal Link
-                          </Divider>
-                          <Tag color="blue" icon={<LinkOutlined />}>
-                            {typeof detailViewRecord.slfGenerator === "object"
-                              ? detailViewRecord.slfGenerator.slfName
-                              : "Linked Generator"}
-                          </Tag>
-                        </div>
-                      )}
                       {hasCharts && (
                         <>
                           <Divider plain orientation="left">
@@ -3795,8 +4466,31 @@ export default function SLFMonitoring({canEdit = true, canDelete = true, isDark}
                 })(),
               },
               {
-                key: "3",
-                label: "Personnel & Monitoring",
+                key: "permits",
+                label: <span style={{ color: "#faad14" }}><SafetyCertificateOutlined /> Permits</span>,
+                children: (
+                  <Descriptions column={2} size="small" bordered>
+                    <Descriptions.Item label="ECC No.">{detailViewRecord.eccNo || "—"}</Descriptions.Item>
+                    <Descriptions.Item label="Hazwaste Gen. ID">{detailViewRecord.hazwasteGenerationId || "—"}</Descriptions.Item>
+                    <Descriptions.Item label="Discharge Permit No.">{detailViewRecord.dischargePermit || "—"}</Descriptions.Item>
+                    <Descriptions.Item label="Discharge Permit Validity">{detailViewRecord.dischargePermitValidity ? dayjs(detailViewRecord.dischargePermitValidity).format("MM/DD/YYYY") : "—"}</Descriptions.Item>
+                    <Descriptions.Item label="Discharge Permit Status">{detailViewRecord.dischargePermitStatus || "—"}</Descriptions.Item>
+                    <Descriptions.Item label="Permit to Operate No.">{detailViewRecord.permitToOperate || "—"}</Descriptions.Item>
+                    <Descriptions.Item label="Permit to Operate Validity">{detailViewRecord.permitToOperateValidity ? dayjs(detailViewRecord.permitToOperateValidity).format("MM/DD/YYYY") : "—"}</Descriptions.Item>
+                    <Descriptions.Item label="Permit to Operate Status">{detailViewRecord.permitToOperateStatus || "—"}</Descriptions.Item>
+                    {detailViewRecord.slfGenerator && (
+                      <Descriptions.Item label="Portal Link" span={2}>
+                        <Tag color="blue" icon={<LinkOutlined />}>
+                          {typeof detailViewRecord.slfGenerator === "object" ? detailViewRecord.slfGenerator.slfName : "Linked Generator"}
+                        </Tag>
+                      </Descriptions.Item>
+                    )}
+                  </Descriptions>
+                ),
+              },
+              {
+                key: "personnel",
+                label: <span style={{ color: "#52c41a" }}><TeamOutlined /> Personnel</span>,
                 children: (
                   <Descriptions column={2} size="small" bordered>
                     <Descriptions.Item label="Target Month">{detailViewRecord.targetMonth || "—"}</Descriptions.Item>
@@ -3804,20 +4498,34 @@ export default function SLFMonitoring({canEdit = true, canDelete = true, isDark}
                     <Descriptions.Item label="ESWM Staff">{detailViewRecord.eswmStaff || "—"}</Descriptions.Item>
                     <Descriptions.Item label="Focal Person">{detailViewRecord.focalPerson || "—"}</Descriptions.Item>
                     <Descriptions.Item label="IIS Number">{detailViewRecord.iisNumber || "—"}</Descriptions.Item>
-                    <Descriptions.Item label="Monitoring">
-                      {detailViewRecord.dateOfMonitoring
-                        ? dayjs(detailViewRecord.dateOfMonitoring).format("MMM DD, YYYY")
-                        : "—"}
+                  </Descriptions>
+                ),
+              },
+              {
+                key: "monitoring",
+                label: <span style={{ color: "#13c2c2" }}><CalendarOutlined /> Monitoring Dates</span>,
+                children: (
+                  <Descriptions column={2} size="small" bordered>
+                    <Descriptions.Item label="Date of Monitoring">
+                      {detailViewRecord.dateOfMonitoring ? dayjs(detailViewRecord.dateOfMonitoring).format("MM/DD/YYYY") : "—"}
                     </Descriptions.Item>
-                    <Descriptions.Item label="Days Prepared">{detailViewRecord.totalDaysReportPrepared ?? "—"}</Descriptions.Item>
+                    <Descriptions.Item label="Report Prepared">
+                      {detailViewRecord.dateReportPrepared ? dayjs(detailViewRecord.dateReportPrepared).format("MM/DD/YYYY") : "—"}
+                    </Descriptions.Item>
+                    <Descriptions.Item label="Reviewed By (Staff)">{detailViewRecord.dateReportReviewedStaff || "—"}</Descriptions.Item>
+                    <Descriptions.Item label="Reviewed By (Focal)">{detailViewRecord.dateReportReviewedFocal || "—"}</Descriptions.Item>
+                    <Descriptions.Item label="Approved">
+                      {detailViewRecord.dateReportApproved ? dayjs(detailViewRecord.dateReportApproved).format("MM/DD/YYYY") : "—"}
+                    </Descriptions.Item>
+                    <Descriptions.Item label="Days to Prepare">{detailViewRecord.totalDaysReportPrepared ?? "—"}</Descriptions.Item>
                     <Descriptions.Item label="Days Staff Review">{detailViewRecord.totalDaysReviewedStaff ?? "—"}</Descriptions.Item>
-                    <Descriptions.Item label="Days Focal Review" span={2}>{detailViewRecord.totalDaysReviewedFocal ?? "—"}</Descriptions.Item>
+                    <Descriptions.Item label="Days Focal Review">{detailViewRecord.totalDaysReviewedFocal ?? "—"}</Descriptions.Item>
                   </Descriptions>
                 ),
               },
               {
                 key: "4",
-                label: "Compliance",
+                label: <span style={{ color: "#eb2f96" }}><FileTextOutlined /> Compliance</span>,
                 children: (
                   <Descriptions column={2} size="small" bordered>
                     <Descriptions.Item label="Remarks" span={2}>{detailViewRecord.remarksAndRecommendation || "—"}</Descriptions.Item>
@@ -3870,15 +4578,51 @@ export default function SLFMonitoring({canEdit = true, canDelete = true, isDark}
                   </>
                 ),
               },
+              {
+                key: "gallery",
+                label: <span style={{ color: "#1677ff" }}><FileImageOutlined /> Gallery</span>,
+                children: (
+                  (detailViewRecord.galleryPhotos || []).length > 0 ? (
+                    <Image.PreviewGroup>
+                      <Row gutter={[8, 8]}>
+                        {(detailViewRecord.galleryPhotos || []).map((url, i) => (
+                          <Col key={i} xs={8} sm={6} md={4}>
+                            <Image src={url} style={{ width: "100%", borderRadius: 6, objectFit: "cover", height: 80 }} />
+                          </Col>
+                        ))}
+                      </Row>
+                    </Image.PreviewGroup>
+                  ) : <Empty description="No gallery photos uploaded yet" />
+                ),
+              },
+              {
+                key: "documents",
+                label: <span style={{ color: "#722ed1" }}><FolderOutlined /> Documents</span>,
+                children: (
+                  (detailViewRecord.slfDocuments || []).length > 0 ? (
+                    <Table
+                      dataSource={detailViewRecord.slfDocuments}
+                      rowKey={(_, i) => i}
+                      size="small"
+                      pagination={false}
+                      columns={[
+                        { title: "Title", dataIndex: "title", render: v => <Text strong style={{ fontSize: 12 }}>{v || "—"}</Text> },
+                        { title: "Type", dataIndex: "docType", width: 160, render: v => v ? <Tag color="purple">{v}</Tag> : "—" },
+                        { title: "Description", dataIndex: "description", render: v => v ? <Text type="secondary" style={{ fontSize: 12 }}>{v}</Text> : "—" },
+                        { title: "File", dataIndex: "url", width: 100, render: v => {
+                          const fileUrl = Array.isArray(v) ? (v[0]?.response?.url || v[0]?.url) : v;
+                          return fileUrl ? <Button size="small" type="link" icon={<FilePdfOutlined />} href={fileUrl} target="_blank">Open</Button> : "—";
+                        }},
+                      ]}
+                    />
+                  ) : <Empty description="No documents uploaded yet" />
+                ),
+              },
               ...(detailViewRecord.slfGenerator
                 ? [
                     {
                       key: "6",
-                      label: (
-                        <>
-                          <DatabaseOutlined /> Baseline Info
-                        </>
-                      ),
+                      label: <span style={{ color: "#595959" }}><DatabaseOutlined /> Baseline Info</span>,
                       children: loadingBaseline ? (
                         <div style={{ textAlign: "center", padding: 32 }}>
                           <Text type="secondary">Loading baseline data...</Text>
@@ -3890,7 +4634,7 @@ export default function SLFMonitoring({canEdit = true, canDelete = true, isDark}
                               <Text type="secondary" style={{ fontSize: 12 }}>
                                 Last updated:{" "}
                                 {baselineData.savedAt
-                                  ? dayjs(baselineData.savedAt).format("MMM DD, YYYY h:mm A")
+                                  ? dayjs(baselineData.savedAt).format("MM/DD/YYYY h:mm A")
                                   : "—"}
                               </Text>
                             </Col>

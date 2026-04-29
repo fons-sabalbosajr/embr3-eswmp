@@ -165,6 +165,20 @@ async function seed() {
       description: "Types of waste received",
       values: ["Residual", "Hazardous Waste"],
     },
+    {
+      category: "congressional-district",
+      label: "Congressional District",
+      module: "SLF",
+      description: "Congressional district options for SLF location (e.g. Lone, 1st, 2nd…). Defaults (Lone, 1st–5th) are always available; add extra entries here.",
+      values: ["Lone", "1st", "2nd", "3rd", "4th", "5th"],
+    },
+    {
+      category: "slf-category",
+      label: "SLF Category",
+      module: "SLF",
+      description: "SLF facility category options. Defaults (Cat 1–4) are always available; add extra entries here.",
+      values: ["Cat 1", "Cat 2", "Cat 3", "Cat 4"],
+    },
 
     // Equipment
     {

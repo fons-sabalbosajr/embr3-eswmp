@@ -178,7 +178,7 @@ export default function HaulerRequests({ isDark, canEdit = true }) {
       dataIndex: "createdAt",
       key: "createdAt",
       width: 130,
-      render: (v) => dayjs(v).format("MMM D, YYYY"),
+      render: (v) => dayjs(v).format("MM/DD/YYYY"),
     },
     {
       title: "LOI",

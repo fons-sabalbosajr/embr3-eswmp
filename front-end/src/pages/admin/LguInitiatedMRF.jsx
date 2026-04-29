@@ -57,6 +57,7 @@ import Swal from "sweetalert2";
 import api from "../../api";
 import { exportToExcel } from "../../utils/exportExcel";
 import secureStorage from "../../utils/secureStorage";
+import { fetchWithCache, invalidateCache } from "../../utils/pageCache";
 import { useDataRef } from "../../utils/dataRef";
 import dayjs from "dayjs";
 
@@ -130,25 +131,14 @@ export default function LguInitiatedMRF({canEdit = true, canDelete = true, isDar
   const [form] = Form.useForm();
 
   const fetchRecords = useCallback(async (skipCache = false) => {
-    setLoading(true);
-    try {
-      if (!skipCache) {
-        const cached = secureStorage.getJSON(CACHE_KEY);
-        if (cached && Date.now() - cached.ts < CACHE_TTL) {
-          setRecords(cached.data.map((r) => ({ ...r, ...computeFields(r) })));
-          setLoading(false);
-          return;
-        }
-      }
-      const { data } = await api.get("/lgu-initiated-mrf");
-      const enriched = data.map((r) => ({ ...r, ...computeFields(r) }));
-      setRecords(enriched);
-      secureStorage.setJSON(CACHE_KEY, { data, ts: Date.now() });
-    } catch {
-      Swal.fire("Error", "Failed to load records", "error");
-    } finally {
-      setLoading(false);
-    }
+    await fetchWithCache(CACHE_KEY, () => api.get("/lgu-initiated-mrf").then(({ data }) => data), {
+      ttl: CACHE_TTL,
+      force: skipCache,
+      onData:  (data) => setRecords(data.map((r) => ({ ...r, ...computeFields(r) }))),
+      onError: ()     => Swal.fire("Error", "Failed to load records", "error"),
+      onStart: ()     => setLoading(true),
+      onEnd:   ()     => setLoading(false),
+    });
   }, []);
 
   useEffect(() => { fetchRecords(); }, [fetchRecords]);
@@ -202,12 +192,12 @@ export default function LguInitiatedMRF({canEdit = true, canDelete = true, isDar
       if (editing) {
         const { data } = await api.put(`/lgu-initiated-mrf/${editing._id}`, payload);
         setRecords((prev) => prev.map((r) => r._id === editing._id ? { ...data, ...computeFields(data) } : r));
-        secureStorage.remove(CACHE_KEY);
+        invalidateCache(CACHE_KEY);
         secureStorage.invalidateDashboard();
         Swal.fire("Updated", "Record updated successfully", "success");
       } else {
         await api.post("/lgu-initiated-mrf", payload);
-        secureStorage.remove(CACHE_KEY);
+        invalidateCache(CACHE_KEY);
         secureStorage.invalidateDashboard();
         Swal.fire("Created", "Record added successfully", "success");
         fetchRecords();
@@ -229,7 +219,7 @@ export default function LguInitiatedMRF({canEdit = true, canDelete = true, isDar
     }).then(async (result) => {
       if (result.isConfirmed) {
         await api.delete(`/lgu-initiated-mrf/${record._id}`);
-        secureStorage.remove(CACHE_KEY);
+        invalidateCache(CACHE_KEY);
         secureStorage.invalidateDashboard();
         setRecords((prev) => prev.filter((r) => r._id !== record._id));
         Swal.fire("Deleted", "Record deleted", "success");
@@ -452,7 +442,7 @@ export default function LguInitiatedMRF({canEdit = true, canDelete = true, isDar
               "Estimated Cost": r.estimatedCost, "Funding Source": r.fundingSource,
               "ENMO Assigned": r.enmoAssigned, "ESWM Staff": r.eswmStaff, "Focal Person": r.focalPerson,
               "Target Month": r.targetMonth, "IIS Number": r.iisNumber,
-              "Date of Monitoring": r.dateOfMonitoring ? dayjs(r.dateOfMonitoring).format("MMM DD, YYYY") : "",
+              "Date of Monitoring": r.dateOfMonitoring ? dayjs(r.dateOfMonitoring).format("MM/DD/YYYY") : "",
               "No. of Brgy Served": r.noOfBrgyServed, "Equipment Used": r.equipmentUsed,
               "Type of Wastes Received": r.typeOfWastesReceived,
               "Quantity Diverted (kg)": r.quantityOfWasteDiverted,
@@ -603,11 +593,11 @@ export default function LguInitiatedMRF({canEdit = true, canDelete = true, isDar
               <Descriptions column={2} size="small" bordered>
                 <Descriptions.Item label="Target Month">{detailViewRecord.targetMonth || "—"}</Descriptions.Item>
                 <Descriptions.Item label="IIS Number">{detailViewRecord.iisNumber || "—"}</Descriptions.Item>
-                <Descriptions.Item label="Date of Monitoring">{detailViewRecord.dateOfMonitoring ? dayjs(detailViewRecord.dateOfMonitoring).format("MMM D, YYYY") : "—"}</Descriptions.Item>
-                <Descriptions.Item label="Report Prepared">{detailViewRecord.dateReportPrepared ? dayjs(detailViewRecord.dateReportPrepared).format("MMM D, YYYY") : "—"}</Descriptions.Item>
-                <Descriptions.Item label="Reviewed (Staff)">{detailViewRecord.dateReportReviewedStaff ? dayjs(detailViewRecord.dateReportReviewedStaff).format("MMM D, YYYY") : "—"}</Descriptions.Item>
-                <Descriptions.Item label="Reviewed (Focal)">{detailViewRecord.dateReportReviewedFocal ? dayjs(detailViewRecord.dateReportReviewedFocal).format("MMM D, YYYY") : "—"}</Descriptions.Item>
-                <Descriptions.Item label="Report Approved">{detailViewRecord.dateReportApproved ? dayjs(detailViewRecord.dateReportApproved).format("MMM D, YYYY") : "—"}</Descriptions.Item>
+                <Descriptions.Item label="Date of Monitoring">{detailViewRecord.dateOfMonitoring ? dayjs(detailViewRecord.dateOfMonitoring).format("MM/DD/YYYY") : "—"}</Descriptions.Item>
+                <Descriptions.Item label="Report Prepared">{detailViewRecord.dateReportPrepared ? dayjs(detailViewRecord.dateReportPrepared).format("MM/DD/YYYY") : "—"}</Descriptions.Item>
+                <Descriptions.Item label="Reviewed (Staff)">{detailViewRecord.dateReportReviewedStaff ? dayjs(detailViewRecord.dateReportReviewedStaff).format("MM/DD/YYYY") : "—"}</Descriptions.Item>
+                <Descriptions.Item label="Reviewed (Focal)">{detailViewRecord.dateReportReviewedFocal ? dayjs(detailViewRecord.dateReportReviewedFocal).format("MM/DD/YYYY") : "—"}</Descriptions.Item>
+                <Descriptions.Item label="Report Approved">{detailViewRecord.dateReportApproved ? dayjs(detailViewRecord.dateReportApproved).format("MM/DD/YYYY") : "—"}</Descriptions.Item>
                 <Descriptions.Item label="Tracking">{detailViewRecord.trackingOfReports || "—"}</Descriptions.Item>
               </Descriptions>
             )},
@@ -681,11 +671,11 @@ export default function LguInitiatedMRF({canEdit = true, canDelete = true, isDar
               <Row gutter={16}>
                 <Col xs={24} sm={8}><Form.Item name="targetMonth" label="Target Month"><Select options={monthOptions} allowClear /></Form.Item></Col>
                 <Col xs={24} sm={8}><Form.Item name="iisNumber" label="IIS Number"><Input /></Form.Item></Col>
-                <Col xs={24} sm={8}><Form.Item name="dateOfMonitoring" label="Date of Monitoring"><DatePicker style={{ width: "100%" }} /></Form.Item></Col>
-                <Col xs={24} sm={8}><Form.Item name="dateReportPrepared" label="Report Prepared"><DatePicker style={{ width: "100%" }} /></Form.Item></Col>
-                <Col xs={24} sm={8}><Form.Item name="dateReportReviewedStaff" label="Reviewed (Staff)"><DatePicker style={{ width: "100%" }} /></Form.Item></Col>
-                <Col xs={24} sm={8}><Form.Item name="dateReportReviewedFocal" label="Reviewed (Focal)"><DatePicker style={{ width: "100%" }} /></Form.Item></Col>
-                <Col xs={24} sm={8}><Form.Item name="dateReportApproved" label="Report Approved"><DatePicker style={{ width: "100%" }} /></Form.Item></Col>
+                <Col xs={24} sm={8}><Form.Item name="dateOfMonitoring" label="Date of Monitoring"><DatePicker format="MM/DD/YYYY" style={{ width: "100%" }} /></Form.Item></Col>
+                <Col xs={24} sm={8}><Form.Item name="dateReportPrepared" label="Report Prepared"><DatePicker format="MM/DD/YYYY" style={{ width: "100%" }} /></Form.Item></Col>
+                <Col xs={24} sm={8}><Form.Item name="dateReportReviewedStaff" label="Reviewed (Staff)"><DatePicker format="MM/DD/YYYY" style={{ width: "100%" }} /></Form.Item></Col>
+                <Col xs={24} sm={8}><Form.Item name="dateReportReviewedFocal" label="Reviewed (Focal)"><DatePicker format="MM/DD/YYYY" style={{ width: "100%" }} /></Form.Item></Col>
+                <Col xs={24} sm={8}><Form.Item name="dateReportApproved" label="Report Approved"><DatePicker format="MM/DD/YYYY" style={{ width: "100%" }} /></Form.Item></Col>
                 <Col xs={24} sm={16}><Form.Item name="trackingOfReports" label="Tracking of Reports"><Input /></Form.Item></Col>
               </Row>
             )},

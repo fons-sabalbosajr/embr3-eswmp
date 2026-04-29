@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, createContext, useContext } from "react";
 import api from "../api";
 import secureStorage from "./secureStorage";
+import { fetchWithCache, invalidateCache } from "./pageCache";
 
 const CACHE_KEY = "data-refs-cache";
 const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
@@ -16,23 +17,11 @@ export function DataRefProvider({ children }) {
   const [loading, setLoading] = useState(true);
 
   const fetchRefs = useCallback(async () => {
-    // Check cache
-    const cached = secureStorage.getJSON(CACHE_KEY);
-    if (cached && Date.now() - cached.ts < CACHE_TTL) {
-      setRefs(cached.data);
-      setLoading(false);
-      return;
-    }
-
-    try {
-      const { data } = await api.get("/data-references");
-      setRefs(data);
-      secureStorage.setJSON(CACHE_KEY, { data, ts: Date.now() });
-    } catch {
-      // silently fall back to cached or empty
-    } finally {
-      setLoading(false);
-    }
+    await fetchWithCache(CACHE_KEY, () => api.get("/data-references").then(({ data }) => data), {
+      ttl: CACHE_TTL,
+      onData:  (data) => { setRefs(data); setLoading(false); },
+      onEnd:   ()     => setLoading(false),
+    });
   }, []);
 
   useEffect(() => {
@@ -48,7 +37,7 @@ export function DataRefProvider({ children }) {
   );
 
   const refresh = useCallback(() => {
-    secureStorage.remove(CACHE_KEY);
+    invalidateCache(CACHE_KEY);
     return fetchRefs();
   }, [fetchRefs]);
 

@@ -13,6 +13,7 @@ import Swal from "sweetalert2";
 import api from "../../api";
 import { exportToExcel } from "../../utils/exportExcel";
 import secureStorage from "../../utils/secureStorage";
+import { fetchWithCache, invalidateCache } from "../../utils/pageCache";
 import { useDataRef } from "../../utils/dataRef";
 import dayjs from "dayjs";
 
@@ -71,18 +72,14 @@ export default function ProjectDescScoping({canEdit = true, canDelete = true, is
   const [form] = Form.useForm();
 
   const fetchRecords = useCallback(async (skipCache = false) => {
-    setLoading(true);
-    try {
-      if (!skipCache) {
-        const cached = secureStorage.getJSON(CACHE_KEY);
-        if (cached && Date.now() - cached.ts < CACHE_TTL) { setRecords(cached.data.map((r) => ({ ...r, ...computeFields(r) }))); setLoading(false); return; }
-      }
-      const { data } = await api.get("/project-desc-scoping");
-      const enriched = data.map((r) => ({ ...r, ...computeFields(r) }));
-      setRecords(enriched);
-      secureStorage.setJSON(CACHE_KEY, { data, ts: Date.now() });
-    } catch { Swal.fire("Error", "Failed to load records", "error"); }
-    finally { setLoading(false); }
+    await fetchWithCache(CACHE_KEY, () => api.get("/project-desc-scoping").then(({ data }) => data), {
+      ttl: CACHE_TTL,
+      force: skipCache,
+      onData:  (data) => setRecords(data.map((r) => ({ ...r, ...computeFields(r) }))),
+      onError: ()     => Swal.fire("Error", "Failed to load records", "error"),
+      onStart: ()     => setLoading(true),
+      onEnd:   ()     => setLoading(false),
+    });
   }, []);
 
   useEffect(() => { fetchRecords(); }, [fetchRecords]);
@@ -356,7 +353,7 @@ export default function ProjectDescScoping({canEdit = true, canDelete = true, is
             { key: "monitoring2", label: <span style={{ color: "#13c2c2" }}><CalendarOutlined /> Schedule</span>, children: (
               <Descriptions column={2} size="small" bordered>
                 <Descriptions.Item label="Target Month">{detailViewRecord.targetMonth || "—"}</Descriptions.Item>
-                <Descriptions.Item label="Monitoring Date">{detailViewRecord.dateOfMonitoring ? dayjs(detailViewRecord.dateOfMonitoring).format("MMM D, YYYY") : "—"}</Descriptions.Item>
+                <Descriptions.Item label="Monitoring Date">{detailViewRecord.dateOfMonitoring ? dayjs(detailViewRecord.dateOfMonitoring).format("MM/DD/YYYY") : "—"}</Descriptions.Item>
               </Descriptions>
             )},
             { key: "compliance", label: <span style={{ color: "#eb2f96" }}><SafetyCertificateOutlined /> Compliance</span>, children: (
@@ -412,11 +409,11 @@ export default function ProjectDescScoping({canEdit = true, canDelete = true, is
               <Row gutter={16}>
                 <Col xs={24} sm={8}><Form.Item name="targetMonth" label="Target Month"><Select options={monthOptions} allowClear /></Form.Item></Col>
                 <Col xs={24} sm={8}><Form.Item name="iisNumber" label="IIS Number"><Input /></Form.Item></Col>
-                <Col xs={24} sm={8}><Form.Item name="dateOfMonitoring" label="Monitoring Date"><DatePicker style={{ width: "100%" }} /></Form.Item></Col>
-                <Col xs={24} sm={8}><Form.Item name="dateReportPrepared" label="Report Prepared"><DatePicker style={{ width: "100%" }} /></Form.Item></Col>
-                <Col xs={24} sm={8}><Form.Item name="dateReportReviewedStaff" label="Reviewed (Staff)"><DatePicker style={{ width: "100%" }} /></Form.Item></Col>
-                <Col xs={24} sm={8}><Form.Item name="dateReportReviewedFocal" label="Reviewed (Focal)"><DatePicker style={{ width: "100%" }} /></Form.Item></Col>
-                <Col xs={24} sm={8}><Form.Item name="dateReportApproved" label="Report Approved"><DatePicker style={{ width: "100%" }} /></Form.Item></Col>
+                <Col xs={24} sm={8}><Form.Item name="dateOfMonitoring" label="Monitoring Date"><DatePicker format="MM/DD/YYYY" style={{ width: "100%" }} /></Form.Item></Col>
+                <Col xs={24} sm={8}><Form.Item name="dateReportPrepared" label="Report Prepared"><DatePicker format="MM/DD/YYYY" style={{ width: "100%" }} /></Form.Item></Col>
+                <Col xs={24} sm={8}><Form.Item name="dateReportReviewedStaff" label="Reviewed (Staff)"><DatePicker format="MM/DD/YYYY" style={{ width: "100%" }} /></Form.Item></Col>
+                <Col xs={24} sm={8}><Form.Item name="dateReportReviewedFocal" label="Reviewed (Focal)"><DatePicker format="MM/DD/YYYY" style={{ width: "100%" }} /></Form.Item></Col>
+                <Col xs={24} sm={8}><Form.Item name="dateReportApproved" label="Report Approved"><DatePicker format="MM/DD/YYYY" style={{ width: "100%" }} /></Form.Item></Col>
                 <Col xs={24} sm={16}><Form.Item name="trackingOfReports" label="Tracking"><Input /></Form.Item></Col>
               </Row>
             )},

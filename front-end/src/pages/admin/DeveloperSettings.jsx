@@ -842,7 +842,7 @@ export default function DeveloperSettings({onSettingsSaved, isDark}) {
                       { title: "LGU/Company", dataIndex: "lguCompanyName", key: "company", ellipsis: true, width: 200 },
                       { title: "Type", dataIndex: "companyType", key: "type", width: 80, render: (v) => <Tag color={v === "LGU" ? "blue" : "purple"} bordered={false}>{v}</Tag> },
                       { title: "Status (before delete)", dataIndex: "status", key: "status", width: 140, render: (v) => <Tag color={v === "pending" ? "orange" : v === "acknowledged" ? "green" : v === "rejected" ? "red" : v === "reverted" ? "volcano" : "default"}>{v?.charAt(0).toUpperCase() + v?.slice(1)}</Tag> },
-                      { title: "Deleted At", dataIndex: "deletedAt", key: "deletedAt", width: 160, render: (v) => <Text type="secondary" style={{ fontSize: 12 }}>{v ? dayjs(v).format("MMM DD, YYYY hh:mm A") : "—"}</Text> },
+                      { title: "Deleted At", dataIndex: "deletedAt", key: "deletedAt", width: 160, render: (v) => <Text type="secondary" style={{ fontSize: 12 }}>{v ? dayjs(v).format("MM/DD/YYYY hh:mm A") : "—"}</Text> },
                       { title: "Deleted By", dataIndex: "deletedBy", key: "deletedBy", width: 120, render: (v) => <Text type="secondary" style={{ fontSize: 12 }}>{v || "—"}</Text> },
                       {
                         title: "Actions", key: "actions", width: 200,
@@ -1011,7 +1011,7 @@ export default function DeveloperSettings({onSettingsSaved, isDark}) {
                       { title: "LGU", dataIndex: "lgu", key: "lgu", width: 180, ellipsis: true, render: (v) => <Text strong>{v || "—"}</Text> },
                       { title: "Category", dataIndex: "category", key: "category", width: 120, render: (v) => v ? <Tag>{v}</Tag> : "—" },
                       { title: "Status", dataIndex: "statusOfSLF", key: "statusOfSLF", width: 150, render: (v) => <Tag color={/operational/i.test(v || "") && !/non/i.test(v || "") ? "green" : /non/i.test(v || "") ? "red" : "default"}>{v || "—"}</Tag> },
-                      { title: "Deleted At", dataIndex: "deletedAt", key: "deletedAt", width: 170, render: (v) => <Text type="secondary" style={{ fontSize: 12 }}>{v ? dayjs(v).format("MMM DD, YYYY hh:mm A") : "—"}</Text> },
+                      { title: "Deleted At", dataIndex: "deletedAt", key: "deletedAt", width: 170, render: (v) => <Text type="secondary" style={{ fontSize: 12 }}>{v ? dayjs(v).format("MM/DD/YYYY hh:mm A") : "—"}</Text> },
                       { title: "Deleted By", dataIndex: "deletedBy", key: "deletedBy", width: 120, render: (v) => <Text type="secondary" style={{ fontSize: 12 }}>{v || "—"}</Text> },
                       {
                         title: "Actions", key: "actions", width: 200,

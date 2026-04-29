@@ -1598,7 +1598,7 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
       title: "Date",
       dataIndex: "createdAt",
       key: "createdAt",
-      render: (v) => dayjs(v).format("MMM DD, YYYY h:mm A"),
+      render: (v) => dayjs(v).format("MM/DD/YYYY h:mm A"),
     },
   ];
 
@@ -8609,11 +8609,11 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                     </Row>
                     <Divider plain orientation="left"><ExperimentOutlined /> Trap Details</Divider>
                     <Row gutter={[16, 12]}>
-                      <Col span={12}><Text type="secondary">Date Installed:</Text>{" "}<Text strong>{trapViewRecord.dateInstalled ? dayjs(trapViewRecord.dateInstalled).format("MMM DD, YYYY") : "\u2014"}</Text></Col>
+                      <Col span={12}><Text type="secondary">Date Installed:</Text>{" "}<Text strong>{trapViewRecord.dateInstalled ? dayjs(trapViewRecord.dateInstalled).format("MM/DD/YYYY") : "\u2014"}</Text></Col>
                       <Col span={12}><Text type="secondary">Status:</Text>{" "}<Text strong>{trapViewRecord.statusOfTrashTraps || "\u2014"}</Text></Col>
                       <Col span={12}><Text type="secondary">HDPE Floaters:</Text>{" "}<Text strong>{trapViewRecord.noOfTrashTrapsHDPE ?? "\u2014"}</Text></Col>
                       <Col span={12}><Text type="secondary">Waste Hauled:</Text>{" "}<Text strong>{trapViewRecord.estimatedVolumeWasteHauled ? `${Number(trapViewRecord.estimatedVolumeWasteHauled).toLocaleString()} kg` : "\u2014"}</Text></Col>
-                      <Col span={12}><Text type="secondary">Last Hauling:</Text>{" "}<Text>{trapViewRecord.dateOfLastHauling ? dayjs(trapViewRecord.dateOfLastHauling).format("MMM DD, YYYY") : "\u2014"}</Text></Col>
+                      <Col span={12}><Text type="secondary">Last Hauling:</Text>{" "}<Text>{trapViewRecord.dateOfLastHauling ? dayjs(trapViewRecord.dateOfLastHauling).format("MM/DD/YYYY") : "\u2014"}</Text></Col>
                     </Row>
                     <Divider plain orientation="left"><SafetyCertificateOutlined /> Accessories</Divider>
                     <Row gutter={[16, 12]}>
@@ -8636,11 +8636,11 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                   <Row gutter={[16, 12]}>
                     <Col span={12}><Text type="secondary">Target Month:</Text>{" "}<Text>{trapViewRecord.targetMonth || "\u2014"}</Text></Col>
                     <Col span={12}><Text type="secondary">IIS Number:</Text>{" "}<Text>{trapViewRecord.iisNumber || "\u2014"}</Text></Col>
-                    <Col span={12}><Text type="secondary">Date of Monitoring:</Text>{" "}<Text>{trapViewRecord.dateOfMonitoring ? dayjs(trapViewRecord.dateOfMonitoring).format("MMM D, YYYY") : "\u2014"}</Text></Col>
-                    <Col span={12}><Text type="secondary">Report Prepared:</Text>{" "}<Text>{trapViewRecord.dateReportPrepared ? dayjs(trapViewRecord.dateReportPrepared).format("MMM D, YYYY") : "\u2014"}</Text></Col>
-                    <Col span={12}><Text type="secondary">Reviewed (Staff):</Text>{" "}<Text>{trapViewRecord.dateReportReviewedStaff ? dayjs(trapViewRecord.dateReportReviewedStaff).format("MMM D, YYYY") : "\u2014"}</Text></Col>
-                    <Col span={12}><Text type="secondary">Reviewed (Focal):</Text>{" "}<Text>{trapViewRecord.dateReportReviewedFocal ? dayjs(trapViewRecord.dateReportReviewedFocal).format("MMM D, YYYY") : "\u2014"}</Text></Col>
-                    <Col span={12}><Text type="secondary">Report Approved:</Text>{" "}<Text>{trapViewRecord.dateReportApproved ? dayjs(trapViewRecord.dateReportApproved).format("MMM D, YYYY") : "\u2014"}</Text></Col>
+                    <Col span={12}><Text type="secondary">Date of Monitoring:</Text>{" "}<Text>{trapViewRecord.dateOfMonitoring ? dayjs(trapViewRecord.dateOfMonitoring).format("MM/DD/YYYY") : "\u2014"}</Text></Col>
+                    <Col span={12}><Text type="secondary">Report Prepared:</Text>{" "}<Text>{trapViewRecord.dateReportPrepared ? dayjs(trapViewRecord.dateReportPrepared).format("MM/DD/YYYY") : "\u2014"}</Text></Col>
+                    <Col span={12}><Text type="secondary">Reviewed (Staff):</Text>{" "}<Text>{trapViewRecord.dateReportReviewedStaff ? dayjs(trapViewRecord.dateReportReviewedStaff).format("MM/DD/YYYY") : "\u2014"}</Text></Col>
+                    <Col span={12}><Text type="secondary">Reviewed (Focal):</Text>{" "}<Text>{trapViewRecord.dateReportReviewedFocal ? dayjs(trapViewRecord.dateReportReviewedFocal).format("MM/DD/YYYY") : "\u2014"}</Text></Col>
+                    <Col span={12}><Text type="secondary">Report Approved:</Text>{" "}<Text>{trapViewRecord.dateReportApproved ? dayjs(trapViewRecord.dateReportApproved).format("MM/DD/YYYY") : "\u2014"}</Text></Col>
                     <Col span={8}><Text type="secondary">Days Prepared:</Text>{" "}<Text strong>{trapViewRecord.totalDaysReportPrepared ?? "\u2014"}</Text></Col>
                     <Col span={8}><Text type="secondary">Days Staff Review:</Text>{" "}<Text strong>{trapViewRecord.totalDaysReviewedStaff ?? "\u2014"}</Text></Col>
                     <Col span={8}><Text type="secondary">Days Focal Review:</Text>{" "}<Text strong>{trapViewRecord.totalDaysReviewedFocal ?? "\u2014"}</Text></Col>

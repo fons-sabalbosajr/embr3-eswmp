@@ -1,11 +1,14 @@
 import { useState, useEffect, useCallback, Component } from "react";
-import { Modal, Button, Typography, Result } from "antd";
+import { Modal, Button, Typography, Result, Collapse, Tag } from "antd";
 import {
   WifiOutlined,
   CloseCircleOutlined,
   BugOutlined,
   ReloadOutlined,
   WarningOutlined,
+  CopyOutlined,
+  HomeOutlined,
+  DownOutlined,
 } from "@ant-design/icons";
 
 const { Text, Title } = Typography;
@@ -163,42 +166,130 @@ const offlineStyles = {
 export class AppErrorBoundary extends Component {
   constructor(props) {
     super(props);
-    this.state = { hasError: false, error: null };
+    this.state = { hasError: false, error: null, errorInfo: null, copied: false, showStack: false };
   }
 
   static getDerivedStateFromError(error) {
     return { hasError: true, error };
   }
 
+  componentDidCatch(error, errorInfo) {
+    this.setState({ errorInfo });
+    // Log to console for dev visibility
+    console.error("[AppErrorBoundary]", error, errorInfo);
+  }
+
   handleReload = () => {
-    this.setState({ hasError: false, error: null });
+    this.setState({ hasError: false, error: null, errorInfo: null, copied: false, showStack: false });
     window.location.reload();
+  };
+
+  handleGoHome = () => {
+    this.setState({ hasError: false, error: null, errorInfo: null, copied: false, showStack: false });
+    window.location.href = "/";
+  };
+
+  handleCopy = () => {
+    const { error, errorInfo } = this.state;
+    const text = [
+      `Error: ${error?.message || "Unknown error"}`,
+      `\nTimestamp: ${new Date().toISOString()}`,
+      `\nURL: ${window.location.href}`,
+      `\nStack:\n${error?.stack || ""}`,
+      errorInfo?.componentStack ? `\nComponent Stack:\n${errorInfo.componentStack}` : "",
+    ].join("");
+    navigator.clipboard.writeText(text).then(() => {
+      this.setState({ copied: true });
+      setTimeout(() => this.setState({ copied: false }), 2000);
+    });
   };
 
   render() {
     if (this.state.hasError) {
+      const { error, errorInfo, copied, showStack } = this.state;
+      const isDev = import.meta.env?.DEV ?? false;
+
       return (
         <div style={boundaryStyles.wrapper}>
           <div style={boundaryStyles.card}>
+            {/* Header band */}
             <div style={boundaryStyles.iconBand}>
-              <BugOutlined style={{ fontSize: 52, color: "#fff" }} />
+              <BugOutlined style={{ fontSize: 44, color: "#fff", marginBottom: 6 }} />
+              <span style={{ color: "#fff", fontWeight: 700, fontSize: 16, letterSpacing: 0.3 }}>
+                Application Error
+              </span>
             </div>
-            <Result
-              status="error"
-              title="Something went wrong"
-              subTitle="An unexpected error occurred. Please try reloading the page."
-              extra={
+
+            {/* Body */}
+            <div style={boundaryStyles.body}>
+              <Title level={4} style={{ margin: "0 0 6px", color: "#1a3353" }}>
+                Something went wrong
+              </Title>
+              <Text type="secondary" style={{ fontSize: 13, display: "block", marginBottom: 16 }}>
+                An unexpected error occurred. You can reload the page or go to the home screen.
+              </Text>
+
+              {/* Error message box */}
+              {error?.message && (
+                <div style={boundaryStyles.errorBox}>
+                  <Tag color="red" style={{ fontSize: 11, marginBottom: 6, borderRadius: 4 }}>
+                    {error.name || "Error"}
+                  </Tag>
+                  <Text code style={{ fontSize: 12, display: "block", wordBreak: "break-word", color: "#cf1322" }}>
+                    {error.message}
+                  </Text>
+                </div>
+              )}
+
+              {/* Stack trace toggle (dev or expandable) */}
+              {(isDev || errorInfo) && (
+                <div style={{ marginBottom: 14 }}>
+                  <Button
+                    size="small"
+                    type="text"
+                    icon={<DownOutlined rotate={showStack ? 180 : 0} style={{ fontSize: 10 }} />}
+                    style={{ fontSize: 11, color: "#8c8c8c", padding: "0 4px" }}
+                    onClick={() => this.setState((s) => ({ showStack: !s.showStack }))}
+                  >
+                    {showStack ? "Hide" : "Show"} stack trace
+                  </Button>
+                  {showStack && (
+                    <pre style={boundaryStyles.stackPre}>
+                      {error?.stack || "No stack available"}
+                      {errorInfo?.componentStack ? `\n\nComponent Stack:${errorInfo.componentStack}` : ""}
+                    </pre>
+                  )}
+                </div>
+              )}
+
+              {/* Action buttons */}
+              <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
                 <Button
                   type="primary"
                   icon={<ReloadOutlined />}
                   onClick={this.handleReload}
-                  style={boundaryStyles.btn}
+                  style={{ ...boundaryStyles.btn, flex: 1 }}
                 >
                   Reload Page
                 </Button>
-              }
-              style={{ padding: "16px 24px 24px" }}
-            />
+                <Button
+                  icon={<HomeOutlined />}
+                  onClick={this.handleGoHome}
+                  style={{ flex: 1, height: 42, borderRadius: 8, fontWeight: 600 }}
+                >
+                  Go to Home
+                </Button>
+              </div>
+              <Button
+                icon={<CopyOutlined />}
+                size="small"
+                type="text"
+                onClick={this.handleCopy}
+                style={{ marginTop: 10, width: "100%", color: copied ? "#52c41a" : "#8c8c8c", fontSize: 12 }}
+              >
+                {copied ? "Copied to clipboard!" : "Copy error details for reporting"}
+              </Button>
+            </div>
           </div>
         </div>
       );
@@ -217,7 +308,7 @@ const boundaryStyles = {
     padding: 16,
   },
   card: {
-    maxWidth: 480,
+    maxWidth: 520,
     width: "100%",
     background: "#fff",
     borderRadius: 16,
@@ -227,9 +318,34 @@ const boundaryStyles = {
   iconBand: {
     background: "linear-gradient(135deg, #ff4d4f 0%, #a8071a 100%)",
     display: "flex",
+    flexDirection: "column",
     alignItems: "center",
     justifyContent: "center",
-    padding: "32px 0 24px",
+    padding: "28px 0 20px",
+    gap: 6,
+  },
+  body: {
+    padding: "20px 28px 24px",
+  },
+  errorBox: {
+    background: "#fff1f0",
+    border: "1px solid #ffa39e",
+    borderRadius: 8,
+    padding: "10px 14px",
+    marginBottom: 14,
+  },
+  stackPre: {
+    background: "#1a1a2e",
+    color: "#a8b2d8",
+    borderRadius: 8,
+    padding: "12px 14px",
+    fontSize: 10,
+    lineHeight: 1.6,
+    overflowX: "auto",
+    maxHeight: 200,
+    whiteSpace: "pre-wrap",
+    wordBreak: "break-word",
+    marginTop: 6,
   },
   btn: {
     height: 42,

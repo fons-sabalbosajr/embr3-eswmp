@@ -233,8 +233,8 @@ router.put("/:id", async (req, res) => {
 router.patch("/:id/cell-status", async (req, res) => {
   try {
     const { cellIndex, status } = req.body;
-    if (cellIndex == null || !["Operational", "Closed"].includes(status)) {
-      return res.status(400).json({ message: "cellIndex and valid status (Operational/Closed) required" });
+    if (cellIndex == null || !["Operational", "Closed", "Under Construction", "Reserved Cell"].includes(status)) {
+      return res.status(400).json({ message: "cellIndex and valid status (Operational/Closed/Under Construction/Reserved Cell) required" });
     }
     const facility = await SlfFacility.findOne({ _id: req.params.id, deletedAt: null });
     if (!facility) return res.status(404).json({ message: "Facility not found" });

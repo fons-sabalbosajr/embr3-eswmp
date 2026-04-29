@@ -54,6 +54,7 @@ import Swal from "sweetalert2";
 import api from "../../api";
 import { exportToExcel } from "../../utils/exportExcel";
 import secureStorage from "../../utils/secureStorage";
+import { fetchWithCache, invalidateCache } from "../../utils/pageCache";
 import { useDataRef } from "../../utils/dataRef";
 import dayjs from "dayjs";
 import { MapContainer, TileLayer, Marker, Popup } from "react-leaflet";
@@ -182,25 +183,14 @@ export default function TenYearSWMPlan({canEdit = true, canDelete = true, isDark
   const [form] = Form.useForm();
 
   const fetchRecords = useCallback(async (skipCache = false) => {
-    setLoading(true);
-    try {
-      if (!skipCache) {
-        const cached = secureStorage.getJSON(CACHE_KEY);
-        if (cached && Date.now() - cached.ts < CACHE_TTL) {
-          setRecords(cached.data.map((r) => ({ ...r, ...computeFields(r) })));
-          setLoading(false);
-          return;
-        }
-      }
-      const { data } = await api.get("/ten-year-swm");
-      const enriched = data.map((r) => ({ ...r, ...computeFields(r) }));
-      setRecords(enriched);
-      secureStorage.setJSON(CACHE_KEY, { data, ts: Date.now() });
-    } catch {
-      Swal.fire("Error", "Failed to load records", "error");
-    } finally {
-      setLoading(false);
-    }
+    await fetchWithCache(CACHE_KEY, () => api.get("/ten-year-swm").then(({ data }) => data), {
+      ttl: CACHE_TTL,
+      force: skipCache,
+      onData:  (data) => setRecords(data.map((r) => ({ ...r, ...computeFields(r) }))),
+      onError: ()     => Swal.fire("Error", "Failed to load records", "error"),
+      onStart: ()     => setLoading(true),
+      onEnd:   ()     => setLoading(false),
+    });
   }, []);
 
   useEffect(() => {
@@ -818,7 +808,7 @@ export default function TenYearSWMPlan({canEdit = true, canDelete = true, isDark
                 "Target Month": r.targetMonth,
                 "IIS Number": r.iisNumber,
                 "Date of Monitoring": r.dateOfMonitoring
-                  ? dayjs(r.dateOfMonitoring).format("MMM DD, YYYY")
+                  ? dayjs(r.dateOfMonitoring).format("MM/DD/YYYY")
                   : "",
                 "Waste Diversion Rate (%)": r.wasteDiversionRate,
                 "Total Waste Generation": r.totalWasteGeneration,
@@ -1336,28 +1326,28 @@ export default function TenYearSWMPlan({canEdit = true, canDelete = true, isDark
                           {detailViewRecord.dateReportPrepared
                             ? dayjs(
                                 detailViewRecord.dateReportPrepared,
-                              ).format("MMM DD, YYYY")
+                              ).format("MM/DD/YYYY")
                             : "—"}
                         </Descriptions.Item>
                         <Descriptions.Item label="Reviewed (Staff)">
                           {detailViewRecord.dateReportReviewedStaff
                             ? dayjs(
                                 detailViewRecord.dateReportReviewedStaff,
-                              ).format("MMM DD, YYYY")
+                              ).format("MM/DD/YYYY")
                             : "—"}
                         </Descriptions.Item>
                         <Descriptions.Item label="Reviewed (Focal)">
                           {detailViewRecord.dateReportReviewedFocal
                             ? dayjs(
                                 detailViewRecord.dateReportReviewedFocal,
-                              ).format("MMM DD, YYYY")
+                              ).format("MM/DD/YYYY")
                             : "—"}
                         </Descriptions.Item>
                         <Descriptions.Item label="Report Approved">
                           {detailViewRecord.dateReportApproved
                             ? dayjs(
                                 detailViewRecord.dateReportApproved,
-                              ).format("MMM DD, YYYY")
+                              ).format("MM/DD/YYYY")
                             : "—"}
                         </Descriptions.Item>
                       </Descriptions>
@@ -1907,7 +1897,7 @@ export default function TenYearSWMPlan({canEdit = true, canDelete = true, isDark
                           label="Date of Monitoring"
                           name="dateOfMonitoring"
                         >
-                          <DatePicker style={{ width: "100%" }} />
+                          <DatePicker format="MM/DD/YYYY" style={{ width: "100%" }} />
                         </Form.Item>
                       </Col>
                       <Col xs={12} sm={6}>
@@ -1915,7 +1905,7 @@ export default function TenYearSWMPlan({canEdit = true, canDelete = true, isDark
                           label="Date Report Prepared"
                           name="dateReportPrepared"
                         >
-                          <DatePicker style={{ width: "100%" }} />
+                          <DatePicker format="MM/DD/YYYY" style={{ width: "100%" }} />
                         </Form.Item>
                       </Col>
                     </Row>
@@ -1925,7 +1915,7 @@ export default function TenYearSWMPlan({canEdit = true, canDelete = true, isDark
                           label="Reviewed (Staff)"
                           name="dateReportReviewedStaff"
                         >
-                          <DatePicker style={{ width: "100%" }} />
+                          <DatePicker format="MM/DD/YYYY" style={{ width: "100%" }} />
                         </Form.Item>
                       </Col>
                       <Col xs={12} sm={6}>
@@ -1933,7 +1923,7 @@ export default function TenYearSWMPlan({canEdit = true, canDelete = true, isDark
                           label="Reviewed (Focal)"
                           name="dateReportReviewedFocal"
                         >
-                          <DatePicker style={{ width: "100%" }} />
+                          <DatePicker format="MM/DD/YYYY" style={{ width: "100%" }} />
                         </Form.Item>
                       </Col>
                       <Col xs={12} sm={6}>
@@ -1941,7 +1931,7 @@ export default function TenYearSWMPlan({canEdit = true, canDelete = true, isDark
                           label="Date Approved"
                           name="dateReportApproved"
                         >
-                          <DatePicker style={{ width: "100%" }} />
+                          <DatePicker format="MM/DD/YYYY" style={{ width: "100%" }} />
                         </Form.Item>
                       </Col>
                       <Col xs={12} sm={6}>

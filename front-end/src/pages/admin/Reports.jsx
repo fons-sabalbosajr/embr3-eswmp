@@ -300,7 +300,7 @@ export default function Reports() {
       width: 140,
       render: (v) => (
         <span style={{ fontSize: 12 }}>
-          {dayjs(v).format("MMM DD, YYYY hh:mm A")}
+          {dayjs(v).format("MM/DD/YYYY hh:mm A")}
         </span>
       ),
     },
@@ -543,7 +543,7 @@ export default function Reports() {
                   <Text style={{ fontSize: 13 }}>{t.description}</Text>
                   <br />
                   <Text type="secondary" style={{ fontSize: 12 }}>
-                    {dayjs(t.createdAt).format("MMM DD, YYYY HH:mm:ss")} —{" "}
+                    {dayjs(t.createdAt).format("MM/DD/YYYY HH:mm:ss")} —{" "}
                     {t.performedBy || "system"}
                   </Text>
                 </div>
