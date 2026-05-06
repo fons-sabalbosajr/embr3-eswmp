@@ -97,11 +97,96 @@ import {
 const { Title, Text } = Typography;
 const ACCENT = "#2f54eb";
 const CHART_COLORS = ["#2f54eb", "#52c41a", "#faad14", "#ff4d4f", "#13c2c2", "#722ed1", "#eb2f96"];
+const UNIT_OPTIONS = [
+  { label: "m³", value: "m³" },
+  { label: "tons", value: "tons" },
+];
+const normalizeUnit = (unit) => (unit || "m³").replace("m3", "m³");
 
 const CACHE_KEY = "slf-facility-cache";
 const CACHE_TTL = 5 * 60 * 1000;
 
 const R3_PROVINCES = ["Bataan", "Bulacan", "Nueva Ecija", "Pampanga", "Tarlac", "Zambales", "Aurora"];
+
+const formatCompact = (value, digits = 1) => {
+  const number = Number(value || 0);
+  if (Math.abs(number) >= 1000000) return `${(number / 1000000).toFixed(digits)}M`;
+  if (Math.abs(number) >= 1000) return `${(number / 1000).toFixed(digits)}k`;
+  return number.toLocaleString();
+};
+
+const sumBy = (items, getter) => items.reduce((sum, item) => sum + Number(getter(item) || 0), 0);
+
+function groupMetric(items, groupGetter, valueGetter) {
+  const map = new Map();
+  items.forEach((item) => {
+    const name = groupGetter(item) || "Unspecified";
+    map.set(name, (map.get(name) || 0) + Number(valueGetter(item) || 0));
+  });
+  return [...map.entries()]
+    .map(([name, value]) => ({ name, value }))
+    .filter((item) => item.value > 0)
+    .sort((a, b) => b.value - a.value);
+}
+
+function topMetric(items, valueGetter, label = "value") {
+  return items
+    .map((item) => ({
+      name: item.lgu || item.facilityName || item.province || "Unspecified SLF",
+      province: item.province || "-",
+      status: item.statusOfSLF || "-",
+      ownership: item.ownership || "-",
+      value: Number(valueGetter(item) || 0),
+      label,
+    }))
+    .filter((item) => item.value > 0)
+    .sort((a, b) => b.value - a.value);
+}
+
+function DashboardMetricCard({ active, color, icon, title, value, suffix, formatter, summary, breakdowns = [], onClick }) {
+  return (
+    <Card
+      size="small"
+      hoverable
+      onClick={onClick}
+      style={{
+        borderRadius: 8,
+        borderLeft: `3px solid ${color}`,
+        height: "100%",
+        cursor: "pointer",
+        boxShadow: active ? `0 0 0 1px ${color} inset` : undefined,
+      }}
+      bodyStyle={{ padding: "10px 12px" }}
+    >
+      <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "flex-start" }}>
+        <Statistic
+          title={<span style={{ fontSize: 11 }}>{title}</span>}
+          value={value}
+          suffix={suffix}
+          valueStyle={{ fontSize: 19, lineHeight: 1.1 }}
+          prefix={icon}
+          formatter={formatter}
+        />
+        <div style={{ textAlign: "right", minWidth: 76, paddingTop: 2 }}>
+          <Text strong style={{ display: "block", fontSize: 11, color }}>{summary}</Text>
+          {breakdowns.slice(0, 2).map((item) => (
+            <Text key={item} type="secondary" style={{ display: "block", fontSize: 10, lineHeight: 1.25 }}>
+              {item}
+            </Text>
+          ))}
+        </div>
+      </div>
+    </Card>
+  );
+}
+
+function InsightStat({ title, value, suffix, color }) {
+  return (
+    <Card size="small" style={{ borderRadius: 8, border: `1px solid ${color}33`, background: `${color}0d`, height: "100%" }}>
+      <Statistic title={title} value={value} suffix={suffix} valueStyle={{ color, fontSize: 22 }} formatter={(v) => Number(v || 0).toLocaleString()} />
+    </Card>
+  );
+}
 
 function buildFilters(records, key) {
   const vals = [...new Set(records.map((r) => r[key]).filter(Boolean))].sort();
@@ -197,7 +282,7 @@ function WasteBaselineInfo() {
       key: "totalVolumeAccepted",
       render: (_, r) =>
         r.totalVolumeAccepted != null
-          ? `${r.totalVolumeAccepted.toLocaleString()} ${(r.totalVolumeAcceptedUnit || "m³").replace("m3", "m³")}`
+          ? `${r.totalVolumeAccepted.toLocaleString()} ${normalizeUnit(r.totalVolumeAcceptedUnit || r.baselineUnit)}`
           : "—",
     },
     {
@@ -205,7 +290,7 @@ function WasteBaselineInfo() {
       key: "activeCellResidual",
       render: (_, r) =>
         r.activeCellResidualVolume != null
-          ? `${r.activeCellResidualVolume.toLocaleString()} ${(r.activeCellResidualUnit || "m³").replace("m3", "m³")}`
+          ? `${r.activeCellResidualVolume.toLocaleString()} ${normalizeUnit(r.activeCellResidualUnit || r.baselineUnit)}`
           : "—",
     },
     {
@@ -213,7 +298,7 @@ function WasteBaselineInfo() {
       key: "activeCellInert",
       render: (_, r) =>
         r.activeCellInertVolume != null
-          ? `${r.activeCellInertVolume.toLocaleString()} ${(r.activeCellInertUnit || "m³").replace("m3", "m³")}`
+          ? `${r.activeCellInertVolume.toLocaleString()} ${normalizeUnit(r.activeCellInertUnit || r.baselineUnit)}`
           : "—",
     },
     {
@@ -221,7 +306,7 @@ function WasteBaselineInfo() {
       key: "closedCellResidual",
       render: (_, r) =>
         r.closedCellResidualVolume != null
-          ? `${r.closedCellResidualVolume.toLocaleString()} ${(r.closedCellResidualUnit || "m³").replace("m3", "m³")}`
+          ? `${r.closedCellResidualVolume.toLocaleString()} ${normalizeUnit(r.closedCellResidualUnit || r.baselineUnit)}`
           : "—",
     },
     {
@@ -229,7 +314,7 @@ function WasteBaselineInfo() {
       key: "closedCellInert",
       render: (_, r) =>
         r.closedCellInertVolume != null
-          ? `${r.closedCellInertVolume.toLocaleString()} ${(r.closedCellInertUnit || "m³").replace("m3", "m³")}`
+          ? `${r.closedCellInertVolume.toLocaleString()} ${normalizeUnit(r.closedCellInertUnit || r.baselineUnit)}`
           : "—",
     },
     {
@@ -1499,6 +1584,7 @@ export default function SLFMonitoring({canEdit = true, canDelete = true, isDark}
   const [filterCategory, setFilterCategory] = useState(null);
   const [filterMonth, setFilterMonth] = useState(null);
   const [quickFilter, setQuickFilter] = useState(null);
+  const [slfInsightModal, setSlfInsightModal] = useState(null);
   const [slfLguModal, setSlfLguModal] = useState(false);
   const [slfWasteModal, setSlfWasteModal] = useState(false);
   const [convArea, setConvArea] = useState(null);
@@ -1594,15 +1680,18 @@ export default function SLFMonitoring({canEdit = true, canDelete = true, isDark}
     form.setFieldsValue({
       ...record,
       cellCapacities: record.cellCapacities || [],
+      cellCapacityUnits: record.cellCapacityUnits || Array.from({ length: record.numberOfCell || 0 }, () => "m³"),
       cellStatuses: record.cellStatuses || Array.from({ length: record.numberOfCell || 0 }, () => "Operational"),
       cellTypes: record.cellTypes || Array.from({ length: record.numberOfCell || 0 }, () => "Residual"),
       cellNotes: record.cellNotes || Array.from({ length: record.numberOfCell || 0 }, () => ""),
       cellFillValues: record.cellFillValues || Array.from({ length: record.numberOfCell || 0 }, () => null),
+      cellFillUnits: record.cellFillUnits || Array.from({ length: record.numberOfCell || 0 }, () => "m³"),
       hasMRF: record.hasMRF || false,
       mrfDetails: record.mrfDetails || [],
       lguServedList: record.lguServedList || [],
       privateCompaniesServed: record.privateCompaniesServed || [],
       volumeCapacityUnit: record.volumeCapacityUnit || "m³",
+      receivingVolumeCapacityUnit: record.receivingVolumeCapacityUnit || "m³",
       leachatePondDetails: (record.leachatePondDetails || []).map((p) => ({ ...p, attachments: toFileList(p.attachments) })),
       gasVentDetails: (record.gasVentDetails || []).map((v) => ({ ...v, attachments: toFileList(v.attachments) })),
       dateOfMonitoring: record.dateOfMonitoring ? dayjs(record.dateOfMonitoring) : null,
@@ -1635,6 +1724,8 @@ export default function SLFMonitoring({canEdit = true, canDelete = true, isDark}
       privateCompaniesServed: [],
       cellNotes: [],
       cellFillValues: [],
+      cellCapacityUnits: [],
+      cellFillUnits: [],
       hasMRF: false,
       mrfDetails: [],
     });
@@ -1676,12 +1767,15 @@ export default function SLFMonitoring({canEdit = true, canDelete = true, isDark}
         longitude: current.longitude,
         eccNo: current.eccNo,
         volumeCapacityUnit: "m³",
+        receivingVolumeCapacityUnit: "m³",
         wasteReceivedUnit: "m³",
         estimatedVolumeWasteUnit: "m³",
         lguServedList: [],
         privateCompaniesServed: [],
         cellNotes: [],
         cellFillValues: [],
+        cellCapacityUnits: [],
+        cellFillUnits: [],
         hasMRF: false,
         mrfDetails: [],
       });
@@ -1924,6 +2018,299 @@ export default function SLFMonitoring({canEdit = true, canDelete = true, isDark}
   const leachateWithData = filtered.filter((r) => r.noOfLeachatePond > 0).length;
   const gasVentsWithData = filtered.filter((r) => r.numberOfGasVents > 0).length;
   const privateWithData = filtered.filter((r) => /private/i.test(r.ownership)).length;
+  const privateClientsTotal = sumBy(filtered, (r) => (r.privateCompaniesServed || []).length);
+  const receivingCapacityTotal = sumBy(filtered, (r) => r.receivingVolumeCapacity || 0);
+  const region3LguServed = sumBy(filtered.filter((r) => R3_PROVINCES.includes(r.province)), (r) => r.noOfLGUServed || 0);
+  const outsideRegionLguServed = Math.max(0, totalLGUs - region3LguServed);
+  const capacityUsePercent = totalCapacity > 0 ? Math.min(100, (totalWaste / totalCapacity) * 100) : 0;
+  const cellStatusSummary = filtered.reduce((acc, record) => {
+    const cellCount = Number(record.numberOfCell || 0);
+    const statuses = record.cellStatuses || [];
+    if (statuses.length > 0) {
+      statuses.slice(0, cellCount || statuses.length).forEach((status) => {
+        const key = status || "Unspecified";
+        acc[key] = (acc[key] || 0) + 1;
+      });
+    } else if (cellCount > 0) {
+      acc.Recorded = (acc.Recorded || 0) + cellCount;
+    }
+    return acc;
+  }, {});
+  const leachateStatusSummary = filtered.reduce((acc, record) => {
+    const ponds = record.leachatePondDetails || [];
+    if (ponds.length > 0) {
+      ponds.forEach((pond) => {
+        const key = pond.status || "Active";
+        acc[key] = (acc[key] || 0) + 1;
+      });
+    } else if (Number(record.noOfLeachatePond || 0) > 0) {
+      acc.Recorded = (acc.Recorded || 0) + Number(record.noOfLeachatePond || 0);
+    }
+    return acc;
+  }, {});
+  const gasStatusSummary = filtered.reduce((acc, record) => {
+    const vents = record.gasVentDetails || [];
+    if (vents.length > 0) {
+      vents.forEach((vent) => {
+        const key = vent.status || "Active";
+        acc[key] = (acc[key] || 0) + 1;
+      });
+    } else if (Number(record.numberOfGasVents || 0) > 0) {
+      acc.Recorded = (acc.Recorded || 0) + Number(record.numberOfGasVents || 0);
+    }
+    return acc;
+  }, {});
+
+  const insightConfig = useMemo(() => {
+    const ownershipBreakdown = groupMetric(filtered, (r) => r.ownership, () => 1);
+    const statusBreakdown = groupMetric(filtered, (r) => r.statusOfSLF, () => 1);
+    const categoryCapacity = groupMetric(filtered, (r) => r.category, (r) => r.volumeCapacity || 0);
+    const provinceCapacity = groupMetric(filtered, (r) => r.province, (r) => r.volumeCapacity || 0);
+    const provinceWaste = groupMetric(filtered, (r) => r.province, (r) => r.actualResidualWasteReceived || 0);
+    const lguData = topMetric(filtered, (r) => r.noOfLGUServed || 0, "LGUs served");
+    const cellData = topMetric(filtered, (r) => r.numberOfCell || 0, "cells");
+    const privateData = filtered
+      .map((record) => ({
+        name: record.lgu || record.facilityName || "Unspecified SLF",
+        province: record.province || "-",
+        status: record.statusOfSLF || "-",
+        ownership: record.ownership || "-",
+        value: (record.privateCompaniesServed || []).length || (/private/i.test(record.ownership || "") ? 1 : 0),
+        label: "private sector served",
+      }))
+      .filter((item) => item.value > 0)
+      .sort((a, b) => b.value - a.value);
+    const leachateData = topMetric(filtered, (r) => r.noOfLeachatePond || 0, "ponds");
+    const gasData = topMetric(filtered, (r) => r.numberOfGasVents || 0, "vents");
+    const wasteData = topMetric(filtered, (r) => r.actualResidualWasteReceived || 0, "tons received");
+    const capacityData = topMetric(filtered, (r) => r.volumeCapacity || 0, "capacity");
+    const statusToChart = (summary) => Object.entries(summary).map(([name, value]) => ({ name, value })).sort((a, b) => b.value - a.value);
+
+    return {
+      cells: {
+        title: "Cell Infrastructure Management",
+        icon: <ExperimentOutlined style={{ color: "#13c2c2" }} />,
+        color: "#13c2c2",
+        primary: totalCells,
+        primaryTitle: "Total Cells",
+        stats: [
+          { title: "Facilities with Cells", value: cellsWithData },
+          { title: "Avg Cells / SLF", value: cellsWithData ? (totalCells / cellsWithData).toFixed(1) : 0 },
+          { title: "Operational SLFs", value: opCount },
+        ],
+        chartData: cellData.slice(0, 10),
+        pieData: statusToChart(cellStatusSummary),
+        narration: `${cellsWithData} of ${totalRecords} SLFs have encoded cell infrastructure. The portfolio records ${totalCells.toLocaleString()} cells, with status mix shown below for operational planning and follow-up.`
+      },
+      lgu: {
+        title: "LGUs Served",
+        icon: <TeamOutlined style={{ color: "#fa8c16" }} />,
+        color: "#fa8c16",
+        primary: totalLGUs,
+        primaryTitle: "Total LGUs Served",
+        stats: [
+          { title: "Reporting SLFs", value: lgusWithData },
+          { title: "Within Region 3", value: region3LguServed },
+          { title: "Outside Region 3", value: outsideRegionLguServed },
+        ],
+        chartData: lguData.slice(0, 10),
+        pieData: [
+          { name: "Within Region 3", value: region3LguServed },
+          { name: "Outside Region 3", value: outsideRegionLguServed },
+        ].filter((item) => item.value > 0),
+        narration: `${lgusWithData} SLFs report LGU coverage. Region 3 accounts for ${region3LguServed.toLocaleString()} served LGUs, while ${outsideRegionLguServed.toLocaleString()} are tagged outside Region 3 or without a Region 3 province match.`
+      },
+      private: {
+        title: "Private Sector Served",
+        icon: <BankOutlined style={{ color: "#722ed1" }} />,
+        color: "#722ed1",
+        primary: privateClientsTotal || privateSectorCount,
+        primaryTitle: privateClientsTotal ? "Private Clients" : "Private SLFs",
+        stats: [
+          { title: "Private-Owned SLFs", value: privateSectorCount },
+          { title: "Client Records", value: privateClientsTotal },
+          { title: "Reporting SLFs", value: privateWithData },
+        ],
+        chartData: privateData.slice(0, 10),
+        pieData: ownershipBreakdown,
+        narration: privateClientsTotal
+          ? `${privateClientsTotal.toLocaleString()} private sector client records are attached to SLF facilities. Use the ranking to spot facilities serving the largest private client groups.`
+          : `${privateSectorCount.toLocaleString()} facilities are tagged as private-owned. Client-level lists are not yet encoded for all records, so ownership is used as the current private sector signal.`
+      },
+      gas: {
+        title: "Gas Management",
+        icon: <ExperimentOutlined style={{ color: "#52c41a" }} />,
+        color: "#52c41a",
+        primary: totalGasVents,
+        primaryTitle: "Gas Vents",
+        stats: [
+          { title: "SLFs with Vents", value: gasVentsWithData },
+          { title: "Avg Vents / SLF", value: gasVentsWithData ? (totalGasVents / gasVentsWithData).toFixed(1) : 0 },
+          { title: "Operational SLFs", value: opCount },
+        ],
+        chartData: gasData.slice(0, 10),
+        pieData: statusToChart(gasStatusSummary),
+        narration: `${gasVentsWithData} SLFs report gas management infrastructure. The status breakdown highlights vents that are active, under maintenance, decommissioned, or only recorded at count level.`
+      },
+      leachate: {
+        title: "Leachate Management",
+        icon: <AlertOutlined style={{ color: "#1890ff" }} />,
+        color: "#1890ff",
+        primary: totalLeachate,
+        primaryTitle: "Leachate Ponds",
+        stats: [
+          { title: "SLFs with Ponds", value: leachateWithData },
+          { title: "Avg Ponds / SLF", value: leachateWithData ? (totalLeachate / leachateWithData).toFixed(1) : 0 },
+          { title: "Non-Operational SLFs", value: nonOpCount },
+        ],
+        chartData: leachateData.slice(0, 10),
+        pieData: statusToChart(leachateStatusSummary),
+        narration: `${leachateWithData} SLFs have leachate pond records. Facilities with higher pond counts may need closer review of pond condition notes, maintenance status, and supporting attachments.`
+      },
+      waste: {
+        title: "Waste Received",
+        icon: <BarChartOutlined style={{ color: "#ff4d4f" }} />,
+        color: "#ff4d4f",
+        primary: totalWaste,
+        primaryTitle: "Waste Received",
+        primarySuffix: "tons",
+        stats: [
+          { title: "Reporting SLFs", value: wasteWithData },
+          { title: "Avg / Facility", value: wasteWithData ? Math.round(totalWaste / wasteWithData) : 0, suffix: "tons" },
+          { title: "Capacity Use", value: capacityUsePercent.toFixed(1), suffix: "%" },
+        ],
+        chartData: wasteData.slice(0, 10),
+        pieData: provinceWaste.slice(0, 8),
+        narration: `${wasteWithData} SLFs report waste received. The total encoded residual waste is ${totalWaste.toLocaleString()} tons, equivalent to ${capacityUsePercent.toFixed(1)}% of encoded total capacity where comparable.`
+      },
+      capacity: {
+        title: "SLF Total Capacities",
+        icon: <DatabaseOutlined style={{ color: "#eb2f96" }} />,
+        color: "#eb2f96",
+        primary: totalCapacity,
+        primaryTitle: "Total Capacity",
+        stats: [
+          { title: "Facilities with Data", value: capacityWithData },
+          { title: "Receiving Capacity", value: receivingCapacityTotal },
+          { title: "Capacity Used", value: capacityUsePercent.toFixed(1), suffix: "%" },
+        ],
+        chartData: capacityData.slice(0, 10),
+        pieData: categoryCapacity.length ? categoryCapacity : provinceCapacity.slice(0, 8),
+        narration: `${capacityWithData} SLFs have encoded capacity. The encoded total is ${totalCapacity.toLocaleString()}, with ${receivingCapacityTotal.toLocaleString()} recorded as receiving volume capacity and ${capacityUsePercent.toFixed(1)}% represented by waste received.`
+      },
+    };
+  }, [
+    capacityUsePercent,
+    capacityWithData,
+    cellStatusSummary,
+    cellsWithData,
+    filtered,
+    gasStatusSummary,
+    gasVentsWithData,
+    leachateStatusSummary,
+    leachateWithData,
+    lgusWithData,
+    nonOpCount,
+    opCount,
+    outsideRegionLguServed,
+    privateClientsTotal,
+    privateSectorCount,
+    privateWithData,
+    receivingCapacityTotal,
+    region3LguServed,
+    totalCapacity,
+    totalCells,
+    totalGasVents,
+    totalLGUs,
+    totalLeachate,
+    totalRecords,
+    totalWaste,
+    wasteWithData,
+  ]);
+
+  const renderInsightModal = () => {
+    const config = insightConfig[slfInsightModal];
+    if (!config) return null;
+    const maxBar = Math.max(...config.chartData.map((item) => item.value), 1);
+    return (
+      <Modal
+        open={!!slfInsightModal}
+        onCancel={() => setSlfInsightModal(null)}
+        title={<Space>{config.icon}<Text strong>{config.title}</Text></Space>}
+        footer={<Button onClick={() => setSlfInsightModal(null)}>Close</Button>}
+        width={1120}
+        destroyOnHidden
+      >
+        <Row gutter={[12, 12]} style={{ marginBottom: 16 }}>
+          <Col xs={24} md={6}>
+            <InsightStat title={config.primaryTitle} value={config.primary} suffix={config.primarySuffix} color={config.color} />
+          </Col>
+          {config.stats.map((stat) => (
+            <Col xs={24} md={6} key={stat.title}>
+              <InsightStat title={stat.title} value={stat.value} suffix={stat.suffix} color={config.color} />
+            </Col>
+          ))}
+        </Row>
+
+        <Alert
+          type="info"
+          showIcon
+          message="Operational Narrative"
+          description={config.narration}
+          style={{ marginBottom: 16, borderRadius: 8 }}
+        />
+
+        <Row gutter={[16, 16]}>
+          <Col xs={24} lg={15}>
+            <Card size="small" title="Facility Ranking" style={{ borderRadius: 8, height: "100%" }}>
+              {config.chartData.length === 0 ? (
+                <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No encoded data for this metric" />
+              ) : (
+                <Space direction="vertical" size={10} style={{ width: "100%" }}>
+                  {config.chartData.map((item, index) => (
+                    <div key={`${item.name}-${index}`}>
+                      <div style={{ display: "flex", justifyContent: "space-between", gap: 12, marginBottom: 4 }}>
+                        <Text strong style={{ fontSize: 12 }}>{index + 1}. {item.name}</Text>
+                        <Text style={{ fontSize: 12, color: config.color }}>{Number(item.value).toLocaleString()} {item.label}</Text>
+                      </div>
+                      <Progress percent={Math.round((item.value / maxBar) * 100)} showInfo={false} strokeColor={config.color} trailColor="#f0f0f0" size="small" />
+                      <Text type="secondary" style={{ fontSize: 11 }}>{item.province} • {item.ownership} • {item.status}</Text>
+                    </div>
+                  ))}
+                </Space>
+              )}
+            </Card>
+          </Col>
+          <Col xs={24} lg={9}>
+            <Card size="small" title="Breakdown" style={{ borderRadius: 8, height: "100%" }}>
+              {config.pieData.length === 0 ? (
+                <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No breakdown data" />
+              ) : (
+                <>
+                  <ResponsiveContainer width="100%" height={210}>
+                    <PieChart>
+                      <Pie data={config.pieData} dataKey="value" nameKey="name" innerRadius={48} outerRadius={78} paddingAngle={2}>
+                        {config.pieData.map((_, index) => (
+                          <RCell key={`slice-${index}`} fill={CHART_COLORS[index % CHART_COLORS.length]} />
+                        ))}
+                      </Pie>
+                      <RTooltip formatter={(value, name) => [Number(value).toLocaleString(), name]} />
+                      <Legend verticalAlign="bottom" height={40} wrapperStyle={{ fontSize: 11 }} />
+                    </PieChart>
+                  </ResponsiveContainer>
+                  <Space size={[6, 6]} wrap>
+                    {config.pieData.slice(0, 8).map((item, index) => (
+                      <Tag key={item.name} color={index % 2 === 0 ? "blue" : "geekblue"}>{item.name}: {Number(item.value).toLocaleString()}</Tag>
+                    ))}
+                  </Space>
+                </>
+              )}
+            </Card>
+          </Col>
+        </Row>
+      </Modal>
+    );
+  };
 
   // Category descriptions
   const CATEGORY_DESC = {
@@ -2204,106 +2591,104 @@ export default function SLFMonitoring({canEdit = true, canDelete = true, isDark}
         </Row>
       ) : (
       <Row gutter={[8, 8]} style={{ marginBottom: 12 }}>
-        {/* Row 1 */}
         <Col xs={12} sm={6} md={6} lg={3}>
-          <Card
-            size="small"
-            hoverable
+          <DashboardMetricCard
+            active={quickFilter === "operational"}
+            color={ACCENT}
+            icon={<BankOutlined style={{ color: ACCENT, fontSize: 14 }} />}
+            title="Total SLF"
+            value={totalRecords}
+            summary={`${opCount} operational`}
+            breakdowns={[`${nonOpCount} non-operational`, `${totalRecords - opCount - nonOpCount} other status`]}
             onClick={() => setQuickFilter(quickFilter === "operational" ? null : "operational")}
-            style={{ borderRadius: 8, borderLeft: `3px solid ${ACCENT}`, height: "100%", padding: 0, cursor: "pointer", boxShadow: quickFilter === "operational" ? "0 0 0 1px #2f54eb inset" : undefined }}
-            bodyStyle={{ padding: "8px 12px" }}
-          >
-            <Statistic
-              title={<span style={{ fontSize: 11 }}>Total SLF</span>}
-              value={totalRecords}
-              valueStyle={{ fontSize: 20 }}
-              prefix={<BankOutlined style={{ color: ACCENT, fontSize: 14 }} />}
-            />
-            <Text type="secondary" style={{ fontSize: 10 }}>
-              <CheckCircleOutlined style={{ color: "#52c41a", marginRight: 2 }} />{opCount}/{totalRecords} Operational
-            </Text>
-          </Card>
+          />
         </Col>
         <Col xs={12} sm={6} md={6} lg={3}>
-          <Card size="small" hoverable onClick={() => setQuickFilter(quickFilter === "withCells" ? null : "withCells")} style={{ borderRadius: 8, borderLeft: "3px solid #13c2c2", height: "100%", padding: 0, cursor: "pointer", boxShadow: quickFilter === "withCells" ? "0 0 0 1px #13c2c2 inset" : undefined }} bodyStyle={{ padding: "8px 12px" }}>
-            <Statistic
-              title={<span style={{ fontSize: 11 }}>Total Cells</span>}
-              value={totalCells}
-              valueStyle={{ fontSize: 20 }}
-              prefix={<ExperimentOutlined style={{ color: "#13c2c2", fontSize: 14 }} />}
-            />
-            <Text type="secondary" style={{ fontSize: 10 }}>{cellsWithData}/{totalRecords} with cells</Text>
-          </Card>
+          <DashboardMetricCard
+            active={quickFilter === "withCells"}
+            color="#13c2c2"
+            icon={<ExperimentOutlined style={{ color: "#13c2c2", fontSize: 14 }} />}
+            title="Cell Infrastructure"
+            value={totalCells}
+            summary={`${cellsWithData}/${totalRecords} SLFs`}
+            breakdowns={Object.entries(cellStatusSummary).slice(0, 2).map(([status, count]) => `${count} ${status}`)}
+            onClick={() => { setQuickFilter(quickFilter === "withCells" ? null : "withCells"); setSlfInsightModal("cells"); }}
+          />
         </Col>
         <Col xs={12} sm={6} md={6} lg={3}>
-          <Card size="small" hoverable onClick={() => { setQuickFilter(quickFilter === "withLGUs" ? null : "withLGUs"); setSlfLguModal(true); }} style={{ borderRadius: 8, borderLeft: "3px solid #fa8c16", height: "100%", padding: 0, cursor: "pointer", boxShadow: quickFilter === "withLGUs" ? "0 0 0 1px #fa8c16 inset" : undefined }} bodyStyle={{ padding: "8px 12px" }}>
-            <Statistic
-              title={<span style={{ fontSize: 11 }}>LGUs Served</span>}
-              value={totalLGUs}
-              valueStyle={{ fontSize: 20 }}
-              prefix={<TeamOutlined style={{ color: "#fa8c16", fontSize: 14 }} />}
-            />
-            <Text type="secondary" style={{ fontSize: 10 }}>{lgusWithData}/{totalRecords} reporting</Text>
-          </Card>
+          <DashboardMetricCard
+            active={quickFilter === "withLGUs"}
+            color="#fa8c16"
+            icon={<TeamOutlined style={{ color: "#fa8c16", fontSize: 14 }} />}
+            title="LGUs Served"
+            value={totalLGUs}
+            summary={`${lgusWithData}/${totalRecords} reporting`}
+            breakdowns={[`${region3LguServed} Region 3`, `${outsideRegionLguServed} outside/other`]}
+            onClick={() => { setQuickFilter(quickFilter === "withLGUs" ? null : "withLGUs"); setSlfInsightModal("lgu"); }}
+          />
         </Col>
         <Col xs={12} sm={6} md={6} lg={3}>
-          <Card size="small" hoverable onClick={() => setQuickFilter(quickFilter === "private" ? null : "private")} style={{ borderRadius: 8, borderLeft: "3px solid #722ed1", height: "100%", padding: 0, cursor: "pointer", boxShadow: quickFilter === "private" ? "0 0 0 1px #722ed1 inset" : undefined }} bodyStyle={{ padding: "8px 12px" }}>
-            <Statistic
-              title={<span style={{ fontSize: 11 }}>Private Sectors</span>}
-              value={privateSectorCount}
-              valueStyle={{ fontSize: 20 }}
-              prefix={<BankOutlined style={{ color: "#722ed1", fontSize: 14 }} />}
-            />
-            <Text type="secondary" style={{ fontSize: 10 }}>{privateWithData}/{totalRecords} private-owned</Text>
-          </Card>
-        </Col>
-        {/* Row 2 */}
-        <Col xs={12} sm={6} md={6} lg={3}>
-          <Card size="small" hoverable onClick={() => setQuickFilter(quickFilter === "withCapacity" ? null : "withCapacity")} style={{ borderRadius: 8, borderLeft: "3px solid #eb2f96", height: "100%", padding: 0, cursor: "pointer", boxShadow: quickFilter === "withCapacity" ? "0 0 0 1px #eb2f96 inset" : undefined }} bodyStyle={{ padding: "8px 12px" }}>
-            <Statistic
-              title={<span style={{ fontSize: 11 }}>Total Capacity</span>}
-              value={totalCapacity}
-              valueStyle={{ fontSize: 20 }}
-              prefix={<DatabaseOutlined style={{ color: "#eb2f96", fontSize: 14 }} />}
-              formatter={(v) => Number(v).toLocaleString()}
-            />
-            <Text type="secondary" style={{ fontSize: 10 }}>{capacityWithData}/{totalRecords} with data</Text>
-          </Card>
+          <DashboardMetricCard
+            active={quickFilter === "private"}
+            color="#722ed1"
+            icon={<BankOutlined style={{ color: "#722ed1", fontSize: 14 }} />}
+            title="Private Sector Served"
+            value={privateClientsTotal || privateSectorCount}
+            summary={`${privateSectorCount} private SLFs`}
+            breakdowns={[`${privateClientsTotal} client records`, `${privateWithData}/${totalRecords} reporting`]}
+            onClick={() => { setQuickFilter(quickFilter === "private" ? null : "private"); setSlfInsightModal("private"); }}
+          />
         </Col>
         <Col xs={12} sm={6} md={6} lg={3}>
-          <Card size="small" hoverable onClick={() => { setQuickFilter(quickFilter === "withWaste" ? null : "withWaste"); setSlfWasteModal(true); }} style={{ borderRadius: 8, borderLeft: "3px solid #ff4d4f", height: "100%", padding: 0, cursor: "pointer", boxShadow: quickFilter === "withWaste" ? "0 0 0 1px #ff4d4f inset" : undefined }} bodyStyle={{ padding: "8px 12px" }}>
-            <Statistic
-              title={<span style={{ fontSize: 11 }}>Waste Received</span>}
-              value={totalWaste}
-              suffix="tons"
-              valueStyle={{ fontSize: 20 }}
-              prefix={<BarChartOutlined style={{ color: "#ff4d4f", fontSize: 14 }} />}
-              formatter={(v) => Number(v).toLocaleString()}
-            />
-            <Text type="secondary" style={{ fontSize: 10 }}>{wasteWithData}/{totalRecords} reporting</Text>
-          </Card>
+          <DashboardMetricCard
+            active={quickFilter === "withCapacity"}
+            color="#eb2f96"
+            icon={<DatabaseOutlined style={{ color: "#eb2f96", fontSize: 14 }} />}
+            title="SLF Total Capacities"
+            value={totalCapacity}
+            formatter={(v) => formatCompact(v)}
+            summary={`${capacityWithData}/${totalRecords} with data`}
+            breakdowns={[`${formatCompact(receivingCapacityTotal)} receiving`, `${capacityUsePercent.toFixed(1)}% used`]}
+            onClick={() => { setQuickFilter(quickFilter === "withCapacity" ? null : "withCapacity"); setSlfInsightModal("capacity"); }}
+          />
         </Col>
         <Col xs={12} sm={6} md={6} lg={3}>
-          <Card size="small" hoverable onClick={() => setQuickFilter(quickFilter === "withLeachate" ? null : "withLeachate")} style={{ borderRadius: 8, borderLeft: "3px solid #1890ff", height: "100%", padding: 0, cursor: "pointer", boxShadow: quickFilter === "withLeachate" ? "0 0 0 1px #1890ff inset" : undefined }} bodyStyle={{ padding: "8px 12px" }}>
-            <Statistic
-              title={<span style={{ fontSize: 11 }}>Leachate Ponds</span>}
-              value={totalLeachate}
-              valueStyle={{ fontSize: 20 }}
-              prefix={<AlertOutlined style={{ color: "#1890ff", fontSize: 14 }} />}
-            />
-            <Text type="secondary" style={{ fontSize: 10 }}>{leachateWithData}/{totalRecords} with ponds</Text>
-          </Card>
+          <DashboardMetricCard
+            active={quickFilter === "withWaste"}
+            color="#ff4d4f"
+            icon={<BarChartOutlined style={{ color: "#ff4d4f", fontSize: 14 }} />}
+            title="Waste Received"
+            value={totalWaste}
+            suffix="tons"
+            formatter={(v) => formatCompact(v)}
+            summary={`${wasteWithData}/${totalRecords} reporting`}
+            breakdowns={[`${formatCompact(wasteWithData ? totalWaste / wasteWithData : 0)} avg`, `${capacityUsePercent.toFixed(1)}% capacity`]}
+            onClick={() => { setQuickFilter(quickFilter === "withWaste" ? null : "withWaste"); setSlfInsightModal("waste"); }}
+          />
         </Col>
         <Col xs={12} sm={6} md={6} lg={3}>
-          <Card size="small" hoverable onClick={() => setQuickFilter(quickFilter === "withGas" ? null : "withGas")} style={{ borderRadius: 8, borderLeft: "3px solid #52c41a", height: "100%", padding: 0, cursor: "pointer", boxShadow: quickFilter === "withGas" ? "0 0 0 1px #52c41a inset" : undefined }} bodyStyle={{ padding: "8px 12px" }}>
-            <Statistic
-              title={<span style={{ fontSize: 11 }}>Gas Vents</span>}
-              value={totalGasVents}
-              valueStyle={{ fontSize: 20 }}
-              prefix={<ExperimentOutlined style={{ color: "#52c41a", fontSize: 14 }} />}
-            />
-            <Text type="secondary" style={{ fontSize: 10 }}>{gasVentsWithData}/{totalRecords} with vents</Text>
-          </Card>
+          <DashboardMetricCard
+            active={quickFilter === "withLeachate"}
+            color="#1890ff"
+            icon={<AlertOutlined style={{ color: "#1890ff", fontSize: 14 }} />}
+            title="Leachate Management"
+            value={totalLeachate}
+            summary={`${leachateWithData}/${totalRecords} SLFs`}
+            breakdowns={Object.entries(leachateStatusSummary).slice(0, 2).map(([status, count]) => `${count} ${status}`)}
+            onClick={() => { setQuickFilter(quickFilter === "withLeachate" ? null : "withLeachate"); setSlfInsightModal("leachate"); }}
+          />
+        </Col>
+        <Col xs={12} sm={6} md={6} lg={3}>
+          <DashboardMetricCard
+            active={quickFilter === "withGas"}
+            color="#52c41a"
+            icon={<ExperimentOutlined style={{ color: "#52c41a", fontSize: 14 }} />}
+            title="Gas Management"
+            value={totalGasVents}
+            summary={`${gasVentsWithData}/${totalRecords} SLFs`}
+            breakdowns={Object.entries(gasStatusSummary).slice(0, 2).map(([status, count]) => `${count} ${status}`)}
+            onClick={() => { setQuickFilter(quickFilter === "withGas" ? null : "withGas"); setSlfInsightModal("gas"); }}
+          />
         </Col>
       </Row>
       )}
@@ -2650,10 +3035,19 @@ export default function SLFMonitoring({canEdit = true, canDelete = true, isDark}
                     <InputNumber style={{ width: "calc(100% - 80px)" }} min={0} placeholder="Capacity" />
                   </Form.Item>
                   <Form.Item name="volumeCapacityUnit" noStyle>
-                    <Select style={{ width: 80 }} options={[
-                      { label: "m³", value: "m³" },
-                      { label: "tons", value: "tons" },
-                    ]} defaultValue="m³" />
+                    <Select style={{ width: 80 }} options={UNIT_OPTIONS} defaultValue="m³" />
+                  </Form.Item>
+                </Space.Compact>
+              </Form.Item>
+            </Col>
+            <Col span={6}>
+              <Form.Item label="Receiving Volume Capacity" style={{ marginBottom: 0 }}>
+                <Space.Compact style={{ width: "100%" }}>
+                  <Form.Item name="receivingVolumeCapacity" noStyle>
+                    <InputNumber style={{ width: "calc(100% - 80px)" }} min={0} placeholder="Receiving capacity" />
+                  </Form.Item>
+                  <Form.Item name="receivingVolumeCapacityUnit" noStyle>
+                    <Select style={{ width: 80 }} options={UNIT_OPTIONS} defaultValue="m³" />
                   </Form.Item>
                 </Space.Compact>
               </Form.Item>
@@ -2692,10 +3086,7 @@ export default function SLFMonitoring({canEdit = true, canDelete = true, isDark}
                     <InputNumber style={{ width: "calc(100% - 90px)" }} min={0} placeholder="Amount received" />
                   </Form.Item>
                   <Form.Item name="wasteReceivedUnit" noStyle>
-                    <Select style={{ width: 90 }} options={[
-                      { label: "m³", value: "m³" },
-                      { label: "tons", value: "tons" },
-                    ]} defaultValue="m³" />
+                    <Select style={{ width: 90 }} options={UNIT_OPTIONS} defaultValue="m³" />
                   </Form.Item>
                 </Space.Compact>
               </Form.Item>
@@ -2909,73 +3300,85 @@ export default function SLFMonitoring({canEdit = true, canDelete = true, isDark}
                     <Form.List name="leachatePondDetails">
                       {(fields, { add, remove }) => (
                         <>
-                          {fields.map(({ key, name, ...rest }) => (
-                            <Card
-                              key={key}
-                              size="small"
-                              style={{ marginBottom: 12, borderRadius: 8, border: `1px solid ${isDark ? "#1d3a6b" : "#bae0ff"}`, overflow: "hidden" }}
-                              headStyle={{ background: isDark ? "rgba(23,119,255,0.08)" : "#e6f4ff", borderBottom: `1px solid ${isDark ? "#1d3a6b" : "#bae0ff"}`, padding: "6px 12px", minHeight: 36 }}
-                              bodyStyle={{ padding: "10px 12px 8px" }}
-                              title={
-                                <Space size={6}>
-                                  <div style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", width: 20, height: 20, background: "#1677ff", borderRadius: "50%", fontSize: 10, color: "#fff", fontWeight: 700, flexShrink: 0 }}>
-                                    {name + 1}
-                                  </div>
-                                  <Text strong style={{ fontSize: 12, color: isDark ? "#69b1ff" : "#0958d9" }}>Leachate Pond</Text>
-                                </Space>
-                              }
-                              extra={<Button size="small" type="text" danger icon={<MinusCircleOutlined />} onClick={() => remove(name)} />}
-                            >
-                              <Row gutter={[12, 0]} align="top">
-                                <Col span={4}>
-                                  <Form.Item {...rest} name={[name, "pondNo"]} label={<Text style={{ fontSize: 11 }}>Pond No.</Text>}>
-                                    <InputNumber style={{ width: "100%" }} min={1} precision={0} />
+                          <Table
+                            size="small"
+                            pagination={false}
+                            dataSource={fields}
+                            rowKey="key"
+                            locale={{ emptyText: "No leachate ponds added yet" }}
+                            scroll={{ x: 980 }}
+                            style={{ marginBottom: 8 }}
+                            columns={[
+                              {
+                                title: "Pond No.",
+                                width: 100,
+                                render: (_, field) => (
+                                  <Form.Item name={[field.name, "pondNo"]} style={{ margin: 0 }}>
+                                    <InputNumber size="small" style={{ width: "100%" }} min={1} precision={0} />
                                   </Form.Item>
-                                </Col>
-                                <Col span={7}>
-                                  <Form.Item {...rest} name={[name, "status"]} label={<Text style={{ fontSize: 11 }}>Operational Status</Text>}>
-                                    <Select placeholder="Select status" options={[
+                                ),
+                              },
+                              {
+                                title: "Status",
+                                width: 180,
+                                render: (_, field) => (
+                                  <Form.Item name={[field.name, "status"]} style={{ margin: 0 }}>
+                                    <Select size="small" placeholder="Select status" options={[
                                       { label: "Active", value: "Active" },
                                       { label: "Inactive", value: "Inactive" },
                                       { label: "Under Maintenance", value: "Under Maintenance" },
                                       { label: "Decommissioned", value: "Decommissioned" },
                                     ]} />
                                   </Form.Item>
-                                </Col>
-                                <Col span={13}>
-                                  <Form.Item {...rest} name={[name, "description"]} label={<Text style={{ fontSize: 11 }}>Description / Condition Notes</Text>}>
-                                    <Input.TextArea rows={2} placeholder="Pond dimensions, lining type, current condition, treatment process..." style={{ resize: "none" }} />
+                                ),
+                              },
+                              {
+                                title: "Description / Condition Notes",
+                                width: 360,
+                                render: (_, field) => (
+                                  <Form.Item name={[field.name, "description"]} style={{ margin: 0 }}>
+                                    <Input.TextArea rows={1} placeholder="Pond dimensions, lining type, current condition..." autoSize={{ minRows: 1, maxRows: 3 }} />
                                   </Form.Item>
-                                </Col>
-                              </Row>
-                              <Divider plain style={{ margin: "2px 0 8px", fontSize: 11, color: "#8c8c8c" }}>
-                                <PaperClipOutlined /> Attached Files
-                              </Divider>
-                              <Form.Item
-                                {...rest}
-                                name={[name, "attachments"]}
-                                valuePropName="fileList"
-                                getValueFromEvent={(e) => Array.isArray(e) ? e : e?.fileList}
-                                style={{ marginBottom: 0 }}
-                              >
-                                <Upload
-                                  action="/eswm-pipeline/api/upload"
-                                  headers={{ Authorization: `Bearer ${secureStorage.get("token")}` }}
-                                  listType="picture"
-                                  accept="image/*,.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx"
-                                  multiple
-                                  beforeUpload={(file) => {
-                                    const ok = file.type.startsWith("image/") || /pdf|msword|officedocument|ms-excel|ms-powerpoint/.test(file.type);
-                                    if (!ok) { message.error("Only images, PDFs, and Office documents are allowed."); return Upload.LIST_IGNORE; }
-                                    if (file.size > 20 * 1024 * 1024) { message.error("File must be under 20 MB."); return Upload.LIST_IGNORE; }
-                                    return true;
-                                  }}
-                                >
-                                  <Button icon={<UploadOutlined />} size="small">Upload Photos or Documents</Button>
-                                </Upload>
-                              </Form.Item>
-                            </Card>
-                          ))}
+                                ),
+                              },
+                              {
+                                title: <Space size={4}><PaperClipOutlined /> Files</Space>,
+                                width: 270,
+                                render: (_, field) => (
+                                  <Form.Item
+                                    name={[field.name, "attachments"]}
+                                    valuePropName="fileList"
+                                    getValueFromEvent={(e) => Array.isArray(e) ? e : e?.fileList}
+                                    style={{ margin: 0 }}
+                                  >
+                                    <Upload
+                                      action="/eswm-pipeline/api/upload"
+                                      headers={{ Authorization: `Bearer ${secureStorage.get("token")}` }}
+                                      listType="text"
+                                      accept="image/*,.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx"
+                                      multiple
+                                      beforeUpload={(file) => {
+                                        const ok = file.type.startsWith("image/") || /pdf|msword|officedocument|ms-excel|ms-powerpoint/.test(file.type);
+                                        if (!ok) { message.error("Only images, PDFs, and Office documents are allowed."); return Upload.LIST_IGNORE; }
+                                        if (file.size > 20 * 1024 * 1024) { message.error("File must be under 20 MB."); return Upload.LIST_IGNORE; }
+                                        return true;
+                                      }}
+                                    >
+                                      <Button icon={<UploadOutlined />} size="small">Upload</Button>
+                                    </Upload>
+                                  </Form.Item>
+                                ),
+                              },
+                              {
+                                title: "",
+                                width: 56,
+                                align: "center",
+                                render: (_, field) => (
+                                  <Button size="small" type="text" danger icon={<DeleteOutlined />} onClick={() => remove(field.name)} />
+                                ),
+                              },
+                            ]}
+                          />
                           <Button type="dashed" onClick={() => add({ pondNo: fields.length + 1, status: "Active" })} block icon={<PlusOutlined />} style={{ marginBottom: 4 }}>
                             Add Leachate Pond
                           </Button>
@@ -2989,32 +3392,30 @@ export default function SLFMonitoring({canEdit = true, canDelete = true, isDark}
                     <Form.List name="gasVentDetails">
                       {(fields, { add, remove }) => (
                         <>
-                          {fields.map(({ key, name, ...rest }) => (
-                            <Card
-                              key={key}
-                              size="small"
-                              style={{ marginBottom: 12, borderRadius: 8, border: `1px solid ${isDark ? "#1a3d20" : "#b7eb8f"}`, overflow: "hidden" }}
-                              headStyle={{ background: isDark ? "rgba(82,196,26,0.08)" : "#f6ffed", borderBottom: `1px solid ${isDark ? "#1a3d20" : "#b7eb8f"}`, padding: "6px 12px", minHeight: 36 }}
-                              bodyStyle={{ padding: "10px 12px 8px" }}
-                              title={
-                                <Space size={6}>
-                                  <div style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", width: 20, height: 20, background: "#52c41a", borderRadius: "50%", fontSize: 10, color: "#fff", fontWeight: 700, flexShrink: 0 }}>
-                                    {name + 1}
-                                  </div>
-                                  <Text strong style={{ fontSize: 12, color: isDark ? "#95de64" : "#389e0d" }}>Gas Vent</Text>
-                                </Space>
-                              }
-                              extra={<Button size="small" type="text" danger icon={<MinusCircleOutlined />} onClick={() => remove(name)} />}
-                            >
-                              <Row gutter={[12, 0]} align="top">
-                                <Col span={4}>
-                                  <Form.Item {...rest} name={[name, "ventNo"]} label={<Text style={{ fontSize: 11 }}>Vent No.</Text>}>
-                                    <InputNumber style={{ width: "100%" }} min={1} precision={0} />
+                          <Table
+                            size="small"
+                            pagination={false}
+                            dataSource={fields}
+                            rowKey="key"
+                            locale={{ emptyText: "No gas vents added yet" }}
+                            scroll={{ x: 1040 }}
+                            style={{ marginBottom: 8 }}
+                            columns={[
+                              {
+                                title: "Vent No.",
+                                width: 100,
+                                render: (_, field) => (
+                                  <Form.Item name={[field.name, "ventNo"]} style={{ margin: 0 }}>
+                                    <InputNumber size="small" style={{ width: "100%" }} min={1} precision={0} />
                                   </Form.Item>
-                                </Col>
-                                <Col span={6}>
-                                  <Form.Item {...rest} name={[name, "ventType"]} label={<Text style={{ fontSize: 11 }}>Vent Type</Text>}>
-                                    <Select placeholder="Select type" allowClear options={[
+                                ),
+                              },
+                              {
+                                title: "Type",
+                                width: 170,
+                                render: (_, field) => (
+                                  <Form.Item name={[field.name, "ventType"]} style={{ margin: 0 }}>
+                                    <Select size="small" placeholder="Select type" allowClear options={[
                                       { label: "Passive", value: "Passive" },
                                       { label: "Active", value: "Active" },
                                       { label: "Flare", value: "Flare" },
@@ -3022,51 +3423,69 @@ export default function SLFMonitoring({canEdit = true, canDelete = true, isDark}
                                       { label: "Other", value: "Other" },
                                     ]} />
                                   </Form.Item>
-                                </Col>
-                                <Col span={6}>
-                                  <Form.Item {...rest} name={[name, "status"]} label={<Text style={{ fontSize: 11 }}>Operational Status</Text>}>
-                                    <Select placeholder="Select status" options={[
+                                ),
+                              },
+                              {
+                                title: "Status",
+                                width: 180,
+                                render: (_, field) => (
+                                  <Form.Item name={[field.name, "status"]} style={{ margin: 0 }}>
+                                    <Select size="small" placeholder="Select status" options={[
                                       { label: "Active", value: "Active" },
                                       { label: "Inactive", value: "Inactive" },
                                       { label: "Under Maintenance", value: "Under Maintenance" },
                                       { label: "Decommissioned", value: "Decommissioned" },
                                     ]} />
                                   </Form.Item>
-                                </Col>
-                                <Col span={8}>
-                                  <Form.Item {...rest} name={[name, "description"]} label={<Text style={{ fontSize: 11 }}>Description / Notes</Text>}>
-                                    <Input.TextArea rows={2} placeholder="Pipe diameter, installation depth, condition, maintenance notes..." style={{ resize: "none" }} />
+                                ),
+                              },
+                              {
+                                title: "Description / Notes",
+                                width: 320,
+                                render: (_, field) => (
+                                  <Form.Item name={[field.name, "description"]} style={{ margin: 0 }}>
+                                    <Input.TextArea rows={1} placeholder="Pipe diameter, depth, condition..." autoSize={{ minRows: 1, maxRows: 3 }} />
                                   </Form.Item>
-                                </Col>
-                              </Row>
-                              <Divider plain style={{ margin: "2px 0 8px", fontSize: 11, color: "#8c8c8c" }}>
-                                <PaperClipOutlined /> Attached Files
-                              </Divider>
-                              <Form.Item
-                                {...rest}
-                                name={[name, "attachments"]}
-                                valuePropName="fileList"
-                                getValueFromEvent={(e) => Array.isArray(e) ? e : e?.fileList}
-                                style={{ marginBottom: 0 }}
-                              >
-                                <Upload
-                                  action="/eswm-pipeline/api/upload"
-                                  headers={{ Authorization: `Bearer ${secureStorage.get("token")}` }}
-                                  listType="picture"
-                                  accept="image/*,.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx"
-                                  multiple
-                                  beforeUpload={(file) => {
-                                    const ok = file.type.startsWith("image/") || /pdf|msword|officedocument|ms-excel|ms-powerpoint/.test(file.type);
-                                    if (!ok) { message.error("Only images, PDFs, and Office documents are allowed."); return Upload.LIST_IGNORE; }
-                                    if (file.size > 20 * 1024 * 1024) { message.error("File must be under 20 MB."); return Upload.LIST_IGNORE; }
-                                    return true;
-                                  }}
-                                >
-                                  <Button icon={<UploadOutlined />} size="small">Upload Photos or Documents</Button>
-                                </Upload>
-                              </Form.Item>
-                            </Card>
-                          ))}
+                                ),
+                              },
+                              {
+                                title: <Space size={4}><PaperClipOutlined /> Files</Space>,
+                                width: 270,
+                                render: (_, field) => (
+                                  <Form.Item
+                                    name={[field.name, "attachments"]}
+                                    valuePropName="fileList"
+                                    getValueFromEvent={(e) => Array.isArray(e) ? e : e?.fileList}
+                                    style={{ margin: 0 }}
+                                  >
+                                    <Upload
+                                      action="/eswm-pipeline/api/upload"
+                                      headers={{ Authorization: `Bearer ${secureStorage.get("token")}` }}
+                                      listType="text"
+                                      accept="image/*,.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx"
+                                      multiple
+                                      beforeUpload={(file) => {
+                                        const ok = file.type.startsWith("image/") || /pdf|msword|officedocument|ms-excel|ms-powerpoint/.test(file.type);
+                                        if (!ok) { message.error("Only images, PDFs, and Office documents are allowed."); return Upload.LIST_IGNORE; }
+                                        if (file.size > 20 * 1024 * 1024) { message.error("File must be under 20 MB."); return Upload.LIST_IGNORE; }
+                                        return true;
+                                      }}
+                                    >
+                                      <Button icon={<UploadOutlined />} size="small">Upload</Button>
+                                    </Upload>
+                                  </Form.Item>
+                                ),
+                              },
+                              {
+                                title: "",
+                                width: 56,
+                                align: "center",
+                                render: (_, field) => (
+                                  <Button size="small" type="text" danger icon={<DeleteOutlined />} onClick={() => remove(field.name)} />
+                                ),
+                              },
+                            ]}
+                          />
                           <Button type="dashed" onClick={() => add({ ventNo: fields.length + 1, status: "Active" })} block icon={<PlusOutlined />} style={{ marginBottom: 4 }}>
                             Add Gas Vent
                           </Button>
@@ -3090,14 +3509,20 @@ export default function SLFMonitoring({canEdit = true, canDelete = true, isDark}
                   options={[1,2,3,4,5,6,7,8,9,10].map(n => ({ label: `${n}`, value: n }))}
                   onChange={(val) => {
                     const cur = form.getFieldValue("cellCapacities") || [];
+                    const curUnits = form.getFieldValue("cellCapacityUnits") || [];
                     const curSt = form.getFieldValue("cellStatuses") || [];
                     const curTy = form.getFieldValue("cellTypes") || [];
                     const curNotes = form.getFieldValue("cellNotes") || [];
+                    const curFill = form.getFieldValue("cellFillValues") || [];
+                    const curFillUnits = form.getFieldValue("cellFillUnits") || [];
                     const next = Array.from({ length: val || 0 }, (_, i) => cur[i] ?? null);
+                    const nextUnits = Array.from({ length: val || 0 }, (_, i) => curUnits[i] || "m³");
                     const nextSt = Array.from({ length: val || 0 }, (_, i) => curSt[i] || "Operational");
                     const nextTy = Array.from({ length: val || 0 }, (_, i) => curTy[i] || "Residual");
                     const nextNotes = Array.from({ length: val || 0 }, (_, i) => curNotes[i] || "");
-                    form.setFieldsValue({ cellCapacities: next, cellStatuses: nextSt, cellTypes: nextTy, cellNotes: nextNotes });
+                    const nextFill = Array.from({ length: val || 0 }, (_, i) => curFill[i] ?? null);
+                    const nextFillUnits = Array.from({ length: val || 0 }, (_, i) => curFillUnits[i] || "m³");
+                    form.setFieldsValue({ cellCapacities: next, cellCapacityUnits: nextUnits, cellStatuses: nextSt, cellTypes: nextTy, cellNotes: nextNotes, cellFillValues: nextFill, cellFillUnits: nextFillUnits });
                   }}
                 />
               </Form.Item>
@@ -3119,7 +3544,7 @@ export default function SLFMonitoring({canEdit = true, canDelete = true, isDark}
             </Col>
           </Row>
 
-          <Form.Item noStyle dependencies={["numberOfCell", "cellStatuses", "cellFillValues"]}>
+          <Form.Item noStyle dependencies={["numberOfCell", "cellStatuses", "cellFillValues", "cellCapacityUnits", "cellFillUnits"]}>
             {() => {
               const cellCount = form.getFieldValue("numberOfCell") || 0;
               if (cellCount < 1) return null;
@@ -3151,8 +3576,15 @@ export default function SLFMonitoring({canEdit = true, canDelete = true, isDark}
                           </Space>
                         }
                       >
-                        <Form.Item name={["cellCapacities", i]} label="Capacity (m³)" style={{ marginBottom: 8 }}>
-                          <InputNumber style={{ width: "100%" }} min={0} step={0.01} placeholder="Capacity" />
+                        <Form.Item label="Capacity" style={{ marginBottom: 8 }}>
+                          <Space.Compact style={{ width: "100%" }}>
+                            <Form.Item name={["cellCapacities", i]} noStyle>
+                              <InputNumber style={{ width: "calc(100% - 78px)" }} min={0} step={0.01} placeholder="Capacity" />
+                            </Form.Item>
+                            <Form.Item name={["cellCapacityUnits", i]} noStyle initialValue="m³">
+                              <Select style={{ width: 78 }} options={UNIT_OPTIONS} />
+                            </Form.Item>
+                          </Space.Compact>
                         </Form.Item>
                         <Form.Item name={["cellStatuses", i]} label="Status" initialValue="Operational" style={{ marginBottom: 8 }}>
                           <Select options={[
@@ -3179,8 +3611,15 @@ export default function SLFMonitoring({canEdit = true, canDelete = true, isDark}
                             { label: "Treated Haz Waste Cell", value: "Treated Haz Waste" },
                           ]} />
                         </Form.Item>
-                        <Form.Item name={["cellFillValues", i]} label="Waste in Cell (m³)" style={{ marginBottom: 0, marginTop: 8 }}>
-                          <InputNumber style={{ width: "100%" }} min={0} step={0.01} placeholder="Volume deposited" />
+                        <Form.Item label="Waste in Cell" style={{ marginBottom: 0, marginTop: 8 }}>
+                          <Space.Compact style={{ width: "100%" }}>
+                            <Form.Item name={["cellFillValues", i]} noStyle>
+                              <InputNumber style={{ width: "calc(100% - 78px)" }} min={0} step={0.01} placeholder="Amount deposited" />
+                            </Form.Item>
+                            <Form.Item name={["cellFillUnits", i]} noStyle initialValue="m³">
+                              <Select style={{ width: 78 }} options={UNIT_OPTIONS} />
+                            </Form.Item>
+                          </Space.Compact>
                         </Form.Item>
                       </Card>
                     </Col>
@@ -3191,14 +3630,16 @@ export default function SLFMonitoring({canEdit = true, canDelete = true, isDark}
               );
             }}
           </Form.Item>
-          <Form.Item noStyle dependencies={["numberOfCell", "cellCapacities", "cellStatuses", "cellTypes", "cellNotes", "cellFillValues", "volumeCapacity", "actualResidualWasteReceived", "wasteReceivedUnit"]}>
+          <Form.Item noStyle dependencies={["numberOfCell", "cellCapacities", "cellCapacityUnits", "cellStatuses", "cellTypes", "cellNotes", "cellFillValues", "cellFillUnits", "volumeCapacity", "actualResidualWasteReceived", "wasteReceivedUnit"]}>
             {() => {
               const cellCount = form.getFieldValue("numberOfCell") || 0;
               const caps = form.getFieldValue("cellCapacities") || [];
+              const capUnits = form.getFieldValue("cellCapacityUnits") || [];
               const statuses = form.getFieldValue("cellStatuses") || [];
               const types = form.getFieldValue("cellTypes") || [];
               const cellNotes = form.getFieldValue("cellNotes") || [];
               const fills = form.getFieldValue("cellFillValues") || [];
+              const fillUnits = form.getFieldValue("cellFillUnits") || [];
               const totalCap = form.getFieldValue("volumeCapacity") || 0;
               const wasteRaw = form.getFieldValue("actualResidualWasteReceived") || 0;
               const wasteUnit = form.getFieldValue("wasteReceivedUnit") || "m³";
@@ -3224,11 +3665,13 @@ export default function SLFMonitoring({canEdit = true, canDelete = true, isDark}
               // Use per-cell fill values; fall back to overall pct if no fill entered for the cell
               const cellDonutData = Array.from({ length: cellCount }, (_, i) => {
                 const cap = caps[i] || 0;
+                const capUnit = normalizeUnit(capUnits[i] || "m³");
                 const st = statuses[i] || "Operational";
                 const ty = types[i] || "Residual";
                 const note = cellNotes[i] || "";
                 const isInactive = st !== "Operational";
                 const fillRaw = fills[i] != null ? fills[i] : null;
+                const fillUnit = normalizeUnit(fillUnits[i] || capUnit);
                 let displayPct = 0;
                 let usedM3 = 0;
                 if (!isInactive) {
@@ -3243,7 +3686,7 @@ export default function SLFMonitoring({canEdit = true, canDelete = true, isDark}
                   }
                 }
                 return {
-                  index: i, capacity: cap, status: st, cellType: ty, note,
+                  index: i, capacity: cap, capacityUnit: capUnit, fillUnit, status: st, cellType: ty, note,
                   pct: displayPct,
                   used: Math.min(usedM3, cap),
                   remaining: Math.max(0, cap - Math.min(usedM3, cap)),
@@ -3270,7 +3713,7 @@ export default function SLFMonitoring({canEdit = true, canDelete = true, isDark}
                         )}
                       />
                       <div style={{ fontSize: 11, color: "#8c8c8c", marginTop: 4 }}>
-                        {wasteRaw > 0 ? wasteRaw.toLocaleString() : "0"} {wasteUnit} / {totalCap > 0 ? totalCap.toLocaleString() : "—"} m³
+                        {wasteRaw > 0 ? wasteRaw.toLocaleString() : "0"} {normalizeUnit(wasteUnit)} / {totalCap > 0 ? totalCap.toLocaleString() : "—"} {normalizeUnit(form.getFieldValue("volumeCapacityUnit") || "m³")}
                         {wasteUnit === "tons" && wasteRaw > 0 && (
                           <div style={{ fontSize: 10, color: "#8c8c8c" }}>≈ {wasteM3.toLocaleString(undefined, { maximumFractionDigits: 0 })} m³ (at 0.20 t/m³)</div>
                         )}
@@ -3304,9 +3747,9 @@ export default function SLFMonitoring({canEdit = true, canDelete = true, isDark}
                               <div style={{ fontSize: 11, fontWeight: 600, marginTop: 2 }}>Cell {i + 1}</div>
                               <Tag color={tagColor} style={{ fontSize: 9, marginTop: 2, marginBottom: 2 }}>{cell.status.replace(" Cell", "")}</Tag>
                               <Tag color={isHaz ? "red" : "blue"} style={{ fontSize: 9, marginBottom: 2 }}>{isHaz ? "Haz" : "Res"}</Tag>
-                              <div style={{ fontSize: 10, color: "#8c8c8c" }}>{cell.capacity > 0 ? `${cell.capacity.toLocaleString()} m³` : "—"}</div>
+                              <div style={{ fontSize: 10, color: "#8c8c8c" }}>{cell.capacity > 0 ? `${cell.capacity.toLocaleString()} ${cell.capacityUnit}` : "—"}</div>
                               {cell.hasCellFill && cell.used > 0 && (
-                                <div style={{ fontSize: 9, color: "#1677ff" }}>{cell.used.toLocaleString()} m³ filled</div>
+                                <div style={{ fontSize: 9, color: "#1677ff" }}>{cell.used.toLocaleString()} {cell.fillUnit} filled</div>
                               )}
                               {cell.note && (
                                 <Tooltip title={cell.note}>
@@ -3349,7 +3792,7 @@ export default function SLFMonitoring({canEdit = true, canDelete = true, isDark}
                                 >
                                   {chartData.map((_, j) => <RCell key={j} fill={colors[j % colors.length]} />)}
                                 </Pie>
-                                <RTooltip formatter={(v) => `${Number(v).toLocaleString()} m³`} />
+                                <RTooltip formatter={(v) => `${Number(v).toLocaleString()} ${cell.capacityUnit}`} />
                               </PieChart>
                             </Col>
                           );
@@ -3962,7 +4405,10 @@ export default function SLFMonitoring({canEdit = true, canDelete = true, isDark}
                     </Descriptions.Item>
                     <Descriptions.Item label="Year Started">{detailViewRecord.yearStartedOperation || "—"}</Descriptions.Item>
                     <Descriptions.Item label="Capacity">
-                      {detailViewRecord.volumeCapacity ? Number(detailViewRecord.volumeCapacity).toLocaleString() : "—"}
+                      {detailViewRecord.volumeCapacity ? `${Number(detailViewRecord.volumeCapacity).toLocaleString()} ${normalizeUnit(detailViewRecord.volumeCapacityUnit)}` : "—"}
+                    </Descriptions.Item>
+                    <Descriptions.Item label="Receiving Volume Capacity">
+                      {detailViewRecord.receivingVolumeCapacity ? `${Number(detailViewRecord.receivingVolumeCapacity).toLocaleString()} ${normalizeUnit(detailViewRecord.receivingVolumeCapacityUnit)}` : "—"}
                     </Descriptions.Item>
                     <Descriptions.Item label="LGUs Served">{detailViewRecord.noOfLGUServed || "—"}</Descriptions.Item>
                     <Descriptions.Item label="Remaining Lifespan">{detailViewRecord.remainingLifeSpan || "—"}</Descriptions.Item>
@@ -3979,6 +4425,8 @@ export default function SLFMonitoring({canEdit = true, canDelete = true, isDark}
                   const wasteReceived = detailViewRecord.actualResidualWasteReceived || 0;
                   const estVolume = detailViewRecord.estimatedVolumeWaste || 0;
                   const capacity = detailViewRecord.volumeCapacity || 0;
+                  const receivingCapacity = detailViewRecord.receivingVolumeCapacity || 0;
+                  const receivingCapacityUnit = normalizeUnit(detailViewRecord.receivingVolumeCapacityUnit || detailViewRecord.volumeCapacityUnit || "m³");
                   const infraData = [
                     { name: "Cells", value: cells },
                     { name: "Leachate Ponds", value: leachate },
@@ -4049,10 +4497,13 @@ export default function SLFMonitoring({canEdit = true, canDelete = true, isDark}
                         <Descriptions.Item label="Leachate Ponds">{leachate || "—"}</Descriptions.Item>
                         <Descriptions.Item label="Gas Vents">{gasVents || "—"}</Descriptions.Item>
                         <Descriptions.Item label="Waste Received" span={1}>
-                          {wasteReceived ? `${Number(wasteReceived).toLocaleString()} tons` : "—"}
+                          {wasteReceived ? `${Number(wasteReceived).toLocaleString()} ${normalizeUnit(detailViewRecord.wasteReceivedUnit || "tons")}` : "—"}
+                        </Descriptions.Item>
+                        <Descriptions.Item label="Receiving Volume Capacity" span={1}>
+                          {receivingCapacity ? `${Number(receivingCapacity).toLocaleString()} ${receivingCapacityUnit}` : "—"}
                         </Descriptions.Item>
                         <Descriptions.Item label="Est. Volume" span={1}>
-                          {estVolume ? Number(estVolume).toLocaleString() : "—"}
+                          {estVolume ? `${Number(estVolume).toLocaleString()} ${normalizeUnit(detailViewRecord.estimatedVolumeWasteUnit)}` : "—"}
                         </Descriptions.Item>
                         <Descriptions.Item label="MRF Established" span={1}>
                           {detailViewRecord.hasMRF
@@ -4083,6 +4534,7 @@ export default function SLFMonitoring({canEdit = true, canDelete = true, isDark}
                       {cells > 0 && (() => {
                         const cellStatuses = detailViewRecord.cellStatuses || [];
                         const cellTypesArr = detailViewRecord.cellTypes || [];
+                        const cellCapacityUnits = detailViewRecord.cellCapacityUnits || [];
                         const hasCellBaseline = baselineData && (
                           baselineData.activeCellResidualVolume > 0 ||
                           baselineData.activeCellInertVolume > 0 ||
@@ -4142,16 +4594,16 @@ export default function SLFMonitoring({canEdit = true, canDelete = true, isDark}
                                 <Row gutter={8} style={{ marginTop: 8, borderTop: "1px solid #f0f0f0", paddingTop: 8 }}>
                                   <Col span={12}>
                                     <div style={{ fontSize: 11, color: "#8c8c8c" }}>Waste Received</div>
-                                    <div style={{ fontSize: 14, fontWeight: 600 }}>{wasteReceived > 0 ? wasteReceived.toLocaleString() : "0"}</div>
+                                    <div style={{ fontSize: 14, fontWeight: 600 }}>{wasteReceived > 0 ? `${wasteReceived.toLocaleString()} ${normalizeUnit(detailViewRecord.wasteReceivedUnit || "tons")}` : "0"}</div>
                                   </Col>
                                   <Col span={12}>
                                     <div style={{ fontSize: 11, color: "#8c8c8c" }}>Total Capacity</div>
-                                    <div style={{ fontSize: 14, fontWeight: 600 }}>{capacity > 0 ? capacity.toLocaleString() : "—"}</div>
+                                    <div style={{ fontSize: 14, fontWeight: 600 }}>{capacity > 0 ? `${capacity.toLocaleString()} ${normalizeUnit(detailViewRecord.volumeCapacityUnit)}` : "—"}</div>
                                   </Col>
                                   <Col span={12} style={{ marginTop: 8 }}>
                                     <div style={{ fontSize: 11, color: "#8c8c8c" }}>Remaining</div>
                                     <div style={{ fontSize: 14, fontWeight: 600, color: capacity - wasteReceived <= 0 ? "#ff4d4f" : "#52c41a" }}>
-                                      {capacity > 0 ? (capacity - wasteReceived).toLocaleString() : "—"}
+                                      {capacity > 0 ? `${(capacity - wasteReceived).toLocaleString()} ${normalizeUnit(detailViewRecord.volumeCapacityUnit)}` : "—"}
                                     </div>
                                   </Col>
                                   <Col span={12} style={{ marginTop: 8 }}>
@@ -4169,6 +4621,7 @@ export default function SLFMonitoring({canEdit = true, canDelete = true, isDark}
                                   {(cellCaps.length > 0 ? cellCaps : Array.from({ length: cells }, () => 0)).map((cap, i) => {
                                     const cellFill = capacity > 0 && cap > 0 ? Math.min(Math.round((cap / capacity) * 100 * cells), 100) : 0;
                                     const cellSt = cellStatuses[i] || "Operational";
+                                    const capUnit = normalizeUnit(cellCapacityUnits[i] || detailViewRecord.volumeCapacityUnit || "m³");
                                     const cellTy = cellTypesArr[i] || "Residual";
                                     const isClosed = cellSt === "Closed";
                                     const isHaz = cellTy === "Treated Haz Waste";
@@ -4189,7 +4642,7 @@ export default function SLFMonitoring({canEdit = true, canDelete = true, isDark}
                                         />
                                         <div style={{ marginTop: 6, fontSize: 12, fontWeight: 600 }}>Cell {i + 1}</div>
                                         <Tag color={isHaz ? "red" : "blue"} style={{ fontSize: 9, marginTop: 2 }}>{cellTy === "Treated Haz Waste" ? "Haz Waste" : cellTy}</Tag>
-                                        <div style={{ fontSize: 10, color: "#8c8c8c" }}>{cap > 0 ? `${cap.toLocaleString()} m³` : "—"}</div>
+                                        <div style={{ fontSize: 10, color: "#8c8c8c" }}>{cap > 0 ? `${cap.toLocaleString()} ${capUnit}` : "—"}</div>
                                         <div style={{ marginTop: 6 }}>
                                           <Tooltip title={isClosed ? "Set to Operational" : "Set to Closed"}>
                                             <Switch
@@ -4782,6 +5235,8 @@ export default function SLFMonitoring({canEdit = true, canDelete = true, isDark}
           </>
         )}
       </Modal>
+
+      {renderInsightModal()}
 
       {/* ── LGU Served Drill-Down Modal ── */}
       <Modal

@@ -26,6 +26,8 @@ const supportTicketSchema = new mongoose.Schema(
         "Technical Issue",
         "Data Correction",
         "Account Access",
+        "Account Issue",
+        "Requirements / Compliance",
         "Submission Concern",
         "General Inquiry",
         "Feature Request",

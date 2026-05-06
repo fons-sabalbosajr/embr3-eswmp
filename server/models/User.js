@@ -17,6 +17,7 @@ const userSchema = new mongoose.Schema(
         dashboard: { view: true, edit: true, delete: true },
         submissions: { view: true, edit: true, delete: true },
         slfMonitoring: { view: true, edit: true, delete: true },
+        messaging: { view: true, edit: true, delete: true },
         reports: { view: true, edit: true, delete: true },
         tenYearSwm: { view: true, edit: true, delete: true },
         fundedMrf: { view: true, edit: true, delete: true },

@@ -20,6 +20,8 @@ const slfFacilitySchema = new mongoose.Schema(
     category: { type: String, trim: true },
     volumeCapacity: { type: Number },
     volumeCapacityUnit: { type: String, trim: true, default: 'm³' },
+    receivingVolumeCapacity: { type: Number },
+    receivingVolumeCapacityUnit: { type: String, trim: true, default: 'm³' },
     noOfLGUServed: { type: Number },
     lguServedList: [{ type: String, trim: true }],
     privateCompaniesServed: [{ type: String, trim: true }],
@@ -65,10 +67,12 @@ const slfFacilitySchema = new mongoose.Schema(
     estimatedVolumeWasteUnit: { type: String, trim: true, default: 'm³' },
     numberOfCell: { type: Number },
     cellCapacities: [{ type: Number }],
+    cellCapacityUnits: [{ type: String, enum: ["m³", "tons", "m3"], default: "m³" }],
     cellStatuses: [{ type: String, enum: ["Operational", "Closed", "Under Construction", "Reserved Cell"], default: "Operational" }],
     cellTypes: [{ type: String, trim: true, default: "Residual" }], // per-cell: "Residual" or "Treated Haz Waste"
     cellNotes: [{ type: String, trim: true }], // per-cell notes (used for Under Construction / Reserved Cell status)
-    cellFillValues: [{ type: Number }], // per-cell waste volume (m³)
+    cellFillValues: [{ type: Number }],
+    cellFillUnits: [{ type: String, enum: ["m³", "tons", "m3"], default: "m³" }],
     estimatedVolumeWaste: { type: Number },
     noOfLeachatePond: { type: Number },
     numberOfGasVents: { type: Number },

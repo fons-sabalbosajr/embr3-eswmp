@@ -221,7 +221,7 @@ export default function HaulerRequests({ isDark, canEdit = true }) {
           </Tooltip>
           {canEdit && r.status === "pending" && (
             <>
-              <Tooltip title="Approve">
+              <Tooltip title="Approve & Delete Hauler">
                 <Button
                   type="text"
                   size="small"

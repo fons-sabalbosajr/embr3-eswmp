@@ -23,7 +23,7 @@ router.get("/portal/:id", async (req, res) => {
   try {
     const selectFields =
       "province lgu barangay category ownership statusOfSLF remainingLifeSpan " +
-      "volumeCapacity numberOfCell cellCapacities cellStatuses cellTypes estimatedVolumeWaste actualResidualWasteReceived " +
+      "volumeCapacity volumeCapacityUnit receivingVolumeCapacity receivingVolumeCapacityUnit numberOfCell cellCapacities cellCapacityUnits cellStatuses cellTypes cellFillValues cellFillUnits estimatedVolumeWaste actualResidualWasteReceived " +
       "noOfLeachatePond numberOfGasVents mrfEstablished yearStartedOperation " +
       "eccNo dischargePermit permitToOperate focalPerson " +
       "leachatePondDetails gasVentDetails trashSlideMeasures firePrevMeasures";
@@ -170,10 +170,10 @@ router.get("/stats", async (req, res) => {
         SlfFacility.find(baseFilter, {
           province: 1, lgu: 1, statusOfSLF: 1, dataYear: 1,
           noOfLeachatePond: 1, numberOfGasVents: 1,
-          numberOfCell: 1, cellCapacities: 1, cellStatuses: 1, cellTypes: 1,
+          numberOfCell: 1, cellCapacities: 1, cellCapacityUnits: 1, cellStatuses: 1, cellTypes: 1, cellFillValues: 1, cellFillUnits: 1,
           leachatePondDetails: 1, gasVentDetails: 1,
           trashSlideMeasures: 1, firePrevMeasures: 1,
-          noOfLGUServed: 1, actualResidualWasteReceived: 1, ownership: 1, category: 1, volumeCapacity: 1,
+          noOfLGUServed: 1, actualResidualWasteReceived: 1, ownership: 1, category: 1, volumeCapacity: 1, volumeCapacityUnit: 1, receivingVolumeCapacity: 1, receivingVolumeCapacityUnit: 1,
         }).sort({ province: 1, lgu: 1 }),
       ]);
 

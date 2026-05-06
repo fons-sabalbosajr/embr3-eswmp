@@ -23,6 +23,21 @@ function getProvinceCode(province) {
 
 const router = express.Router();
 
+const baselineDataMatch = {
+  $or: [
+    { totalVolumeAccepted: { $exists: true, $ne: null } },
+    { activeCellResidualVolume: { $exists: true, $ne: null } },
+    { activeCellInertVolume: { $exists: true, $ne: null } },
+    { activeCellHazardousVolume: { $exists: true, $ne: null } },
+    { closedCellResidualVolume: { $exists: true, $ne: null } },
+    { closedCellInertVolume: { $exists: true, $ne: null } },
+    { closedCellHazardousVolume: { $exists: true, $ne: null } },
+    { "activeCellEntries.0": { $exists: true } },
+    { "closedCellEntries.0": { $exists: true } },
+    { "accreditedHaulers.0": { $exists: true } },
+  ],
+};
+
 // Submit SLF data — batch (client portal)
 router.post("/", async (req, res) => {
   try {
@@ -200,30 +215,34 @@ router.get("/baseline/:slfName", async (req, res) => {
     const slfName = req.params.slfName;
 
     const latest = await DataSLF.findOne({
-      $or: [{ slfName }, { lguCompanyName: slfName }],
-      totalVolumeAccepted: { $ne: null },
+      $and: [
+        { $or: [{ slfName }, { lguCompanyName: slfName }] },
+        baselineDataMatch,
+      ],
     })
       .setOptions({ includeHiddenYears: true })
       .sort({ createdAt: -1 });
 
     if (!latest) return res.json(null);
 
+    const baselineUnit = latest.baselineUnit || latest.totalVolumeAcceptedUnit || "m³";
+
     res.json({
-      baselineUnit: latest.baselineUnit,
+      baselineUnit,
       totalVolumeAccepted: latest.totalVolumeAccepted,
-      totalVolumeAcceptedUnit: latest.totalVolumeAcceptedUnit,
+      totalVolumeAcceptedUnit: latest.totalVolumeAcceptedUnit || baselineUnit,
       activeCellResidualVolume: latest.activeCellResidualVolume,
-      activeCellResidualUnit: latest.activeCellResidualUnit,
+      activeCellResidualUnit: latest.activeCellResidualUnit || baselineUnit,
       activeCellInertVolume: latest.activeCellInertVolume,
-      activeCellInertUnit: latest.activeCellInertUnit,
+      activeCellInertUnit: latest.activeCellInertUnit || baselineUnit,
       activeCellHazardousVolume: latest.activeCellHazardousVolume,
-      activeCellHazardousUnit: latest.activeCellHazardousUnit,
+      activeCellHazardousUnit: latest.activeCellHazardousUnit || baselineUnit,
       closedCellResidualVolume: latest.closedCellResidualVolume,
-      closedCellResidualUnit: latest.closedCellResidualUnit,
+      closedCellResidualUnit: latest.closedCellResidualUnit || baselineUnit,
       closedCellInertVolume: latest.closedCellInertVolume,
-      closedCellInertUnit: latest.closedCellInertUnit,
+      closedCellInertUnit: latest.closedCellInertUnit || baselineUnit,
       closedCellHazardousVolume: latest.closedCellHazardousVolume,
-      closedCellHazardousUnit: latest.closedCellHazardousUnit,
+      closedCellHazardousUnit: latest.closedCellHazardousUnit || baselineUnit,
       acceptsHazardousWaste: latest.acceptsHazardousWaste || false,
       activeCellEntries: latest.activeCellEntries || [],
       closedCellEntries: latest.closedCellEntries || [],
@@ -242,8 +261,11 @@ router.get("/baselines", async (req, res) => {
   try {
     // Aggregate from DataSLF directly — covers both SLFGenerator and SlfFacility refs
     // Include soft-deleted records since baseline is facility-level data
+    // Match any record that has baseline data: totalVolumeAccepted set, OR activeCellEntries/closedCellEntries present
     const latestPerSlf = await DataSLF.aggregate([
-      { $match: { totalVolumeAccepted: { $ne: null } } },
+      {
+        $match: baselineDataMatch,
+      },
       { $sort: { createdAt: -1 } },
       {
         $group: {
@@ -266,25 +288,27 @@ router.get("/baselines", async (req, res) => {
       { $sort: { slfName: 1 } },
     ]);
 
-    const results = latestPerSlf.map((d) => ({
+    const results = latestPerSlf.map((d) => {
+      const baselineUnit = d.baselineUnit || d.totalVolumeAcceptedUnit || "m³";
+      return ({
       _id: d._id,
       slfGenerator: d.slfGenerator,
       slfName: d.slfName || d.lguCompanyName || "Unknown",
-      baselineUnit: d.baselineUnit || "m³",
+      baselineUnit,
       totalVolumeAccepted: d.totalVolumeAccepted,
-      totalVolumeAcceptedUnit: d.totalVolumeAcceptedUnit || "m³",
+      totalVolumeAcceptedUnit: d.totalVolumeAcceptedUnit || baselineUnit,
       activeCellResidualVolume: d.activeCellResidualVolume,
-      activeCellResidualUnit: d.activeCellResidualUnit || "m³",
+      activeCellResidualUnit: d.activeCellResidualUnit || baselineUnit,
       activeCellInertVolume: d.activeCellInertVolume,
-      activeCellInertUnit: d.activeCellInertUnit || "m³",
+      activeCellInertUnit: d.activeCellInertUnit || baselineUnit,
       activeCellHazardousVolume: d.activeCellHazardousVolume,
-      activeCellHazardousUnit: d.activeCellHazardousUnit || "m³",
+      activeCellHazardousUnit: d.activeCellHazardousUnit || baselineUnit,
       closedCellResidualVolume: d.closedCellResidualVolume,
-      closedCellResidualUnit: d.closedCellResidualUnit || "m³",
+      closedCellResidualUnit: d.closedCellResidualUnit || baselineUnit,
       closedCellInertVolume: d.closedCellInertVolume,
-      closedCellInertUnit: d.closedCellInertUnit || "m³",
+      closedCellInertUnit: d.closedCellInertUnit || baselineUnit,
       closedCellHazardousVolume: d.closedCellHazardousVolume,
-      closedCellHazardousUnit: d.closedCellHazardousUnit || "m³",
+      closedCellHazardousUnit: d.closedCellHazardousUnit || baselineUnit,
       acceptsHazardousWaste: d.acceptsHazardousWaste || false,
       accreditedHaulers: d.accreditedHaulers || [],
       activeCellEntries: d.activeCellEntries || [],
@@ -293,7 +317,8 @@ router.get("/baselines", async (req, res) => {
       baselineUpdateApproved: d.baselineUpdateApproved || false,
       baselineUpdateRequested: d.baselineUpdateRequested || false,
       lastUpdated: d.updatedAt || d.createdAt,
-    }));
+    });
+    });
 
     res.json(results);
   } catch (error) {
@@ -355,19 +380,40 @@ router.delete("/baselines/:id", async (req, res) => {
     const entry = await DataSLF.findById(req.params.id);
     if (!entry) return res.status(404).json({ message: "Baseline record not found" });
 
-    const slfName = entry.slfName;
-    entry.totalVolumeAccepted = undefined;
-    entry.totalVolumeAcceptedUnit = undefined;
-    entry.activeCellResidualVolume = undefined;
-    entry.activeCellResidualUnit = undefined;
-    entry.activeCellInertVolume = undefined;
-    entry.activeCellInertUnit = undefined;
-    entry.closedCellResidualVolume = undefined;
-    entry.closedCellResidualUnit = undefined;
-    entry.closedCellInertVolume = undefined;
-    entry.closedCellInertUnit = undefined;
-    entry.accreditedHaulers = [];
-    await entry.save();
+    const slfName = entry.slfName || entry.lguCompanyName;
+    await DataSLF.updateOne(
+      { _id: entry._id },
+      {
+        $unset: {
+          baselineUnit: "",
+          totalVolumeAccepted: "",
+          totalVolumeAcceptedUnit: "",
+          activeCellResidualVolume: "",
+          activeCellResidualUnit: "",
+          activeCellInertVolume: "",
+          activeCellInertUnit: "",
+          activeCellHazardousVolume: "",
+          activeCellHazardousUnit: "",
+          closedCellResidualVolume: "",
+          closedCellResidualUnit: "",
+          closedCellInertVolume: "",
+          closedCellInertUnit: "",
+          closedCellHazardousVolume: "",
+          closedCellHazardousUnit: "",
+          baselineUpdateRequestedAt: "",
+          baselineUpdateApprovedAt: "",
+          baselineUpdateApprovedBy: "",
+        },
+        $set: {
+          acceptsHazardousWaste: false,
+          activeCellEntries: [],
+          closedCellEntries: [],
+          accreditedHaulers: [],
+          baselineUpdateRequested: false,
+          baselineUpdateApproved: false,
+        },
+      }
+    );
 
     await Transaction.create({
       dataEntry: entry._id,
@@ -399,8 +445,10 @@ router.patch("/baseline-update-approve/:slfName", async (req, res) => {
     const { approvedBy } = req.body || {};
 
     const filter = {
-      $or: [{ slfName }, { lguCompanyName: slfName }],
-      totalVolumeAccepted: { $ne: null },
+      $and: [
+        { $or: [{ slfName }, { lguCompanyName: slfName }] },
+        baselineDataMatch,
+      ],
     };
 
     // Update ALL docs for this company so aggregation always picks up the flag
@@ -460,8 +508,10 @@ router.patch("/baseline-update-lock/:slfName", async (req, res) => {
     const { lockedBy } = req.body || {};
 
     const filter = {
-      $or: [{ slfName }, { lguCompanyName: slfName }],
-      totalVolumeAccepted: { $ne: null },
+      $and: [
+        { $or: [{ slfName }, { lguCompanyName: slfName }] },
+        baselineDataMatch,
+      ],
     };
 
     const result = await DataSLF.updateMany(filter, {
@@ -518,8 +568,10 @@ router.patch("/baseline-update-reject/:slfName", async (req, res) => {
     const { rejectedBy, reason } = req.body || {};
 
     const filter = {
-      $or: [{ slfName }, { lguCompanyName: slfName }],
-      totalVolumeAccepted: { $ne: null },
+      $and: [
+        { $or: [{ slfName }, { lguCompanyName: slfName }] },
+        baselineDataMatch,
+      ],
     };
 
     // Clear flags on ALL matching docs
@@ -1325,12 +1377,15 @@ router.post("/:id/send-email", async (req, res) => {
   }
 });
 
-// Portal user saves updated baseline data (after admin approval) — re-locks the record
+// Portal user saves updated baseline data (after admin approval OR initial baseline save) — re-locks the record
 router.patch("/portal-save-baseline/:slfName", async (req, res) => {
   try {
     const slfName = decodeURIComponent(req.params.slfName);
     const {
       submittedBy,
+      slfGenerator,
+      lguCompanyName,
+      companyType,
       baselineUnit,
       totalVolumeAccepted, totalVolumeAcceptedUnit,
       activeCellResidualVolume, activeCellResidualUnit,
@@ -1346,9 +1401,9 @@ router.patch("/portal-save-baseline/:slfName", async (req, res) => {
 
     if (!slfName) return res.status(400).json({ message: "slfName is required" });
 
+    // Broad filter — match any DataSLF entry for this SLF regardless of existing baseline data
     const filter = {
       $or: [{ slfName }, { lguCompanyName: slfName }],
-      totalVolumeAccepted: { $ne: null },
     };
 
     const updateFields = {
@@ -1374,7 +1429,52 @@ router.patch("/portal-save-baseline/:slfName", async (req, res) => {
       if (v !== undefined) updateFields[k] = v;
     }
 
-    await DataSLF.updateMany(filter, { $set: updateFields });
+    const updateResult = await DataSLF.updateMany(filter, { $set: updateFields });
+
+    // If no existing records exist for this SLF, create a baseline-only record
+    if (updateResult.matchedCount === 0) {
+      // Resolve slfGenerator from SlfFacility if ID not provided
+      let genId = slfGenerator || null;
+      let facilityLgu = lguCompanyName || slfName;
+      let facilityType = companyType || "LGU";
+
+      if (!genId) {
+        const facility = await SlfFacility.findOne({
+          $or: [
+            { lgu: { $regex: new RegExp(slfName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i") } },
+          ],
+        }).sort({ dataYear: -1 });
+        if (facility) {
+          genId = facility._id;
+          facilityLgu = facility.lgu || lguCompanyName || slfName;
+          facilityType = (facility.ownership || "").toLowerCase().includes("private") ? "Private" : "LGU";
+        }
+      }
+
+      const provCode = getProvinceCode("");
+      const typeCode = facilityType === "Private" ? "PVT" : "LGU";
+      const pattern = new RegExp(`^SLF-${typeCode}-${provCode}-`);
+      const lastDoc = await DataSLF.findOne({ idNo: pattern }).sort({ idNo: -1 });
+      let seq = 1;
+      if (lastDoc?.idNo) {
+        const parts = lastDoc.idNo.split("-");
+        const lastNum = parseInt(parts[3], 10);
+        if (!isNaN(lastNum)) seq = lastNum + 1;
+      }
+
+      const newDoc = new DataSLF({
+        ...updateFields,
+        slfGenerator: genId,
+        slfName,
+        lguCompanyName: facilityLgu,
+        companyType: facilityType,
+        dateOfDisposal: new Date(),
+        submittedBy: submittedBy || slfName,
+        idNo: `SLF-${typeCode}-${provCode}-${String(seq).padStart(4, "0")}`,
+        status: "pending",
+      });
+      await newDoc.save();
+    }
 
     const latest = await DataSLF.findOne(filter).setOptions({ includeHiddenYears: true }).sort({ createdAt: -1 });
 
@@ -1451,7 +1551,6 @@ router.post("/baseline-update-request", async (req, res) => {
     // updateMany ensures the aggregation picks up the flag regardless of which doc is $first
     const filter = {
       $or: [{ slfName }, { lguCompanyName: slfName }],
-      totalVolumeAccepted: { $ne: null },
     };
     await DataSLF.updateMany(filter, {
       $set: {

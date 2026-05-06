@@ -16,8 +16,14 @@
 
 /* Banner */
 .slf-banner {
-  background: linear-gradient(135deg, rgba(26,51,83,0.88) 0%, rgba(45,95,138,0.85) 50%, rgba(26,51,83,0.90) 100%),
-              url("../assets/bgemb.webp") center/cover no-repeat;
+  background:
+    linear-gradient(
+      135deg,
+      rgba(26, 51, 83, 0.88) 0%,
+      rgba(45, 95, 138, 0.85) 50%,
+      rgba(26, 51, 83, 0.9) 100%
+    ),
+    url("../assets/bgemb.webp") center/cover no-repeat;
   padding: 40px 24px;
   text-align: center;
 }
@@ -286,8 +292,13 @@
 
 /* ── Submission History Status Animations ── */
 @keyframes pendingPulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.55; }
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.55;
+  }
 }
 
 .status-pending {

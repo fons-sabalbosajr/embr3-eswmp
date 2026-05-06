@@ -37,6 +37,7 @@ const notificationRoutes = require("./routes/notifications");
 const supportTicketRoutes = require("./routes/supportTickets");
 const haulerDeleteRequestRoutes = require("./routes/haulerDeleteRequests");
 const uploadRoutes = require("./routes/upload");
+const messageRoutes = require("./routes/messages");
 
 const app = express();
 const server = http.createServer(app);
@@ -90,6 +91,10 @@ io.on("connection", (socket) => {
   const { role } = socket.handshake.query || {};
   if (role === "admin") {
     socket.join("admin-room");
+    const email = socket.handshake.query.email;
+    const userId = socket.handshake.query.userId;
+    if (email) socket.join(`admin-${email}`);
+    if (userId) socket.join(`admin-${userId}`);
   }
   if (role === "portal") {
     const email = socket.handshake.query.email;
@@ -248,6 +253,7 @@ app.use("/api/notifications", notificationRoutes);
 app.use("/api/support-tickets", supportTicketRoutes);
 app.use("/api/hauler-delete-requests", haulerDeleteRequestRoutes);
 app.use("/api/upload", uploadRoutes);
+app.use("/api/messages", messageRoutes);
 
 // Get local IP address
 function getLocalIP() {

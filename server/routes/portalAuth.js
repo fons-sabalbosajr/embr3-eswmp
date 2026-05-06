@@ -9,6 +9,8 @@ const {
   sendPortalSignupEmail,
   sendPortalResetPasswordEmail,
 } = require("../utils/email");
+const { notifyAdmin } = require("../utils/socketEmit");
+const Notification = require("../models/Notification");
 
 const router = express.Router();
 
@@ -98,7 +100,6 @@ router.post("/signup", upload.single("verificationFile"), async (req, res) => {
 
     // Notify admins of new portal user
     try {
-      const Notification = require("../models/Notification");
       await Notification.create({
         recipient: "admin",
         type: "new_portal_user",
@@ -106,6 +107,7 @@ router.post("/signup", upload.single("verificationFile"), async (req, res) => {
         message: `${firstName} ${lastName} (${email}) registered and is pending approval`,
         meta: { email, companyName: companyName || "" },
       });
+      notifyAdmin(req, { type: "new_portal_user", title: "New Portal Registration", message: `${firstName} ${lastName} (${email}) registered and is pending approval` });
     } catch { /* silent */ }
 
     writeLog("info", "portal.signup", {
@@ -372,6 +374,18 @@ router.post("/submit-verification", upload.single("verificationFile"), async (re
     user.verificationSubmitted = true;
 
     await user.save();
+
+    // Notify admin that verification docs were submitted
+    try {
+      await Notification.create({
+        recipient: "admin",
+        type: "portal_verification_submitted",
+        title: "Verification Documents Submitted",
+        message: `${user.firstName} ${user.lastName} (${user.email}) has submitted their verification documents for review.`,
+        meta: { email: user.email },
+      });
+      notifyAdmin(req, { type: "portal_verification_submitted", title: "Verification Docs Submitted", message: `${user.firstName} ${user.lastName} submitted verification docs` });
+    } catch { /* silent */ }
 
     writeLog("info", "portal.verification.submit", {
       message: `Verification update submitted: ${user.email}`,

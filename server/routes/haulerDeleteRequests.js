@@ -182,7 +182,7 @@ router.get("/", async (req, res) => {
 // ── Admin: Approve hauler deletion request ──
 router.patch("/:id/approve", async (req, res) => {
   try {
-    const { adminName, adminEmail, remarks } = req.body;
+    const { adminName, adminEmail, remarks, adminRemarks } = req.body;
     const request = await HaulerDeleteRequest.findById(req.params.id);
     if (!request) return res.status(404).json({ message: "Request not found." });
     if (request.status !== "pending") {
@@ -192,16 +192,25 @@ router.patch("/:id/approve", async (req, res) => {
     request.status = "approved";
     request.reviewedBy = adminName || adminEmail || "admin";
     request.reviewedAt = new Date();
-    request.adminRemarks = remarks || "";
+    request.adminRemarks = remarks || adminRemarks || "";
     await request.save();
 
     // Remove hauler from baseline data
-    if (request.slfName && request.haulerKey) {
+    if (request.slfName || request.companyName) {
       try {
-        await DataSLF.updateMany(
-          { slfName: request.slfName },
-          { $pull: { accreditedHaulers: { key: request.haulerKey } } }
-        );
+        const slfFilter = {
+          deletedAt: null,
+          $or: [
+            request.slfName && { slfName: request.slfName },
+            request.slfName && { lguCompanyName: request.slfName },
+            request.companyName && { lguCompanyName: request.companyName },
+          ].filter(Boolean),
+        };
+        const pullByKey = request.haulerKey
+          ? DataSLF.updateMany(slfFilter, { $pull: { accreditedHaulers: { key: request.haulerKey } } })
+          : Promise.resolve({ modifiedCount: 0 });
+        const pullByName = DataSLF.updateMany(slfFilter, { $pull: { accreditedHaulers: { haulerName: request.haulerName } } });
+        await Promise.all([pullByKey, pullByName]);
       } catch (e) {
         writeLog("warn", "hauler_delete_request.remove_hauler", {
           message: `Could not remove hauler from DataSLF: ${e.message}`,
@@ -253,7 +262,7 @@ router.patch("/:id/approve", async (req, res) => {
 // ── Admin: Reject hauler deletion request ──
 router.patch("/:id/reject", async (req, res) => {
   try {
-    const { adminName, adminEmail, remarks } = req.body;
+    const { adminName, adminEmail, remarks, adminRemarks } = req.body;
     const request = await HaulerDeleteRequest.findById(req.params.id);
     if (!request) return res.status(404).json({ message: "Request not found." });
     if (request.status !== "pending") {
@@ -263,7 +272,7 @@ router.patch("/:id/reject", async (req, res) => {
     request.status = "rejected";
     request.reviewedBy = adminName || adminEmail || "admin";
     request.reviewedAt = new Date();
-    request.adminRemarks = remarks || "";
+    request.adminRemarks = remarks || adminRemarks || "";
     await request.save();
 
     // Notify portal user
@@ -272,7 +281,7 @@ router.patch("/:id/reject", async (req, res) => {
         recipient: request.portalUserEmail,
         type: "hauler_delete_rejected",
         title: "Hauler Deletion Request Rejected",
-        message: `Your request to delete hauler "${request.haulerName}" (${request.requestNo}) was rejected. ${remarks ? `Remarks: ${remarks}` : ""}`,
+        message: `Your request to delete hauler "${request.haulerName}" (${request.requestNo}) was rejected. ${request.adminRemarks ? `Remarks: ${request.adminRemarks}` : ""}`,
         meta: { requestNo: request.requestNo, haulerName: request.haulerName },
       });
     } catch { /* silent */ }

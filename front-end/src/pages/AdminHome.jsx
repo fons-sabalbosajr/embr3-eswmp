@@ -29,6 +29,7 @@ import {
   Popover,
   Empty,
   Spin,
+  Skeleton,
   List,
   Collapse,
 } from "antd";
@@ -108,6 +109,7 @@ const Reports = lazy(() => import("./admin/Reports"));
 const SupportTab = lazy(() => import("./admin/SupportTab"));
 const NotificationManagement = lazy(() => import("./admin/NotificationManagement"));
 const PortalUsers = lazy(() => import("./admin/PortalUsers"));
+const Messaging = lazy(() => import("./admin/Messaging"));
 import api from "../api";
 import secureStorage from "../utils/secureStorage";
 import { DataRefProvider } from "../utils/dataRef";
@@ -236,6 +238,48 @@ function FitBounds({ points }) {
   return null;
 }
 
+function DashboardSkeleton({ isDark }) {
+  const panelBg = isDark ? "#141414" : "#fff";
+  const border = isDark ? "1px solid #303030" : "1px solid #f0f0f0";
+
+  return (
+    <div style={{ padding: "4px 0 16px" }}>
+      <div style={{ display: "flex", gap: 12, marginBottom: 16, overflow: "hidden" }}>
+        {Array.from({ length: 6 }).map((_, index) => (
+          <Skeleton.Button key={index} active size="small" style={{ width: index === 0 ? 180 : 150, height: 34, borderRadius: 8 }} />
+        ))}
+      </div>
+      <Row gutter={[16, 16]} style={{ marginBottom: 16 }}>
+        {Array.from({ length: 4 }).map((_, index) => (
+          <Col xs={12} md={6} key={index}>
+            <Card style={{ borderRadius: 10, height: 110, background: panelBg, border }} bodyStyle={{ padding: 16 }}>
+              <Skeleton active paragraph={{ rows: 1, width: ["70%"] }} title={{ width: "45%" }} />
+            </Card>
+          </Col>
+        ))}
+      </Row>
+      <Row gutter={[16, 16]}>
+        <Col xs={24} lg={14}>
+          <Row gutter={[16, 16]}>
+            {Array.from({ length: 6 }).map((_, index) => (
+              <Col xs={24} sm={12} key={index}>
+                <Card style={{ borderRadius: 10, height: 280, background: panelBg, border }} bodyStyle={{ padding: 18 }}>
+                  <Skeleton active paragraph={{ rows: 6 }} title={{ width: "52%" }} />
+                </Card>
+              </Col>
+            ))}
+          </Row>
+        </Col>
+        <Col xs={24} lg={10}>
+          <Card style={{ borderRadius: 10, minHeight: 872, background: panelBg, border }} bodyStyle={{ padding: 18 }}>
+            <Skeleton active paragraph={{ rows: 12 }} title={{ width: "46%" }} />
+          </Card>
+        </Col>
+      </Row>
+    </div>
+  );
+}
+
 const TILE_LAYERS = {
   street: {
     name: "Street",
@@ -281,6 +325,10 @@ export default function AdminHome() {
   const [notifications, setNotifications] = useState([]);
   const [unreadCount, setUnreadCount] = useState(0);
   const [notifLoading, setNotifLoading] = useState(false);
+  const [messageOpen, setMessageOpen] = useState(false);
+  const [quickMessages, setQuickMessages] = useState([]);
+  const [messageUnreadCount, setMessageUnreadCount] = useState(0);
+  const [messageLoading, setMessageLoading] = useState(false);
   const screens = useBreakpoint();
   const isMobile = !screens.md;
   const navigate = useNavigate();
@@ -374,18 +422,6 @@ export default function AdminHome() {
     finally { setNotifLoading(false); }
   }, []);
 
-  useEffect(() => {
-    fetchNotifications();
-    const socket = connectSocket("admin");
-    socket.on("notification", () => fetchNotifications());
-    socket.on("data-refresh", () => fetchNotifications());
-    return () => {
-      socket.off("notification");
-      socket.off("data-refresh");
-      disconnectSocket();
-    };
-  }, [fetchNotifications]);
-
   const markNotifRead = async (id) => {
     try {
       await api.patch(`/notifications/${id}/read`);
@@ -402,11 +438,77 @@ export default function AdminHome() {
     } catch { /* silent */ }
   };
 
+  const previewMessage = (thread) => {
+    if (thread.draft?.body) return thread.draft.body;
+    if (thread.lastMessage?.body) return thread.lastMessage.body;
+    if (thread.lastMessage?.attachments?.length) return "Attachment sent";
+    if (thread.lastMessage?.appLinks?.length) return "App data attached";
+    return "No messages yet";
+  };
+
+  const senderName = (sender) => {
+    if (!sender) return "Unknown User";
+    return `${sender.firstName || ""} ${sender.lastName || ""}`.trim() || sender.username || sender.email || "Unknown User";
+  };
+
+  const fetchMessagePreview = useCallback(async () => {
+    try {
+      setMessageLoading(true);
+      const { data } = await api.get("/messages/conversations?folder=inbox");
+      const list = Array.isArray(data) ? data : [];
+      setQuickMessages(list.slice(0, 6));
+      setMessageUnreadCount(list.reduce((total, thread) => total + (thread.unreadCount || 0), 0));
+    } catch { /* silent */ }
+    finally { setMessageLoading(false); }
+  }, []);
+
+  useEffect(() => {
+    fetchNotifications();
+    fetchMessagePreview();
+    const socket = connectSocket("admin", { email: user?.email, userId: user?.id || user?._id });
+    socket.on("notification", () => fetchNotifications());
+    socket.on("data-refresh", () => fetchNotifications());
+    socket.on("internal-message", () => fetchMessagePreview());
+    socket.on("message-refresh", () => fetchMessagePreview());
+    return () => {
+      socket.off("notification");
+      socket.off("data-refresh");
+      socket.off("internal-message");
+      socket.off("message-refresh");
+      disconnectSocket();
+    };
+  }, [fetchNotifications, fetchMessagePreview, user?.email, user?.id, user?._id]);
+
+  const markMessageThreadRead = async (threadId) => {
+    const threadUnread = quickMessages.find((thread) => thread._id === threadId)?.unreadCount || 0;
+    try {
+      await api.patch(`/messages/conversations/${threadId}/read`);
+      setQuickMessages((prev) => prev.map((thread) => thread._id === threadId ? { ...thread, unreadCount: 0 } : thread));
+      setMessageUnreadCount((prev) => Math.max(0, prev - threadUnread));
+    } catch { /* silent */ }
+  };
+
+  const markAllMessagesRead = async () => {
+    const unreadThreads = quickMessages.filter((thread) => thread.unreadCount > 0);
+    try {
+      await Promise.all(unreadThreads.map((thread) => api.patch(`/messages/conversations/${thread._id}/read`)));
+      setQuickMessages((prev) => prev.map((thread) => ({ ...thread, unreadCount: 0 })));
+      setMessageUnreadCount(0);
+    } catch { /* silent */ }
+  };
+
   const getNotifIcon = (type) => {
     if (type === "new_submission") return <InboxOutlined style={{ color: "#2f54eb" }} />;
     if (type === "resubmission") return <ReconciliationOutlined style={{ color: "#13c2c2" }} />;
     if (type === "new_portal_user") return <TeamOutlined style={{ color: "#52c41a" }} />;
     return <BellOutlined style={{ color: "#fa8c16" }} />;
+  };
+
+  const getNotifTarget = (type) => {
+    if (["new_submission", "resubmission", "baseline_update_request", "baseline_update"].includes(type)) return "slf-waste-generators";
+    if (["new_portal_user", "portal_verification_submitted"].includes(type)) return "settings-portal-users";
+    if (type === "support_ticket") return "dev-support";
+    return null;
   };
 
   const toggleTheme = () => {
@@ -441,6 +543,14 @@ export default function AdminHome() {
         key: "dashboard",
         icon: <DashboardOutlined />,
         label: "Dashboard",
+      });
+    }
+
+    if (hasAccess("messaging")) {
+      items.push({
+        key: "messaging",
+        icon: <MessageOutlined />,
+        label: "Messaging",
       });
     }
 
@@ -659,6 +769,8 @@ export default function AdminHome() {
         return isDeveloper && hasAccess("accountSettings") ? <AccountSettings isDark={isDark} /> : denied;
       case "settings-portal-users":
         return (isDeveloper || hasAccess("portalUsers")) ? <PortalUsers isDark={isDark} /> : denied;
+      case "messaging":
+        return hasAccess("messaging") ? <Messaging isDark={isDark} currentUser={user} /> : denied;
       case "settings-fields":
         return hasAccess("portalFields") ? <FieldSettings isDark={isDark} canEdit={canEdit("portalFields")} canDelete={canDelete("portalFields")} /> : denied;
       case "settings-data-refs":
@@ -885,17 +997,104 @@ export default function AdminHome() {
                 unCheckedChildren={<BulbOutlined />}
                 style={{ marginRight: 12 }}
               />
-              <Tooltip title="Messages (Coming Soon)">
-                <Button
-                  type="text"
-                  icon={<MessageOutlined />}
-                  style={{
-                    fontSize: 18,
-                    color: isDark ? "#999" : "#666",
-                    marginRight: 4,
-                  }}
-                />
-              </Tooltip>
+              <Popover
+                open={messageOpen}
+                onOpenChange={(open) => {
+                  setMessageOpen(open);
+                  if (open) fetchMessagePreview();
+                }}
+                trigger="click"
+                placement="bottomRight"
+                arrow={false}
+                overlayInnerStyle={{ padding: 0, borderRadius: 12, overflow: "hidden" }}
+                overlayStyle={{ width: 380 }}
+                content={
+                  <div>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "14px 16px 10px", borderBottom: isDark ? "1px solid #303030" : "1px solid #f0f0f0" }}>
+                      <Space size={8}><MessageOutlined /><Text strong style={{ fontSize: 15 }}>Messages</Text></Space>
+                      {messageUnreadCount > 0 && (
+                        <Button type="link" size="small" onClick={markAllMessagesRead} style={{ fontSize: 12, padding: 0 }}>Mark as read</Button>
+                      )}
+                    </div>
+                    <div style={{ maxHeight: 420, overflowY: "auto" }}>
+                      {messageLoading && quickMessages.length === 0 ? (
+                        <div style={{ padding: 16 }}><Skeleton active avatar paragraph={{ rows: 3 }} /></div>
+                      ) : quickMessages.length === 0 ? (
+                        <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No messages" style={{ padding: "40px 0" }} />
+                      ) : (
+                        <List
+                          dataSource={quickMessages}
+                          renderItem={(thread) => {
+                            const isUnread = thread.unreadCount > 0;
+                            const lastSender = thread.lastMessage?.sender;
+                            return (
+                              <div
+                                key={thread._id}
+                                onClick={() => {
+                                  setActiveMenu("messaging");
+                                  setMessageOpen(false);
+                                }}
+                                style={{
+                                  display: "flex", gap: 12, padding: "12px 16px",
+                                  cursor: "pointer",
+                                  background: isUnread ? (isDark ? "rgba(47,84,235,0.06)" : "#f0f5ff") : "transparent",
+                                  borderBottom: isDark ? "1px solid #303030" : "1px solid #f5f5f5",
+                                }}
+                              >
+                                <Avatar style={{ backgroundColor: isUnread ? "#2f54eb" : (isDark ? "#303030" : "#d9e6f2") }} icon={<UserOutlined />} />
+                                <div style={{ flex: 1, minWidth: 0 }}>
+                                  <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
+                                    <Text strong={isUnread} style={{ fontSize: 13 }} ellipsis>{thread.subject}</Text>
+                                    <Text type="secondary" style={{ fontSize: 11, whiteSpace: "nowrap" }}>{dayjs(thread.lastMessageAt || thread.updatedAt).fromNow()}</Text>
+                                  </div>
+                                  <Text type="secondary" style={{ display: "block", fontSize: 12 }} ellipsis>
+                                    {lastSender ? `${senderName(lastSender)}: ` : ""}{previewMessage(thread)}
+                                  </Text>
+                                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 4 }}>
+                                    {isUnread ? <Badge count={thread.unreadCount} size="small" /> : <Text type="secondary" style={{ fontSize: 11 }}>Read</Text>}
+                                    {isUnread && (
+                                      <Button
+                                        type="link"
+                                        size="small"
+                                        onClick={(event) => {
+                                          event.stopPropagation();
+                                          markMessageThreadRead(thread._id);
+                                        }}
+                                        style={{ padding: 0, fontSize: 12 }}
+                                      >
+                                        Mark as read
+                                      </Button>
+                                    )}
+                                  </div>
+                                </div>
+                              </div>
+                            );
+                          }}
+                        />
+                      )}
+                    </div>
+                    <div style={{ padding: 12, borderTop: isDark ? "1px solid #303030" : "1px solid #f0f0f0", textAlign: "center" }}>
+                      <Button type="primary" block icon={<MessageOutlined />} onClick={() => { setActiveMenu("messaging"); setMessageOpen(false); }}>
+                        See all in Messaging
+                      </Button>
+                    </div>
+                  </div>
+                }
+              >
+                <Badge count={messageUnreadCount} size="small" offset={[-6, 6]} style={{ backgroundColor: "#2f54eb", boxShadow: isDark ? "0 0 0 2px #141414" : "0 0 0 2px #fff", fontSize: 10, lineHeight: "16px", height: 16, minWidth: 16, padding: "0 4px" }}>
+                  <Tooltip title="Messages">
+                    <Button
+                      type="text"
+                      icon={<MessageOutlined />}
+                      style={{
+                        fontSize: 18,
+                        color: isDark ? "#999" : "#666",
+                        marginRight: 4,
+                      }}
+                    />
+                  </Tooltip>
+                </Badge>
+              </Popover>
               <Popover
                 open={notifOpen}
                 onOpenChange={setNotifOpen}
@@ -923,10 +1122,14 @@ export default function AdminHome() {
                           renderItem={(n) => (
                             <div
                               key={n._id}
-                              onClick={() => { if (!n.read) markNotifRead(n._id); }}
+                            onClick={() => {
+                              if (!n.read) markNotifRead(n._id);
+                              const target = getNotifTarget(n.type);
+                              if (target) { setActiveMenu(target); setNotifOpen(false); }
+                            }}
                               style={{
                                 display: "flex", gap: 12, padding: "12px 16px",
-                                cursor: n.read ? "default" : "pointer",
+                                cursor: getNotifTarget(n.type) ? "pointer" : (n.read ? "default" : "pointer"),
                                 background: n.read ? "transparent" : (isDark ? "rgba(47,84,235,0.06)" : "#f0f5ff"),
                                 borderBottom: isDark ? "1px solid #303030" : "1px solid #f5f5f5",
                                 transition: "background 0.2s",
@@ -1143,7 +1346,7 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
   const [slfTileKey, setSlfTileKey] = useState("street");
   const [slfFilterProvince, setSlfFilterProvince] = useState(null);
   const [slfFilterStatus, setSlfFilterStatus] = useState(null);
-  const [slfDashModal, setSlfDashModal] = useState(null); // { type: 'leachate'|'gas'|'trashSlide'|'firePrev' }
+  const [slfDashModal, setSlfDashModal] = useState(null); // { type: dashboard metric key }
 
   const mapPts = useMemo(
     () =>
@@ -1557,6 +1760,10 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
     rejected: "#ff4d4f",
   };
   const textColor = isDark ? "#e0e0e0" : "#1a3353";
+
+  if (loading && !stats && !swmStats && !mrfStats && !lguMrfStats && !trapStats && !equipStats && !slfFacStats) {
+    return <DashboardSkeleton isDark={isDark} />;
+  }
 
   const pendingCount = stats?.byStatus?.pending || 0;
   const ackCount = stats?.byStatus?.acknowledged || 0;
@@ -6871,9 +7078,10 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                     <Col xs={12} sm={12} md={6}>
                       <Card
                         hoverable
-                        style={{ borderRadius: 10, height: 110, borderLeft: "4px solid #2f54eb" }}
+                        style={{ borderRadius: 10, height: 110, borderLeft: "4px solid #2f54eb", cursor: "pointer" }}
                         loading={loading}
                         styles={{ body: { padding: "10px 14px" } }}
+                        onClick={() => setSlfDashModal({ type: "total" })}
                       >
                         <Statistic
                           title="Total SLF"
@@ -6921,9 +7129,10 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                     <Col xs={12} sm={12} md={6}>
                       <Card
                         hoverable
-                        style={{ borderRadius: 10, height: 110, borderLeft: "4px solid #722ed1" }}
+                        style={{ borderRadius: 10, height: 110, borderLeft: "4px solid #722ed1", cursor: "pointer" }}
                         loading={loading}
                         styles={{ body: { padding: "10px 14px" } }}
+                        onClick={() => setSlfDashModal({ type: "private" })}
                       >
                         <Statistic
                           title="Private Sectors Served"
@@ -7647,10 +7856,49 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                     const PAG = { pageSize: 15, showSizeChanger: true, pageSizeOptions: ["10", "15", "25", "50"], showTotal: (t) => `${t} total entries` };
                     const slfCol = { title: "LGU / SLF", dataIndex: "slfName", width: 180, fixed: "left", render: (v) => <Text strong style={{ fontSize: 12 }}>{v}</Text> };
                     const provCol = { title: "Province", dataIndex: "province", width: 160, render: (v) => <Text type="secondary" style={{ fontSize: 12 }}>{v || "—"}</Text> };
+                    const metricColor = {
+                      total: "#2f54eb",
+                      cells: "#13c2c2",
+                      lgu: "#fa8c16",
+                      private: "#722ed1",
+                      capacity: "#eb2f96",
+                      waste: "#ff4d4f",
+                      leachate: "#1890ff",
+                      gas: "#52c41a",
+                      trashSlide: "#fa8c16",
+                      firePrev: "#ff4d4f",
+                    };
+                    const metricValue = (type, row) => {
+                      if (type === "total") return 1;
+                      if (type === "cells") return row.numberOfCell || 0;
+                      if (type === "lgu") return row.noOfLGUServed || 0;
+                      if (type === "private") return /private/i.test(row.ownership || "") ? 1 : 0;
+                      if (type === "capacity") return row.volumeCapacity || 0;
+                      if (type === "waste") return row.actualResidualWasteReceived || 0;
+                      if (type === "leachate") return row.noOfLeachatePond || 0;
+                      if (type === "gas") return row.numberOfGasVents || 0;
+                      if (type === "trashSlide") return row.trashSlideMeasures?.length || 0;
+                      if (type === "firePrev") return row.firePrevMeasures?.length || 0;
+                      return 0;
+                    };
 
                     const modalConfig = {
+                      total: {
+                        title: <Space><BankOutlined style={{ color: "#2f54eb" }} /> Total SLF — Facility Portfolio</Space>,
+                        filter: () => true,
+                        metricLabel: "facilities",
+                        flatten: (r) => [{ key: r._id || r.lgu, slfName: r.lgu, province: r.province, status: r.statusOfSLF, ownership: r.ownership, category: r.category, dataYear: r.dataYear }],
+                        columns: [
+                          slfCol, provCol,
+                          { title: "Status", dataIndex: "status", width: 150, render: (v) => v ? <Tag color={v.toLowerCase().includes("non") ? "red" : "green"}>{v}</Tag> : "—" },
+                          { title: "Ownership", dataIndex: "ownership", width: 130, render: (v) => v || "—" },
+                          { title: "Category", dataIndex: "category", width: 90, render: (v) => v ? <Tag color="purple">{v}</Tag> : "—" },
+                          { title: "Year", dataIndex: "dataYear", width: 90, align: "center", render: (v) => v || "—" },
+                        ],
+                      },
                       leachate: {
                         title: <Space><AlertOutlined style={{ color: "#1890ff" }} /> Leachate Management — All Pond Details</Space>,
+                        metricLabel: "ponds",
                         filter: (r) => (r.noOfLeachatePond || 0) > 0,
                         flatten: (r) => (r.leachatePondDetails || []).length > 0
                           ? r.leachatePondDetails.map((p, i) => ({ key: `${r.lgu}_${i}`, slfName: r.lgu, province: r.province, pondNo: p.pondNo ?? i + 1, description: p.description, status: p.status, attachments: p.attachments || [] }))
@@ -7665,6 +7913,7 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                       },
                       gas: {
                         title: <Space><SafetyCertificateOutlined style={{ color: "#52c41a" }} /> Gas Management — All Vent Details</Space>,
+                        metricLabel: "vents",
                         filter: (r) => (r.numberOfGasVents || 0) > 0,
                         flatten: (r) => (r.gasVentDetails || []).length > 0
                           ? r.gasVentDetails.map((g, i) => ({ key: `${r.lgu}_${i}`, slfName: r.lgu, province: r.province, ventNo: g.ventNo ?? i + 1, ventType: g.ventType, description: g.description, status: g.status, attachments: g.attachments || [] }))
@@ -7680,6 +7929,7 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                       },
                       trashSlide: {
                         title: <Space><WarningOutlined style={{ color: "#fa8c16" }} /> Trash Slide Prevention — All Measures</Space>,
+                        metricLabel: "measures",
                         filter: (r) => (r.trashSlideMeasures?.length || 0) > 0,
                         flatten: (r) => (r.trashSlideMeasures || []).map((m, i) => ({ key: `${r.lgu}_${i}`, slfName: r.lgu, province: r.province, measure: m.measure, description: m.description, status: m.status, attachments: m.attachments || [] })),
                         columns: [
@@ -7692,6 +7942,7 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                       },
                       firePrev: {
                         title: <Space><FireOutlined style={{ color: "#ff4d4f" }} /> Fire Prevention — All Measures</Space>,
+                        metricLabel: "measures",
                         filter: (r) => (r.firePrevMeasures?.length || 0) > 0,
                         flatten: (r) => (r.firePrevMeasures || []).map((m, i) => ({ key: `${r.lgu}_${i}`, slfName: r.lgu, province: r.province, measure: m.measure, description: m.description, status: m.status, attachments: m.attachments || [] })),
                         columns: [
@@ -7704,6 +7955,7 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                       },
                       cells: {
                         title: <Space><ContainerOutlined style={{ color: "#13c2c2" }} /> Cell Infrastructure — All Facilities</Space>,
+                        metricLabel: "cells",
                         filter: (r) => (r.numberOfCell || 0) > 0,
                         flatten: (r) => {
                           const caps = r.cellCapacities || [];
@@ -7745,6 +7997,7 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                       },
                       capacity: {
                         title: <Space><BarChartOutlined style={{ color: "#eb2f96" }} /> Total Capacity — Per SLF</Space>,
+                        metricLabel: "capacity",
                         filter: (r) => (r.volumeCapacity || 0) > 0,
                         flatten: (r) => [{ key: r.lgu, slfName: r.lgu, province: r.province, volumeCapacity: r.volumeCapacity, status: r.statusOfSLF, ownership: r.ownership, category: r.category }],
                         columns: [
@@ -7757,6 +8010,7 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                       },
                       lgu: {
                         title: <Space><TeamOutlined style={{ color: "#fa8c16" }} /> LGUs Served — Per SLF</Space>,
+                        metricLabel: "LGUs served",
                         filter: (r) => (r.noOfLGUServed || 0) > 0,
                         flatten: (r) => [{ key: r.lgu, slfName: r.lgu, province: r.province, lguCount: r.noOfLGUServed, status: r.statusOfSLF, ownership: r.ownership, category: r.category }],
                         columns: [
@@ -7769,6 +8023,7 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                       },
                       waste: {
                         title: <Space><BarChartOutlined style={{ color: "#ff4d4f" }} /> Waste Received — Per SLF</Space>,
+                        metricLabel: "tons received",
                         filter: (r) => (r.actualResidualWasteReceived || 0) > 0,
                         flatten: (r) => [{ key: r.lgu, slfName: r.lgu, province: r.province, wasteReceived: r.actualResidualWasteReceived, status: r.statusOfSLF, ownership: r.ownership }],
                         columns: [
@@ -7778,9 +8033,46 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                           { title: "Status", dataIndex: "status", width: 150, render: (v) => v ? <Tag color={v.toLowerCase().includes("non") ? "red" : "green"}>{v}</Tag> : "—" },
                         ],
                       },
+                      private: {
+                        title: <Space><BankOutlined style={{ color: "#722ed1" }} /> Private Sector Served — SLF Portfolio</Space>,
+                        metricLabel: "private SLFs",
+                        filter: (r) => /private/i.test(r.ownership || ""),
+                        flatten: (r) => [{ key: r.lgu, slfName: r.lgu, province: r.province, ownership: r.ownership, status: r.statusOfSLF, category: r.category, lguCount: r.noOfLGUServed || 0 }],
+                        columns: [
+                          slfCol, provCol,
+                          { title: "Ownership", dataIndex: "ownership", width: 130, render: (v) => <Tag color="purple">{v || "Private"}</Tag> },
+                          { title: "LGUs Served", dataIndex: "lguCount", width: 120, align: "center", render: (v) => <Tag color="orange" style={{ fontWeight: 700 }}>{v ?? "—"}</Tag> },
+                          { title: "Category", dataIndex: "category", width: 90, render: (v) => v ? <Tag color="purple">{v}</Tag> : "—" },
+                          { title: "Status", dataIndex: "status", width: 150, render: (v) => v ? <Tag color={v.toLowerCase().includes("non") ? "red" : "green"}>{v}</Tag> : "—" },
+                        ],
+                      },
                     };
                     const cfg = modalConfig[slfDashModal.type];
-                    const flatData = mgmtData.filter(cfg.filter).flatMap(cfg.flatten);
+                    const sourceRows = cfg ? mgmtData.filter(cfg.filter) : [];
+                    const flatData = cfg ? sourceRows.flatMap(cfg.flatten) : [];
+                    const color = metricColor[slfDashModal.type] || "#2f54eb";
+                    const totalMetricValue = sourceRows.reduce((sum, row) => sum + metricValue(slfDashModal.type, row), 0);
+                    const provinceData = Object.entries(sourceRows.reduce((acc, row) => {
+                      const province = row.province || "Unspecified";
+                      acc[province] = (acc[province] || 0) + metricValue(slfDashModal.type, row);
+                      return acc;
+                    }, {})).map(([name, value]) => ({ name, value })).sort((a, b) => b.value - a.value);
+                    const statusData = Object.entries(sourceRows.reduce((acc, row) => {
+                      const status = row.statusOfSLF || "Unspecified";
+                      acc[status] = (acc[status] || 0) + 1;
+                      return acc;
+                    }, {})).map(([name, value]) => ({ name, value })).sort((a, b) => b.value - a.value);
+                    const topFacilities = sourceRows
+                      .map((row) => ({
+                        name: row.lgu || "Unspecified SLF",
+                        province: row.province || "—",
+                        status: row.statusOfSLF || "—",
+                        value: metricValue(slfDashModal.type, row),
+                      }))
+                      .sort((a, b) => b.value - a.value)
+                      .slice(0, 8);
+                    const maxProvince = Math.max(...provinceData.map((item) => item.value), 1);
+                    const maxFacility = Math.max(...topFacilities.map((item) => item.value), 1);
                     return (
                       <Modal
                         open
@@ -7800,13 +8092,103 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                         {flatData.length === 0 ? (
                           <Empty description="No data available for this category." />
                         ) : (
-                          <Table
-                            dataSource={flatData}
-                            columns={cfg.columns}
-                            size="small"
-                            pagination={PAG}
-                            scroll={{ x: "max-content" }}
-                            bordered
+                          <Tabs
+                            defaultActiveKey="dashboard"
+                            items={[
+                              {
+                                key: "dashboard",
+                                label: <span><PieChartOutlined /> Dashboard</span>,
+                                children: (
+                                  <>
+                                    <Row gutter={[12, 12]} style={{ marginBottom: 16 }}>
+                                      <Col xs={24} md={6}>
+                                        <Card size="small" style={{ borderRadius: 8, border: `1px solid ${color}33`, background: `${color}0d` }}>
+                                          <Statistic title="Metric Total" value={totalMetricValue} suffix={cfg.metricLabel} valueStyle={{ color, fontSize: 22 }} formatter={(v) => Number(v || 0).toLocaleString()} />
+                                        </Card>
+                                      </Col>
+                                      <Col xs={24} md={6}>
+                                        <Card size="small" style={{ borderRadius: 8 }}>
+                                          <Statistic title="Reporting SLFs" value={sourceRows.length} valueStyle={{ fontSize: 22 }} />
+                                        </Card>
+                                      </Col>
+                                      <Col xs={24} md={6}>
+                                        <Card size="small" style={{ borderRadius: 8 }}>
+                                          <Statistic title="Province Coverage" value={provinceData.length} valueStyle={{ fontSize: 22 }} />
+                                        </Card>
+                                      </Col>
+                                      <Col xs={24} md={6}>
+                                        <Card size="small" style={{ borderRadius: 8 }}>
+                                          <Statistic title="Record Rows" value={flatData.length} valueStyle={{ fontSize: 22 }} />
+                                        </Card>
+                                      </Col>
+                                    </Row>
+
+                                    <Row gutter={[16, 16]}>
+                                      <Col xs={24} lg={14}>
+                                        <Card size="small" title="Top SLFs" style={{ borderRadius: 8, height: "100%" }}>
+                                          <Space direction="vertical" size={10} style={{ width: "100%" }}>
+                                            {topFacilities.map((item, index) => {
+                                              const percent = Math.round((item.value / maxFacility) * 100);
+                                              return (
+                                                <div key={`${item.name}-${index}`}>
+                                                  <div style={{ display: "flex", justifyContent: "space-between", gap: 12, marginBottom: 4 }}>
+                                                    <Text strong style={{ fontSize: 12 }}>{index + 1}. {item.name}</Text>
+                                                    <Text style={{ fontSize: 12, color }}>{Number(item.value).toLocaleString()} {cfg.metricLabel}</Text>
+                                                  </div>
+                                                  <Progress percent={percent} showInfo={false} strokeColor={color} trailColor="#f0f0f0" size="small" />
+                                                  <Text type="secondary" style={{ fontSize: 11 }}>{item.province} • {item.status}</Text>
+                                                </div>
+                                              );
+                                            })}
+                                          </Space>
+                                        </Card>
+                                      </Col>
+                                      <Col xs={24} lg={10}>
+                                        <Card size="small" title="Province Breakdown" style={{ borderRadius: 8, marginBottom: 16 }}>
+                                          <Space direction="vertical" size={8} style={{ width: "100%" }}>
+                                            {provinceData.slice(0, 8).map((item) => {
+                                              const percent = Math.round((item.value / maxProvince) * 100);
+                                              return (
+                                                <div key={item.name}>
+                                                  <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, marginBottom: 2 }}>
+                                                    <span>{item.name}</span>
+                                                    <strong>{Number(item.value).toLocaleString()}</strong>
+                                                  </div>
+                                                  <Progress percent={percent} showInfo={false} strokeColor={color} size="small" />
+                                                </div>
+                                              );
+                                            })}
+                                          </Space>
+                                        </Card>
+                                        <Card size="small" title="Status Mix" style={{ borderRadius: 8 }}>
+                                          <Space size={[6, 6]} wrap>
+                                            {statusData.map((item) => (
+                                              <Tag key={item.name} color={item.name.toLowerCase().includes("non") ? "red" : item.name.toLowerCase().includes("operational") ? "green" : "default"}>
+                                                {item.name}: {item.value}
+                                              </Tag>
+                                            ))}
+                                          </Space>
+                                        </Card>
+                                      </Col>
+                                    </Row>
+                                  </>
+                                ),
+                              },
+                              {
+                                key: "records",
+                                label: <span><TableOutlined /> Records</span>,
+                                children: (
+                                  <Table
+                                    dataSource={flatData}
+                                    columns={cfg.columns}
+                                    size="small"
+                                    pagination={PAG}
+                                    scroll={{ x: "max-content" }}
+                                    bordered
+                                  />
+                                ),
+                              },
+                            ]}
                           />
                         )}
                       </Modal>

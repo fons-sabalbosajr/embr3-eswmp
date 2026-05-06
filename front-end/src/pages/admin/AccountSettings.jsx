@@ -52,6 +52,7 @@ const PERMISSION_GROUPS = [
     { key: "dashboard", label: "Dashboard" },
     { key: "submissions", label: "SLF Submissions" },
     { key: "slfMonitoring", label: "SLF Monitoring" },
+    { key: "messaging", label: "Messaging" },
     { key: "reports", label: "Reports" },
   ]},
   { group: "SWM Programs", icon: <ExperimentOutlined />, color: "#13c2c2", items: [

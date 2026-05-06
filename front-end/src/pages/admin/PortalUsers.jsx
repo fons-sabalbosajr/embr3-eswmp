@@ -2,7 +2,8 @@ import { useState, useEffect, useMemo } from "react";
 import {
   Table, Tag, Button, Space, Modal, Select, Typography,
   Empty, Tooltip, Badge, Card, Descriptions, Avatar,
-  Divider, Row, Col, Timeline, Alert,
+  Divider, Row, Col, Timeline, Alert, Dropdown, Form,
+  Input, List, Spin,
 } from "antd";
 import {
   CheckCircleOutlined, CloseCircleOutlined, DeleteOutlined,
@@ -11,6 +12,7 @@ import {
   EnvironmentOutlined, ClockCircleOutlined, LockOutlined,
   UnlockOutlined, BellOutlined, FileDoneOutlined, LinkOutlined,
   FileTextOutlined, FileImageOutlined, SafetyCertificateOutlined,
+  MessageOutlined, MoreOutlined, SendOutlined,
 } from "@ant-design/icons";
 import Swal from "sweetalert2";
 import dayjs from "dayjs";
@@ -35,6 +37,13 @@ export default function PortalUsers({ isDark }) {
   const [editingSlfLoading, setEditingSlfLoading] = useState(false);
   const [holdLoading, setHoldLoading] = useState(false);
   const [reminderLoading, setReminderLoading] = useState(false);
+  const [messageModal, setMessageModal] = useState({ open: false, user: null });
+  const [messageThreads, setMessageThreads] = useState([]);
+  const [messageLoading, setMessageLoading] = useState(false);
+  const [messageSending, setMessageSending] = useState(false);
+  const [selectedThreadId, setSelectedThreadId] = useState(null);
+  const [replyText, setReplyText] = useState("");
+  const [messageForm] = Form.useForm();
 
   useEffect(() => {
     fetchData();
@@ -231,6 +240,27 @@ export default function PortalUsers({ isDark }) {
     }
   };
 
+  const handleSendHoldFollowUp = async (record) => {
+    const result = await Swal.fire({
+      title: "Send Hold Account Follow-Up?",
+      html: `A follow-up email with document requirements will be sent to <strong>${record.email}</strong>.`,
+      icon: "info",
+      showCancelButton: true,
+      confirmButtonColor: "#1a3353",
+      confirmButtonText: "Send Email",
+    });
+    if (!result.isConfirmed) return;
+    setReminderLoading(true);
+    try {
+      await api.post(`/portal-users/${record._id}/send-hold-followup`);
+      Swal.fire({ icon: "success", title: "Follow-Up Email Sent", text: `Email sent to ${record.email}.`, confirmButtonColor: "#1a3353" });
+    } catch (err) {
+      Swal.fire("Error", err.response?.data?.message || "Failed to send follow-up email", "error");
+    } finally {
+      setReminderLoading(false);
+    }
+  };
+
   const handleSendReminder = async (record) => {
     const result = await Swal.fire({
       title: "Send Verification Reminder?",
@@ -271,6 +301,87 @@ export default function PortalUsers({ isDark }) {
       Swal.fire("Error", err.response?.data?.message || "Failed to review", "error");
     }
   };
+
+  const fetchMessageThreads = async (record, nextSelectedId) => {
+    if (!record?._id) return;
+    setMessageLoading(true);
+    try {
+      const { data } = await api.get(`/portal-users/${record._id}/message-threads`);
+      setMessageThreads(data || []);
+      setSelectedThreadId(nextSelectedId || data?.[0]?._id || null);
+    } catch (err) {
+      Swal.fire("Error", err.response?.data?.message || "Failed to load message threads", "error");
+    } finally {
+      setMessageLoading(false);
+    }
+  };
+
+  const openMessageManager = (record) => {
+    setMessageModal({ open: true, user: record });
+    setMessageThreads([]);
+    setSelectedThreadId(null);
+    setReplyText("");
+    messageForm.setFieldsValue({
+      category: "Requirements / Compliance",
+      priority: "Medium",
+      subject: "",
+      message: "",
+    });
+    fetchMessageThreads(record);
+  };
+
+  const handleCreateMessageThread = async (values) => {
+    const user = messageModal.user;
+    if (!user?._id) return;
+    setMessageSending(true);
+    try {
+      const { data } = await api.post(`/portal-users/${user._id}/message-threads`, values);
+      messageForm.resetFields();
+      messageForm.setFieldsValue({ category: "Requirements / Compliance", priority: "Medium" });
+      await fetchMessageThreads(user, data?.data?._id);
+      Swal.fire({ icon: "success", title: "Message Sent", timer: 1200, showConfirmButton: false });
+    } catch (err) {
+      Swal.fire("Error", err.response?.data?.message || "Failed to send message", "error");
+    } finally {
+      setMessageSending(false);
+    }
+  };
+
+  const handleSendThreadReply = async () => {
+    const user = messageModal.user;
+    if (!user?._id || !selectedThreadId || !replyText.trim()) return;
+    setMessageSending(true);
+    try {
+      await api.post(`/portal-users/${user._id}/message-threads/${selectedThreadId}/reply`, { message: replyText.trim() });
+      setReplyText("");
+      await fetchMessageThreads(user, selectedThreadId);
+    } catch (err) {
+      Swal.fire("Error", err.response?.data?.message || "Failed to send reply", "error");
+    } finally {
+      setMessageSending(false);
+    }
+  };
+
+  const openEditSlfAssignment = (record) => {
+    const raw = Array.isArray(record.assignedSlf)
+      ? record.assignedSlf
+      : record.assignedSlf ? [record.assignedSlf] : [];
+    const idToLabel = new Map(
+      generators.map((g) => [
+        g._id,
+        `${g.lgu || ""}${g.ownership ? " (" + g.ownership + ")" : ""}`.trim(),
+      ])
+    );
+    const labelToId = new Map(slfOptions.map((o) => [o.label, o.value]));
+    const normalized = raw.map((id) => {
+      const lbl = idToLabel.get(id);
+      return lbl && labelToId.has(lbl) ? labelToId.get(lbl) : id;
+    });
+    setEditSlfValue(normalized);
+    setEditSlfModal({ open: true, user: record });
+  };
+
+  const selectedThread = messageThreads.find((thread) => thread._id === selectedThreadId);
 
   const columns = [
     {
@@ -333,6 +444,23 @@ export default function PortalUsers({ isDark }) {
       ),
     },
     {
+      title: "Attachments",
+      key: "attachments",
+      width: 150,
+      render: (_, record) => record.verificationFileUrl ? (
+        <a href={record.verificationFileUrl} target="_blank" rel="noopener noreferrer">
+          <Button
+            size="small"
+            type="link"
+            icon={record.verificationFileType === "image" ? <FileImageOutlined /> : <FileTextOutlined />}
+            style={{ paddingInline: 0 }}
+          >
+            {record.verificationFileType === "image" ? "Image" : "Document"}
+          </Button>
+        </a>
+      ) : <Text type="secondary">No file</Text>,
+    },
+    {
       title: "Registered",
       dataIndex: "createdAt",
       key: "createdAt",
@@ -342,121 +470,53 @@ export default function PortalUsers({ isDark }) {
     {
       title: "Actions",
       key: "actions",
-      width: 200,
-      render: (_, record) => (
-        <Space size="small">
-          <Tooltip title="View Details">
-            <Button
-              size="small"
-              icon={<EyeOutlined />}
-              onClick={() =>
-                setDetailModal({ open: true, user: record })
-              }
-            />
-          </Tooltip>
-          {record.status === "pending" && (
-            <>
-              <Tooltip title="Approve">
-                <Button
-                  size="small"
-                  type="primary"
-                  style={{ background: "#52c41a", borderColor: "#52c41a" }}
-                  icon={<CheckCircleOutlined />}
-                  onClick={() => {
-                    setSelectedSlf([]);
-                    setApproveModal({ open: true, user: record });
-                  }}
-                />
-              </Tooltip>
-              <Tooltip title="Reject">
-                <Button
-                  size="small"
-                  danger
-                  icon={<CloseCircleOutlined />}
-                  onClick={() => handleReject(record)}
-                />
-              </Tooltip>
-            </>
-          )}
-          {record.status === "approved" && (
-            <>
-              <Tooltip title="Edit Assigned SLF">
-                <Button
-                  size="small"
-                  icon={<EditOutlined />}
-                  onClick={() => {
-                    const raw = Array.isArray(record.assignedSlf)
-                      ? record.assignedSlf
-                      : record.assignedSlf ? [record.assignedSlf] : [];
-                    // Map potentially stale IDs to canonical (latest-year) IDs
-                    const idToLabel = new Map(
-                      generators.map((g) => [
-                        g._id,
-                        `${g.lgu || ""}${g.ownership ? " (" + g.ownership + ")" : ""}`.trim(),
-                      ])
-                    );
-                    const labelToId = new Map(slfOptions.map((o) => [o.label, o.value]));
-                    const normalized = raw.map((id) => {
-                      const lbl = idToLabel.get(id);
-                      return lbl && labelToId.has(lbl) ? labelToId.get(lbl) : id;
-                    });
-                    setEditSlfValue(normalized);
-                    setEditSlfModal({ open: true, user: record });
-                  }}
-                />
-              </Tooltip>
-              {!record.verificationRequired ? (
-                <Tooltip title="Hold Account (require re-verification)">
-                  <Button
-                    size="small"
-                    icon={<LockOutlined />}
-                    style={{ color: "#fa8c16", borderColor: "#fa8c16" }}
-                    loading={holdLoading}
-                    onClick={() => handleHold(record)}
-                  />
-                </Tooltip>
-              ) : (
-                <Tooltip title="Remove Hold">
-                  <Button
-                    size="small"
-                    icon={<UnlockOutlined />}
-                    style={{ color: "#52c41a", borderColor: "#52c41a" }}
-                    onClick={() => handleUnhold(record)}
-                  />
-                </Tooltip>
-              )}
-              <Tooltip title="Send Verification Reminder Email">
-                <Button
-                  size="small"
-                  icon={<BellOutlined />}
-                  loading={reminderLoading}
-                  onClick={() => handleSendReminder(record)}
-                />
-              </Tooltip>
-              {record.verificationSubmitted && (
-                <Tooltip title="Mark Verification as Reviewed">
-                  <Button
-                    size="small"
-                    type="primary"
-                    icon={<FileDoneOutlined />}
-                    style={{ background: "#52c41a", borderColor: "#52c41a" }}
-                    onClick={() => handleReviewVerification(record)}
-                  />
-                </Tooltip>
-              )}
-            </>
-          )}
-          <Tooltip title="Delete">
-            <Button
-              size="small"
-              danger
-              type="text"
-              icon={<DeleteOutlined />}
-              onClick={() => handleDelete(record)}
-            />
-          </Tooltip>
-        </Space>
-      ),
+      width: 130,
+      render: (_, record) => {
+        const actionItems = [
+          { key: "view", icon: <EyeOutlined />, label: "View Details" },
+          { key: "message", icon: <MessageOutlined />, label: "Message User" },
+          { type: "divider" },
+          record.status === "pending" && { key: "approve", icon: <CheckCircleOutlined />, label: "Approve" },
+          record.status === "pending" && { key: "reject", icon: <CloseCircleOutlined />, label: "Reject", danger: true },
+          record.status === "approved" && { key: "edit-slf", icon: <EditOutlined />, label: "Edit Assigned SLF" },
+          record.status === "approved" && {
+            key: record.verificationRequired ? "unhold" : "hold",
+            icon: record.verificationRequired ? <UnlockOutlined /> : <LockOutlined />,
+            label: record.verificationRequired ? "Remove Hold" : "Hold Account",
+          },
+          record.status === "approved" && { key: "reminder", icon: <BellOutlined />, label: "Send Reminder Email" },
+          record.verificationRequired && !record.verificationSubmitted && { key: "hold-followup", icon: <MailOutlined />, label: "Send Hold Follow-Up" },
+          record.verificationSubmitted && { key: "review", icon: <FileDoneOutlined />, label: "Mark Verification Reviewed" },
+          { type: "divider" },
+          { key: "delete", icon: <DeleteOutlined />, label: "Delete", danger: true },
+        ].filter(Boolean);
+
+        return (
+          <Dropdown
+            trigger={["click"]}
+            menu={{
+              items: actionItems,
+              onClick: ({ key }) => {
+                if (key === "view") setDetailModal({ open: true, user: record });
+                if (key === "message") openMessageManager(record);
+                if (key === "approve") { setSelectedSlf([]); setApproveModal({ open: true, user: record }); }
+                if (key === "reject") handleReject(record);
+                if (key === "edit-slf") openEditSlfAssignment(record);
+                if (key === "hold") handleHold(record);
+                if (key === "unhold") handleUnhold(record);
+                if (key === "reminder") handleSendReminder(record);
+                if (key === "hold-followup") handleSendHoldFollowUp(record);
+                if (key === "review") handleReviewVerification(record);
+                if (key === "delete") handleDelete(record);
+              },
+            }}
+          >
+            <Button size="small" icon={<MoreOutlined />}>
+              Actions
+            </Button>
+          </Dropdown>
+        );
+      },
     },
   ];
 
@@ -494,7 +554,7 @@ export default function PortalUsers({ isDark }) {
         loading={loading}
         size="small"
         pagination={{ pageSize: 15 }}
-        scroll={{ x: 900 }}
+        scroll={{ x: 1050 }}
         locale={{
           emptyText: (
             <Empty
@@ -596,6 +656,181 @@ export default function PortalUsers({ isDark }) {
               notFoundContent={<Empty description="No SLF available" />}
             />
           </div>
+        )}
+      </Modal>
+
+      {/* Portal User Message Threads */}
+      <Modal
+        title={
+          <Space>
+            <MessageOutlined style={{ color: "#1a3353" }} />
+            <span>
+              Message Portal User{messageModal.user ? ` — ${messageModal.user.firstName} ${messageModal.user.lastName}` : ""}
+            </span>
+          </Space>
+        }
+        open={messageModal.open}
+        onCancel={() => {
+          setMessageModal({ open: false, user: null });
+          setMessageThreads([]);
+          setSelectedThreadId(null);
+          setReplyText("");
+          messageForm.resetFields();
+        }}
+        footer={null}
+        width={980}
+        destroyOnHidden
+      >
+        {messageModal.user && (
+          <Row gutter={[16, 16]}>
+            <Col xs={24} md={9}>
+              <Card size="small" title="Start Custom Message" style={{ borderRadius: 8, marginBottom: 12 }}>
+                <Form
+                  form={messageForm}
+                  layout="vertical"
+                  initialValues={{ category: "Requirements / Compliance", priority: "Medium" }}
+                  onFinish={handleCreateMessageThread}
+                >
+                  <Form.Item name="category" label="Category" rules={[{ required: true, message: "Select a category" }]}> 
+                    <Select size="small" options={[
+                      { label: "Requirements / Compliance", value: "Requirements / Compliance" },
+                      { label: "Account Issue", value: "Account Issue" },
+                      { label: "Data Correction", value: "Data Correction" },
+                      { label: "General Inquiry", value: "General Inquiry" },
+                      { label: "Other", value: "Other" },
+                    ]} />
+                  </Form.Item>
+                  <Form.Item name="priority" label="Priority" rules={[{ required: true, message: "Select priority" }]}> 
+                    <Select size="small" options={[
+                      { label: "Low", value: "Low" },
+                      { label: "Medium", value: "Medium" },
+                      { label: "High", value: "High" },
+                      { label: "Urgent", value: "Urgent" },
+                    ]} />
+                  </Form.Item>
+                  <Form.Item name="subject" label="Subject" rules={[{ required: true, message: "Enter a subject" }]}> 
+                    <Input size="small" placeholder="e.g. Missing compliance requirement" />
+                  </Form.Item>
+                  <Form.Item name="message" label="Message" rules={[{ required: true, message: "Enter a message" }]}> 
+                    <Input.TextArea rows={4} placeholder="Describe the requirement or compliance issue..." />
+                  </Form.Item>
+                  <Button type="primary" htmlType="submit" icon={<SendOutlined />} loading={messageSending} block>
+                    Send Message
+                  </Button>
+                </Form>
+              </Card>
+
+              <Card size="small" title="Threads" style={{ borderRadius: 8 }} bodyStyle={{ padding: 0 }}>
+                {messageLoading ? (
+                  <div style={{ textAlign: "center", padding: 28 }}><Spin /></div>
+                ) : messageThreads.length === 0 ? (
+                  <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No threads yet" style={{ padding: "18px 0" }} />
+                ) : (
+                  <List
+                    dataSource={messageThreads}
+                    renderItem={(thread) => (
+                      <List.Item
+                        onClick={() => setSelectedThreadId(thread._id)}
+                        style={{
+                          cursor: "pointer",
+                          padding: "10px 12px",
+                          background: selectedThreadId === thread._id ? (isDark ? "rgba(22,119,255,0.16)" : "#e6f4ff") : "transparent",
+                        }}
+                      >
+                        <List.Item.Meta
+                          title={<Text strong style={{ fontSize: 12 }}>{thread.subject}</Text>}
+                          description={
+                            <Space direction="vertical" size={2}>
+                              <Text type="secondary" style={{ fontSize: 11 }}>{thread.ticketNo} · {dayjs(thread.updatedAt).format("MMM D, h:mm A")}</Text>
+                              <Space size={4} wrap>
+                                <Tag color="blue" style={{ margin: 0, fontSize: 10 }}>{thread.category}</Tag>
+                                <Tag color={thread.status === "resolved" ? "green" : thread.status === "closed" ? "default" : "orange"} style={{ margin: 0, fontSize: 10 }}>
+                                  {thread.status?.replace("_", " ").toUpperCase()}
+                                </Tag>
+                              </Space>
+                            </Space>
+                          }
+                        />
+                      </List.Item>
+                    )}
+                  />
+                )}
+              </Card>
+            </Col>
+
+            <Col xs={24} md={15}>
+              <Card
+                size="small"
+                title={selectedThread ? `${selectedThread.ticketNo} — ${selectedThread.subject}` : "Conversation"}
+                extra={selectedThread ? <Tag color="blue">{selectedThread.priority}</Tag> : null}
+                style={{ borderRadius: 8, minHeight: 560 }}
+              >
+                {!selectedThread ? (
+                  <Empty description="Select a thread or send a new custom message" />
+                ) : (
+                  <>
+                    <div style={{ maxHeight: 390, overflowY: "auto", paddingRight: 4 }}>
+                      <div
+                        style={{
+                          background: isDark ? "rgba(22,119,255,0.12)" : "#e6f4ff",
+                          borderLeft: "3px solid #1677ff",
+                          borderRadius: 6,
+                          padding: "10px 12px",
+                          marginBottom: 8,
+                        }}
+                      >
+                        <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
+                          <Text strong style={{ fontSize: 12 }}>Admin</Text>
+                          <Text type="secondary" style={{ fontSize: 11 }}>{dayjs(selectedThread.createdAt).format("MMM D, h:mm A")}</Text>
+                        </div>
+                        <Text style={{ fontSize: 13, whiteSpace: "pre-wrap" }}>{selectedThread.message}</Text>
+                      </div>
+
+                      {(selectedThread.replies || []).map((reply) => (
+                        <div
+                          key={reply._id || `${reply.createdAt}-${reply.message}`}
+                          style={{
+                            background: reply.isAdmin ? (isDark ? "rgba(22,119,255,0.12)" : "#e6f4ff") : (isDark ? "rgba(82,196,26,0.12)" : "#f6ffed"),
+                            borderLeft: `3px solid ${reply.isAdmin ? "#1677ff" : "#52c41a"}`,
+                            borderRadius: 6,
+                            padding: "10px 12px",
+                            marginBottom: 8,
+                          }}
+                        >
+                          <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
+                            <Text strong style={{ fontSize: 12 }}>{reply.isAdmin ? "Admin" : messageModal.user.firstName}</Text>
+                            <Text type="secondary" style={{ fontSize: 11 }}>{dayjs(reply.createdAt).format("MMM D, h:mm A")}</Text>
+                          </div>
+                          <Text style={{ fontSize: 13, whiteSpace: "pre-wrap" }}>{reply.message}</Text>
+                        </div>
+                      ))}
+                    </div>
+
+                    {selectedThread.status !== "closed" && selectedThread.status !== "resolved" && (
+                      <div style={{ marginTop: 12 }}>
+                        <Input.TextArea
+                          rows={3}
+                          value={replyText}
+                          onChange={(e) => setReplyText(e.target.value)}
+                          placeholder="Write a reply to this portal user..."
+                        />
+                        <Button
+                          type="primary"
+                          icon={<SendOutlined />}
+                          loading={messageSending}
+                          disabled={!replyText.trim()}
+                          onClick={handleSendThreadReply}
+                          style={{ marginTop: 8 }}
+                        >
+                          Send Reply
+                        </Button>
+                      </div>
+                    )}
+                  </>
+                )}
+              </Card>
+            </Col>
+          </Row>
         )}
       </Modal>
 

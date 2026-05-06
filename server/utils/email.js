@@ -667,6 +667,90 @@ async function sendPortalVerificationReminderEmail(email, firstName) {
   });
 }
 
+async function sendHoldAccountFollowUpEmail(email, firstName) {
+  const loginLink = `${getClientUrl()}/slfportal/login`;
+
+  const body = `
+    <div style="text-align:center;margin-bottom:24px;">
+      <div style="display:inline-block;background:#fff7e6;border-radius:50%;padding:16px;">
+        <span style="font-size:32px;">&#128203;</span>
+      </div>
+    </div>
+    <h2 style="margin:0 0 8px;color:#1a3353;font-size:22px;text-align:center;">Follow-Up: Document Requirements for Account Verification</h2>
+    <p style="margin:0 0 24px;color:#666;font-size:15px;line-height:1.6;">
+      Hi <strong>${firstName}</strong>,
+    </p>
+    <p style="margin:0 0 16px;color:#666;font-size:15px;line-height:1.6;">
+      This is a follow-up from the Environmental Management Bureau Region III (EMB R3) regarding your
+      <strong>held account</strong> on the SLF Generators Portal. Your account is currently on hold
+      pending submission of the required verification documents.
+    </p>
+    <div style="padding:16px;background:#fff7e6;border-radius:8px;border:1px solid #ffd591;margin-bottom:24px;">
+      <p style="margin:0 0 10px;color:#ad4e00;font-size:14px;font-weight:700;">Please prepare and submit the following document requirements:</p>
+      <ul style="margin:0;padding-left:18px;color:#595959;font-size:14px;line-height:2.0;">
+        <li><strong>Authorization Letter</strong> — Official letter from your organization authorizing you to register on behalf of your company/LGU on the EMB R3 ESWMP Portal</li>
+        <li><strong>Office Email Address</strong> — Your official company or LGU-issued email address</li>
+        <li><strong>PCO (Pollution Control Officer) Email Address</strong> — The registered PCO's official email address</li>
+        <li><strong>Company ID or Proof of Employment</strong> — A valid company ID or document proving your affiliation with the organization</li>
+      </ul>
+    </div>
+    <p style="margin:0 0 16px;color:#666;font-size:14px;line-height:1.6;">
+      Log in to the SLF Generators Portal and navigate to <strong>Account Verification</strong> to submit your documents. Your account will remain on hold until the verification is reviewed and approved by EMB R3.
+    </p>
+    <table width="100%" cellpadding="0" cellspacing="0">
+      <tr><td align="center" style="padding:8px 0 24px;">
+        <a href="${loginLink}" target="_blank" style="display:inline-block;background:#1a3353;color:#fff;text-decoration:none;padding:14px 40px;border-radius:8px;font-size:16px;font-weight:600;letter-spacing:0.5px;">
+          Log In &amp; Submit Documents
+        </a>
+      </td></tr>
+    </table>
+    <div style="padding:16px;background:#f0f5ff;border-radius:8px;border:1px solid #adc6ff;">
+      <p style="margin:0;color:#1d39c4;font-size:13px;line-height:1.5;">
+        If you have already submitted your documents or have questions, please contact the EMB R3 ESWMP office directly. Do not reply to this email.
+      </p>
+    </div>`;
+
+  await transporter.sendMail({
+    from: `"EMBR3 ESWMP" <${process.env.EMAIL_USER}>`,
+    to: email,
+    subject: "Follow-Up: Document Requirements for Your SLF Portal Account Verification",
+    html: portalEmailWrapper(body),
+  });
+}
+
+async function sendInternalMessageEmail(email, firstName, senderName, subject, preview) {
+  const appLink = `${getClientUrl()}/admin`;
+  const body = `
+    <h2 style="margin:0 0 8px;color:#1a3353;font-size:22px;text-align:center;">New Conversation Message</h2>
+    <p style="margin:0 0 18px;color:#666;font-size:15px;line-height:1.6;">
+      Hi <strong>${firstName || "there"}</strong>,
+    </p>
+    <p style="margin:0 0 16px;color:#666;font-size:15px;line-height:1.6;">
+      <strong>${senderName}</strong> sent you a message in the EMBR3 ESWMP internal messaging module.
+    </p>
+    <div style="padding:16px;background:#f0f5ff;border-radius:8px;border:1px solid #adc6ff;margin-bottom:22px;">
+      <p style="margin:0 0 8px;color:#1d39c4;font-size:13px;font-weight:700;">${subject}</p>
+      <p style="margin:0;color:#434343;font-size:14px;line-height:1.6;">${preview || "Open the app to view the message."}</p>
+    </div>
+    <table width="100%" cellpadding="0" cellspacing="0">
+      <tr><td align="center" style="padding:4px 0 20px;">
+        <a href="${appLink}" target="_blank" style="display:inline-block;background:#1a3353;color:#fff;text-decoration:none;padding:13px 34px;border-radius:8px;font-size:15px;font-weight:600;">
+          Open Messaging
+        </a>
+      </td></tr>
+    </table>
+    <p style="margin:0;color:#999;font-size:12px;line-height:1.5;text-align:center;">
+      This is an automated notification. Reply inside the EMBR3 ESWMP app to keep the conversation secured.
+    </p>`;
+
+  await transporter.sendMail({
+    from: `"EMBR3 ESWMP" <${process.env.EMAIL_USER}>`,
+    to: email,
+    subject: `New ESWMP Message: ${subject}`,
+    html: portalEmailWrapper(body),
+  });
+}
+
 module.exports = {
   sendVerificationEmail,
   sendAcknowledgementEmail,
@@ -676,6 +760,8 @@ module.exports = {
   sendPortalRejectionEmail,
   sendPortalResetPasswordEmail,
   sendPortalVerificationReminderEmail,
+  sendHoldAccountFollowUpEmail,
+  sendInternalMessageEmail,
   sendAdminResetPasswordEmail,
   sendSubmissionEmail,
   sendAdminApprovalRequestEmail,
