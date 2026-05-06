@@ -127,6 +127,11 @@ export default function SLFPortalModals({
   resubmitComment, setResubmitComment,
   editingRevertedId, setEditingRevertedId,
 }) {
+  const haulerFieldErr = (name) =>
+    haulerErrors[name]
+      ? { validateStatus: "error", help: haulerErrors[name] }
+      : {};
+
   return (
     <>
       {/* ── Hauler Modal ── */}
