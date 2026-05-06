@@ -5478,6 +5478,7 @@ export default function SLFPortal() {
       <SLFPortalModals
         entryForm={entryForm}
         baselineForm={baselineForm}
+        companyForm={companyForm}
         haulerModalOpen={haulerModalOpen}
         setHaulerModalOpen={setHaulerModalOpen}
         haulerDraft={haulerDraft}
@@ -5494,6 +5495,9 @@ export default function SLFPortal() {
         setHaulerBarangayList={setHaulerBarangayList}
         loadingHaulerAddress={loadingHaulerAddress}
         setLoadingHaulerAddress={setLoadingHaulerAddress}
+        fetchHaulerProvinces={fetchHaulerProvinces}
+        fetchHaulerCities={fetchHaulerCities}
+        fetchHaulerBarangays={fetchHaulerBarangays}
         clientModalOpen={clientModalOpen}
         setClientModalOpen={setClientModalOpen}
         editingClientKey={editingClientKey}
@@ -5525,6 +5529,7 @@ export default function SLFPortal() {
         revertReason={revertReason}
         setRevertReason={setRevertReason}
         revertLoading={revertLoading}
+        loading={loading}
         profileModalOpen={profileModalOpen}
         setProfileModalOpen={setProfileModalOpen}
         supportDrawerOpen={supportDrawerOpen}
@@ -5534,6 +5539,9 @@ export default function SLFPortal() {
         supportTickets={supportTickets}
         supportLoading={supportLoading}
         supportSubmitting={supportSubmitting}
+        fetchSupportTickets={fetchSupportTickets}
+        faqActiveKey={faqActiveKey}
+        setFaqActiveKey={setFaqActiveKey}
         supportDetailModal={supportDetailModal}
         setSupportDetailModal={setSupportDetailModal}
         supportReplyText={supportReplyText}
@@ -5548,6 +5556,8 @@ export default function SLFPortal() {
         setUploadGuideType={setUploadGuideType}
         uploadPreviewData={uploadPreviewData}
         uploadPreviewColumns={uploadPreviewColumns}
+        setUploadPreviewData={setUploadPreviewData}
+        setUploadPreviewColumns={setUploadPreviewColumns}
         activeCellModalOpen={activeCellModalOpen}
         setActiveCellModalOpen={setActiveCellModalOpen}
         activeCellDraft={activeCellDraft}
@@ -5567,6 +5577,7 @@ export default function SLFPortal() {
         haulerDeleteFile={haulerDeleteFile}
         setHaulerDeleteFile={setHaulerDeleteFile}
         haulerDeleteLoading={haulerDeleteLoading}
+        setHaulerDeleteLoading={setHaulerDeleteLoading}
         leachateModalOpen={leachateModalOpen}
         setLeachateModalOpen={setLeachateModalOpen}
         leachateDetails={leachateDetails}
@@ -5591,6 +5602,7 @@ export default function SLFPortal() {
         activeCellEntries={activeCellEntries}
         closedCellEntries={closedCellEntries}
         haulers={haulers}
+        trucks={trucks}
         baselineUnit={baselineUnit}
         baselineSaved={baselineSaved}
         submissions={submissions}
@@ -5599,6 +5611,9 @@ export default function SLFPortal() {
         activeSlfName={activeSlfName}
         slfInfo={slfInfo}
         regions={regions}
+        provinces={provinces}
+        municipalities={municipalities}
+        barangays={barangays}
         extraTransportFields={extraTransportFields}
         acceptsHazardousWaste={acceptsHazardousWaste}
         hazWasteCodes={hazWasteCodes}
@@ -5620,11 +5635,13 @@ export default function SLFPortal() {
         handleSaveActiveCellEntry={handleSaveActiveCellEntry}
         handleSaveClosedCellEntry={handleSaveClosedCellEntry}
         handleConfirmUpload={handleConfirmUpload}
+        proceedToFilePicker={proceedToFilePicker}
         updateUploadCell={updateUploadCell}
         handleOpenWasteReceived={handleOpenWasteReceived}
         handleSaveFacilityDetails={handleSaveFacilityDetails}
         handleEditReverted={handleEditReverted}
         handleResubmitReverted={handleResubmitReverted}
+        renderStatusTag={renderStatusTag}
         fl={fl}
         isRequired={isRequired}
         opts={opts}
