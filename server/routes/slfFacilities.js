@@ -6,6 +6,43 @@ const { writeLog } = require("../utils/logger");
 
 const router = express.Router();
 
+const escapeRegExp = (value) => String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+async function findPortalFacility(id, slfName, selectFields) {
+  let facility = null;
+  if (mongoose.isValidObjectId(id)) {
+    facility = await SlfFacility.findOne({ _id: id, deletedAt: null }).select(selectFields);
+  }
+  if (facility || !slfName) return facility;
+
+  const rawName = String(slfName).replace(/\s*\(.*?\)\s*/g, "").trim();
+  const nameRx = new RegExp(`^${escapeRegExp(rawName)}$`, "i");
+  const cy = new Date().getFullYear();
+
+  facility = await SlfFacility.findOne({
+    $or: [{ lgu: nameRx }, { province: nameRx }],
+    deletedAt: null,
+    dataYear: cy,
+  }).select(selectFields);
+
+  if (!facility) {
+    facility = await SlfFacility.findOne({
+      $or: [{ lgu: nameRx }, { province: nameRx }],
+      deletedAt: null,
+    }).sort({ dataYear: -1 }).select(selectFields);
+  }
+
+  if (facility && mongoose.isValidObjectId(id)) {
+    await UserPortal.updateMany(
+      { assignedSlf: id },
+      { $set: { "assignedSlf.$[elem]": facility._id } },
+      { arrayFilters: [{ elem: id }] }
+    );
+  }
+
+  return facility;
+}
+
 // Get all records (admin management view — respects App Settings year visibility filter)
 router.get("/", async (req, res) => {
   try {
@@ -23,49 +60,12 @@ router.get("/portal/:id", async (req, res) => {
   try {
     const selectFields =
       "province lgu barangay category ownership statusOfSLF remainingLifeSpan " +
-      "volumeCapacity volumeCapacityUnit receivingVolumeCapacity receivingVolumeCapacityUnit numberOfCell cellCapacities cellCapacityUnits cellStatuses cellTypes cellFillValues cellFillUnits estimatedVolumeWaste actualResidualWasteReceived " +
+      "volumeCapacity volumeCapacityUnit receivingVolumeCapacity receivingVolumeCapacityUnit numberOfCell cellCapacities cellCapacityUnits cellStatuses cellTypes cellNotes cellFillValues cellFillUnits estimatedVolumeWaste estimatedVolumeWasteUnit actualResidualWasteReceived wasteReceivedUnit " +
       "noOfLeachatePond numberOfGasVents mrfEstablished yearStartedOperation " +
       "eccNo dischargePermit permitToOperate focalPerson " +
-      "leachatePondDetails gasVentDetails trashSlideMeasures firePrevMeasures";
+      "leachatePondDetails gasVentDetails trashSlideMeasures firePrevMeasures galleryPhotos slfDocuments";
 
-    let facility = null;
-    if (mongoose.isValidObjectId(req.params.id)) {
-      facility = await SlfFacility.findOne({ _id: req.params.id, deletedAt: null }).select(selectFields);
-    }
-
-    // Fallback: if the ObjectId reference is stale (e.g. after re-seeding),
-    // look up by slfName from the portal user and update the reference.
-    if (!facility && req.query.slfName) {
-      // Strip parenthetical suffixes and trim to get the core LGU name
-      const rawName = req.query.slfName.replace(/\s*\(.*?\)\s*/g, "").trim();
-      const nameRx = new RegExp(`^${rawName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "i");
-      const cy = new Date().getFullYear();
-
-      // Try current year first, then any year (most recent)
-      facility = await SlfFacility.findOne({
-        $or: [{ lgu: nameRx }, { province: nameRx }],
-        deletedAt: null,
-        dataYear: cy,
-      }).select(selectFields);
-
-      if (!facility) {
-        facility = await SlfFacility.findOne({
-          $or: [{ lgu: nameRx }, { province: nameRx }],
-          deletedAt: null,
-        }).sort({ dataYear: -1 }).select(selectFields);
-      }
-
-      // Update the portal user's stale reference (supports array field)
-      if (facility) {
-        if (mongoose.isValidObjectId(req.params.id)) {
-          await UserPortal.updateMany(
-            { assignedSlf: req.params.id },
-            { $set: { "assignedSlf.$[elem]": facility._id } },
-            { arrayFilters: [{ elem: req.params.id }] }
-          );
-        }
-      }
-    }
+    const facility = await findPortalFacility(req.params.id, req.query.slfName, selectFields);
 
     if (!facility) return res.status(404).json({ message: "Facility not found" });
     res.json(facility);
@@ -77,15 +77,18 @@ router.get("/portal/:id", async (req, res) => {
 // Portal: Update facility management details (leachate ponds, gas vents, trash slide, fire prevention)
 router.patch("/portal/:id/facility-details", async (req, res) => {
   try {
-    const { leachatePondDetails, gasVentDetails, trashSlideMeasures, firePrevMeasures } = req.body;
+    const { leachatePondDetails, gasVentDetails, trashSlideMeasures, firePrevMeasures, slfName } = req.body;
     const allowed = {};
     if (leachatePondDetails !== undefined) allowed.leachatePondDetails = leachatePondDetails;
     if (gasVentDetails !== undefined) allowed.gasVentDetails = gasVentDetails;
     if (trashSlideMeasures !== undefined) allowed.trashSlideMeasures = trashSlideMeasures;
     if (firePrevMeasures !== undefined) allowed.firePrevMeasures = firePrevMeasures;
 
+    const existing = await findPortalFacility(req.params.id, slfName || req.query.slfName, "_id");
+    if (!existing) return res.status(404).json({ message: "Facility not found" });
+
     const facility = await SlfFacility.findOneAndUpdate(
-      { _id: req.params.id, deletedAt: null },
+      { _id: existing._id, deletedAt: null },
       { $set: allowed },
       { new: true, select: "leachatePondDetails gasVentDetails trashSlideMeasures firePrevMeasures" }
     );

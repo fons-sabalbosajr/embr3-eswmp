@@ -27,6 +27,7 @@ const transactionSchema = new mongoose.Schema(
         "baseline_update_approved", // admin approved baseline update request
         "baseline_update",   // admin updated baseline data
         "baseline_delete",   // admin cleared baseline data
+        "admin_edit",        // admin edited a portal submission
         "support_ticket",    // portal user raised a support concern
         "support_ticket_reply", // admin replied to support ticket
         "submission_edit_request", // portal user requested edit on approved submission

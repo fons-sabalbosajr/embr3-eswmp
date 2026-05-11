@@ -103,7 +103,7 @@ const UNIT_OPTIONS = [
 ];
 const normalizeUnit = (unit) => (unit || "m³").replace("m3", "m³");
 
-const CACHE_KEY = "slf-facility-cache";
+const CACHE_KEY = "slf-facility-cache-v3";
 const CACHE_TTL = 5 * 60 * 1000;
 
 const R3_PROVINCES = ["Bataan", "Bulacan", "Nueva Ecija", "Pampanga", "Tarlac", "Zambales", "Aurora"];
@@ -116,6 +116,124 @@ const formatCompact = (value, digits = 1) => {
 };
 
 const sumBy = (items, getter) => items.reduce((sum, item) => sum + Number(getter(item) || 0), 0);
+
+const getNameVariants = (value) => {
+  const raw = String(value || "").trim();
+  if (!raw) return [];
+  const noParens = raw.replace(/\s*\(.*?\)\s*/g, " ").trim();
+  const withoutPrefix = noParens
+    .replace(/^province\s+of\s+/i, "")
+    .replace(/^(local\s+governm\s*ent\s+unit|lgu|municipality\s+of|city\s+of)\s*[-:\u2012-\u2015]?\s*/i, "")
+    .trim();
+  const firstCommaPart = withoutPrefix.split(",")[0]?.trim();
+  return [...new Set([raw, noParens, withoutPrefix, firstCommaPart].filter(Boolean))];
+};
+
+const normalizeSlfKey = (value) => String(value || "")
+  .replace(/\s*\(.*?\)\s*/g, " ")
+  .replace(/\blocal\s+governm\s*ent\s+unit\b/gi, " ")
+  .replace(/\blgu\b/gi, " ")
+  .replace(/\bmunicipality\s+of\b/gi, " ")
+  .replace(/\bcity\s+of\b/gi, " ")
+  .replace(/^province\s+of\s+/i, "")
+  .replace(/[\u2012-\u2015-]+/g, " ")
+  .replace(/[,.;:/]+/g, " ")
+  .replace(/\s+/g, " ")
+  .trim()
+  .toLowerCase();
+
+const expandSlfNames = (names = []) => [
+  ...new Set(names.flatMap((name) => getNameVariants(name)).filter(Boolean)),
+];
+
+const getFacilitySlfNames = (record) => [
+  ...(record?.slfGenerator && typeof record.slfGenerator === "object" ? [record.slfGenerator.slfName] : []),
+  record?.slfName,
+  record?.lgu,
+  record?.lgu && record?.province ? `${record.lgu}, ${record.province}` : null,
+  record?.province,
+].filter(Boolean);
+
+const getBaselineSlfNames = (baseline) => expandSlfNames([
+  baseline?.slfName,
+  baseline?.lguCompanyName,
+]);
+
+const parseCellIndex = (cellName) => {
+  const match = String(cellName || "").match(/(?:cell\s*)?(\d+)/i);
+  return match ? Number(match[1]) - 1 : null;
+};
+
+const getActiveBaselineUsage = (baseline, cellCount = 0) => {
+  if (!baseline) return { total: 0, unit: "m³", hasData: false, perCell: [] };
+  const unit = normalizeUnit(baseline.baselineUnit || baseline.activeCellResidualUnit || baseline.totalVolumeAcceptedUnit || "m³");
+  const entries = Array.isArray(baseline.activeCellEntries) ? baseline.activeCellEntries : [];
+  const perCell = Array.from({ length: Math.max(cellCount || 0, entries.length) }, () => null);
+  let total = 0;
+
+  entries.forEach((entry, orderIndex) => {
+    const volume = Number(entry?.volume || 0);
+    if (volume <= 0) return;
+    total += volume;
+    const parsedIndex = parseCellIndex(entry.cellName);
+    const targetIndex = parsedIndex != null && parsedIndex >= 0 ? parsedIndex : orderIndex;
+    perCell[targetIndex] = Number(perCell[targetIndex] || 0) + volume;
+  });
+
+  if (entries.length === 0) {
+    const fallbackTotal = Number(baseline.activeCellResidualVolume || 0) +
+      Number(baseline.activeCellInertVolume || 0) +
+      Number(baseline.activeCellHazardousVolume || 0);
+    total = fallbackTotal;
+    if (fallbackTotal > 0) perCell[0] = fallbackTotal;
+  }
+
+  return { total, unit, hasData: total > 0, perCell };
+};
+
+const buildBaselineMap = (baselines = []) => {
+  const map = new Map();
+  baselines.forEach((baseline) => {
+    getBaselineSlfNames(baseline).forEach((name) => {
+      const key = normalizeSlfKey(name);
+      if (key && !map.has(key)) map.set(key, baseline);
+    });
+  });
+  return map;
+};
+
+const findBaselineForFacility = (record, baselineMap) => {
+  for (const name of expandSlfNames(getFacilitySlfNames(record))) {
+    const baseline = baselineMap.get(normalizeSlfKey(name));
+    if (baseline) return baseline;
+  }
+  return null;
+};
+
+const enrichFacilityWithBaseline = (record, baseline) => {
+  if (!record || !baseline) return record;
+  const cellCount = Number(record.numberOfCell || 0);
+  const usage = getActiveBaselineUsage(baseline, cellCount);
+  if (!usage.hasData) return record;
+
+  const currentFillValues = Array.isArray(record.cellFillValues) ? record.cellFillValues : [];
+  const currentFillUnits = Array.isArray(record.cellFillUnits) ? record.cellFillUnits : [];
+  const nextFillValues = Array.from({ length: Math.max(cellCount, usage.perCell.length) }, (_, index) =>
+    usage.perCell[index] != null ? usage.perCell[index] : currentFillValues[index]
+  );
+  const nextFillUnits = nextFillValues.map((_, index) => currentFillUnits[index] || usage.unit);
+
+  return {
+    ...record,
+    actualResidualWasteReceived: usage.total,
+    wasteReceivedUnit: usage.unit,
+    cellFillValues: nextFillValues,
+    cellFillUnits: nextFillUnits,
+    _baselineWasteReceived: usage.total,
+    _baselineWasteReceivedUnit: usage.unit,
+    _baselineActiveCellEntries: baseline.activeCellEntries || [],
+  };
+};
 
 function groupMetric(items, groupGetter, valueGetter) {
   const map = new Map();
@@ -1596,7 +1714,14 @@ export default function SLFMonitoring({canEdit = true, canDelete = true, isDark}
   const [form] = Form.useForm();
 
   const fetchRecords = useCallback(async (skipCache = false) => {
-    await fetchWithCache(CACHE_KEY, () => api.get("/slf-facilities").then(({ data }) => data), {
+    await fetchWithCache(CACHE_KEY, async () => {
+      const [{ data: facilities }, { data: baselines }] = await Promise.all([
+        api.get("/slf-facilities"),
+        api.get("/data-slf/baselines"),
+      ]);
+      const baselineMap = buildBaselineMap(baselines || []);
+      return (facilities || []).map((record) => enrichFacilityWithBaseline(record, findBaselineForFacility(record, baselineMap)));
+    }, {
       ttl: CACHE_TTL,
       force: skipCache,
       onData:  (data) => setRecords(data.map((r) => ({ ...r, ...computeFields(r) }))),
@@ -1623,23 +1748,24 @@ export default function SLFMonitoring({canEdit = true, canDelete = true, isDark}
     fetchGenerators();
   }, [fetchRecords, fetchGenerators]);
 
-  // Fetch baseline data when detail modal opens for a facility with linked generator
+  // Fetch baseline data when detail modal opens for a facility.
   useEffect(() => {
     if (!detailModal) {
       setBaselineData(null);
       return;
     }
-    const gen = detailModal.slfGenerator;
-    const slfName =
-      gen && typeof gen === "object" ? gen.slfName : null;
-    if (!slfName) {
+    const candidateNames = expandSlfNames(getFacilitySlfNames(detailModal));
+    if (candidateNames.length === 0) {
       setBaselineData(null);
       return;
     }
     setLoadingBaseline(true);
     api
-      .get(`/data-slf/baseline/${encodeURIComponent(slfName)}`)
-      .then(({ data }) => setBaselineData(data))
+      .get("/data-slf/baselines")
+      .then(({ data }) => {
+        const baselineMap = buildBaselineMap(data || []);
+        setBaselineData(findBaselineForFacility(detailModal, baselineMap));
+      })
       .catch(() => setBaselineData(null))
       .finally(() => setLoadingBaseline(false));
   }, [detailModal]);
@@ -1660,9 +1786,11 @@ export default function SLFMonitoring({canEdit = true, canDelete = true, isDark}
 
   const detailViewRecord = useMemo(() => {
     if (!detailModal) return null;
-    if (detailYearRecords.length === 0) return detailModal;
-    return detailYearRecords.find((r) => (r.dataYear || new Date().getFullYear()) === detailYear) || null;
-  }, [detailModal, detailYearRecords, detailYear]);
+    const baseRecord = detailYearRecords.length === 0
+      ? detailModal
+      : detailYearRecords.find((r) => (r.dataYear || new Date().getFullYear()) === detailYear) || null;
+    return enrichFacilityWithBaseline(baseRecord, baselineData);
+  }, [baselineData, detailModal, detailYearRecords, detailYear]);
 
   const generatorOptions = useMemo(
     () => generators.map((g) => ({ label: g.slfName, value: g._id })),
@@ -1816,9 +1944,9 @@ export default function SLFMonitoring({canEdit = true, canDelete = true, isDark}
         slfDocuments: (values.slfDocuments || []).map((d) => ({
           ...d,
           url: Array.isArray(d.url)
-            ? (d.url[0]?.response?.url || d.url[0]?.url || "")
+            ? (fromFileList(d.url)[0] || "")
             : (d.url || ""),
-        })),
+        })).filter((d) => d.title || d.url || d.description || d.docType),
       };
       Object.assign(payload, computeFields(payload));
       if (editing && editing._id) {
@@ -2082,7 +2210,7 @@ export default function SLFMonitoring({canEdit = true, canDelete = true, isDark}
       .sort((a, b) => b.value - a.value);
     const leachateData = topMetric(filtered, (r) => r.noOfLeachatePond || 0, "ponds");
     const gasData = topMetric(filtered, (r) => r.numberOfGasVents || 0, "vents");
-    const wasteData = topMetric(filtered, (r) => r.actualResidualWasteReceived || 0, "tons received");
+    const wasteData = topMetric(filtered, (r) => r.actualResidualWasteReceived || 0, "received");
     const capacityData = topMetric(filtered, (r) => r.volumeCapacity || 0, "capacity");
     const statusToChart = (summary) => Object.entries(summary).map(([name, value]) => ({ name, value })).sort((a, b) => b.value - a.value);
 
@@ -2173,15 +2301,15 @@ export default function SLFMonitoring({canEdit = true, canDelete = true, isDark}
         color: "#ff4d4f",
         primary: totalWaste,
         primaryTitle: "Waste Received",
-        primarySuffix: "tons",
+        primarySuffix: filtered.some((r) => normalizeUnit(r.wasteReceivedUnit) === "tons") ? "tons" : "m³",
         stats: [
           { title: "Reporting SLFs", value: wasteWithData },
-          { title: "Avg / Facility", value: wasteWithData ? Math.round(totalWaste / wasteWithData) : 0, suffix: "tons" },
+          { title: "Avg / Facility", value: wasteWithData ? Math.round(totalWaste / wasteWithData) : 0, suffix: filtered.some((r) => normalizeUnit(r.wasteReceivedUnit) === "tons") ? "tons" : "m³" },
           { title: "Capacity Use", value: capacityUsePercent.toFixed(1), suffix: "%" },
         ],
         chartData: wasteData.slice(0, 10),
         pieData: provinceWaste.slice(0, 8),
-        narration: `${wasteWithData} SLFs report waste received. The total encoded residual waste is ${totalWaste.toLocaleString()} tons, equivalent to ${capacityUsePercent.toFixed(1)}% of encoded total capacity where comparable.`
+        narration: `${wasteWithData} SLFs report waste received. The total follows the latest portal baseline active-cell entries where available and is ${totalWaste.toLocaleString()}, equivalent to ${capacityUsePercent.toFixed(1)}% of encoded total capacity where comparable.`
       },
       capacity: {
         title: "SLF Total Capacities",
@@ -2436,13 +2564,13 @@ export default function SLFMonitoring({canEdit = true, canDelete = true, isDark}
     { title: "Leachate", dataIndex: "noOfLeachatePond", width: 80 },
     { title: "Gas Vents", dataIndex: "numberOfGasVents", width: 80 },
     {
-      title: "Waste (tons)",
+      title: "Waste Received",
       dataIndex: "actualResidualWasteReceived",
       width: 110,
       sorter: (a, b) =>
         (a.actualResidualWasteReceived || 0) -
         (b.actualResidualWasteReceived || 0),
-      render: (v) => (v != null ? Number(v).toLocaleString() : "—"),
+      render: (v, record) => (v != null ? `${Number(v).toLocaleString()} ${normalizeUnit(record.wasteReceivedUnit || "m³")}` : "—"),
     },
     { title: "Lifespan", dataIndex: "remainingLifeSpan", width: 100 },
     {
@@ -2561,6 +2689,7 @@ export default function SLFMonitoring({canEdit = true, canDelete = true, isDark}
       Leachate: r.noOfLeachatePond,
       "Gas Vents": r.numberOfGasVents,
       "Waste Received": r.actualResidualWasteReceived,
+      "Waste Received Unit": normalizeUnit(r.wasteReceivedUnit || "m³"),
       Lifespan: r.remainingLifeSpan,
       "Target Month": r.targetMonth,
       ENMO: r.enmo,
@@ -4432,23 +4561,7 @@ export default function SLFMonitoring({canEdit = true, canDelete = true, isDark}
                     { name: "Leachate Ponds", value: leachate },
                     { name: "Gas Vents", value: gasVents },
                   ].filter((d) => d.value > 0);
-                  // Baseline waste-type breakdown for donut chart
-                  const residualBaselineVol = baselineData
-                    ? (baselineData.activeCellResidualVolume || 0) + (baselineData.closedCellResidualVolume || 0)
-                    : 0;
-                  const hazBaselineVol = baselineData
-                    ? (baselineData.activeCellInertVolume || 0) + (baselineData.closedCellInertVolume || 0)
-                    : 0;
-                  const baselineWasteTotal = residualBaselineVol + hazBaselineVol;
                   const capacityData = (() => {
-                    if (capacity > 0 && baselineWasteTotal > 0) {
-                      const slices = [];
-                      if (residualBaselineVol > 0) slices.push({ name: "Residual Waste", value: residualBaselineVol });
-                      if (hazBaselineVol > 0) slices.push({ name: "Haz/Inert Waste", value: hazBaselineVol });
-                      const remaining = Math.max(0, capacity - baselineWasteTotal);
-                      if (remaining > 0) slices.push({ name: "Remaining Capacity", value: remaining });
-                      return slices;
-                    }
                     if (capacity > 0) {
                       return [
                         { name: "Waste Received", value: Math.min(wasteReceived, capacity) },
@@ -4462,8 +4575,23 @@ export default function SLFMonitoring({canEdit = true, canDelete = true, isDark}
                     estVolume > 0 && { name: "Est. Volume", value: estVolume },
                     capacity > 0 && { name: "Capacity", value: capacity },
                   ].filter(Boolean);
+                  const activeCellEntries = Array.isArray(baselineData?.activeCellEntries) ? baselineData.activeCellEntries : [];
+                  const closedCellEntries = Array.isArray(baselineData?.closedCellEntries) ? baselineData.closedCellEntries : [];
+                  const baselineEntryUnit = normalizeUnit(baselineData?.baselineUnit || baselineData?.totalVolumeAcceptedUnit || "m³");
+                  const baselineEntryVolumeData = [
+                    ...activeCellEntries.map((entry, i) => ({
+                      name: `Active ${entry.cellName || `Cell ${i + 1}`}`,
+                      value: Number(entry.volume || 0),
+                      unit: baselineEntryUnit,
+                    })),
+                    ...closedCellEntries.map((entry, i) => ({
+                      name: `Closed ${entry.cellName || `Cell ${i + 1}`}`,
+                      value: Number(entry.volume || 0),
+                      unit: baselineEntryUnit,
+                    })),
+                  ].filter((item) => item.value > 0);
                   // Cell volume data from baseline
-                  const cellVolumeData = baselineData
+                  const aggregateCellVolumeData = baselineData
                     ? [
                         baselineData.activeCellResidualVolume > 0 && {
                           name: "Active Residual",
@@ -4487,6 +4615,7 @@ export default function SLFMonitoring({canEdit = true, canDelete = true, isDark}
                         },
                       ].filter(Boolean)
                     : [];
+                  const cellVolumeData = baselineEntryVolumeData.length > 0 ? baselineEntryVolumeData : aggregateCellVolumeData;
                   const hasCharts = infraData.length > 0 || capacityData.length > 0 || cellVolumeData.length > 0;
                   const pctUsed = capacity > 0 ? Math.min(Math.round((wasteReceived / capacity) * 100), 100) : 0;
                   const cellCaps = detailViewRecord.cellCapacities || [];
@@ -4536,6 +4665,8 @@ export default function SLFMonitoring({canEdit = true, canDelete = true, isDark}
                         const cellTypesArr = detailViewRecord.cellTypes || [];
                         const cellCapacityUnits = detailViewRecord.cellCapacityUnits || [];
                         const hasCellBaseline = baselineData && (
+                          activeCellEntries.some((entry) => Number(entry?.volume || 0) > 0) ||
+                          closedCellEntries.some((entry) => Number(entry?.volume || 0) > 0) ||
                           baselineData.activeCellResidualVolume > 0 ||
                           baselineData.activeCellInertVolume > 0 ||
                           baselineData.closedCellResidualVolume > 0 ||
@@ -4576,8 +4707,7 @@ export default function SLFMonitoring({canEdit = true, canDelete = true, isDark}
                                           <RCell
                                             key={i}
                                             fill={
-                                              entry.name.includes("Residual") ? "#52c41a"
-                                              : entry.name.includes("Haz") ? "#ff4d4f"
+                                              entry.name.includes("Waste") ? "#52c41a"
                                               : entry.name.includes("Remaining") ? "#d9d9d9"
                                               : CHART_COLORS[i % CHART_COLORS.length]
                                             }
@@ -4619,7 +4749,9 @@ export default function SLFMonitoring({canEdit = true, canDelete = true, isDark}
                               <Card size="small" title={<><BarChartOutlined /> Per-Cell Status &amp; Capacity</>} style={{ borderRadius: 10 }}>
                                 <Row gutter={[16, 16]} justify="center">
                                   {(cellCaps.length > 0 ? cellCaps : Array.from({ length: cells }, () => 0)).map((cap, i) => {
-                                    const cellFill = capacity > 0 && cap > 0 ? Math.min(Math.round((cap / capacity) * 100 * cells), 100) : 0;
+                                    const fillValues = detailViewRecord.cellFillValues || [];
+                                    const usedInCell = Number(fillValues[i] || 0);
+                                    const cellFill = cap > 0 ? Math.min(Math.round((usedInCell / cap) * 100), 100) : 0;
                                     const cellSt = cellStatuses[i] || "Operational";
                                     const capUnit = normalizeUnit(cellCapacityUnits[i] || detailViewRecord.volumeCapacityUnit || "m³");
                                     const cellTy = cellTypesArr[i] || "Residual";
@@ -4642,7 +4774,7 @@ export default function SLFMonitoring({canEdit = true, canDelete = true, isDark}
                                         />
                                         <div style={{ marginTop: 6, fontSize: 12, fontWeight: 600 }}>Cell {i + 1}</div>
                                         <Tag color={isHaz ? "red" : "blue"} style={{ fontSize: 9, marginTop: 2 }}>{cellTy === "Treated Haz Waste" ? "Haz Waste" : cellTy}</Tag>
-                                        <div style={{ fontSize: 10, color: "#8c8c8c" }}>{cap > 0 ? `${cap.toLocaleString()} ${capUnit}` : "—"}</div>
+                                        <div style={{ fontSize: 10, color: "#8c8c8c" }}>{usedInCell > 0 ? `${usedInCell.toLocaleString()} / ` : ""}{cap > 0 ? `${cap.toLocaleString()} ${capUnit}` : "—"}</div>
                                         <div style={{ marginTop: 6 }}>
                                           <Tooltip title={isClosed ? "Set to Operational" : "Set to Closed"}>
                                             <Switch
@@ -4669,6 +4801,20 @@ export default function SLFMonitoring({canEdit = true, canDelete = true, isDark}
                           {hasCellBaseline ? (
                             <Card size="small" title="Baseline Cell Volumes" style={{ borderRadius: 10, marginBottom: 8 }}>
                               <Descriptions size="small" bordered column={2}>
+                                {activeCellEntries.map((entry, i) => (
+                                  <Descriptions.Item key={`active-entry-${i}`} label={`Active ${entry.cellName || `Cell ${i + 1}`}`}>
+                                    {Number(entry.volume || 0) > 0
+                                      ? `${Number(entry.volume).toLocaleString()} ${baselineEntryUnit}${entry.wasteType ? ` (${entry.wasteType})` : ""}`
+                                      : "—"}
+                                  </Descriptions.Item>
+                                ))}
+                                {closedCellEntries.map((entry, i) => (
+                                  <Descriptions.Item key={`closed-entry-${i}`} label={`Closed ${entry.cellName || `Cell ${i + 1}`}`}>
+                                    {Number(entry.volume || 0) > 0
+                                      ? `${Number(entry.volume).toLocaleString()} ${baselineEntryUnit}${entry.wasteType ? ` (${entry.wasteType})` : ""}`
+                                      : "—"}
+                                  </Descriptions.Item>
+                                ))}
                                 <Descriptions.Item label="Active Cell (Residual)">
                                   {baselineData.activeCellResidualVolume > 0
                                     ? `${Number(baselineData.activeCellResidualVolume).toLocaleString()} ${(baselineData.activeCellResidualUnit || "m³").replace("m3", "m³")}`
@@ -5340,8 +5486,8 @@ export default function SLFMonitoring({canEdit = true, canDelete = true, isDark}
               <div style={{ marginBottom: 20 }}>
                 <Row gutter={12} style={{ marginBottom: 10 }}>
                   <Col span={8}><Card size="small" style={{ borderRadius: 8, background: `${color}0d`, border: `1px solid ${color}40` }}><Statistic title="SLF Facilities" value={barData.length} valueStyle={{ color, fontSize: 20 }} /></Card></Col>
-                  <Col span={8}><Card size="small" style={{ borderRadius: 8, background: `${color}0d`, border: `1px solid ${color}40` }}><Statistic title="Total Waste (tons)" value={total.toLocaleString()} valueStyle={{ color, fontSize: 20 }} /></Card></Col>
-                  <Col span={8}><Card size="small" style={{ borderRadius: 8, background: `${color}0d`, border: `1px solid ${color}40` }}><Statistic title="Avg/Facility (tons)" value={(total / barData.length).toLocaleString(undefined, { maximumFractionDigits: 0 })} valueStyle={{ color, fontSize: 20 }} /></Card></Col>
+                  <Col span={8}><Card size="small" style={{ borderRadius: 8, background: `${color}0d`, border: `1px solid ${color}40` }}><Statistic title="Total Waste Received" value={total.toLocaleString()} valueStyle={{ color, fontSize: 20 }} /></Card></Col>
+                  <Col span={8}><Card size="small" style={{ borderRadius: 8, background: `${color}0d`, border: `1px solid ${color}40` }}><Statistic title="Avg/Facility" value={(total / barData.length).toLocaleString(undefined, { maximumFractionDigits: 0 })} valueStyle={{ color, fontSize: 20 }} /></Card></Col>
                 </Row>
                 <ResponsiveContainer width="100%" height={Math.max(160, barData.length * 30)}>
                   <BarChart data={barData} layout="vertical" margin={{ top: 4, right: 40, bottom: 4, left: 10 }}>

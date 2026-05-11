@@ -315,4 +315,18 @@ router.patch("/:id/reject", async (req, res) => {
   }
 });
 
+// ── Admin: Remove (hard-delete) a hauler deletion request record ──
+router.delete("/:id", async (req, res) => {
+  try {
+    const request = await HaulerDeleteRequest.findByIdAndDelete(req.params.id);
+    if (!request) return res.status(404).json({ message: "Request not found." });
+    writeLog("info", "hauler_delete_request.removed", {
+      message: `Hauler deletion request ${request.requestNo} removed by admin`,
+    });
+    res.json({ message: "Request removed.", data: request });
+  } catch (err) {
+    res.status(500).json({ message: "Server error", error: err.message });
+  }
+});
+
 module.exports = router;

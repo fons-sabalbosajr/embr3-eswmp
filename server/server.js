@@ -40,6 +40,7 @@ const uploadRoutes = require("./routes/upload");
 const messageRoutes = require("./routes/messages");
 
 const app = express();
+const ADMIN_DISPLAY_NAME = "EMBR3 ESWMP Admin";
 const server = http.createServer(app);
 const PORT = process.env.PORT || 5000;
 const MONGODB_URI =
@@ -194,7 +195,7 @@ mongoose
                 submittedBy: e.submittedBy || "",
                 type: "status_change",
                 description: `Entry ${e.idNo} marked as ${e.status}`,
-                performedBy: "admin",
+                performedBy: ADMIN_DISPLAY_NAME,
                 meta: { status: e.status, idNo: e.idNo },
                 createdAt: e.updatedAt || e.createdAt,
                 updatedAt: e.updatedAt || e.createdAt,

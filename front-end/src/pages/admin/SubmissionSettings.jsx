@@ -56,6 +56,8 @@ const { Option } = Select;
 const ACCENT = "#2f54eb";
 const CACHE_KEY = "submissions-cache";
 const CACHE_TTL = 10 * 60 * 1000;
+const SUBMISSION_MODAL_WIDTH = 1120;
+const TRANSACTION_HISTORY_MODAL_WIDTH = 1180;
 
 export default function SubmissionSettings({canEdit = true, canDelete = true, isDark}) {
   const [data, setData] = useState([]);
@@ -308,6 +310,7 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, is
       companyProvince: record.companyProvince,
       companyMunicipality: record.companyMunicipality,
       companyBarangay: record.companyBarangay,
+      baselineUnit: record.baselineUnit || record.totalVolumeAcceptedUnit || "m³",
       totalVolumeAccepted: record.totalVolumeAccepted,
       totalVolumeAcceptedUnit: record.totalVolumeAcceptedUnit || "m³",
       activeCellResidualVolume: record.activeCellResidualVolume,
@@ -318,6 +321,8 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, is
       closedCellResidualUnit: record.closedCellResidualUnit || "m³",
       closedCellInertVolume: record.closedCellInertVolume,
       closedCellInertUnit: record.closedCellInertUnit || "m³",
+      activeCellEntries: record.activeCellEntries || [],
+      closedCellEntries: record.closedCellEntries || [],
       accreditedHaulers: record.accreditedHaulers || [],
       trucks: record.trucks || [],
     });
@@ -344,6 +349,7 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, is
       );
       const payload = {
         ...values,
+        updatedBy: "EMBR3 ESWMP Admin",
         dateOfDisposal: values.dateOfDisposal?.toISOString(),
         address:
           addressParts.length > 0 ? addressParts.join(", ") : values.address,
@@ -418,7 +424,7 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, is
     try {
       await api.patch(`/data-slf/${revertModal.record._id}/admin-revert`, {
         reason: revertReason,
-        performedBy: "admin",
+        performedBy: "EMBR3 ESWMP Admin",
       });
       Swal.fire({
         icon: "success",
@@ -831,7 +837,7 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, is
             </Space>
           </div>
         }
-        width={820}
+        width={SUBMISSION_MODAL_WIDTH}
         style={{ maxWidth: "95vw" }}
         styles={{ body: { padding: 0 } }}
       >
@@ -1785,10 +1791,11 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, is
                       icon={<HistoryOutlined />}
                       style={{
                         borderColor: "#722ed1",
-                        color: "#722ed1",
+                        color: "#fefefe",
                         marginTop: 8,
                         marginBottom: 8,
                       }}
+                      type="primary"
                       onClick={() => openTxnHistory(r.submissionId)}
                     >
                       View Transaction History
@@ -1816,7 +1823,7 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, is
           loading: editLoading,
           style: { background: ACCENT, borderColor: ACCENT },
         }}
-        width={900}
+        width={SUBMISSION_MODAL_WIDTH}
         style={{ maxWidth: "95vw" }}
         destroyOnHidden
       >
@@ -2079,6 +2086,14 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, is
                 ),
                 children: (
                   <Row gutter={12}>
+                    <Col xs={12} sm={6}>
+                      <Form.Item name="baselineUnit" label="Baseline Unit">
+                        <Select>
+                          <Option value="m³">m³</Option>
+                          <Option value="tons">Tons</Option>
+                        </Select>
+                      </Form.Item>
+                    </Col>
                     <Col xs={12} sm={12}>
                       <Form.Item
                         name="totalVolumeAccepted"
@@ -2158,6 +2173,86 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, is
                           <Option value="tons">Tons</Option>
                         </Select>
                       </Form.Item>
+                    </Col>
+                    <Col xs={24} md={12}>
+                      <Card size="small" title="Active Cell Entries" style={{ borderRadius: 8, marginBottom: 8 }}>
+                        <Form.List name="activeCellEntries">
+                          {(fields, { add, remove }) => (
+                            <>
+                              {fields.map(({ key, name, ...rest }) => (
+                                <Row gutter={8} key={key} align="middle">
+                                  <Col xs={24} sm={8}>
+                                    <Form.Item {...rest} name={[name, "cellName"]} label="Cell Name">
+                                      <Input placeholder="Cell 1" />
+                                    </Form.Item>
+                                  </Col>
+                                  <Col xs={24} sm={8}>
+                                    <Form.Item {...rest} name={[name, "wasteType"]} label="Waste Type">
+                                      <Select placeholder="Select type" allowClear>
+                                        <Option value="Residual">Residual</Option>
+                                        <Option value="Inert">Inert</Option>
+                                        <Option value="Hazardous Waste">Hazardous Waste</Option>
+                                        <Option value="Treated Hazardous Waste">Treated Hazardous Waste</Option>
+                                      </Select>
+                                    </Form.Item>
+                                  </Col>
+                                  <Col xs={20} sm={6}>
+                                    <Form.Item {...rest} name={[name, "volume"]} label="Volume">
+                                      <InputNumber min={0} style={{ width: "100%" }} />
+                                    </Form.Item>
+                                  </Col>
+                                  <Col xs={4} sm={2} style={{ paddingTop: 22 }}>
+                                    <Button type="text" danger icon={<DeleteOutlined />} onClick={() => remove(name)} />
+                                  </Col>
+                                </Row>
+                              ))}
+                              <Button type="dashed" block onClick={() => add({ wasteType: "Residual" })}>
+                                Add Active Cell Entry
+                              </Button>
+                            </>
+                          )}
+                        </Form.List>
+                      </Card>
+                    </Col>
+                    <Col xs={24} md={12}>
+                      <Card size="small" title="Closed Cell Entries" style={{ borderRadius: 8, marginBottom: 8 }}>
+                        <Form.List name="closedCellEntries">
+                          {(fields, { add, remove }) => (
+                            <>
+                              {fields.map(({ key, name, ...rest }) => (
+                                <Row gutter={8} key={key} align="middle">
+                                  <Col xs={24} sm={8}>
+                                    <Form.Item {...rest} name={[name, "cellName"]} label="Cell Name">
+                                      <Input placeholder="Cell 1" />
+                                    </Form.Item>
+                                  </Col>
+                                  <Col xs={24} sm={8}>
+                                    <Form.Item {...rest} name={[name, "wasteType"]} label="Waste Type">
+                                      <Select placeholder="Select type" allowClear>
+                                        <Option value="Residual">Residual</Option>
+                                        <Option value="Inert">Inert</Option>
+                                        <Option value="Hazardous Waste">Hazardous Waste</Option>
+                                        <Option value="Treated Hazardous Waste">Treated Hazardous Waste</Option>
+                                      </Select>
+                                    </Form.Item>
+                                  </Col>
+                                  <Col xs={20} sm={6}>
+                                    <Form.Item {...rest} name={[name, "volume"]} label="Volume">
+                                      <InputNumber min={0} style={{ width: "100%" }} />
+                                    </Form.Item>
+                                  </Col>
+                                  <Col xs={4} sm={2} style={{ paddingTop: 22 }}>
+                                    <Button type="text" danger icon={<DeleteOutlined />} onClick={() => remove(name)} />
+                                  </Col>
+                                </Row>
+                              ))}
+                              <Button type="dashed" block onClick={() => add({ wasteType: "Residual" })}>
+                                Add Closed Cell Entry
+                              </Button>
+                            </>
+                          )}
+                        </Form.List>
+                      </Card>
                     </Col>
                   </Row>
                 ),
@@ -2520,13 +2615,13 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, is
             Close
           </Button>
         }
-        width={900}
+        width={TRANSACTION_HISTORY_MODAL_WIDTH}
         zIndex={1100}
         styles={{ body: { padding: 0 } }}
         destroyOnHidden
       >
         {/* Gradient header */}
-        <div style={{ background: `linear-gradient(135deg, #722ed1 0%, #531dab 100%)`, padding: "18px 24px", borderRadius: "8px 8px 0 0" }}>
+        <div style={{ background: `linear-gradient(135deg, #2e6dd1 0%, #531dab 100%)`, padding: "18px 24px", borderRadius: "8px 8px 0 0" }}>
           <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
             <div style={{ width: 36, height: 36, borderRadius: 8, background: "rgba(255,255,255,0.15)", display: "flex", alignItems: "center", justifyContent: "center" }}>
               <HistoryOutlined style={{ color: "#fff", fontSize: 18 }} />
@@ -2562,10 +2657,14 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, is
                 email_ack_failed:      { color: "#ff4d4f", bg: "#fff1f0", label: "Email Failed" },
                 status_change:         { color: "#fa8c16", bg: "#fff7e6", label: "Status Change" },
                 revert_approved:       { color: "#fa541c", bg: "#fff2e8", label: "Reverted" },
+                baseline_update_request:{ color: "#faad14", bg: "#fffbe6", label: "Baseline Request" },
+                baseline_update_approved:{ color: "#52c41a", bg: "#f6ffed", label: "Baseline Approved" },
                 baseline_update:       { color: "#722ed1", bg: "#f9f0ff", label: "Baseline Update" },
+                baseline_delete:       { color: "#ff4d4f", bg: "#fff1f0", label: "Baseline Cleared" },
                 admin_edit:            { color: "#2f54eb", bg: "#f0f5ff", label: "Admin Edit" },
-                edit_approved:         { color: "#52c41a", bg: "#f6ffed", label: "Edit Approved" },
-                edit_rejected:         { color: "#ff4d4f", bg: "#fff1f0", label: "Edit Rejected" },
+                submission_edit_request:{ color: "#faad14", bg: "#fffbe6", label: "Edit Request" },
+                submission_edit_approved:{ color: "#52c41a", bg: "#f6ffed", label: "Edit Approved" },
+                submission_edit_rejected:{ color: "#ff4d4f", bg: "#fff1f0", label: "Edit Rejected" },
                 hauler_delete_request: { color: "#fa8c16", bg: "#fff7e6", label: "Hauler Delete Req." },
                 hauler_delete_approved:{ color: "#52c41a", bg: "#f6ffed", label: "Hauler Deleted" },
                 hauler_delete_rejected:{ color: "#ff4d4f", bg: "#fff1f0", label: "Hauler Delete Rej." },
@@ -2623,15 +2722,18 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, is
                     title: "By",
                     dataIndex: "performedBy",
                     key: "by",
-                    width: 150,
-                    render: (v) => (
+                    width: 200,
+                    render: (v) => {
+                      const displayName = v === "admin" ? "EMBR3 ESWMP Admin" : (v || "system");
+                      return (
                       <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
                         <div style={{ width: 22, height: 22, borderRadius: "50%", background: isDark ? "rgba(47,84,235,0.15)" : "#f0f5ff", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 10, color: ACCENT, fontWeight: 600, flexShrink: 0 }}>
-                          {(v || "S").charAt(0).toUpperCase()}
+                          {displayName.charAt(0).toUpperCase()}
                         </div>
-                        <Text type="secondary" style={{ fontSize: 12 }}>{v || "system"}</Text>
+                        <Text type="secondary" style={{ fontSize: 12 }}>{displayName}</Text>
                       </div>
-                    ),
+                    );
+                    },
                   },
                   {
                     title: "Date / Time",

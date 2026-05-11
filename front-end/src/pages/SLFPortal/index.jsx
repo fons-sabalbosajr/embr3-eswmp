@@ -581,7 +581,7 @@ export default function SLFPortal() {
       { retries: 3, signal: ac.signal },
     )
       .then(({ data }) => {
-        if (data && data.totalVolumeAccepted != null) {
+        if (data && (data.totalVolumeAccepted != null || data.activeCellEntries?.length || data.closedCellEntries?.length)) {
           const unit =
             data.baselineUnit || data.totalVolumeAcceptedUnit || "m³";
           setBaselineUnit(unit);
@@ -723,7 +723,7 @@ export default function SLFPortal() {
         api
           .get(`/data-slf/baseline/${encodeURIComponent(activeSlfName)}`)
           .then(({ data }) => {
-            if (data && data.totalVolumeAccepted != null) {
+            if (data && (data.totalVolumeAccepted != null || data.activeCellEntries?.length || data.closedCellEntries?.length)) {
               if (data.baselineUpdateApproved) {
                 setBaselineSaved(false);
                 setBaselineUpdatePending(false);
@@ -1473,7 +1473,7 @@ export default function SLFPortal() {
     if (!activeSlfId) return;
     setFacilityMgmtSaving(true);
     try {
-      const payload = {};
+      const payload = { slfName: activeSlfName };
       if (type === "leachate")
         payload.leachatePondDetails = data.map(({ _key, ...r }) => r);
       if (type === "gasVent")

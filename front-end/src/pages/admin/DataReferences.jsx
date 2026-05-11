@@ -355,7 +355,7 @@ export default function DataReferences({canEdit = true, canDelete = true, isDark
         </Card>
       ) : (
         <Collapse
-          defaultActiveKey={Object.keys(grouped)}
+          defaultActiveKey={[]}
           ghost
           items={Object.entries(grouped).map(([mod, items]) => ({
             key: mod,

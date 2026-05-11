@@ -19,6 +19,8 @@ import {
   EditOutlined,
   DeleteOutlined,
   DatabaseOutlined,
+  ReloadOutlined,
+  FormOutlined,
 } from "@ant-design/icons";
 import Swal from "sweetalert2";
 import api from "../../api";
@@ -202,10 +204,25 @@ export default function FieldSettings({canEdit = true, canDelete = true, isDark}
 
   return (
     <div>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4, flexWrap: "wrap", gap: 12 }}>
-        <div>
+      <div style={{ marginBottom: 16 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 2 }}>
+          <FormOutlined style={{ fontSize: 20, color: "#1a3353" }} />
+          <Title level={4} style={{ margin: 0, color: "#1a3353" }}>Portal Field Settings</Title>
         </div>
+        <Text type="secondary" style={{ fontSize: 13 }}>
+          Manage the fields displayed in the SLF Portal submission form. Changes here are reflected in the portal for all users.
+        </Text>
+      </div>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4, flexWrap: "wrap", gap: 12 }}>
+        <div />
         <Space>
+          <Button
+            icon={<ReloadOutlined />}
+            onClick={fetchFields}
+            loading={loading}
+          >
+            Refresh
+          </Button>
           <Button
             icon={<DatabaseOutlined />}
             onClick={handleSeed}

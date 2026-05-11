@@ -3,6 +3,7 @@ const Transaction = require("../models/Transaction");
 const DataSLF = require("../models/DataSLF");
 
 const router = express.Router();
+const ADMIN_DISPLAY_NAME = "EMBR3 ESWMP Admin";
 
 // Backfill transactions from existing data-slf entries that have no transaction records
 router.post("/seed", async (req, res) => {
@@ -68,7 +69,7 @@ router.post("/seed", async (req, res) => {
             submittedBy: e.submittedBy || "",
             type: "status_change",
             description: `Entry ${e.idNo} marked as ${e.status}`,
-            performedBy: "admin",
+            performedBy: ADMIN_DISPLAY_NAME,
             meta: { status: e.status, idNo: e.idNo },
             createdAt: e.updatedAt || e.createdAt,
             updatedAt: e.updatedAt || e.createdAt,

@@ -10,6 +10,7 @@ import {
   Modal,
   Tooltip,
   Badge,
+  Popconfirm,
 } from "antd";
 import {
   CheckOutlined,
@@ -93,6 +94,16 @@ export default function HaulerRequests({ isDark, canEdit = true }) {
       Swal.fire("Error", err?.response?.data?.message || "Could not approve the request.", "error");
     } finally {
       setActionLoading(false);
+    }
+  };
+
+  const handleRemove = async (id) => {
+    try {
+      await api.delete(`/hauler-delete-requests/${id}`);
+      setData((prev) => prev.filter((r) => r._id !== id));
+      Swal.fire({ icon: "success", title: "Removed", timer: 900, showConfirmButton: false });
+    } catch (err) {
+      Swal.fire("Error", err?.response?.data?.message || "Could not remove the request.", "error");
     }
   };
 
@@ -213,7 +224,7 @@ export default function HaulerRequests({ isDark, canEdit = true }) {
     {
       title: "Actions",
       key: "actions",
-      width: 110,
+      width: 130,
       render: (_, r) => (
         <Space size={4}>
           <Tooltip title="View Details">
@@ -243,6 +254,17 @@ export default function HaulerRequests({ isDark, canEdit = true }) {
               </Tooltip>
             </>
           )}
+          <Popconfirm
+            title="Remove this request record?"
+            description="This will permanently delete the record from the list."
+            onConfirm={() => handleRemove(r._id)}
+            okText="Remove"
+            okButtonProps={{ danger: true }}
+          >
+            <Tooltip title="Remove Record">
+              <Button type="text" size="small" danger icon={<DeleteOutlined />} />
+            </Tooltip>
+          </Popconfirm>
         </Space>
       ),
     },

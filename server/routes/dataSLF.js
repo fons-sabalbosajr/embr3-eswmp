@@ -21,7 +21,48 @@ function getProvinceCode(province) {
   return PROVINCE_CODES[key] || province.substring(0, 2).toUpperCase();
 }
 
+function getNameVariants(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return [];
+  const noParens = raw.replace(/\s*\(.*?\)\s*/g, " ").trim();
+  const withoutPrefix = noParens
+    .replace(/^province\s+of\s+/i, "")
+    .replace(/^(local\s+governm\s*ent\s+unit|lgu|municipality\s+of|city\s+of)\s*[-:\u2012-\u2015]?\s*/i, "")
+    .trim();
+  const firstCommaPart = withoutPrefix.split(",")[0]?.trim();
+  return [...new Set([raw, noParens, withoutPrefix, firstCommaPart].filter(Boolean))];
+}
+
+function normalizeSlfName(value) {
+  return String(value || "")
+    .replace(/\s*\(.*?\)\s*/g, " ")
+    .replace(/\blocal\s+governm\s*ent\s+unit\b/gi, " ")
+    .replace(/\blgu\b/gi, " ")
+    .replace(/\bmunicipality\s+of\b/gi, " ")
+    .replace(/\bcity\s+of\b/gi, " ")
+    .replace(/^province\s+of\s+/i, "")
+    .replace(/[\u2012-\u2015-]+/g, " ")
+    .replace(/[,.;:/]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+}
+
+function getBaselineNameKeys(item) {
+  return [item?.slfName, item?.lguCompanyName]
+    .flatMap((name) => getNameVariants(name))
+    .map((name) => normalizeSlfName(name))
+    .filter(Boolean);
+}
+
+function matchesBaselineName(item, requestedName) {
+  const requestedKeys = getNameVariants(requestedName).map((name) => normalizeSlfName(name)).filter(Boolean);
+  const itemKeys = getBaselineNameKeys(item);
+  return requestedKeys.some((key) => itemKeys.includes(key));
+}
+
 const router = express.Router();
+const ADMIN_DISPLAY_NAME = "EMBR3 ESWMP Admin";
 
 const baselineDataMatch = {
   $or: [
@@ -130,6 +171,7 @@ router.put("/:id", async (req, res) => {
       "closedCellResidualVolume", "closedCellResidualUnit",
       "closedCellInertVolume", "closedCellInertUnit",
       "closedCellHazardousVolume", "closedCellHazardousUnit",
+      "activeCellEntries", "closedCellEntries",
       "acceptsHazardousWaste",
     ];
     for (const field of allowedFields) {
@@ -214,14 +256,23 @@ router.get("/baseline/:slfName", async (req, res) => {
   try {
     const slfName = req.params.slfName;
 
-    const latest = await DataSLF.findOne({
+    let latest = await DataSLF.findOne({
       $and: [
         { $or: [{ slfName }, { lguCompanyName: slfName }] },
         baselineDataMatch,
       ],
     })
       .setOptions({ includeHiddenYears: true })
-      .sort({ createdAt: -1 });
+      .sort({ createdAt: -1 })
+      .lean();
+
+    if (!latest) {
+      const candidates = await DataSLF.find(baselineDataMatch)
+        .setOptions({ includeHiddenYears: true })
+        .sort({ createdAt: -1 })
+        .lean();
+      latest = candidates.find((item) => matchesBaselineName(item, slfName));
+    }
 
     if (!latest) return res.json(null);
 
@@ -294,6 +345,7 @@ router.get("/baselines", async (req, res) => {
       _id: d._id,
       slfGenerator: d.slfGenerator,
       slfName: d.slfName || d.lguCompanyName || "Unknown",
+      lguCompanyName: d.lguCompanyName,
       baselineUnit,
       totalVolumeAccepted: d.totalVolumeAccepted,
       totalVolumeAcceptedUnit: d.totalVolumeAcceptedUnit || baselineUnit,
@@ -358,13 +410,13 @@ router.put("/baselines/:id", async (req, res) => {
       submittedBy: entry.submittedBy,
       type: "baseline_update",
       description: `Admin updated baseline data for ${entry.slfName}`,
-      performedBy: req.body.updatedBy || "admin",
+      performedBy: req.body.updatedBy || ADMIN_DISPLAY_NAME,
       meta: { entryId: entry._id, slfName: entry.slfName },
     });
 
     writeLog("info", "baseline.admin-update", {
       message: `Admin updated baseline for ${entry.slfName}`,
-      user: req.body.updatedBy || "admin",
+      user: req.body.updatedBy || ADMIN_DISPLAY_NAME,
       meta: { entryId: entry._id, slfName: entry.slfName },
     });
 
@@ -422,13 +474,13 @@ router.delete("/baselines/:id", async (req, res) => {
       submittedBy: entry.submittedBy,
       type: "baseline_delete",
       description: `Admin cleared baseline data for ${slfName}`,
-      performedBy: "admin",
+      performedBy: ADMIN_DISPLAY_NAME,
       meta: { entryId: entry._id, slfName },
     });
 
     writeLog("warn", "baseline.admin-delete", {
       message: `Admin cleared baseline data for ${slfName}`,
-      user: "admin",
+      user: ADMIN_DISPLAY_NAME,
       meta: { entryId: entry._id, slfName },
     });
 
@@ -456,7 +508,7 @@ router.patch("/baseline-update-approve/:slfName", async (req, res) => {
       $set: {
         baselineUpdateApproved: true,
         baselineUpdateApprovedAt: new Date(),
-        baselineUpdateApprovedBy: approvedBy || "admin",
+        baselineUpdateApprovedBy: approvedBy || ADMIN_DISPLAY_NAME,
         baselineUpdateRequested: false,
       },
     });
@@ -485,14 +537,14 @@ router.patch("/baseline-update-approve/:slfName", async (req, res) => {
         submittedBy: latest.submittedBy,
         type: "baseline_update_approved",
         description: `Admin approved baseline update request for ${slfName}`,
-        performedBy: approvedBy || "admin",
+        performedBy: approvedBy || ADMIN_DISPLAY_NAME,
         meta: { slfName },
       });
     } catch { /* silent */ }
 
     writeLog("info", "baseline.update-approved", {
       message: `Baseline update approved for ${slfName}`,
-      user: approvedBy || "admin",
+      user: approvedBy || ADMIN_DISPLAY_NAME,
     });
 
     res.json({ message: "Baseline update approved", data: latest });
@@ -545,14 +597,14 @@ router.patch("/baseline-update-lock/:slfName", async (req, res) => {
         submittedBy: latest?.submittedBy,
         type: "baseline_locked",
         description: `Admin locked baseline data for ${slfName}`,
-        performedBy: lockedBy || "admin",
+        performedBy: lockedBy || ADMIN_DISPLAY_NAME,
         meta: { slfName },
       });
     } catch { /* silent */ }
 
     writeLog("info", "baseline.locked", {
       message: `Baseline locked for ${slfName}`,
-      user: lockedBy || "admin",
+      user: lockedBy || ADMIN_DISPLAY_NAME,
     });
 
     res.json({ message: "Baseline re-locked" });
@@ -603,7 +655,7 @@ router.patch("/baseline-update-reject/:slfName", async (req, res) => {
         submittedBy: latest.submittedBy,
         type: "baseline_update_request",
         description: `Admin rejected baseline update request for ${slfName}${reason ? ": " + reason : ""}`,
-        performedBy: rejectedBy || "admin",
+        performedBy: rejectedBy || ADMIN_DISPLAY_NAME,
         meta: { slfName, reason, action: "rejected" },
       });
     } catch { /* silent */ }
@@ -673,7 +725,7 @@ router.patch("/:id/approve-edit", async (req, res) => {
 
     const { approvedBy, reason } = req.body || {};
     entry.status = "reverted";
-    entry.revertedBy = approvedBy || "admin";
+    entry.revertedBy = approvedBy || ADMIN_DISPLAY_NAME;
     entry.revertedAt = new Date();
     entry.revertReason = reason || entry.revertReason || "Edit request approved by admin";
     entry.revertRequested = false;
@@ -703,7 +755,7 @@ router.patch("/:id/approve-edit", async (req, res) => {
         submittedBy: entry.submittedBy,
         type: "submission_edit_approved",
         description: `Admin approved edit request for ${entry.idNo}`,
-        performedBy: approvedBy || "admin",
+        performedBy: approvedBy || ADMIN_DISPLAY_NAME,
         meta: { idNo: entry.idNo },
       });
     } catch { /* silent */ }
@@ -750,7 +802,7 @@ router.patch("/:id/reject-edit", async (req, res) => {
         submittedBy: entry.submittedBy,
         type: "submission_edit_rejected",
         description: `Admin rejected edit request for ${entry.idNo}: ${reason || "No reason"}`,
-        performedBy: rejectedBy || "admin",
+        performedBy: rejectedBy || ADMIN_DISPLAY_NAME,
         meta: { idNo: entry.idNo, reason },
       });
     } catch { /* silent */ }
@@ -902,17 +954,32 @@ router.patch("/:id/admin-edit", async (req, res) => {
       "closedCellResidualVolume", "closedCellResidualUnit",
       "closedCellInertVolume", "closedCellInertUnit",
       "closedCellHazardousVolume", "closedCellHazardousUnit",
+      "activeCellEntries", "closedCellEntries",
       "acceptsHazardousWaste",
     ];
+    const updatedFields = allowed.filter((key) => req.body[key] !== undefined);
     for (const key of allowed) {
       if (req.body[key] !== undefined) entry[key] = req.body[key];
     }
     await entry.save();
     const populated = await DataSLF.findById(entry._id).populate("slfGenerator");
+    try {
+      await Transaction.create({
+        submissionId: entry.submissionId,
+        dataEntry: entry._id,
+        companyName: entry.lguCompanyName,
+        companyType: entry.companyType,
+        submittedBy: entry.submittedBy,
+        type: "admin_edit",
+        description: `Admin edited submission ${entry.idNo}`,
+        performedBy: req.body.updatedBy || ADMIN_DISPLAY_NAME,
+        meta: { idNo: entry.idNo, updatedFields },
+      });
+    } catch { /* silent */ }
     res.json(populated);
     writeLog("info", "submission.update", {
       message: `Submission ${entry.idNo} edited by admin`,
-      user: req.logUser || "admin",
+      user: req.logUser || req.body.updatedBy || ADMIN_DISPLAY_NAME,
       ip: req.ip,
       meta: { id: entry._id, idNo: entry.idNo },
     });
@@ -964,7 +1031,7 @@ router.patch("/:id/status", async (req, res) => {
         submittedBy: entry.submittedBy,
         type: "status_change",
         description: `Entry ${entry.idNo} marked as ${status}`,
-        performedBy: "admin",
+        performedBy: ADMIN_DISPLAY_NAME,
         meta: { status, idNo: entry.idNo },
       });
     } catch { /* silent */ }
@@ -1029,7 +1096,7 @@ router.patch("/bulk-status", async (req, res) => {
           submittedBy: entry.submittedBy,
           type: "status_change",
           description: `Entry ${entry.idNo} marked as ${status} (bulk)`,
-          performedBy: "admin",
+          performedBy: ADMIN_DISPLAY_NAME,
           meta: { status, idNo: entry.idNo, bulk: true },
         });
       } catch { /* silent */ }
@@ -1095,7 +1162,7 @@ router.delete("/:id", async (req, res) => {
         submittedBy: entry.submittedBy,
         type: "deleted",
         description: `Entry ${entry.idNo} deleted`,
-        performedBy: "admin",
+        performedBy: ADMIN_DISPLAY_NAME,
         meta: { idNo: entry.idNo },
       });
     } catch { /* silent */ }
@@ -1221,7 +1288,7 @@ router.patch("/:id/admin-revert", async (req, res) => {
 
     entry.status = "reverted";
     entry.revertReason = reason;
-    entry.revertedBy = performedBy || "admin";
+    entry.revertedBy = performedBy || ADMIN_DISPLAY_NAME;
     entry.revertedAt = new Date();
     await entry.save();
 
@@ -1234,7 +1301,7 @@ router.patch("/:id/admin-revert", async (req, res) => {
         submittedBy: entry.submittedBy,
         type: "status_change",
         description: `Admin reverted submission ${entry.idNo}: ${reason}`,
-        performedBy: performedBy || "admin",
+        performedBy: performedBy || ADMIN_DISPLAY_NAME,
         meta: { idNo: entry.idNo, reason },
       });
     } catch { /* silent */ }
@@ -1315,7 +1382,7 @@ router.patch("/:id/approve-revert", async (req, res) => {
         submittedBy: entry.submittedBy,
         type: "revert_approved",
         description: `Revert approved for ${entry.idNo}, status set to pending`,
-        performedBy: "admin",
+        performedBy: ADMIN_DISPLAY_NAME,
         meta: { idNo: entry.idNo },
       });
     } catch { /* silent */ }

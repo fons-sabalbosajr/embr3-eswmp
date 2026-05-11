@@ -990,7 +990,7 @@ export default function BaselineData({
         open={detailOpen}
         onCancel={() => setDetailOpen(false)}
         footer={<Button onClick={() => setDetailOpen(false)}>Close</Button>}
-        width={720}
+        width={1100}
         styles={{ body: { padding: 0 } }}
         destroyOnHidden
       >
@@ -1385,7 +1385,7 @@ export default function BaselineData({
         onOk={handleSave}
         okText="Save"
         okButtonProps={{ icon: <SaveOutlined />, loading: saving }}
-        width={760}
+        width={1100}
         forceRender
         destroyOnHidden
       >

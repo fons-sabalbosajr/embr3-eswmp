@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import {
   Card,
   Table,
@@ -34,6 +34,7 @@ import {
 import Swal from "sweetalert2";
 import dayjs from "dayjs";
 import api from "../../api";
+import { getSocket } from "../../utils/socket";
 
 const { Text } = Typography;
 const { Option } = Select;
@@ -87,8 +88,31 @@ export default function NotificationManagement({ isDark }) {
     }
   }, [typeFilter, recipientFilter, searchText]);
 
+  // Initial fetch on mount / filter changes
   useEffect(() => {
     fetchNotifications();
+  }, [fetchNotifications]);
+
+  // Real-time: listen on the existing admin socket connection
+  const currentPageRef = useRef(pagination.current);
+  const currentPageSizeRef = useRef(pagination.pageSize);
+  useEffect(() => {
+    currentPageRef.current = pagination.current;
+    currentPageSizeRef.current = pagination.pageSize;
+  }, [pagination.current, pagination.pageSize]);
+
+  useEffect(() => {
+    const socket = getSocket();
+    if (!socket) return;
+    const handleLive = () => {
+      fetchNotifications(currentPageRef.current, currentPageSizeRef.current);
+    };
+    socket.on("notification", handleLive);
+    socket.on("data-refresh", handleLive);
+    return () => {
+      socket.off("notification", handleLive);
+      socket.off("data-refresh", handleLive);
+    };
   }, [fetchNotifications]);
 
   const handleDelete = async (id) => {
@@ -157,19 +181,20 @@ export default function NotificationManagement({ isDark }) {
           {!r.read && <Badge dot style={{ marginLeft: 6 }} />}
         </div>
       ),
+      width: 250,
     },
     {
       title: "Message",
       dataIndex: "message",
       key: "message",
-      ellipsis: true,
+      ellipsis: false,
       render: (v) => <Text type="secondary" style={{ fontSize: 12 }}>{v || "—"}</Text>,
     },
     {
       title: "Recipient",
       dataIndex: "recipient",
       key: "recipient",
-      width: 180,
+      width: 280,
       render: (v) => (
         <Space size={4}>
           {v === "admin" ? <TeamOutlined style={{ color: "#1a3353" }} /> : <UserOutlined style={{ color: "#52c41a" }} />}
@@ -191,7 +216,7 @@ export default function NotificationManagement({ isDark }) {
       title: "Date",
       dataIndex: "createdAt",
       key: "createdAt",
-      width: 150,
+      width: 100,
       sorter: (a, b) => new Date(a.createdAt) - new Date(b.createdAt),
       defaultSortOrder: "descend",
       render: (v) => (
@@ -205,7 +230,7 @@ export default function NotificationManagement({ isDark }) {
     {
       title: "Action",
       key: "action",
-      width: 120,
+      width: 100,
       align: "center",
       fixed: "right",
       render: (_, r) => (

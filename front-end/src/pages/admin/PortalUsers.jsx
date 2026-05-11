@@ -391,24 +391,20 @@ export default function PortalUsers({ isDark }) {
       render: (_, __, i) => i + 1,
     },
     {
-      title: "Name",
-      key: "name",
-      render: (_, r) => `${r.firstName} ${r.lastName}`,
+      title: "Portal User",
+      key: "portalUser",
+      width: 360,
       sorter: (a, b) =>
         `${a.firstName} ${a.lastName}`.localeCompare(
           `${b.firstName} ${b.lastName}`
         ),
-    },
-    {
-      title: "Email",
-      dataIndex: "email",
-      key: "email",
-    },
-    {
-      title: "Company/LGU",
-      dataIndex: "companyName",
-      key: "companyName",
-      render: (v) => v || "—",
+      render: (_, r) => (
+        <div style={{ display: "flex", flexDirection: "column", gap: 1 }}>
+          <Text strong style={{ lineHeight: 1.4 }}>{r.firstName} {r.lastName}</Text>
+          <Text type="secondary" style={{ fontSize: 12, lineHeight: 1.4 }}>{r.email}</Text>
+          <Text style={{ fontSize: 12, color: "#555", lineHeight: 1.4 }}>{r.companyName || "—"}</Text>
+        </div>
+      ),
     },
     {
       title: "Assigned SLF",
@@ -420,45 +416,45 @@ export default function PortalUsers({ isDark }) {
           ? names.map((n, i) => <Tag key={i} color="blue" style={{ marginBottom: 2 }}>{n}</Tag>)
           : <Text type="secondary">Not assigned</Text>;
       },
+      width: 240,
     },
     {
-      title: "Status",
-      dataIndex: "status",
-      key: "status",
+      title: "Status & Files",
+      key: "statusFiles",
+      width: 240,
       filters: [
         { text: "Pending", value: "pending" },
         { text: "Approved", value: "approved" },
         { text: "Rejected", value: "rejected" },
       ],
       onFilter: (value, record) => record.status === value,
-      render: (v, record) => (
-        <Space size={4} wrap>
-          <Tag color={statusColor[v]}>{v?.toUpperCase()}</Tag>
-          {record.verificationRequired && !record.verificationSubmitted && (
-            <Tag color="orange" icon={<LockOutlined />}>HELD</Tag>
+      render: (_, record) => (
+        <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+          <Space size={4} wrap>
+            <Tag color={statusColor[record.status]}>{record.status?.toUpperCase()}</Tag>
+            {record.verificationRequired && !record.verificationSubmitted && (
+              <Tag color="orange" icon={<LockOutlined />}>HELD</Tag>
+            )}
+            {record.verificationSubmitted && (
+              <Tag color="blue" icon={<FileDoneOutlined />}>DOCS SUBMITTED</Tag>
+            )}
+          </Space>
+          {record.verificationFileUrl ? (
+            <a href={record.verificationFileUrl} target="_blank" rel="noopener noreferrer">
+              <Button
+                size="small"
+                type="link"
+                icon={record.verificationFileType === "image" ? <FileImageOutlined /> : <FileTextOutlined />}
+                style={{ paddingInline: 0 }}
+              >
+                {record.verificationFileType === "image" ? "Image" : "Document"}
+              </Button>
+            </a>
+          ) : (
+            <Text type="secondary" style={{ fontSize: 12 }}>No file</Text>
           )}
-          {record.verificationSubmitted && (
-            <Tag color="blue" icon={<FileDoneOutlined />}>DOCS SUBMITTED</Tag>
-          )}
-        </Space>
+        </div>
       ),
-    },
-    {
-      title: "Attachments",
-      key: "attachments",
-      width: 150,
-      render: (_, record) => record.verificationFileUrl ? (
-        <a href={record.verificationFileUrl} target="_blank" rel="noopener noreferrer">
-          <Button
-            size="small"
-            type="link"
-            icon={record.verificationFileType === "image" ? <FileImageOutlined /> : <FileTextOutlined />}
-            style={{ paddingInline: 0 }}
-          >
-            {record.verificationFileType === "image" ? "Image" : "Document"}
-          </Button>
-        </a>
-      ) : <Text type="secondary">No file</Text>,
     },
     {
       title: "Registered",
@@ -511,7 +507,7 @@ export default function PortalUsers({ isDark }) {
               },
             }}
           >
-            <Button size="small" icon={<MoreOutlined />}>
+            <Button size="small" icon={<MoreOutlined />} type="primary"> 
               Actions
             </Button>
           </Dropdown>
@@ -554,7 +550,7 @@ export default function PortalUsers({ isDark }) {
         loading={loading}
         size="small"
         pagination={{ pageSize: 15 }}
-        scroll={{ x: 1050 }}
+        scroll={{ x: 1000 }}
         locale={{
           emptyText: (
             <Empty
@@ -1064,7 +1060,7 @@ export default function PortalUsers({ isDark }) {
                           target="_blank"
                           rel="noopener noreferrer"
                         >
-                          <Button size="small" icon={<LinkOutlined />} type="primary" ghost>
+                          <Button size="small" icon={<LinkOutlined />} type="primary">
                             Open in Drive
                           </Button>
                         </a>
