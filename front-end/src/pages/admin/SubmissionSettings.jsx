@@ -43,6 +43,7 @@ import {
   UndoOutlined,
   ExclamationCircleOutlined,
   PieChartOutlined,
+  ToolOutlined,
 } from "@ant-design/icons";
 import { exportToExcel } from "../../utils/exportExcel";
 import Swal from "sweetalert2";
@@ -79,6 +80,28 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, is
   const [revertModal, setRevertModal] = useState({ open: false, record: null });
   const [revertReason, setRevertReason] = useState("");
   const [revertLoading, setRevertLoading] = useState(false);
+  const [repairingXX, setRepairingXX] = useState(false);
+
+  const handleRepairXX = async () => {
+    setRepairingXX(true);
+    try {
+      const { data } = await api.post("/data-slf/repair-xx-ids");
+      Swal.fire({
+        icon: "success",
+        title: "XX IDs Repaired",
+        html: `<div style="text-align:left;font-size:13px">
+          <p>${data.message}</p>
+          ${data.errors?.length ? `<p style="color:#ff4d4f">${data.errors.length} error(s) encountered.</p>` : ""}
+        </div>`,
+        confirmButtonColor: "#2f54eb",
+      });
+      fetchData(true);
+    } catch {
+      Swal.fire("Error", "Could not repair XX IDs.", "error");
+    } finally {
+      setRepairingXX(false);
+    }
+  };
   // Address cascading dropdowns for admin edit
   const [addrRegions, setAddrRegions] = useState([]);
   const [addrProvinces, setAddrProvinces] = useState([]);
@@ -690,14 +713,35 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, is
       >
         <div>
         </div>
-        <Button
-          icon={<ReloadOutlined />}
-          onClick={() => fetchData(true)}
-          loading={loading}
-          size="small"
-        >
-          Refresh
-        </Button>
+        <Space>
+          {canDelete && (
+            <Popconfirm
+              title="Fix XX Province Codes"
+              description="This will update all ID Nos with 'XX' province code using the stored company province data."
+              onConfirm={handleRepairXX}
+              okText="Yes, Fix Now"
+              cancelText="Cancel"
+              okButtonProps={{ loading: repairingXX }}
+            >
+              <Button
+                icon={<ToolOutlined />}
+                size="small"
+                loading={repairingXX}
+                danger
+              >
+                Fix XX IDs
+              </Button>
+            </Popconfirm>
+          )}
+          <Button
+            icon={<ReloadOutlined />}
+            onClick={() => fetchData(true)}
+            loading={loading}
+            size="small"
+          >
+            Refresh
+          </Button>
+        </Space>
       </div>
 
       <Card style={{ marginTop: 16, borderRadius: 10 }}>

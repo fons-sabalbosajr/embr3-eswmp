@@ -145,7 +145,7 @@ const dataSLFSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-// Province code mapping for ID generation
+// Province name → abbreviation mapping for ID generation
 const PROVINCE_CODES = {
   aurora: "AU",
   bataan: "BA",
@@ -155,6 +155,17 @@ const PROVINCE_CODES = {
   pampanga: "PA",
   tarlac: "TA",
   zambales: "ZA",
+};
+
+// PSGC province code → abbreviation (Region III)
+const PSGC_PROVINCE_CODES = {
+  "030800000": "BA", // Bataan
+  "031400000": "BU", // Bulacan
+  "034900000": "NE", // Nueva Ecija
+  "035400000": "PA", // Pampanga
+  "036900000": "TA", // Tarlac
+  "037100000": "ZA", // Zambales
+  "037700000": "AU", // Aurora
 };
 
 function getProvinceCode(province) {
@@ -173,9 +184,37 @@ dataSLFSchema.pre("save", async function () {
     let province = "";
     if (this.slfGenerator) {
       const facility = await SlfFacility.findById(this.slfGenerator).select("province");
-      if (facility) province = facility.province;
+      if (facility) province = facility.province || "";
     }
-    const provCode = getProvinceCode(province);
+    let provCode = getProvinceCode(province);
+
+    // Fallback 1: use PSGC province code stored on the submission itself
+    if (provCode === "XX" && this.companyProvince) {
+      const psgcCode = PSGC_PROVINCE_CODES[this.companyProvince];
+      if (psgcCode) provCode = psgcCode;
+    }
+
+    // Fallback 2: inherit province code from a previous submission for this SLF
+    // (handles cases where SlfFacility.province is empty / not set)
+    if (provCode === "XX") {
+      const filter = this.slfGenerator
+        ? { slfGenerator: this.slfGenerator }
+        : this.slfName
+        ? { slfName: this.slfName }
+        : null;
+      if (filter) {
+        const prevDoc = await DataSLF.findOne({
+          ...filter,
+          idNo: { $exists: true, $ne: null },
+        }).sort({ createdAt: -1 });
+        if (prevDoc?.idNo) {
+          const parts = prevDoc.idNo.split("-");
+          if (parts.length >= 4 && parts[2] !== "XX") {
+            provCode = parts[2];
+          }
+        }
+      }
+    }
 
     const typeCode =
       this.companyType === "Private"
@@ -201,4 +240,6 @@ dataSLFSchema.pre("save", async function () {
 
 dataSLFSchema.plugin(dateFieldYearVisibilityPlugin("dateOfDisposal"));
 
-module.exports = mongoose.model("DataSLF", dataSLFSchema, "data-slf");
+const DataSLFModel = mongoose.model("DataSLF", dataSLFSchema, "data-slf");
+DataSLFModel.PSGC_PROVINCE_CODES = PSGC_PROVINCE_CODES;
+module.exports = DataSLFModel;

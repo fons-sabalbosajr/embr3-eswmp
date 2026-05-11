@@ -433,38 +433,44 @@ router.delete("/baselines/:id", async (req, res) => {
     if (!entry) return res.status(404).json({ message: "Baseline record not found" });
 
     const slfName = entry.slfName || entry.lguCompanyName;
-    await DataSLF.updateOne(
-      { _id: entry._id },
-      {
-        $unset: {
-          baselineUnit: "",
-          totalVolumeAccepted: "",
-          totalVolumeAcceptedUnit: "",
-          activeCellResidualVolume: "",
-          activeCellResidualUnit: "",
-          activeCellInertVolume: "",
-          activeCellInertUnit: "",
-          activeCellHazardousVolume: "",
-          activeCellHazardousUnit: "",
-          closedCellResidualVolume: "",
-          closedCellResidualUnit: "",
-          closedCellInertVolume: "",
-          closedCellInertUnit: "",
-          closedCellHazardousVolume: "",
-          closedCellHazardousUnit: "",
-          baselineUpdateRequestedAt: "",
-          baselineUpdateApprovedAt: "",
-          baselineUpdateApprovedBy: "",
-        },
-        $set: {
-          acceptsHazardousWaste: false,
-          activeCellEntries: [],
-          closedCellEntries: [],
-          accreditedHaulers: [],
-          baselineUpdateRequested: false,
-          baselineUpdateApproved: false,
-        },
-      }
+
+    // Clear baseline data from ALL DataSLF documents for this SLF so the
+    // aggregation in GET /baselines no longer returns any row for this SLF.
+    const baselineClear = {
+      $unset: {
+        baselineUnit: "",
+        totalVolumeAccepted: "",
+        totalVolumeAcceptedUnit: "",
+        activeCellResidualVolume: "",
+        activeCellResidualUnit: "",
+        activeCellInertVolume: "",
+        activeCellInertUnit: "",
+        activeCellHazardousVolume: "",
+        activeCellHazardousUnit: "",
+        closedCellResidualVolume: "",
+        closedCellResidualUnit: "",
+        closedCellInertVolume: "",
+        closedCellInertUnit: "",
+        closedCellHazardousVolume: "",
+        closedCellHazardousUnit: "",
+        baselineUpdateRequestedAt: "",
+        baselineUpdateApprovedAt: "",
+        baselineUpdateApprovedBy: "",
+      },
+      $set: {
+        acceptsHazardousWaste: false,
+        activeCellEntries: [],
+        closedCellEntries: [],
+        accreditedHaulers: [],
+        baselineUpdateRequested: false,
+        baselineUpdateApproved: false,
+      },
+    };
+
+    // Update all documents belonging to this SLF (matching by slfName or lguCompanyName)
+    await DataSLF.updateMany(
+      { $or: [{ slfName }, { lguCompanyName: slfName }] },
+      baselineClear
     );
 
     await Transaction.create({
@@ -1140,6 +1146,109 @@ router.patch("/bulk-status", async (req, res) => {
       user: req.logUser || "admin",
       ip: req.ip,
       meta: { status, count: updated.length, ids: updated.map((e) => e.idNo) },
+    });
+  } catch (error) {
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+});
+
+// Repair XX province codes in existing idNo values
+// Derives correct province from companyProvince (PSGC code) or companyType-scoped lookup
+router.post("/repair-xx-ids", async (req, res) => {
+  try {
+    const PSGC_MAP = DataSLF.PSGC_PROVINCE_CODES || {};
+    const SlfFacility = require("../models/SlfFacility");
+
+    // Province name → abbreviation (same as DataSLF.js)
+    const PROVINCE_NAME_MAP = {
+      aurora: "AU", bataan: "BA", bulacan: "BU",
+      "nueva ecija": "NE", nueva_ecija: "NE",
+      pampanga: "PA", tarlac: "TA", zambales: "ZA",
+    };
+    const getProvCode = (name) => {
+      if (!name) return null;
+      const key = name.toLowerCase().replace(/^province of\s+/i, "").trim();
+      return PROVINCE_NAME_MAP[key] || null;
+    };
+
+    // Fetch all records that have an XX province code in idNo
+    const xxDocs = await DataSLF.find({ idNo: /^SLF-\w+-XX-/ })
+      .setOptions({ includeHiddenYears: true })
+      .lean();
+
+    if (xxDocs.length === 0) {
+      return res.json({ message: "No XX records found.", updated: 0 });
+    }
+
+    let updated = 0;
+    const errors = [];
+
+    for (const doc of xxDocs) {
+      try {
+        let provCode = null;
+
+        // 1. Try facility province
+        if (doc.slfGenerator) {
+          const facility = await SlfFacility.findById(doc.slfGenerator).select("province").lean();
+          if (facility?.province) provCode = getProvCode(facility.province);
+        }
+
+        // 2. Try companyProvince PSGC code
+        if (!provCode && doc.companyProvince) {
+          provCode = PSGC_MAP[doc.companyProvince] || null;
+        }
+
+        // 3. Try another approved doc for the same SLF
+        if (!provCode) {
+          const filter = doc.slfGenerator
+            ? { slfGenerator: doc.slfGenerator, idNo: { $exists: true, $not: /XX/ } }
+            : doc.slfName
+            ? { slfName: doc.slfName, idNo: { $exists: true, $not: /XX/ } }
+            : null;
+          if (filter) {
+            const sibling = await DataSLF.findOne(filter)
+              .setOptions({ includeHiddenYears: true })
+              .sort({ createdAt: -1 })
+              .lean();
+            if (sibling?.idNo) {
+              const parts = sibling.idNo.split("-");
+              if (parts.length >= 4 && parts[2] !== "XX") provCode = parts[2];
+            }
+          }
+        }
+
+        if (!provCode) continue; // skip if still unknown
+
+        const parts = doc.idNo.split("-"); // ["SLF", typeCode, "XX", seq]
+        if (parts.length < 4) continue;
+        const typeCode = parts[1];
+        const seq = parts[3];
+        const newIdNo = `SLF-${typeCode}-${provCode}-${seq}`;
+
+        // Avoid collisions — if a doc already has this exact idNo, keep a suffix
+        const existing = await DataSLF.findOne({ _id: { $ne: doc._id }, idNo: newIdNo })
+          .setOptions({ includeHiddenYears: true })
+          .lean();
+        const finalIdNo = existing ? `${newIdNo}-R` : newIdNo;
+
+        await DataSLF.updateOne({ _id: doc._id }, { $set: { idNo: finalIdNo } });
+        updated++;
+      } catch (err) {
+        errors.push({ id: doc._id, error: err.message });
+      }
+    }
+
+    writeLog("warn", "id.repair-xx", {
+      message: `Repaired ${updated} XX province code records`,
+      user: ADMIN_DISPLAY_NAME,
+      meta: { total: xxDocs.length, updated, errors: errors.length },
+    });
+
+    res.json({
+      message: `Repaired ${updated} of ${xxDocs.length} XX records.`,
+      updated,
+      skipped: xxDocs.length - updated - errors.length,
+      errors,
     });
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });

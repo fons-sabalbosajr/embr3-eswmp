@@ -2165,36 +2165,22 @@ export default function SLFPortalModals({
                 </Text>
               ),
               children: (
-                <Descriptions bordered size="small" column={{ xs: 1, sm: 2 }}>
-                  <Descriptions.Item label="Company Name">
-                    {companyForm.getFieldValue("lguCompanyName") || "—"}
-                  </Descriptions.Item>
-                  <Descriptions.Item label="Region">
-                    {regions.find(
-                      (r) =>
-                        r.code === companyForm.getFieldValue("companyRegion"),
-                    )?.name || "—"}
-                  </Descriptions.Item>
-                  <Descriptions.Item label="Province">
-                    {provinces.find(
-                      (p) =>
-                        p.code === companyForm.getFieldValue("companyProvince"),
-                    )?.name || "—"}
-                  </Descriptions.Item>
-                  <Descriptions.Item label="City/Municipality">
-                    {municipalities.find(
-                      (m) =>
-                        m.code ===
-                        companyForm.getFieldValue("companyMunicipality"),
-                    )?.name || "—"}
-                  </Descriptions.Item>
-                  <Descriptions.Item label="Barangay">
-                    {barangays.find(
-                      (b) =>
-                        b.code === companyForm.getFieldValue("companyBarangay"),
-                    )?.name || "—"}
-                  </Descriptions.Item>
-                </Descriptions>
+                <Row gutter={[12, 8]}>
+                  {[
+                    { label: "Company Name", value: companyForm.getFieldValue("lguCompanyName") },
+                    { label: "Region", value: regions.find((r) => r.code === companyForm.getFieldValue("companyRegion"))?.name },
+                    { label: "Province", value: provinces.find((p) => p.code === companyForm.getFieldValue("companyProvince"))?.name },
+                    { label: "City/Municipality", value: municipalities.find((m) => m.code === companyForm.getFieldValue("companyMunicipality"))?.name },
+                    { label: "Barangay", value: barangays.find((b) => b.code === companyForm.getFieldValue("companyBarangay"))?.name },
+                  ].map(({ label, value }) => (
+                    <Col xs={24} sm={12} key={label}>
+                      <div style={{ marginBottom: 2 }}>
+                        <Text type="secondary" style={{ fontSize: 11, display: "block", marginBottom: 3 }}>{label}</Text>
+                        <Input value={value || "—"} readOnly style={{ background: "#fafafa", cursor: "default", color: "#222" }} />
+                      </div>
+                    </Col>
+                  ))}
+                </Row>
               ),
             },
             {
@@ -2205,24 +2191,29 @@ export default function SLFPortalModals({
                 </Text>
               ),
               children: (
-                <Descriptions bordered size="small" column={{ xs: 1, sm: 2 }}>
-                  <Descriptions.Item label="Date of Disposal">
-                    {entryForm.getFieldValue("dateOfDisposal")
-                      ? dayjs(entryForm.getFieldValue("dateOfDisposal")).format(
-                          "MM/DD/YYYY",
-                        )
-                      : "—"}
-                  </Descriptions.Item>
-                  <Descriptions.Item label="LGU/Company Name">
-                    {trucks[0]?.lguCompanyName || "—"}
-                  </Descriptions.Item>
-                  <Descriptions.Item label="Company Type">
-                    {trucks[0]?.companyType || "—"}
-                  </Descriptions.Item>
-                  <Descriptions.Item label="Address">
-                    {trucks[0]?.address || "—"}
-                  </Descriptions.Item>
-                </Descriptions>
+                <Row gutter={[12, 8]}>
+                  {[
+                    {
+                      label: "Date of Disposal",
+                      value: entryForm.getFieldValue("dateOfDisposal")
+                        ? dayjs(entryForm.getFieldValue("dateOfDisposal")).format("MM/DD/YYYY")
+                        : "—",
+                    },
+                    { label: "LGU/Company Name", value: companyForm.getFieldValue("lguCompanyName") },
+                    {
+                      label: "Company Type",
+                      value: slfInfo
+                        ? (slfInfo.ownership || "").toLowerCase().includes("private") ? "Private" : "LGU"
+                        : "—",
+                    },
+                    { label: "Address", value: entryForm.getFieldValue("address") },
+                  ].map(({ label, value }) => (
+                    <Col xs={24} sm={12} key={label}>
+                      <Text type="secondary" style={{ fontSize: 11, display: "block", marginBottom: 3 }}>{label}</Text>
+                      <Input value={value || "—"} readOnly style={{ background: "#fafafa", cursor: "default", color: "#222" }} />
+                    </Col>
+                  ))}
+                </Row>
               ),
             },
             {
@@ -2231,10 +2222,7 @@ export default function SLFPortalModals({
                 <Text strong style={{ color: "#1a3353" }}>
                   <DatabaseOutlined /> Baseline Data
                   {!baselineSaved && (
-                    <Tag
-                      color="volcano"
-                      style={{ marginLeft: 8, fontSize: 10 }}
-                    >
+                    <Tag color="volcano" style={{ marginLeft: 8, fontSize: 10 }}>
                       First-time Entry
                     </Tag>
                   )}
@@ -2243,103 +2231,71 @@ export default function SLFPortalModals({
               children: (
                 <>
                   {!baselineSaved && (
-                    <div
-                      style={{
-                        background: "#fff7e6",
-                        border: "1px solid #ffe58f",
-                        borderRadius: 6,
-                        padding: "8px 14px",
-                        marginBottom: 12,
-                      }}
-                    >
-                      <InfoCircleOutlined
-                        style={{ color: "#fa8c16", marginRight: 8 }}
-                      />
+                    <div style={{ background: "#fff7e6", border: "1px solid #ffe58f", borderRadius: 6, padding: "8px 14px", marginBottom: 12 }}>
+                      <InfoCircleOutlined style={{ color: "#fa8c16", marginRight: 8 }} />
                       <Text style={{ color: "#ad6800", fontSize: 12 }}>
                         This baseline data will be{" "}
-                        <Text strong style={{ color: "#ad6800" }}>
-                          locked after submission
-                        </Text>{" "}
-                        and cannot be changed without requesting an update.
-                        Please verify all details carefully.
+                        <Text strong style={{ color: "#ad6800" }}>locked after submission</Text>{" "}
+                        and cannot be changed without requesting an update. Please verify all details carefully.
                       </Text>
                     </div>
                   )}
-                  <Descriptions bordered size="small" column={{ xs: 1, sm: 2 }}>
-                    <Descriptions.Item label="Total Volume Accepted">
-                      {baselineForm.getFieldValue("totalVolumeAccepted") != null
-                        ? `${Number(baselineForm.getFieldValue("totalVolumeAccepted")).toLocaleString()} ${(baselineForm.getFieldValue("totalVolumeAcceptedUnit") || "m³").replace("m3", "m³")}`
-                        : "—"}
-                    </Descriptions.Item>
-                    <Descriptions.Item label="Active Cell Entries" span={2}>
-                      {activeCellEntries.length === 0 ? (
-                        "—"
-                      ) : (
-                        <Table
-                          dataSource={activeCellEntries}
-                          rowKey="key"
-                          size="small"
-                          pagination={false}
-                          style={{ marginTop: 4 }}
-                          columns={[
-                            {
-                              title: "Cell Name",
-                              dataIndex: "cellName",
-                              key: "cellName",
-                              render: (v) => v || "—",
-                            },
-                            {
-                              title: "Waste Type",
-                              dataIndex: "wasteType",
-                              key: "wasteType",
-                            },
-                            {
-                              title: "Volume",
-                              key: "vol",
-                              render: (_, r) =>
-                                r.volume != null
-                                  ? `${r.volume} ${baselineUnit || "m³"}`
-                                  : "—",
-                            },
-                          ]}
-                        />
-                      )}
-                    </Descriptions.Item>
-                    <Descriptions.Item label="Closed Cell Entries" span={2}>
-                      {closedCellEntries.length === 0 ? (
-                        "—"
-                      ) : (
-                        <Table
-                          dataSource={closedCellEntries}
-                          rowKey="key"
-                          size="small"
-                          pagination={false}
-                          style={{ marginTop: 4 }}
-                          columns={[
-                            {
-                              title: "Cell Name",
-                              dataIndex: "cellName",
-                              key: "cellName",
-                              render: (v) => v || "—",
-                            },
-                            {
-                              title: "Waste Type",
-                              dataIndex: "wasteType",
-                              key: "wasteType",
-                            },
-                            {
-                              title: "Volume",
-                              key: "vol",
-                              render: (_, r) =>
-                                r.volume != null
-                                  ? `${r.volume} ${baselineUnit || "m³"}`
-                                  : "—",
-                            },
-                          ]}
-                        />
-                      )}
-                    </Descriptions.Item>
-                  </Descriptions>
+                  <Row gutter={[12, 8]} style={{ marginBottom: 12 }}>
+                    <Col xs={24} sm={12}>
+                      <Text type="secondary" style={{ fontSize: 11, display: "block", marginBottom: 3 }}>Total Volume Accepted</Text>
+                      <Input
+                        value={
+                          baselineForm.getFieldValue("totalVolumeAccepted") != null
+                            ? `${Number(baselineForm.getFieldValue("totalVolumeAccepted")).toLocaleString()} ${(baselineForm.getFieldValue("totalVolumeAcceptedUnit") || "m³").replace("m3", "m³")}`
+                            : "—"
+                        }
+                        readOnly
+                        style={{ background: "#fafafa", cursor: "default", color: "#222" }}
+                      />
+                    </Col>
+                  </Row>
+                  {activeCellEntries.length > 0 && (
+                    <div style={{ marginBottom: 12 }}>
+                      <Text type="secondary" style={{ fontSize: 11, display: "block", marginBottom: 6 }}>Active Cell Entries</Text>
+                      {activeCellEntries.map((e, i) => (
+                        <Row gutter={[8, 4]} key={e.key ?? i} style={{ marginBottom: 6, background: "#f9f9f9", borderRadius: 6, padding: "6px 8px" }}>
+                          <Col xs={24} sm={8}>
+                            <Text type="secondary" style={{ fontSize: 10 }}>Cell Name</Text>
+                            <Input size="small" value={e.cellName || "—"} readOnly style={{ background: "#fafafa", cursor: "default" }} />
+                          </Col>
+                          <Col xs={24} sm={8}>
+                            <Text type="secondary" style={{ fontSize: 10 }}>Waste Type</Text>
+                            <Input size="small" value={e.wasteType || "—"} readOnly style={{ background: "#fafafa", cursor: "default" }} />
+                          </Col>
+                          <Col xs={24} sm={8}>
+                            <Text type="secondary" style={{ fontSize: 10 }}>Volume</Text>
+                            <Input size="small" value={e.volume != null ? `${e.volume} ${baselineUnit || "m³"}` : "—"} readOnly style={{ background: "#fafafa", cursor: "default" }} />
+                          </Col>
+                        </Row>
+                      ))}
+                    </div>
+                  )}
+                  {closedCellEntries.length > 0 && (
+                    <div>
+                      <Text type="secondary" style={{ fontSize: 11, display: "block", marginBottom: 6 }}>Closed Cell Entries</Text>
+                      {closedCellEntries.map((e, i) => (
+                        <Row gutter={[8, 4]} key={e.key ?? i} style={{ marginBottom: 6, background: "#f9f9f9", borderRadius: 6, padding: "6px 8px" }}>
+                          <Col xs={24} sm={8}>
+                            <Text type="secondary" style={{ fontSize: 10 }}>Cell Name</Text>
+                            <Input size="small" value={e.cellName || "—"} readOnly style={{ background: "#fafafa", cursor: "default" }} />
+                          </Col>
+                          <Col xs={24} sm={8}>
+                            <Text type="secondary" style={{ fontSize: 10 }}>Waste Type</Text>
+                            <Input size="small" value={e.wasteType || "—"} readOnly style={{ background: "#fafafa", cursor: "default" }} />
+                          </Col>
+                          <Col xs={24} sm={8}>
+                            <Text type="secondary" style={{ fontSize: 10 }}>Volume</Text>
+                            <Input size="small" value={e.volume != null ? `${e.volume} ${baselineUnit || "m³"}` : "—"} readOnly style={{ background: "#fafafa", cursor: "default" }} />
+                          </Col>
+                        </Row>
+                      ))}
+                    </div>
+                  )}
                 </>
               ),
             },
@@ -2353,47 +2309,37 @@ export default function SLFPortalModals({
                       </Text>
                     ),
                     children: (
-                      <Table
-                        dataSource={haulers}
-                        rowKey="key"
-                        size="small"
-                        pagination={false}
-                        scroll={{ x: 500 }}
-                        columns={[
-                          {
-                            title: "Hauler",
-                            dataIndex: "haulerName",
-                          },
-                          {
-                            title: "Trucks",
-                            dataIndex: "numberOfTrucks",
-                            width: 70,
-                          },
-                          {
-                            title: "Vehicles",
-                            key: "vehicles",
-                            render: (_, rec) => {
-                              const vehs = rec.vehicles || [];
-                              if (!vehs.length) return "—";
-                              return vehs.map((v, i) => (
-                                <div key={i} style={{ whiteSpace: "nowrap" }}>
-                                  {v.plateNumber || "N/A"} —{" "}
-                                  {v.vehicleType || "N/A"} ({v.capacity ?? "—"}{" "}
-                                  {v.capacityUnit || "m³"})
-                                </div>
-                              ));
-                            },
-                          },
-                          {
-                            title: "Clients",
-                            dataIndex: "privateSectorClients",
-                            render: (v) => {
-                              const arr = Array.isArray(v) ? v : v ? [v] : [];
-                              return arr.length > 0 ? arr.join(", ") : "—";
-                            },
-                          },
-                        ]}
-                      />
+                      <div>
+                        {haulers.map((h, hi) => (
+                          <div key={h.key ?? hi} style={{ background: "#f9f9f9", borderRadius: 8, padding: "10px 12px", marginBottom: 10 }}>
+                            <Text strong style={{ fontSize: 12, color: "#1a3353", display: "block", marginBottom: 8 }}>
+                              Hauler {hi + 1}
+                            </Text>
+                            <Row gutter={[8, 6]}>
+                              <Col xs={24} sm={12}>
+                                <Text type="secondary" style={{ fontSize: 10 }}>Hauler Name</Text>
+                                <Input size="small" value={h.haulerName || "—"} readOnly style={{ background: "#fafafa", cursor: "default" }} />
+                              </Col>
+                              <Col xs={24} sm={12}>
+                                <Text type="secondary" style={{ fontSize: 10 }}>Number of Trucks</Text>
+                                <Input size="small" value={h.numberOfTrucks ?? "—"} readOnly style={{ background: "#fafafa", cursor: "default" }} />
+                              </Col>
+                              {(h.vehicles || []).map((v, vi) => (
+                                <Col xs={24} key={vi}>
+                                  <Text type="secondary" style={{ fontSize: 10 }}>Vehicle {vi + 1}</Text>
+                                  <Input size="small" value={`${v.plateNumber || "N/A"} — ${v.vehicleType || "N/A"} (${v.capacity ?? "—"} ${v.capacityUnit || "m³"})`} readOnly style={{ background: "#fafafa", cursor: "default" }} />
+                                </Col>
+                              ))}
+                              {(h.privateSectorClients || []).length > 0 && (
+                                <Col xs={24}>
+                                  <Text type="secondary" style={{ fontSize: 10 }}>Private Sector Clients</Text>
+                                  <Input size="small" value={(h.privateSectorClients || []).map((c) => (typeof c === "object" ? c.clientName : c)).join(", ")} readOnly style={{ background: "#fafafa", cursor: "default" }} />
+                                </Col>
+                              )}
+                            </Row>
+                          </div>
+                        ))}
+                      </div>
                     ),
                   },
                 ]
@@ -2406,105 +2352,40 @@ export default function SLFPortalModals({
                 </Text>
               ),
               children: (
-                <Table
-                  dataSource={trucks}
-                  rowKey="key"
-                  size="small"
-                  pagination={false}
-                  scroll={{ x: 700 }}
-                  columns={[
-                    {
-                      title: "#",
-                      key: "i",
-                      width: 40,
-                      render: (_, __, i) => i + 1,
-                    },
-                    {
-                      title: "Ticket No.",
-                      dataIndex: "disposalTicketNo",
-                      render: (v) => v || "—",
-                    },
-                    { title: "Hauler", dataIndex: "hauler" },
-                    {
-                      title: "Plate No.",
-                      key: "plateNumber",
-                      render: (_, t) => {
-                        const vehs = t.vehicles || [];
-                        if (vehs.length > 1)
-                          return (
-                            vehs
-                              .map((v) => v.plateNumber)
-                              .filter(Boolean)
-                              .join(", ") ||
-                            t.plateNumber ||
-                            "—"
-                          );
-                        return vehs[0]?.plateNumber || t.plateNumber || "—";
-                      },
-                    },
-                    {
-                      title: "Capacity",
-                      key: "cap",
-                      render: (_, t) => {
-                        const vehs = t.vehicles || [];
-                        if (vehs.length > 1)
-                          return (
-                            vehs
-                              .filter((v) => v.capacity != null)
-                              .map(
-                                (v) =>
-                                  `${v.capacity} ${(v.capacityUnit || "m³").replace("m3", "m³")}`,
-                              )
-                              .join(", ") || "—"
-                          );
-                        const cap = vehs[0]?.capacity ?? t.truckCapacity;
-                        const unit =
-                          vehs[0]?.capacityUnit || t.truckCapacityUnit || "m³";
-                        return cap != null
-                          ? `${cap} ${unit.replace("m3", "m³")}`
-                          : "—";
-                      },
-                    },
-                    {
-                      title: "Volume",
-                      key: "vol",
-                      render: (_, t) =>
-                        t.actualVolume != null
-                          ? `${t.actualVolume} ${t.actualVolumeUnit || "tons"}`
-                          : "—",
-                    },
-                    {
-                      title: "Waste Type",
-                      dataIndex: "wasteType",
-                      render: (v) => v || "—",
-                    },
-                    {
-                      title: "Haz. Code",
-                      dataIndex: "hazWasteCode",
-                      render: (v) => v || "—",
-                    },
-                    {
-                      title: "Clients",
-                      key: "clients",
-                      render: (_, t) => {
-                        const vehs = t.vehicles || [];
-                        const allClients = vehs.flatMap(
-                          (v) => v.selectedClients || [],
-                        );
-                        if (!allClients.length) return "—";
-                        return allClients.map((c, i) => (
-                          <Tag
-                            key={i}
-                            color={c.clientType === "LGU" ? "blue" : "green"}
-                            style={{ marginBottom: 2, fontSize: 11 }}
-                          >
-                            {typeof c === "object" ? c.clientName : c}
-                          </Tag>
-                        ));
-                      },
-                    },
-                  ]}
-                />
+                <div>
+                  {trucks.map((t, ti) => {
+                    const vehs = t.vehicles || [];
+                    const plateStr = vehs.length > 1
+                      ? vehs.map((v) => v.plateNumber).filter(Boolean).join(", ") || t.plateNumber || "—"
+                      : vehs[0]?.plateNumber || t.plateNumber || "—";
+                    const capStr = vehs.length > 1
+                      ? vehs.filter((v) => v.capacity != null).map((v) => `${v.capacity} ${(v.capacityUnit || "m³").replace("m3", "m³")}`).join(", ") || "—"
+                      : (() => { const cap = vehs[0]?.capacity ?? t.truckCapacity; const unit = (vehs[0]?.capacityUnit || t.truckCapacityUnit || "m³").replace("m3", "m³"); return cap != null ? `${cap} ${unit}` : "—"; })();
+                    return (
+                      <div key={t.key ?? ti} style={{ background: "#f9f9f9", borderRadius: 8, padding: "10px 12px", marginBottom: 10 }}>
+                        <Text strong style={{ fontSize: 12, color: "#1a3353", display: "block", marginBottom: 8 }}>
+                          Entry #{ti + 1}
+                        </Text>
+                        <Row gutter={[8, 6]}>
+                          {[
+                            { label: "Ticket No.", value: t.disposalTicketNo || "—" },
+                            { label: "Hauler", value: t.hauler || "—" },
+                            { label: "Plate No.", value: plateStr },
+                            { label: "Capacity", value: capStr },
+                            { label: "Actual Volume", value: t.actualVolume != null ? `${t.actualVolume} ${(t.actualVolumeUnit || "m³").replace("m3", "m³")}` : "—" },
+                            { label: "Waste Type", value: t.wasteType || "—" },
+                            ...(t.hazWasteCode?.length ? [{ label: "Haz. Code", value: Array.isArray(t.hazWasteCode) ? t.hazWasteCode.join(", ") : t.hazWasteCode }] : []),
+                          ].map(({ label, value }) => (
+                            <Col xs={24} sm={12} key={label}>
+                              <Text type="secondary" style={{ fontSize: 10 }}>{label}</Text>
+                              <Input size="small" value={value} readOnly style={{ background: "#fafafa", cursor: "default" }} />
+                            </Col>
+                          ))}
+                        </Row>
+                      </div>
+                    );
+                  })}
+                </div>
               ),
             },
           ]}

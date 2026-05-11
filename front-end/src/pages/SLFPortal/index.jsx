@@ -1948,10 +1948,35 @@ export default function SLFPortal() {
       const baselineValues = baselineForm.getFieldsValue();
       const companyValues = companyForm.getFieldsValue();
       const disposalValues = entryForm.getFieldsValue();
+      // Compute active/closed cell totals for backward compat
+      const activeCellResidualVolume =
+        activeCellEntries.filter((e) => e.wasteType === "Residual").reduce((s, e) => s + (e.volume || 0), 0) ||
+        baselineValues.activeCellResidualVolume || 0;
+      const activeCellInertVolume =
+        activeCellEntries.filter((e) => e.wasteType === "Inert/Hazardous Waste").reduce((s, e) => s + (e.volume || 0), 0) ||
+        baselineValues.activeCellInertVolume || 0;
+      const closedCellResidualVolume =
+        closedCellEntries.filter((e) => e.wasteType === "Residual").reduce((s, e) => s + (e.volume || 0), 0) ||
+        baselineValues.closedCellResidualVolume || 0;
+      const closedCellInertVolume =
+        closedCellEntries.filter((e) => e.wasteType === "Inert/Hazardous Waste").reduce((s, e) => s + (e.volume || 0), 0) ||
+        baselineValues.closedCellInertVolume || 0;
       const entry = {
         ...disposalValues,
         ...baselineValues,
         ...companyValues,
+        lguCompanyName: companyValues.lguCompanyName || disposalValues.lguCompanyName || "",
+        companyType:
+          companyValues.companyType ||
+          disposalValues.companyType ||
+          ((slfInfo?.ownership || "").toLowerCase().includes("private") ? "Private" : "LGU"),
+        address: companyValues.address || disposalValues.address || "",
+        activeCellEntries: activeCellEntries.map(({ key, ...rest }) => rest),
+        activeCellResidualVolume,
+        activeCellInertVolume,
+        closedCellEntries: closedCellEntries.map(({ key, ...rest }) => rest),
+        closedCellResidualVolume,
+        closedCellInertVolume,
         accreditedHaulers: haulers.map(({ key, ...rest }) => rest),
         slfName: activeSlfName,
         slfGenerator: activeSlfId || null,
@@ -2043,14 +2068,15 @@ export default function SLFPortal() {
       return;
     }
     const firstTruck = trucks[0];
-    if (!firstTruck?.lguCompanyName || !firstTruck?.companyType) {
+    const companyVals = companyForm.getFieldsValue();
+    if (!companyVals?.lguCompanyName) {
       showError({
         type: "warning",
         title: "Incomplete Waste Generator Info",
         message:
-          "Please fill in Company Name and Company Type in the first transport entry.",
+          "Please fill in Company Name in the Waste Generator's Information tab.",
       });
-      setActiveTab("disposal");
+      setActiveTab("basic-info");
       return;
     }
     setReviewModalOpen(true);
@@ -2101,11 +2127,14 @@ export default function SLFPortal() {
         ...disposalValues,
         ...baselineValues,
         ...companyValues,
-        // Company info comes from first transport entry
+        // Company info comes from companyForm / entryForm
         lguCompanyName:
-          firstTruck.lguCompanyName || disposalValues.lguCompanyName || "",
-        companyType: firstTruck.companyType || disposalValues.companyType || "",
-        address: firstTruck.address || disposalValues.address || "",
+          companyValues.lguCompanyName || disposalValues.lguCompanyName || "",
+        companyType:
+          companyValues.companyType ||
+          disposalValues.companyType ||
+          ((slfInfo?.ownership || "").toLowerCase().includes("private") ? "Private" : "LGU"),
+        address: companyValues.address || disposalValues.address || "",
         // Active cell entries
         activeCellEntries: activeCellEntries.map(({ key, ...rest }) => rest),
         activeCellResidualVolume,
