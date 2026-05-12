@@ -451,11 +451,12 @@ cd ../front-end
 npm install
 npm run build
 
-# Copy new build to nginx directory
+# Copy new build to nginx directory (dist/ subdirectory required)
 sudo cp -r dist/* /var/www/eswm-pipeline/dist/
+sudo chown -R www-data:www-data /var/www/eswm-pipeline/
 
-# Restart the server
-pm2 restart embr3-server
+# Restart the server (actual PM2 process name: embr3-eswmp-api, port: 5006)
+pm2 restart embr3-eswmp-api --update-env && pm2 save
 ```
 
 ### Quick Redeploy (Copy Pre-built from Local)
@@ -481,13 +482,13 @@ npm install --production
 # 5. Re-seed SLF data (IMPORTANT after seed script changes)
 node seeds/seedSlfFacilities.js
 
-# 6. Start or restart the server
-pm2 start server.js --name embr3-server   # first time
-pm2 restart embr3-server                   # subsequent deploys
+# 6. Start or restart the server (PM2 process: embr3-eswmp-api, port 5006)
+pm2 start server.js --name embr3-eswmp-api   # first time
+pm2 restart embr3-eswmp-api --update-env      # subsequent deploys
 pm2 save
 
 # 7. Verify
-curl http://localhost:5003/api/health
+curl http://localhost:5006/api/health
 pm2 logs embr3-server --lines 20
 ```
 
