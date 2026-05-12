@@ -6,6 +6,10 @@ const UserPortal = require("../models/UserPortal");
 const { writeLog } = require("../utils/logger");
 const { uploadFileToDrive } = require("../utils/googleDrive");
 const {
+  saveVerificationFile,
+  resolveVerificationFile,
+} = require("../utils/verificationFileStorage");
+const {
   sendPortalSignupEmail,
   sendPortalResetPasswordEmail,
 } = require("../utils/email");
@@ -13,6 +17,58 @@ const { notifyAdmin } = require("../utils/socketEmit");
 const Notification = require("../models/Notification");
 
 const router = express.Router();
+
+async function saveVerificationAttachment(req, file, email, logContext) {
+  const isImage = file.mimetype.startsWith("image/");
+  try {
+    const driveResult = await uploadFileToDrive(
+      file.buffer,
+      file.mimetype,
+      file.originalname,
+      isImage
+    );
+    return {
+      url: driveResult.viewUrl,
+      driveId: driveResult.fileId,
+      fileType: isImage ? "image" : "document",
+    };
+  } catch (driveErr) {
+    writeLog("warn", `${logContext}.drive`, {
+      message: `Drive upload failed for ${email}: ${driveErr.message}`,
+      user: email,
+      ip: req.ip,
+    });
+
+    const localResult = await saveVerificationFile(file);
+    writeLog("info", `${logContext}.local-fallback`, {
+      message: `Drive unavailable — verification file stored locally for ${email}`,
+      user: email,
+      ip: req.ip,
+      meta: { fileName: localResult.fileName },
+    });
+    console.info(`[portal-auth] Verification file saved locally (Drive unavailable) — ${localResult.fileName}`);
+
+    return {
+      url: localResult.url,
+      driveId: "",
+      fileType: isImage ? "image" : "document",
+    };
+  }
+}
+
+router.get("/verification-files/:fileName", (req, res) => {
+  try {
+    const filePath = resolveVerificationFile(req.params.fileName);
+    res.setHeader("Cache-Control", "private, max-age=3600");
+    res.sendFile(filePath, (error) => {
+      if (error && !res.headersSent) {
+        res.status(error.statusCode === 404 ? 404 : 500).json({ message: "File not found" });
+      }
+    });
+  } catch {
+    res.status(400).json({ message: "Invalid file path" });
+  }
+});
 
 // Multer: memory storage — files stay in RAM as Buffer for Drive upload
 const upload = multer({
@@ -56,25 +112,19 @@ router.post("/signup", upload.single("verificationFile"), async (req, res) => {
     let verificationFileType = "";
 
     if (req.file) {
-      const isImage = req.file.mimetype.startsWith("image/");
-      verificationFileType = isImage ? "image" : "document";
       try {
-        const driveResult = await uploadFileToDrive(
-          req.file.buffer,
-          req.file.mimetype,
-          req.file.originalname,
-          isImage
-        );
-        verificationFileUrl = driveResult.viewUrl;
-        verificationFileDriveId = driveResult.fileId;
-      } catch (driveErr) {
+        const storedFile = await saveVerificationAttachment(req, req.file, email, "portal.signup");
+        verificationFileUrl = storedFile.url;
+        verificationFileDriveId = storedFile.driveId;
+        verificationFileType = storedFile.fileType;
+      } catch (fileErr) {
         // Log but do not block registration
-        writeLog("warn", "portal.signup.drive", {
-          message: `Drive upload failed for ${email}: ${driveErr.message}`,
+        writeLog("warn", "portal.signup.file", {
+          message: `Verification file storage failed for ${email}: ${fileErr.message}`,
           user: email,
           ip: req.ip,
         });
-        // Non-blocking — registration continues even if Drive upload fails
+        // Non-blocking — registration continues even if attachment storage fails
       }
     }
 
@@ -348,24 +398,18 @@ router.post("/submit-verification", upload.single("verificationFile"), async (re
 
     // Upload new verification file if provided
     if (req.file) {
-      const isImage = req.file.mimetype.startsWith("image/");
       try {
-        const driveResult = await uploadFileToDrive(
-          req.file.buffer,
-          req.file.mimetype,
-          req.file.originalname,
-          isImage
-        );
-        user.verificationFileUrl = driveResult.viewUrl;
-        user.verificationFileDriveId = driveResult.fileId;
-        user.verificationFileType = isImage ? "image" : "document";
-      } catch (driveErr) {
-        writeLog("warn", "portal.verification.drive", {
-          message: `Drive upload failed for ${user.email}: ${driveErr.message}`,
+        const storedFile = await saveVerificationAttachment(req, req.file, user.email, "portal.verification");
+        user.verificationFileUrl = storedFile.url;
+        user.verificationFileDriveId = storedFile.driveId;
+        user.verificationFileType = storedFile.fileType;
+      } catch (fileErr) {
+        writeLog("error", "portal.verification.file", {
+          message: `Verification file storage failed for ${user.email}: ${fileErr.message}`,
           user: user.email,
           ip: req.ip,
         });
-        return res.status(502).json({ message: `File upload to Drive failed: ${driveErr.message}` });
+        return res.status(500).json({ message: "File upload failed. Please try again." });
       }
     }
 

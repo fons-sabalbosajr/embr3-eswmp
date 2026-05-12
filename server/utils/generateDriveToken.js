@@ -1,67 +1,77 @@
 /**
- * ONE-TIME SCRIPT — Generate a Google Drive OAuth2 refresh token.
+ * Generate a Google Drive OAuth2 refresh token.
  *
- * Run ONCE from the server/ directory:
+ * Run from the server/ directory:
  *   node utils/generateDriveToken.js
  *
- * Prerequisites (fill in below before running):
- *   GDRIVE_CLIENT_ID     — from Google Cloud Console → OAuth 2.0 Client IDs
- *   GDRIVE_CLIENT_SECRET — same place
+ * Required in server/.env:
+ *   GDRIVE_CLIENT_ID
+ *   GDRIVE_CLIENT_SECRET
  *
- * What it does:
- *   1. Prints an authorization URL — open it in a browser and sign in with
- *      the Google account whose Drive you want to upload to.
- *   2. Google redirects to localhost with a ?code= param — paste that code here.
- *   3. Prints the refresh token — copy it into .env as GDRIVE_REFRESH_TOKEN.
+ * Google Cloud Console OAuth client setup:
+ *   Add http://localhost:3000/oauth2callback as an authorized redirect URI.
  */
 
-const { google } = require("googleapis");
-const readline = require("readline");
+require("dotenv").config();
 
-// ── Set these in server/.env before running ───────────────────────────────────
-// GDRIVE_CLIENT_ID=<your-client-id>
-// GDRIVE_CLIENT_SECRET=<your-client-secret>
-const CLIENT_ID     = process.env.GDRIVE_CLIENT_ID;
+const http = require("http");
+const { google } = require("googleapis");
+
+const CLIENT_ID = process.env.GDRIVE_CLIENT_ID;
 const CLIENT_SECRET = process.env.GDRIVE_CLIENT_SECRET;
+const PORT = Number(process.env.GDRIVE_TOKEN_PORT || 3000);
+const REDIRECT_URI = `http://localhost:${PORT}/oauth2callback`;
+const SCOPES = ["https://www.googleapis.com/auth/drive"];
+
 if (!CLIENT_ID || !CLIENT_SECRET) {
-  console.error("❌  GDRIVE_CLIENT_ID and GDRIVE_CLIENT_SECRET must be set in server/.env");
+  console.error("GDRIVE_CLIENT_ID and GDRIVE_CLIENT_SECRET must be set in server/.env");
   process.exit(1);
 }
-// ──────────────────────────────────────────────────────────────────────────────
-
-const REDIRECT_URI = "urn:ietf:wg:oauth:2.0:oob"; // out-of-band — no local server needed
-const SCOPES = ["https://www.googleapis.com/auth/drive.file"];
 
 const oauth2Client = new google.auth.OAuth2(CLIENT_ID, CLIENT_SECRET, REDIRECT_URI);
 
 const authUrl = oauth2Client.generateAuthUrl({
   access_type: "offline",
-  prompt: "consent",           // always get a refresh token
+  prompt: "consent",
   scope: SCOPES,
 });
 
-console.log("\n──────────────────────────────────────────────────────────────");
-console.log("Step 1: Open this URL in a browser and sign in with the Google");
-console.log("        account whose Drive you want to use for file uploads:");
-console.log("\n" + authUrl + "\n");
-console.log("Step 2: After signing in, Google will show you an auth code.");
-console.log("        Copy it and paste it below.");
-console.log("──────────────────────────────────────────────────────────────\n");
-
-const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-
-rl.question("Paste the authorization code here: ", async (code) => {
-  rl.close();
+const server = http.createServer(async (req, res) => {
   try {
-    const { tokens } = await oauth2Client.getToken(code.trim());
-    console.log("\n✅  Success! Add these to your server/.env:\n");
-    console.log(`GDRIVE_CLIENT_ID=${CLIENT_ID}`);
-    console.log(`GDRIVE_CLIENT_SECRET=${CLIENT_SECRET}`);
+    const requestUrl = new URL(req.url, REDIRECT_URI);
+    if (requestUrl.pathname !== "/oauth2callback") {
+      res.writeHead(404, { "Content-Type": "text/plain" });
+      res.end("Not found");
+      return;
+    }
+
+    const code = requestUrl.searchParams.get("code");
+    const error = requestUrl.searchParams.get("error");
+    if (error) throw new Error(error);
+    if (!code) throw new Error("Missing authorization code.");
+
+    const { tokens } = await oauth2Client.getToken(code);
+    if (!tokens.refresh_token) {
+      throw new Error("Google did not return a refresh token. Revoke app access, then run this script again.");
+    }
+
+    res.writeHead(200, { "Content-Type": "text/html" });
+    res.end("<h1>Success</h1><p>You can close this tab and return to the terminal.</p>");
+
+    console.log("\nSuccess. Update server/.env with this refresh token:\n");
     console.log(`GDRIVE_REFRESH_TOKEN=${tokens.refresh_token}`);
-    console.log("\nThe refresh token does not expire unless you revoke access.");
-    console.log("Keep it secret — treat it like a password.\n");
+    console.log("\nRestart the backend after saving .env.\n");
   } catch (err) {
-    console.error("\n❌  Failed to exchange code for token:", err.message);
-    console.error("Make sure you pasted the full code and that CLIENT_ID/SECRET are correct.\n");
+    res.writeHead(500, { "Content-Type": "text/html" });
+    res.end(`<h1>Failed</h1><pre>${String(err.message || err)}</pre>`);
+    console.error("\nFailed to generate refresh token:", err.message || err);
+  } finally {
+    server.close();
   }
+});
+
+server.listen(PORT, () => {
+  console.log("\nOpen this URL in your browser and sign in with the Google Drive upload account:\n");
+  console.log(authUrl);
+  console.log("\nWaiting for Google OAuth callback on " + REDIRECT_URI + " ...\n");
 });

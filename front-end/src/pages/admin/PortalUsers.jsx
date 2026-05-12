@@ -21,6 +21,18 @@ import api from "../../api";
 const { Text, Title } = Typography;
 const { Option } = Select;
 
+const appBase = (import.meta.env.BASE_URL || "/eswm-pipeline/").replace(/\/+$/, "");
+const appApiBase = `${appBase}/api`;
+
+function normalizeVerificationFileUrl(url) {
+  if (!url) return "";
+  let normalized = String(url).replace("/porta-auth/", "/portal-auth/");
+  if (normalized.startsWith("/api/")) {
+    normalized = `${appApiBase}${normalized.slice(4)}`;
+  }
+  return normalized;
+}
+
 export default function PortalUsers({ isDark }) {
   const [users, setUsers] = useState([]);
   const [generators, setGenerators] = useState([]);
@@ -440,7 +452,7 @@ export default function PortalUsers({ isDark }) {
             )}
           </Space>
           {record.verificationFileUrl ? (
-            <a href={record.verificationFileUrl} target="_blank" rel="noopener noreferrer">
+            <a href={normalizeVerificationFileUrl(record.verificationFileUrl)} target="_blank" rel="noopener noreferrer">
               <Button
                 size="small"
                 type="link"
@@ -1021,7 +1033,7 @@ export default function PortalUsers({ isDark }) {
                           borderRadius: "8px 8px 0 0",
                         }}>
                           <img
-                            src={u.verificationFileUrl}
+                            src={normalizeVerificationFileUrl(u.verificationFileUrl)}
                             alt="Verification attachment"
                             style={{ maxWidth: "100%", maxHeight: 240, objectFit: "contain", display: "block", margin: "0 auto" }}
                             onError={(e) => { e.target.style.display = "none"; }}
@@ -1056,7 +1068,7 @@ export default function PortalUsers({ isDark }) {
                           </div>
                         </div>
                         <a
-                          href={u.verificationFileUrl}
+                          href={normalizeVerificationFileUrl(u.verificationFileUrl)}
                           target="_blank"
                           rel="noopener noreferrer"
                         >

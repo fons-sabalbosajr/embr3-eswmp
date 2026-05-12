@@ -72,6 +72,7 @@ import {
   FileImageOutlined,
   FolderOutlined,
   FilePdfOutlined,
+  ContainerOutlined,
 } from "@ant-design/icons";
 import Swal from "sweetalert2";
 import api from "../../api";
@@ -102,8 +103,38 @@ const UNIT_OPTIONS = [
   { label: "tons", value: "tons" },
 ];
 const normalizeUnit = (unit) => (unit || "m³").replace("m3", "m³");
+const TON_PER_M3 = 0.2;
+const ACTIVE_VOLUME_STATUSES = new Set(["pending", "acknowledged", "revert_requested"]);
 
-const CACHE_KEY = "slf-facility-cache-v3";
+const getUploadHeaders = () => {
+  const token = secureStorage.get("token");
+  return token ? { Authorization: `Bearer ${token}` } : {};
+};
+
+const convertVolume = (value, fromUnit = "tons", toUnit = fromUnit) => {
+  const number = Number(value || 0);
+  const from = normalizeUnit(fromUnit);
+  const to = normalizeUnit(toUnit || from);
+  if (!number || from === to) return number;
+  if (from === "tons" && to === "m³") return number / TON_PER_M3;
+  if (from === "m³" && to === "tons") return number * TON_PER_M3;
+  return number;
+};
+
+const getWasteKind = (wasteType) => {
+  const value = String(wasteType || "").toLowerCase();
+  if (value.includes("haz") || value.includes("inert")) return "hazardous";
+  return "residual";
+};
+
+const isHazardousCellType = (cellType) => /haz|inert/i.test(String(cellType || ""));
+
+const formatVolume = (value, unit = "tons") => {
+  const number = Number(value || 0);
+  return `${number.toLocaleString(undefined, { maximumFractionDigits: number >= 100 ? 0 : 2 })} ${normalizeUnit(unit)}`;
+};
+
+const CACHE_KEY = "slf-facility-cache-v4";
 const CACHE_TTL = 5 * 60 * 1000;
 
 const R3_PROVINCES = ["Bataan", "Bulacan", "Nueva Ecija", "Pampanga", "Tarlac", "Zambales", "Aurora"];
@@ -159,36 +190,25 @@ const getBaselineSlfNames = (baseline) => expandSlfNames([
   baseline?.lguCompanyName,
 ]);
 
+const getSubmissionSlfNames = (submission) => expandSlfNames([
+  submission?.slfName,
+  submission?.slfGenerator && typeof submission.slfGenerator === "object" ? submission.slfGenerator.slfName : null,
+]);
+
+const getRecordIds = (record) => [
+  record?._id,
+  record?.slfGenerator && typeof record.slfGenerator === "object" ? record.slfGenerator._id : record?.slfGenerator,
+].filter(Boolean).map(String);
+
+const getSubmissionSlfId = (submission) => {
+  const value = submission?.slfGenerator;
+  if (!value) return "";
+  return String(typeof value === "object" ? value._id : value);
+};
+
 const parseCellIndex = (cellName) => {
   const match = String(cellName || "").match(/(?:cell\s*)?(\d+)/i);
   return match ? Number(match[1]) - 1 : null;
-};
-
-const getActiveBaselineUsage = (baseline, cellCount = 0) => {
-  if (!baseline) return { total: 0, unit: "m³", hasData: false, perCell: [] };
-  const unit = normalizeUnit(baseline.baselineUnit || baseline.activeCellResidualUnit || baseline.totalVolumeAcceptedUnit || "m³");
-  const entries = Array.isArray(baseline.activeCellEntries) ? baseline.activeCellEntries : [];
-  const perCell = Array.from({ length: Math.max(cellCount || 0, entries.length) }, () => null);
-  let total = 0;
-
-  entries.forEach((entry, orderIndex) => {
-    const volume = Number(entry?.volume || 0);
-    if (volume <= 0) return;
-    total += volume;
-    const parsedIndex = parseCellIndex(entry.cellName);
-    const targetIndex = parsedIndex != null && parsedIndex >= 0 ? parsedIndex : orderIndex;
-    perCell[targetIndex] = Number(perCell[targetIndex] || 0) + volume;
-  });
-
-  if (entries.length === 0) {
-    const fallbackTotal = Number(baseline.activeCellResidualVolume || 0) +
-      Number(baseline.activeCellInertVolume || 0) +
-      Number(baseline.activeCellHazardousVolume || 0);
-    total = fallbackTotal;
-    if (fallbackTotal > 0) perCell[0] = fallbackTotal;
-  }
-
-  return { total, unit, hasData: total > 0, perCell };
 };
 
 const buildBaselineMap = (baselines = []) => {
@@ -210,18 +230,127 @@ const findBaselineForFacility = (record, baselineMap) => {
   return null;
 };
 
-const enrichFacilityWithBaseline = (record, baseline) => {
-  if (!record || !baseline) return record;
+const submissionMatchesFacility = (record, submission) => {
+  const submissionId = getSubmissionSlfId(submission);
+  if (submissionId && getRecordIds(record).includes(submissionId)) return true;
+
+  const recordKeys = expandSlfNames(getFacilitySlfNames(record)).map((name) => normalizeSlfKey(name));
+  const submissionKeys = getSubmissionSlfNames(submission).map((name) => normalizeSlfKey(name));
+  return submissionKeys.some((key) => key && recordKeys.includes(key));
+};
+
+const findBestCellIndex = (rows, wasteType, preferredIndex = null) => {
+  if (preferredIndex != null && rows[preferredIndex]) return preferredIndex;
+  const kind = getWasteKind(wasteType);
+  const activeMatch = rows.findIndex((row) =>
+    row.status !== "Closed" &&
+    (kind === "hazardous" ? row.isHazardous : !row.isHazardous)
+  );
+  if (activeMatch >= 0) return activeMatch;
+  const operational = rows.findIndex((row) => row.status === "Operational");
+  return operational >= 0 ? operational : 0;
+};
+
+const addVolumeToCell = (row, volume, source, wasteType, unit) => {
+  const converted = convertVolume(volume, unit, row.unit);
+  if (converted <= 0) return;
+  row[source] += converted;
+  row.total += converted;
+  const kind = getWasteKind(wasteType);
+  row.byWasteType[kind] = (row.byWasteType[kind] || 0) + converted;
+};
+
+const buildFacilityCellUsage = (record, baseline, submissions = []) => {
+  const cellCount = Math.max(
+    Number(record?.numberOfCell || 0),
+    Array.isArray(record?.cellCapacities) ? record.cellCapacities.length : 0,
+    Array.isArray(baseline?.activeCellEntries) ? baseline.activeCellEntries.length : 0,
+    1
+  );
+  const targetUnit = normalizeUnit(
+    record?.volumeCapacityUnit ||
+    baseline?.baselineUnit ||
+    baseline?.activeCellResidualUnit ||
+    baseline?.totalVolumeAcceptedUnit ||
+    record?.wasteReceivedUnit ||
+    "tons"
+  );
+
+  const rows = Array.from({ length: cellCount }, (_, index) => {
+    const status = record?.cellStatuses?.[index] || "Operational";
+    const type = record?.cellTypes?.[index] || "Residual";
+    return {
+      key: `cell-${index + 1}`,
+      index,
+      cellName: `Cell ${index + 1}`,
+      status,
+      type,
+      isHazardous: isHazardousCellType(type),
+      capacity: Number(record?.cellCapacities?.[index] || 0),
+      capacityUnit: normalizeUnit(record?.cellCapacityUnits?.[index] || record?.volumeCapacityUnit || "m³"),
+      unit: targetUnit,
+      baseline: 0,
+      submissions: 0,
+      total: 0,
+      byWasteType: {},
+    };
+  });
+
+  const activeEntries = Array.isArray(baseline?.activeCellEntries) ? baseline.activeCellEntries : [];
+  activeEntries.forEach((entry, orderIndex) => {
+    const parsedIndex = parseCellIndex(entry.cellName);
+    const targetIndex = findBestCellIndex(rows, entry.wasteType, parsedIndex != null && parsedIndex >= 0 ? parsedIndex : orderIndex);
+    const row = rows[targetIndex] || rows[0];
+    if (entry.cellName) row.cellName = entry.cellName;
+    addVolumeToCell(row, Number(entry.volume || 0), "baseline", entry.wasteType, targetUnit);
+  });
+
+  if (activeEntries.length === 0 && baseline) {
+    [
+      { volume: baseline.activeCellResidualVolume, unit: baseline.activeCellResidualUnit, wasteType: "Residual" },
+      { volume: baseline.activeCellInertVolume, unit: baseline.activeCellInertUnit, wasteType: "Treated Hazardous Waste" },
+      { volume: baseline.activeCellHazardousVolume, unit: baseline.activeCellHazardousUnit, wasteType: "Hazardous Waste" },
+    ].forEach((entry) => {
+      const targetIndex = findBestCellIndex(rows, entry.wasteType);
+      addVolumeToCell(rows[targetIndex] || rows[0], Number(entry.volume || 0), "baseline", entry.wasteType, entry.unit || targetUnit);
+    });
+  }
+
+  const matchingSubmissions = submissions.filter((submission) =>
+    ACTIVE_VOLUME_STATUSES.has(submission.status || "pending") && submissionMatchesFacility(record, submission)
+  );
+  matchingSubmissions.forEach((submission) => {
+    (submission.trucks || []).forEach((truck) => {
+      const targetIndex = findBestCellIndex(rows, truck.wasteType);
+      addVolumeToCell(rows[targetIndex] || rows[0], Number(truck.actualVolume || 0), "submissions", truck.wasteType, truck.actualVolumeUnit || "tons");
+    });
+  });
+
+  const totalBaseline = rows.reduce((sum, row) => sum + row.baseline, 0);
+  const totalSubmissions = rows.reduce((sum, row) => sum + row.submissions, 0);
+  const total = rows.reduce((sum, row) => sum + row.total, 0);
+  return {
+    rows,
+    totalBaseline,
+    totalSubmissions,
+    total,
+    unit: targetUnit,
+    submissionCount: matchingSubmissions.length,
+  };
+};
+
+const enrichFacilityWithBaseline = (record, baseline, submissions = []) => {
+  if (!record) return record;
   const cellCount = Number(record.numberOfCell || 0);
-  const usage = getActiveBaselineUsage(baseline, cellCount);
-  if (!usage.hasData) return record;
+  const usage = buildFacilityCellUsage(record, baseline, submissions);
+  if (usage.total <= 0) return record;
 
   const currentFillValues = Array.isArray(record.cellFillValues) ? record.cellFillValues : [];
   const currentFillUnits = Array.isArray(record.cellFillUnits) ? record.cellFillUnits : [];
-  const nextFillValues = Array.from({ length: Math.max(cellCount, usage.perCell.length) }, (_, index) =>
-    usage.perCell[index] != null ? usage.perCell[index] : currentFillValues[index]
+  const nextFillValues = Array.from({ length: Math.max(cellCount, usage.rows.length) }, (_, index) =>
+    usage.rows[index]?.total > 0 ? usage.rows[index].total : currentFillValues[index]
   );
-  const nextFillUnits = nextFillValues.map((_, index) => currentFillUnits[index] || usage.unit);
+  const nextFillUnits = nextFillValues.map((_, index) => currentFillUnits[index] || usage.rows[index]?.unit || usage.unit);
 
   return {
     ...record,
@@ -229,9 +358,13 @@ const enrichFacilityWithBaseline = (record, baseline) => {
     wasteReceivedUnit: usage.unit,
     cellFillValues: nextFillValues,
     cellFillUnits: nextFillUnits,
-    _baselineWasteReceived: usage.total,
+    _baselineWasteReceived: usage.totalBaseline,
     _baselineWasteReceivedUnit: usage.unit,
-    _baselineActiveCellEntries: baseline.activeCellEntries || [],
+    _submissionWasteReceived: usage.totalSubmissions,
+    _submissionWasteReceivedUnit: usage.unit,
+    _cellUsageRows: usage.rows,
+    _cellUsageSubmissionCount: usage.submissionCount,
+    _baselineActiveCellEntries: baseline?.activeCellEntries || [],
   };
 };
 
@@ -457,6 +590,50 @@ function WasteBaselineInfo() {
     },
   ];
 
+  const buildBaselineCellRows = (record, cellType) => {
+    const entries = cellType === "active" ? record.activeCellEntries || [] : record.closedCellEntries || [];
+    const fallbackRows = cellType === "active"
+      ? [
+          { cellName: "Active Cell - Residual", wasteType: "Residual", volume: record.activeCellResidualVolume, unit: record.activeCellResidualUnit || record.baselineUnit },
+          { cellName: "Active Cell - Inert", wasteType: "Inert", volume: record.activeCellInertVolume, unit: record.activeCellInertUnit || record.baselineUnit },
+          { cellName: "Active Cell - Hazardous", wasteType: "Hazardous Waste", volume: record.activeCellHazardousVolume, unit: record.activeCellHazardousUnit || record.baselineUnit },
+        ]
+      : [
+          { cellName: "Closed Cell - Residual", wasteType: "Residual", volume: record.closedCellResidualVolume, unit: record.closedCellResidualUnit || record.baselineUnit },
+          { cellName: "Closed Cell - Inert", wasteType: "Inert", volume: record.closedCellInertVolume, unit: record.closedCellInertUnit || record.baselineUnit },
+          { cellName: "Closed Cell - Hazardous", wasteType: "Hazardous Waste", volume: record.closedCellHazardousVolume, unit: record.closedCellHazardousUnit || record.baselineUnit },
+        ];
+
+    const source = entries.length > 0
+      ? entries.map((entry, index) => ({
+          key: `${cellType}-${index}`,
+          cellNo: (parseCellIndex(entry.cellName) ?? index) + 1,
+          cellName: entry.cellName || `Cell ${index + 1}`,
+          wasteType: entry.wasteType || "Residual",
+          volume: Number(entry.volume || 0),
+          unit: record.baselineUnit || "m³",
+        }))
+      : fallbackRows.map((entry, index) => ({
+          key: `${cellType}-fallback-${index}`,
+          cellNo: index + 1,
+          cellName: entry.cellName,
+          wasteType: entry.wasteType,
+          volume: Number(entry.volume || 0),
+          unit: entry.unit || record.baselineUnit || "m³",
+        }));
+
+    return source
+      .filter((entry) => entry.volume > 0)
+      .sort((a, b) => a.cellNo - b.cellNo || a.cellName.localeCompare(b.cellName));
+  };
+
+  const baselineCellColumns = [
+    { title: "Cell No.", dataIndex: "cellNo", width: 90, render: (value) => <Tag color="blue">{value}</Tag> },
+    { title: "Cell Name", dataIndex: "cellName", render: (value) => <Text strong>{value}</Text> },
+    { title: "Waste Type", dataIndex: "wasteType", render: (value) => <Tag color={getWasteKind(value) === "hazardous" ? "red" : "green"}>{value}</Tag> },
+    { title: "Baseline Volume", key: "volume", align: "right", render: (_, row) => <Text strong>{formatVolume(row.volume, row.unit)}</Text> },
+  ];
+
   return (
     <>
       <div
@@ -496,37 +673,52 @@ function WasteBaselineInfo() {
           expandedRowKeys: expandedGen ? [expandedGen] : [],
           onExpand: (expanded, record) =>
             setExpandedGen(expanded ? record._id : null),
-          expandedRowRender: (record) =>
-            record.accreditedHaulers?.length > 0 ? (
-              <Table
-                dataSource={record.accreditedHaulers}
-                rowKey={(_, i) => i}
-                size="small"
-                pagination={false}
-                columns={[
-                  {
-                    title: "Hauler Name",
-                    dataIndex: "haulerName",
-                    key: "haulerName",
-                  },
-                  {
-                    title: "Number of Trucks",
-                    dataIndex: "numberOfTrucks",
-                    key: "numberOfTrucks",
-                    render: (v) => v ?? "—",
-                  },
-                  {
-                    title: "Private Sector Clients",
-                    dataIndex: "privateSectorClients",
-                    key: "privateSectorClients",
-                    render: (v) => v || "—",
-                  },
-                ]}
-              />
-            ) : (
-              <Text type="secondary">No accredited haulers</Text>
-            ),
-          rowExpandable: (record) => record.accreditedHaulers?.length > 0,
+          expandedRowRender: (record) => {
+            const activeRows = buildBaselineCellRows(record, "active");
+            const closedRows = buildBaselineCellRows(record, "closed");
+            return (
+              <Card size="small" style={{ borderRadius: 8 }} bodyStyle={{ padding: 8 }}>
+                <Collapse
+                  size="small"
+                  defaultActiveKey={["active"]}
+                  items={[
+                    {
+                      key: "active",
+                      label: <Space><ContainerOutlined /> Active Cell Volumes <Tag color="green">{activeRows.length}</Tag></Space>,
+                      children: activeRows.length > 0 ? (
+                        <Table dataSource={activeRows} columns={baselineCellColumns} rowKey="key" size="small" pagination={false} />
+                      ) : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No active cell baseline volumes" />,
+                    },
+                    {
+                      key: "closed",
+                      label: <Space><DatabaseOutlined /> Closed Cell Volumes <Tag>{closedRows.length}</Tag></Space>,
+                      children: closedRows.length > 0 ? (
+                        <Table dataSource={closedRows} columns={baselineCellColumns} rowKey="key" size="small" pagination={false} />
+                      ) : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No closed cell baseline volumes" />,
+                    },
+                    {
+                      key: "haulers",
+                      label: <Space><TeamOutlined /> Accredited Haulers <Tag color="blue">{record.accreditedHaulers?.length || 0}</Tag></Space>,
+                      children: record.accreditedHaulers?.length > 0 ? (
+                        <Table
+                          dataSource={record.accreditedHaulers}
+                          rowKey={(_, i) => i}
+                          size="small"
+                          pagination={false}
+                          columns={[
+                            { title: "Hauler Name", dataIndex: "haulerName", key: "haulerName" },
+                            { title: "Number of Trucks", dataIndex: "numberOfTrucks", key: "numberOfTrucks", render: (v) => v ?? "—" },
+                            { title: "Private Sector Clients", dataIndex: "privateSectorClients", key: "privateSectorClients", render: (v) => v || "—" },
+                          ]}
+                        />
+                      ) : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No accredited haulers" />,
+                    },
+                  ]}
+                />
+              </Card>
+            );
+          },
+          rowExpandable: () => true,
         }}
       />
     </>
@@ -720,6 +912,53 @@ function PortalGenerators({
     });
     return { residual, haz, other };
   }, [submissions]);
+
+  const portalCellSummaries = useMemo(() => {
+    return generators.map((generator) => {
+      const generatorId = String(generator._id || "");
+      const facility = slfRecords.find((record) => {
+        const ids = getRecordIds(record);
+        const names = expandSlfNames(getFacilitySlfNames(record)).map((name) => normalizeSlfKey(name));
+        return ids.includes(generatorId) || names.includes(normalizeSlfKey(generator.slfName));
+      });
+      const generatorSubmissions = submissions.filter((submission) => {
+        const submissionId = getSubmissionSlfId(submission);
+        if (submissionId && submissionId === generatorId) return true;
+        return getSubmissionSlfNames(submission).some((name) => normalizeSlfKey(name) === normalizeSlfKey(generator.slfName));
+      });
+      const usage = facility?._cellUsageRows?.length
+        ? {
+            rows: facility._cellUsageRows,
+            totalBaseline: Number(facility._baselineWasteReceived || 0),
+            totalSubmissions: Number(facility._submissionWasteReceived || 0),
+            total: Number(facility.actualResidualWasteReceived || 0),
+            unit: facility.wasteReceivedUnit || "tons",
+          }
+        : buildFacilityCellUsage({ ...generator, lgu: generator.slfName, numberOfCell: 1 }, null, generatorSubmissions);
+
+      return {
+        key: generatorId || generator.slfName,
+        slfName: generator.slfName,
+        facility,
+        rows: usage.rows.filter((row) => row.status !== "Closed" || row.total > 0),
+        totalBaseline: usage.totalBaseline,
+        totalSubmissions: usage.totalSubmissions,
+        total: usage.total,
+        unit: usage.unit,
+        submissionCount: generatorSubmissions.length,
+      };
+    }).filter((item) => item.submissionCount > 0 || item.total > 0 || item.facility?._cellUsageRows?.length > 0);
+  }, [generators, slfRecords, submissions]);
+
+  const portalCellColumns = [
+    { title: "Cell", dataIndex: "cellName", width: 130, render: (value, row) => <Text strong>{value || `Cell ${row.index + 1}`}</Text> },
+    { title: "Type", dataIndex: "type", width: 120, render: (value) => <Tag color={isHazardousCellType(value) ? "red" : "blue"}>{isHazardousCellType(value) ? "Haz" : "Residual"}</Tag> },
+    { title: "Status", dataIndex: "status", width: 130, render: (value) => <Tag color={value === "Operational" ? "green" : value === "Closed" ? "default" : "gold"}>{value || "Operational"}</Tag> },
+    { title: "Baseline", key: "baseline", align: "right", render: (_, row) => formatVolume(row.baseline, row.unit) },
+    { title: "Submissions", key: "submissions", align: "right", render: (_, row) => <Text strong style={{ color: "#2f54eb" }}>{formatVolume(row.submissions, row.unit)}</Text> },
+    { title: "Total Fill", key: "total", align: "right", render: (_, row) => <Text strong>{formatVolume(row.total, row.unit)}</Text> },
+    { title: "Capacity", key: "capacity", align: "right", render: (_, row) => row.capacity > 0 ? formatVolume(row.capacity, row.capacityUnit) : "—" },
+  ];
 
   const revertRequestCount = useMemo(
     () => submissions.filter((s) => s.revertRequested).length,
@@ -1207,6 +1446,59 @@ function PortalGenerators({
             rowExpandable: (g) => !!(statsMap[g._id] || linkedFacilities[g._id] || (g.accreditedHaulers || []).length),
           }}
         />
+      </Card>
+
+      <Card
+        size="small"
+        style={{ borderRadius: 10, marginBottom: 16 }}
+        bodyStyle={{ padding: 0 }}
+        title={
+          <Space wrap>
+            <PieChartOutlined style={{ color: "#13c2c2" }} />
+            <Text strong>Portal Submission Volume by Active Cell</Text>
+            <Tag bordered={false} color="cyan">{portalCellSummaries.length} SLFs</Tag>
+          </Space>
+        }
+      >
+        {portalCellSummaries.length === 0 ? (
+          <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No portal submission volume data yet" style={{ padding: 24 }} />
+        ) : (
+          <Collapse
+            size="small"
+            bordered={false}
+            items={portalCellSummaries.map((summary) => ({
+              key: summary.key,
+              label: (
+                <Space wrap>
+                  <BankOutlined />
+                  <Text strong>{summary.slfName}</Text>
+                  <Tag color="blue">{summary.submissionCount} submission{summary.submissionCount === 1 ? "" : "s"}</Tag>
+                  <Tag color="green">Baseline {formatVolume(summary.totalBaseline, summary.unit)}</Tag>
+                  <Tag color="geekblue">Submissions {formatVolume(summary.totalSubmissions, summary.unit)}</Tag>
+                </Space>
+              ),
+              children: (
+                <Table
+                  dataSource={summary.rows}
+                  columns={portalCellColumns}
+                  rowKey={(row) => row.key}
+                  size="small"
+                  pagination={false}
+                  scroll={{ x: 900 }}
+                  summary={() => (
+                    <Table.Summary.Row>
+                      <Table.Summary.Cell index={0} colSpan={3}><Text strong>Total</Text></Table.Summary.Cell>
+                      <Table.Summary.Cell index={3} align="right"><Text strong>{formatVolume(summary.totalBaseline, summary.unit)}</Text></Table.Summary.Cell>
+                      <Table.Summary.Cell index={4} align="right"><Text strong style={{ color: "#2f54eb" }}>{formatVolume(summary.totalSubmissions, summary.unit)}</Text></Table.Summary.Cell>
+                      <Table.Summary.Cell index={5} align="right"><Text strong>{formatVolume(summary.total, summary.unit)}</Text></Table.Summary.Cell>
+                      <Table.Summary.Cell index={6} />
+                    </Table.Summary.Row>
+                  )}
+                />
+              ),
+            }))}
+          />
+        )}
       </Card>
 
       {/* ── Portal Submissions ────────────────────────────────────────── */}
@@ -1711,16 +2003,19 @@ export default function SLFMonitoring({canEdit = true, canDelete = true, isDark}
   const [convDensity, setConvDensity] = useState(0.2);
   const [convM3ToTons, setConvM3ToTons] = useState(null);
   const [convModalOpen, setConvModalOpen] = useState(false);
+  const [slfSubmissions, setSlfSubmissions] = useState([]);
   const [form] = Form.useForm();
 
   const fetchRecords = useCallback(async (skipCache = false) => {
     await fetchWithCache(CACHE_KEY, async () => {
-      const [{ data: facilities }, { data: baselines }] = await Promise.all([
+      const [{ data: facilities }, { data: baselines }, { data: submissions }] = await Promise.all([
         api.get("/slf-facilities"),
         api.get("/data-slf/baselines"),
+        api.get("/data-slf"),
       ]);
+      setSlfSubmissions(submissions || []);
       const baselineMap = buildBaselineMap(baselines || []);
-      return (facilities || []).map((record) => enrichFacilityWithBaseline(record, findBaselineForFacility(record, baselineMap)));
+      return (facilities || []).map((record) => enrichFacilityWithBaseline(record, findBaselineForFacility(record, baselineMap), submissions || []));
     }, {
       ttl: CACHE_TTL,
       force: skipCache,
@@ -1789,8 +2084,12 @@ export default function SLFMonitoring({canEdit = true, canDelete = true, isDark}
     const baseRecord = detailYearRecords.length === 0
       ? detailModal
       : detailYearRecords.find((r) => (r.dataYear || new Date().getFullYear()) === detailYear) || null;
-    return enrichFacilityWithBaseline(baseRecord, baselineData);
-  }, [baselineData, detailModal, detailYearRecords, detailYear]);
+    // Include portal submissions so cell fill values reflect submitted volumes
+    const facilitySubmissions = slfSubmissions.filter(
+      (sub) => ACTIVE_VOLUME_STATUSES.has(sub.status || "pending") && submissionMatchesFacility(detailModal, sub)
+    );
+    return enrichFacilityWithBaseline(baseRecord, baselineData, facilitySubmissions);
+  }, [baselineData, detailModal, detailYearRecords, detailYear, slfSubmissions]);
 
   const generatorOptions = useMemo(
     () => generators.map((g) => ({ label: g.slfName, value: g._id })),
@@ -2134,6 +2433,10 @@ export default function SLFMonitoring({canEdit = true, canDelete = true, isDark}
     (s, r) => s + (r.actualResidualWasteReceived || 0),
     0,
   );
+  const wasteUnitLabel = filtered.some((r) => normalizeUnit(r.wasteReceivedUnit) === "tons") &&
+    !filtered.some((r) => normalizeUnit(r.wasteReceivedUnit) === "m³")
+    ? "tons"
+    : "m³";
   const privateSectorCount = filtered.filter(
     (r) => /private/i.test(r.ownership),
   ).length;
@@ -2788,7 +3091,7 @@ export default function SLFMonitoring({canEdit = true, canDelete = true, isDark}
             icon={<BarChartOutlined style={{ color: "#ff4d4f", fontSize: 14 }} />}
             title="Waste Received"
             value={totalWaste}
-            suffix="tons"
+            suffix={wasteUnitLabel}
             formatter={(v) => formatCompact(v)}
             summary={`${wasteWithData}/${totalRecords} reporting`}
             breakdowns={[`${formatCompact(wasteWithData ? totalWaste / wasteWithData : 0)} avg`, `${capacityUsePercent.toFixed(1)}% capacity`]}
@@ -3482,7 +3785,7 @@ export default function SLFMonitoring({canEdit = true, canDelete = true, isDark}
                                   >
                                     <Upload
                                       action="/eswm-pipeline/api/upload"
-                                      headers={{ Authorization: `Bearer ${secureStorage.get("token")}` }}
+                                      headers={getUploadHeaders()}
                                       listType="text"
                                       accept="image/*,.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx"
                                       multiple
@@ -3589,7 +3892,7 @@ export default function SLFMonitoring({canEdit = true, canDelete = true, isDark}
                                   >
                                     <Upload
                                       action="/eswm-pipeline/api/upload"
-                                      headers={{ Authorization: `Bearer ${secureStorage.get("token")}` }}
+                                      headers={getUploadHeaders()}
                                       listType="text"
                                       accept="image/*,.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx"
                                       multiple
@@ -3849,55 +4152,80 @@ export default function SLFMonitoring({canEdit = true, canDelete = true, isDark}
                       </div>
                     </Col>
                     <Col xs={24} md={18}>
-                      <Row gutter={[8, 8]} justify="start">
-                        {cellDonutData.map((cell, i) => {
-                          const isInactive = cell.status !== "Operational";
-                          const isHaz = cell.cellType === "Treated Haz Waste";
-                          const strokeFn = STATUS_STROKE[cell.status] || STATUS_STROKE["Operational"];
-                          const strokeColor = isInactive ? strokeFn(0) : (isHaz ? "#f5222d" : strokeFn(cell.pct));
-                          const tagColor = STATUS_TAG[cell.status] || "default";
-                          return (
-                            <Col xs={12} sm={8} md={6} key={i} style={{ textAlign: "center" }}>
-                              <Progress
-                                type="dashboard"
-                                percent={isInactive ? 0 : cell.pct}
-                                size={65}
-                                strokeLinecap="butt"
-                                strokeColor={strokeColor}
-                                trailColor={cell.status === "Closed" ? "#bfbfbf" : undefined}
-                                format={() => (
-                                  <div style={{ lineHeight: 1.2 }}>
-                                    <div style={{ fontSize: 11, fontWeight: 700, color: strokeColor }}>
-                                      {cell.status === "Closed" ? "✕" : isInactive ? "—" : `${cell.pct}%`}
-                                    </div>
-                                  </div>
+                      {(() => {
+                        const residualGauges = cellDonutData.filter(c => c.cellType !== "Treated Haz Waste");
+                        const hazGauges = cellDonutData.filter(c => c.cellType === "Treated Haz Waste");
+                        const renderGaugeGroup = (cells) => (
+                          <Row gutter={[8, 8]} justify="start">
+                            {cells.map((cell) => {
+                              const isInactive = cell.status !== "Operational";
+                              const isHaz = cell.cellType === "Treated Haz Waste";
+                              const strokeFn = STATUS_STROKE[cell.status] || STATUS_STROKE["Operational"];
+                              const strokeColor = isInactive ? strokeFn(0) : (isHaz ? "#f5222d" : strokeFn(cell.pct));
+                              const tagColor = STATUS_TAG[cell.status] || "default";
+                              return (
+                                <Col xs={12} sm={8} md={6} key={cell.index} style={{ textAlign: "center" }}>
+                                  <Progress
+                                    type="dashboard"
+                                    percent={isInactive ? 0 : cell.pct}
+                                    size={65}
+                                    strokeLinecap="butt"
+                                    strokeColor={strokeColor}
+                                    trailColor={cell.status === "Closed" ? "#bfbfbf" : undefined}
+                                    format={() => (
+                                      <div style={{ lineHeight: 1.2 }}>
+                                        <div style={{ fontSize: 11, fontWeight: 700, color: strokeColor }}>
+                                          {cell.status === "Closed" ? "✕" : isInactive ? "—" : `${cell.pct}%`}
+                                        </div>
+                                      </div>
+                                    )}
+                                  />
+                                  <div style={{ fontSize: 11, fontWeight: 600, marginTop: 2 }}>Cell {cell.index + 1}</div>
+                                  <Tag color={tagColor} style={{ fontSize: 9, marginTop: 2, marginBottom: 2 }}>{cell.status.replace(" Cell", "")}</Tag>
+                                  <Tag color={isHaz ? "red" : "blue"} style={{ fontSize: 9, marginBottom: 2 }}>{isHaz ? "Haz" : "Res"}</Tag>
+                                  <div style={{ fontSize: 10, color: "#8c8c8c" }}>{cell.capacity > 0 ? `${cell.capacity.toLocaleString()} ${cell.capacityUnit}` : "—"}</div>
+                                  {cell.hasCellFill && cell.used > 0 && (
+                                    <div style={{ fontSize: 9, color: "#1677ff" }}>{cell.used.toLocaleString()} {cell.fillUnit} filled</div>
+                                  )}
+                                  {cell.note && (
+                                    <Tooltip title={cell.note}>
+                                      <div style={{ fontSize: 9, color: "#595959", fontStyle: "italic", marginTop: 2, maxWidth: 80, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{cell.note}</div>
+                                    </Tooltip>
+                                  )}
+                                </Col>
+                              );
+                            })}
+                          </Row>
+                        );
+                        return (
+                          <>
+                            {residualGauges.length > 0 && (
+                              <>
+                                {hazGauges.length > 0 && (
+                                  <div style={{ fontSize: 10, fontWeight: 600, color: "#1677ff", marginBottom: 4 }}>Residual Cells</div>
                                 )}
-                              />
-                              <div style={{ fontSize: 11, fontWeight: 600, marginTop: 2 }}>Cell {i + 1}</div>
-                              <Tag color={tagColor} style={{ fontSize: 9, marginTop: 2, marginBottom: 2 }}>{cell.status.replace(" Cell", "")}</Tag>
-                              <Tag color={isHaz ? "red" : "blue"} style={{ fontSize: 9, marginBottom: 2 }}>{isHaz ? "Haz" : "Res"}</Tag>
-                              <div style={{ fontSize: 10, color: "#8c8c8c" }}>{cell.capacity > 0 ? `${cell.capacity.toLocaleString()} ${cell.capacityUnit}` : "—"}</div>
-                              {cell.hasCellFill && cell.used > 0 && (
-                                <div style={{ fontSize: 9, color: "#1677ff" }}>{cell.used.toLocaleString()} {cell.fillUnit} filled</div>
-                              )}
-                              {cell.note && (
-                                <Tooltip title={cell.note}>
-                                  <div style={{ fontSize: 9, color: "#595959", fontStyle: "italic", marginTop: 2, maxWidth: 80, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{cell.note}</div>
-                                </Tooltip>
-                              )}
-                            </Col>
-                          );
-                        })}
-                      </Row>
+                                {renderGaugeGroup(residualGauges)}
+                              </>
+                            )}
+                            {hazGauges.length > 0 && (
+                              <>
+                                <div style={{ fontSize: 10, fontWeight: 600, color: "#f5222d", marginTop: residualGauges.length > 0 ? 8 : 0, marginBottom: 4 }}>Treated Haz Waste Cells</div>
+                                {renderGaugeGroup(hazGauges)}
+                              </>
+                            )}
+                          </>
+                        );
+                      })()}
                     </Col>
                   </Row>
 
-                  {/* Per-cell donut breakdown — fixed pixel sizes to avoid ResizeObserver lag in modal */}
-                  {cellCount >= 2 && cellDonutData.some(c => c.capacity > 0) && (
-                    <>
-                      <Divider plain style={{ fontSize: 11, margin: "10px 0 6px" }}>Per-Cell Capacity Breakdown</Divider>
+                  {/* Per-cell donut breakdown — grouped by cell type */}
+                  {cellCount >= 2 && cellDonutData.some(c => c.capacity > 0) && (() => {
+                    const residualDonuts = cellDonutData.filter(c => c.capacity > 0 && c.cellType !== "Treated Haz Waste");
+                    const hazDonuts = cellDonutData.filter(c => c.capacity > 0 && c.cellType === "Treated Haz Waste");
+                    const renderDonutGroup = (cells) => (
                       <Row gutter={[4, 4]} justify="center">
-                        {cellDonutData.filter(c => c.capacity > 0).map((cell) => {
+                        {cells.map((cell) => {
                           const isInactive = cell.status !== "Operational";
                           const isHaz = cell.cellType === "Treated Haz Waste";
                           const chartData = isInactive
@@ -3927,8 +4255,31 @@ export default function SLFMonitoring({canEdit = true, canDelete = true, isDark}
                           );
                         })}
                       </Row>
-                    </>
-                  )}
+                    );
+                    return (
+                      <>
+                        <Divider plain style={{ fontSize: 11, margin: "10px 0 6px" }}>Per-Cell Capacity Breakdown</Divider>
+                        {residualDonuts.length > 0 && (
+                          <>
+                            {hazDonuts.length > 0 && (
+                              <Divider plain style={{ fontSize: 10, margin: "6px 0 4px", borderColor: "#1677ff" }}>
+                                <span style={{ color: "#1677ff" }}>Residual Cells</span>
+                              </Divider>
+                            )}
+                            {renderDonutGroup(residualDonuts)}
+                          </>
+                        )}
+                        {hazDonuts.length > 0 && (
+                          <>
+                            <Divider plain style={{ fontSize: 10, margin: "8px 0 4px", borderColor: "#f5222d" }}>
+                              <span style={{ color: "#f5222d" }}>Treated Haz Waste Cells</span>
+                            </Divider>
+                            {renderDonutGroup(hazDonuts)}
+                          </>
+                        )}
+                      </>
+                    );
+                  })()}
                 </Card>
               );
             }}
@@ -4255,7 +4606,7 @@ export default function SLFMonitoring({canEdit = true, canDelete = true, isDark}
                         accept="image/*"
                         multiple
                         action="/eswm-pipeline/api/upload"
-                        headers={{ Authorization: `Bearer ${secureStorage.get("token")}` }}
+                        headers={getUploadHeaders()}
                         onChange={({ fileList }) => {
                           form.setFieldValue("galleryPhotos", fileList);
                         }}
@@ -4347,7 +4698,7 @@ export default function SLFMonitoring({canEdit = true, canDelete = true, isDark}
                                       maxCount={1}
                                       accept=".pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx"
                                       action="/eswm-pipeline/api/upload"
-                                      headers={{ Authorization: `Bearer ${secureStorage.get("token")}` }}
+                                      headers={getUploadHeaders()}
                                     >
                                       <Button icon={<FilePdfOutlined />}>Upload Document</Button>
                                     </Upload>
@@ -4725,6 +5076,12 @@ export default function SLFMonitoring({canEdit = true, canDelete = true, isDark}
                                   <Col span={12}>
                                     <div style={{ fontSize: 11, color: "#8c8c8c" }}>Waste Received</div>
                                     <div style={{ fontSize: 14, fontWeight: 600 }}>{wasteReceived > 0 ? `${wasteReceived.toLocaleString()} ${normalizeUnit(detailViewRecord.wasteReceivedUnit || "tons")}` : "0"}</div>
+                                    {detailViewRecord._submissionWasteReceived > 0 && (
+                                      <div style={{ fontSize: 10, color: "#2f54eb" }}>
+                                        {Number(detailViewRecord._baselineWasteReceived || 0).toLocaleString()} baseline +{" "}
+                                        {Number(detailViewRecord._submissionWasteReceived).toLocaleString()} submissions
+                                      </div>
+                                    )}
                                   </Col>
                                   <Col span={12}>
                                     <div style={{ fontSize: 11, color: "#8c8c8c" }}>Total Capacity</div>
@@ -4746,7 +5103,28 @@ export default function SLFMonitoring({canEdit = true, canDelete = true, isDark}
                               </Card>
                             </Col>
                             <Col xs={24} md={14}>
-                              <Card size="small" title={<><BarChartOutlined /> Per-Cell Status &amp; Capacity</>} style={{ borderRadius: 10 }}>
+                              <Card
+                                size="small"
+                                title={
+                                  <Space wrap size={4}>
+                                    <BarChartOutlined /> Per-Cell Status &amp; Capacity
+                                    {detailViewRecord._cellUsageSubmissionCount > 0 && (
+                                      <Tag color="geekblue" style={{ fontSize: 10 }}>
+                                        {detailViewRecord._cellUsageSubmissionCount} portal submission{detailViewRecord._cellUsageSubmissionCount !== 1 ? "s" : ""} included
+                                      </Tag>
+                                    )}
+                                  </Space>
+                                }
+                                style={{ borderRadius: 10 }}
+                              >
+                                {detailViewRecord._submissionWasteReceived > 0 && (
+                                  <div style={{ marginBottom: 8, fontSize: 11, color: "#8c8c8c", borderBottom: "1px solid #f0f0f0", paddingBottom: 6 }}>
+                                    <Space size={12} wrap>
+                                      <span>Baseline: <Text strong>{Number(detailViewRecord._baselineWasteReceived || 0).toLocaleString()} {normalizeUnit(detailViewRecord.wasteReceivedUnit || "tons")}</Text></span>
+                                      <span style={{ color: "#2f54eb" }}>Submissions: <Text strong style={{ color: "#2f54eb" }}>+{Number(detailViewRecord._submissionWasteReceived).toLocaleString()} {normalizeUnit(detailViewRecord._submissionWasteReceivedUnit || "tons")}</Text></span>
+                                    </Space>
+                                  </div>
+                                )}
                                 <Row gutter={[16, 16]} justify="center">
                                   {(cellCaps.length > 0 ? cellCaps : Array.from({ length: cells }, () => 0)).map((cap, i) => {
                                     const fillValues = detailViewRecord.cellFillValues || [];
@@ -4798,51 +5176,195 @@ export default function SLFMonitoring({canEdit = true, canDelete = true, isDark}
                           </Row>
 
                           {/* Baseline cell volumes */}
-                          {hasCellBaseline ? (
-                            <Card size="small" title="Baseline Cell Volumes" style={{ borderRadius: 10, marginBottom: 8 }}>
-                              <Descriptions size="small" bordered column={2}>
-                                {activeCellEntries.map((entry, i) => (
-                                  <Descriptions.Item key={`active-entry-${i}`} label={`Active ${entry.cellName || `Cell ${i + 1}`}`}>
-                                    {Number(entry.volume || 0) > 0
-                                      ? `${Number(entry.volume).toLocaleString()} ${baselineEntryUnit}${entry.wasteType ? ` (${entry.wasteType})` : ""}`
-                                      : "—"}
-                                  </Descriptions.Item>
-                                ))}
-                                {closedCellEntries.map((entry, i) => (
-                                  <Descriptions.Item key={`closed-entry-${i}`} label={`Closed ${entry.cellName || `Cell ${i + 1}`}`}>
-                                    {Number(entry.volume || 0) > 0
-                                      ? `${Number(entry.volume).toLocaleString()} ${baselineEntryUnit}${entry.wasteType ? ` (${entry.wasteType})` : ""}`
-                                      : "—"}
-                                  </Descriptions.Item>
-                                ))}
-                                <Descriptions.Item label="Active Cell (Residual)">
-                                  {baselineData.activeCellResidualVolume > 0
-                                    ? `${Number(baselineData.activeCellResidualVolume).toLocaleString()} ${(baselineData.activeCellResidualUnit || "m³").replace("m3", "m³")}`
-                                    : "—"}
-                                </Descriptions.Item>
-                                <Descriptions.Item label="Active Cell (Inert)">
-                                  {baselineData.activeCellInertVolume > 0
-                                    ? `${Number(baselineData.activeCellInertVolume).toLocaleString()} ${(baselineData.activeCellInertUnit || "m³").replace("m3", "m³")}`
-                                    : "—"}
-                                </Descriptions.Item>
-                                <Descriptions.Item label="Closed Cell (Residual)">
-                                  {baselineData.closedCellResidualVolume > 0
-                                    ? `${Number(baselineData.closedCellResidualVolume).toLocaleString()} ${(baselineData.closedCellResidualUnit || "m³").replace("m3", "m³")}`
-                                    : "—"}
-                                </Descriptions.Item>
-                                <Descriptions.Item label="Closed Cell (Inert)">
-                                  {baselineData.closedCellInertVolume > 0
-                                    ? `${Number(baselineData.closedCellInertVolume).toLocaleString()} ${(baselineData.closedCellInertUnit || "m³").replace("m3", "m³")}`
-                                    : "—"}
-                                </Descriptions.Item>
-                                {baselineData.totalVolumeAccepted > 0 && (
-                                  <Descriptions.Item label="Total Volume Accepted" span={2}>
-                                    {Number(baselineData.totalVolumeAccepted).toLocaleString()} {(baselineData.totalVolumeAcceptedUnit || "m³").replace("m3", "m³")}
-                                  </Descriptions.Item>
-                                )}
-                              </Descriptions>
-                            </Card>
-                          ) : (
+                          {hasCellBaseline ? (() => {
+                            // Build per-cell rows: prefer _cellUsageRows from enriched record, else build from baseline entries
+                            const cellRows = detailViewRecord?._cellUsageRows?.length
+                              ? detailViewRecord._cellUsageRows
+                              : (() => {
+                                  const rows = [];
+                                  activeCellEntries.forEach((entry, i) => {
+                                    rows.push({
+                                      key: `active-${i}`,
+                                      cellName: entry.cellName || `Cell ${i + 1}`,
+                                      cellStatus: "Operational",
+                                      wasteType: entry.wasteType || "Residual",
+                                      baseline: Number(entry.volume || 0),
+                                      submissions: 0,
+                                      total: Number(entry.volume || 0),
+                                      unit: baselineEntryUnit,
+                                      capacity: 0,
+                                      capacityUnit: baselineEntryUnit,
+                                    });
+                                  });
+                                  closedCellEntries.forEach((entry, i) => {
+                                    rows.push({
+                                      key: `closed-${i}`,
+                                      cellName: entry.cellName || `Closed Cell ${i + 1}`,
+                                      cellStatus: "Closed",
+                                      wasteType: entry.wasteType || "Residual",
+                                      baseline: Number(entry.volume || 0),
+                                      submissions: 0,
+                                      total: Number(entry.volume || 0),
+                                      unit: baselineEntryUnit,
+                                      capacity: 0,
+                                      capacityUnit: baselineEntryUnit,
+                                    });
+                                  });
+                                  return rows;
+                                })();
+
+                            const cellTableCols = [
+                              {
+                                title: "Cell",
+                                dataIndex: "cellName",
+                                width: 130,
+                                sorter: (a, b) => (a.cellName || "").localeCompare(b.cellName || ""),
+                                render: (v, row) => (
+                                  <Space size={4}>
+                                    <Text strong>{v}</Text>
+                                    {row.isHazardous && <Tag color="red" style={{ fontSize: 9 }}>Haz</Tag>}
+                                  </Space>
+                                ),
+                              },
+                              {
+                                title: "Status",
+                                dataIndex: "status",
+                                width: 130,
+                                render: (v) => (
+                                  <Tag color={v === "Operational" ? "green" : v === "Closed" ? "default" : "gold"}>
+                                    {v || "Operational"}
+                                  </Tag>
+                                ),
+                              },
+                              {
+                                title: "Type",
+                                dataIndex: "type",
+                                width: 120,
+                                render: (v) => (
+                                  <Tag color={isHazardousCellType(v) ? "red" : "blue"}>
+                                    {isHazardousCellType(v) ? "Treated Haz Waste" : "Residual"}
+                                  </Tag>
+                                ),
+                              },
+                              {
+                                title: "Baseline Volume",
+                                key: "baseline",
+                                align: "right",
+                                render: (_, row) =>
+                                  row.baseline > 0 ? (
+                                    <Text style={{ color: "#595959" }}>
+                                      {Number(row.baseline).toLocaleString(undefined, { maximumFractionDigits: 2 })} {row.unit}
+                                    </Text>
+                                  ) : "—",
+                              },
+                              {
+                                title: "Submissions",
+                                key: "submissions",
+                                align: "right",
+                                render: (_, row) =>
+                                  row.submissions > 0 ? (
+                                    <Text strong style={{ color: "#2f54eb" }}>
+                                      +{Number(row.submissions).toLocaleString(undefined, { maximumFractionDigits: 2 })} {row.unit}
+                                    </Text>
+                                  ) : <Text type="secondary">—</Text>,
+                              },
+                              {
+                                title: "Total Fill",
+                                key: "total",
+                                align: "right",
+                                render: (_, row) => {
+                                  const pctFill = row.capacity > 0 ? Math.min(Math.round((row.total / row.capacity) * 100), 100) : null;
+                                  return row.total > 0 ? (
+                                    <Space direction="vertical" size={0} align="end">
+                                      <Text strong>
+                                        {Number(row.total).toLocaleString(undefined, { maximumFractionDigits: 2 })} {row.unit}
+                                      </Text>
+                                      {pctFill != null && (
+                                        <Text style={{ fontSize: 10, color: pctFill >= 90 ? "#ff4d4f" : pctFill >= 70 ? "#faad14" : "#52c41a" }}>
+                                          {pctFill}% full
+                                        </Text>
+                                      )}
+                                    </Space>
+                                  ) : "—";
+                                },
+                              },
+                              {
+                                title: "Capacity",
+                                key: "capacity",
+                                align: "right",
+                                render: (_, row) =>
+                                  row.capacity > 0
+                                    ? `${Number(row.capacity).toLocaleString()} ${row.capacityUnit || row.unit}`
+                                    : "—",
+                              },
+                            ];
+
+                            const totalBaseline = cellRows.reduce((s, r) => s + (r.baseline || 0), 0);
+                            const totalSub = cellRows.reduce((s, r) => s + (r.submissions || 0), 0);
+                            const totalFill = cellRows.reduce((s, r) => s + (r.total || 0), 0);
+                            const displayUnit = cellRows[0]?.unit || baselineEntryUnit;
+
+                            return (
+                              <Collapse
+                                size="small"
+                                bordered={false}
+                                style={{ marginBottom: 8 }}
+                                items={[{
+                                  key: "cell-volumes",
+                                  label: (
+                                    <Space wrap>
+                                      <DatabaseOutlined style={{ color: "#2f54eb" }} />
+                                      <Text strong>Baseline Cell Volumes</Text>
+                                      <Tag color="blue">{cellRows.length} cell{cellRows.length !== 1 ? "s" : ""}</Tag>
+                                      {totalBaseline > 0 && (
+                                        <Tag color="default">
+                                          Baseline {Number(totalBaseline).toLocaleString(undefined, { maximumFractionDigits: 1 })} {displayUnit}
+                                        </Tag>
+                                      )}
+                                      {totalSub > 0 && (
+                                        <Tag color="geekblue">
+                                          +{Number(totalSub).toLocaleString(undefined, { maximumFractionDigits: 1 })} {displayUnit} from submissions
+                                        </Tag>
+                                      )}
+                                    </Space>
+                                  ),
+                                  children: (
+                                    <Table
+                                      dataSource={cellRows}
+                                      columns={cellTableCols}
+                                      rowKey={(row) => row.key || `${row.cellName}-${row.index}`}
+                                      size="small"
+                                      pagination={false}
+                                      scroll={{ x: 760 }}
+                                      summary={() => (
+                                        <Table.Summary.Row>
+                                          <Table.Summary.Cell index={0} colSpan={3}>
+                                            <Text strong>Total</Text>
+                                          </Table.Summary.Cell>
+                                          <Table.Summary.Cell index={3} align="right">
+                                            <Text strong style={{ color: "#595959" }}>
+                                              {totalBaseline > 0 ? `${Number(totalBaseline).toLocaleString(undefined, { maximumFractionDigits: 2 })} ${displayUnit}` : "—"}
+                                            </Text>
+                                          </Table.Summary.Cell>
+                                          <Table.Summary.Cell index={4} align="right">
+                                            <Text strong style={{ color: "#2f54eb" }}>
+                                              {totalSub > 0 ? `+${Number(totalSub).toLocaleString(undefined, { maximumFractionDigits: 2 })} ${displayUnit}` : "—"}
+                                            </Text>
+                                          </Table.Summary.Cell>
+                                          <Table.Summary.Cell index={5} align="right">
+                                            <Text strong>
+                                              {totalFill > 0 ? `${Number(totalFill).toLocaleString(undefined, { maximumFractionDigits: 2 })} ${displayUnit}` : "—"}
+                                            </Text>
+                                          </Table.Summary.Cell>
+                                          <Table.Summary.Cell index={6} />
+                                        </Table.Summary.Row>
+                                      )}
+                                    />
+                                  ),
+                                }]}
+                              />
+                            );
+                          })() : (
                             <Alert
                               type="warning"
                               showIcon

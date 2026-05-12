@@ -1,6 +1,7 @@
 const express = require("express");
 const mongoose = require("mongoose");
 const SlfFacility = require("../models/SlfFacility");
+const DataSLF = require("../models/DataSLF");
 const UserPortal = require("../models/UserPortal");
 const { writeLog } = require("../utils/logger");
 
@@ -43,6 +44,108 @@ async function findPortalFacility(id, slfName, selectFields) {
   return facility;
 }
 
+const TON_PER_M3 = 0.2;
+const ACTIVE_VOLUME_STATUSES = new Set(["pending", "acknowledged", "revert_requested"]);
+
+function normalizeUnit(unit) {
+  return String(unit || "m³").replace("m3", "m³");
+}
+
+function convertVolume(value, fromUnit = "tons", toUnit = fromUnit) {
+  const number = Number(value || 0);
+  const from = normalizeUnit(fromUnit);
+  const to = normalizeUnit(toUnit || from);
+  if (!number || from === to) return number;
+  if (from === "tons" && to === "m³") return number / TON_PER_M3;
+  if (from === "m³" && to === "tons") return number * TON_PER_M3;
+  return number;
+}
+
+function parseCellIndex(cellName) {
+  const match = String(cellName || "").match(/(?:cell\s*)?(\d+)/i);
+  return match ? Number(match[1]) - 1 : null;
+}
+
+function isHazardousWaste(wasteType) {
+  return /haz|inert/i.test(String(wasteType || ""));
+}
+
+function isHazardousCell(cellType) {
+  return /haz|inert/i.test(String(cellType || ""));
+}
+
+function findBestCellIndex(rows, wasteType, preferredIndex = null) {
+  if (preferredIndex != null && rows[preferredIndex]) return preferredIndex;
+  const hazardous = isHazardousWaste(wasteType);
+  const matchIndex = rows.findIndex((row) => row.status !== "Closed" && row.hazardous === hazardous);
+  if (matchIndex >= 0) return matchIndex;
+  const operationalIndex = rows.findIndex((row) => row.status === "Operational");
+  return operationalIndex >= 0 ? operationalIndex : 0;
+}
+
+function addVolume(rows, index, value, fromUnit, targetUnit) {
+  const row = rows[index] || rows[0];
+  if (!row) return;
+  row.total += convertVolume(value, fromUnit, targetUnit);
+}
+
+async function enrichPortalFacilityVolumes(facilityDoc, requestedSlfName) {
+  const facility = facilityDoc.toObject ? facilityDoc.toObject() : { ...facilityDoc };
+  const targetUnit = normalizeUnit(facility.volumeCapacityUnit || facility.wasteReceivedUnit || "m³");
+  const cellCount = Math.max(Number(facility.numberOfCell || 0), facility.cellCapacities?.length || 0, 1);
+  const rows = Array.from({ length: cellCount }, (_, index) => ({
+    total: 0,
+    status: facility.cellStatuses?.[index] || "Operational",
+    hazardous: isHazardousCell(facility.cellTypes?.[index] || "Residual"),
+  }));
+
+  const names = [requestedSlfName, facility.lgu, facility.province].filter(Boolean);
+  const nameFilters = names.flatMap((name) => [{ slfName: name }, { lguCompanyName: name }]);
+  const filters = [{ slfGenerator: facility._id }, ...nameFilters];
+  const entries = await DataSLF.find({ deletedAt: null, $or: filters }).sort({ createdAt: -1 }).lean();
+
+  const baseline = entries.find((entry) =>
+    entry.totalVolumeAccepted != null ||
+    entry.activeCellResidualVolume != null ||
+    entry.activeCellInertVolume != null ||
+    entry.activeCellHazardousVolume != null ||
+    entry.activeCellEntries?.length
+  );
+
+  if (baseline?.activeCellEntries?.length) {
+    baseline.activeCellEntries.forEach((entry, orderIndex) => {
+      const parsedIndex = parseCellIndex(entry.cellName);
+      const targetIndex = findBestCellIndex(rows, entry.wasteType, parsedIndex != null && parsedIndex >= 0 ? parsedIndex : orderIndex);
+      addVolume(rows, targetIndex, entry.volume, baseline.baselineUnit || targetUnit, targetUnit);
+    });
+  } else if (baseline) {
+    [
+      { value: baseline.activeCellResidualVolume, unit: baseline.activeCellResidualUnit, wasteType: "Residual" },
+      { value: baseline.activeCellInertVolume, unit: baseline.activeCellInertUnit, wasteType: "Treated Hazardous Waste" },
+      { value: baseline.activeCellHazardousVolume, unit: baseline.activeCellHazardousUnit, wasteType: "Hazardous Waste" },
+    ].forEach((item) => addVolume(rows, findBestCellIndex(rows, item.wasteType), item.value, item.unit || baseline.baselineUnit || targetUnit, targetUnit));
+  }
+
+  entries
+    .filter((entry) => ACTIVE_VOLUME_STATUSES.has(entry.status || "pending"))
+    .forEach((entry) => {
+      (entry.trucks || []).forEach((truck) => {
+        addVolume(rows, findBestCellIndex(rows, truck.wasteType), truck.actualVolume, truck.actualVolumeUnit || "tons", targetUnit);
+      });
+    });
+
+  const total = rows.reduce((sum, row) => sum + row.total, 0);
+  if (total <= 0) return facility;
+
+  return {
+    ...facility,
+    actualResidualWasteReceived: total,
+    wasteReceivedUnit: targetUnit,
+    cellFillValues: rows.map((row) => row.total),
+    cellFillUnits: rows.map(() => targetUnit),
+  };
+}
+
 // Get all records (admin management view — respects App Settings year visibility filter)
 router.get("/", async (req, res) => {
   try {
@@ -68,7 +171,7 @@ router.get("/portal/:id", async (req, res) => {
     const facility = await findPortalFacility(req.params.id, req.query.slfName, selectFields);
 
     if (!facility) return res.status(404).json({ message: "Facility not found" });
-    res.json(facility);
+    res.json(await enrichPortalFacilityVolumes(facility, req.query.slfName));
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });
   }

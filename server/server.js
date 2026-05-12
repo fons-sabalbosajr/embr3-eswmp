@@ -248,6 +248,7 @@ app.use("/api/transfer-stations", transferStationRoutes);
 app.use("/api/lgu-assist-diversion", lguAssistDiversionRoutes);
 app.use("/api/technical-assistance", technicalAssistanceRoutes);
 app.use("/api/portal-auth", portalAuthRoutes);
+app.use("/api/porta-auth", portalAuthRoutes); // Backward compatibility for previously stored typo URLs
 app.use("/api/portal-users", portalUsersRoutes);
 app.use("/api/data-history", dataHistoryRoutes);
 app.use("/api/notifications", notificationRoutes);

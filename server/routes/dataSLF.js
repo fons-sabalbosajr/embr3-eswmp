@@ -61,6 +61,28 @@ function matchesBaselineName(item, requestedName) {
   return requestedKeys.some((key) => itemKeys.includes(key));
 }
 
+async function markSubmissionNotificationsRead(entries) {
+  const list = (Array.isArray(entries) ? entries : [entries]).filter(Boolean);
+  if (list.length === 0) return;
+
+  const dataEntryIds = list.map((entry) => entry._id).filter(Boolean);
+  const submissionIds = [...new Set(list.map((entry) => entry.submissionId).filter(Boolean))];
+  const filters = [];
+  if (dataEntryIds.length > 0) filters.push({ dataEntry: { $in: dataEntryIds } });
+  if (submissionIds.length > 0) filters.push({ submissionId: { $in: submissionIds } });
+  if (filters.length === 0) return;
+
+  await Notification.updateMany(
+    {
+      recipient: "admin",
+      read: false,
+      type: { $in: ["new_submission", "resubmission", "submission_edit_request"] },
+      $or: filters,
+    },
+    { $set: { read: true } }
+  );
+}
+
 const router = express.Router();
 const ADMIN_DISPLAY_NAME = "EMBR3 ESWMP Admin";
 
@@ -1006,6 +1028,10 @@ router.patch("/:id/status", async (req, res) => {
     if (!entry) return res.status(404).json({ message: "Entry not found" });
     res.json(entry);
 
+    if (status === "acknowledged") {
+      markSubmissionNotificationsRead(entry).catch(() => {});
+    }
+
     // Notify portal user of status change
     if (entry.submittedBy) {
       try {
@@ -1090,6 +1116,10 @@ router.patch("/bulk-status", async (req, res) => {
     await DataSLF.updateMany({ _id: { $in: ids } }, { status });
 
     const updated = await DataSLF.find({ _id: { $in: ids } }).populate("slfGenerator");
+
+    if (status === "acknowledged") {
+      markSubmissionNotificationsRead(updated).catch(() => {});
+    }
 
     // Log transactions
     for (const entry of updated) {

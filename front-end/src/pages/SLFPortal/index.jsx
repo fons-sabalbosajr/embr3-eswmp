@@ -3351,28 +3351,29 @@ export default function SLFPortal() {
                           </div>
                           <Row gutter={[12, 12]}>
                             {cellCaps.map((cap, i) => {
-                              const cellPct =
-                                capacity > 0 && cap > 0
-                                  ? Math.min(
-                                      Math.round(
-                                        (cap / capacity) * 100 * cells,
-                                      ),
-                                      100,
-                                    )
-                                  : 0;
                               const cellSt = cellStatuses[i] || "Operational";
                               const cellT = cellTypes[i] || "Residual";
                               const isClosed = cellSt === "Closed";
+                              const isInactive = isClosed || cellSt === "Under Construction" || cellSt === "Reserved Cell";
                               const isHaz = cellT === "Treated Haz Waste";
+                              // Use per-cell fill values from backend (routed by waste type)
+                              const cellFillUnit = slfInfo.cellFillUnits?.[i] || baselineUnit || "m³";
+                              const cellFill = slfInfo.cellFillValues?.[i] || 0;
+                              const cellPct = cap > 0 && cellFill > 0 && !isInactive
+                                ? Math.min(Math.round((cellFill / cap) * 100), 100)
+                                : 0;
                               const cellColor = isClosed
                                 ? "#d9d9d9"
-                                : isHaz
-                                  ? "#f5222d"
-                                  : cellPct >= 90
-                                    ? "#ff4d4f"
-                                    : cellPct >= 70
-                                      ? "#faad14"
-                                      : "#52c41a";
+                                : isInactive
+                                  ? "#722ed1"
+                                  : isHaz
+                                    ? (cellPct >= 90 ? "#ff4d4f" : cellPct >= 70 ? "#faad14" : "#f5222d")
+                                    : cellPct >= 90
+                                      ? "#ff4d4f"
+                                      : cellPct >= 70
+                                        ? "#faad14"
+                                        : "#52c41a";
+                              const remaining = cap > 0 ? Math.max(0, cap - cellFill) : 0;
                               return (
                                 <Col
                                   xs={12}
@@ -3392,10 +3393,11 @@ export default function SLFPortal() {
                                   >
                                     <Progress
                                       type="dashboard"
-                                      percent={isClosed ? 100 : cellPct}
+                                      percent={isInactive ? 0 : cellPct}
                                       size={isMobile ? 64 : 80}
                                       strokeWidth={6}
                                       strokeColor={cellColor}
+                                      trailColor={isClosed ? "#bfbfbf" : undefined}
                                       format={() => (
                                         <span
                                           style={{
@@ -3404,7 +3406,7 @@ export default function SLFPortal() {
                                             color: cellColor,
                                           }}
                                         >
-                                          {isClosed ? "—" : `${cellPct}%`}
+                                          {isClosed ? "—" : isInactive ? "N/A" : `${cellPct}%`}
                                         </span>
                                       )}
                                     />
@@ -3419,7 +3421,7 @@ export default function SLFPortal() {
                                       Cell {i + 1}
                                     </div>
                                     <Tag
-                                      color={isClosed ? "default" : "success"}
+                                      color={isClosed ? "default" : isInactive ? "purple" : "success"}
                                       style={{ fontSize: 10, marginTop: 4 }}
                                     >
                                       {cellSt}
@@ -3442,6 +3444,19 @@ export default function SLFPortal() {
                                         ? `${cap.toLocaleString()} ${baselineUnit || "m³"}`
                                         : "—"}
                                     </div>
+                                    {!isInactive && cellFill > 0 && (
+                                      <div style={{ fontSize: 10, marginTop: 3 }}>
+                                        <span style={{ color: isHaz ? "#f5222d" : "#52c41a", fontWeight: 600 }}>
+                                          {cellFill.toLocaleString(undefined, { maximumFractionDigits: 1 })} {cellFillUnit}
+                                        </span>
+                                        {" "}<span style={{ color: "#8c8c8c" }}>filled</span>
+                                      </div>
+                                    )}
+                                    {!isInactive && cap > 0 && remaining > 0 && (
+                                      <div style={{ fontSize: 10, color: "#8c8c8c", marginTop: 1 }}>
+                                        {remaining.toLocaleString(undefined, { maximumFractionDigits: 1 })} {cellFillUnit} remaining
+                                      </div>
+                                    )}
                                   </div>
                                 </Col>
                               );

@@ -13,6 +13,9 @@ node_modules
 # Environment variables
 .env
 
+# Runtime-uploaded verification attachments
+uploads/
+
 # Service account credentials (Google Drive / GCP)
 secrets/
 

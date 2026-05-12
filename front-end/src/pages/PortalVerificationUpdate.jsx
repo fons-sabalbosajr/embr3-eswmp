@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import { Form, Input, Button, Card, Typography, Upload, message as antMessage, Alert } from "antd";
-import { MailOutlined, UploadOutlined, FileProtectOutlined, WarningOutlined } from "@ant-design/icons";
+import { MailOutlined, UploadOutlined, FileProtectOutlined, WarningOutlined, LogoutOutlined } from "@ant-design/icons";
 import { useNavigate } from "react-router-dom";
 import Swal from "sweetalert2";
 import api from "../api";
@@ -47,6 +47,12 @@ export default function PortalVerificationUpdate() {
   const onRemoveFile = () => {
     setVerificationFile(null);
     return true;
+  };
+
+  const handleLogout = () => {
+    secureStorage.remove("portal_token");
+    secureStorage.remove("portal_user");
+    navigate("/slfportal/login", { replace: true });
   };
 
   const onFinish = async (values) => {
@@ -182,6 +188,11 @@ export default function PortalVerificationUpdate() {
                   block
                 >
                   Submit Verification
+                </Button>
+              </Form.Item>
+              <Form.Item style={{ marginBottom: 0, marginTop: 10 }}>
+                <Button icon={<LogoutOutlined />} onClick={handleLogout} block>
+                  Verify Later
                 </Button>
               </Form.Item>
             </Form>
