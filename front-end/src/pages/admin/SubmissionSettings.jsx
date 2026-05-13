@@ -419,6 +419,8 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, is
     }
   };
 
+  const getTxnHistoryKey = (record) => record?.submissionId || record?.idNo || record?._id || null;
+
   const handleAdminRevert = async () => {
     if (!revertReason.trim()) {
       Swal.fire("Warning", "Please provide a reason for reverting.", "warning");
@@ -614,13 +616,13 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, is
               onClick={() => setViewRecord(r)}
             />
           </Tooltip>
-          {r.submissionId && (
+          {getTxnHistoryKey(r) && (
             <Tooltip title="Transaction History">
               <Button
                 size="small"
                 icon={<HistoryOutlined />}
                 style={{ borderColor: "#722ed1", color: "#722ed1" }}
-                onClick={() => openTxnHistory(r.submissionId)}
+                onClick={() => openTxnHistory(getTxnHistoryKey(r))}
               />
             </Tooltip>
           )}
@@ -1829,7 +1831,7 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, is
                   />
 
                   {/* Transaction History Button */}
-                  {r.submissionId && (
+                  {getTxnHistoryKey(r) && (
                     <Button
                       block
                       icon={<HistoryOutlined />}
@@ -1840,7 +1842,7 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, is
                         marginBottom: 8,
                       }}
                       type="primary"
-                      onClick={() => openTxnHistory(r.submissionId)}
+                      onClick={() => openTxnHistory(getTxnHistoryKey(r))}
                     >
                       View Transaction History
                     </Button>
@@ -1951,7 +1953,7 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, is
                         label="Company Type"
                         rules={[{ required: true }]}
                       >
-                        <Select>
+                        <Select placeholder="Select unit">
                           <Option value="LGU">LGU</Option>
                           <Option value="Private">Private</Option>
                         </Select>
@@ -2097,7 +2099,7 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, is
                         label="Unit"
                         initialValue="m³"
                       >
-                        <Select>
+                        <Select placeholder="Select unit">
                           <Option value="m³">m³</Option>
                           <Option value="tons">Tons</Option>
                         </Select>
@@ -2131,8 +2133,8 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, is
                 children: (
                   <Row gutter={12}>
                     <Col xs={12} sm={6}>
-                      <Form.Item name="baselineUnit" label="Baseline Unit">
-                        <Select>
+                      <Form.Item name="baselineUnit" label="Baseline Unit" initialValue="m³">
+                        <Select placeholder="Select baseline unit">
                           <Option value="m³">m³</Option>
                           <Option value="tons">Tons</Option>
                         </Select>
@@ -2147,8 +2149,8 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, is
                       </Form.Item>
                     </Col>
                     <Col xs={6} sm={6}>
-                      <Form.Item name="totalVolumeAcceptedUnit" label="Unit">
-                        <Select>
+                      <Form.Item name="totalVolumeAcceptedUnit" label="Unit" initialValue="m³">
+                        <Select placeholder="Select unit">
                           <Option value="m³">m³</Option>
                           <Option value="tons">Tons</Option>
                         </Select>
@@ -2163,8 +2165,8 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, is
                       </Form.Item>
                     </Col>
                     <Col xs={6} sm={6}>
-                      <Form.Item name="activeCellResidualUnit" label="Unit">
-                        <Select>
+                      <Form.Item name="activeCellResidualUnit" label="Unit" initialValue="m³">
+                        <Select placeholder="Select unit">
                           <Option value="m³">m³</Option>
                           <Option value="tons">Tons</Option>
                         </Select>
@@ -2179,8 +2181,8 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, is
                       </Form.Item>
                     </Col>
                     <Col xs={6} sm={6}>
-                      <Form.Item name="activeCellInertUnit" label="Unit">
-                        <Select>
+                      <Form.Item name="activeCellInertUnit" label="Unit" initialValue="m³">
+                        <Select placeholder="Select unit">
                           <Option value="m³">m³</Option>
                           <Option value="tons">Tons</Option>
                         </Select>
@@ -2195,8 +2197,8 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, is
                       </Form.Item>
                     </Col>
                     <Col xs={6} sm={6}>
-                      <Form.Item name="closedCellResidualUnit" label="Unit">
-                        <Select>
+                      <Form.Item name="closedCellResidualUnit" label="Unit" initialValue="m³">
+                        <Select placeholder="Select unit">
                           <Option value="m³">m³</Option>
                           <Option value="tons">Tons</Option>
                         </Select>
@@ -2211,8 +2213,8 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, is
                       </Form.Item>
                     </Col>
                     <Col xs={6} sm={6}>
-                      <Form.Item name="closedCellInertUnit" label="Unit">
-                        <Select>
+                      <Form.Item name="closedCellInertUnit" label="Unit" initialValue="m³">
+                        <Select placeholder="Select unit">
                           <Option value="m³">m³</Option>
                           <Option value="tons">Tons</Option>
                         </Select>

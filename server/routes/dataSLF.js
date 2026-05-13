@@ -1,5 +1,6 @@
 const express = require("express");
 const crypto = require("crypto");
+const mongoose = require("mongoose");
 const DataSLF = require("../models/DataSLF");
 const SLFGenerator = require("../models/SLFGenerator");
 const SlfFacility = require("../models/SlfFacility");
@@ -100,6 +101,33 @@ const baselineDataMatch = {
     { "accreditedHaulers.0": { $exists: true } },
   ],
 };
+
+function hasTruckVolume(entry) {
+  return (entry?.trucks || []).some((truck) => Number(truck?.actualVolume || 0) > 0);
+}
+
+function chooseBaselineRecord(entries = []) {
+  return entries.find((entry) => !hasTruckVolume(entry)) || entries[0] || null;
+}
+
+function escapeRegExp(value) {
+  return String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function hasBaselineData(entry) {
+  return !!(
+    entry?.totalVolumeAccepted != null ||
+    entry?.activeCellResidualVolume != null ||
+    entry?.activeCellInertVolume != null ||
+    entry?.activeCellHazardousVolume != null ||
+    entry?.closedCellResidualVolume != null ||
+    entry?.closedCellInertVolume != null ||
+    entry?.closedCellHazardousVolume != null ||
+    entry?.activeCellEntries?.length ||
+    entry?.closedCellEntries?.length ||
+    entry?.accreditedHaulers?.length
+  );
+}
 
 // Submit SLF data — batch (client portal)
 router.post("/", async (req, res) => {
@@ -278,7 +306,7 @@ router.get("/baseline/:slfName", async (req, res) => {
   try {
     const slfName = req.params.slfName;
 
-    let latest = await DataSLF.findOne({
+    let candidates = await DataSLF.find({
       $and: [
         { $or: [{ slfName }, { lguCompanyName: slfName }] },
         baselineDataMatch,
@@ -287,13 +315,14 @@ router.get("/baseline/:slfName", async (req, res) => {
       .setOptions({ includeHiddenYears: true })
       .sort({ createdAt: -1 })
       .lean();
+    let latest = chooseBaselineRecord(candidates);
 
     if (!latest) {
-      const candidates = await DataSLF.find(baselineDataMatch)
+      candidates = await DataSLF.find(baselineDataMatch)
         .setOptions({ includeHiddenYears: true })
         .sort({ createdAt: -1 })
         .lean();
-      latest = candidates.find((item) => matchesBaselineName(item, slfName));
+      latest = chooseBaselineRecord(candidates.filter((item) => matchesBaselineName(item, slfName)));
     }
 
     if (!latest) return res.json(null);
@@ -302,6 +331,13 @@ router.get("/baseline/:slfName", async (req, res) => {
 
     res.json({
       baselineUnit,
+      lguCompanyName: latest.lguCompanyName,
+      companyType: latest.companyType,
+      address: latest.address,
+      companyRegion: latest.companyRegion,
+      companyProvince: latest.companyProvince,
+      companyMunicipality: latest.companyMunicipality,
+      companyBarangay: latest.companyBarangay,
       totalVolumeAccepted: latest.totalVolumeAccepted,
       totalVolumeAcceptedUnit: latest.totalVolumeAcceptedUnit || baselineUnit,
       activeCellResidualVolume: latest.activeCellResidualVolume,
@@ -339,7 +375,21 @@ router.get("/baselines", async (req, res) => {
       {
         $match: baselineDataMatch,
       },
-      { $sort: { createdAt: -1 } },
+      {
+        $addFields: {
+          _truckVolumeTotal: {
+            $sum: {
+              $map: {
+                input: { $ifNull: ["$trucks", []] },
+                as: "truck",
+                in: { $ifNull: ["$$truck.actualVolume", 0] },
+              },
+            },
+          },
+        },
+      },
+      { $addFields: { _hasTruckVolume: { $gt: ["$_truckVolumeTotal", 0] } } },
+      { $sort: { _hasTruckVolume: 1, createdAt: -1 } },
       {
         $group: {
           _id: { $ifNull: ["$slfName", "$lguCompanyName"] },
@@ -1592,6 +1642,11 @@ router.patch("/portal-save-baseline/:slfName", async (req, res) => {
       slfGenerator,
       lguCompanyName,
       companyType,
+      address,
+      companyRegion,
+      companyProvince,
+      companyMunicipality,
+      companyBarangay,
       baselineUnit,
       totalVolumeAccepted, totalVolumeAcceptedUnit,
       activeCellResidualVolume, activeCellResidualUnit,
@@ -1611,8 +1666,15 @@ router.patch("/portal-save-baseline/:slfName", async (req, res) => {
     const filter = {
       $or: [{ slfName }, { lguCompanyName: slfName }],
     };
+    const baselineOnlyFilter = {
+      $and: [
+        filter,
+        { $or: [{ trucks: { $exists: false } }, { trucks: { $size: 0 } }] },
+      ],
+    };
 
     const updateFields = {
+      slfName,
       baselineUpdateApproved: false,
       baselineUpdateRequested: false,
       baselineUpdateApprovedAt: null,
@@ -1620,6 +1682,13 @@ router.patch("/portal-save-baseline/:slfName", async (req, res) => {
 
     const fieldMap = {
       baselineUnit,
+      lguCompanyName,
+      companyType,
+      address,
+      companyRegion,
+      companyProvince,
+      companyMunicipality,
+      companyBarangay,
       totalVolumeAccepted, totalVolumeAcceptedUnit,
       activeCellResidualVolume, activeCellResidualUnit,
       activeCellInertVolume, activeCellInertUnit,
@@ -1635,7 +1704,7 @@ router.patch("/portal-save-baseline/:slfName", async (req, res) => {
       if (v !== undefined) updateFields[k] = v;
     }
 
-    const updateResult = await DataSLF.updateMany(filter, { $set: updateFields });
+    const updateResult = await DataSLF.updateMany(baselineOnlyFilter, { $set: updateFields });
 
     // If no existing records exist for this SLF, create a baseline-only record
     if (updateResult.matchedCount === 0) {
@@ -1652,8 +1721,8 @@ router.patch("/portal-save-baseline/:slfName", async (req, res) => {
         }).sort({ dataYear: -1 });
         if (facility) {
           genId = facility._id;
-          facilityLgu = facility.lgu || lguCompanyName || slfName;
-          facilityType = (facility.ownership || "").toLowerCase().includes("private") ? "Private" : "LGU";
+          facilityLgu = lguCompanyName || facility.lgu || slfName;
+          facilityType = companyType || ((facility.ownership || "").toLowerCase().includes("private") ? "Private" : "LGU");
         }
       }
 
@@ -1674,6 +1743,11 @@ router.patch("/portal-save-baseline/:slfName", async (req, res) => {
         slfName,
         lguCompanyName: facilityLgu,
         companyType: facilityType,
+        address,
+        companyRegion,
+        companyProvince,
+        companyMunicipality,
+        companyBarangay,
         dateOfDisposal: new Date(),
         submittedBy: submittedBy || slfName,
         idNo: `SLF-${typeCode}-${provCode}-${String(seq).padStart(4, "0")}`,
@@ -1682,7 +1756,7 @@ router.patch("/portal-save-baseline/:slfName", async (req, res) => {
       await newDoc.save();
     }
 
-    const latest = await DataSLF.findOne(filter).setOptions({ includeHiddenYears: true }).sort({ createdAt: -1 });
+    const latest = await DataSLF.findOne(baselineOnlyFilter).setOptions({ includeHiddenYears: true }).sort({ createdAt: -1 });
 
     // Log transaction
     await Transaction.create({
@@ -1747,7 +1821,7 @@ router.post("/baseline-update-request", async (req, res) => {
         },
         $setOnInsert: { recipient: "admin", type: "baseline_update_request" },
       },
-      { upsert: true, new: true, timestamps: true }
+      { upsert: true, returnDocument: "after", timestamps: true }
     );
 
     notifyAdmin(req, { type: "baseline_update_request", title: "Baseline Update Request", message: `${requestedBy} requested baseline update for ${slfName}` });
@@ -1790,29 +1864,171 @@ router.post("/baseline-update-request", async (req, res) => {
   }
 });
 
-// Portal: Get waste received breakdown (LGU R3 / LGU outside R3 / Private) for dashboard
-// Region 3 Central Luzon: PSGC region code starts with "03"
+// Portal: Get waste received breakdown by baseline clients and submitted client selections.
+// Region 3 Central Luzon: PSGC region code starts with "03".
 router.get("/waste-received-summary/:slfName", async (req, res) => {
   try {
     const slfName = decodeURIComponent(req.params.slfName);
-    const { year } = req.query;
+    const { year, slfId } = req.query;
+    const requestedNames = getNameVariants(slfName);
+    const requestedRegexes = requestedNames.map((name) => new RegExp(`^${escapeRegExp(name)}$`, "i"));
+
+    let facilities = [];
+    if (slfId && mongoose.isValidObjectId(slfId)) {
+      const selectedFacility = await SlfFacility.findOne({ _id: slfId, deletedAt: null })
+        .select("_id lgu province")
+        .lean();
+      if (selectedFacility) facilities = [selectedFacility];
+    }
+    if (!facilities.length && requestedRegexes.length) {
+      facilities = await SlfFacility.find({
+        deletedAt: null,
+        lgu: { $in: requestedRegexes },
+      }).select("_id lgu province").lean();
+    }
+    if (!facilities.length && requestedRegexes.length) {
+      facilities = await SlfFacility.find({
+        deletedAt: null,
+        province: { $in: requestedRegexes },
+      }).select("_id lgu province").lean();
+    }
+    const facilityIds = facilities.map((facility) => facility._id);
+    const facilityNameKeys = new Set(
+      facilities
+        .flatMap((facility) => getNameVariants(facility.lgu))
+        .map((name) => normalizeSlfName(name))
+        .filter(Boolean),
+    );
+    const identityNames = (slfId && facilities.length
+      ? [
+          ...facilities.flatMap((facility) => getNameVariants(facility.lgu)),
+          ...requestedNames.filter((name) => facilityNameKeys.has(normalizeSlfName(name))),
+        ]
+      : [
+          ...requestedNames,
+          ...facilities.flatMap((facility) => getNameVariants(facility.lgu)),
+        ]).filter(Boolean);
+    const nameRegexes = [...new Set(identityNames)].map((name) => new RegExp(`^${escapeRegExp(name)}$`, "i"));
+
     const match = {
-      slfName: { $regex: new RegExp(`^${slfName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`, "i") },
+      $or: [
+        ...nameRegexes.map((regex) => ({ slfName: regex })),
+        ...(facilityIds.length ? [{ slfGenerator: { $in: facilityIds } }] : []),
+      ],
       deletedAt: null,
       status: { $ne: "rejected" },
     };
+    if (match.$or.length === 0) {
+      match.slfName = { $regex: new RegExp(`^${escapeRegExp(slfName)}`, "i") };
+      delete match.$or;
+    }
     if (year) {
       const y = Number(year);
       match.dateOfDisposal = { $gte: new Date(`${y}-01-01`), $lte: new Date(`${y}-12-31`) };
     }
 
     const records = await DataSLF.find(match).select(
-      "companyType companyRegion lguCompanyName trucks dateOfDisposal"
+      "companyType companyRegion companyProvince companyMunicipality lguCompanyName trucks dateOfDisposal accreditedHaulers baselineUnit totalVolumeAccepted totalVolumeAcceptedUnit activeCellEntries activeCellResidualVolume activeCellResidualUnit activeCellInertVolume activeCellInertUnit activeCellHazardousVolume activeCellHazardousUnit closedCellEntries closedCellResidualVolume closedCellResidualUnit closedCellInertVolume closedCellInertUnit closedCellHazardousVolume closedCellHazardousUnit"
     ).lean();
 
     const summary = { lguR3: [], lguOutside: [], privateIndustry: [] };
+    const baselineClientMap = new Map();
+    const submissionClientMap = new Map();
+    const baselineVolumeRows = [];
+    const baselineTotals = { m3: 0, tons: 0 };
+
+    const clientKey = (client) => [
+      client.clientName || client.company || "—",
+      client.clientType || client.companyType || "Private",
+      client.region || client.companyRegion || "",
+      client.province || client.companyProvince || "",
+      client.municipality || "",
+    ].join("|");
+    const normalizeClient = (client, fallback = {}) => {
+      if (!client) return null;
+      if (typeof client === "string") {
+        return {
+          clientName: client,
+          clientType: fallback.clientType || "Private",
+          region: fallback.region || "",
+          regionName: fallback.regionName || "",
+          province: fallback.province || "",
+          provinceName: fallback.provinceName || "",
+          municipality: fallback.municipality || "",
+          municipalityName: fallback.municipalityName || "",
+        };
+      }
+      return {
+        clientName: client.clientName || client.company || client.lguCompanyName || fallback.clientName || "—",
+        clientType: client.clientType || client.companyType || fallback.clientType || "Private",
+        region: client.region || client.companyRegion || fallback.region || "",
+        regionName: client.regionName || client.companyRegionName || fallback.regionName || "",
+        province: client.province || client.companyProvince || fallback.province || "",
+        provinceName: client.provinceName || client.companyProvinceName || fallback.provinceName || "",
+        municipality: client.municipality || client.companyMunicipality || fallback.municipality || "",
+        municipalityName: client.municipalityName || client.companyMunicipalityName || fallback.municipalityName || "",
+      };
+    };
+    const addClient = (map, client, volume = 0, unit = "m³", truckCount = 0) => {
+      const normalized = normalizeClient(client);
+      if (!normalized?.clientName) return;
+      const key = clientKey(normalized);
+      if (!map.has(key)) {
+        map.set(key, { ...normalized, totalM3: 0, totalTons: 0, entries: 0, truckCount: 0 });
+      }
+      const row = map.get(key);
+      const normalizedUnit = String(unit || "m³").replace("m3", "m³");
+      if (normalizedUnit === "tons") row.totalTons += Number(volume || 0);
+      else row.totalM3 += Number(volume || 0);
+      if (volume || truckCount) row.entries += 1;
+      row.truckCount += truckCount;
+    };
+
+    const addBaselineVolume = (label, volume = 0, unit = "m³", wasteType = "Residual") => {
+      const amount = Number(volume || 0);
+      if (amount <= 0) return;
+      const normalizedUnit = String(unit || "m³").replace("m3", "m³");
+      const row = {
+        clientName: label || "Baseline Utilization",
+        clientType: "Baseline",
+        wasteType,
+        totalM3: normalizedUnit === "tons" ? 0 : amount,
+        totalTons: normalizedUnit === "tons" ? amount : 0,
+        entries: 1,
+        truckCount: 0,
+      };
+      baselineVolumeRows.push(row);
+      if (normalizedUnit === "tons") baselineTotals.tons += amount;
+      else baselineTotals.m3 += amount;
+    };
+
+    const baseline = chooseBaselineRecord(records.filter(hasBaselineData));
+    if (baseline?.activeCellEntries?.length) {
+      baseline.activeCellEntries.forEach((entry, index) => {
+        addBaselineVolume(
+          entry.cellName || `Active Cell ${index + 1}`,
+          entry.volume,
+          entry.unit || baseline.baselineUnit || baseline.activeCellResidualUnit || "m³",
+          entry.wasteType || "Residual",
+        );
+      });
+    } else if (baseline) {
+      [
+        { label: "Active Cell - Residual", value: baseline.activeCellResidualVolume, unit: baseline.activeCellResidualUnit, wasteType: "Residual" },
+        { label: "Active Cell - Inert", value: baseline.activeCellInertVolume, unit: baseline.activeCellInertUnit, wasteType: "Inert/Hazardous Waste" },
+        { label: "Active Cell - Hazardous", value: baseline.activeCellHazardousVolume, unit: baseline.activeCellHazardousUnit, wasteType: "Hazardous Waste" },
+      ].forEach((entry) => addBaselineVolume(entry.label, entry.value, entry.unit || baseline.baselineUnit || "m³", entry.wasteType));
+    }
 
     for (const r of records) {
+      (r.accreditedHaulers || []).forEach((hauler) => {
+        const clients = [
+          ...(Array.isArray(hauler.privateSectorClients) ? hauler.privateSectorClients : hauler.privateSectorClients ? [hauler.privateSectorClients] : []),
+          ...(Array.isArray(hauler.clients) ? hauler.clients : []),
+        ];
+        clients.forEach((client) => addClient(baselineClientMap, client));
+      });
+
       const totalVol = (r.trucks || []).reduce((s, t) => s + (t.actualVolume || 0), 0);
       const isR3 = (r.companyRegion || "").startsWith("03");
       const item = {
@@ -1828,6 +2044,20 @@ router.get("/waste-received-summary/:slfName", async (req, res) => {
       } else {
         summary.privateIndustry.push(item);
       }
+
+      (r.trucks || []).forEach((truck) => {
+        const clients = Array.isArray(truck.selectedClients) && truck.selectedClients.length
+          ? truck.selectedClients
+          : [{
+              clientName: truck.lguCompanyName || r.lguCompanyName || "—",
+              clientType: truck.companyType || r.companyType || "Private",
+              region: r.companyRegion || "",
+              province: r.companyProvince || "",
+              municipality: r.companyMunicipality || "",
+            }];
+        const splitVolume = Number(truck.actualVolume || 0) / Math.max(clients.length, 1);
+        clients.forEach((client) => addClient(submissionClientMap, client, splitVolume, truck.actualVolumeUnit || r.baselineUnit || "m³", 1 / Math.max(clients.length, 1)));
+      });
     }
 
     // Aggregate duplicates per company
@@ -1841,10 +2071,26 @@ router.get("/waste-received-summary/:slfName", async (req, res) => {
       return Object.values(map).sort((a, b) => b.totalVolume - a.totalVolume);
     };
 
+    const byClientVolume = (a, b) => (b.totalM3 + b.totalTons) - (a.totalM3 + a.totalTons);
+    const baselineClients = Array.from(baselineClientMap.values()).sort((a, b) => String(a.clientName).localeCompare(String(b.clientName)));
+    const baselineRows = baselineClients.length ? [...baselineClients, ...baselineVolumeRows] : baselineVolumeRows;
+    const submissionClients = Array.from(submissionClientMap.values()).sort(byClientVolume);
+
     res.json({
       lguR3: agg(summary.lguR3),
       lguOutside: agg(summary.lguOutside),
       privateIndustry: agg(summary.privateIndustry),
+      baselineClients: baselineRows,
+      baselineCellBreakdown: baselineVolumeRows,
+      baselineTotals,
+      submissionClients,
+      clientBreakdown: submissionClients,
+      totals: submissionClients.reduce((acc, row) => {
+        acc.m3 += row.totalM3 || 0;
+        acc.tons += row.totalTons || 0;
+        acc.trucks += row.truckCount || 0;
+        return acc;
+      }, { m3: 0, tons: 0, trucks: 0 }),
     });
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });

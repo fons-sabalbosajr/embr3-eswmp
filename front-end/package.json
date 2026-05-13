@@ -11,6 +11,9 @@
   },
   "dependencies": {
     "@ant-design/icons": "^6.1.0",
+    "@fullcalendar/daygrid": "^6.1.20",
+    "@fullcalendar/interaction": "^6.1.20",
+    "@fullcalendar/react": "^6.1.20",
     "@react-google-maps/api": "^2.20.8",
     "antd": "^6.3.2",
     "axios": "^1.13.6",

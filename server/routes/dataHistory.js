@@ -67,7 +67,7 @@ router.post("/snapshot", authMiddleware, async (req, res) => {
         additionalMetrics: additionalMetrics || {},
         source: "system",
       },
-      { upsert: true, new: true }
+      { upsert: true, returnDocument: "after" }
     );
 
     res.json(record);

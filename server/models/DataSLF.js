@@ -96,11 +96,13 @@ const dataSLFSchema = new mongoose.Schema(
       cellName: { type: String, trim: true },
       wasteType: { type: String, trim: true },
       volume: { type: Number },
+      unit: { type: String, enum: ["m³", "tons", "m3"], default: "m³" },
     }],
     closedCellEntries: [{
       cellName: { type: String, trim: true },
       wasteType: { type: String, trim: true },
       volume: { type: Number },
+      unit: { type: String, enum: ["m³", "tons", "m3"], default: "m³" },
     }],
     accreditedHaulers: [haulerSchema],
     // Baseline update approval

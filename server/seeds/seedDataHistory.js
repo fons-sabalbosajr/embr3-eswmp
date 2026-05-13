@@ -442,7 +442,7 @@ async function seed() {
     await DataHistory.findOneAndUpdate(
       { year: h.year, category: h.category },
       h,
-      { upsert: true, new: true }
+      { upsert: true, returnDocument: "after" }
     );
     upserted++;
   }

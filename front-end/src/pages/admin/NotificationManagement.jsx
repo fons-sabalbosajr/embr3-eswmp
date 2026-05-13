@@ -99,6 +99,8 @@ export default function NotificationManagement({ isDark }) {
   useEffect(() => {
     currentPageRef.current = pagination.current;
     currentPageSizeRef.current = pagination.pageSize;
+
+    
   }, [pagination.current, pagination.pageSize]);
 
   useEffect(() => {

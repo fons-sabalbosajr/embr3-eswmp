@@ -102,6 +102,38 @@ const { Option } = Select;
 const { Header, Sider, Content } = Layout;
 const { useBreakpoint } = Grid;
 const { TextArea } = Input;
+const TON_PER_M3 = 0.2;
+
+const normalizeUnit = (unit) => String(unit || "m³").replace("m3", "m³");
+
+const convertVolume = (value, fromUnit = "m³", toUnit = fromUnit) => {
+  const number = Number(value || 0);
+  const from = normalizeUnit(fromUnit);
+  const to = normalizeUnit(toUnit || from);
+  if (!number || from === to) return number;
+  if (from === "tons" && to === "m³") return number / TON_PER_M3;
+  if (from === "m³" && to === "tons") return number * TON_PER_M3;
+  return number;
+};
+
+const normalizeCellStatus = (status) => {
+  const value = String(status || "").trim();
+  if (/^operational$/i.test(value)) return "Active Cell";
+  if (/^closed$/i.test(value)) return "Used/Completed";
+  if (/^reserved cell$/i.test(value)) return "Reserved Area";
+  return value || "Active Cell";
+};
+
+const isActiveCellStatus = (status) =>
+  ["Active Cell", "Operational", "Active"].includes(String(status || ""));
+
+const isCompletedCellStatus = (status) =>
+  ["Used/Completed", "Closed"].includes(String(status || ""));
+
+const isUnavailableCellStatus = (status) =>
+  ["Under Construction", "Reserved Area", "Reserved Cell", "Not Existed"].includes(
+    String(status || ""),
+  );
 
 
 export default function SLFPortal() {
@@ -204,10 +236,11 @@ export default function SLFPortal() {
   const [municipalities, setMunicipalities] = useState([]);
   const [barangays, setBarangays] = useState([]);
   // Global baseline unit of measurement
-  const [baselineUnit, setBaselineUnit] = useState(null);
+  const [baselineUnit, setBaselineUnit] = useState("m³");
   const [acceptsHazardousWaste, setAcceptsHazardousWaste] = useState(false);
   // Support ticket states
   const [supportDrawerOpen, setSupportDrawerOpen] = useState(false);
+  const [messageDrawerOpen, setMessageDrawerOpen] = useState(false);
   const [supportTab, setSupportTab] = useState("new");
   const [supportTickets, setSupportTickets] = useState([]);
   const [supportLoading, setSupportLoading] = useState(false);
@@ -228,7 +261,7 @@ export default function SLFPortal() {
   const [faqActiveKey, setFaqActiveKey] = useState([]);
   // Profile modal
   const [profileModalOpen, setProfileModalOpen] = useState(false);
-  // Facility management modals (Leachate, Gas Vents, Trash Slide, Fire Prevention)
+  // Facility management modals (Leachate, Gas Management, Trash Slide, Fire Prevention)
   const [leachateModalOpen, setLeachateModalOpen] = useState(false);
   const [gasVentModalOpen, setGasVentModalOpen] = useState(false);
   const [trashSlideModalOpen, setTrashSlideModalOpen] = useState(false);
@@ -245,6 +278,10 @@ export default function SLFPortal() {
     lguR3: [],
     lguOutside: [],
     privateIndustry: [],
+    baselineClients: [],
+    submissionClients: [],
+    clientBreakdown: [],
+    totals: { m3: 0, tons: 0, trucks: 0 },
   });
   const [wasteReceivedLoading, setWasteReceivedLoading] = useState(false);
 
@@ -534,6 +571,19 @@ export default function SLFPortal() {
     ? portalUser.assignedSlfName[selectedSlfIdx] ||
       portalUser.assignedSlfName[0]
     : portalUser?.assignedSlfName;
+  const activeCellOptions = (() => {
+    const count = Number(slfInfo?.numberOfCell || slfInfo?.cellStatuses?.length || 0);
+    return Array.from({ length: count }, (_, index) => {
+      const status = normalizeCellStatus(slfInfo?.cellStatuses?.[index]);
+      const isOpen = isActiveCellStatus(status);
+      return isOpen
+        ? {
+            label: `Cell ${index + 1}${slfInfo?.cellTypes?.[index] ? ` - ${slfInfo.cellTypes[index]}` : ""}`,
+            value: `Cell ${index + 1}`,
+          }
+        : null;
+    }).filter(Boolean);
+  })();
 
   useEffect(() => {
     if (!activeSlfId) return;
@@ -604,6 +654,65 @@ export default function SLFPortal() {
             closedCellHazardousUnit: unit,
             acceptsHazardousWaste: data.acceptsHazardousWaste || false,
           });
+          const savedCompanyValues = {
+            lguCompanyName:
+              data.lguCompanyName ||
+              companyForm.getFieldValue("lguCompanyName") ||
+              "",
+            companyRegion: data.companyRegion,
+            companyProvince: data.companyProvince,
+            companyMunicipality: data.companyMunicipality,
+            companyBarangay: data.companyBarangay,
+          };
+          companyForm.setFieldsValue(savedCompanyValues);
+          entryForm.setFieldsValue({
+            lguCompanyName: savedCompanyValues.lguCompanyName,
+            companyType:
+              data.companyType ||
+              ((slfInfo?.ownership || "").toLowerCase().includes("private")
+                ? "Private"
+                : "LGU"),
+            address: data.address || entryForm.getFieldValue("address"),
+          });
+          if (data.companyRegion) {
+            withRetry(
+              () =>
+                api.get(`/settings/address/provinces/${data.companyRegion}`, {
+                  signal: ac.signal,
+                }),
+              { retries: 2, signal: ac.signal },
+            )
+              .then(({ data: provinceData }) => setProvinces(provinceData || []))
+              .then(() => companyForm.setFieldsValue(savedCompanyValues))
+              .catch(() => {});
+          }
+          if (data.companyProvince) {
+            withRetry(
+              () =>
+                api.get(
+                  `/settings/address/municipalities/${data.companyProvince}`,
+                  { signal: ac.signal },
+                ),
+              { retries: 2, signal: ac.signal },
+            )
+              .then(({ data: municipalityData }) =>
+                setMunicipalities(municipalityData || []),
+              )
+              .then(() => companyForm.setFieldsValue(savedCompanyValues))
+              .catch(() => {});
+          }
+          if (data.companyMunicipality) {
+            withRetry(
+              () =>
+                api.get(`/settings/address/barangays/${data.companyMunicipality}`, {
+                  signal: ac.signal,
+                }),
+              { retries: 2, signal: ac.signal },
+            )
+              .then(({ data: barangayData }) => setBarangays(barangayData || []))
+              .then(() => companyForm.setFieldsValue(savedCompanyValues))
+              .catch(() => {});
+          }
           if (data.accreditedHaulers?.length > 0) {
             setHaulers(
               data.accreditedHaulers.map((h, i) => {
@@ -651,7 +760,7 @@ export default function SLFPortal() {
           // Load activeCellEntries from saved data (or migrate from flat fields)
           if (data.activeCellEntries?.length) {
             setActiveCellEntries(
-              data.activeCellEntries.map((e, i) => ({ ...e, key: i })),
+              data.activeCellEntries.map((e, i) => ({ ...e, unit: e.unit || unit, key: i })),
             );
           } else {
             const entries = [];
@@ -662,6 +771,7 @@ export default function SLFPortal() {
                 cellName: "",
                 wasteType: "Residual",
                 volume: data.activeCellResidualVolume,
+                unit,
               });
             if (data.activeCellInertVolume)
               entries.push({
@@ -669,13 +779,14 @@ export default function SLFPortal() {
                 cellName: "",
                 wasteType: "Inert/Hazardous Waste",
                 volume: data.activeCellInertVolume,
+                unit,
               });
             setActiveCellEntries(entries);
           }
           // Load closedCellEntries from saved data (or migrate from flat fields)
           if (data.closedCellEntries?.length) {
             setClosedCellEntries(
-              data.closedCellEntries.map((e, i) => ({ ...e, key: i })),
+              data.closedCellEntries.map((e, i) => ({ ...e, unit: e.unit || unit, key: i })),
             );
           } else {
             const cEntries = [];
@@ -686,6 +797,7 @@ export default function SLFPortal() {
                 cellName: "",
                 wasteType: "Residual",
                 volume: data.closedCellResidualVolume,
+                unit,
               });
             if (data.closedCellInertVolume)
               cEntries.push({
@@ -693,6 +805,7 @@ export default function SLFPortal() {
                 cellName: "",
                 wasteType: "Inert/Hazardous Waste",
                 volume: data.closedCellInertVolume,
+                unit,
               });
             setClosedCellEntries(cEntries);
           }
@@ -819,6 +932,7 @@ export default function SLFPortal() {
       const filtered = (data.transactions || []).filter(
         (t) =>
           requestTypes.has(t.type) &&
+          !/^admin (started|replied to) conversation\b/i.test(t.description || "") &&
           (t.submittedBy === portalUser.email ||
             t.performedBy === portalUser.email),
       );
@@ -1168,14 +1282,14 @@ export default function SLFPortal() {
       setActiveCellEntries((prev) =>
         prev.map((e) =>
           e.key === editingActiveCellKey
-            ? { ...activeCellDraft, key: editingActiveCellKey }
+            ? { ...activeCellDraft, unit: activeCellDraft.unit || baselineUnit || "m³", key: editingActiveCellKey }
             : e,
         ),
       );
     } else {
       setActiveCellEntries((prev) => [
         ...prev,
-        { ...activeCellDraft, key: Date.now() },
+        { ...activeCellDraft, unit: activeCellDraft.unit || baselineUnit || "m³", key: Date.now() },
       ]);
     }
     setActiveCellModalOpen(false);
@@ -1194,14 +1308,14 @@ export default function SLFPortal() {
       setClosedCellEntries((prev) =>
         prev.map((e) =>
           e.key === editingClosedCellKey
-            ? { ...closedCellDraft, key: editingClosedCellKey }
+            ? { ...closedCellDraft, unit: closedCellDraft.unit || baselineUnit || "m³", key: editingClosedCellKey }
             : e,
         ),
       );
     } else {
       setClosedCellEntries((prev) => [
         ...prev,
-        { ...closedCellDraft, key: Date.now() },
+        { ...closedCellDraft, unit: closedCellDraft.unit || baselineUnit || "m³", key: Date.now() },
       ]);
     }
     setClosedCellModalOpen(false);
@@ -1389,6 +1503,17 @@ export default function SLFPortal() {
     setBaselineSavingLoading(true);
     try {
       const baselineValues = baselineForm.getFieldsValue();
+      const companyValues = companyForm.getFieldsValue();
+      const disposalValues = entryForm.getFieldsValue();
+      const addressParts = [
+        barangays.find((b) => b.code === companyValues.companyBarangay)?.name,
+        municipalities.find((m) => m.code === companyValues.companyMunicipality)
+          ?.name,
+        provinces.find((p) => p.code === companyValues.companyProvince)?.name,
+        regions.find((r) => r.code === companyValues.companyRegion)?.name,
+      ].filter(Boolean);
+      const resolvedAddress =
+        disposalValues.address || companyValues.address || addressParts.join(", ");
       // Compute legacy totals from entries for backward compat
       const activeCellResidualVolume =
         activeCellEntries
@@ -1420,8 +1545,18 @@ export default function SLFPortal() {
         {
           submittedBy: portalUser?.email,
           slfGenerator: activeSlfId || null,
-          lguCompanyName: slfInfo?.lgu || activeSlfName,
-          companyType: (slfInfo?.ownership || "").toLowerCase().includes("private") ? "Private" : "LGU",
+          lguCompanyName:
+            companyValues.lguCompanyName || slfInfo?.lgu || activeSlfName,
+          companyType:
+            companyValues.companyType ||
+            ((slfInfo?.ownership || "").toLowerCase().includes("private")
+              ? "Private"
+              : "LGU"),
+          address: resolvedAddress,
+          companyRegion: companyValues.companyRegion,
+          companyProvince: companyValues.companyProvince,
+          companyMunicipality: companyValues.companyMunicipality,
+          companyBarangay: companyValues.companyBarangay,
           baselineUnit,
           totalVolumeAccepted: baselineValues.totalVolumeAccepted,
           totalVolumeAcceptedUnit: baselineUnit,
@@ -1433,8 +1568,8 @@ export default function SLFPortal() {
           closedCellResidualUnit: baselineUnit,
           closedCellInertVolume,
           closedCellInertUnit: baselineUnit,
-          activeCellEntries: activeCellEntries.map(({ key, ...rest }) => rest),
-          closedCellEntries: closedCellEntries.map(({ key, ...rest }) => rest),
+          activeCellEntries: activeCellEntries.map(({ key, ...rest }) => ({ ...rest, unit: rest.unit || baselineUnit })),
+          closedCellEntries: closedCellEntries.map(({ key, ...rest }) => ({ ...rest, unit: rest.unit || baselineUnit })),
           accreditedHaulers: haulers.map(({ key, ...rest }) => ({
             ...rest,
             privateSectorClients: (rest.privateSectorClients || []).map(
@@ -1468,16 +1603,19 @@ export default function SLFPortal() {
     }
   };
 
-  // ── Save facility management details (leachate ponds, gas vents, etc.) ──
+  // ── Save facility management details (Leachate Treatment Plant, gas management, etc.) ──
   const handleSaveFacilityDetails = async (type, data) => {
     if (!activeSlfId) return;
     setFacilityMgmtSaving(true);
     try {
       const payload = { slfName: activeSlfName };
-      if (type === "leachate")
-        payload.leachatePondDetails = data.map(({ _key, ...r }) => r);
+      if (type === "leachate") {
+        payload.leachatePondDetails = data.map(({ _key, attachments, hasWastewaterTreatmentFacility, wastewaterTreatmentFacilityType, ...r }) => ({ ...r, attachments: [] }));
+        payload.hasWastewaterTreatmentFacility = !!slfInfo?.hasWastewaterTreatmentFacility;
+        payload.wastewaterTreatmentFacilityType = slfInfo?.wastewaterTreatmentFacilityType || "";
+      }
       if (type === "gasVent")
-        payload.gasVentDetails = data.map(({ _key, ...r }) => r);
+        payload.gasVentDetails = data.map(({ _key, attachments, ...r }) => ({ ...r, attachments: [] }));
       if (type === "trashSlide")
         payload.trashSlideMeasures = data.map(({ _key, ...r }) => r);
       if (type === "firePrev")
@@ -1512,10 +1650,22 @@ export default function SLFPortal() {
     try {
       const { data } = await api.get(
         `/data-slf/waste-received-summary/${encodeURIComponent(activeSlfName)}`,
+        { params: { slfId: activeSlfId } },
       );
-      setWasteReceivedData(data);
+      setWasteReceivedData({
+        lguR3: [],
+        lguOutside: [],
+        privateIndustry: [],
+        baselineClients: [],
+        baselineCellBreakdown: [],
+        baselineTotals: { m3: 0, tons: 0 },
+        submissionClients: [],
+        clientBreakdown: [],
+        totals: { m3: 0, tons: 0, trucks: 0 },
+        ...(data || {}),
+      });
     } catch {
-      setWasteReceivedData({ lguR3: [], lguOutside: [], privateIndustry: [] });
+      setWasteReceivedData({ lguR3: [], lguOutside: [], privateIndustry: [], baselineClients: [], baselineCellBreakdown: [], baselineTotals: { m3: 0, tons: 0 }, submissionClients: [], clientBreakdown: [], totals: { m3: 0, tons: 0, trucks: 0 } });
     } finally {
       setWasteReceivedLoading(false);
     }
@@ -1537,6 +1687,22 @@ export default function SLFPortal() {
     }
   }, [portalUser?.email]);
 
+  useEffect(() => {
+    if (!portalUser?.email) return;
+    const sock = connectSocket("portal", portalUser.email);
+    const refreshMessages = (payload) => {
+      if (!payload || ["support_ticket_reply", "admin_message", "message_from_admin"].includes(payload.type)) {
+        fetchSupportTickets();
+      }
+    };
+    sock.on("notification", refreshMessages);
+    sock.on("data-refresh", refreshMessages);
+    return () => {
+      sock.off("notification", refreshMessages);
+      sock.off("data-refresh", refreshMessages);
+    };
+  }, [portalUser?.email, fetchSupportTickets]);
+
   const handleSubmitTicket = async (values) => {
     setSupportSubmitting(true);
     try {
@@ -1555,7 +1721,7 @@ export default function SLFPortal() {
         confirmButtonColor: "#1a3353",
       });
       fetchSupportTickets();
-      setSupportTab("tickets");
+      setSupportTab("my-tickets");
     } catch (err) {
       Swal.fire({
         icon: "error",
@@ -1945,25 +2111,10 @@ export default function SLFPortal() {
     }
     setLoading(true);
     try {
-      const baselineValues = baselineForm.getFieldsValue();
       const companyValues = companyForm.getFieldsValue();
       const disposalValues = entryForm.getFieldsValue();
-      // Compute active/closed cell totals for backward compat
-      const activeCellResidualVolume =
-        activeCellEntries.filter((e) => e.wasteType === "Residual").reduce((s, e) => s + (e.volume || 0), 0) ||
-        baselineValues.activeCellResidualVolume || 0;
-      const activeCellInertVolume =
-        activeCellEntries.filter((e) => e.wasteType === "Inert/Hazardous Waste").reduce((s, e) => s + (e.volume || 0), 0) ||
-        baselineValues.activeCellInertVolume || 0;
-      const closedCellResidualVolume =
-        closedCellEntries.filter((e) => e.wasteType === "Residual").reduce((s, e) => s + (e.volume || 0), 0) ||
-        baselineValues.closedCellResidualVolume || 0;
-      const closedCellInertVolume =
-        closedCellEntries.filter((e) => e.wasteType === "Inert/Hazardous Waste").reduce((s, e) => s + (e.volume || 0), 0) ||
-        baselineValues.closedCellInertVolume || 0;
       const entry = {
         ...disposalValues,
-        ...baselineValues,
         ...companyValues,
         lguCompanyName: companyValues.lguCompanyName || disposalValues.lguCompanyName || "",
         companyType:
@@ -1971,13 +2122,6 @@ export default function SLFPortal() {
           disposalValues.companyType ||
           ((slfInfo?.ownership || "").toLowerCase().includes("private") ? "Private" : "LGU"),
         address: companyValues.address || disposalValues.address || "",
-        activeCellEntries: activeCellEntries.map(({ key, ...rest }) => rest),
-        activeCellResidualVolume,
-        activeCellInertVolume,
-        closedCellEntries: closedCellEntries.map(({ key, ...rest }) => rest),
-        closedCellResidualVolume,
-        closedCellInertVolume,
-        accreditedHaulers: haulers.map(({ key, ...rest }) => rest),
         slfName: activeSlfName,
         slfGenerator: activeSlfId || null,
         dateOfDisposal: disposalValues.dateOfDisposal
@@ -2093,39 +2237,10 @@ export default function SLFPortal() {
     }
     setLoading(true);
     try {
-      const baselineValues = baselineForm.getFieldsValue();
       const companyValues = companyForm.getFieldsValue();
       const disposalValues = entryForm.getFieldsValue();
-      const firstTruck = trucks[0] || {};
-      // Compute active cell totals from entries for backward compat
-      const activeCellResidualVolume =
-        activeCellEntries
-          .filter((e) => e.wasteType === "Residual")
-          .reduce((s, e) => s + (e.volume || 0), 0) ||
-        baselineValues.activeCellResidualVolume ||
-        0;
-      const activeCellInertVolume =
-        activeCellEntries
-          .filter((e) => e.wasteType === "Inert/Hazardous Waste")
-          .reduce((s, e) => s + (e.volume || 0), 0) ||
-        baselineValues.activeCellInertVolume ||
-        0;
-      // Compute closed cell totals from entries for backward compat
-      const closedCellResidualVolume =
-        closedCellEntries
-          .filter((e) => e.wasteType === "Residual")
-          .reduce((s, e) => s + (e.volume || 0), 0) ||
-        baselineValues.closedCellResidualVolume ||
-        0;
-      const closedCellInertVolume =
-        closedCellEntries
-          .filter((e) => e.wasteType === "Inert/Hazardous Waste")
-          .reduce((s, e) => s + (e.volume || 0), 0) ||
-        baselineValues.closedCellInertVolume ||
-        0;
       const entry = {
         ...disposalValues,
-        ...baselineValues,
         ...companyValues,
         // Company info comes from companyForm / entryForm
         lguCompanyName:
@@ -2135,20 +2250,6 @@ export default function SLFPortal() {
           disposalValues.companyType ||
           ((slfInfo?.ownership || "").toLowerCase().includes("private") ? "Private" : "LGU"),
         address: companyValues.address || disposalValues.address || "",
-        // Active cell entries
-        activeCellEntries: activeCellEntries.map(({ key, ...rest }) => rest),
-        activeCellResidualVolume,
-        activeCellInertVolume,
-        // Closed cell entries
-        closedCellEntries: closedCellEntries.map(({ key, ...rest }) => rest),
-        closedCellResidualVolume,
-        closedCellInertVolume,
-        accreditedHaulers: haulers.map(({ key, ...rest }) => ({
-          ...rest,
-          privateSectorClients: (rest.privateSectorClients || []).map(
-            ({ key: ck, ...cr }) => cr,
-          ),
-        })),
         slfName: activeSlfName,
         slfGenerator: activeSlfId || null,
         dateOfDisposal: disposalValues.dateOfDisposal
@@ -2864,50 +2965,99 @@ export default function SLFPortal() {
             </div>
           ) : slfInfo ? (
             (() => {
-              const capacity = slfInfo.volumeCapacity || 0;
-              const facilityWaste = slfInfo.actualResidualWasteReceived || 0;
-              // Use baseline totalVolumeAccepted if available for more accurate utilization
-              const baselineVol = baselineForm.getFieldValue(
-                "totalVolumeAccepted",
+              const dashboardUnit = normalizeUnit(
+                slfInfo.volumeCapacityUnit ||
+                  slfInfo.cellCapacityUnits?.find(Boolean) ||
+                  slfInfo.cellFillUnits?.find(Boolean) ||
+                  baselineUnit ||
+                  "m³",
               );
-              const waste =
-                baselineVol != null && baselineVol > 0
-                  ? baselineVol
-                  : facilityWaste;
-              const pct =
-                capacity > 0
-                  ? Math.min(Math.round((waste / capacity) * 100), 100)
-                  : 0;
-              const cells = slfInfo.numberOfCell || 0;
               const cellCaps = slfInfo.cellCapacities || [];
               const cellStatuses = slfInfo.cellStatuses || [];
+              const cellFillValues = slfInfo.cellFillValues || [];
+              const cellFillUnits = slfInfo.cellFillUnits || [];
+              const cellCapacityUnits = slfInfo.cellCapacityUnits || [];
+              const cells = Math.max(
+                Number(slfInfo.numberOfCell || 0),
+                cellCaps.length,
+                cellStatuses.length,
+                cellFillValues.length,
+              );
               const cellTypes = slfInfo.cellTypes || [];
-              const operationalCells = cellStatuses.filter(
-                (s) => s !== "Closed",
-              ).length;
-              const closedCells = cellStatuses.filter(
-                (s) => s === "Closed",
-              ).length;
+              const adminCellRows = Array.from({ length: cells }, (_, index) => {
+                const status = normalizeCellStatus(cellStatuses[index]);
+                const capacityUnit = normalizeUnit(
+                  cellCapacityUnits[index] || slfInfo.volumeCapacityUnit || dashboardUnit,
+                );
+                const fillUnit = normalizeUnit(
+                  cellFillUnits[index] || slfInfo.wasteReceivedUnit || capacityUnit,
+                );
+                const capacity = Number(cellCaps[index] || 0);
+                const used = convertVolume(cellFillValues[index] || 0, fillUnit, capacityUnit);
+                const pct = capacity > 0
+                  ? Math.min(Math.round((Math.min(used, capacity) / capacity) * 100), 100)
+                  : 0;
+                return {
+                  index,
+                  status,
+                  type: cellTypes[index] || "Residual",
+                  capacity,
+                  capacityUnit,
+                  fillUnit,
+                  used,
+                  pct,
+                  remaining: capacity > 0 ? Math.max(0, capacity - used) : 0,
+                  isActive: isActiveCellStatus(status),
+                  isCompleted: isCompletedCellStatus(status),
+                  isUnavailable: isUnavailableCellStatus(status),
+                };
+              });
+              const capacity = adminCellRows.reduce(
+                (sum, row) => sum + convertVolume(row.capacity, row.capacityUnit, dashboardUnit),
+                0,
+              ) || convertVolume(
+                slfInfo.volumeCapacity || 0,
+                slfInfo.volumeCapacityUnit || dashboardUnit,
+                dashboardUnit,
+              );
+              const waste = adminCellRows.reduce(
+                (sum, row) => sum + convertVolume(row.used, row.capacityUnit, dashboardUnit),
+                0,
+              ) || convertVolume(
+                slfInfo.actualResidualWasteReceived || 0,
+                slfInfo.wasteReceivedUnit || dashboardUnit,
+                dashboardUnit,
+              );
+              const pct = capacity > 0
+                ? Math.min(Math.round((Math.min(waste, capacity) / capacity) * 100), 100)
+                : 0;
+              const operationalCells = adminCellRows.filter((row) => row.isActive).length;
+              const closedCells = adminCellRows.filter((row) => row.isCompleted).length;
               const residualCells =
-                cellTypes.filter((t) => t !== "Treated Haz Waste").length ||
+                adminCellRows.filter((row) => row.type !== "Treated Haz Waste").length ||
                 cells;
-              const hazCells = cellTypes.filter(
-                (t) => t === "Treated Haz Waste",
-              ).length;
+              const hazCells = adminCellRows.filter((row) => row.type === "Treated Haz Waste").length;
               const capColor =
                 pct >= 90 ? "#ff4d4f" : pct >= 70 ? "#faad14" : "#52c41a";
               const capLabel =
                 pct >= 90 ? "Critical" : pct >= 70 ? "Warning" : "Normal";
               const isOp = !slfInfo.statusOfSLF?.toLowerCase().includes("non");
               // Baseline cell breakdown
-              const activeCellRes =
-                baselineForm.getFieldValue("activeCellResidualVolume") || 0;
-              const activeCellInert =
-                baselineForm.getFieldValue("activeCellInertVolume") || 0;
-              const closedCellRes =
-                baselineForm.getFieldValue("closedCellResidualVolume") || 0;
-              const closedCellInert =
-                baselineForm.getFieldValue("closedCellInertVolume") || 0;
+              const isResidualEntry = (entry) => !/haz|inert/i.test(String(entry?.wasteType || "Residual"));
+              const sumEntryVolumes = (entries, predicate) =>
+                entries.filter(predicate).reduce((sum, entry) => sum + Number(entry?.volume || 0), 0);
+              const activeCellRes = activeCellEntries.length
+                ? sumEntryVolumes(activeCellEntries, isResidualEntry)
+                : baselineForm.getFieldValue("activeCellResidualVolume") || 0;
+              const activeCellInert = activeCellEntries.length
+                ? sumEntryVolumes(activeCellEntries, (entry) => !isResidualEntry(entry))
+                : baselineForm.getFieldValue("activeCellInertVolume") || 0;
+              const closedCellRes = closedCellEntries.length
+                ? sumEntryVolumes(closedCellEntries, isResidualEntry)
+                : baselineForm.getFieldValue("closedCellResidualVolume") || 0;
+              const closedCellInert = closedCellEntries.length
+                ? sumEntryVolumes(closedCellEntries, (entry) => !isResidualEntry(entry))
+                : baselineForm.getFieldValue("closedCellInertVolume") || 0;
               const hasBaselineCell =
                 activeCellRes > 0 ||
                 activeCellInert > 0 ||
@@ -3165,10 +3315,10 @@ export default function SLFPortal() {
                                 }}
                               >
                                 {waste > 0
-                                  ? `${waste.toLocaleString()} ${baselineUnit || "m³"}`
+                                  ? `${waste.toLocaleString(undefined, { maximumFractionDigits: 2 })} ${dashboardUnit}`
                                   : "—"}
                               </div>
-                              {baselineVol != null && baselineVol > 0 && (
+                              {adminCellRows.some((row) => row.used > 0) && (
                                 <div
                                   style={{
                                     fontSize: 10,
@@ -3177,7 +3327,7 @@ export default function SLFPortal() {
                                     marginTop: 2,
                                   }}
                                 >
-                                  From Baseline • Tap for breakdown
+                                  From Cell Infrastructure • Tap for breakdown
                                 </div>
                               )}
                             </div>
@@ -3224,7 +3374,7 @@ export default function SLFPortal() {
                                 }}
                               >
                                 {capacity > 0
-                                  ? `${capacity.toLocaleString()} ${baselineUnit || "m³"}`
+                                  ? `${capacity.toLocaleString(undefined, { maximumFractionDigits: 2 })} ${dashboardUnit}`
                                   : "—"}
                               </div>
                               {capacity > 0 && waste > 0 && (
@@ -3239,8 +3389,8 @@ export default function SLFPortal() {
                                   {Math.max(
                                     0,
                                     capacity - waste,
-                                  ).toLocaleString()}{" "}
-                                  remaining
+                                  ).toLocaleString(undefined, { maximumFractionDigits: 2 })}{" "}
+                                  {dashboardUnit} remaining
                                 </div>
                               )}
                             </div>
@@ -3299,7 +3449,7 @@ export default function SLFPortal() {
 
                   {/* Cell Infrastructure & Baseline Utilization — side by side */}
                   <Row gutter={[16, 16]} style={{ marginBottom: 20 }}>
-                    {cells > 0 && cellCaps.length > 0 && (
+                    {adminCellRows.length > 0 && (
                       <Col xs={24} md={baselineSaved ? 14 : 24}>
                         <div
                           style={{
@@ -3350,122 +3500,119 @@ export default function SLFPortal() {
                             </Space>
                           </div>
                           <Row gutter={[12, 12]}>
-                            {cellCaps.map((cap, i) => {
-                              const cellSt = cellStatuses[i] || "Operational";
-                              const cellT = cellTypes[i] || "Residual";
-                              const isClosed = cellSt === "Closed";
-                              const isInactive = isClosed || cellSt === "Under Construction" || cellSt === "Reserved Cell";
-                              const isHaz = cellT === "Treated Haz Waste";
-                              // Use per-cell fill values from backend (routed by waste type)
-                              const cellFillUnit = slfInfo.cellFillUnits?.[i] || baselineUnit || "m³";
-                              const cellFill = slfInfo.cellFillValues?.[i] || 0;
-                              const cellPct = cap > 0 && cellFill > 0 && !isInactive
-                                ? Math.min(Math.round((cellFill / cap) * 100), 100)
-                                : 0;
-                              const cellColor = isClosed
-                                ? "#d9d9d9"
-                                : isInactive
-                                  ? "#722ed1"
-                                  : isHaz
-                                    ? (cellPct >= 90 ? "#ff4d4f" : cellPct >= 70 ? "#faad14" : "#f5222d")
-                                    : cellPct >= 90
-                                      ? "#ff4d4f"
-                                      : cellPct >= 70
-                                        ? "#faad14"
-                                        : "#52c41a";
-                              const remaining = cap > 0 ? Math.max(0, cap - cellFill) : 0;
-                              return (
-                                <Col
-                                  xs={12}
-                                  sm={8}
-                                  md={Math.min(8, Math.floor(24 / cells))}
-                                  key={i}
-                                >
-                                  <div
-                                    style={{
-                                      background: isClosed ? "#fafafa" : "#fff",
-                                      borderRadius: 10,
-                                      padding: "14px 12px",
-                                      border: `1px solid ${isClosed ? "#e8e8e8" : cellColor}30`,
-                                      textAlign: "center",
-                                      opacity: isClosed ? 0.7 : 1,
-                                    }}
+                            {adminCellRows.map((row) => {
+                                const cap = row.capacity;
+                                const cellSt = row.status;
+                                const cellT = row.type;
+                                const isClosed = row.isCompleted;
+                                const isInactive = row.isCompleted || row.isUnavailable;
+                                const isHaz = cellT === "Treated Haz Waste";
+                                const cellFillUnit = row.capacityUnit;
+                                const cellFill = row.used;
+                                const cellPct = row.pct;
+                                const cellColor = isClosed
+                                  ? "#d9d9d9"
+                                  : isInactive
+                                    ? "#722ed1"
+                                    : isHaz
+                                      ? (cellPct >= 90 ? "#ff4d4f" : cellPct >= 70 ? "#faad14" : "#f5222d")
+                                      : cellPct >= 90
+                                        ? "#ff4d4f"
+                                        : cellPct >= 70
+                                          ? "#faad14"
+                                          : "#52c41a";
+                                const remaining = row.remaining;
+                                return (
+                                  <Col
+                                    xs={12}
+                                    sm={8}
+                                    md={Math.min(8, Math.floor(24 / cells))}
+                                    key={row.index}
                                   >
-                                    <Progress
-                                      type="dashboard"
-                                      percent={isInactive ? 0 : cellPct}
-                                      size={isMobile ? 64 : 80}
-                                      strokeWidth={6}
-                                      strokeColor={cellColor}
-                                      trailColor={isClosed ? "#bfbfbf" : undefined}
-                                      format={() => (
-                                        <span
-                                          style={{
-                                            fontSize: isMobile ? 13 : 15,
-                                            fontWeight: 700,
-                                            color: cellColor,
-                                          }}
-                                        >
-                                          {isClosed ? "—" : isInactive ? "N/A" : `${cellPct}%`}
-                                        </span>
+                                    <div
+                                      style={{
+                                        background: isClosed ? "#fafafa" : "#fff",
+                                        borderRadius: 10,
+                                        padding: "14px 12px",
+                                        border: `1px solid ${isClosed ? "#e8e8e8" : cellColor}30`,
+                                        textAlign: "center",
+                                        opacity: isClosed ? 0.7 : 1,
+                                      }}
+                                    >
+                                      <Progress
+                                        type="dashboard"
+                                        percent={isInactive ? 0 : cellPct}
+                                        size={isMobile ? 64 : 80}
+                                        strokeWidth={6}
+                                        strokeColor={cellColor}
+                                        trailColor={isClosed ? "#bfbfbf" : undefined}
+                                        format={() => (
+                                          <span
+                                            style={{
+                                              fontSize: isMobile ? 13 : 15,
+                                              fontWeight: 700,
+                                              color: cellColor,
+                                            }}
+                                          >
+                                            {isClosed ? "—" : isInactive ? "N/A" : `${cellPct}%`}
+                                          </span>
+                                        )}
+                                      />
+                                      <div
+                                        style={{
+                                          fontWeight: 700,
+                                          fontSize: 13,
+                                          color: "#1a3353",
+                                          marginTop: 6,
+                                        }}
+                                      >
+                                        Cell {row.index + 1}
+                                      </div>
+                                      <Tag
+                                        color={isClosed ? "default" : isInactive ? "purple" : "success"}
+                                        style={{ fontSize: 10, marginTop: 4 }}
+                                      >
+                                        {cellSt}
+                                      </Tag>
+                                      <Tag
+                                        color={isHaz ? "red" : "blue"}
+                                        style={{ fontSize: 10, marginTop: 2 }}
+                                      >
+                                        {cellT}
+                                      </Tag>
+                                      <div
+                                        style={{
+                                          fontSize: 11,
+                                          color: "#8c8c8c",
+                                          marginTop: 4,
+                                          fontWeight: 500,
+                                        }}
+                                      >
+                                        {cap > 0
+                                          ? `${cap.toLocaleString(undefined, { maximumFractionDigits: 2 })} ${row.capacityUnit}`
+                                          : "—"}
+                                      </div>
+                                      {!isInactive && cellFill > 0 && (
+                                        <div style={{ fontSize: 10, marginTop: 3 }}>
+                                          <span style={{ color: isHaz ? "#f5222d" : "#52c41a", fontWeight: 600 }}>
+                                            {cellFill.toLocaleString(undefined, { maximumFractionDigits: 1 })} {cellFillUnit}
+                                          </span>
+                                          {" "}<span style={{ color: "#8c8c8c" }}>filled</span>
+                                        </div>
                                       )}
-                                    />
-                                    <div
-                                      style={{
-                                        fontWeight: 700,
-                                        fontSize: 13,
-                                        color: "#1a3353",
-                                        marginTop: 6,
-                                      }}
-                                    >
-                                      Cell {i + 1}
+                                      {!isInactive && cap > 0 && remaining > 0 && (
+                                        <div style={{ fontSize: 10, color: "#8c8c8c", marginTop: 1 }}>
+                                          {remaining.toLocaleString(undefined, { maximumFractionDigits: 1 })} {cellFillUnit} remaining
+                                        </div>
+                                      )}
                                     </div>
-                                    <Tag
-                                      color={isClosed ? "default" : isInactive ? "purple" : "success"}
-                                      style={{ fontSize: 10, marginTop: 4 }}
-                                    >
-                                      {cellSt}
-                                    </Tag>
-                                    <Tag
-                                      color={isHaz ? "red" : "blue"}
-                                      style={{ fontSize: 10, marginTop: 2 }}
-                                    >
-                                      {cellT}
-                                    </Tag>
-                                    <div
-                                      style={{
-                                        fontSize: 11,
-                                        color: "#8c8c8c",
-                                        marginTop: 4,
-                                        fontWeight: 500,
-                                      }}
-                                    >
-                                      {cap > 0
-                                        ? `${cap.toLocaleString()} ${baselineUnit || "m³"}`
-                                        : "—"}
-                                    </div>
-                                    {!isInactive && cellFill > 0 && (
-                                      <div style={{ fontSize: 10, marginTop: 3 }}>
-                                        <span style={{ color: isHaz ? "#f5222d" : "#52c41a", fontWeight: 600 }}>
-                                          {cellFill.toLocaleString(undefined, { maximumFractionDigits: 1 })} {cellFillUnit}
-                                        </span>
-                                        {" "}<span style={{ color: "#8c8c8c" }}>filled</span>
-                                      </div>
-                                    )}
-                                    {!isInactive && cap > 0 && remaining > 0 && (
-                                      <div style={{ fontSize: 10, color: "#8c8c8c", marginTop: 1 }}>
-                                        {remaining.toLocaleString(undefined, { maximumFractionDigits: 1 })} {cellFillUnit} remaining
-                                      </div>
-                                    )}
-                                  </div>
-                                </Col>
-                              );
-                            })}
+                                  </Col>
+                                );
+                              })}
                           </Row>
                         </div>
                       </Col>
                     )}
-
                     {/* Baseline Utilization Breakdown */}
                     {baselineSaved && (
                       <Col xs={24} md={cells > 0 ? 10 : 24}>
@@ -3670,12 +3817,16 @@ export default function SLFPortal() {
                             value: slfInfo.remainingLifeSpan,
                           },
                           slfInfo.noOfLeachatePond != null && {
-                            label: "Leachate Ponds",
+                            label: "Leachate Treatment Plant",
                             value: slfInfo.noOfLeachatePond,
                           },
                           slfInfo.numberOfGasVents != null && {
-                            label: "Gas Vents",
+                            label: "Gas Management",
                             value: slfInfo.numberOfGasVents,
+                          },
+                          slfInfo.hasWastewaterTreatmentFacility != null && {
+                            label: "WWTF",
+                            value: slfInfo.hasWastewaterTreatmentFacility ? (slfInfo.wastewaterTreatmentFacilityType || "Yes") : "No",
                           },
                           [
                             slfInfo.barangay,
@@ -4088,9 +4239,10 @@ export default function SLFPortal() {
                           </Text>
                         </div>
                         <Select
-                          value={baselineUnit}
+                          value={baselineUnit || "m³"}
                           onChange={handleBaselineUnitChange}
                           disabled={baselineSaved}
+                          placeholder="Select unit of measurement"
                           style={{ width: 200 }}
                         >
                           <Option value="m³">m³ (cubic meters)</Option>
@@ -5578,6 +5730,8 @@ export default function SLFPortal() {
         setProfileModalOpen={setProfileModalOpen}
         supportDrawerOpen={supportDrawerOpen}
         setSupportDrawerOpen={setSupportDrawerOpen}
+        messageDrawerOpen={messageDrawerOpen}
+        setMessageDrawerOpen={setMessageDrawerOpen}
         supportTab={supportTab}
         setSupportTab={setSupportTab}
         supportTickets={supportTickets}
@@ -5644,6 +5798,7 @@ export default function SLFPortal() {
         wasteReceivedData={wasteReceivedData}
         wasteReceivedLoading={wasteReceivedLoading}
         activeCellEntries={activeCellEntries}
+        activeCellOptions={activeCellOptions}
         closedCellEntries={closedCellEntries}
         haulers={haulers}
         trucks={trucks}

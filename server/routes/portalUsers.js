@@ -3,7 +3,6 @@ const UserPortal = require("../models/UserPortal");
 const SlfFacility = require("../models/SlfFacility");
 const SupportTicket = require("../models/SupportTicket");
 const Notification = require("../models/Notification");
-const Transaction = require("../models/Transaction");
 const { authMiddleware, adminOnly } = require("../middleware/auth");
 const { writeLog } = require("../utils/logger");
 const { notifyPortal, refreshAdmin } = require("../utils/socketEmit");
@@ -315,6 +314,7 @@ router.post("/:id/message-threads", async (req, res) => {
       category,
       priority,
       message: message.trim(),
+      source: "admin_message",
       status: "in_progress",
     });
     await thread.save();
@@ -328,18 +328,6 @@ router.post("/:id/message-threads", async (req, res) => {
         meta: { ticketNo: thread.ticketNo, portalUserEmail: user.email },
       });
       notifyPortal(req, user.email, { type: "support_ticket_reply", title: "Message from Admin", message: thread.subject });
-    } catch { /* silent */ }
-
-    try {
-      await Transaction.create({
-        companyName: user.companyName || user.email,
-        submissionId: thread.ticketNo,
-        submittedBy: user.email,
-        type: "support_ticket_reply",
-        description: `Admin started conversation ${thread.ticketNo}: ${thread.subject}`,
-        performedBy: req.user?.email || req.user?.id || "admin",
-        meta: { ticketNo: thread.ticketNo, category, priority, portalUserEmail: user.email },
-      });
     } catch { /* silent */ }
 
     refreshAdmin(req, "tickets");
@@ -390,18 +378,6 @@ router.post("/:id/message-threads/:threadId/reply", async (req, res) => {
         meta: { ticketNo: thread.ticketNo, portalUserEmail: user.email },
       });
       notifyPortal(req, user.email, { type: "support_ticket_reply", title: "Message from Admin", message: thread.subject });
-    } catch { /* silent */ }
-
-    try {
-      await Transaction.create({
-        companyName: thread.companyName || user.companyName || user.email,
-        submissionId: thread.ticketNo,
-        submittedBy: user.email,
-        type: "support_ticket_reply",
-        description: `Admin replied to conversation ${thread.ticketNo}`,
-        performedBy: req.user?.email || req.user?.id || "admin",
-        meta: { ticketNo: thread.ticketNo, portalUserEmail: user.email },
-      });
     } catch { /* silent */ }
 
     refreshAdmin(req, "tickets");

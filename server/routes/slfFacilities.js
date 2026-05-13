@@ -3,7 +3,9 @@ const mongoose = require("mongoose");
 const SlfFacility = require("../models/SlfFacility");
 const DataSLF = require("../models/DataSLF");
 const UserPortal = require("../models/UserPortal");
+const Notification = require("../models/Notification");
 const { writeLog } = require("../utils/logger");
+const { notifyAdmin, notifyPortal, refreshAdmin } = require("../utils/socketEmit");
 
 const router = express.Router();
 
@@ -74,12 +76,55 @@ function isHazardousCell(cellType) {
   return /haz|inert/i.test(String(cellType || ""));
 }
 
+function isActiveCellStatus(status) {
+  return ["Active Cell", "Operational", "Active"].includes(String(status || ""));
+}
+
+function normalizeCellStatus(status) {
+  const value = String(status || "").trim();
+  if (/^operational$/i.test(value)) return "Active Cell";
+  if (/^closed$/i.test(value)) return "Used/Completed";
+  if (/^reserved cell$/i.test(value)) return "Reserved Area";
+  return value || "Active Cell";
+}
+
+function getDataEntryId(entry) {
+  return entry?._id ? String(entry._id) : "";
+}
+
+function isSameDataEntry(left, right) {
+  const leftId = getDataEntryId(left);
+  const rightId = getDataEntryId(right);
+  return !!leftId && !!rightId && leftId === rightId;
+}
+
+function hasTruckVolume(entry) {
+  return (entry?.trucks || []).some((truck) => Number(truck?.actualVolume || 0) > 0);
+}
+
+function getPortalVolumeUnit(baseline, submissions, facility) {
+  return normalizeUnit(
+    submissions
+      .flatMap((entry) => entry.trucks || [])
+      .find((truck) => Number(truck?.actualVolume || 0) > 0 && truck.actualVolumeUnit)?.actualVolumeUnit ||
+    (baseline?.activeCellEntries || []).find((entry) => Number(entry?.volume || 0) > 0 && entry.unit)?.unit ||
+    baseline?.baselineUnit ||
+    baseline?.activeCellResidualUnit ||
+    baseline?.totalVolumeAcceptedUnit ||
+    facility?.wasteReceivedUnit ||
+    facility?.cellFillUnits?.find(Boolean) ||
+    facility?.cellCapacityUnits?.find(Boolean) ||
+    facility?.volumeCapacityUnit ||
+    "m³"
+  );
+}
+
 function findBestCellIndex(rows, wasteType, preferredIndex = null) {
-  if (preferredIndex != null && rows[preferredIndex]) return preferredIndex;
+  if (preferredIndex != null && rows[preferredIndex] && isActiveCellStatus(rows[preferredIndex].status)) return preferredIndex;
   const hazardous = isHazardousWaste(wasteType);
-  const matchIndex = rows.findIndex((row) => row.status !== "Closed" && row.hazardous === hazardous);
+  const matchIndex = rows.findIndex((row) => isActiveCellStatus(row.status) && row.hazardous === hazardous);
   if (matchIndex >= 0) return matchIndex;
-  const operationalIndex = rows.findIndex((row) => row.status === "Operational");
+  const operationalIndex = rows.findIndex((row) => isActiveCellStatus(row.status));
   return operationalIndex >= 0 ? operationalIndex : 0;
 }
 
@@ -91,16 +136,8 @@ function addVolume(rows, index, value, fromUnit, targetUnit) {
 
 async function enrichPortalFacilityVolumes(facilityDoc, requestedSlfName) {
   const facility = facilityDoc.toObject ? facilityDoc.toObject() : { ...facilityDoc };
-  const targetUnit = normalizeUnit(facility.volumeCapacityUnit || facility.wasteReceivedUnit || "m³");
-  const cellCount = Math.max(Number(facility.numberOfCell || 0), facility.cellCapacities?.length || 0, 1);
-  const rows = Array.from({ length: cellCount }, (_, index) => ({
-    total: 0,
-    status: facility.cellStatuses?.[index] || "Operational",
-    hazardous: isHazardousCell(facility.cellTypes?.[index] || "Residual"),
-  }));
-
-  const names = [requestedSlfName, facility.lgu, facility.province].filter(Boolean);
-  const nameFilters = names.flatMap((name) => [{ slfName: name }, { lguCompanyName: name }]);
+  const names = [...new Set([requestedSlfName, facility.lgu].filter(Boolean))];
+  const nameFilters = names.map((name) => ({ slfName: new RegExp(`^${escapeRegExp(name)}$`, "i") }));
   const filters = [{ slfGenerator: facility._id }, ...nameFilters];
   const entries = await DataSLF.find({ deletedAt: null, $or: filters }).sort({ createdAt: -1 }).lean();
 
@@ -111,12 +148,24 @@ async function enrichPortalFacilityVolumes(facilityDoc, requestedSlfName) {
     entry.activeCellHazardousVolume != null ||
     entry.activeCellEntries?.length
   );
+  const matchingSubmissions = entries.filter((entry) =>
+    ACTIVE_VOLUME_STATUSES.has(entry.status || "pending") &&
+    !isSameDataEntry(entry, baseline) &&
+    hasTruckVolume(entry)
+  );
+  const targetUnit = getPortalVolumeUnit(baseline, matchingSubmissions, facility);
+  const cellCount = Math.max(Number(facility.numberOfCell || 0), facility.cellCapacities?.length || 0, 1);
+  const rows = Array.from({ length: cellCount }, (_, index) => ({
+    total: 0,
+    status: normalizeCellStatus(facility.cellStatuses?.[index]),
+    hazardous: isHazardousCell(facility.cellTypes?.[index] || "Residual"),
+  }));
 
   if (baseline?.activeCellEntries?.length) {
     baseline.activeCellEntries.forEach((entry, orderIndex) => {
       const parsedIndex = parseCellIndex(entry.cellName);
       const targetIndex = findBestCellIndex(rows, entry.wasteType, parsedIndex != null && parsedIndex >= 0 ? parsedIndex : orderIndex);
-      addVolume(rows, targetIndex, entry.volume, baseline.baselineUnit || targetUnit, targetUnit);
+      addVolume(rows, targetIndex, entry.volume, entry.unit || baseline.baselineUnit || targetUnit, targetUnit);
     });
   } else if (baseline) {
     [
@@ -126,9 +175,7 @@ async function enrichPortalFacilityVolumes(facilityDoc, requestedSlfName) {
     ].forEach((item) => addVolume(rows, findBestCellIndex(rows, item.wasteType), item.value, item.unit || baseline.baselineUnit || targetUnit, targetUnit));
   }
 
-  entries
-    .filter((entry) => ACTIVE_VOLUME_STATUSES.has(entry.status || "pending"))
-    .forEach((entry) => {
+  matchingSubmissions.forEach((entry) => {
       (entry.trucks || []).forEach((truck) => {
         addVolume(rows, findBestCellIndex(rows, truck.wasteType), truck.actualVolume, truck.actualVolumeUnit || "tons", targetUnit);
       });
@@ -165,8 +212,8 @@ router.get("/portal/:id", async (req, res) => {
       "province lgu barangay category ownership statusOfSLF remainingLifeSpan " +
       "volumeCapacity volumeCapacityUnit receivingVolumeCapacity receivingVolumeCapacityUnit numberOfCell cellCapacities cellCapacityUnits cellStatuses cellTypes cellNotes cellFillValues cellFillUnits estimatedVolumeWaste estimatedVolumeWasteUnit actualResidualWasteReceived wasteReceivedUnit " +
       "noOfLeachatePond numberOfGasVents mrfEstablished yearStartedOperation " +
-      "eccNo dischargePermit permitToOperate focalPerson " +
-      "leachatePondDetails gasVentDetails trashSlideMeasures firePrevMeasures galleryPhotos slfDocuments";
+      "eccNo dischargePermit dischargePermitValidity dischargePermitStatus dischargePermits permitToOperate permitToOperateValidity permitToOperateStatus permitToOperatePermits focalPerson " +
+      "receivingFacilities hasWastewaterTreatmentFacility wastewaterTreatmentFacilityType leachatePondDetails gasVentDetails trashSlideMeasures firePrevMeasures galleryPhotos galleryItems slfDocuments preventiveMeasureFiles scrpDetails";
 
     const facility = await findPortalFacility(req.params.id, req.query.slfName, selectFields);
 
@@ -177,15 +224,17 @@ router.get("/portal/:id", async (req, res) => {
   }
 });
 
-// Portal: Update facility management details (leachate ponds, gas vents, trash slide, fire prevention)
+// Portal: Update facility management details (Leachate Treatment Plant, gas vents, trash slide, fire prevention)
 router.patch("/portal/:id/facility-details", async (req, res) => {
   try {
-    const { leachatePondDetails, gasVentDetails, trashSlideMeasures, firePrevMeasures, slfName } = req.body;
+    const { leachatePondDetails, gasVentDetails, trashSlideMeasures, firePrevMeasures, hasWastewaterTreatmentFacility, wastewaterTreatmentFacilityType, slfName } = req.body;
     const allowed = {};
     if (leachatePondDetails !== undefined) allowed.leachatePondDetails = leachatePondDetails;
     if (gasVentDetails !== undefined) allowed.gasVentDetails = gasVentDetails;
     if (trashSlideMeasures !== undefined) allowed.trashSlideMeasures = trashSlideMeasures;
     if (firePrevMeasures !== undefined) allowed.firePrevMeasures = firePrevMeasures;
+    if (hasWastewaterTreatmentFacility !== undefined) allowed.hasWastewaterTreatmentFacility = hasWastewaterTreatmentFacility;
+    if (wastewaterTreatmentFacilityType !== undefined) allowed.wastewaterTreatmentFacilityType = wastewaterTreatmentFacilityType;
 
     const existing = await findPortalFacility(req.params.id, slfName || req.query.slfName, "_id");
     if (!existing) return res.status(404).json({ message: "Facility not found" });
@@ -193,7 +242,7 @@ router.patch("/portal/:id/facility-details", async (req, res) => {
     const facility = await SlfFacility.findOneAndUpdate(
       { _id: existing._id, deletedAt: null },
       { $set: allowed },
-      { new: true, select: "leachatePondDetails gasVentDetails trashSlideMeasures firePrevMeasures" }
+      { returnDocument: "after", select: "leachatePondDetails gasVentDetails trashSlideMeasures firePrevMeasures hasWastewaterTreatmentFacility wastewaterTreatmentFacilityType" }
     );
     if (!facility) return res.status(404).json({ message: "Facility not found" });
     res.json(facility);
@@ -322,10 +371,15 @@ router.post("/", async (req, res) => {
 // Update
 router.put("/:id", async (req, res) => {
   try {
+    const update = { ...(req.body || {}) };
+    ["_id", "id", "createdAt", "updatedAt", "deletedAt", "__v"].forEach((key) => delete update[key]);
+    Object.keys(update).forEach((key) => {
+      if (key.startsWith("_")) delete update[key];
+    });
     const record = await SlfFacility.findOneAndUpdate(
       { _id: req.params.id, deletedAt: null },
-      req.body,
-      { returnDocument: "after" }
+      { $set: update },
+      { returnDocument: "after", runValidators: true }
     );
     if (!record) return res.status(404).json({ message: "Record not found" });
     res.json(record);
@@ -339,8 +393,9 @@ router.put("/:id", async (req, res) => {
 router.patch("/:id/cell-status", async (req, res) => {
   try {
     const { cellIndex, status } = req.body;
-    if (cellIndex == null || !["Operational", "Closed", "Under Construction", "Reserved Cell"].includes(status)) {
-      return res.status(400).json({ message: "cellIndex and valid status (Operational/Closed/Under Construction/Reserved Cell) required" });
+    const normalizedStatus = normalizeCellStatus(status);
+    if (cellIndex == null || !["Active Cell", "Used/Completed", "Under Construction", "Reserved Area", "Not Existed"].includes(normalizedStatus)) {
+      return res.status(400).json({ message: "cellIndex and valid status required" });
     }
     const facility = await SlfFacility.findOne({ _id: req.params.id, deletedAt: null });
     if (!facility) return res.status(404).json({ message: "Facility not found" });
@@ -349,19 +404,98 @@ router.patch("/:id/cell-status", async (req, res) => {
     const cells = facility.numberOfCell || 0;
     if (!facility.cellStatuses || facility.cellStatuses.length < cells) {
       facility.cellStatuses = Array.from({ length: cells }, (_, i) =>
-        facility.cellStatuses?.[i] || "Operational"
+        normalizeCellStatus(facility.cellStatuses?.[i])
       );
     }
     if (cellIndex >= cells) return res.status(400).json({ message: "cellIndex out of range" });
 
-    facility.cellStatuses[cellIndex] = status;
+    facility.cellStatuses[cellIndex] = normalizedStatus;
     facility.markModified("cellStatuses");
     await facility.save();
     res.json(facility);
     writeLog("info", "slfFacility.cellStatus", {
-      message: `Cell ${cellIndex + 1} set to ${status} for ${facility.lgu}`,
+      message: `Cell ${cellIndex + 1} set to ${normalizedStatus} for ${facility.lgu}`,
       ip: req.ip,
     });
+  } catch (error) {
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+});
+
+// Notify assigned portal users when an active cell reaches the configured capacity threshold.
+router.post("/:id/cell-capacity-alert", async (req, res) => {
+  try {
+    const { cellIndex, percent, message, threshold = 80 } = req.body || {};
+    const facility = await SlfFacility.findOne({ _id: req.params.id, deletedAt: null });
+    if (!facility) return res.status(404).json({ message: "Facility not found" });
+
+    const cellNo = Number(cellIndex || 0) + 1;
+    const alertMessage = String(message || "").trim() ||
+      `${facility.lgu || "Assigned SLF"} Cell ${cellNo} has reached ${Number(percent || 0).toFixed(1)}% capacity. Please review disposal planning and remaining cell capacity.`;
+
+    const assignedUsers = await UserPortal.find({
+      status: "approved",
+      $or: [
+        { assignedSlf: facility._id },
+        { assignedSlfName: facility.lgu },
+        { assignedSlfName: facility.province },
+      ],
+    }).select("email firstName lastName companyName assignedSlf assignedSlfName").lean();
+
+    const uniqueUsers = Array.from(new Map(
+      assignedUsers.filter((user) => user.email).map((user) => [user.email, user]),
+    ).values());
+
+    const meta = {
+      facilityId: facility._id,
+      slfName: facility.lgu || facility.province,
+      cellIndex,
+      cellNo,
+      percent: Number(percent || 0),
+      threshold: Number(threshold || 80),
+    };
+
+    const notifications = [
+      {
+        recipient: "admin",
+        type: "cell_capacity_alert",
+        title: "SLF Cell Capacity Alert",
+        message: `${facility.lgu || "SLF"} Cell ${cellNo} reached ${Number(percent || 0).toFixed(1)}% capacity. ${uniqueUsers.length} assigned portal user(s) notified.`,
+        meta: { ...meta, notifiedUsers: uniqueUsers.map((user) => user.email) },
+      },
+      ...uniqueUsers.map((user) => ({
+        recipient: user.email,
+        type: "cell_capacity_alert",
+        title: "SLF Cell Capacity Alert",
+        message: alertMessage,
+        meta,
+      })),
+    ];
+
+    await Notification.insertMany(notifications);
+    uniqueUsers.forEach((user) => {
+      notifyPortal(req, user.email, {
+        type: "cell_capacity_alert",
+        title: "SLF Cell Capacity Alert",
+        message: alertMessage,
+        meta,
+      });
+    });
+    notifyAdmin(req, {
+      type: "cell_capacity_alert",
+      title: "SLF Cell Capacity Alert",
+      message: `${facility.lgu || "SLF"} Cell ${cellNo} reached ${Number(percent || 0).toFixed(1)}% capacity.`,
+      meta,
+    });
+    refreshAdmin(req, "notifications");
+
+    writeLog("info", "slfFacility.cellCapacityAlert", {
+      message: `Cell capacity alert sent for ${facility.lgu} Cell ${cellNo}`,
+      ip: req.ip,
+      meta,
+    });
+
+    res.json({ message: "Cell capacity alert sent", notified: uniqueUsers.length, users: uniqueUsers });
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });
   }

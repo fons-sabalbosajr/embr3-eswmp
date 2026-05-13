@@ -41,6 +41,12 @@ const supportTicketSchema = new mongoose.Schema(
       default: "Medium",
     },
     message: { type: String, required: true, trim: true },
+    source: {
+      type: String,
+      enum: ["portal_ticket", "admin_message"],
+      default: "portal_ticket",
+      index: true,
+    },
 
     status: {
       type: String,

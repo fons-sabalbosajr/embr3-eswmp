@@ -1,9 +1,9 @@
 import dayjs from "dayjs";
 import {
-  Avatar, Button, Col, Collapse, DatePicker, Descriptions, Divider,
+  Avatar, Badge, Button, Checkbox, Col, Collapse, DatePicker, Descriptions, Divider,
   Drawer, Empty, Form, Input, InputNumber, List,
   Modal, Progress, Row, Select, Space, Spin, Table, Tabs, Tag, Upload,
-  Typography,
+  Typography, Card
 } from "antd";
 import {
   AuditOutlined, BankOutlined, BarChartOutlined, CarOutlined, CheckCircleOutlined,
@@ -52,6 +52,7 @@ export default function SLFPortalModals({
   revertLoading,
   profileModalOpen, setProfileModalOpen,
   supportDrawerOpen, setSupportDrawerOpen,
+  messageDrawerOpen, setMessageDrawerOpen,
   supportTab, setSupportTab,
   supportTickets,
   supportLoading,
@@ -92,6 +93,7 @@ export default function SLFPortalModals({
   wasteReceivedData,
   wasteReceivedLoading,
   activeCellEntries,
+  activeCellOptions = [],
   closedCellEntries,
   haulers,
   trucks,
@@ -144,6 +146,45 @@ export default function SLFPortalModals({
     haulerErrors[name]
       ? { validateStatus: "error", help: haulerErrors[name] }
       : {};
+  const adminMessages = (supportTickets || []).filter((ticket) => ticket.source === "admin_message");
+  const portalSupportTickets = (supportTickets || []).filter((ticket) => ticket.source !== "admin_message");
+  const formatClientVolume = (row = {}) => {
+    const parts = [];
+    const m3 = Number(row.totalM3 ?? row.m3 ?? 0);
+    const tons = Number(row.totalTons ?? row.tons ?? 0);
+    if (m3 > 0) parts.push(`${m3.toLocaleString()} m³`);
+    if (tons > 0) parts.push(`${tons.toLocaleString()} tons`);
+    if (parts.length) return parts.join(" / ");
+    if (Number(row.totalVolume || 0) > 0) return `${Number(row.totalVolume || 0).toLocaleString()} ${row.unit || baselineUnit || "m³"}`;
+    return "—";
+  };
+  const getClientCategory = (row = {}) => {
+    const type = row.clientType || row.companyType || "Private";
+    const region = row.region || row.companyRegion || "";
+    if (/baseline/i.test(type)) return "Baseline Utilization";
+    if (/lgu/i.test(type)) return String(region).startsWith("03") ? "LGU - Region III" : "LGU - Outside Region III";
+    return "Private Industry";
+  };
+  const getAddressLabel = (row = {}, field) => {
+    const nameKey = `${field}Name`;
+    const value = row[field];
+    if (row[nameKey]) return row[nameKey];
+    const options = field === "province"
+      ? [...(clientProvinces || []), ...(provinces || [])]
+      : [...(clientMunicipalities || []), ...(municipalities || [])];
+    return options.find((item) => String(item.code) === String(value))?.name || value || "—";
+  };
+  const legacySubmissionRows = [
+    ...(wasteReceivedData.lguR3 || []).map((row) => ({ ...row, clientName: row.company, clientType: "LGU", region: row.region, unit: "m³" })),
+    ...(wasteReceivedData.lguOutside || []).map((row) => ({ ...row, clientName: row.company, clientType: "LGU", region: row.region, unit: "m³" })),
+    ...(wasteReceivedData.privateIndustry || []).map((row) => ({ ...row, clientName: row.company, clientType: "Private", region: row.region, unit: "m³" })),
+  ].filter((row) => Number(row.totalVolume || 0) > 0 || Number(row.entries || 0) > 0);
+  const submittedBreakdownRows = (wasteReceivedData.clientBreakdown || wasteReceivedData.submissionClients || []).length
+    ? (wasteReceivedData.clientBreakdown || wasteReceivedData.submissionClients || [])
+    : legacySubmissionRows;
+  const baselineBreakdownRows = (wasteReceivedData.baselineClients || []).length
+    ? wasteReceivedData.baselineClients || []
+    : wasteReceivedData.baselineCellBreakdown || [];
 
   return (
     <>
@@ -403,7 +444,8 @@ export default function SLFPortalModals({
                         <Col xs={12} sm={3}>
                           <Form.Item label="Unit" style={{ marginBottom: 8 }}>
                             <Select
-                              value={v.capacityUnit}
+                              value={v.capacityUnit || baselineUnit || "m³"}
+                              placeholder="Select unit"
                               onChange={(val) =>
                                 updateVehicle(i, "capacityUnit", val)
                               }
@@ -886,6 +928,7 @@ export default function SLFPortalModals({
                     <Form.Item label="Unit" style={{ marginBottom: 4 }}>
                       <Select
                         value={veh.capacityUnit || baselineUnit || "m³"}
+                        placeholder="Select unit"
                         onChange={(val) => {
                           const updated = [...(truckDraft.vehicles || [])];
                           updated[vi] = { ...updated[vi], capacityUnit: val };
@@ -1045,7 +1088,8 @@ export default function SLFPortalModals({
             <Col xs={12} sm={4}>
               <Form.Item label="Unit">
                 <Select
-                  value={truckDraft.actualVolumeUnit}
+                  value={truckDraft.actualVolumeUnit || baselineUnit || "m³"}
+                  placeholder="Select unit"
                   onChange={(v) => updateTruckDraft("actualVolumeUnit", v)}
                 >
                   <Option value="tons">tons</Option>
@@ -2535,6 +2579,36 @@ export default function SLFPortalModals({
         </Descriptions>
       </Modal>
 
+      {/* ── Admin Messages Floating Button ── */}
+      <Button
+        type="primary"
+        icon={<MessageOutlined />}
+        onClick={() => {
+          setMessageDrawerOpen(true);
+          if (supportTickets.length === 0) fetchSupportTickets();
+        }}
+        style={{
+          position: "fixed",
+          bottom: 92,
+          right: 32,
+          zIndex: 999,
+          height: 48,
+          borderRadius: 24,
+          fontSize: 15,
+          fontWeight: 600,
+          display: "flex",
+          alignItems: "center",
+          gap: 8,
+          background: "#1677ff",
+          borderColor: "#1677ff",
+          boxShadow: "0 4px 16px rgba(0,0,0,0.22)",
+          paddingInline: 20,
+        }}
+      >
+        Messages
+        {adminMessages.length > 0 && <Badge count={adminMessages.length} size="small" />}
+      </Button>
+
       {/* ── Support & FAQ Floating Button ── */}
       <Button
         type="primary"
@@ -2563,6 +2637,52 @@ export default function SLFPortalModals({
       >
         Support &amp; FAQ
       </Button>
+
+      {/* ── Admin Messages Drawer ── */}
+      <Drawer
+        title={<Space><MessageOutlined /> Messages from Admin</Space>}
+        placement="right"
+        size={isMobile ? "100%" : 520}
+        onClose={() => setMessageDrawerOpen(false)}
+        open={messageDrawerOpen}
+        styles={{ body: { padding: 16 } }}
+      >
+        {supportLoading ? (
+          <div style={{ textAlign: "center", padding: 40 }}><Spin /></div>
+        ) : adminMessages.length === 0 ? (
+          <Empty description="No admin messages yet" />
+        ) : (
+          <List
+            dataSource={adminMessages}
+            renderItem={(thread) => (
+              <List.Item
+                style={{ cursor: "pointer", padding: "12px 0" }}
+                onClick={() => setSupportDetailModal(thread)}
+              >
+                <List.Item.Meta
+                  avatar={<Avatar icon={<MessageOutlined />} style={{ background: "#1677ff" }} />}
+                  title={
+                    <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
+                      <Text strong style={{ fontSize: 13 }}>{thread.subject}</Text>
+                      <Tag color={thread.status === "resolved" ? "green" : thread.status === "closed" ? "default" : "blue"}>
+                        {thread.status?.replace("_", " ").toUpperCase()}
+                      </Tag>
+                    </div>
+                  }
+                  description={
+                    <Space direction="vertical" size={2}>
+                      <Text type="secondary" style={{ fontSize: 11 }}>
+                        {thread.ticketNo} &middot; {dayjs(thread.updatedAt || thread.createdAt).format("MMM D, YYYY h:mm A")}
+                      </Text>
+                      <Text ellipsis style={{ maxWidth: 420, fontSize: 12 }}>{thread.message}</Text>
+                    </Space>
+                  }
+                />
+              </List.Item>
+            )}
+          />
+        )}
+      </Drawer>
 
       {/* ── Support Drawer ── */}
       <Drawer
@@ -2721,11 +2841,11 @@ export default function SLFPortalModals({
                     <div style={{ textAlign: "center", padding: 40 }}>
                       <Spin />
                     </div>
-                  ) : supportTickets.length === 0 ? (
+                  ) : portalSupportTickets.length === 0 ? (
                     <Empty description="No support tickets yet" />
                   ) : (
                     <List
-                      dataSource={supportTickets}
+                      dataSource={portalSupportTickets}
                       renderItem={(ticket) => (
                         <List.Item
                           style={{ cursor: "pointer", padding: "12px 0" }}
@@ -2787,8 +2907,8 @@ export default function SLFPortalModals({
       <Modal
         title={
           supportDetailModal
-            ? `${supportDetailModal.ticketNo} — ${supportDetailModal.subject}`
-            : "Ticket Detail"
+            ? `${supportDetailModal.source === "admin_message" ? "Message" : supportDetailModal.ticketNo} — ${supportDetailModal.subject}`
+            : "Thread Detail"
         }
         open={!!supportDetailModal}
         onCancel={() => {
@@ -3169,12 +3289,15 @@ export default function SLFPortalModals({
       >
         <Form layout="vertical" requiredMark={false}>
           <Form.Item label="Cell Name" required>
-            <Input
-              placeholder="e.g. Cell 1"
-              value={activeCellDraft.cellName}
-              onChange={(e) =>
-                setActiveCellDraft((d) => ({ ...d, cellName: e.target.value }))
+            <Select
+              showSearch
+              placeholder="Select active cell"
+              value={activeCellDraft.cellName || undefined}
+              onChange={(value) =>
+                setActiveCellDraft((d) => ({ ...d, cellName: value }))
               }
+              options={activeCellOptions}
+              notFoundContent="No active cells available"
             />
           </Form.Item>
           <Form.Item label="Waste Type" required>
@@ -3586,118 +3709,71 @@ export default function SLFPortalModals({
             Close
           </Button>
         }
-        width={800}
+        width={960}
         destroyOnHidden
       >
         <Spin spinning={wasteReceivedLoading}>
-          {[
-            {
-              key: "lguR3",
-              label: "LGU Waste — Region III (Central Luzon)",
-              color: "#1890ff",
-              bg: "#e6f7ff",
-              icon: <TeamOutlined />,
-            },
-            {
-              key: "lguOutside",
-              label: "LGU Waste — Outside Region III",
-              color: "#722ed1",
-              bg: "#f9f0ff",
-              icon: <TeamOutlined />,
-            },
-            {
-              key: "privateIndustry",
-              label: "Waste from Private Industries",
-              color: "#52c41a",
-              bg: "#f6ffed",
-              icon: <BankOutlined />,
-            },
-          ].map(({ key, label, color, bg, icon }) => {
-            const rows = wasteReceivedData[key] || [];
-            const total = rows.reduce((s, r) => s + (r.totalVolume || 0), 0);
-            return (
-              <div key={key} style={{ marginBottom: 20 }}>
-                <div
-                  style={{
-                    display: "flex",
-                    alignItems: "center",
-                    gap: 8,
-                    marginBottom: 10,
-                    padding: "8px 12px",
-                    background: bg,
-                    borderRadius: 8,
-                    border: `1px solid ${color}30`,
-                  }}
-                >
-                  <span style={{ color, fontSize: 14 }}>{icon}</span>
-                  <Text strong style={{ color, fontSize: 13 }}>
-                    {label}
-                  </Text>
-                  <Tag
-                    color={
-                      color === "#1890ff"
-                        ? "blue"
-                        : color === "#722ed1"
-                          ? "purple"
-                          : "green"
-                    }
-                    style={{ marginLeft: "auto" }}
-                  >
-                    {rows.length} company{rows.length !== 1 ? "ies" : "y"}
-                  </Tag>
-                  <Text style={{ fontSize: 12, color: "#8c8c8c" }}>
-                    Total: {total.toLocaleString()} m³
-                  </Text>
-                </div>
-                {rows.length === 0 ? (
-                  <Empty
-                    description="No data"
-                    image={Empty.PRESENTED_IMAGE_SIMPLE}
-                    style={{ margin: "8px 0" }}
-                  />
-                ) : (
-                  <Table
-                    size="small"
-                    dataSource={rows}
-                    rowKey="company"
-                    pagination={false}
-                    columns={[
-                      { title: "#", render: (_, __, i) => i + 1, width: 40 },
-                      {
-                        title: "Company",
-                        dataIndex: "company",
-                        key: "company",
-                      },
-                      {
-                        title: "Entries",
-                        dataIndex: "entries",
-                        key: "entries",
-                        align: "center",
-                        width: 80,
-                      },
-                      {
-                        title: "Total Volume",
-                        dataIndex: "totalVolume",
-                        key: "totalVolume",
-                        align: "right",
-                        width: 140,
-                        render: (v) => (
-                          <Text strong style={{ color }}>
-                            {(v || 0).toLocaleString()} m³
-                          </Text>
-                        ),
-                      },
-                    ]}
-                    style={{ marginBottom: 4 }}
-                  />
-                )}
-              </div>
-            );
-          })}
+          <Row gutter={[12, 12]} style={{ marginBottom: 16 }}>
+            <Col xs={24} sm={8}>
+              <Card size="small" style={{ borderRadius: 8 }}>
+                <Text type="secondary" style={{ fontSize: 11 }}>Baseline Clients</Text>
+                <div style={{ fontSize: 22, fontWeight: 700, color: "#1a3353" }}>{baselineBreakdownRows.length}</div>
+              </Card>
+            </Col>
+            <Col xs={24} sm={8}>
+              <Card size="small" style={{ borderRadius: 8 }}>
+                <Text type="secondary" style={{ fontSize: 11 }}>Submission Clients</Text>
+                <div style={{ fontSize: 22, fontWeight: 700, color: "#fa8c16" }}>{submittedBreakdownRows.length}</div>
+              </Card>
+            </Col>
+            <Col xs={24} sm={8}>
+              <Card size="small" style={{ borderRadius: 8 }}>
+                <Text type="secondary" style={{ fontSize: 11 }}>Waste Filled</Text>
+                <div style={{ fontSize: 16, fontWeight: 700, color: "#52c41a" }}>{formatClientVolume({
+                  totalM3: Number(wasteReceivedData.baselineTotals?.m3 || 0) + Number(wasteReceivedData.totals?.m3 || 0),
+                  totalTons: Number(wasteReceivedData.baselineTotals?.tons || 0) + Number(wasteReceivedData.totals?.tons || 0),
+                })}</div>
+              </Card>
+            </Col>
+          </Row>
+
+          <Divider orientation="left" style={{ fontSize: 13 }}><TeamOutlined /> Baseline Client List</Divider>
+          <Table
+            size="small"
+            dataSource={baselineBreakdownRows}
+            rowKey={(row, index) => `${row.clientName || row.company || index}-baseline-${index}`}
+            pagination={{ pageSize: 5, size: "small" }}
+            locale={{ emptyText: <Empty description="No baseline breakdown encoded" image={Empty.PRESENTED_IMAGE_SIMPLE} /> }}
+            columns={[
+              { title: "#", render: (_, __, index) => index + 1, width: 48 },
+              { title: "Source", dataIndex: "clientName", ellipsis: true, render: (value, row) => value || row.company || "—" },
+              { title: "Category", width: 180, render: (_, row) => <Tag color={/private/i.test(row.clientType || "") ? "green" : "blue"}>{getClientCategory(row)}</Tag> },
+              { title: "Baseline Volume", width: 160, align: "right", render: (_, row) => <Text strong>{formatClientVolume(row)}</Text> },
+              { title: "Province", dataIndex: "province", width: 150, render: (_, row) => getAddressLabel(row, "province") },
+              { title: "Municipality", dataIndex: "municipality", width: 150, render: (_, row) => getAddressLabel(row, "municipality") },
+            ]}
+            style={{ marginBottom: 16 }}
+          />
+
+          <Divider orientation="left" style={{ fontSize: 13 }}><BarChartOutlined /> Submission Volume by Client</Divider>
+          <Table
+            size="small"
+            dataSource={submittedBreakdownRows}
+            rowKey={(row, index) => `${row.clientName || row.company || index}-submission-${index}`}
+            pagination={{ pageSize: 6, size: "small" }}
+            locale={{ emptyText: <Empty description="No submitted client breakdown yet" image={Empty.PRESENTED_IMAGE_SIMPLE} /> }}
+            columns={[
+              { title: "#", render: (_, __, index) => index + 1, width: 48 },
+              { title: "Client", dataIndex: "clientName", ellipsis: true, render: (value, row) => value || row.company || "—" },
+              { title: "Category", width: 180, render: (_, row) => <Tag color={/private/i.test(row.clientType || "") ? "green" : "blue"}>{getClientCategory(row)}</Tag> },
+              { title: "Truck Entries", dataIndex: "truckCount", width: 120, align: "center", render: (value, row) => Number(value || row.entries || 0).toLocaleString(undefined, { maximumFractionDigits: 1 }) },
+              { title: "Total Volume", width: 180, align: "right", render: (_, row) => <Text strong style={{ color: "#fa8c16" }}>{formatClientVolume(row)}</Text> },
+            ]}
+          />
         </Spin>
       </Modal>
 
-      {/* ══════════════════════ LEACHATE PONDS MODAL ══════════════════════ */}
+      {/* ══════════════════════ Leachate Treatment Plant MODAL ══════════════════════ */}
       <Modal
         title={
           <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
@@ -3716,7 +3792,7 @@ export default function SLFPortalModals({
             </div>
             <div>
               <div style={{ fontWeight: 700, fontSize: 15, color: "#1a3353" }}>
-                Leachate Ponds Management
+                Leachate Treatment Plant Management
               </div>
               <div style={{ fontSize: 11, color: "#8c8c8c" }}>
                 Count registered: {slfInfo?.noOfLeachatePond ?? "—"}
@@ -3858,96 +3934,12 @@ export default function SLFPortalModals({
                   />
                 </Col>
               </Row>
-              {/* Attachments */}
-              <div style={{ marginTop: 10 }}>
-                <div
-                  style={{ fontSize: 11, color: "#8c8c8c", marginBottom: 4 }}
-                >
-                  Attachments / Document Links
-                </div>
-                {(pond.attachments || []).map((url, ai) => (
-                  <div
-                    key={ai}
-                    style={{ display: "flex", gap: 6, marginBottom: 6 }}
-                  >
-                    <Input
-                      size="small"
-                      value={url}
-                      placeholder="Google Drive link or URL"
-                      onChange={(e) =>
-                        setLeachateDetails((p) =>
-                          p.map((x, i) =>
-                            i === idx
-                              ? {
-                                  ...x,
-                                  attachments: x.attachments.map((a, j) =>
-                                    j === ai ? e.target.value : a,
-                                  ),
-                                }
-                              : x,
-                          ),
-                        )
-                      }
-                      addonBefore={<FileTextOutlined />}
-                    />
-                    {url && (
-                      <Button
-                        size="small"
-                        type="link"
-                        icon={<EyeOutlined />}
-                        href={url}
-                        target="_blank"
-                        style={{ padding: 0 }}
-                      />
-                    )}
-                    <Button
-                      size="small"
-                      danger
-                      type="text"
-                      icon={<DeleteOutlined />}
-                      onClick={() =>
-                        setLeachateDetails((p) =>
-                          p.map((x, i) =>
-                            i === idx
-                              ? {
-                                  ...x,
-                                  attachments: x.attachments.filter(
-                                    (_, j) => j !== ai,
-                                  ),
-                                }
-                              : x,
-                          ),
-                        )
-                      }
-                    />
-                  </div>
-                ))}
-                <Button
-                  size="small"
-                  type="dashed"
-                  icon={<PlusOutlined />}
-                  onClick={() =>
-                    setLeachateDetails((p) =>
-                      p.map((x, i) =>
-                        i === idx
-                          ? {
-                              ...x,
-                              attachments: [...(x.attachments || []), ""],
-                            }
-                          : x,
-                      ),
-                    )
-                  }
-                >
-                  Add Link
-                </Button>
-              </div>
             </div>
           ))
         )}
       </Modal>
 
-      {/* ══════════════════════ GAS VENTS MODAL ══════════════════════ */}
+      {/* ══════════════════════ GAS MANAGEMENT MODAL ══════════════════════ */}
       <Modal
         title={
           <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
@@ -3966,7 +3958,7 @@ export default function SLFPortalModals({
             </div>
             <div>
               <div style={{ fontWeight: 700, fontSize: 15, color: "#1a3353" }}>
-                Gas Vents Management
+                Gas Management
               </div>
               <div style={{ fontSize: 11, color: "#8c8c8c" }}>
                 Count registered: {slfInfo?.numberOfGasVents ?? "—"}
@@ -4016,7 +4008,7 @@ export default function SLFPortalModals({
       >
         {gasVentDetails.length === 0 ? (
           <Empty
-            description="No gas vent records yet. Click 'Add Vent' to start."
+            description="No gas management records yet. Click 'Add Vent' to start."
             image={Empty.PRESENTED_IMAGE_SIMPLE}
           />
         ) : (
@@ -4126,89 +4118,6 @@ export default function SLFPortalModals({
                   />
                 </Col>
               </Row>
-              <div style={{ marginTop: 10 }}>
-                <div
-                  style={{ fontSize: 11, color: "#8c8c8c", marginBottom: 4 }}
-                >
-                  Attachments / Document Links
-                </div>
-                {(vent.attachments || []).map((url, ai) => (
-                  <div
-                    key={ai}
-                    style={{ display: "flex", gap: 6, marginBottom: 6 }}
-                  >
-                    <Input
-                      size="small"
-                      value={url}
-                      placeholder="Google Drive link or URL"
-                      onChange={(e) =>
-                        setGasVentDetails((p) =>
-                          p.map((x, i) =>
-                            i === idx
-                              ? {
-                                  ...x,
-                                  attachments: x.attachments.map((a, j) =>
-                                    j === ai ? e.target.value : a,
-                                  ),
-                                }
-                              : x,
-                          ),
-                        )
-                      }
-                      addonBefore={<FileTextOutlined />}
-                    />
-                    {url && (
-                      <Button
-                        size="small"
-                        type="link"
-                        icon={<EyeOutlined />}
-                        href={url}
-                        target="_blank"
-                        style={{ padding: 0 }}
-                      />
-                    )}
-                    <Button
-                      size="small"
-                      danger
-                      type="text"
-                      icon={<DeleteOutlined />}
-                      onClick={() =>
-                        setGasVentDetails((p) =>
-                          p.map((x, i) =>
-                            i === idx
-                              ? {
-                                  ...x,
-                                  attachments: x.attachments.filter(
-                                    (_, j) => j !== ai,
-                                  ),
-                                }
-                              : x,
-                          ),
-                        )
-                      }
-                    />
-                  </div>
-                ))}
-                <Button
-                  size="small"
-                  type="dashed"
-                  icon={<PlusOutlined />}
-                  onClick={() =>
-                    setGasVentDetails((p) =>
-                      p.map((x, i) =>
-                        i === idx
-                          ? {
-                              ...x,
-                              attachments: [...(x.attachments || []), ""],
-                            }
-                          : x,
-                      ),
-                    )
-                  }
-                >
-                  Add Link
-                </Button>
-              </div>
             </div>
           ))
         )}

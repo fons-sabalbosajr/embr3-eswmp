@@ -57,7 +57,7 @@ router.post("/", async (req, res) => {
 router.put("/:id", async (req, res) => {
   try {
     const ref = await DataReference.findByIdAndUpdate(req.params.id, req.body, {
-      new: true,
+      returnDocument: "after",
       runValidators: true,
     });
     if (!ref) return res.status(404).json({ message: "Not found" });

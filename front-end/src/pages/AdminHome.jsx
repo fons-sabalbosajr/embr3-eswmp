@@ -7194,7 +7194,7 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                           value={slfOps.totalLeachatePonds || 0}
                           prefix={<AlertOutlined style={{ color: "#1890ff" }} />}
                         />
-                        <Text type="secondary" style={{ fontSize: 11 }}>Click to view leachate ponds</Text>
+                        <Text type="secondary" style={{ fontSize: 11 }}>Click to view Leachate Treatment Plant</Text>
                       </Card>
                     </Col>
                     <Col xs={12} sm={12} md={6}>
@@ -7210,7 +7210,7 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                           value={slfOps.totalGasVents || 0}
                           prefix={<SafetyCertificateOutlined style={{ color: "#52c41a" }} />}
                         />
-                        <Text type="secondary" style={{ fontSize: 11 }}>Click to view gas vents</Text>
+                        <Text type="secondary" style={{ fontSize: 11 }}>Click to view gas management</Text>
                       </Card>
                     </Col>
                   </Row>

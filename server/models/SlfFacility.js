@@ -31,9 +31,20 @@ const slfFacilitySchema = new mongoose.Schema(
     dischargePermit: { type: String, trim: true },
     dischargePermitValidity: { type: Date },
     dischargePermitStatus: { type: String, trim: true }, // "New" | "Renewal"
+    dischargePermits: [{
+      permitNo: { type: String, trim: true },
+      permitType: { type: String, enum: ["Domestic", "Industrial", ""], default: "" },
+      validity: { type: Date },
+      status: { type: String, trim: true },
+    }],
     permitToOperate: { type: String, trim: true },
     permitToOperateValidity: { type: Date },
     permitToOperateStatus: { type: String, trim: true }, // "New" | "Renewal"
+    permitToOperatePermits: [{
+      permitNo: { type: String, trim: true },
+      validity: { type: Date },
+      status: { type: String, trim: true },
+    }],
     hazwasteGenerationId: { type: String, trim: true },
 
     // Personnel
@@ -68,7 +79,7 @@ const slfFacilitySchema = new mongoose.Schema(
     numberOfCell: { type: Number },
     cellCapacities: [{ type: Number }],
     cellCapacityUnits: [{ type: String, enum: ["m³", "tons", "m3"], default: "m³" }],
-    cellStatuses: [{ type: String, enum: ["Operational", "Closed", "Under Construction", "Reserved Cell"], default: "Operational" }],
+    cellStatuses: [{ type: String, enum: ["Active Cell", "Used/Completed", "Under Construction", "Reserved Area", "Not Existed", "Operational", "Closed", "Reserved Cell"], default: "Active Cell" }],
     cellTypes: [{ type: String, trim: true, default: "Residual" }], // per-cell: "Residual" or "Treated Haz Waste"
     cellNotes: [{ type: String, trim: true }], // per-cell notes (used for Under Construction / Reserved Cell status)
     cellFillValues: [{ type: Number }],
@@ -84,12 +95,22 @@ const slfFacilitySchema = new mongoose.Schema(
       status: { type: String, trim: true, default: "Active" },
       notes: { type: String, trim: true },
     }],
+    receivingFacilities: [{
+      mrfTypes: [{ type: String, trim: true }],
+      mrfName: { type: String, trim: true },
+      status: { type: String, trim: true, default: "Active" },
+      description: { type: String, trim: true },
+    }],
+    hasWastewaterTreatmentFacility: { type: Boolean, default: false },
+    wastewaterTreatmentFacilityType: { type: String, trim: true },
 
-    // Leachate Pond Details
+    // Leachate Treatment Plant Details
     leachatePondDetails: [{
       pondNo: { type: Number },
       description: { type: String, trim: true },
       status: { type: String, trim: true, default: "Active" },
+      hasWastewaterTreatmentFacility: { type: Boolean, default: false },
+      wastewaterTreatmentFacilityType: { type: String, trim: true },
       attachments: [{ type: String, trim: true }],
     }],
 
@@ -129,9 +150,27 @@ const slfFacilitySchema = new mongoose.Schema(
     dateOfTechnicalConference: { type: String, trim: true },
     commitments: { type: String, trim: true },
     signedDocument: { type: String, trim: true },
+    technicalConferenceConducted: { type: Boolean, default: false },
+    commitmentFiles: [{ type: String, trim: true }],
+    progressReportFiles: [{ type: String, trim: true }],
+
+    // Preventive Measures / Closure Plan
+    preventiveMeasureFiles: [{ type: String, trim: true }],
+    scrpDetails: [{
+      planTitle: { type: String, trim: true },
+      status: { type: String, trim: true },
+      remarks: { type: String, trim: true },
+      attachments: [{ type: String, trim: true }],
+    }],
 
     // Gallery & Documents
     galleryPhotos: [{ type: String, trim: true }], // array of photo URLs
+    galleryItems: [{
+      url: { type: String, trim: true },
+      caption: { type: String, trim: true },
+      folder: { type: String, trim: true },
+      component: { type: String, trim: true },
+    }],
     slfDocuments: [{
       title: { type: String, trim: true },
       url: { type: String, trim: true },

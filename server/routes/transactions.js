@@ -129,9 +129,14 @@ router.get("/companies", async (req, res) => {
 // Get transaction thread for a specific submission
 router.get("/thread/:submissionId", async (req, res) => {
   try {
-    const transactions = await Transaction.find({
-      submissionId: req.params.submissionId,
-    }).sort({ createdAt: 1 });
+    const key = req.params.submissionId;
+    const dataEntryFilters = [{ submissionId: key }, { idNo: key }];
+    if (/^[a-f\d]{24}$/i.test(key)) dataEntryFilters.push({ _id: key });
+    const entry = await DataSLF.findOne({ $or: dataEntryFilters }).select("_id submissionId idNo").lean();
+    const submissionKeys = [...new Set([key, entry?.submissionId, entry?.idNo].filter(Boolean))];
+    const filters = [{ submissionId: { $in: submissionKeys } }];
+    if (entry?._id) filters.push({ dataEntry: entry._id });
+    const transactions = await Transaction.find({ $or: filters }).sort({ createdAt: 1 });
     res.json(transactions);
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });

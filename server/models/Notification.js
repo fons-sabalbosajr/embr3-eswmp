@@ -20,6 +20,7 @@ const notificationSchema = new mongoose.Schema(
         "submission_edit_request", // portal user requests submission edit
         "submission_edit_approved", // admin approved submission edit
         "submission_edit_rejected", // admin rejected submission edit
+        "cell_capacity_alert", // active SLF cell reached configured capacity threshold
       ],
       required: true,
     },
