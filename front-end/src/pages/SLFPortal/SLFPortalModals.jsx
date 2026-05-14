@@ -55,6 +55,8 @@ export default function SLFPortalModals({
   messageDrawerOpen, setMessageDrawerOpen,
   supportTab, setSupportTab,
   supportTickets,
+  portalNotificationCounts = {},
+  markPortalNotificationsRead = () => {},
   supportLoading,
   supportSubmitting,
   fetchSupportTickets,
@@ -148,6 +150,15 @@ export default function SLFPortalModals({
       : {};
   const adminMessages = (supportTickets || []).filter((ticket) => ticket.source === "admin_message");
   const portalSupportTickets = (supportTickets || []).filter((ticket) => ticket.source !== "admin_message");
+  const uniqueHaulers = Array.from(
+    new Map(
+      (haulers || [])
+        .filter((hauler) => hauler?.haulerName)
+        .map((hauler) => [hauler.haulerName.trim().toLowerCase(), hauler]),
+    ).values(),
+  );
+  const messageUnreadCount = portalNotificationCounts.messages || 0;
+  const supportUnreadCount = portalNotificationCounts.support || 0;
   const formatClientVolume = (row = {}) => {
     const parts = [];
     const m3 = Number(row.totalM3 ?? row.m3 ?? 0);
@@ -760,7 +771,7 @@ export default function SLFPortalModals({
                     </Text>
                   }
                 >
-                  {haulers.map((h) => (
+                  {uniqueHaulers.map((h) => (
                     <Option key={h.key || h.haulerName} value={h.haulerName}>
                       {h.haulerName}
                     </Option>
@@ -809,10 +820,15 @@ export default function SLFPortalModals({
             </Text>
           )}
           {(truckDraft.vehicles || []).map((veh, vi) => {
-            const selectedHauler = haulers.find(
+            const matchingHaulers = (haulers || []).filter(
               (h) => h.haulerName === truckDraft.hauler,
             );
-            const haulerVehicles = selectedHauler?.vehicles || [];
+            const haulerVehicles = matchingHaulers
+              .flatMap((hauler) => hauler.vehicles || [])
+              .filter((vehicle, index, list) =>
+                vehicle?.plateNumber &&
+                list.findIndex((item) => item.plateNumber === vehicle.plateNumber) === index,
+              );
             return (
               <div
                 key={veh.key || vi}
@@ -941,11 +957,12 @@ export default function SLFPortalModals({
                     </Form.Item>
                   </Col>
                   {(() => {
-                    const selectedHauler = haulers.find(
-                      (h) => h.haulerName === truckDraft.hauler,
-                    );
-                    const haulerClients =
-                      selectedHauler?.privateSectorClients || [];
+                    const haulerClients = matchingHaulers
+                      .flatMap((hauler) => hauler.privateSectorClients || [])
+                      .filter((client, index, list) => {
+                        const name = typeof client === "object" ? client.clientName : client;
+                        return name && list.findIndex((item) => (typeof item === "object" ? item.clientName : item) === name) === index;
+                      });
                     if (!haulerClients.length || !veh.plateNumber) return null;
                     return (
                       <Col xs={24}>
@@ -2586,6 +2603,7 @@ export default function SLFPortalModals({
         onClick={() => {
           setMessageDrawerOpen(true);
           if (supportTickets.length === 0) fetchSupportTickets();
+          markPortalNotificationsRead("messages");
         }}
         style={{
           position: "fixed",
@@ -2606,7 +2624,7 @@ export default function SLFPortalModals({
         }}
       >
         Messages
-        {adminMessages.length > 0 && <Badge count={adminMessages.length} size="small" />}
+        {messageUnreadCount > 0 && <Badge count={messageUnreadCount} size="small" />}
       </Button>
 
       {/* ── Support & FAQ Floating Button ── */}
@@ -2616,6 +2634,7 @@ export default function SLFPortalModals({
         onClick={() => {
           setSupportDrawerOpen(true);
           if (supportTickets.length === 0) fetchSupportTickets();
+          markPortalNotificationsRead("support");
         }}
         style={{
           position: "fixed",
@@ -2636,6 +2655,7 @@ export default function SLFPortalModals({
         }}
       >
         Support &amp; FAQ
+        {supportUnreadCount > 0 && <Badge count={supportUnreadCount} size="small" />}
       </Button>
 
       {/* ── Admin Messages Drawer ── */}
@@ -2703,6 +2723,9 @@ export default function SLFPortalModals({
               label: (
                 <span>
                   <QuestionCircleOutlined /> FAQ
+                  {(portalNotificationCounts.total || 0) > 0 && (
+                    <Badge dot style={{ marginLeft: 6 }} />
+                  )}
                 </span>
               ),
               children: (
@@ -2833,6 +2856,9 @@ export default function SLFPortalModals({
               label: (
                 <span>
                   <FileTextOutlined /> My Tickets
+                  {supportUnreadCount > 0 && (
+                    <Badge count={supportUnreadCount} size="small" style={{ marginLeft: 6 }} />
+                  )}
                 </span>
               ),
               children: (

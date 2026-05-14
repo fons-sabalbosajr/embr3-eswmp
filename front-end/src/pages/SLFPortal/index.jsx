@@ -106,6 +106,101 @@ const TON_PER_M3 = 0.2;
 
 const normalizeUnit = (unit) => String(unit || "m³").replace("m3", "m³");
 
+const normalizeVehicleRecord = (vehicle = {}, fallbackUnit = "m³") => ({
+  plateNumber: vehicle.plateNumber || vehicle.plateNo || vehicle.plate || "",
+  vehicleType: vehicle.vehicleType || vehicle.type || "",
+  capacity: vehicle.capacity ?? vehicle.truckCapacity ?? null,
+  capacityUnit: normalizeUnit(vehicle.capacityUnit || vehicle.truckCapacityUnit || fallbackUnit),
+  selectedClients: Array.isArray(vehicle.selectedClients) ? vehicle.selectedClients : [],
+});
+
+const normalizeClientRecord = (client, index = 0) => {
+  if (typeof client === "string") {
+    return {
+      key: index,
+      clientName: client,
+      clientType: "Private",
+      region: "",
+      province: "",
+      municipality: "",
+    };
+  }
+  return { key: client?.key ?? client?._id ?? index, ...(client || {}) };
+};
+
+const normalizeHaulerRecord = (hauler = {}, index = 0, fallbackUnit = "m³") => {
+  let vehicles = Array.isArray(hauler.vehicles)
+    ? hauler.vehicles.map((vehicle) => normalizeVehicleRecord(vehicle, fallbackUnit))
+    : [];
+  if (
+    vehicles.length === 0 &&
+    (hauler.plateNumber || hauler.plateNo || hauler.vehicleType || hauler.capacity != null)
+  ) {
+    vehicles = [normalizeVehicleRecord(hauler, fallbackUnit)];
+  }
+  const clients = Array.isArray(hauler.privateSectorClients)
+    ? hauler.privateSectorClients
+    : hauler.privateSectorClients
+      ? [hauler.privateSectorClients]
+      : Array.isArray(hauler.clients)
+        ? hauler.clients
+        : [];
+  return {
+    key: hauler.key || hauler._id || `${Date.now()}-${index}`,
+    ...hauler,
+    haulerName: hauler.haulerName || hauler.name || "",
+    numberOfTrucks: hauler.numberOfTrucks || vehicles.length || null,
+    vehicles,
+    privateSectorClients: clients.map(normalizeClientRecord),
+  };
+};
+
+const mergeHaulersByName = (haulers = [], fallbackUnit = "m³") => {
+  const merged = new Map();
+  haulers.forEach((hauler, index) => {
+    const normalized = normalizeHaulerRecord(hauler, index, fallbackUnit);
+    const nameKey = normalized.haulerName.trim().toLowerCase() || `hauler-${index}`;
+    const existing = merged.get(nameKey);
+    if (!existing) {
+      merged.set(nameKey, normalized);
+      return;
+    }
+    const vehicleMap = new Map(
+      (existing.vehicles || []).map((vehicle, vehicleIndex) => [
+        (vehicle.plateNumber || `vehicle-${vehicleIndex}`).trim().toLowerCase(),
+        vehicle,
+      ]),
+    );
+    (normalized.vehicles || []).forEach((vehicle, vehicleIndex) => {
+      const plateKey = (vehicle.plateNumber || `new-${vehicleIndex}`).trim().toLowerCase();
+      if (!vehicleMap.has(plateKey)) vehicleMap.set(plateKey, vehicle);
+    });
+    const clientMap = new Map(
+      (existing.privateSectorClients || []).map((client, clientIndex) => [
+        (client.clientName || `client-${clientIndex}`).trim().toLowerCase(),
+        client,
+      ]),
+    );
+    (normalized.privateSectorClients || []).forEach((client, clientIndex) => {
+      const clientKey = (client.clientName || `new-client-${clientIndex}`).trim().toLowerCase();
+      if (!clientMap.has(clientKey)) clientMap.set(clientKey, client);
+    });
+    merged.set(nameKey, {
+      ...existing,
+      ...normalized,
+      key: existing.key,
+      vehicles: Array.from(vehicleMap.values()),
+      privateSectorClients: Array.from(clientMap.values()),
+      numberOfTrucks: Math.max(
+        Number(existing.numberOfTrucks || 0),
+        Number(normalized.numberOfTrucks || 0),
+        vehicleMap.size,
+      ),
+    });
+  });
+  return Array.from(merged.values());
+};
+
 const convertVolume = (value, fromUnit = "m³", toUnit = fromUnit) => {
   const number = Number(value || 0);
   const from = normalizeUnit(fromUnit);
@@ -247,6 +342,8 @@ export default function SLFPortal() {
   const [supportSubmitting, setSupportSubmitting] = useState(false);
   const [supportDetailModal, setSupportDetailModal] = useState(null);
   const [supportReplyText, setSupportReplyText] = useState("");
+  const [portalNotifications, setPortalNotifications] = useState([]);
+  const [portalUnreadCount, setPortalUnreadCount] = useState(0);
   // Excel/CSV upload states
   const [uploadModalOpen, setUploadModalOpen] = useState(false);
   const [uploadType, setUploadType] = useState("truck"); // "truck" or "hauler"
@@ -713,50 +810,7 @@ export default function SLFPortal() {
               .then(() => companyForm.setFieldsValue(savedCompanyValues))
               .catch(() => {});
           }
-          if (data.accreditedHaulers?.length > 0) {
-            setHaulers(
-              data.accreditedHaulers.map((h, i) => {
-                let vehicles = Array.isArray(h.vehicles) ? h.vehicles : [];
-                if (
-                  vehicles.length === 0 &&
-                  (h.plateNumber || h.vehicleType || h.capacity != null)
-                ) {
-                  vehicles = [
-                    {
-                      plateNumber: h.plateNumber || "",
-                      vehicleType: h.vehicleType || "",
-                      capacity: h.capacity,
-                      capacityUnit: h.capacityUnit || "m³",
-                    },
-                  ];
-                }
-                // Normalize privateSectorClients to array of objects
-                let clients = Array.isArray(h.privateSectorClients)
-                  ? h.privateSectorClients
-                  : h.privateSectorClients
-                    ? [h.privateSectorClients]
-                    : [];
-                clients = clients.map((c, ci) =>
-                  typeof c === "string"
-                    ? {
-                        key: ci,
-                        clientName: c,
-                        clientType: "Private",
-                        region: "",
-                        province: "",
-                        municipality: "",
-                      }
-                    : { key: ci, ...c },
-                );
-                return {
-                  key: Date.now() + i,
-                  ...h,
-                  vehicles,
-                  privateSectorClients: clients,
-                };
-              }),
-            );
-          }
+          setHaulers(mergeHaulersByName(data.accreditedHaulers || [], unit));
           // Load activeCellEntries from saved data (or migrate from flat fields)
           if (data.activeCellEntries?.length) {
             setActiveCellEntries(
@@ -817,6 +871,12 @@ export default function SLFPortal() {
             setBaselineUpdatePending(false);
           }
           setActiveTab("disposal");
+        } else {
+          setBaselineSaved(false);
+          setBaselineUpdatePending(false);
+          setHaulers([]);
+          setActiveCellEntries([]);
+          setClosedCellEntries([]);
         }
       })
       .catch(() => {});
@@ -1183,15 +1243,25 @@ export default function SLFPortal() {
       regionName,
     ].filter(Boolean);
     const resolvedAddress = addressParts.join(", ");
-    const finalDraft = { ...haulerDraft, officeAddress: resolvedAddress };
+    const finalDraft = normalizeHaulerRecord(
+      { ...haulerDraft, officeAddress: resolvedAddress },
+      0,
+      baselineUnit || "m³",
+    );
     if (editingHaulerKey) {
       setHaulers((prev) =>
-        prev.map((h) =>
-          h.key === editingHaulerKey ? { ...h, ...finalDraft } : h,
+        mergeHaulersByName(
+          prev.map((h) => (h.key === editingHaulerKey ? { ...h, ...finalDraft } : h)),
+          baselineUnit || "m³",
         ),
       );
     } else {
-      setHaulers((prev) => [...prev, { key: Date.now(), ...finalDraft }]);
+      setHaulers((prev) =>
+        mergeHaulersByName(
+          [...prev, { key: Date.now(), ...finalDraft }],
+          baselineUnit || "m³",
+        ),
+      );
     }
     setHaulerModalOpen(false);
     setEditingHaulerKey(null);
@@ -1570,12 +1640,19 @@ export default function SLFPortal() {
           closedCellInertUnit: baselineUnit,
           activeCellEntries: activeCellEntries.map(({ key, ...rest }) => ({ ...rest, unit: rest.unit || baselineUnit })),
           closedCellEntries: closedCellEntries.map(({ key, ...rest }) => ({ ...rest, unit: rest.unit || baselineUnit })),
-          accreditedHaulers: haulers.map(({ key, ...rest }) => ({
-            ...rest,
-            privateSectorClients: (rest.privateSectorClients || []).map(
-              ({ key: ck, ...cr }) => cr,
-            ),
-          })),
+          accreditedHaulers: mergeHaulersByName(haulers, baselineUnit).map(
+            ({ key, vehicles, privateSectorClients, ...rest }) => ({
+              ...rest,
+              numberOfTrucks: rest.numberOfTrucks || vehicles?.length || 0,
+              vehicles: (vehicles || []).map(({ key: vehicleKey, ...vehicle }) => ({
+                ...vehicle,
+                capacityUnit: normalizeUnit(vehicle.capacityUnit || baselineUnit),
+              })),
+              privateSectorClients: (privateSectorClients || []).map(
+                ({ key: clientKey, ...client }) => client,
+              ),
+            }),
+          ),
         },
       );
 
@@ -1687,6 +1764,74 @@ export default function SLFPortal() {
     }
   }, [portalUser?.email]);
 
+  const fetchPortalNotifications = useCallback(async () => {
+    if (!portalUser?.email) return;
+    const recipients = [...new Set([portalUser.email, portalUser._id].filter(Boolean))];
+    try {
+      const responses = await Promise.all(
+        recipients.map((recipient) =>
+          api.get(`/notifications/${encodeURIComponent(recipient)}`, {
+            params: { limit: 50 },
+          }),
+        ),
+      );
+      const notificationMap = new Map();
+      responses.forEach(({ data }) => {
+        (data.notifications || []).forEach((notification) => {
+          notificationMap.set(notification._id, notification);
+        });
+      });
+      const notifications = Array.from(notificationMap.values()).sort(
+        (a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0),
+      );
+      setPortalNotifications(notifications);
+      setPortalUnreadCount(notifications.filter((notification) => !notification.read).length);
+    } catch {
+      /* silent */
+    }
+  }, [portalUser?.email, portalUser?._id]);
+
+  const isMessageNotification = (notification = {}) =>
+    notification.type === "support_ticket_reply" &&
+    /message from admin|admin sent you a message|admin replied/i.test(
+      `${notification.title || ""} ${notification.message || ""}`,
+    );
+
+  const isSupportNotification = (notification = {}) =>
+    notification.type === "support_ticket_reply" && !isMessageNotification(notification);
+
+  const markPortalNotificationsRead = useCallback(
+    async (category) => {
+      const unread = portalNotifications.filter((notification) => {
+        if (notification.read) return false;
+        if (category === "messages") return isMessageNotification(notification);
+        if (category === "support") return isSupportNotification(notification);
+        if (category === "history") {
+          return [
+            "reverted",
+            "status_change",
+            "submission_edit_approved",
+            "submission_edit_rejected",
+          ].includes(notification.type);
+        }
+        if (category === "requests") {
+          return ["baseline_update_approved", "baseline_update_rejected"].includes(notification.type);
+        }
+        return false;
+      });
+      if (unread.length === 0) return;
+      try {
+        await Promise.all(
+          unread.map((notification) => api.patch(`/notifications/${notification._id}/read`)),
+        );
+        await fetchPortalNotifications();
+      } catch {
+        /* silent */
+      }
+    },
+    [portalNotifications, fetchPortalNotifications],
+  );
+
   useEffect(() => {
     if (!portalUser?.email) return;
     const sock = connectSocket("portal", portalUser.email);
@@ -1694,14 +1839,16 @@ export default function SLFPortal() {
       if (!payload || ["support_ticket_reply", "admin_message", "message_from_admin"].includes(payload.type)) {
         fetchSupportTickets();
       }
+      fetchPortalNotifications();
     };
+    fetchPortalNotifications();
     sock.on("notification", refreshMessages);
     sock.on("data-refresh", refreshMessages);
     return () => {
       sock.off("notification", refreshMessages);
       sock.off("data-refresh", refreshMessages);
     };
-  }, [portalUser?.email, fetchSupportTickets]);
+  }, [portalUser?.email, fetchSupportTickets, fetchPortalNotifications]);
 
   const handleSubmitTicket = async (values) => {
     setSupportSubmitting(true);
@@ -1754,7 +1901,8 @@ export default function SLFPortal() {
 
   // ── Excel/CSV Upload Handlers ──
   const handleExcelUpload = (file, type) => {
-    if (type) setUploadType(type);
+    const effectiveType = type || uploadType || "truck";
+    setUploadType(effectiveType);
     const reader = new FileReader();
     reader.onload = (e) => {
       try {
@@ -1774,7 +1922,7 @@ export default function SLFPortal() {
           const normalized = { key: `upload-${i}-${Date.now()}` };
           for (const [key, value] of Object.entries(row)) {
             const k = key.toLowerCase().trim();
-            if (uploadType === "truck") {
+            if (effectiveType === "truck") {
               if (k.includes("ticket") || k.includes("disposal"))
                 normalized.disposalTicketNo = String(value);
               else if (k.includes("hauler")) normalized.hauler = String(value);
@@ -1804,6 +1952,8 @@ export default function SLFPortal() {
                 normalized.vehicleType = String(value);
               else if (k.includes("capacity") && !k.includes("unit"))
                 normalized.capacity = Number(value) || null;
+              else if (k.includes("capacity") && k.includes("unit"))
+                normalized.capacityUnit = normalizeUnit(value || baselineUnit || "m³");
               else if (k.includes("client"))
                 normalized.privateSectorClients = String(value)
                   .split(",")
@@ -1816,7 +1966,7 @@ export default function SLFPortal() {
         setUploadPreviewData(normalized);
 
         // Build editable columns
-        if (uploadType === "truck") {
+        if (effectiveType === "truck") {
           setUploadPreviewColumns([
             { title: "#", width: 50, render: (_, __, i) => i + 1 },
             {
@@ -1964,7 +2114,7 @@ export default function SLFPortal() {
       const newHaulers = uploadPreviewData.map((d) => ({
         key: d.key,
         haulerName: d.haulerName || "",
-        numberOfTrucks: d.numberOfTrucks || 1,
+        numberOfTrucks: d.numberOfTrucks || null,
         officeAddress: d.officeAddress || "",
         vehicles: d.plateNumber
           ? [
@@ -1972,13 +2122,15 @@ export default function SLFPortal() {
                 plateNumber: d.plateNumber || "",
                 vehicleType: d.vehicleType || "",
                 capacity: d.capacity,
-                capacityUnit: baselineUnit || "m³",
+                capacityUnit: d.capacityUnit || baselineUnit || "m³",
               },
             ]
           : [],
         privateSectorClients: d.privateSectorClients || [],
       }));
-      setHaulers((prev) => [...prev, ...newHaulers]);
+      setHaulers((prev) =>
+        mergeHaulersByName([...prev, ...newHaulers], baselineUnit || "m³"),
+      );
     }
     setUploadModalOpen(false);
     setUploadPreviewData([]);
@@ -1996,6 +2148,31 @@ export default function SLFPortal() {
     setUploadPreviewData((prev) =>
       prev.map((r) => (r.key === key ? { ...r, [field]: value } : r)),
     );
+  };
+
+  const cleanClientForSubmit = (client) => {
+    if (!client || typeof client !== "object") return client;
+    const { key, ...rest } = client;
+    return rest;
+  };
+
+  const cleanTruckForSubmit = ({ key, vehicles, selectedClients, ...rest }) => {
+    const cleanedVehicles = (vehicles || []).map(
+      ({ key: vehicleKey, selectedClients: vehicleClients, ...vehicle }) => ({
+        ...vehicle,
+        selectedClients: (vehicleClients || []).map(cleanClientForSubmit),
+      }),
+    );
+    const flattenedClients = cleanedVehicles.flatMap(
+      (vehicle) => vehicle.selectedClients || [],
+    );
+    return {
+      ...rest,
+      selectedClients: (selectedClients || []).length
+        ? selectedClients.map(cleanClientForSubmit)
+        : flattenedClients,
+      vehicles: cleanedVehicles,
+    };
   };
 
   // ── Baseline unit change handler ──
@@ -2042,6 +2219,8 @@ export default function SLFPortal() {
   const [resubmitComment, setResubmitComment] = useState("");
 
   const handleEditReverted = (record) => {
+    const recordBaselineUnit = record.baselineUnit || record.totalVolumeAcceptedUnit || baselineUnit || "m³";
+    setBaselineUnit(recordBaselineUnit);
     // Load record data into all forms
     entryForm.setFieldsValue({
       dateOfDisposal: record.dateOfDisposal
@@ -2060,16 +2239,31 @@ export default function SLFPortal() {
     });
     baselineForm.setFieldsValue({
       totalVolumeAccepted: record.totalVolumeAccepted,
-      totalVolumeAcceptedUnit: record.totalVolumeAcceptedUnit,
+      baselineUnit: recordBaselineUnit,
+      totalVolumeAcceptedUnit: record.totalVolumeAcceptedUnit || recordBaselineUnit,
       activeCellResidualVolume: record.activeCellResidualVolume,
-      activeCellResidualUnit: record.activeCellResidualUnit,
+      activeCellResidualUnit: record.activeCellResidualUnit || recordBaselineUnit,
       activeCellInertVolume: record.activeCellInertVolume,
-      activeCellInertUnit: record.activeCellInertUnit,
+      activeCellInertUnit: record.activeCellInertUnit || recordBaselineUnit,
       closedCellResidualVolume: record.closedCellResidualVolume,
-      closedCellResidualUnit: record.closedCellResidualUnit,
+      closedCellResidualUnit: record.closedCellResidualUnit || recordBaselineUnit,
       closedCellInertVolume: record.closedCellInertVolume,
-      closedCellInertUnit: record.closedCellInertUnit,
+      closedCellInertUnit: record.closedCellInertUnit || recordBaselineUnit,
     });
+    setActiveCellEntries(
+      (record.activeCellEntries || []).map((entry, index) => ({
+        ...entry,
+        unit: entry.unit || recordBaselineUnit,
+        key: `reverted-active-${index}-${Date.now()}`,
+      })),
+    );
+    setClosedCellEntries(
+      (record.closedCellEntries || []).map((entry, index) => ({
+        ...entry,
+        unit: entry.unit || recordBaselineUnit,
+        key: `reverted-closed-${index}-${Date.now()}`,
+      })),
+    );
     // Load trucks
     const loadedTrucks = (record.trucks || []).map((t, i) => ({
       ...t,
@@ -2077,11 +2271,7 @@ export default function SLFPortal() {
     }));
     setTrucks(loadedTrucks);
     // Load haulers
-    const loadedHaulers = (record.accreditedHaulers || []).map((h, i) => ({
-      ...h,
-      key: `reverted-hauler-${i}-${Date.now()}`,
-    }));
-    setHaulers(loadedHaulers);
+    setHaulers(mergeHaulersByName(record.accreditedHaulers || [], recordBaselineUnit));
     setEditingRevertedId(record._id);
     setSubmitted(false);
     setBaselineSaved(true);
@@ -2113,6 +2303,7 @@ export default function SLFPortal() {
     try {
       const companyValues = companyForm.getFieldsValue();
       const disposalValues = entryForm.getFieldsValue();
+      const baselineValues = baselineForm.getFieldsValue();
       const entry = {
         ...disposalValues,
         ...companyValues,
@@ -2127,10 +2318,44 @@ export default function SLFPortal() {
         dateOfDisposal: disposalValues.dateOfDisposal
           ? disposalValues.dateOfDisposal.format("YYYY-MM-DD")
           : null,
-        trucks: trucks.map(({ key, vehicles, ...rest }) => ({
+        baselineUnit,
+        totalVolumeAccepted: baselineValues.totalVolumeAccepted,
+        totalVolumeAcceptedUnit: baselineUnit,
+        activeCellResidualVolume: baselineValues.activeCellResidualVolume,
+        activeCellResidualUnit: baselineUnit,
+        activeCellInertVolume: baselineValues.activeCellInertVolume,
+        activeCellInertUnit: baselineUnit,
+        activeCellHazardousVolume: baselineValues.activeCellHazardousVolume,
+        activeCellHazardousUnit: baselineUnit,
+        closedCellResidualVolume: baselineValues.closedCellResidualVolume,
+        closedCellResidualUnit: baselineUnit,
+        closedCellInertVolume: baselineValues.closedCellInertVolume,
+        closedCellInertUnit: baselineUnit,
+        closedCellHazardousVolume: baselineValues.closedCellHazardousVolume,
+        closedCellHazardousUnit: baselineUnit,
+        activeCellEntries: activeCellEntries.map(({ key, ...rest }) => ({
           ...rest,
-          vehicles: (vehicles || []).map(({ key: vk, ...vr }) => vr),
+          unit: rest.unit || baselineUnit,
         })),
+        closedCellEntries: closedCellEntries.map(({ key, ...rest }) => ({
+          ...rest,
+          unit: rest.unit || baselineUnit,
+        })),
+        accreditedHaulers: mergeHaulersByName(haulers, baselineUnit).map(
+          ({ key, vehicles, privateSectorClients, ...rest }) => ({
+            ...rest,
+            numberOfTrucks: rest.numberOfTrucks || vehicles?.length || 0,
+            vehicles: (vehicles || []).map(({ key: vehicleKey, ...vehicle }) => ({
+              ...vehicle,
+              capacityUnit: normalizeUnit(vehicle.capacityUnit || baselineUnit),
+            })),
+            privateSectorClients: (privateSectorClients || []).map(
+              ({ key: clientKey, ...client }) => client,
+            ),
+          }),
+        ),
+        acceptsHazardousWaste,
+        trucks: trucks.map(cleanTruckForSubmit),
       };
       // Update the existing entry and set status back to pending
       await api.put(`/data-slf/${editingRevertedId}`, {
@@ -2239,6 +2464,7 @@ export default function SLFPortal() {
     try {
       const companyValues = companyForm.getFieldsValue();
       const disposalValues = entryForm.getFieldsValue();
+      const baselineValues = baselineForm.getFieldsValue();
       const entry = {
         ...disposalValues,
         ...companyValues,
@@ -2255,11 +2481,43 @@ export default function SLFPortal() {
         dateOfDisposal: disposalValues.dateOfDisposal
           ? disposalValues.dateOfDisposal.format("YYYY-MM-DD")
           : null,
-        trucks: trucks.map(({ key, vehicles, ...rest }) => ({
+        trucks: trucks.map(cleanTruckForSubmit),
+        totalVolumeAccepted: baselineValues.totalVolumeAccepted,
+        totalVolumeAcceptedUnit: baselineUnit,
+        activeCellResidualVolume: baselineValues.activeCellResidualVolume,
+        activeCellResidualUnit: baselineUnit,
+        activeCellInertVolume: baselineValues.activeCellInertVolume,
+        activeCellInertUnit: baselineUnit,
+        activeCellHazardousVolume: baselineValues.activeCellHazardousVolume,
+        activeCellHazardousUnit: baselineUnit,
+        closedCellResidualVolume: baselineValues.closedCellResidualVolume,
+        closedCellResidualUnit: baselineUnit,
+        closedCellInertVolume: baselineValues.closedCellInertVolume,
+        closedCellInertUnit: baselineUnit,
+        closedCellHazardousVolume: baselineValues.closedCellHazardousVolume,
+        closedCellHazardousUnit: baselineUnit,
+        activeCellEntries: activeCellEntries.map(({ key, ...rest }) => ({
           ...rest,
-          vehicles: (vehicles || []).map(({ key: vk, ...vr }) => vr),
+          unit: rest.unit || baselineUnit,
         })),
-        acceptsHazardousWaste: false,
+        closedCellEntries: closedCellEntries.map(({ key, ...rest }) => ({
+          ...rest,
+          unit: rest.unit || baselineUnit,
+        })),
+        accreditedHaulers: mergeHaulersByName(haulers, baselineUnit).map(
+          ({ key, vehicles, privateSectorClients, ...rest }) => ({
+            ...rest,
+            numberOfTrucks: rest.numberOfTrucks || vehicles?.length || 0,
+            vehicles: (vehicles || []).map(({ key: vehicleKey, ...vehicle }) => ({
+              ...vehicle,
+              capacityUnit: normalizeUnit(vehicle.capacityUnit || baselineUnit),
+            })),
+            privateSectorClients: (privateSectorClients || []).map(
+              ({ key: clientKey, ...client }) => client,
+            ),
+          }),
+        ),
+        acceptsHazardousWaste,
         baselineUnit,
       };
       await api.post("/data-slf", {
@@ -2703,18 +2961,47 @@ export default function SLFPortal() {
   const revertedCount = submissions.filter(
     (s) => s.status === "reverted",
   ).length;
+  const unreadPortalNotifications = portalNotifications.filter((notification) => !notification.read);
+  const portalNotificationCounts = {
+    total: portalUnreadCount,
+    messages: unreadPortalNotifications.filter(isMessageNotification).length,
+    support: unreadPortalNotifications.filter(isSupportNotification).length,
+    history: unreadPortalNotifications.filter((notification) =>
+      [
+        "reverted",
+        "status_change",
+        "submission_edit_approved",
+        "submission_edit_rejected",
+      ].includes(notification.type),
+    ).length,
+    requests: unreadPortalNotifications.filter((notification) =>
+      ["baseline_update_approved", "baseline_update_rejected"].includes(notification.type),
+    ).length,
+  };
+  const historyBadgeCount = revertedCount + portalNotificationCounts.history;
 
   const menuItems = [
-    { key: "data-entry", icon: <FileTextOutlined />, label: "Data Entry" },
+    {
+      key: "data-entry",
+      icon: <FileTextOutlined />,
+      label: (
+        <span>
+          Data Entry
+          {portalNotificationCounts.total > 0 && activeMenu !== "data-entry" && (
+            <Badge dot style={{ marginLeft: 8 }} />
+          )}
+        </span>
+      ),
+    },
     {
       key: "history",
       icon: <HistoryOutlined />,
       label: (
         <span>
           Submission History
-          {revertedCount > 0 && (
+          {historyBadgeCount > 0 && (
             <Badge
-              count={revertedCount}
+              count={historyBadgeCount}
               size="small"
               style={{ marginLeft: 8, backgroundColor: "#fa541c" }}
             />
@@ -2722,7 +3009,22 @@ export default function SLFPortal() {
         </span>
       ),
     },
-    { key: "requests", icon: <AuditOutlined />, label: "My Requests" },
+    {
+      key: "requests",
+      icon: <AuditOutlined />,
+      label: (
+        <span>
+          My Requests
+          {portalNotificationCounts.requests > 0 && (
+            <Badge
+              count={portalNotificationCounts.requests}
+              size="small"
+              style={{ marginLeft: 8, backgroundColor: "#1677ff" }}
+            />
+          )}
+        </span>
+      ),
+    },
   ];
 
   const siderContent = (
@@ -2757,6 +3059,8 @@ export default function SLFPortal() {
         selectedKeys={[activeMenu]}
         onClick={({ key }) => {
           setActiveMenu(key);
+          if (key === "history") markPortalNotificationsRead("history");
+          if (key === "requests") markPortalNotificationsRead("requests");
           if (isMobile) setMobileDrawer(false);
         }}
         items={menuItems}
@@ -2856,7 +3160,13 @@ export default function SLFPortal() {
                     setSelectedSlfIdx(val);
                     setBaselineSaved(false);
                     setSlfInfo(null);
+                    setHaulers([]);
+                    setTrucks([]);
+                    setActiveCellEntries([]);
+                    setClosedCellEntries([]);
                     baselineForm.resetFields();
+                    companyForm.resetFields();
+                    entryForm.resetFields();
                   }}
                   style={{ minWidth: 280 }}
                   options={portalUser.assignedSlfName.map((name, i) => ({
@@ -5735,6 +6045,8 @@ export default function SLFPortal() {
         supportTab={supportTab}
         setSupportTab={setSupportTab}
         supportTickets={supportTickets}
+        portalNotificationCounts={portalNotificationCounts}
+        markPortalNotificationsRead={markPortalNotificationsRead}
         supportLoading={supportLoading}
         supportSubmitting={supportSubmitting}
         fetchSupportTickets={fetchSupportTickets}

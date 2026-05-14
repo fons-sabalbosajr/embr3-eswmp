@@ -56,7 +56,7 @@ const PRIORITY_CONFIG = {
   Urgent: { color: "#cf1322", bg: "#fff1f0" },
 };
 
-export default function SupportTab({ isDark }) {
+export default function SupportTab({ isDark, canEdit = true, canDelete = true }) {
   const [tickets, setTickets] = useState([]);
   const [loading, setLoading] = useState(true);
   const [detailOpen, setDetailOpen] = useState(false);
@@ -276,11 +276,13 @@ export default function SupportTab({ isDark }) {
               onClick={() => { setSelectedTicket(r); setDetailOpen(true); setReplyText(""); }}
             />
           </Tooltip>
-          <Popconfirm title="Delete this ticket?" onConfirm={() => handleDelete(r._id)} okText="Delete" okButtonProps={{ danger: true }}>
-            <Tooltip title="Delete">
-              <Button type="text" size="small" icon={<DeleteOutlined style={{ color: "#ff4d4f" }} />} />
-            </Tooltip>
-          </Popconfirm>
+          {canDelete && (
+            <Popconfirm title="Delete this ticket?" onConfirm={() => handleDelete(r._id)} okText="Delete" okButtonProps={{ danger: true }}>
+              <Tooltip title="Delete">
+                <Button type="text" size="small" icon={<DeleteOutlined style={{ color: "#ff4d4f" }} />} />
+              </Tooltip>
+            </Popconfirm>
+          )}
         </Space>
       ),
     },
@@ -409,18 +411,20 @@ export default function SupportTab({ isDark }) {
                     <Tag>{ticket.category}</Tag>
                   </Space>
                 </div>
-                <Select
-                  value={ticket.status}
-                  onChange={(v) => handleStatusChange(ticket._id, v)}
-                  size="small"
-                  style={{ width: 140 }}
-                  popupMatchSelectWidth={false}
-                >
-                  <Option value="open">Open</Option>
-                  <Option value="in_progress">In Progress</Option>
-                  <Option value="resolved">Resolved</Option>
-                  <Option value="closed">Closed</Option>
-                </Select>
+                {canEdit && (
+                  <Select
+                    value={ticket.status}
+                    onChange={(v) => handleStatusChange(ticket._id, v)}
+                    size="small"
+                    style={{ width: 140 }}
+                    popupMatchSelectWidth={false}
+                  >
+                    <Option value="open">Open</Option>
+                    <Option value="in_progress">In Progress</Option>
+                    <Option value="resolved">Resolved</Option>
+                    <Option value="closed">Closed</Option>
+                  </Select>
+                )}
               </div>
             </div>
 
@@ -482,11 +486,21 @@ export default function SupportTab({ isDark }) {
                       key: i,
                       color: r.isAdmin ? "#1677ff" : "#52c41a",
                       dot: (
-                        <Avatar
-                          size={24}
-                          icon={r.isAdmin ? <SafetyCertificateOutlined /> : <UserOutlined />}
-                          style={{ background: r.isAdmin ? "#1677ff" : "#52c41a", fontSize: 12 }}
-                        />
+                        <span
+                          style={{
+                            width: 28,
+                            height: 28,
+                            display: "inline-flex",
+                            alignItems: "center",
+                            justifyContent: "center",
+                            borderRadius: "50%",
+                            background: r.isAdmin ? "#1677ff" : "#52c41a",
+                            color: "#fff",
+                            flexShrink: 0,
+                          }}
+                        >
+                          {r.isAdmin ? <SafetyCertificateOutlined style={{ fontSize: 15 }} /> : <UserOutlined style={{ fontSize: 15 }} />}
+                        </span>
                       ),
                       children: (
                         <div style={{
@@ -516,7 +530,7 @@ export default function SupportTab({ isDark }) {
             </div>
 
             {/* Reply Box */}
-            {ticket.status !== "closed" && (
+            {canEdit && ticket.status !== "closed" && (
               <div style={{
                 padding: "16px 28px 24px",
                 borderTop: `1px solid ${isDark ? "#303030" : "#f0f0f0"}`,

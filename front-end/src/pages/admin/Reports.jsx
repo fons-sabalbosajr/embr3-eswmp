@@ -133,7 +133,7 @@ const TYPE_CONFIG = {
   },
 };
 
-export default function Reports() {
+export default function Reports({ canEdit = true, canDelete = true }) {
   const [transactions, setTransactions] = useState([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
@@ -369,24 +369,28 @@ export default function Reports() {
               onClick={() => handleView(record)}
             />
           </Tooltip>
-          <Tooltip title="Edit">
-            <EditOutlined
-              style={{ fontSize: 15, cursor: "pointer", color: "#722ed1" }}
-              onClick={() => handleEdit(record)}
-            />
-          </Tooltip>
-          <Popconfirm
-            title="Delete this transaction log?"
-            onConfirm={() => handleDelete(record._id)}
-            okText="Yes"
-            cancelText="No"
-          >
-            <Tooltip title="Delete">
-              <DeleteOutlined
-                style={{ fontSize: 15, cursor: "pointer", color: "#ff4d4f" }}
+          {canEdit && (
+            <Tooltip title="Edit">
+              <EditOutlined
+                style={{ fontSize: 15, cursor: "pointer", color: "#722ed1" }}
+                onClick={() => handleEdit(record)}
               />
             </Tooltip>
-          </Popconfirm>
+          )}
+          {canDelete && (
+            <Popconfirm
+              title="Delete this transaction log?"
+              onConfirm={() => handleDelete(record._id)}
+              okText="Yes"
+              cancelText="No"
+            >
+              <Tooltip title="Delete">
+                <DeleteOutlined
+                  style={{ fontSize: 15, cursor: "pointer", color: "#ff4d4f" }}
+                />
+              </Tooltip>
+            </Popconfirm>
+          )}
         </Space>
       ),
     },

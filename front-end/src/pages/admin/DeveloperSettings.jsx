@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import {
   Card,
   Typography,
@@ -74,6 +74,7 @@ export default function DeveloperSettings({onSettingsSaved, isDark}) {
   const [logsLoading, setLogsLoading] = useState(false);
   const [logLevel, setLogLevel] = useState("all");
   const [logSearch, setLogSearch] = useState("");
+  const logFiltersRef = useRef({ level: "all", search: "" });
 
   // Deleted submissions state
   const [deletedEntries, setDeletedEntries] = useState([]);
@@ -109,8 +110,8 @@ export default function DeveloperSettings({onSettingsSaved, isDark}) {
 
   useEffect(() => {
     fetchSettings();
-    fetchLogs();
-    const logInterval = setInterval(fetchLogs, 8000);
+    fetchLogs({ showLoading: true });
+    const logInterval = setInterval(() => fetchLogs({ showLoading: false }), 8000);
     return () => clearInterval(logInterval);
   }, []);
 
@@ -131,19 +132,23 @@ export default function DeveloperSettings({onSettingsSaved, isDark}) {
     }
   };
 
-  const fetchLogs = async () => {
-    setLogsLoading(true);
+  const fetchLogs = async (options = {}) => {
+    const showLoading = options.showLoading !== false;
+    const level = options.level ?? logFiltersRef.current.level;
+    const search = options.search ?? logFiltersRef.current.search;
+    logFiltersRef.current = { level, search };
+    if (showLoading) setLogsLoading(true);
     try {
       const params = { limit: 100 };
-      if (logLevel !== "all") params.level = logLevel;
-      if (logSearch) params.search = logSearch;
+      if (level !== "all") params.level = level;
+      if (search) params.search = search;
       const { data } = await api.get("/logs", { params });
       setLogs(data.logs);
       setLogsTotal(data.total);
     } catch {
       /* silent */
     } finally {
-      setLogsLoading(false);
+      if (showLoading) setLogsLoading(false);
     }
   };
 
@@ -222,7 +227,7 @@ export default function DeveloperSettings({onSettingsSaved, isDark}) {
   };
 
   const writeClientLog = (action) => {
-    fetchLogs();
+    fetchLogs({ showLoading: true });
   };
 
   // ── Dashboard Tab Visibility ──
@@ -710,7 +715,10 @@ export default function DeveloperSettings({onSettingsSaved, isDark}) {
                     <Space wrap>
                       <Select
                         value={logLevel}
-                        onChange={(v) => { setLogLevel(v); setTimeout(fetchLogs, 0); }}
+                        onChange={(v) => {
+                          setLogLevel(v);
+                          fetchLogs({ level: v, search: logSearch, showLoading: true });
+                        }}
                         style={{ width: "100%", minWidth: 90, maxWidth: 110 }}
                         size="small"
                       >
@@ -722,13 +730,16 @@ export default function DeveloperSettings({onSettingsSaved, isDark}) {
                       <Input
                         placeholder="Search logs..."
                         value={logSearch}
-                        onChange={(e) => setLogSearch(e.target.value)}
-                        onPressEnter={fetchLogs}
+                        onChange={(e) => {
+                          setLogSearch(e.target.value);
+                          logFiltersRef.current = { ...logFiltersRef.current, search: e.target.value };
+                        }}
+                        onPressEnter={() => fetchLogs({ showLoading: true })}
                         style={{ width: "100%", maxWidth: 180 }}
                         size="small"
                         allowClear
                       />
-                      <Button size="small" icon={<ReloadOutlined />} onClick={fetchLogs}>
+                      <Button size="small" icon={<ReloadOutlined />} onClick={() => fetchLogs({ showLoading: true })}>
                         Refresh
                       </Button>
                       <Popconfirm title="Clear all logs?" onConfirm={clearLogs}>
@@ -774,7 +785,7 @@ export default function DeveloperSettings({onSettingsSaved, isDark}) {
                         title: "Action",
                         dataIndex: "action",
                         key: "action",
-                        width: 120,
+                        width: 180,
                         render: (v) => <Tag style={{ fontSize: 10, padding: "0 4px", lineHeight: "18px" }}>{v}</Tag>,
                       },
                       {
@@ -788,7 +799,7 @@ export default function DeveloperSettings({onSettingsSaved, isDark}) {
                         title: "User",
                         dataIndex: "user",
                         key: "user",
-                        width: 120,
+                        width: 220,
                         ellipsis: true,
                         render: (v) => <Text style={{ fontSize: 10 }}>{v || "—"}</Text>,
                       },
@@ -796,7 +807,7 @@ export default function DeveloperSettings({onSettingsSaved, isDark}) {
                         title: "IP",
                         dataIndex: "ip",
                         key: "ip",
-                        width: 100,
+                        width: 190,
                         render: (v) => <Text style={{ fontSize: 10 }}>{v || "—"}</Text>,
                       },
                     ]}

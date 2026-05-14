@@ -14,7 +14,9 @@ const notificationSchema = new mongoose.Schema(
         "reverted",           // admin reverted a submission
         "new_portal_user",    // new portal user registered
         "baseline_update_request", // portal user requests baseline field update
+        "baseline_update", // portal user/admin saved baseline changes
         "baseline_update_approved", // admin approved baseline update
+        "baseline_update_rejected", // admin rejected baseline update
         "support_ticket",     // portal user raised a concern
         "support_ticket_reply", // admin replied to support ticket
         "submission_edit_request", // portal user requests submission edit

@@ -6,8 +6,11 @@ const clientSchema = new mongoose.Schema(
     clientName: { type: String, trim: true },
     clientType: { type: String, enum: ["Private", "LGU"], default: "Private" },
     region: { type: String, trim: true },
+    regionName: { type: String, trim: true },
     province: { type: String, trim: true },
+    provinceName: { type: String, trim: true },
     municipality: { type: String, trim: true },
+    municipalityName: { type: String, trim: true },
   },
   { _id: false }
 );
@@ -18,6 +21,7 @@ const vehicleSchema = new mongoose.Schema(
     vehicleType: { type: String, trim: true },
     capacity: { type: Number },
     capacityUnit: { type: String, enum: ["tons", "m³", "m3"], default: "m³" },
+    selectedClients: [clientSchema],
   },
   { _id: false }
 );

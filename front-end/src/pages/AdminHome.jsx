@@ -325,6 +325,10 @@ export default function AdminHome() {
   const [notifications, setNotifications] = useState([]);
   const [unreadCount, setUnreadCount] = useState(0);
   const [notifLoading, setNotifLoading] = useState(false);
+  const [notifHistoryOpen, setNotifHistoryOpen] = useState(false);
+  const [notifHistory, setNotifHistory] = useState([]);
+  const [notifHistoryLoading, setNotifHistoryLoading] = useState(false);
+  const [notifHistoryPagination, setNotifHistoryPagination] = useState({ current: 1, pageSize: 50, total: 0 });
   const [messageOpen, setMessageOpen] = useState(false);
   const [quickMessages, setQuickMessages] = useState([]);
   const [messageUnreadCount, setMessageUnreadCount] = useState(0);
@@ -333,6 +337,28 @@ export default function AdminHome() {
   const isMobile = !screens.md;
   const navigate = useNavigate();
 
+  const syncCurrentUser = useCallback(async () => {
+    try {
+      const { data } = await api.get("/auth/me");
+      const nextUser = {
+        id: data._id || data.id,
+        firstName: data.firstName,
+        lastName: data.lastName,
+        username: data.username,
+        email: data.email,
+        role: data.role,
+        position: data.position,
+        designation: data.designation,
+        permissions: data.permissions,
+      };
+      secureStorage.setJSON("user", nextUser);
+      setUser(nextUser);
+      return nextUser;
+    } catch {
+      return null;
+    }
+  }, []);
+
   useEffect(() => {
     const stored = secureStorage.getJSON("user");
     if (!stored) {
@@ -340,6 +366,7 @@ export default function AdminHome() {
       return;
     }
     setUser(stored);
+    syncCurrentUser();
 
     // Load theme preference
     const savedTheme = secureStorage.get("admin-theme");
@@ -366,7 +393,17 @@ export default function AdminHome() {
         if (data.sidebarStyle) setSidebarStyle(data.sidebarStyle);
       })
       .catch(() => {});
-  }, [navigate]);
+  }, [navigate, syncCurrentUser]);
+
+  useEffect(() => {
+    const handleFocus = () => syncCurrentUser();
+    window.addEventListener("focus", handleFocus);
+    const interval = setInterval(syncCurrentUser, 30000);
+    return () => {
+      window.removeEventListener("focus", handleFocus);
+      clearInterval(interval);
+    };
+  }, [syncCurrentUser]);
 
   // ── Idle auto-logout (5 minutes of inactivity) ──
   useEffect(() => {
@@ -426,6 +463,7 @@ export default function AdminHome() {
     try {
       await api.patch(`/notifications/${id}/read`);
       setNotifications((prev) => prev.map((n) => n._id === id ? { ...n, read: true } : n));
+      setNotifHistory((prev) => prev.map((n) => n._id === id ? { ...n, read: true } : n));
       setUnreadCount((prev) => Math.max(0, prev - 1));
     } catch { /* silent */ }
   };
@@ -434,8 +472,44 @@ export default function AdminHome() {
     try {
       await api.patch("/notifications/admin/read-all");
       setNotifications((prev) => prev.map((n) => ({ ...n, read: true })));
+      setNotifHistory((prev) => prev.map((n) => ({ ...n, read: true })));
       setUnreadCount(0);
     } catch { /* silent */ }
+  };
+
+  const fetchNotificationHistory = useCallback(async (page = 1, pageSize = 50) => {
+    setNotifHistoryLoading(true);
+    try {
+      const { data } = await api.get("/notifications/admin", {
+        params: { page, limit: pageSize },
+      });
+      setNotifHistory(data.notifications || []);
+      setNotifHistoryPagination({
+        current: page,
+        pageSize,
+        total: data.total || 0,
+      });
+    } catch {
+      /* silent */
+    } finally {
+      setNotifHistoryLoading(false);
+    }
+  }, []);
+
+  const openNotificationHistory = () => {
+    setNotifOpen(false);
+    setNotifHistoryOpen(true);
+    fetchNotificationHistory(1, notifHistoryPagination.pageSize);
+  };
+
+  const openNotificationTarget = (notification) => {
+    if (!notification.read) markNotifRead(notification._id);
+    const target = getNotifTarget(notification.type);
+    if (target) {
+      setActiveMenu(target);
+      setNotifOpen(false);
+      setNotifHistoryOpen(false);
+    }
   };
 
   const previewMessage = (thread) => {
@@ -532,7 +606,7 @@ export default function AdminHome() {
     return p?.[level] !== false;
   };
   const canEdit = (key) => hasAccess(key, "edit");
-  const canDelete = () => isDeveloper;
+  const canDelete = (key) => hasAccess(key, "delete");
 
   const menuItems = useMemo(() => {
     const items = [];
@@ -579,7 +653,7 @@ export default function AdminHome() {
         label: "SLF Data Table",
       });
     }
-    if (hasAccess("submissions") || hasAccess("reports")) {
+    if (hasAccess("submissions") || hasAccess("reports") || hasAccess("baselineData")) {
       slfChildren.push({
         key: "slf-waste-generators",
         icon: <InboxOutlined />,
@@ -615,14 +689,14 @@ export default function AdminHome() {
     // ── Settings ──
     {
       const settingsChildren = [];
-      if (isDeveloper && hasAccess("portalFields")) {
+      if (hasAccess("portalFields")) {
         settingsChildren.push({
           key: "settings-fields",
           icon: <FormOutlined />,
           label: "Portal Fields",
         });
       }
-      if (isDeveloper) {
+      if (hasAccess("dataReferences")) {
         settingsChildren.push({
           key: "settings-data-refs",
           icon: <DatabaseOutlined />,
@@ -780,13 +854,24 @@ export default function AdminHome() {
       case "slf-monitoring":
         return hasAccess("slfMonitoring") ? <SLFMonitoring isDark={isDark} canEdit={canEdit("slfMonitoring")} canDelete={canDelete("slfMonitoring")} /> : denied;
       case "slf-waste-generators":
-        return hasAccess("submissions") || hasAccess("reports") ? (
-          <SLFWasteGenerators isDark={isDark} canEdit={canEdit("submissions")} canDelete={canDelete("submissions")} />
+        return hasAccess("submissions") || hasAccess("reports") || hasAccess("baselineData") ? (
+          <SLFWasteGenerators
+            isDark={isDark}
+            canViewSubmissions={hasAccess("submissions")}
+            canEdit={canEdit("submissions")}
+            canDelete={canDelete("submissions")}
+            canViewReports={hasAccess("reports")}
+            canEditReports={canEdit("reports")}
+            canDeleteReports={canDelete("reports")}
+            canViewBaseline={hasAccess("baselineData")}
+            canEditBaseline={canEdit("baselineData")}
+            canDeleteBaseline={canDelete("baselineData")}
+          />
         ) : (
           denied
         );
       case "dev-support":
-        return (isDeveloper || hasAccess("supportTickets")) ? <SupportTab isDark={isDark} /> : denied;
+        return (isDeveloper || hasAccess("supportTickets")) ? <SupportTab isDark={isDark} canEdit={canEdit("supportTickets")} canDelete={canDelete("supportTickets")} /> : denied;
       case "dev-notifications":
         return isDeveloper ? <NotificationManagement isDark={isDark} /> : denied;
       case "dev-settings":
@@ -1123,9 +1208,7 @@ export default function AdminHome() {
                             <div
                               key={n._id}
                             onClick={() => {
-                              if (!n.read) markNotifRead(n._id);
-                              const target = getNotifTarget(n.type);
-                              if (target) { setActiveMenu(target); setNotifOpen(false); }
+                              openNotificationTarget(n);
                             }}
                               style={{
                                 display: "flex", gap: 12, padding: "12px 16px",
@@ -1150,6 +1233,11 @@ export default function AdminHome() {
                           )}
                         />
                       )}
+                    </div>
+                    <div style={{ padding: 12, borderTop: isDark ? "1px solid #303030" : "1px solid #f0f0f0", textAlign: "center" }}>
+                      <Button type="link" block icon={<BellOutlined />} onClick={openNotificationHistory}>
+                        View previous notifications
+                      </Button>
                     </div>
                   </div>
                 }
@@ -1207,6 +1295,78 @@ export default function AdminHome() {
           </div>
         </Layout>
       </Layout>
+
+      <Modal
+        title={
+          <Space>
+            <BellOutlined />
+            <span>Previous Notifications</span>
+            {unreadCount > 0 && <Badge count={unreadCount} size="small" />}
+          </Space>
+        }
+        open={notifHistoryOpen}
+        onCancel={() => setNotifHistoryOpen(false)}
+        footer={
+          <Space>
+            {unreadCount > 0 && <Button onClick={markAllRead}>Mark all as read</Button>}
+            <Button type="primary" onClick={() => setNotifHistoryOpen(false)}>Close</Button>
+          </Space>
+        }
+        width={720}
+      >
+        <List
+          loading={notifHistoryLoading}
+          dataSource={notifHistory}
+          locale={{ emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No previous notifications" /> }}
+          pagination={
+            notifHistoryPagination.total > notifHistoryPagination.pageSize
+              ? {
+                  current: notifHistoryPagination.current,
+                  pageSize: notifHistoryPagination.pageSize,
+                  total: notifHistoryPagination.total,
+                  showSizeChanger: false,
+                  onChange: (page) => fetchNotificationHistory(page, notifHistoryPagination.pageSize),
+                }
+              : false
+          }
+          renderItem={(notification) => {
+            const target = getNotifTarget(notification.type);
+            return (
+              <List.Item
+                key={notification._id}
+                onClick={() => openNotificationTarget(notification)}
+                style={{
+                  cursor: target || !notification.read ? "pointer" : "default",
+                  padding: "12px 4px",
+                  background: notification.read ? "transparent" : isDark ? "rgba(47,84,235,0.06)" : "#f0f5ff",
+                  borderRadius: 8,
+                  marginBottom: 4,
+                }}
+              >
+                <List.Item.Meta
+                  avatar={
+                    <div style={{ width: 38, height: 38, borderRadius: "50%", background: isDark ? "#1f1f1f" : "#f5f5f5", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 16 }}>
+                      {getNotifIcon(notification.type)}
+                    </div>
+                  }
+                  title={
+                    <Space size={6} wrap>
+                      <Text strong={!notification.read}>{notification.title}</Text>
+                      {!notification.read && <Badge status="processing" text="Unread" />}
+                    </Space>
+                  }
+                  description={
+                    <div>
+                      <Text type="secondary" style={{ display: "block" }}>{notification.message}</Text>
+                      <Text type="secondary" style={{ fontSize: 11 }}>{dayjs(notification.createdAt).format("MMM D, YYYY h:mm A")}</Text>
+                    </div>
+                  }
+                />
+              </List.Item>
+            );
+          }}
+        />
+      </Modal>
 
       <Modal
         title={

@@ -12,7 +12,7 @@ import {
   EnvironmentOutlined, ClockCircleOutlined, LockOutlined,
   UnlockOutlined, BellOutlined, FileDoneOutlined, LinkOutlined,
   FileTextOutlined, FileImageOutlined, SafetyCertificateOutlined,
-  MessageOutlined, MoreOutlined, SendOutlined,
+  MessageOutlined, MoreOutlined, SendOutlined, SearchOutlined
 } from "@ant-design/icons";
 import Swal from "sweetalert2";
 import dayjs from "dayjs";
@@ -55,6 +55,12 @@ export default function PortalUsers({ isDark }) {
   const [messageSending, setMessageSending] = useState(false);
   const [selectedThreadId, setSelectedThreadId] = useState(null);
   const [replyText, setReplyText] = useState("");
+  const [searchText, setSearchText] = useState("");
+  const [statusFilter, setStatusFilter] = useState("all");
+  const [assignmentFilter, setAssignmentFilter] = useState("all");
+  const [verificationFilter, setVerificationFilter] = useState("all");
+  const [fileFilter, setFileFilter] = useState("all");
+  const [slfFilter, setSlfFilter] = useState(null);
   const [messageForm] = Form.useForm();
 
   useEffect(() => {
@@ -395,6 +401,63 @@ export default function PortalUsers({ isDark }) {
 
   const selectedThread = messageThreads.find((thread) => thread._id === selectedThreadId);
 
+  const assignedSlfNameOptions = useMemo(() => {
+    const names = new Set();
+    users.forEach((user) => {
+      const assigned = Array.isArray(user.assignedSlfName)
+        ? user.assignedSlfName
+        : user.assignedSlfName ? [user.assignedSlfName] : [];
+      assigned.forEach((name) => {
+        if (name) names.add(name);
+      });
+    });
+    return Array.from(names)
+      .sort((a, b) => a.localeCompare(b))
+      .map((name) => ({ label: name, value: name }));
+  }, [users]);
+
+  const filteredUsers = useMemo(() => {
+    const query = searchText.trim().toLowerCase();
+    return users.filter((user) => {
+      const assignedNames = Array.isArray(user.assignedSlfName)
+        ? user.assignedSlfName
+        : user.assignedSlfName ? [user.assignedSlfName] : [];
+      const hasAssignedSlf = assignedNames.length > 0;
+      const haystack = [
+        user.firstName,
+        user.lastName,
+        user.email,
+        user.companyName,
+        user.contactNumber,
+        ...assignedNames,
+      ]
+        .filter(Boolean)
+        .join(" ")
+        .toLowerCase();
+
+      if (query && !haystack.includes(query)) return false;
+      if (statusFilter !== "all" && user.status !== statusFilter) return false;
+      if (assignmentFilter === "assigned" && !hasAssignedSlf) return false;
+      if (assignmentFilter === "unassigned" && hasAssignedSlf) return false;
+      if (slfFilter && !assignedNames.includes(slfFilter)) return false;
+      if (fileFilter === "with-file" && !user.verificationFileUrl) return false;
+      if (fileFilter === "no-file" && user.verificationFileUrl) return false;
+      if (verificationFilter === "held" && !user.verificationRequired) return false;
+      if (verificationFilter === "submitted" && !user.verificationSubmitted) return false;
+      if (verificationFilter === "needs-docs" && !(user.verificationRequired && !user.verificationSubmitted)) return false;
+      return true;
+    });
+  }, [assignmentFilter, fileFilter, searchText, slfFilter, statusFilter, users, verificationFilter]);
+
+  const resetFilters = () => {
+    setSearchText("");
+    setStatusFilter("all");
+    setAssignmentFilter("all");
+    setVerificationFilter("all");
+    setFileFilter("all");
+    setSlfFilter(null);
+  };
+
   const columns = [
     {
       title: "#",
@@ -555,8 +618,72 @@ export default function PortalUsers({ isDark }) {
         </Button>
       </div>
 
+      <Card size="small" style={{ marginBottom: 16, borderRadius: 8 }}>
+        <Row gutter={[12, 12]} align="middle">
+          <Col xs={24} md={8} lg={7}>
+            <Input
+              allowClear
+              prefix={<SearchOutlined />}
+              placeholder="Search name, email, company, SLF..."
+              value={searchText}
+              onChange={(event) => setSearchText(event.target.value)}
+            />
+          </Col>
+          <Col xs={24} sm={12} md={4}>
+            <Select value={statusFilter} onChange={setStatusFilter} style={{ width: "100%" }}>
+              <Option value="all">All Status</Option>
+              <Option value="pending">Pending</Option>
+              <Option value="approved">Approved</Option>
+              <Option value="rejected">Rejected</Option>
+            </Select>
+          </Col>
+          <Col xs={24} sm={12} md={4}>
+            <Select value={assignmentFilter} onChange={setAssignmentFilter} style={{ width: "100%" }}>
+              <Option value="all">All Assignments</Option>
+              <Option value="assigned">Assigned</Option>
+              <Option value="unassigned">Unassigned</Option>
+            </Select>
+          </Col>
+          <Col xs={24} sm={12} md={4}>
+            <Select value={verificationFilter} onChange={setVerificationFilter} style={{ width: "100%" }}>
+              <Option value="all">All Verification</Option>
+              <Option value="held">Held</Option>
+              <Option value="submitted">Docs Submitted</Option>
+              <Option value="needs-docs">Needs Docs</Option>
+            </Select>
+          </Col>
+          <Col xs={24} sm={12} md={4}>
+            <Select value={fileFilter} onChange={setFileFilter} style={{ width: "100%" }}>
+              <Option value="all">All Files</Option>
+              <Option value="with-file">With File</Option>
+              <Option value="no-file">No File</Option>
+            </Select>
+          </Col>
+          <Col xs={24} md={8} lg={7}>
+            <Select
+              allowClear
+              showSearch
+              placeholder="Filter by assigned SLF"
+              optionFilterProp="label"
+              value={slfFilter}
+              onChange={setSlfFilter}
+              options={assignedSlfNameOptions}
+              style={{ width: "100%" }}
+            />
+          </Col>
+          <Col xs={24} md={16} lg={17}>
+            <Space wrap style={{ width: "100%", justifyContent: "space-between" }}>
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                Showing <Text strong>{filteredUsers.length}</Text> of <Text strong>{users.length}</Text> portal users
+              </Text>
+              <Button size="small" onClick={resetFilters}>Reset Filters</Button>
+            </Space>
+          </Col>
+        </Row>
+      </Card>
+
       <Table
-        dataSource={users}
+        dataSource={filteredUsers}
         columns={columns}
         rowKey="_id"
         loading={loading}

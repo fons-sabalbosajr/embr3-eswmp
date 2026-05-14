@@ -3168,6 +3168,7 @@ export default function SLFMonitoring({
   const [saving, setSaving] = useState(false);
   const [capacityAlertModal, setCapacityAlertModal] = useState(null);
   const [capacityAlertSending, setCapacityAlertSending] = useState(false);
+  const [mapPreview, setMapPreview] = useState(null);
   const [slfSubmissions, setSlfSubmissions] = useState([]);
   const [form] = Form.useForm();
 
@@ -3763,14 +3764,53 @@ export default function SLFMonitoring({
     syncWasteReceivedFromCellFills(nextFills);
   };
 
+  const handleCellCapacityUnitChange = (index, value) => {
+    const unit = normalizeUnit(value);
+    const nextCapacityUnits = [...(form.getFieldValue("cellCapacityUnits") || [])];
+    const nextFillUnits = [...(form.getFieldValue("cellFillUnits") || [])];
+    nextCapacityUnits[index] = unit;
+    nextFillUnits[index] = unit;
+    form.setFieldsValue({
+      cellCapacityUnits: nextCapacityUnits,
+      cellFillUnits: nextFillUnits,
+      volumeCapacityUnit: unit,
+      receivingVolumeCapacityUnit: unit,
+      wasteReceivedUnit: unit,
+    });
+    syncWasteReceivedFromCellFills(
+      form.getFieldValue("cellFillValues") || [],
+      nextFillUnits,
+    );
+  };
+
   const handleCellFillUnitChange = (index, value) => {
     const nextUnits = [...(form.getFieldValue("cellFillUnits") || [])];
-    nextUnits[index] = normalizeUnit(value);
-    form.setFieldsValue({ cellFillUnits: nextUnits });
+    const unit = normalizeUnit(value);
+    nextUnits[index] = unit;
+    form.setFieldsValue({ cellFillUnits: nextUnits, wasteReceivedUnit: unit });
     syncWasteReceivedFromCellFills(
       form.getFieldValue("cellFillValues") || [],
       nextUnits,
     );
+  };
+
+  const openMapPreview = () => {
+    const latitude = form.getFieldValue("latitude");
+    const longitude = form.getFieldValue("longitude");
+    if (
+      latitude == null ||
+      longitude == null ||
+      Number.isNaN(Number(latitude)) ||
+      Number.isNaN(Number(longitude))
+    ) {
+      message.warning("Enter valid latitude and longitude first.");
+      return;
+    }
+    setMapPreview({
+      latitude: Number(latitude),
+      longitude: Number(longitude),
+      label: form.getFieldValue("lgu") || editing?.lgu || "SLF Location",
+    });
   };
 
   const sendCapacityAlert = async () => {
@@ -5345,6 +5385,15 @@ export default function SLFMonitoring({
                         />
                       </Form.Item>
                     </Col>
+                    <Col span={24}>
+                      <Button
+                        size="small"
+                        icon={<EnvironmentOutlined />}
+                        onClick={openMapPreview}
+                      >
+                        View in Maps
+                      </Button>
+                    </Col>
                   </Row>
                 ),
               },
@@ -6356,7 +6405,7 @@ export default function SLFMonitoring({
                               );
                               const nextFillUnits = Array.from(
                                 { length: val || 0 },
-                                (_, i) => curFillUnits[i] || "m³",
+                                (_, i) => curFillUnits[i] || nextUnits[i] || "m³",
                               );
                               form.setFieldsValue({
                                 cellCapacities: next,
@@ -6469,6 +6518,12 @@ export default function SLFMonitoring({
                                             <Select
                                               style={{ width: 78 }}
                                               options={UNIT_OPTIONS}
+                                              onChange={(value) =>
+                                                handleCellCapacityUnitChange(
+                                                  i,
+                                                  value,
+                                                )
+                                              }
                                             />
                                           </Form.Item>
                                         </Space.Compact>
@@ -6628,25 +6683,52 @@ export default function SLFMonitoring({
                           form.getFieldValue("cellFillValues") || [];
                         const fillUnits =
                           form.getFieldValue("cellFillUnits") || [];
-                        const totalCap =
-                          form.getFieldValue("volumeCapacity") || 0;
-                        const totalCapUnit = normalizeUnit(
-                          form.getFieldValue("volumeCapacityUnit") || "m³",
+                        const cellDisplayUnit = normalizeUnit(
+                          form.getFieldValue("wasteReceivedUnit") ||
+                            form.getFieldValue("volumeCapacityUnit") ||
+                            capUnits.find(Boolean) ||
+                            fillUnits.find(Boolean) ||
+                            form.getFieldValue("wasteReceivedUnit") ||
+                            "m³",
                         );
-                        const wasteRaw =
-                          form.getFieldValue("actualResidualWasteReceived") ||
-                          0;
-                        const wasteUnit =
-                          form.getFieldValue("wasteReceivedUnit") || "m³";
-                        const wasteInCapacityUnit = convertVolume(
-                          wasteRaw,
-                          wasteUnit,
-                          totalCapUnit,
+                        const cellCapacityTotal = Array.from(
+                          { length: cellCount },
+                          (_, index) =>
+                            convertVolume(
+                              caps[index] || 0,
+                              capUnits[index] || cellDisplayUnit,
+                              cellDisplayUnit,
+                            ),
+                        ).reduce((sum, value) => sum + value, 0);
+                        const cellFillTotal = Array.from(
+                          { length: cellCount },
+                          (_, index) => {
+                            const fill = fills[index];
+                            if (fill == null) return 0;
+                            return convertVolume(
+                              fill,
+                              fillUnits[index] || cellDisplayUnit,
+                              cellDisplayUnit,
+                            );
+                          },
+                        ).reduce((sum, value) => sum + value, 0);
+                        const fallbackCapacity = convertVolume(
+                          form.getFieldValue("volumeCapacity") || 0,
+                          form.getFieldValue("volumeCapacityUnit") || cellDisplayUnit,
+                          cellDisplayUnit,
                         );
+                        const fallbackWaste = convertVolume(
+                          form.getFieldValue("actualResidualWasteReceived") || 0,
+                          form.getFieldValue("wasteReceivedUnit") || cellDisplayUnit,
+                          cellDisplayUnit,
+                        );
+                        const totalCap = cellCapacityTotal || fallbackCapacity;
+                        const wasteRaw = cellFillTotal || fallbackWaste;
+                        const wasteUnit = cellDisplayUnit;
                         const pct =
                           totalCap > 0
                             ? Math.min(
-                                Math.round((wasteInCapacityUnit / totalCap) * 100),
+                                Math.round((wasteRaw / totalCap) * 100),
                                 100,
                               )
                             : 0;
@@ -6789,15 +6871,12 @@ export default function SLFMonitoring({
                                   {wasteRaw > 0
                                     ? wasteRaw.toLocaleString()
                                     : "0"}{" "}
-                                  {normalizeUnit(wasteUnit)} /{" "}
+                                  {cellDisplayUnit} /{" "}
                                   {totalCap > 0
                                     ? totalCap.toLocaleString()
                                     : "—"}{" "}
-                                  {normalizeUnit(
-                                    form.getFieldValue("volumeCapacityUnit") ||
-                                      "m³",
-                                  )}
-                                  {wasteUnit === "tons" && wasteRaw > 0 && (
+                                  {cellDisplayUnit}
+                                  {cellDisplayUnit === "tons" && wasteRaw > 0 && (
                                     <div
                                       style={{ fontSize: 10, color: "#8c8c8c" }}
                                     >
@@ -6928,7 +7007,7 @@ export default function SLFMonitoring({
                                                   }}
                                                 >
                                                   {cell.used.toLocaleString()}{" "}
-                                                  {cell.fillUnit} filled
+                                                  {cell.capacityUnit} filled
                                                 </div>
                                               )}
                                             {cell.note && (
@@ -8005,6 +8084,53 @@ export default function SLFMonitoring({
           />
           </Form>
         </Spin>
+      </Modal>
+
+      <Modal
+        title={
+          <Space>
+            <EnvironmentOutlined />
+            <span>{mapPreview?.label || "SLF Location"}</span>
+          </Space>
+        }
+        open={!!mapPreview}
+        onCancel={() => setMapPreview(null)}
+        footer={
+          <Space>
+            {mapPreview && (
+              <Button
+                icon={<LinkOutlined />}
+                href={`https://www.google.com/maps/search/?api=1&query=${mapPreview.latitude},${mapPreview.longitude}`}
+                target="_blank"
+                rel="noreferrer"
+              >
+                Open Google Maps
+              </Button>
+            )}
+            <Button onClick={() => setMapPreview(null)}>Close</Button>
+          </Space>
+        }
+        width={820}
+        destroyOnHidden
+      >
+        {mapPreview && (
+          <div>
+            <Text type="secondary" style={{ display: "block", marginBottom: 8 }}>
+              {mapPreview.latitude}, {mapPreview.longitude}
+            </Text>
+            <iframe
+              title="SLF map preview"
+              src={`https://maps.google.com/maps?q=${mapPreview.latitude},${mapPreview.longitude}&z=16&output=embed`}
+              style={{
+                width: "100%",
+                height: 420,
+                border: 0,
+                borderRadius: 8,
+              }}
+              loading="lazy"
+            />
+          </div>
+        )}
       </Modal>
 
       {/* ── Capacity Converter Modal ── */}

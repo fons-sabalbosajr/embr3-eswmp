@@ -179,6 +179,27 @@ async function seed() {
       description: "SLF facility category options. Defaults (Cat 1–4) are always available; add extra entries here.",
       values: ["Cat 1", "Cat 2", "Cat 3", "Cat 4"],
     },
+    {
+      category: "cell-status",
+      label: "Cell Status",
+      module: "SLF",
+      description: "Cell infrastructure status options used in SLF Data Table.",
+      values: ["Active Cell", "Used/Completed", "Under Construction", "Reserved Area", "Not Existed"],
+    },
+    {
+      category: "cell-type",
+      label: "Cell Type",
+      module: "SLF",
+      description: "Cell infrastructure type options.",
+      values: ["Residual", "Treated Haz Waste"],
+    },
+    {
+      category: "hauler-request-status",
+      label: "Hauler Request Status",
+      module: "SLF",
+      description: "Status values for portal hauler deletion requests.",
+      values: ["pending", "approved", "rejected"],
+    },
 
     // Equipment
     {
@@ -269,6 +290,55 @@ async function seed() {
       module: "RCA",
       description: "Type of RCA facility",
       values: colValues(data, 30, 1, 5),
+    },
+    {
+      category: "support-ticket-category",
+      label: "Support Ticket Category",
+      module: "Support",
+      description: "Categories used when portal users or admins create support conversations.",
+      values: ["Technical Issue", "Data Correction", "Account Access", "Submission Concern", "Requirements / Compliance", "General Inquiry", "Feature Request", "Other"],
+    },
+    {
+      category: "support-ticket-priority",
+      label: "Support Ticket Priority",
+      module: "Support",
+      description: "Priority values used in support ticket workflows.",
+      values: ["Low", "Medium", "High", "Urgent"],
+    },
+    {
+      category: "portal-user-status",
+      label: "Portal User Status",
+      module: "Portal Users",
+      description: "Portal registration and approval states.",
+      values: ["pending", "approved", "rejected"],
+    },
+    {
+      category: "portal-verification-status",
+      label: "Portal Verification Status",
+      module: "Portal Users",
+      description: "Verification states shown in Portal User Management filters.",
+      values: ["Held", "Docs Submitted", "Needs Docs", "Reviewed"],
+    },
+    {
+      category: "notification-type",
+      label: "Notification Type",
+      module: "Notifications",
+      description: "Notification event types shown in Notification Management.",
+      values: ["new_submission", "resubmission", "status_change", "reverted", "new_portal_user", "baseline_update_request", "baseline_update_approved", "support_ticket", "support_ticket_reply", "submission_edit_request", "submission_edit_approved", "submission_edit_rejected"],
+    },
+    {
+      category: "permission-module",
+      label: "Permission Module",
+      module: "Accounts",
+      description: "Modules controlled by Accounts and Roles access switches.",
+      values: ["dashboard", "submissions", "slfMonitoring", "messaging", "reports", "tenYearSwm", "fundedMrf", "lguInitiatedMrf", "trashTraps", "swmEquipment", "technicalAssistance", "transferStations", "openDumpsites", "projectDescScoping", "residualContainment", "lguAssistDiversion", "accountSettings", "portalUsers", "portalFields", "dataReferences", "orgChart", "baselineData", "supportTickets"],
+    },
+    {
+      category: "transaction-type",
+      label: "Transaction Type",
+      module: "Transactions",
+      description: "Transaction history event types used by Reports.",
+      values: ["submission", "email_ack_sent", "email_ack_failed", "status_change", "deleted", "resubmission", "revert_requested", "revert_approved", "baseline_update_request", "baseline_update", "baseline_delete", "support_ticket", "support_ticket_reply", "hauler_delete_request", "hauler_delete_approved", "hauler_delete_rejected"],
     },
   ];
 

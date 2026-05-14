@@ -148,8 +148,8 @@ export default function NotificationManagement({ isDark }) {
 
   const handleClearAdminRead = async () => {
     try {
-      const { data } = await api.delete("/notifications/admin/clear-read");
-      Swal.fire({ icon: "success", title: `Cleared ${data.deleted || 0} read notifications`, timer: 1500, showConfirmButton: false });
+      await api.patch("/notifications/admin/read-all");
+      Swal.fire({ icon: "success", title: "Admin notifications marked as read", timer: 1500, showConfirmButton: false });
       fetchNotifications(pagination.current, pagination.pageSize);
     } catch {
       Swal.fire("Error", "Could not clear notifications", "error");
@@ -338,7 +338,7 @@ export default function NotificationManagement({ isDark }) {
                   </Button>
                 </Popconfirm>
               )}
-              <Popconfirm title="Clear all read admin notifications?" onConfirm={handleClearAdminRead} okText="Clear">
+              <Popconfirm title="Mark all admin notifications as read?" onConfirm={handleClearAdminRead} okText="Mark Read">
                 <Button icon={<ClearOutlined />} size="small">
                   Clear Read (Admin)
                 </Button>

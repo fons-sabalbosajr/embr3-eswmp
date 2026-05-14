@@ -315,6 +315,7 @@ router.get("/baseline/:slfName", async (req, res) => {
       .setOptions({ includeHiddenYears: true })
       .sort({ createdAt: -1 })
       .lean();
+    let matchedCandidates = candidates;
     let latest = chooseBaselineRecord(candidates);
 
     if (!latest) {
@@ -322,12 +323,17 @@ router.get("/baseline/:slfName", async (req, res) => {
         .setOptions({ includeHiddenYears: true })
         .sort({ createdAt: -1 })
         .lean();
-      latest = chooseBaselineRecord(candidates.filter((item) => matchesBaselineName(item, slfName)));
+      matchedCandidates = candidates.filter((item) => matchesBaselineName(item, slfName));
+      latest = chooseBaselineRecord(matchedCandidates);
     }
 
     if (!latest) return res.json(null);
 
     const baselineUnit = latest.baselineUnit || latest.totalVolumeAcceptedUnit || "m³";
+    const haulerSource =
+      matchedCandidates.find((item) => item?.accreditedHaulers?.length > 0 && !hasTruckVolume(item)) ||
+      matchedCandidates.find((item) => item?.accreditedHaulers?.length > 0) ||
+      latest;
 
     res.json({
       baselineUnit,
@@ -355,7 +361,7 @@ router.get("/baseline/:slfName", async (req, res) => {
       acceptsHazardousWaste: latest.acceptsHazardousWaste || false,
       activeCellEntries: latest.activeCellEntries || [],
       closedCellEntries: latest.closedCellEntries || [],
-      accreditedHaulers: latest.accreditedHaulers || [],
+      accreditedHaulers: haulerSource.accreditedHaulers || [],
       baselineUpdateApproved: latest.baselineUpdateApproved || false,
       baselineUpdateRequested: latest.baselineUpdateRequested || false,
       savedAt: latest.updatedAt || latest.createdAt,
@@ -1899,6 +1905,12 @@ router.get("/waste-received-summary/:slfName", async (req, res) => {
         .map((name) => normalizeSlfName(name))
         .filter(Boolean),
     );
+    const selectedMunicipalityKeys = new Set(
+      facilities
+        .flatMap((facility) => getNameVariants(facility.lgu))
+        .map((name) => normalizeSlfName(name))
+        .filter(Boolean),
+    );
     const identityNames = (slfId && facilities.length
       ? [
           ...facilities.flatMap((facility) => getNameVariants(facility.lgu)),
@@ -1969,9 +1981,23 @@ router.get("/waste-received-summary/:slfName", async (req, res) => {
         municipalityName: client.municipalityName || client.companyMunicipalityName || fallback.municipalityName || "",
       };
     };
-    const addClient = (map, client, volume = 0, unit = "m³", truckCount = 0) => {
+    const getClientMunicipalityKeys = (client = {}) => [
+      client.municipalityName,
+      /^\d+$/.test(String(client.municipality || "")) ? "" : client.municipality,
+    ]
+      .flatMap((value) => getNameVariants(value))
+      .map((value) => normalizeSlfName(value))
+      .filter(Boolean);
+    const clientMatchesSelectedMunicipality = (client) => {
+      if (!selectedMunicipalityKeys.size) return true;
+      const keys = getClientMunicipalityKeys(client);
+      if (!keys.length) return true;
+      return keys.some((key) => selectedMunicipalityKeys.has(key));
+    };
+    const addClient = (map, client, volume = 0, unit = "m³", truckCount = 0, options = {}) => {
       const normalized = normalizeClient(client);
       if (!normalized?.clientName) return;
+      if (options.filterMunicipality && !clientMatchesSelectedMunicipality(normalized)) return;
       const key = clientKey(normalized);
       if (!map.has(key)) {
         map.set(key, { ...normalized, totalM3: 0, totalTons: 0, entries: 0, truckCount: 0 });
@@ -2046,17 +2072,29 @@ router.get("/waste-received-summary/:slfName", async (req, res) => {
       }
 
       (r.trucks || []).forEach((truck) => {
+        const vehicleClients = (truck.vehicles || []).flatMap((vehicle) =>
+          Array.isArray(vehicle.selectedClients) ? vehicle.selectedClients : [],
+        );
         const clients = Array.isArray(truck.selectedClients) && truck.selectedClients.length
           ? truck.selectedClients
-          : [{
-              clientName: truck.lguCompanyName || r.lguCompanyName || "—",
-              clientType: truck.companyType || r.companyType || "Private",
-              region: r.companyRegion || "",
-              province: r.companyProvince || "",
-              municipality: r.companyMunicipality || "",
-            }];
+          : vehicleClients.length
+            ? vehicleClients
+            : [{
+                clientName: truck.lguCompanyName || r.lguCompanyName || "—",
+                clientType: truck.companyType || r.companyType || "Private",
+                region: r.companyRegion || "",
+                province: r.companyProvince || "",
+                municipality: r.companyMunicipality || "",
+              }];
         const splitVolume = Number(truck.actualVolume || 0) / Math.max(clients.length, 1);
-        clients.forEach((client) => addClient(submissionClientMap, client, splitVolume, truck.actualVolumeUnit || r.baselineUnit || "m³", 1 / Math.max(clients.length, 1)));
+        clients.forEach((client) => addClient(
+          submissionClientMap,
+          client,
+          splitVolume,
+          truck.actualVolumeUnit || r.baselineUnit || "m³",
+          1 / Math.max(clients.length, 1),
+          { filterMunicipality: true },
+        ));
       });
     }
 
