@@ -50,7 +50,7 @@ Internet
 │  embr3-onlinesystems.cloud              │
 │  ┌────────────────────────────────────┐ │
 │  │ /eswm-pipeline/*  → static files  │ │  ← Vite build (dist/)
-│  │ /api/*            → proxy         │─┼──▶ localhost:5000 (Express API)
+│  │ /api/*            → proxy         │─┼──▶ localhost:5006 (Express API)
 │  └────────────────────────────────────┘ │
 └─────────────────────────────────────────┘
          │
@@ -58,14 +58,14 @@ Internet
 ┌──────────────────┐    ┌────────────────┐
 │  PM2 (process    │    │  MongoDB       │
 │  manager)        │    │  (port 27017)  │
-│  └── embr3-server│    │  DB: embr3_eswmp│
+│  └── embr3-eswmp-api│ │  DB: embr3_eswmp│
 └──────────────────┘    └────────────────┘
 ```
 
 **URL Routing:**
 - `/eswm-pipeline/slfportal/*` → SLF Generators Portal (login, signup, data entry)
 - `/eswm-pipeline/admin/*` → Admin Panel (login, dashboard, settings)
-- `/eswm-pipeline/api/*` → Express REST API (rewritten & proxied via Nginx to port 5003)
+- `/eswm-pipeline/api/*` → Express REST API (rewritten & proxied via Nginx to port 5006)
 
 ---
 
@@ -222,7 +222,7 @@ nano .env
 ```
 
 ```env
-PORT=5003
+PORT=5006
 MONGODB_URI=mongodb://embr3admin:STRONG_PASSWORD_HERE@127.0.0.1:27017/embr3_eswmp?authSource=admin
 JWT_SECRET=generate-a-long-random-string-here
 EMAIL_USER=your-gmail@gmail.com
@@ -236,7 +236,7 @@ Generate a secure JWT secret:
 node -e "console.log(require('crypto').randomBytes(64).toString('hex'))"
 ```
 
-> **Port 5003** is used for ESWMP. Other apps on this VPS: HRPMS (5000), OCSM (5001), AQM (3001).
+> **Port 5006** is used for ESWMP on the live VPS.
 
 ---
 
@@ -252,12 +252,12 @@ This creates a `dist/` folder with static files. Nginx will serve these from the
 Copy the build output to the web directory:
 
 ```bash
-sudo mkdir -p /var/www/eswm-pipeline
-sudo cp -r ~/apps/embr3-eswmp/front-end/dist/* /var/www/eswm-pipeline/
+sudo mkdir -p /var/www/eswm-pipeline/dist
+sudo cp -a ~/apps/embr3-eswmp/front-end/dist/. /var/www/eswm-pipeline/dist/
 sudo chown -R www-data:www-data /var/www/eswm-pipeline
 ```
 
-> **Note:** Files go directly into `/var/www/eswm-pipeline/` (NOT a `dist/` subfolder). The Nginx alias points to this directory.
+> **Note:** The live VPS serves ESWMP from `/var/www/eswm-pipeline/dist/`. Copying only to `/var/www/eswm-pipeline/` can leave the public site on an older build.
 
 ---
 
@@ -273,7 +273,7 @@ The ESWMP section within the shared config:
 
 ```nginx
     # ══════════════════════════════════════════════════════════════════
-    # ESWMP – Ecological Solid Waste Management Pipeline (port 5003)
+    # ESWMP – Ecological Solid Waste Management Pipeline (port 5006)
     # ══════════════════════════════════════════════════════════════════
 
     # ── Bare /eswm-pipeline → trailing slash ─────────────────────────
@@ -283,7 +283,7 @@ The ESWMP section within the shared config:
 
     # ── ESWMP Front-end (static SPA) ────────────────────────────────
     location /eswm-pipeline/ {
-        alias /var/www/eswm-pipeline/;
+        alias /var/www/eswm-pipeline/dist/;
         index index.html;
         try_files $uri $uri/ /eswm-pipeline/index.html;
     }
@@ -291,7 +291,7 @@ The ESWMP section within the shared config:
     # ── ESWMP API reverse proxy ─────────────────────────────────────
     location /eswm-pipeline/api/ {
         rewrite ^/eswm-pipeline/api/(.*) /api/$1 break;
-        proxy_pass         http://127.0.0.1:5003;
+        proxy_pass         http://127.0.0.1:5006;
         proxy_http_version 1.1;
         proxy_set_header   Host              $host;
         proxy_set_header   X-Real-IP         $remote_addr;
@@ -345,7 +345,7 @@ Start the EMBR3 server:
 
 ```bash
 cd ~/apps/embr3-eswmp/server
-pm2 start server.js --name embr3-server
+pm2 start server.js --name embr3-eswmp-api
 ```
 
 Configure PM2 to restart on reboot:
@@ -359,15 +359,15 @@ pm2 save                   # Save current process list
 
 ```bash
 pm2 list                            # List all processes
-pm2 logs embr3-server               # Tail logs
-pm2 logs embr3-server --lines 100   # Last 100 log lines
-pm2 restart embr3-server            # Restart
-pm2 stop embr3-server               # Stop (without removing)
-pm2 delete embr3-server             # Remove from PM2
+pm2 logs embr3-eswmp-api            # Tail logs
+pm2 logs embr3-eswmp-api --lines 100 # Last 100 log lines
+pm2 restart embr3-eswmp-api         # Restart
+pm2 stop embr3-eswmp-api            # Stop (without removing)
+pm2 delete embr3-eswmp-api          # Remove from PM2
 pm2 monit                           # Real-time monitoring
 ```
 
-> **Isolation:** PM2 manages each app as a named separate process. Restarting `embr3-server` has no effect on other PM2 processes.
+> **Isolation:** PM2 manages each app as a named separate process. Restarting `embr3-eswmp-api` has no effect on other PM2 processes.
 
 ---
 
@@ -382,7 +382,7 @@ sudo ufw enable
 sudo ufw status
 ```
 
-**Do NOT expose port 5000 externally.** The Express server should only be accessible via Nginx's reverse proxy on localhost.
+**Do NOT expose port 5006 externally.** The Express server should only be accessible via Nginx's reverse proxy on localhost.
 
 **Do NOT expose port 27017 (MongoDB) externally.** It should only be accessible on localhost.
 
@@ -397,7 +397,7 @@ Before deploying, check which ports are already in use:
 sudo ss -tlnp | grep LISTEN
 ```
 
-Make sure your `PORT=5000` isn't taken. If it is, change it in `.env` and the Nginx config.
+Make sure your `PORT=5006` isn't taken. If it is, change it in `.env` and the Nginx config.
 
 ### Nginx Conflicts
 - Each app should have its **own** file in `/etc/nginx/sites-available/`.
@@ -418,7 +418,7 @@ Make sure your `PORT=5000` isn't taken. If it is, change it in `.env` and the Ng
 - Set `max_memory_restart` if the VPS has limited RAM:
 
 ```bash
-pm2 start server.js --name embr3-server --max-memory-restart 300M
+pm2 start server.js --name embr3-eswmp-api --max-memory-restart 300M
 ```
 
 ### Disk & Log Rotation
@@ -452,7 +452,8 @@ npm install
 npm run build
 
 # Copy new build to nginx directory (dist/ subdirectory required)
-sudo cp -r dist/* /var/www/eswm-pipeline/dist/
+sudo mkdir -p /var/www/eswm-pipeline/dist
+sudo cp -a dist/. /var/www/eswm-pipeline/dist/
 sudo chown -R www-data:www-data /var/www/eswm-pipeline/
 
 # Restart the server (actual PM2 process name: embr3-eswmp-api, port: 5006)
@@ -465,7 +466,8 @@ If you've already built on your local machine and are uploading via SCP/SFTP:
 
 ```bash
 # 1. On your LOCAL machine — upload the built files
-scp -r front-end/dist/* root@72.61.125.232:/var/www/eswm-pipeline/
+ssh root@72.61.125.232 'mkdir -p /var/www/eswm-pipeline/dist'
+scp -r front-end/dist/* root@72.61.125.232:/var/www/eswm-pipeline/dist/
 scp -r server/* root@72.61.125.232:/home/embr3_eswm/apps/embr3-eswmp/server/
 
 # 2. SSH into VPS
@@ -489,7 +491,7 @@ pm2 save
 
 # 7. Verify
 curl http://localhost:5006/api/health
-pm2 logs embr3-server --lines 20
+pm2 logs embr3-eswmp-api --lines 20
 ```
 
 ### Running Seed Scripts
@@ -512,7 +514,7 @@ node seeds/seedDataReferences.js
 ### Checking Server Health
 
 ```bash
-curl http://localhost:5003/api/health
+curl http://localhost:5006/api/health
 # Should return: {"status":"ok","message":"Server is running"}
 ```
 
@@ -520,7 +522,7 @@ curl http://localhost:5003/api/health
 
 ```bash
 pm2 monit                    # Real-time CPU/memory
-pm2 logs embr3-server        # Live logs
+pm2 logs embr3-eswmp-api     # Live logs
 df -h                        # Disk usage
 free -h                      # Memory usage
 ```
@@ -531,7 +533,7 @@ free -h                      # Memory usage
 
 ### App won't start
 ```bash
-pm2 logs embr3-server --lines 50     # Check error logs
+pm2 logs embr3-eswmp-api --lines 50  # Check error logs
 cd ~/apps/embr3-eswmp/server
 node server.js                        # Run directly to see errors
 ```
@@ -544,15 +546,15 @@ mongosh                                # Can you connect locally?
 
 ### Nginx 502 Bad Gateway
 ```bash
-pm2 list                              # Is embr3-server running?
-curl http://localhost:5003/api/health  # Can Express respond?
+pm2 list                              # Is embr3-eswmp-api running?
+curl http://localhost:5006/api/health  # Can Express respond?
 sudo nginx -t                         # Config valid?
 sudo tail -f /var/log/nginx/error.log # Check Nginx errors
 ```
 
 ### Port already in use
 ```bash
-sudo ss -tlnp | grep 5003
+sudo ss -tlnp | grep 5006
 # Kill conflicting process or change PORT in .env
 ```
 
