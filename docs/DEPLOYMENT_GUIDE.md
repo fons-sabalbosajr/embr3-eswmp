@@ -29,10 +29,61 @@
 
 ---
 
+## VPS Quick Reference (Confirmed Paths)
+
+> These are the **verified, live** paths on the VPS. Use these and stop guessing.
+
+| Item | Value |
+|---|---|
+| SSH | `ssh root@72.61.125.232` |
+| OS | Ubuntu 24.04.4 LTS |
+| App user | `embr3_eswm` |
+| App root | `/home/embr3_eswm/apps/embr3-eswmp` |
+| Server dir | `/home/embr3_eswm/apps/embr3-eswmp/server` |
+| Front-end dir | `/home/embr3_eswm/apps/embr3-eswmp/front-end` |
+| Nginx static files | `/var/www/eswm-pipeline/dist/` |
+| PM2 process name | `embr3-eswmp-api` (ID 18) |
+| Express port | `5006` |
+| Node version | v22 via nvm (at `/home/embr3_eswm/.nvm`) |
+
+### Standard Update (copy-paste ready)
+
+```bash
+# SSH in
+ssh root@72.61.125.232
+
+# Switch to app user (nvm + correct environment)
+su - embr3_eswm
+
+# Pull latest code
+cd /home/embr3_eswm/apps/embr3-eswmp
+git pull origin main
+
+# Update server deps (only if package.json changed)
+cd server && npm install --production && cd ..
+
+# Rebuild front-end
+cd front-end && npm install && npm run build && cd ..
+
+# Deploy build to nginx directory
+sudo mkdir -p /var/www/eswm-pipeline/dist
+sudo cp -a front-end/dist/. /var/www/eswm-pipeline/dist/
+sudo chown -R www-data:www-data /var/www/eswm-pipeline/
+
+# Restart API
+pm2 restart embr3-eswmp-api --update-env && pm2 save
+
+# Verify
+curl http://localhost:5006/api/health
+pm2 logs embr3-eswmp-api --lines 20
+```
+
+---
+
 ## Prerequisites
 
 - **Hostinger KVM 2 VPS** — `ssh root@72.61.125.232`
-- **Ubuntu 22.04 LTS** (or your installed OS)
+- **Ubuntu 24.04.4 LTS**
 - Domain **`embr3-onlinesystems.cloud`** with DNS A record pointed to `72.61.125.232`
 - **Gmail App Password** for the email functionality
 - SSH client (PuTTY on Windows, or native `ssh` on Mac/Linux)
