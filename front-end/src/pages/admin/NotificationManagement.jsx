@@ -17,6 +17,9 @@ import {
   Popconfirm,
   Modal,
   Descriptions,
+  DatePicker,
+  Divider,
+  Grid,
 } from "antd";
 import {
   BellOutlined,
@@ -36,8 +39,9 @@ import dayjs from "dayjs";
 import api from "../../api";
 import { getSocket } from "../../utils/socket";
 
-const { Text } = Typography;
+const { Text, Title, Paragraph } = Typography;
 const { Option } = Select;
+const { RangePicker } = DatePicker;
 
 const TYPE_CONFIG = {
   new_submission: { label: "New Submission", color: "blue" },
@@ -52,9 +56,14 @@ const TYPE_CONFIG = {
   submission_edit_request: { label: "Edit Request", color: "volcano" },
   submission_edit_approved: { label: "Edit Approved", color: "green" },
   submission_edit_rejected: { label: "Edit Rejected", color: "red" },
+  cell_capacity_alert: { label: "Cell Capacity Alert", color: "red" },
+  portal_user_email: { label: "Portal User Email", color: "geekblue" },
+  submission_revert_followup: { label: "Revert Follow-Up", color: "volcano" },
+  submission_temp_deleted: { label: "Temp Deleted", color: "red" },
 };
 
 export default function NotificationManagement({ isDark }) {
+  const screens = Grid.useBreakpoint();
   const [notifications, setNotifications] = useState([]);
   const [loading, setLoading] = useState(true);
   const [pagination, setPagination] = useState({ current: 1, pageSize: 30, total: 0 });
@@ -65,6 +74,7 @@ export default function NotificationManagement({ isDark }) {
   const [detailOpen, setDetailOpen] = useState(false);
   const [selectedNotif, setSelectedNotif] = useState(null);
   const [globalUnread, setGlobalUnread] = useState(0);
+  const [dateRange, setDateRange] = useState(null);
 
   const fetchNotifications = useCallback(async (page = 1, pageSize = 30) => {
     setLoading(true);
@@ -73,6 +83,8 @@ export default function NotificationManagement({ isDark }) {
       if (typeFilter !== "all") params.append("type", typeFilter);
       if (recipientFilter !== "all") params.append("recipient", recipientFilter);
       if (searchText.trim()) params.append("search", searchText.trim());
+      if (dateRange?.[0]) params.append("dateFrom", dateRange[0].startOf("day").toISOString());
+      if (dateRange?.[1]) params.append("dateTo", dateRange[1].endOf("day").toISOString());
       const { data } = await api.get(`/notifications/all/manage?${params}`);
       setNotifications(data.notifications || []);
       setGlobalUnread(data.unreadCount || 0);
@@ -86,7 +98,7 @@ export default function NotificationManagement({ isDark }) {
     } finally {
       setLoading(false);
     }
-  }, [typeFilter, recipientFilter, searchText]);
+  }, [typeFilter, recipientFilter, searchText, dateRange]);
 
   // Initial fetch on mount / filter changes
   useEffect(() => {
@@ -148,9 +160,10 @@ export default function NotificationManagement({ isDark }) {
 
   const handleClearAdminRead = async () => {
     try {
-      await api.patch("/notifications/admin/read-all");
-      Swal.fire({ icon: "success", title: "Admin notifications marked as read", timer: 1500, showConfirmButton: false });
-      fetchNotifications(pagination.current, pagination.pageSize);
+      await api.delete("/notifications/admin/clear-read");
+      Swal.fire({ icon: "success", title: "Read admin notifications cleared", timer: 1500, showConfirmButton: false });
+      setSelectedRows([]);
+      fetchNotifications(1, pagination.pageSize);
     } catch {
       Swal.fire("Error", "Could not clear notifications", "error");
     }
@@ -160,16 +173,17 @@ export default function NotificationManagement({ isDark }) {
   const unreadCount = notifications.filter((n) => !n.read).length;
   const adminCount = notifications.filter((n) => n.recipient === "admin").length;
   const portalCount = notifications.filter((n) => n.recipient !== "admin").length;
+  const isCompact = !screens.md;
 
   const columns = [
     {
       title: "Type",
       dataIndex: "type",
       key: "type",
-      width: 180,
+      minWidth: isCompact ? 116 : 150,
       render: (t) => {
         const cfg = TYPE_CONFIG[t] || { label: t, color: "default" };
-        return <Tag color={cfg.color} style={{ borderRadius: 4 }}>{cfg.label}</Tag>;
+        return <Tag color={cfg.color} style={{ borderRadius: 4, whiteSpace: "normal" }}>{cfg.label}</Tag>;
       },
     },
     {
@@ -178,25 +192,32 @@ export default function NotificationManagement({ isDark }) {
       key: "title",
       ellipsis: true,
       render: (v, r) => (
-        <div>
-          <Text strong={!r.read} style={{ fontSize: 13 }}>{v}</Text>
+        <Space direction="vertical" size={2} style={{ width: "100%" }}>
+          <Text strong={!r.read} style={{ fontSize: isCompact ? 12 : 13 }}>{v}</Text>
           {!r.read && <Badge dot style={{ marginLeft: 6 }} />}
-        </div>
+          {isCompact && (
+            <Text type="secondary" style={{ fontSize: 11 }}>
+              {r.recipient === "admin" ? "Admin" : r.recipient} · {r.read ? "Read" : "Unread"}
+            </Text>
+          )}
+        </Space>
       ),
-      width: 250,
+      minWidth: isCompact ? 180 : 220,
     },
     {
       title: "Message",
       dataIndex: "message",
       key: "message",
-      ellipsis: false,
+      responsive: ["md"],
+      minWidth: 200,
       render: (v) => <Text type="secondary" style={{ fontSize: 12 }}>{v || "—"}</Text>,
     },
     {
       title: "Recipient",
       dataIndex: "recipient",
       key: "recipient",
-      width: 280,
+      responsive: ["lg"],
+      minWidth: 170,
       render: (v) => (
         <Space size={4}>
           {v === "admin" ? <TeamOutlined style={{ color: "#1a3353" }} /> : <UserOutlined style={{ color: "#52c41a" }} />}
@@ -208,7 +229,8 @@ export default function NotificationManagement({ isDark }) {
       title: "Status",
       dataIndex: "read",
       key: "read",
-      width: 90,
+      responsive: ["sm"],
+      minWidth: 86,
       align: "center",
       render: (read) => read
         ? <Tag color="default" style={{ borderRadius: 4 }}>Read</Tag>
@@ -218,7 +240,7 @@ export default function NotificationManagement({ isDark }) {
       title: "Date",
       dataIndex: "createdAt",
       key: "createdAt",
-      width: 100,
+      minWidth: isCompact ? 112 : 145,
       sorter: (a, b) => new Date(a.createdAt) - new Date(b.createdAt),
       defaultSortOrder: "descend",
       render: (v) => (
@@ -232,9 +254,8 @@ export default function NotificationManagement({ isDark }) {
     {
       title: "Action",
       key: "action",
-      width: 100,
+      minWidth: 112,
       align: "center",
-      fixed: "right",
       render: (_, r) => (
         <Space size={4}>
           <Tooltip title="View Detail">
@@ -271,6 +292,15 @@ export default function NotificationManagement({ isDark }) {
 
   return (
     <>
+      <div style={{ marginBottom: 16 }}>
+        <Title level={3} style={{ marginBottom: 4, color: isDark ? "#7eb8da" : "#1a3353" }}>
+          Notification Management
+        </Title>
+        <Paragraph type="secondary" style={{ marginBottom: 0 }}>
+          Review, filter, clear, and audit system notifications across admin and portal activity.
+        </Paragraph>
+      </div>
+
       {/* Summary Stats */}
       <Row gutter={[16, 16]} style={{ marginBottom: 20 }}>
         <Col xs={12} sm={6}>
@@ -319,6 +349,7 @@ export default function NotificationManagement({ isDark }) {
                 <Option value="all">All Recipients</Option>
                 <Option value="admin">Admin</Option>
               </Select>
+              <RangePicker value={dateRange} onChange={setDateRange} allowClear style={{ width: 260 }} />
               <Button icon={<ReloadOutlined />} onClick={() => fetchNotifications(1, pagination.pageSize)}>
                 Search
               </Button>
@@ -338,7 +369,7 @@ export default function NotificationManagement({ isDark }) {
                   </Button>
                 </Popconfirm>
               )}
-              <Popconfirm title="Mark all admin notifications as read?" onConfirm={handleClearAdminRead} okText="Mark Read">
+              <Popconfirm title="Delete all read admin notifications?" onConfirm={handleClearAdminRead} okText="Clear Read" okButtonProps={{ danger: true }}>
                 <Button icon={<ClearOutlined />} size="small">
                   Clear Read (Admin)
                 </Button>
@@ -356,7 +387,7 @@ export default function NotificationManagement({ isDark }) {
           rowKey="_id"
           loading={loading}
           size="small"
-          scroll={{ x: 1100 }}
+          scroll={{ x: isCompact ? 620 : "max-content" }}
           rowSelection={{
             selectedRowKeys: selectedRows,
             onChange: setSelectedRows,
@@ -395,45 +426,48 @@ export default function NotificationManagement({ isDark }) {
             </Popconfirm>
           ),
         ]}
-        width={600}
+        width={760}
         destroyOnClose
       >
         {selectedNotif && (
-          <Descriptions bordered size="small" column={1} style={{ marginTop: 8 }}>
-            <Descriptions.Item label="Type">
-              {(() => {
-                const cfg = TYPE_CONFIG[selectedNotif.type] || { label: selectedNotif.type, color: "default" };
-                return <Tag color={cfg.color}>{cfg.label}</Tag>;
-              })()}
-            </Descriptions.Item>
-            <Descriptions.Item label="Title">
-              <Text strong>{selectedNotif.title}</Text>
-            </Descriptions.Item>
-            <Descriptions.Item label="Message">
-              {selectedNotif.message || "—"}
-            </Descriptions.Item>
-            <Descriptions.Item label="Recipient">
-              <Space size={4}>
-                {selectedNotif.recipient === "admin" ? <TeamOutlined /> : <UserOutlined />}
-                {selectedNotif.recipient === "admin" ? "Admin" : selectedNotif.recipient}
+          <div>
+            <Card
+              size="small"
+              style={{ borderRadius: 8, marginBottom: 12, background: isDark ? "#1f1f1f" : "#f7f9fc" }}
+            >
+              <Space direction="vertical" size={6} style={{ width: "100%" }}>
+                <Space wrap>
+                  {(() => {
+                    const cfg = TYPE_CONFIG[selectedNotif.type] || { label: selectedNotif.type, color: "default" };
+                    return <Tag color={cfg.color}>{cfg.label}</Tag>;
+                  })()}
+                  {selectedNotif.read ? <Tag>Read</Tag> : <Tag color="blue">Unread</Tag>}
+                  <Text type="secondary" style={{ fontSize: 12 }}>{dayjs(selectedNotif.createdAt).format("MMM D, YYYY h:mm A")}</Text>
+                </Space>
+                <Text strong style={{ fontSize: 16, lineHeight: 1.35 }}>{selectedNotif.title}</Text>
+                <Text style={{ whiteSpace: "pre-wrap", lineHeight: 1.6 }}>{selectedNotif.message || "—"}</Text>
               </Space>
-            </Descriptions.Item>
-            <Descriptions.Item label="Status">
-              {selectedNotif.read
-                ? <Tag color="default">Read</Tag>
-                : <Tag color="blue">Unread</Tag>}
-            </Descriptions.Item>
-            <Descriptions.Item label="Date">
-              {dayjs(selectedNotif.createdAt).format("MM/DD/YYYY h:mm:ss A")}
-            </Descriptions.Item>
+            </Card>
+            <Descriptions bordered size="small" column={{ xs: 1, sm: 1, md: 2 }} style={{ marginTop: 8 }}>
+              <Descriptions.Item label="Recipient">
+                <Space size={4}>
+                  {selectedNotif.recipient === "admin" ? <TeamOutlined /> : <UserOutlined />}
+                  {selectedNotif.recipient === "admin" ? "Admin" : selectedNotif.recipient}
+                </Space>
+              </Descriptions.Item>
+              <Descriptions.Item label="Notification ID">
+                <Text copyable style={{ fontSize: 12 }}>{selectedNotif._id}</Text>
+              </Descriptions.Item>
+            </Descriptions>
             {selectedNotif.meta && (
-              <Descriptions.Item label="Meta Data">
-                <pre style={{ fontSize: 11, margin: 0, maxHeight: 150, overflow: "auto", background: "#f5f5f5", padding: 8, borderRadius: 4 }}>
+              <>
+                <Divider style={{ margin: "14px 0 8px" }}>Metadata</Divider>
+                <pre style={{ fontSize: 11, margin: 0, maxHeight: 220, overflow: "auto", background: isDark ? "#141414" : "#f5f5f5", padding: 10, borderRadius: 6, whiteSpace: "pre-wrap" }}>
                   {JSON.stringify(selectedNotif.meta, null, 2)}
                 </pre>
-              </Descriptions.Item>
+              </>
             )}
-          </Descriptions>
+          </div>
         )}
       </Modal>
     </>

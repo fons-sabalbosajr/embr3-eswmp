@@ -24,6 +24,7 @@ import {
   Badge,
   Tooltip,
   Select,
+  DatePicker,
   Drawer,
   Grid,
   Popover,
@@ -35,6 +36,7 @@ import {
 } from "antd";
 import {
   DashboardOutlined,
+  ReloadOutlined,
   FileTextOutlined,
   TeamOutlined,
   BarChartOutlined,
@@ -83,6 +85,7 @@ import {
   WarningOutlined,
   FireOutlined,
   TableOutlined,
+  MailOutlined,
 } from "@ant-design/icons";
 import { useNavigate } from "react-router-dom";
 import Swal from "sweetalert2";
@@ -328,7 +331,8 @@ export default function AdminHome() {
   const [notifHistoryOpen, setNotifHistoryOpen] = useState(false);
   const [notifHistory, setNotifHistory] = useState([]);
   const [notifHistoryLoading, setNotifHistoryLoading] = useState(false);
-  const [notifHistoryPagination, setNotifHistoryPagination] = useState({ current: 1, pageSize: 50, total: 0 });
+  const [notifHistoryPagination, setNotifHistoryPagination] = useState({ current: 1, pageSize: 20, total: 0 });
+  const [notifHistoryDateRange, setNotifHistoryDateRange] = useState(null);
   const [messageOpen, setMessageOpen] = useState(false);
   const [quickMessages, setQuickMessages] = useState([]);
   const [messageUnreadCount, setMessageUnreadCount] = useState(0);
@@ -477,11 +481,14 @@ export default function AdminHome() {
     } catch { /* silent */ }
   };
 
-  const fetchNotificationHistory = useCallback(async (page = 1, pageSize = 50) => {
+  const fetchNotificationHistory = useCallback(async (page = 1, pageSize = 20, range = notifHistoryDateRange) => {
     setNotifHistoryLoading(true);
     try {
+      const params = { page, limit: pageSize };
+      if (range?.[0]) params.dateFrom = range[0].startOf("day").toISOString();
+      if (range?.[1]) params.dateTo = range[1].endOf("day").toISOString();
       const { data } = await api.get("/notifications/admin", {
-        params: { page, limit: pageSize },
+        params,
       });
       setNotifHistory(data.notifications || []);
       setNotifHistoryPagination({
@@ -494,7 +501,7 @@ export default function AdminHome() {
     } finally {
       setNotifHistoryLoading(false);
     }
-  }, []);
+  }, [notifHistoryDateRange]);
 
   const openNotificationHistory = () => {
     setNotifOpen(false);
@@ -575,12 +582,13 @@ export default function AdminHome() {
     if (type === "new_submission") return <InboxOutlined style={{ color: "#2f54eb" }} />;
     if (type === "resubmission") return <ReconciliationOutlined style={{ color: "#13c2c2" }} />;
     if (type === "new_portal_user") return <TeamOutlined style={{ color: "#52c41a" }} />;
+    if (type === "portal_user_email") return <MailOutlined style={{ color: "#1677ff" }} />;
     return <BellOutlined style={{ color: "#fa8c16" }} />;
   };
 
   const getNotifTarget = (type) => {
-    if (["new_submission", "resubmission", "baseline_update_request", "baseline_update"].includes(type)) return "slf-waste-generators";
-    if (["new_portal_user", "portal_verification_submitted"].includes(type)) return "settings-portal-users";
+    if (["new_submission", "resubmission", "baseline_update_request", "baseline_update", "submission_revert_followup", "submission_temp_deleted"].includes(type)) return "slf-waste-generators";
+    if (["new_portal_user", "portal_verification_submitted", "portal_user_email"].includes(type)) return "settings-portal-users";
     if (type === "support_ticket") return "dev-support";
     return null;
   };
@@ -604,6 +612,13 @@ export default function AdminHome() {
     if (p === undefined) return true;
     if (typeof p === "boolean") return p; // backward compat
     return p?.[level] !== false;
+  };
+  const hasExplicitAccess = (key, level = "view") => {
+    if (isDeveloper) return true;
+    const p = perms[key];
+    if (p === undefined) return false;
+    if (typeof p === "boolean") return p;
+    return p?.[level] === true;
   };
   const canEdit = (key) => hasAccess(key, "edit");
   const canDelete = (key) => hasAccess(key, "delete");
@@ -734,43 +749,44 @@ export default function AdminHome() {
       }
     }
 
-    if (isDeveloper) {
-      const devChildren = [
-        {
+    {
+      const devChildren = [];
+      if (isDeveloper || hasExplicitAccess("developerSettings")) {
+        devChildren.push({
           key: "dev-settings",
           icon: <ToolOutlined />,
           label: "App Settings",
-        },
-        {
+        });
+      }
+      if (isDeveloper) {
+        devChildren.push({
           key: "settings-accounts",
           icon: <TeamOutlined />,
           label: "Accounts & Roles",
-        },
-        {
+        });
+      }
+      if (isDeveloper || hasAccess("supportTickets")) {
+        devChildren.push({
           key: "dev-support",
           icon: <CustomerServiceOutlined />,
           label: "Support & Tickets",
-        },
-        {
+        });
+      }
+      if (isDeveloper || hasExplicitAccess("notificationManagement")) {
+        devChildren.push({
           key: "dev-notifications",
           icon: <BellOutlined />,
           label: "Notification Management",
-        },
-      ];
-      items.push({
-        key: "developer",
-        icon: <CodeOutlined />,
-        label: "Developer",
-        children: devChildren,
-      });
-    } else if (hasAccess("supportTickets")) {
-      // Non-developer with support access
-      items.push({ type: "divider" });
-      items.push({
-        key: "dev-support",
-        icon: <CustomerServiceOutlined />,
-        label: "Support & Tickets",
-      });
+        });
+      }
+      if (devChildren.length > 0) {
+        items.push({
+          key: "developer",
+          icon: <CodeOutlined />,
+          label: isDeveloper ? "Developer" : "Administration",
+          children: devChildren,
+        });
+      }
     }
 
     return items;
@@ -842,7 +858,15 @@ export default function AdminHome() {
       case "settings-accounts":
         return isDeveloper && hasAccess("accountSettings") ? <AccountSettings isDark={isDark} /> : denied;
       case "settings-portal-users":
-        return (isDeveloper || hasAccess("portalUsers")) ? <PortalUsers isDark={isDark} /> : denied;
+        return (isDeveloper || hasAccess("portalUsers")) ? (
+          <PortalUsers
+            isDark={isDark}
+            canEdit={isDeveloper || canEdit("portalUsers")}
+            canDelete={isDeveloper || canDelete("portalUsers")}
+            canEmail={isDeveloper || hasExplicitAccess("portalUserEmail", "edit")}
+            canViewHistory={isDeveloper || hasExplicitAccess("portalSubmissionHistory")}
+          />
+        ) : denied;
       case "messaging":
         return hasAccess("messaging") ? <Messaging isDark={isDark} currentUser={user} /> : denied;
       case "settings-fields":
@@ -873,9 +897,9 @@ export default function AdminHome() {
       case "dev-support":
         return (isDeveloper || hasAccess("supportTickets")) ? <SupportTab isDark={isDark} canEdit={canEdit("supportTickets")} canDelete={canDelete("supportTickets")} /> : denied;
       case "dev-notifications":
-        return isDeveloper ? <NotificationManagement isDark={isDark} /> : denied;
+        return (isDeveloper || hasExplicitAccess("notificationManagement")) ? <NotificationManagement isDark={isDark} /> : denied;
       case "dev-settings":
-        return isDeveloper ? (
+        return (isDeveloper || hasExplicitAccess("developerSettings")) ? (
           <DeveloperSettings isDark={isDark}
             onSettingsSaved={(s) => {
               if (s.primaryColor) {
@@ -1312,8 +1336,21 @@ export default function AdminHome() {
             <Button type="primary" onClick={() => setNotifHistoryOpen(false)}>Close</Button>
           </Space>
         }
-        width={720}
+        width={860}
       >
+        <Space wrap style={{ width: "100%", justifyContent: "space-between", marginBottom: 12 }}>
+          <DatePicker.RangePicker
+            value={notifHistoryDateRange}
+            onChange={(range) => {
+              setNotifHistoryDateRange(range);
+              fetchNotificationHistory(1, notifHistoryPagination.pageSize, range);
+            }}
+            allowClear
+          />
+          <Button icon={<ReloadOutlined />} onClick={() => fetchNotificationHistory(1, notifHistoryPagination.pageSize)} loading={notifHistoryLoading}>
+            Refresh
+          </Button>
+        </Space>
         <List
           loading={notifHistoryLoading}
           dataSource={notifHistory}
@@ -1324,8 +1361,10 @@ export default function AdminHome() {
                   current: notifHistoryPagination.current,
                   pageSize: notifHistoryPagination.pageSize,
                   total: notifHistoryPagination.total,
-                  showSizeChanger: false,
-                  onChange: (page) => fetchNotificationHistory(page, notifHistoryPagination.pageSize),
+                  showSizeChanger: true,
+                  pageSizeOptions: ["10", "20", "50"],
+                  showTotal: (total, range) => `${range[0]}-${range[1]} of ${total}`,
+                  onChange: (page, pageSize) => fetchNotificationHistory(page, pageSize),
                 }
               : false
           }

@@ -102,7 +102,8 @@ const slfFacilitySchema = new mongoose.Schema(
       description: { type: String, trim: true },
     }],
     hasWastewaterTreatmentFacility: { type: Boolean, default: false },
-    wastewaterTreatmentFacilityType: { type: String, trim: true },
+    wastewaterTreatmentFacilityType: [{ type: String, trim: true }],
+    wastewaterTreatmentFacilityRemarks: { type: String, trim: true },
 
     // Leachate Treatment Plant Details
     leachatePondDetails: [{
@@ -110,7 +111,8 @@ const slfFacilitySchema = new mongoose.Schema(
       description: { type: String, trim: true },
       status: { type: String, trim: true, default: "Active" },
       hasWastewaterTreatmentFacility: { type: Boolean, default: false },
-      wastewaterTreatmentFacilityType: { type: String, trim: true },
+      wastewaterTreatmentFacilityType: [{ type: String, trim: true }],
+      wastewaterTreatmentFacilityRemarks: { type: String, trim: true },
       attachments: [{ type: String, trim: true }],
     }],
 

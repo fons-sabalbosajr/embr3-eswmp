@@ -1689,7 +1689,12 @@ export default function SLFPortal() {
       if (type === "leachate") {
         payload.leachatePondDetails = data.map(({ _key, attachments, hasWastewaterTreatmentFacility, wastewaterTreatmentFacilityType, ...r }) => ({ ...r, attachments: [] }));
         payload.hasWastewaterTreatmentFacility = !!slfInfo?.hasWastewaterTreatmentFacility;
-        payload.wastewaterTreatmentFacilityType = slfInfo?.wastewaterTreatmentFacilityType || "";
+        payload.wastewaterTreatmentFacilityType = Array.isArray(slfInfo?.wastewaterTreatmentFacilityType)
+          ? slfInfo.wastewaterTreatmentFacilityType
+          : slfInfo?.wastewaterTreatmentFacilityType
+            ? [slfInfo.wastewaterTreatmentFacilityType]
+            : [];
+        payload.wastewaterTreatmentFacilityRemarks = slfInfo?.wastewaterTreatmentFacilityRemarks || "";
       }
       if (type === "gasVent")
         payload.gasVentDetails = data.map(({ _key, attachments, ...r }) => ({ ...r, attachments: [] }));
@@ -4136,7 +4141,11 @@ export default function SLFPortal() {
                           },
                           slfInfo.hasWastewaterTreatmentFacility != null && {
                             label: "WWTF",
-                            value: slfInfo.hasWastewaterTreatmentFacility ? (slfInfo.wastewaterTreatmentFacilityType || "Yes") : "No",
+                            value: slfInfo.hasWastewaterTreatmentFacility
+                              ? (Array.isArray(slfInfo.wastewaterTreatmentFacilityType)
+                                  ? slfInfo.wastewaterTreatmentFacilityType.join(", ")
+                                  : slfInfo.wastewaterTreatmentFacilityType) || "Yes"
+                              : "No",
                           },
                           [
                             slfInfo.barangay,

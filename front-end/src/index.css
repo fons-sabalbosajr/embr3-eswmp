@@ -8,9 +8,16 @@ body {
   margin: 0;
   min-width: 320px;
   min-height: 100vh;
+  width: 100%;
+  overflow-x: hidden;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue",
     Arial, "Noto Sans", sans-serif;
   -webkit-font-smoothing: antialiased;
+}
+
+#root {
+  width: 100%;
+  min-height: 100vh;
 }
 
 /* Submenu background aligned with sider theme */
@@ -220,8 +227,9 @@ body:has([data-theme="dark"]) .swal2-validation-message {
 }
 .admin-content {
   padding: 24px;
-  min-height: 280;
+  min-height: 280px;
   flex: 1 0 auto;
+  min-width: 0;
 }
 
 /* ── Admin sub-page toolbars ── */
@@ -236,6 +244,39 @@ body:has([data-theme="dark"]) .swal2-validation-message {
 /* ── Ant modal responsive ── */
 .ant-modal {
   max-width: calc(100vw - 32px) !important;
+}
+
+/* ── Responsive Ant tables across admin and portal screens ── */
+.ant-table-wrapper {
+  width: 100%;
+  max-width: 100%;
+}
+.ant-table-wrapper .ant-table {
+  width: 100%;
+}
+.ant-table-wrapper .ant-table table {
+  table-layout: auto !important;
+  width: max-content;
+  min-width: 100%;
+}
+.ant-table-wrapper .ant-table-thead > tr > th,
+.ant-table-wrapper .ant-table-tbody > tr > td {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: normal;
+}
+.ant-table-wrapper .ant-table-cell .ant-typography,
+.ant-table-wrapper .ant-table-cell .ant-tag,
+.ant-table-wrapper .ant-table-cell .ant-btn {
+  max-width: 100%;
+}
+
+.ant-modal-content,
+.ant-popover-inner,
+.ant-card,
+.ant-drawer-content,
+.ant-tabs-content-holder {
+  max-width: 100%;
 }
 
 /* ── Desktop+ (≥ 1600px) ── */
@@ -257,8 +298,66 @@ body:has([data-theme="dark"]) .swal2-validation-message {
 
 /* ── Tablet (≤ 992px) ── */
 @media (max-width: 992px) {
+  body {
+    font-size: 13px;
+  }
+  .ant-typography,
+  .ant-form-item-label > label,
+  .ant-input,
+  .ant-input-number,
+  .ant-select,
+  .ant-btn,
+  .ant-menu,
+  .ant-dropdown-menu,
+  .ant-tabs,
+  .ant-descriptions,
+  .ant-modal,
+  .ant-drawer,
+  .ant-card,
+  .ant-list,
+  .ant-statistic-title {
+    font-size: 13px !important;
+  }
+  h1.ant-typography,
+  .ant-typography h1 {
+    font-size: 26px !important;
+  }
+  h2.ant-typography,
+  .ant-typography h2 {
+    font-size: 22px !important;
+  }
+  h3.ant-typography,
+  .ant-typography h3 {
+    font-size: 19px !important;
+  }
+  h4.ant-typography,
+  .ant-typography h4 {
+    font-size: 17px !important;
+  }
+  h5.ant-typography,
+  .ant-typography h5 {
+    font-size: 15px !important;
+  }
+  .ant-statistic-content-value,
+  .ant-statistic-content-prefix,
+  .ant-statistic-content-suffix {
+    font-size: 20px !important;
+  }
   .admin-content {
     padding: 16px 12px;
+  }
+  .ant-table-wrapper .ant-table-cell-fix-left,
+  .ant-table-wrapper .ant-table-cell-fix-right,
+  .ant-table-wrapper .ant-table-cell-fix-left-last,
+  .ant-table-wrapper .ant-table-cell-fix-right-first {
+    position: static !important;
+    right: auto !important;
+    left: auto !important;
+    box-shadow: none !important;
+  }
+  .ant-table-wrapper .ant-table-container::before,
+  .ant-table-wrapper .ant-table-container::after {
+    display: none !important;
   }
   .ant-descriptions-item-label,
   .ant-descriptions-item-content {
@@ -268,8 +367,68 @@ body:has([data-theme="dark"]) .swal2-validation-message {
 
 /* ── Small tablet / large phone (≤ 768px) ── */
 @media (max-width: 768px) {
+  body {
+    font-size: 12.5px;
+  }
+  .ant-typography,
+  .ant-form-item-label > label,
+  .ant-input,
+  .ant-input-number,
+  .ant-select,
+  .ant-btn,
+  .ant-menu,
+  .ant-dropdown-menu,
+  .ant-tabs,
+  .ant-descriptions,
+  .ant-modal,
+  .ant-drawer,
+  .ant-card,
+  .ant-list,
+  .ant-statistic-title {
+    font-size: 12.5px !important;
+  }
+  h1.ant-typography,
+  .ant-typography h1 {
+    font-size: 23px !important;
+  }
+  h2.ant-typography,
+  .ant-typography h2 {
+    font-size: 20px !important;
+  }
+  h3.ant-typography,
+  .ant-typography h3 {
+    font-size: 18px !important;
+  }
+  .ant-btn {
+    min-height: 31px;
+    padding-inline: 10px;
+  }
+  .ant-input,
+  .ant-input-affix-wrapper,
+  .ant-select-selector,
+  .ant-input-number {
+    min-height: 31px !important;
+  }
+  .ant-statistic-content-value,
+  .ant-statistic-content-prefix,
+  .ant-statistic-content-suffix {
+    font-size: 18px !important;
+  }
   .admin-content {
     padding: 12px 8px;
+  }
+  .ant-modal {
+    width: calc(100vw - 20px) !important;
+  }
+  .ant-popover {
+    max-width: calc(100vw - 16px);
+  }
+  .ant-popover .ant-popover-inner-content,
+  .ant-popover .ant-popover-inner {
+    max-width: calc(100vw - 16px);
+  }
+  .ant-form-item {
+    margin-bottom: 14px;
   }
   /* Stack admin header items */
   .admin-header-right .admin-clock {
@@ -279,6 +438,43 @@ body:has([data-theme="dark"]) .swal2-validation-message {
 
 /* ── Phone (≤ 576px) ── */
 @media (max-width: 576px) {
+  body {
+    font-size: 12px;
+  }
+  .ant-typography,
+  .ant-form-item-label > label,
+  .ant-input,
+  .ant-input-number,
+  .ant-select,
+  .ant-btn,
+  .ant-menu,
+  .ant-dropdown-menu,
+  .ant-tabs,
+  .ant-descriptions,
+  .ant-modal,
+  .ant-drawer,
+  .ant-card,
+  .ant-list,
+  .ant-statistic-title {
+    font-size: 12px !important;
+  }
+  h1.ant-typography,
+  .ant-typography h1 {
+    font-size: 21px !important;
+  }
+  h2.ant-typography,
+  .ant-typography h2 {
+    font-size: 19px !important;
+  }
+  h3.ant-typography,
+  .ant-typography h3 {
+    font-size: 17px !important;
+  }
+  .ant-statistic-content-value,
+  .ant-statistic-content-prefix,
+  .ant-statistic-content-suffix {
+    font-size: 16px !important;
+  }
   .admin-content {
     padding: 8px 4px;
   }
@@ -295,6 +491,20 @@ body:has([data-theme="dark"]) .swal2-validation-message {
   .ant-table-cell {
     padding: 6px 8px !important;
     font-size: 12px !important;
+  }
+  .ant-table-wrapper .ant-table table {
+    min-width: 640px;
+  }
+  .ant-space {
+    max-width: 100%;
+  }
+  .ant-space.ant-space-horizontal {
+    flex-wrap: wrap;
+  }
+  .ant-btn {
+    white-space: normal;
+    height: auto;
+    min-height: 32px;
   }
   /* Ant card compact */
   .ant-card-body {

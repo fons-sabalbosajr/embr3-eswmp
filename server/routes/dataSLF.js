@@ -62,6 +62,48 @@ function matchesBaselineName(item, requestedName) {
   return requestedKeys.some((key) => itemKeys.includes(key));
 }
 
+async function softDeleteOverdueReverted(req) {
+  const dueEntries = await DataSLF.find({
+    deletedAt: null,
+    status: "reverted",
+    temporaryDeleteAfter: { $lte: new Date() },
+  }).limit(100);
+
+  for (const entry of dueEntries) {
+    entry.deletedAt = new Date();
+    entry.deletedBy = "system-overdue-revert";
+    await entry.save();
+
+    try {
+      await Transaction.create({
+        submissionId: entry.submissionId,
+        dataEntry: entry._id,
+        companyName: entry.lguCompanyName,
+        companyType: entry.companyType,
+        submittedBy: entry.submittedBy,
+        type: "deleted",
+        description: `Overdue reverted entry ${entry.idNo} moved to Deleted Submissions`,
+        performedBy: "system-overdue-revert",
+        meta: { idNo: entry.idNo, temporaryDeleteAfter: entry.temporaryDeleteAfter },
+      });
+      await Notification.create({
+        recipient: "admin",
+        type: "submission_temp_deleted",
+        title: "Reverted Submission Temporarily Deleted",
+        message: `${entry.idNo || "A reverted submission"} was moved to Deleted Submissions after the follow-up deadline passed.`,
+        submissionId: entry.submissionId,
+        dataEntry: entry._id,
+        meta: { idNo: entry.idNo, submittedBy: entry.submittedBy, temporaryDeleteAfter: entry.temporaryDeleteAfter },
+      });
+      notifyAdmin(req, {
+        type: "submission_temp_deleted",
+        title: "Reverted Submission Temporarily Deleted",
+        message: `${entry.idNo || "A reverted submission"} was moved to Deleted Submissions.`,
+      });
+    } catch { /* silent */ }
+  }
+}
+
 async function markSubmissionNotificationsRead(entries) {
   const list = (Array.isArray(entries) ? entries : [entries]).filter(Boolean);
   if (list.length === 0) return;
@@ -1011,6 +1053,7 @@ router.get("/generator-summary", async (req, res) => {
 // Get all SLF data entries (admin) — excludes soft-deleted
 router.get("/", async (req, res) => {
   try {
+    await softDeleteOverdueReverted(req);
     // Admin management view — respects App Settings year visibility filter
     const entries = await DataSLF.find({ deletedAt: null })
       .populate("slfGenerator")
@@ -1475,7 +1518,7 @@ router.patch("/:id/request-revert", async (req, res) => {
 // Admin-initiated revert (admin sends submission back to portal user for correction)
 router.patch("/:id/admin-revert", async (req, res) => {
   try {
-    const { reason, performedBy } = req.body || {};
+    const { reason, performedBy, sendFollowUp, followUpSubject, followUpMessage, temporaryDeleteAfterDays = 3 } = req.body || {};
     if (!reason) return res.status(400).json({ message: "Reason is required" });
 
     const entry = await DataSLF.findById(req.params.id);
@@ -1485,6 +1528,13 @@ router.patch("/:id/admin-revert", async (req, res) => {
     entry.revertReason = reason;
     entry.revertedBy = performedBy || ADMIN_DISPLAY_NAME;
     entry.revertedAt = new Date();
+    if (sendFollowUp) {
+      const days = Math.max(1, Number(temporaryDeleteAfterDays) || 3);
+      entry.revertFollowUpSubject = followUpSubject || "Follow-Up Required: Reverted SLF Submission";
+      entry.revertFollowUpMessage = followUpMessage || "Please update and resubmit your reverted SLF submission.";
+      entry.revertFollowUpSentAt = new Date();
+      entry.temporaryDeleteAfter = new Date(Date.now() + days * 24 * 60 * 60 * 1000);
+    }
     await entry.save();
 
     try {
@@ -1537,6 +1587,40 @@ router.patch("/:id/admin-revert", async (req, res) => {
       } catch (emailErr) {
         writeLog("warn", "submission.revert-email-failed", {
           message: `Failed to send revert email to ${entry.submittedBy}`,
+          meta: { id: entry._id, error: emailErr.message },
+        });
+      }
+    }
+
+    if (sendFollowUp && entry.submittedBy) {
+      try {
+        const deadline = entry.temporaryDeleteAfter ? entry.temporaryDeleteAfter.toLocaleDateString("en-US") : "the deadline";
+        const templateData = {
+          "{{idNo}}": entry.idNo || entry.submissionId || "your submission",
+          "{{companyName}}": entry.lguCompanyName || "your facility",
+          "{{reason}}": reason,
+          "{{deadline}}": deadline,
+        };
+        const renderTemplate = (text = "") => Object.entries(templateData).reduce((output, [token, value]) => output.split(token).join(value), text);
+        await sendSubmissionEmail(entry.submittedBy, {
+          subject: renderTemplate(entry.revertFollowUpSubject),
+          message: renderTemplate(entry.revertFollowUpMessage),
+          submissionId: entry.submissionId || entry.idNo,
+          companyName: entry.lguCompanyName,
+        });
+        await Notification.create({
+          recipient: "admin",
+          type: "submission_revert_followup",
+          title: "Revert Follow-Up Sent",
+          message: `Follow-up email sent to ${entry.submittedBy} for ${entry.idNo}.`,
+          submissionId: entry.submissionId,
+          dataEntry: entry._id,
+          meta: { idNo: entry.idNo, submittedBy: entry.submittedBy, temporaryDeleteAfter: entry.temporaryDeleteAfter },
+        });
+        refreshAdmin(req, "notifications");
+      } catch (emailErr) {
+        writeLog("warn", "submission.revert-followup-email-failed", {
+          message: `Failed to send revert follow-up email to ${entry.submittedBy}`,
           meta: { id: entry._id, error: emailErr.message },
         });
       }

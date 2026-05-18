@@ -3,6 +3,8 @@ const UserPortal = require("../models/UserPortal");
 const SlfFacility = require("../models/SlfFacility");
 const SupportTicket = require("../models/SupportTicket");
 const Notification = require("../models/Notification");
+const DataSLF = require("../models/DataSLF");
+const Transaction = require("../models/Transaction");
 const { authMiddleware, adminOnly } = require("../middleware/auth");
 const { writeLog } = require("../utils/logger");
 const { notifyPortal, refreshAdmin } = require("../utils/socketEmit");
@@ -11,6 +13,7 @@ const {
   sendPortalRejectionEmail,
   sendPortalVerificationReminderEmail,
   sendHoldAccountFollowUpEmail,
+  sendPortalCustomEmail,
 } = require("../utils/email");
 
 const router = express.Router();
@@ -287,6 +290,59 @@ router.get("/:id/message-threads", async (req, res) => {
     }).sort({ updatedAt: -1 });
 
     res.json(threads);
+  } catch (error) {
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+});
+
+// Admin: Get submission tracker and conversations for a portal user
+router.get("/:id/submission-history", async (req, res) => {
+  try {
+    const user = await UserPortal.findById(req.params.id).select("-password");
+    if (!user) return res.status(404).json({ message: "User not found" });
+
+    const [submissions, conversations] = await Promise.all([
+      DataSLF.find({ submittedBy: user.email }).setOptions({ includeHiddenYears: true }).populate("slfGenerator").sort({ createdAt: -1 }).lean(),
+      SupportTicket.find({ $or: [{ portalUser: user._id }, { portalUserEmail: user.email }] }).sort({ updatedAt: -1 }).lean(),
+    ]);
+    const submissionIds = submissions.map((submission) => submission.submissionId).filter(Boolean);
+    const transactions = submissionIds.length
+      ? await Transaction.find({ submissionId: { $in: submissionIds } }).sort({ createdAt: -1 }).lean()
+      : [];
+
+    res.json({ submissions, transactions, conversations });
+  } catch (error) {
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+});
+
+// Admin: Send editable email template to portal user
+router.post("/:id/send-email", async (req, res) => {
+  try {
+    const user = await UserPortal.findById(req.params.id).select("-password");
+    if (!user) return res.status(404).json({ message: "User not found" });
+
+    const { subject, message, templateType = "custom" } = req.body || {};
+    if (!subject?.trim() || !message?.trim()) {
+      return res.status(400).json({ message: "Subject and message are required" });
+    }
+
+    await sendPortalCustomEmail(user.email, { subject: subject.trim(), message: message.trim(), firstName: user.firstName });
+    await Notification.create({
+      recipient: "admin",
+      type: "portal_user_email",
+      title: "Portal User Email Sent",
+      message: `${templateType} email sent to ${user.email}: ${subject.trim()}`,
+      meta: { portalUserId: user._id, portalUserEmail: user.email, templateType, subject: subject.trim() },
+    });
+    refreshAdmin(req, "notifications");
+    res.json({ message: `Email sent to ${user.email}.` });
+    writeLog("info", "portal.send-email", {
+      message: `Custom portal email sent to ${user.email}`,
+      user: req.user.id,
+      ip: req.ip,
+      meta: { templateType, subject: subject.trim() },
+    });
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });
   }

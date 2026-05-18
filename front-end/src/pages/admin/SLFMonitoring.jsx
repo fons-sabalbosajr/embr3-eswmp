@@ -166,10 +166,21 @@ const DP_TYPE_OPTIONS = [
 ];
 const WWTF_TYPE_OPTIONS = [
   "Primary Treatment",
+  "Preliminary Treatment",
   "Biological",
   "Chemical",
+  "Physical-Chemical Treatment",
+  "Tertiary Treatment",
+  "Disinfection",
+  "Constructed Wetland",
+  "Leachate Recirculation",
   "Other",
 ].map((value) => ({ label: value, value }));
+const asStringArray = (value) => {
+  if (Array.isArray(value)) return value.filter(Boolean);
+  return value ? [value] : [];
+};
+const formatStringArray = (value) => asStringArray(value).join(", ");
 const RECEIVING_FACILITY_TYPE_OPTIONS = [
   "Material Recovery Facility (MRF)",
   "Sorting Facility",
@@ -565,22 +576,40 @@ const enrichFacilityWithBaseline = (record, baseline, submissions = []) => {
   const currentFillUnits = Array.isArray(record.cellFillUnits)
     ? record.cellFillUnits
     : [];
+  const hasStoredFillValues = currentFillValues.some(
+    (value) => value !== null && value !== undefined && value !== "",
+  );
+  const storedTargetUnit = normalizeUnit(record.wasteReceivedUnit || usage.unit);
+  const storedFillTotal = currentFillValues.reduce(
+    (sum, value, index) =>
+      sum +
+      convertVolume(
+        value,
+        currentFillUnits[index] || storedTargetUnit,
+        storedTargetUnit,
+      ),
+    0,
+  );
   const nextFillValues = Array.from(
     { length: Math.max(cellCount, usage.rows.length) },
     (_, index) =>
-      usage.rows[index]?.total > 0
-        ? usage.rows[index].total
-        : currentFillValues[index],
+      currentFillValues[index] !== null && currentFillValues[index] !== undefined && currentFillValues[index] !== ""
+        ? currentFillValues[index]
+        : usage.rows[index]?.total > 0
+          ? usage.rows[index].total
+          : currentFillValues[index],
   );
   const nextFillUnits = nextFillValues.map(
     (_, index) =>
-      usage.rows[index]?.unit || usage.unit || currentFillUnits[index],
+      currentFillUnits[index] || usage.rows[index]?.unit || usage.unit,
   );
 
   return {
     ...record,
-    actualResidualWasteReceived: usage.total,
-    wasteReceivedUnit: usage.unit,
+    actualResidualWasteReceived: hasStoredFillValues
+      ? Number(storedFillTotal.toFixed(3))
+      : usage.total,
+    wasteReceivedUnit: hasStoredFillValues ? storedTargetUnit : usage.unit,
     cellFillValues: nextFillValues,
     cellFillUnits: nextFillUnits,
     _baselineWasteReceived: usage.totalBaseline,
@@ -1143,6 +1172,12 @@ function PortalGenerators({
   const [revertModal, setRevertModal] = useState({ open: false, record: null });
   const [revertReason, setRevertReason] = useState("");
   const [revertLoading, setRevertLoading] = useState(false);
+  const [revertFollowUp, setRevertFollowUp] = useState({
+    enabled: false,
+    subject: "",
+    message: "",
+    temporaryDeleteAfterDays: 3,
+  });
   const [submissionSearch, setSubmissionSearch] = useState("");
   const [submissionStatusFilter, setSubmissionStatusFilter] = useState(null);
   const [expandedRowKeys, setExpandedRowKeys] = useState([]);
@@ -1198,6 +1233,31 @@ function PortalGenerators({
     setEmailModal({ open: true, record });
     setEmailSubject("");
     setEmailMessage("");
+  };
+
+  const isAgedSubmission = (record) => dayjs().diff(dayjs(record?.createdAt), "day") >= 1;
+
+  const getRevertFollowUpTemplate = (record) => ({
+    enabled: isAgedSubmission(record),
+    subject: "Follow-Up Required: Reverted SLF Submission {{idNo}}",
+    message: [
+      "Dear Portal User,",
+      "",
+      "This is a follow-up regarding your reverted SLF submission {{idNo}} for {{companyName}}.",
+      "",
+      "Reason for revert: {{reason}}",
+      "",
+      "Please log in to the SLF portal, update the reverted data, and submit the corrected entry on or before {{deadline}}. If no corrected submission is received by the deadline, the data will be temporarily moved to Deleted Submissions for admin review.",
+      "",
+      "Thank you.",
+    ].join("\n"),
+    temporaryDeleteAfterDays: 3,
+  });
+
+  const openRevertModal = (record) => {
+    setRevertModal({ open: true, record });
+    setRevertReason("");
+    setRevertFollowUp(getRevertFollowUpTemplate(record));
   };
 
   const handleSendEmail = async () => {
@@ -1263,6 +1323,10 @@ function PortalGenerators({
       await api.patch(`/data-slf/${revertModal.record._id}/admin-revert`, {
         reason: revertReason,
         performedBy: "admin",
+        sendFollowUp: revertFollowUp.enabled,
+        followUpSubject: revertFollowUp.subject,
+        followUpMessage: revertFollowUp.message,
+        temporaryDeleteAfterDays: revertFollowUp.temporaryDeleteAfterDays,
       });
       Swal.fire({
         icon: "success",
@@ -1273,6 +1337,7 @@ function PortalGenerators({
       });
       setRevertModal({ open: false, record: null });
       setRevertReason("");
+      setRevertFollowUp({ enabled: false, subject: "", message: "", temporaryDeleteAfterDays: 3 });
       fetchSubmissions();
     } catch (err) {
       Swal.fire(
@@ -1963,10 +2028,7 @@ function PortalGenerators({
                 type="text"
                 size="small"
                 icon={<UndoOutlined style={{ color: "#fa541c" }} />}
-                onClick={() => {
-                  setRevertModal({ open: true, record: r });
-                  setRevertReason("");
-                }}
+                onClick={() => openRevertModal(r)}
               />
             </Tooltip>
           )}
@@ -3010,14 +3072,17 @@ function PortalGenerators({
           </Space>
         }
         open={revertModal.open}
-        onCancel={() => setRevertModal({ open: false, record: null })}
+        onCancel={() => {
+          setRevertModal({ open: false, record: null });
+          setRevertFollowUp({ enabled: false, subject: "", message: "", temporaryDeleteAfterDays: 3 });
+        }}
         onOk={handleAdminRevert}
         confirmLoading={revertLoading}
         okText="Revert Submission"
         okButtonProps={{
           style: { background: "#fa541c", borderColor: "#fa541c" },
         }}
-        width={520}
+        width={680}
       >
         {revertModal.record && (
           <div>
@@ -3060,6 +3125,52 @@ function PortalGenerators({
                   onChange={(e) => setRevertReason(e.target.value)}
                 />
               </Form.Item>
+              {isAgedSubmission(revertModal.record) && (
+                <Card size="small" style={{ borderRadius: 8, background: "#fff7e6", borderColor: "#ffd591" }}>
+                  <Space direction="vertical" size={10} style={{ width: "100%" }}>
+                    <Alert
+                      type="warning"
+                      showIcon
+                      message="This submission is at least 1 day old. A follow-up email template can be sent with a temporary deletion deadline."
+                    />
+                    <Form.Item label="Send follow-up email" style={{ marginBottom: 0 }}>
+                      <Switch
+                        checked={revertFollowUp.enabled}
+                        onChange={(enabled) => setRevertFollowUp((prev) => ({ ...prev, enabled }))}
+                      />
+                    </Form.Item>
+                    {revertFollowUp.enabled && (
+                      <>
+                        <Form.Item label="Follow-Up Subject" required>
+                          <Input
+                            value={revertFollowUp.subject}
+                            onChange={(e) => setRevertFollowUp((prev) => ({ ...prev, subject: e.target.value }))}
+                          />
+                        </Form.Item>
+                        <Form.Item label="Follow-Up Message" required>
+                          <Input.TextArea
+                            rows={7}
+                            value={revertFollowUp.message}
+                            onChange={(e) => setRevertFollowUp((prev) => ({ ...prev, message: e.target.value }))}
+                          />
+                        </Form.Item>
+                        <Form.Item label="Temporarily delete after (days)" style={{ maxWidth: 220 }}>
+                          <InputNumber
+                            min={1}
+                            precision={0}
+                            value={revertFollowUp.temporaryDeleteAfterDays}
+                            onChange={(value) => setRevertFollowUp((prev) => ({ ...prev, temporaryDeleteAfterDays: value || 1 }))}
+                            style={{ width: "100%" }}
+                          />
+                        </Form.Item>
+                        <Text type="secondary" style={{ fontSize: 12 }}>
+                          Available tokens: {"{{idNo}}"}, {"{{companyName}}"}, {"{{reason}}"}, {"{{deadline}}"}
+                        </Text>
+                      </>
+                    )}
+                  </Space>
+                </Card>
+              )}
             </Form>
           </div>
         )}
@@ -3377,6 +3488,8 @@ export default function SLFMonitoring({
       privateCompaniesServed: record.privateCompaniesServed || [],
       volumeCapacityUnit: record.volumeCapacityUnit || "m³",
       receivingVolumeCapacityUnit: record.receivingVolumeCapacityUnit || "m³",
+      wastewaterTreatmentFacilityType: asStringArray(record.wastewaterTreatmentFacilityType),
+      wastewaterTreatmentFacilityRemarks: record.wastewaterTreatmentFacilityRemarks || "",
       receivingFacilities,
       leachatePondDetails: (record.leachatePondDetails || []).map((p) => ({
         ...p,
@@ -3475,6 +3588,8 @@ export default function SLFMonitoring({
       leachatePondDetails: [],
       gasVentDetails: [],
       receivingFacilities: [],
+      wastewaterTreatmentFacilityType: [],
+      wastewaterTreatmentFacilityRemarks: "",
       commitmentFiles: [],
       progressReportFiles: [],
       preventiveMeasureFiles: [],
@@ -3544,6 +3659,8 @@ export default function SLFMonitoring({
         leachatePondDetails: [],
         gasVentDetails: [],
         receivingFacilities: [],
+        wastewaterTreatmentFacilityType: [],
+        wastewaterTreatmentFacilityRemarks: "",
         commitmentFiles: [],
         progressReportFiles: [],
         preventiveMeasureFiles: [],
@@ -3605,6 +3722,8 @@ export default function SLFMonitoring({
             facility.status ||
             facility.description,
         );
+          const existingLeachateDetails = editing?.leachatePondDetails || [];
+          const existingGasVentDetails = editing?.gasVentDetails || [];
       const payload = {
         ...values,
         dataYear: editYear,
@@ -3613,14 +3732,25 @@ export default function SLFMonitoring({
           ? (values.privateCompaniesServed || []).length
           : (values.lguServedList || []).length,
         cellStatuses: (values.cellStatuses || []).map(normalizeCellStatus),
+        wastewaterTreatmentFacilityType: values.hasWastewaterTreatmentFacility
+          ? asStringArray(values.wastewaterTreatmentFacilityType)
+          : [],
+        wastewaterTreatmentFacilityRemarks: values.hasWastewaterTreatmentFacility
+          ? values.wastewaterTreatmentFacilityRemarks || ""
+          : "",
         receivingFacilities,
-        leachatePondDetails: (values.leachatePondDetails || []).map((p) => ({
+        leachatePondDetails: (values.leachatePondDetails || []).map((p, index) => ({
           ...p,
-          attachments: [],
+          wastewaterTreatmentFacilityType: asStringArray(p.wastewaterTreatmentFacilityType),
+          attachments: p.attachments !== undefined
+            ? fromFileList(p.attachments)
+            : existingLeachateDetails[index]?.attachments || [],
         })),
-        gasVentDetails: (values.gasVentDetails || []).map((v) => ({
+        gasVentDetails: (values.gasVentDetails || []).map((v, index) => ({
           ...v,
-          attachments: [],
+          attachments: v.attachments !== undefined
+            ? fromFileList(v.attachments)
+            : existingGasVentDetails[index]?.attachments || [],
         })),
         dateOfMonitoring: values.dateOfMonitoring?.toISOString(),
         dateReportPrepared: values.dateReportPrepared?.toISOString(),
@@ -5427,7 +5557,7 @@ export default function SLFMonitoring({
                       </Col>
                       <Col span={6}>
                         <Form.Item
-                          label="Receiving Volume Capacity per day"
+                          label="Capacity per day"
                           style={{ marginBottom: 0 }}
                         >
                           <Space.Compact style={{ width: "100%" }}>
@@ -6044,8 +6174,8 @@ export default function SLFMonitoring({
                       size="small"
                       style={{ borderRadius: 8, marginBottom: 16 }}
                     >
-                      <Row gutter={12} align="middle">
-                        <Col span={8}>
+                      <Row gutter={[12, 12]} align="middle">
+                        <Col xs={24} md={8}>
                           <Form.Item
                             name="hasWastewaterTreatmentFacility"
                             valuePropName="checked"
@@ -6054,7 +6184,7 @@ export default function SLFMonitoring({
                             <Checkbox>Wastewater Treatment Facility</Checkbox>
                           </Form.Item>
                         </Col>
-                        <Col span={10}>
+                        <Col xs={24} md={8}>
                           <Form.Item
                             noStyle
                             dependencies={["hasWastewaterTreatmentFacility"]}
@@ -6062,18 +6192,43 @@ export default function SLFMonitoring({
                             {() => (
                               <Form.Item
                                 name="wastewaterTreatmentFacilityType"
-                                label="WWTF Type"
+                                label="Treatment Type"
                                 style={{ marginBottom: 0 }}
                               >
                                 <Select
+                                  mode="multiple"
                                   allowClear
-                                  placeholder="Select type"
+                                  placeholder="Select treatment type(s)"
                                   disabled={
                                     !form.getFieldValue(
                                       "hasWastewaterTreatmentFacility",
                                     )
                                   }
                                   options={WWTF_TYPE_OPTIONS}
+                                />
+                              </Form.Item>
+                            )}
+                          </Form.Item>
+                        </Col>
+                        <Col xs={24} md={8}>
+                          <Form.Item
+                            noStyle
+                            dependencies={["hasWastewaterTreatmentFacility"]}
+                          >
+                            {() => (
+                              <Form.Item
+                                name="wastewaterTreatmentFacilityRemarks"
+                                label="Remarks"
+                                style={{ marginBottom: 0 }}
+                              >
+                                <Input.TextArea
+                                  rows={2}
+                                  placeholder="Add WWTF remarks"
+                                  disabled={
+                                    !form.getFieldValue(
+                                      "hasWastewaterTreatmentFacility",
+                                    )
+                                  }
                                 />
                               </Form.Item>
                             )}
@@ -8489,7 +8644,7 @@ export default function SLFMonitoring({
                           <Descriptions.Item label="Year Started">
                             {detailViewRecord.yearStartedOperation || "—"}
                           </Descriptions.Item>
-                          <Descriptions.Item label="Receiving Volume Capacity per day">
+                          <Descriptions.Item label="Capacity per day">
                             {detailViewRecord.receivingVolumeCapacity
                               ? `${Number(detailViewRecord.receivingVolumeCapacity).toLocaleString()} ${normalizeUnit(detailViewRecord.receivingVolumeCapacityUnit)}`
                               : "—"}
@@ -8504,9 +8659,12 @@ export default function SLFMonitoring({
                               <Tag>No</Tag>
                             )}
                           </Descriptions.Item>
-                          <Descriptions.Item label="WWTF Type">
-                            {detailViewRecord.wastewaterTreatmentFacilityType ||
+                          <Descriptions.Item label="Treatment Type">
+                            {formatStringArray(detailViewRecord.wastewaterTreatmentFacilityType) ||
                               "—"}
+                          </Descriptions.Item>
+                          <Descriptions.Item label="WWTF Remarks">
+                            {detailViewRecord.wastewaterTreatmentFacilityRemarks || "—"}
                           </Descriptions.Item>
                         </Descriptions>
                         {(detailViewRecord.receivingFacilities || []).length >
@@ -8758,7 +8916,7 @@ export default function SLFMonitoring({
                                 : "—"}
                             </Descriptions.Item>
                             <Descriptions.Item
-                              label="Receiving Volume Capacity per day"
+                              label="Capacity per day"
                               span={1}
                             >
                               {receivingCapacity

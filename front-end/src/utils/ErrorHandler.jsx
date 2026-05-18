@@ -175,8 +175,13 @@ export class AppErrorBoundary extends Component {
 
   componentDidCatch(error, errorInfo) {
     this.setState({ errorInfo });
-    // Log to console for dev visibility
-    console.error("[AppErrorBoundary]", error, errorInfo);
+    const safeError = {
+      name: error?.name || "Error",
+      message: error?.message || "Unknown error",
+      stack: error?.stack || "",
+      componentStack: errorInfo?.componentStack || "",
+    };
+    console.error("[AppErrorBoundary]", safeError);
   }
 
   handleReload = () => {

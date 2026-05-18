@@ -7,7 +7,7 @@ const router = express.Router();
 // Admin: Get all notifications (paginated, filterable) — must be before /:recipient
 router.get("/all/manage", async (req, res) => {
   try {
-    const { page = 1, limit = 50, type, recipient, search } = req.query;
+    const { page = 1, limit = 50, type, recipient, search, dateFrom, dateTo } = req.query;
     const filter = {};
     if (type && type !== "all") filter.type = type;
     if (recipient && recipient !== "all") filter.recipient = recipient;
@@ -17,6 +17,11 @@ router.get("/all/manage", async (req, res) => {
         { message: { $regex: search, $options: "i" } },
         { recipient: { $regex: search, $options: "i" } },
       ];
+    }
+    if (dateFrom || dateTo) {
+      filter.createdAt = {};
+      if (dateFrom) filter.createdAt.$gte = new Date(dateFrom);
+      if (dateTo) filter.createdAt.$lte = new Date(dateTo);
     }
     const skip = (Number(page) - 1) * Number(limit);
     const [notifications, total, unreadCount] = await Promise.all([
@@ -52,15 +57,21 @@ router.post("/bulk-delete", async (req, res) => {
 router.get("/:recipient", async (req, res) => {
   try {
     const { recipient } = req.params;
-    const { page = 1, limit = 30 } = req.query;
+    const { page = 1, limit = 30, dateFrom, dateTo } = req.query;
     const skip = (Number(page) - 1) * Number(limit);
+    const filter = { recipient };
+    if (dateFrom || dateTo) {
+      filter.createdAt = {};
+      if (dateFrom) filter.createdAt.$gte = new Date(dateFrom);
+      if (dateTo) filter.createdAt.$lte = new Date(dateTo);
+    }
 
     const [notifications, total, unreadCount] = await Promise.all([
-      Notification.find({ recipient })
+      Notification.find(filter)
         .sort({ createdAt: -1 })
         .skip(skip)
         .limit(Number(limit)),
-      Notification.countDocuments({ recipient }),
+      Notification.countDocuments(filter),
       Notification.countDocuments({ recipient, read: false }),
     ]);
 

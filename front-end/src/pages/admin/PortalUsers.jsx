@@ -3,7 +3,7 @@ import {
   Table, Tag, Button, Space, Modal, Select, Typography,
   Empty, Tooltip, Badge, Card, Descriptions, Avatar,
   Divider, Row, Col, Timeline, Alert, Dropdown, Form,
-  Input, List, Spin,
+  Input, List, Spin, Tabs,
 } from "antd";
 import {
   CheckCircleOutlined, CloseCircleOutlined, DeleteOutlined,
@@ -12,7 +12,8 @@ import {
   EnvironmentOutlined, ClockCircleOutlined, LockOutlined,
   UnlockOutlined, BellOutlined, FileDoneOutlined, LinkOutlined,
   FileTextOutlined, FileImageOutlined, SafetyCertificateOutlined,
-  MessageOutlined, MoreOutlined, SendOutlined, SearchOutlined
+  MessageOutlined, MoreOutlined, SendOutlined, SearchOutlined,
+  HistoryOutlined
 } from "@ant-design/icons";
 import Swal from "sweetalert2";
 import dayjs from "dayjs";
@@ -20,6 +21,21 @@ import api from "../../api";
 
 const { Text, Title } = Typography;
 const { Option } = Select;
+
+const getPortalEmailTemplates = (user = {}) => ({
+  reminder: {
+    subject: "Reminder: Update Your SLF Portal Submission",
+    message: `Dear ${user.firstName || "Portal User"},\n\nThis is a reminder to review your SLF Portal account and submit any pending or corrected data required by EMB R3.\n\nPlease log in to the SLF Portal and complete the needed updates.\n\nThank you.`,
+  },
+  followup: {
+    subject: "Follow-Up: Pending SLF Portal Action Required",
+    message: `Dear ${user.firstName || "Portal User"},\n\nWe are following up on your pending SLF Portal action. Please review the latest instructions, submit the required data or attachments, and reply through the portal if you need assistance.\n\nThank you.`,
+  },
+  custom: {
+    subject: "",
+    message: "",
+  },
+});
 
 const appBase = (import.meta.env.BASE_URL || "/eswm-pipeline/").replace(/\/+$/, "");
 const appApiBase = `${appBase}/api`;
@@ -33,7 +49,7 @@ function normalizeVerificationFileUrl(url) {
   return normalized;
 }
 
-export default function PortalUsers({ isDark }) {
+export default function PortalUsers({ isDark, canEdit = true, canDelete = true, canEmail = true, canViewHistory = true }) {
   const [users, setUsers] = useState([]);
   const [generators, setGenerators] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -55,6 +71,11 @@ export default function PortalUsers({ isDark }) {
   const [messageSending, setMessageSending] = useState(false);
   const [selectedThreadId, setSelectedThreadId] = useState(null);
   const [replyText, setReplyText] = useState("");
+  const [emailUserModal, setEmailUserModal] = useState({ open: false, user: null });
+  const [emailSending, setEmailSending] = useState(false);
+  const [historyModal, setHistoryModal] = useState({ open: false, user: null });
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyData, setHistoryData] = useState({ submissions: [], transactions: [], conversations: [] });
   const [searchText, setSearchText] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
   const [assignmentFilter, setAssignmentFilter] = useState("all");
@@ -62,6 +83,7 @@ export default function PortalUsers({ isDark }) {
   const [fileFilter, setFileFilter] = useState("all");
   const [slfFilter, setSlfFilter] = useState(null);
   const [messageForm] = Form.useForm();
+  const [emailForm] = Form.useForm();
 
   useEffect(() => {
     fetchData();
@@ -348,6 +370,79 @@ export default function PortalUsers({ isDark }) {
     fetchMessageThreads(record);
   };
 
+  const openEmailPortalUser = (record) => {
+    const templates = getPortalEmailTemplates(record);
+    setEmailUserModal({ open: true, user: record });
+    emailForm.setFieldsValue({
+      templateType: "reminder",
+      subject: templates.reminder.subject,
+      message: templates.reminder.message,
+    });
+  };
+
+  const handlePortalEmailTemplateChange = (templateType) => {
+    const templates = getPortalEmailTemplates(emailUserModal.user || {});
+    emailForm.setFieldsValue({
+      templateType,
+      subject: templates[templateType]?.subject || "",
+      message: templates[templateType]?.message || "",
+    });
+  };
+
+  const handleSendPortalUserEmail = async (values) => {
+    const user = emailUserModal.user;
+    if (!user?._id) return;
+    setEmailSending(true);
+    try {
+      await api.post(`/portal-users/${user._id}/send-email`, values);
+      Swal.fire({ icon: "success", title: "Email Sent", text: `Email sent to ${user.email}.`, confirmButtonColor: "#1a3353" });
+      setEmailUserModal({ open: false, user: null });
+      emailForm.resetFields();
+    } catch (err) {
+      Swal.fire("Error", err.response?.data?.message || "Failed to send email", "error");
+    } finally {
+      setEmailSending(false);
+    }
+  };
+
+  const openSubmissionHistory = async (record) => {
+    setHistoryModal({ open: true, user: record });
+    setHistoryData({ submissions: [], transactions: [], conversations: [] });
+    setHistoryLoading(true);
+    try {
+      const { data } = await api.get(`/portal-users/${record._id}/submission-history`);
+      setHistoryData({
+        submissions: data.submissions || [],
+        transactions: data.transactions || [],
+        conversations: data.conversations || [],
+      });
+    } catch (err) {
+      Swal.fire("Error", err.response?.data?.message || "Failed to load submission history", "error");
+    } finally {
+      setHistoryLoading(false);
+    }
+  };
+
+  const renderAttachments = (attachments = []) => {
+    const list = Array.isArray(attachments) ? attachments.filter(Boolean) : [];
+    if (list.length === 0) return null;
+    return (
+      <Space direction="vertical" size={4} style={{ marginTop: 6 }}>
+        {list.map((attachment, index) => {
+          const url = typeof attachment === "string" ? attachment : attachment.url || attachment.href;
+          const name = typeof attachment === "string" ? `Attachment ${index + 1}` : attachment.name || attachment.fileName || `Attachment ${index + 1}`;
+          return url ? (
+            <a key={`${url}-${index}`} href={url} target="_blank" rel="noopener noreferrer">
+              <Button size="small" icon={<LinkOutlined />}>{name}</Button>
+            </a>
+          ) : (
+            <Tag key={index} icon={<FileTextOutlined />}>{name}</Tag>
+          );
+        })}
+      </Space>
+    );
+  };
+
   const handleCreateMessageThread = async (values) => {
     const user = messageModal.user;
     if (!user?._id) return;
@@ -546,20 +641,22 @@ export default function PortalUsers({ isDark }) {
         const actionItems = [
           { key: "view", icon: <EyeOutlined />, label: "View Details" },
           { key: "message", icon: <MessageOutlined />, label: "Message User" },
+          canEmail && { key: "email-user", icon: <MailOutlined />, label: "Email Portal User" },
+          canViewHistory && { key: "submission-history", icon: <HistoryOutlined />, label: "Submission History" },
           { type: "divider" },
-          record.status === "pending" && { key: "approve", icon: <CheckCircleOutlined />, label: "Approve" },
-          record.status === "pending" && { key: "reject", icon: <CloseCircleOutlined />, label: "Reject", danger: true },
-          record.status === "approved" && { key: "edit-slf", icon: <EditOutlined />, label: "Edit Assigned SLF" },
-          record.status === "approved" && {
+          canEdit && record.status === "pending" && { key: "approve", icon: <CheckCircleOutlined />, label: "Approve" },
+          canEdit && record.status === "pending" && { key: "reject", icon: <CloseCircleOutlined />, label: "Reject", danger: true },
+          canEdit && record.status === "approved" && { key: "edit-slf", icon: <EditOutlined />, label: "Edit Assigned SLF" },
+          canEdit && record.status === "approved" && {
             key: record.verificationRequired ? "unhold" : "hold",
             icon: record.verificationRequired ? <UnlockOutlined /> : <LockOutlined />,
             label: record.verificationRequired ? "Remove Hold" : "Hold Account",
           },
-          record.status === "approved" && { key: "reminder", icon: <BellOutlined />, label: "Send Reminder Email" },
-          record.verificationRequired && !record.verificationSubmitted && { key: "hold-followup", icon: <MailOutlined />, label: "Send Hold Follow-Up" },
-          record.verificationSubmitted && { key: "review", icon: <FileDoneOutlined />, label: "Mark Verification Reviewed" },
+          canEmail && record.status === "approved" && { key: "reminder", icon: <BellOutlined />, label: "Send Reminder Email" },
+          canEmail && record.verificationRequired && !record.verificationSubmitted && { key: "hold-followup", icon: <MailOutlined />, label: "Send Hold Follow-Up" },
+          canEdit && record.verificationSubmitted && { key: "review", icon: <FileDoneOutlined />, label: "Mark Verification Reviewed" },
           { type: "divider" },
-          { key: "delete", icon: <DeleteOutlined />, label: "Delete", danger: true },
+          canDelete && { key: "delete", icon: <DeleteOutlined />, label: "Delete", danger: true },
         ].filter(Boolean);
 
         return (
@@ -570,6 +667,8 @@ export default function PortalUsers({ isDark }) {
               onClick: ({ key }) => {
                 if (key === "view") setDetailModal({ open: true, user: record });
                 if (key === "message") openMessageManager(record);
+                if (key === "email-user") openEmailPortalUser(record);
+                if (key === "submission-history") openSubmissionHistory(record);
                 if (key === "approve") { setSelectedSlf([]); setApproveModal({ open: true, user: record }); }
                 if (key === "reject") handleReject(record);
                 if (key === "edit-slf") openEditSlfAssignment(record);
@@ -582,7 +681,7 @@ export default function PortalUsers({ isDark }) {
               },
             }}
           >
-            <Button size="small" icon={<MoreOutlined />} type="primary"> 
+            <Button size="small" icon={<MoreOutlined />} type="primary">
               Actions
             </Button>
           </Dropdown>
@@ -826,7 +925,7 @@ export default function PortalUsers({ isDark }) {
                   initialValues={{ category: "Requirements / Compliance", priority: "Medium" }}
                   onFinish={handleCreateMessageThread}
                 >
-                  <Form.Item name="category" label="Category" rules={[{ required: true, message: "Select a category" }]}> 
+                  <Form.Item name="category" label="Category" rules={[{ required: true, message: "Select a category" }]}>
                     <Select size="small" options={[
                       { label: "Requirements / Compliance", value: "Requirements / Compliance" },
                       { label: "Account Issue", value: "Account Issue" },
@@ -835,7 +934,7 @@ export default function PortalUsers({ isDark }) {
                       { label: "Other", value: "Other" },
                     ]} />
                   </Form.Item>
-                  <Form.Item name="priority" label="Priority" rules={[{ required: true, message: "Select priority" }]}> 
+                  <Form.Item name="priority" label="Priority" rules={[{ required: true, message: "Select priority" }]}>
                     <Select size="small" options={[
                       { label: "Low", value: "Low" },
                       { label: "Medium", value: "Medium" },
@@ -843,10 +942,10 @@ export default function PortalUsers({ isDark }) {
                       { label: "Urgent", value: "Urgent" },
                     ]} />
                   </Form.Item>
-                  <Form.Item name="subject" label="Subject" rules={[{ required: true, message: "Enter a subject" }]}> 
+                  <Form.Item name="subject" label="Subject" rules={[{ required: true, message: "Enter a subject" }]}>
                     <Input size="small" placeholder="e.g. Missing compliance requirement" />
                   </Form.Item>
-                  <Form.Item name="message" label="Message" rules={[{ required: true, message: "Enter a message" }]}> 
+                  <Form.Item name="message" label="Message" rules={[{ required: true, message: "Enter a message" }]}>
                     <Input.TextArea rows={4} placeholder="Describe the requirement or compliance issue..." />
                   </Form.Item>
                   <Button type="primary" htmlType="submit" icon={<SendOutlined />} loading={messageSending} block>
@@ -966,6 +1065,138 @@ export default function PortalUsers({ isDark }) {
               </Card>
             </Col>
           </Row>
+        )}
+      </Modal>
+
+      {/* Portal User Email Menu */}
+      <Modal
+        title={<Space><MailOutlined style={{ color: "#1a3353" }} />Email Portal User</Space>}
+        open={emailUserModal.open}
+        onCancel={() => {
+          setEmailUserModal({ open: false, user: null });
+          emailForm.resetFields();
+        }}
+        onOk={() => emailForm.submit()}
+        confirmLoading={emailSending}
+        okText="Send Email"
+        width={720}
+        destroyOnHidden
+      >
+        {emailUserModal.user && (
+          <Form form={emailForm} layout="vertical" onFinish={handleSendPortalUserEmail}>
+            <Descriptions column={1} size="small" style={{ marginBottom: 12 }}>
+              <Descriptions.Item label="Recipient">{emailUserModal.user.email}</Descriptions.Item>
+              <Descriptions.Item label="Name">{emailUserModal.user.firstName} {emailUserModal.user.lastName}</Descriptions.Item>
+            </Descriptions>
+            <Form.Item name="templateType" label="Email Template" rules={[{ required: true, message: "Select a template" }]}>
+              <Select onChange={handlePortalEmailTemplateChange}>
+                <Option value="reminder">Send Reminder Email</Option>
+                <Option value="followup">Follow-Up Email</Option>
+                <Option value="custom">Custom Email</Option>
+              </Select>
+            </Form.Item>
+            <Form.Item name="subject" label="Subject" rules={[{ required: true, message: "Enter a subject" }]}>
+              <Input placeholder="Email subject" />
+            </Form.Item>
+            <Form.Item name="message" label="Message" rules={[{ required: true, message: "Enter a message" }]}>
+              <Input.TextArea rows={8} placeholder="Write the email body..." />
+            </Form.Item>
+          </Form>
+        )}
+      </Modal>
+
+      {/* Submission History */}
+      <Modal
+        title={<Space><HistoryOutlined style={{ color: "#1a3353" }} />Submission History</Space>}
+        open={historyModal.open}
+        onCancel={() => setHistoryModal({ open: false, user: null })}
+        footer={<Button type="primary" onClick={() => setHistoryModal({ open: false, user: null })}>Close</Button>}
+        width={1100}
+        destroyOnHidden
+      >
+        {historyModal.user && (
+          <Spin spinning={historyLoading}>
+            <Descriptions column={{ xs: 1, sm: 2 }} size="small" style={{ marginBottom: 12 }}>
+              <Descriptions.Item label="Portal User">{historyModal.user.firstName} {historyModal.user.lastName}</Descriptions.Item>
+              <Descriptions.Item label="Email">{historyModal.user.email}</Descriptions.Item>
+            </Descriptions>
+            <Tabs
+              items={[
+                {
+                  key: "tracker",
+                  label: "Submission Tracker",
+                  children: (
+                    <Table
+                      dataSource={historyData.submissions}
+                      rowKey="_id"
+                      size="small"
+                      pagination={{ pageSize: 8 }}
+                      scroll={{ x: "max-content" }}
+                      columns={[
+                        { title: "ID No.", dataIndex: "idNo", key: "idNo", render: (value) => <Text strong>{value || "—"}</Text> },
+                        { title: "Company/LGU", dataIndex: "lguCompanyName", key: "lguCompanyName" },
+                        { title: "Status", dataIndex: "status", key: "status", render: (value) => <Tag color={value === "acknowledged" ? "green" : value === "reverted" ? "volcano" : value === "rejected" ? "red" : "orange"}>{value || "pending"}</Tag> },
+                        { title: "Date of Disposal", dataIndex: "dateOfDisposal", key: "dateOfDisposal", render: (value) => value ? dayjs(value).format("MM/DD/YYYY") : "—" },
+                        { title: "Submitted", dataIndex: "createdAt", key: "createdAt", render: (value) => value ? dayjs(value).format("MM/DD/YYYY h:mm A") : "—" },
+                        { title: "Revert Reason", dataIndex: "revertReason", key: "revertReason", render: (value) => value || "—" },
+                      ]}
+                      expandable={{
+                        expandedRowRender: (record) => {
+                          const transactions = historyData.transactions.filter((txn) => txn.submissionId === record.submissionId);
+                          return transactions.length ? (
+                            <Timeline
+                              items={transactions.map((txn) => ({
+                                color: txn.type === "deleted" ? "red" : txn.type?.includes("revert") ? "orange" : "blue",
+                                children: (
+                                  <div>
+                                    <Text strong>{txn.description || txn.type}</Text>
+                                    <div><Text type="secondary" style={{ fontSize: 12 }}>{dayjs(txn.createdAt).format("MMM D, YYYY h:mm A")} · {txn.performedBy || "system"}</Text></div>
+                                  </div>
+                                ),
+                              }))}
+                            />
+                          ) : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No tracker activity" />;
+                        },
+                      }}
+                    />
+                  ),
+                },
+                {
+                  key: "conversation",
+                  label: "Conversation & Attachments",
+                  children: historyData.conversations.length === 0 ? (
+                    <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No conversations yet" />
+                  ) : (
+                    <List
+                      dataSource={historyData.conversations}
+                      renderItem={(thread) => (
+                        <List.Item style={{ alignItems: "stretch" }}>
+                          <Card size="small" style={{ width: "100%", borderRadius: 8 }} title={`${thread.ticketNo || "Thread"} — ${thread.subject}`} extra={<Tag>{thread.status}</Tag>}>
+                            <Space direction="vertical" size={10} style={{ width: "100%" }}>
+                              <div>
+                                <Text strong>{thread.source === "admin_message" ? "Admin" : thread.portalUserName || historyModal.user.firstName}</Text>
+                                <Text type="secondary" style={{ marginLeft: 8, fontSize: 12 }}>{dayjs(thread.createdAt).format("MMM D, YYYY h:mm A")}</Text>
+                                <div style={{ whiteSpace: "pre-wrap", marginTop: 4 }}>{thread.message}</div>
+                                {renderAttachments(thread.attachments)}
+                              </div>
+                              {(thread.replies || []).map((reply) => (
+                                <div key={reply._id || `${reply.createdAt}-${reply.message}`} style={{ padding: "8px 10px", borderRadius: 6, background: reply.isAdmin ? "#e6f4ff" : "#f6ffed" }}>
+                                  <Text strong>{reply.isAdmin ? "Admin" : reply.repliedByName || historyModal.user.firstName}</Text>
+                                  <Text type="secondary" style={{ marginLeft: 8, fontSize: 12 }}>{dayjs(reply.createdAt).format("MMM D, YYYY h:mm A")}</Text>
+                                  <div style={{ whiteSpace: "pre-wrap", marginTop: 4 }}>{reply.message}</div>
+                                  {renderAttachments(reply.attachments)}
+                                </div>
+                              ))}
+                            </Space>
+                          </Card>
+                        </List.Item>
+                      )}
+                    />
+                  ),
+                },
+              ]}
+            />
+          </Spin>
         )}
       </Modal>
 

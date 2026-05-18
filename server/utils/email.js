@@ -718,6 +718,27 @@ async function sendHoldAccountFollowUpEmail(email, firstName) {
   });
 }
 
+async function sendPortalCustomEmail(email, { subject, message, firstName }) {
+  const body = `
+    <h2 style="margin:0 0 8px;color:#1a3353;font-size:22px;">${subject}</h2>
+    <p style="margin:0 0 16px;color:#666;font-size:15px;line-height:1.6;">
+      Hi <strong>${firstName || "there"}</strong>,
+    </p>
+    <div style="padding:16px;background:#f6f8fa;border-radius:8px;border:1px solid #e1e4e8;margin-bottom:24px;">
+      <p style="margin:0;color:#333;font-size:14px;line-height:1.8;white-space:pre-wrap;">${message}</p>
+    </div>
+    <p style="margin:0;color:#999;font-size:13px;line-height:1.5;">
+      This message was sent by the EMBR3 ESWMP administration.
+    </p>`;
+
+  await transporter.sendMail({
+    from: `"EMBR3 ESWMP" <${process.env.EMAIL_USER}>`,
+    to: email,
+    subject: `${subject} — EMBR3 ESWMP`,
+    html: portalEmailWrapper(body),
+  });
+}
+
 async function sendInternalMessageEmail(email, firstName, senderName, subject, preview) {
   const appLink = `${getClientUrl()}/admin`;
   const body = `
@@ -761,6 +782,7 @@ module.exports = {
   sendPortalResetPasswordEmail,
   sendPortalVerificationReminderEmail,
   sendHoldAccountFollowUpEmail,
+  sendPortalCustomEmail,
   sendInternalMessageEmail,
   sendAdminResetPasswordEmail,
   sendSubmissionEmail,

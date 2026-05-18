@@ -6,6 +6,7 @@ const supportReplySchema = new mongoose.Schema(
     repliedBy: { type: String, trim: true }, // "admin" or portal user email
     repliedByName: { type: String, trim: true },
     isAdmin: { type: Boolean, default: false },
+    attachments: [{ type: mongoose.Schema.Types.Mixed }],
   },
   { timestamps: true }
 );
@@ -41,6 +42,7 @@ const supportTicketSchema = new mongoose.Schema(
       default: "Medium",
     },
     message: { type: String, required: true, trim: true },
+    attachments: [{ type: mongoose.Schema.Types.Mixed }],
     source: {
       type: String,
       enum: ["portal_ticket", "admin_message"],

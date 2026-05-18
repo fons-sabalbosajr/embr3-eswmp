@@ -23,6 +23,9 @@ const notificationSchema = new mongoose.Schema(
         "submission_edit_approved", // admin approved submission edit
         "submission_edit_rejected", // admin rejected submission edit
         "cell_capacity_alert", // active SLF cell reached configured capacity threshold
+        "portal_user_email", // admin emailed a portal user
+        "submission_revert_followup", // admin sent revert follow-up template
+        "submission_temp_deleted", // overdue reverted data moved to deleted submissions
       ],
       required: true,
     },

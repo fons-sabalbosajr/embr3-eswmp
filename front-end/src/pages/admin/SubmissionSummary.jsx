@@ -482,7 +482,7 @@ export default function SubmissionSummary({ isDark }) {
         open={!!calendarRecord}
         onCancel={() => setCalendarRecord(null)}
         footer={<Button onClick={() => setCalendarRecord(null)}>Close</Button>}
-        width={1400}
+        width={1600}
         destroyOnHidden
       >
         {calendarRecord && (
@@ -503,7 +503,7 @@ export default function SubmissionSummary({ isDark }) {
                 </Col>
               </Row>
             </Col>
-            <Col xs={24} lg={15}>
+            <Col xs={24} lg={12}>
               <Card size="small" style={{ borderRadius: 8 }} bodyStyle={{ padding: 12 }}>
                 <style>{`
                   .submission-fc .fc { font-size: 12px; }
@@ -540,7 +540,7 @@ export default function SubmissionSummary({ isDark }) {
                 </div>
               </Card>
             </Col>
-            <Col xs={24} lg={9}>
+            <Col xs={24} lg={12}>
               <Card size="small" style={{ borderRadius: 8 }} title={calendarDate.format("MMMM D, YYYY")}>
                 <Space size={6} wrap style={{ marginBottom: 12 }}>
                   <Tag color="blue">{selectedDayTotals.submissions} submission(s)</Tag>
@@ -575,7 +575,7 @@ export default function SubmissionSummary({ isDark }) {
                     },
                     {
                       title: "Remaining",
-                      width: 105,
+                      //width: 105,
                       render: (_, row) => row.remaining == null ? "—" : `${row.remaining.toLocaleString(undefined, { maximumFractionDigits: 2 })} ${row.unit}`,
                     },
                   ]}
@@ -587,12 +587,12 @@ export default function SubmissionSummary({ isDark }) {
                   rowKey={(record) => record._id}
                   locale={{ emptyText: "No submissions on this date" }}
                   columns={[
-                    { title: "ID", dataIndex: "idNo", width: 110, render: (value) => <Text strong>{value || "—"}</Text> },
-                    { title: "Generator", dataIndex: "lguCompanyName", ellipsis: true, render: (value) => value || "—" },
+                    { title: "ID", dataIndex: "idNo", width: 80, render: (value) => <Text strong>{value || "—"}</Text> },
+                    { title: "Generator",  width: 90, dataIndex: "lguCompanyName", ellipsis: true, render: (value) => value || "—" },
                     { title: "Trucks", width: 70, align: "center", render: (_, record) => record.trucks?.length || 0 },
                     {
                       title: "Volume",
-                      width: 130,
+                      width: 80,
                       render: (_, record) => {
                         const dayTotal = (record.trucks || []).reduce((acc, truck) => {
                           const unit = normalizeUnit(truck.actualVolumeUnit || record.baselineUnit || "m³");
@@ -603,7 +603,7 @@ export default function SubmissionSummary({ isDark }) {
                         return formatVolume(dayTotal.m3, dayTotal.tons);
                       },
                     },
-                    { title: "Status", dataIndex: "status", width: 110, render: (value) => <Tag color={statusColor[value] || "default"}>{value?.replace("_", " ") || "—"}</Tag> },
+                    { title: "Status", dataIndex: "status", width: 60, render: (value) => <Tag color={statusColor[value] || "default"}>{value?.replace("_", " ") || "—"}</Tag> },
                     { title: "", width: 54, render: (_, record) => <Button size="small" icon={<EyeOutlined />} onClick={() => setSubmissionDetail(record)} /> },
                   ]}
                 />
@@ -651,7 +651,7 @@ export default function SubmissionSummary({ isDark }) {
             </Row>
             <Table
               size="small"
-              pagination={false}
+              pagination={true}
               dataSource={submissionDetail.trucks || []}
               rowKey={(_, index) => index}
               locale={{ emptyText: "No truck entries recorded" }}

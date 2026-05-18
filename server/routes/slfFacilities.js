@@ -213,7 +213,7 @@ router.get("/portal/:id", async (req, res) => {
       "volumeCapacity volumeCapacityUnit receivingVolumeCapacity receivingVolumeCapacityUnit numberOfCell cellCapacities cellCapacityUnits cellStatuses cellTypes cellNotes cellFillValues cellFillUnits estimatedVolumeWaste estimatedVolumeWasteUnit actualResidualWasteReceived wasteReceivedUnit " +
       "noOfLeachatePond numberOfGasVents mrfEstablished yearStartedOperation " +
       "eccNo dischargePermit dischargePermitValidity dischargePermitStatus dischargePermits permitToOperate permitToOperateValidity permitToOperateStatus permitToOperatePermits focalPerson " +
-      "receivingFacilities hasWastewaterTreatmentFacility wastewaterTreatmentFacilityType leachatePondDetails gasVentDetails trashSlideMeasures firePrevMeasures galleryPhotos galleryItems slfDocuments preventiveMeasureFiles scrpDetails";
+      "receivingFacilities hasWastewaterTreatmentFacility wastewaterTreatmentFacilityType wastewaterTreatmentFacilityRemarks leachatePondDetails gasVentDetails trashSlideMeasures firePrevMeasures galleryPhotos galleryItems slfDocuments preventiveMeasureFiles scrpDetails";
 
     const facility = await findPortalFacility(req.params.id, req.query.slfName, selectFields);
 
@@ -227,7 +227,7 @@ router.get("/portal/:id", async (req, res) => {
 // Portal: Update facility management details (Leachate Treatment Plant, gas vents, trash slide, fire prevention)
 router.patch("/portal/:id/facility-details", async (req, res) => {
   try {
-    const { leachatePondDetails, gasVentDetails, trashSlideMeasures, firePrevMeasures, hasWastewaterTreatmentFacility, wastewaterTreatmentFacilityType, slfName } = req.body;
+    const { leachatePondDetails, gasVentDetails, trashSlideMeasures, firePrevMeasures, hasWastewaterTreatmentFacility, wastewaterTreatmentFacilityType, wastewaterTreatmentFacilityRemarks, slfName } = req.body;
     const allowed = {};
     if (leachatePondDetails !== undefined) allowed.leachatePondDetails = leachatePondDetails;
     if (gasVentDetails !== undefined) allowed.gasVentDetails = gasVentDetails;
@@ -235,6 +235,7 @@ router.patch("/portal/:id/facility-details", async (req, res) => {
     if (firePrevMeasures !== undefined) allowed.firePrevMeasures = firePrevMeasures;
     if (hasWastewaterTreatmentFacility !== undefined) allowed.hasWastewaterTreatmentFacility = hasWastewaterTreatmentFacility;
     if (wastewaterTreatmentFacilityType !== undefined) allowed.wastewaterTreatmentFacilityType = wastewaterTreatmentFacilityType;
+    if (wastewaterTreatmentFacilityRemarks !== undefined) allowed.wastewaterTreatmentFacilityRemarks = wastewaterTreatmentFacilityRemarks;
 
     const existing = await findPortalFacility(req.params.id, slfName || req.query.slfName, "_id");
     if (!existing) return res.status(404).json({ message: "Facility not found" });
@@ -242,7 +243,7 @@ router.patch("/portal/:id/facility-details", async (req, res) => {
     const facility = await SlfFacility.findOneAndUpdate(
       { _id: existing._id, deletedAt: null },
       { $set: allowed },
-      { returnDocument: "after", select: "leachatePondDetails gasVentDetails trashSlideMeasures firePrevMeasures hasWastewaterTreatmentFacility wastewaterTreatmentFacilityType" }
+      { returnDocument: "after", select: "leachatePondDetails gasVentDetails trashSlideMeasures firePrevMeasures hasWastewaterTreatmentFacility wastewaterTreatmentFacilityType wastewaterTreatmentFacilityRemarks" }
     );
     if (!facility) return res.status(404).json({ message: "Facility not found" });
     res.json(facility);
@@ -376,12 +377,24 @@ router.put("/:id", async (req, res) => {
     Object.keys(update).forEach((key) => {
       if (key.startsWith("_")) delete update[key];
     });
-    const record = await SlfFacility.findOneAndUpdate(
-      { _id: req.params.id, deletedAt: null },
-      { $set: update },
-      { returnDocument: "after", runValidators: true }
-    );
+    const record = await SlfFacility.findOne({ _id: req.params.id, deletedAt: null });
     if (!record) return res.status(404).json({ message: "Record not found" });
+
+    ["leachatePondDetails", "gasVentDetails", "trashSlideMeasures", "firePrevMeasures", "scrpDetails"].forEach((key) => {
+      if (!Array.isArray(update[key])) return;
+      const existingRows = Array.isArray(record[key]) ? record[key] : [];
+      update[key] = update[key].map((row, index) => {
+        const existing = existingRows[index]?.toObject?.() || existingRows[index] || {};
+        return {
+          ...existing,
+          ...row,
+          attachments: row.attachments !== undefined ? row.attachments : existing.attachments || [],
+        };
+      });
+    });
+
+    record.set(update);
+    await record.save();
     res.json(record);
     writeLog("info", "slfFacility.update", { message: `Updated SLF: ${record.lgu}`, ip: req.ip });
   } catch (error) {

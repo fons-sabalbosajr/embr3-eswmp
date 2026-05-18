@@ -69,12 +69,12 @@ export default function Signup() {
 
             <Form name="signup" size="large" onFinish={onFinish} layout="vertical" requiredMark={false} className="auth-form">
               <Row gutter={12}>
-                <Col span={12}>
+                <Col xs={24} sm={12}>
                   <Form.Item name="firstName" label="First Name" rules={[{ required: true, message: "Required" }]}>
                     <Input prefix={<UserOutlined style={{ color: "#1a3353" }} />} placeholder="Juan" />
                   </Form.Item>
                 </Col>
-                <Col span={12}>
+                <Col xs={24} sm={12}>
                   <Form.Item name="lastName" label="Last Name" rules={[{ required: true, message: "Required" }]}>
                     <Input prefix={<UserOutlined style={{ color: "#1a3353" }} />} placeholder="Dela Cruz" />
                   </Form.Item>

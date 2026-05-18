@@ -73,11 +73,15 @@ const PERMISSION_GROUPS = [
   { group: "Settings", icon: <SettingOutlined />, color: "#fa8c16", items: [
     { key: "accountSettings", label: "Accounts & Roles" },
     { key: "portalUsers", label: "Portal User Management" },
+    { key: "portalUserEmail", label: "Portal User Email Menu" },
+    { key: "portalSubmissionHistory", label: "Submission History" },
     { key: "portalFields", label: "Portal Fields" },
     { key: "dataReferences", label: "Data References" },
     { key: "orgChart", label: "Org Chart" },
     { key: "baselineData", label: "Baseline Data" },
     { key: "supportTickets", label: "Support Tickets" },
+    { key: "notificationManagement", label: "Notification Management" },
+    { key: "developerSettings", label: "App Settings" },
   ]},
 ];
 
@@ -362,6 +366,14 @@ export default function AccountSettings({ isDark }) {
 
   return (
     <div>
+      <div style={{ marginBottom: 16 }}>
+        <Title level={3} style={{ marginBottom: 4, color: isDark ? "#7eb8da" : "#1a3353" }}>
+          Accounts & Roles
+        </Title>
+        <Text type="secondary">
+          Manage admin accounts, approval status, roles, and module-level access for secured system functions.
+        </Text>
+      </div>
       <Card style={{ marginTop: 16, borderRadius: 10 }}>
         <Space style={{ marginBottom: 16, flexWrap: "wrap", width: "100%" }}>
           <Input

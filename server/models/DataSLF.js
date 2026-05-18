@@ -143,6 +143,10 @@ const dataSLFSchema = new mongoose.Schema(
     revertRequestedAt: { type: Date },
     revertedBy: { type: String, trim: true },
     revertedAt: { type: Date },
+    revertFollowUpSubject: { type: String, trim: true },
+    revertFollowUpMessage: { type: String, trim: true },
+    revertFollowUpSentAt: { type: Date },
+    temporaryDeleteAfter: { type: Date },
     submittedBy: { type: String, trim: true },
     // Soft delete
     deletedAt: { type: Date, default: null },
