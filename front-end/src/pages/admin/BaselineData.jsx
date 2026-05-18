@@ -1347,17 +1347,23 @@ export default function BaselineData({
                                 {
                                   title: "Private Clients",
                                   key: "clients",
+                                  width: 260,
                                   render: (_, h) => {
                                     const c = h.privateSectorClients || [];
-                                    return c.length > 0
+                                    const text = c.length > 0
                                       ? c
-                                          .map((x) =>
-                                            typeof x === "string"
-                                              ? x
-                                              : x.clientName || "—",
-                                          )
-                                          .join(", ")
+                                        .map((x) =>
+                                          typeof x === "string"
+                                            ? x
+                                            : x.clientName || "—",
+                                        )
+                                        .join(", ")
                                       : "—";
+                                    return (
+                                      <Text style={{ whiteSpace: "normal", overflowWrap: "anywhere", wordBreak: "break-word", fontSize: 12 }}>
+                                        {text}
+                                      </Text>
+                                    );
                                   },
                                 },
                               ]}

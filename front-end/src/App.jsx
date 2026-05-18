@@ -1,17 +1,17 @@
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import { Suspense, lazy } from "react";
 import { Spin } from "antd";
+import SLFPortal from "./pages/SLFPortal";
+import PortalVerificationUpdate from "./pages/PortalVerificationUpdate";
 
 const Landing = lazy(() => import("./pages/Landing"));
 const Login = lazy(() => import("./pages/Login"));
 const Signup = lazy(() => import("./pages/Signup"));
 const VerifyEmail = lazy(() => import("./pages/VerifyEmail"));
 const AdminHome = lazy(() => import("./pages/AdminHome"));
-const SLFPortal = lazy(() => import("./pages/SLFPortal"));
 const PortalLogin = lazy(() => import("./pages/PortalLogin"));
 const PortalSignup = lazy(() => import("./pages/PortalSignup"));
 const PortalForgotPassword = lazy(() => import("./pages/PortalForgotPassword"));
-const PortalVerificationUpdate = lazy(() => import("./pages/PortalVerificationUpdate"));
 const AdminForgotPassword = lazy(() => import("./pages/AdminForgotPassword"));
 
 const PageLoader = () => (

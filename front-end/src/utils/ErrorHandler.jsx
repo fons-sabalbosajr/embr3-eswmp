@@ -12,6 +12,8 @@ import {
 } from "@ant-design/icons";
 
 const { Text, Title } = Typography;
+const DYNAMIC_IMPORT_ERROR_RE = /Failed to fetch dynamically imported module|Importing a module script failed|error loading dynamically imported module/i;
+const DYNAMIC_IMPORT_RELOAD_KEY = "eswm-pipeline:dynamic-import-reload";
 
 /* ─────── Styled error modal (replaces SweetAlert) ─────── */
 
@@ -175,6 +177,15 @@ export class AppErrorBoundary extends Component {
 
   componentDidCatch(error, errorInfo) {
     this.setState({ errorInfo });
+    const message = error?.message || "";
+    if (DYNAMIC_IMPORT_ERROR_RE.test(message)) {
+      const retryKey = `${DYNAMIC_IMPORT_RELOAD_KEY}:${window.location.pathname}`;
+      if (sessionStorage.getItem(retryKey) !== "1") {
+        sessionStorage.setItem(retryKey, "1");
+        window.location.reload();
+        return;
+      }
+    }
     const safeError = {
       name: error?.name || "Error",
       message: error?.message || "Unknown error",
@@ -185,6 +196,9 @@ export class AppErrorBoundary extends Component {
   }
 
   handleReload = () => {
+    Object.keys(sessionStorage)
+      .filter((key) => key.startsWith(DYNAMIC_IMPORT_RELOAD_KEY))
+      .forEach((key) => sessionStorage.removeItem(key));
     this.setState({ hasError: false, error: null, errorInfo: null, copied: false, showStack: false });
     window.location.reload();
   };

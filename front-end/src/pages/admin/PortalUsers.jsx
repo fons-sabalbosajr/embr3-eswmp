@@ -75,7 +75,7 @@ export default function PortalUsers({ isDark, canEdit = true, canDelete = true, 
   const [emailSending, setEmailSending] = useState(false);
   const [historyModal, setHistoryModal] = useState({ open: false, user: null });
   const [historyLoading, setHistoryLoading] = useState(false);
-  const [historyData, setHistoryData] = useState({ submissions: [], transactions: [], conversations: [] });
+  const [historyData, setHistoryData] = useState({ submissions: [], transactions: [], conversations: [], verificationHistory: [] });
   const [searchText, setSearchText] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
   const [assignmentFilter, setAssignmentFilter] = useState("all");
@@ -240,19 +240,22 @@ export default function PortalUsers({ isDark, canEdit = true, canDelete = true, 
   };
 
   const handleHold = async (record) => {
+    const needsCorrectedAttachment = record.verificationRequired && record.verificationSubmitted;
     const result = await Swal.fire({
-      title: "Put Account On Hold?",
-      html: `This will require <strong>${record.firstName} ${record.lastName}</strong> to re-upload their verification documents the next time they log in.`,
+      title: needsCorrectedAttachment ? "Request New Attachment?" : "Put Account On Hold?",
+      html: needsCorrectedAttachment
+        ? `The current attachment from <strong>${record.firstName} ${record.lastName}</strong> will be moved to Submission History and the user must upload a corrected file.`
+        : `This will require <strong>${record.firstName} ${record.lastName}</strong> to re-upload their verification documents the next time they log in. The current attachment will be moved to Submission History.`,
       icon: "warning",
       showCancelButton: true,
       confirmButtonColor: "#fa8c16",
-      confirmButtonText: "Yes, Hold Account",
+      confirmButtonText: needsCorrectedAttachment ? "Require New File" : "Yes, Hold Account",
     });
     if (!result.isConfirmed) return;
     setHoldLoading(true);
     try {
       await api.patch(`/portal-users/${record._id}/hold`);
-      Swal.fire({ icon: "success", title: "Account On Hold", text: "The user will be prompted to verify on next login.", confirmButtonColor: "#1a3353" });
+      Swal.fire({ icon: "success", title: needsCorrectedAttachment ? "New Attachment Required" : "Account On Hold", text: "The user will be prompted to verify before accessing the portal.", confirmButtonColor: "#1a3353" });
       fetchData();
     } catch (err) {
       Swal.fire("Error", err.response?.data?.message || "Failed to hold account", "error");
@@ -407,7 +410,7 @@ export default function PortalUsers({ isDark, canEdit = true, canDelete = true, 
 
   const openSubmissionHistory = async (record) => {
     setHistoryModal({ open: true, user: record });
-    setHistoryData({ submissions: [], transactions: [], conversations: [] });
+    setHistoryData({ submissions: [], transactions: [], conversations: [], verificationHistory: [] });
     setHistoryLoading(true);
     try {
       const { data } = await api.get(`/portal-users/${record._id}/submission-history`);
@@ -415,6 +418,7 @@ export default function PortalUsers({ isDark, canEdit = true, canDelete = true, 
         submissions: data.submissions || [],
         transactions: data.transactions || [],
         conversations: data.conversations || [],
+        verificationHistory: data.verificationHistory || [],
       });
     } catch (err) {
       Swal.fire("Error", err.response?.data?.message || "Failed to load submission history", "error");
@@ -442,6 +446,18 @@ export default function PortalUsers({ isDark, canEdit = true, canDelete = true, 
       </Space>
     );
   };
+
+  const historyCellStyle = {
+    fontSize: 12,
+    whiteSpace: "normal",
+    overflowWrap: "anywhere",
+    wordBreak: "break-word",
+    lineHeight: 1.35,
+  };
+
+  const wrapHistoryText = (value, strong = false) => (
+    <Text strong={strong} style={historyCellStyle}>{value || "—"}</Text>
+  );
 
   const handleCreateMessageThread = async (values) => {
     const user = messageModal.user;
@@ -647,10 +663,15 @@ export default function PortalUsers({ isDark, canEdit = true, canDelete = true, 
           canEdit && record.status === "pending" && { key: "approve", icon: <CheckCircleOutlined />, label: "Approve" },
           canEdit && record.status === "pending" && { key: "reject", icon: <CloseCircleOutlined />, label: "Reject", danger: true },
           canEdit && record.status === "approved" && { key: "edit-slf", icon: <EditOutlined />, label: "Edit Assigned SLF" },
-          canEdit && record.status === "approved" && {
-            key: record.verificationRequired ? "unhold" : "hold",
-            icon: record.verificationRequired ? <UnlockOutlined /> : <LockOutlined />,
-            label: record.verificationRequired ? "Remove Hold" : "Hold Account",
+          canEdit && record.status === "approved" && (!record.verificationRequired || record.verificationSubmitted) && {
+            key: "hold",
+            icon: <LockOutlined />,
+            label: record.verificationSubmitted ? "Request New Attachment" : "Hold Account",
+          },
+          canEdit && record.status === "approved" && record.verificationRequired && !record.verificationSubmitted && {
+            key: "unhold",
+            icon: <UnlockOutlined />,
+            label: "Remove Hold",
           },
           canEmail && record.status === "approved" && { key: "reminder", icon: <BellOutlined />, label: "Send Reminder Email" },
           canEmail && record.verificationRequired && !record.verificationSubmitted && { key: "hold-followup", icon: <MailOutlined />, label: "Send Hold Follow-Up" },
@@ -1133,12 +1154,12 @@ export default function PortalUsers({ isDark, canEdit = true, canDelete = true, 
                       pagination={{ pageSize: 8 }}
                       scroll={{ x: "max-content" }}
                       columns={[
-                        { title: "ID No.", dataIndex: "idNo", key: "idNo", render: (value) => <Text strong>{value || "—"}</Text> },
-                        { title: "Company/LGU", dataIndex: "lguCompanyName", key: "lguCompanyName" },
+                        { title: "ID No.", dataIndex: "idNo", key: "idNo", width: 140, render: (value) => wrapHistoryText(value, true) },
+                        { title: "Company/LGU", dataIndex: "lguCompanyName", key: "lguCompanyName", width: 220, render: (value) => wrapHistoryText(value) },
                         { title: "Status", dataIndex: "status", key: "status", render: (value) => <Tag color={value === "acknowledged" ? "green" : value === "reverted" ? "volcano" : value === "rejected" ? "red" : "orange"}>{value || "pending"}</Tag> },
                         { title: "Date of Disposal", dataIndex: "dateOfDisposal", key: "dateOfDisposal", render: (value) => value ? dayjs(value).format("MM/DD/YYYY") : "—" },
                         { title: "Submitted", dataIndex: "createdAt", key: "createdAt", render: (value) => value ? dayjs(value).format("MM/DD/YYYY h:mm A") : "—" },
-                        { title: "Revert Reason", dataIndex: "revertReason", key: "revertReason", render: (value) => value || "—" },
+                        { title: "Revert Reason", dataIndex: "revertReason", key: "revertReason", width: 260, render: (value) => wrapHistoryText(value) },
                       ]}
                       expandable={{
                         expandedRowRender: (record) => {
@@ -1158,6 +1179,50 @@ export default function PortalUsers({ isDark, canEdit = true, canDelete = true, 
                           ) : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No tracker activity" />;
                         },
                       }}
+                    />
+                  ),
+                },
+                {
+                  key: "verification",
+                  label: "Verification Attachments",
+                  children: (
+                    <Table
+                      dataSource={historyData.verificationHistory || []}
+                      rowKey={(row, index) => row._id || `${row.fileUrl}-${index}`}
+                      size="small"
+                      pagination={{ pageSize: 8 }}
+                      scroll={{ x: 900 }}
+                      locale={{ emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No verification attachment history" /> }}
+                      columns={[
+                        {
+                          title: "Date",
+                          dataIndex: "submittedAt",
+                          key: "submittedAt",
+                          width: 150,
+                          render: (value) => value ? <Text style={historyCellStyle}>{dayjs(value).format("MM/DD/YYYY h:mm A")}</Text> : wrapHistoryText("—"),
+                        },
+                        {
+                          title: "Action",
+                          dataIndex: "action",
+                          key: "action",
+                          width: 110,
+                          render: (value) => <Tag color={value === "archived" ? "orange" : "blue"}>{(value || "submitted").toUpperCase()}</Tag>,
+                        },
+                        {
+                          title: "Attachment",
+                          dataIndex: "fileUrl",
+                          key: "fileUrl",
+                          width: 220,
+                          render: (value, row) => value ? (
+                            <a href={normalizeVerificationFileUrl(value)} target="_blank" rel="noopener noreferrer" style={historyCellStyle}>
+                              {row.fileType === "image" ? "Image" : "Document"}
+                            </a>
+                          ) : wrapHistoryText("—"),
+                        },
+                        { title: "Office Email", dataIndex: "officeEmail", key: "officeEmail", width: 190, render: (value) => wrapHistoryText(value) },
+                        { title: "PCO Email", dataIndex: "pcoEmail", key: "pcoEmail", width: 190, render: (value) => wrapHistoryText(value) },
+                        { title: "Note", dataIndex: "note", key: "note", width: 260, render: (value) => wrapHistoryText(value) },
+                      ]}
                     />
                   ),
                 },

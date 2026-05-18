@@ -224,6 +224,61 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, is
     }
   };
 
+  const handleBulkDelete = async () => {
+    if (selectedRowKeys.length === 0) return;
+    const confirmed = await Swal.fire({
+      title: `Delete ${selectedRowKeys.length} selected entry(ies)?`,
+      text: "Selected entries will be moved to Deleted Submissions.",
+      icon: "warning",
+      showCancelButton: true,
+      confirmButtonText: "Delete Selected",
+      confirmButtonColor: "#ff4d4f",
+    });
+    if (!confirmed.isConfirmed) return;
+    try {
+      const { data: result } = await api.post("/data-slf/bulk-delete", {
+        ids: selectedRowKeys,
+        performedBy: "EMBR3 ESWMP Admin",
+      });
+      setData((prev) => prev.filter((entry) => !result.data.some((deleted) => deleted._id === entry._id)));
+      secureStorage.remove(CACHE_KEY);
+      secureStorage.invalidateDashboard();
+      setSelectedRowKeys([]);
+      Swal.fire({ icon: "success", title: result.message || "Selected entries deleted", timer: 1500, showConfirmButton: false });
+    } catch (err) {
+      Swal.fire("Error", err.response?.data?.message || "Could not delete selected entries", "error");
+    }
+  };
+
+  const handleBulkRevert = async () => {
+    if (selectedRowKeys.length === 0) return;
+    const { value: reason, isConfirmed } = await Swal.fire({
+      title: `Revert ${selectedRowKeys.length} selected entry(ies)?`,
+      input: "textarea",
+      inputLabel: "Reason for revert",
+      inputPlaceholder: "Enter one reason that applies to all selected rows...",
+      inputValidator: (value) => (!value?.trim() ? "Please enter a reason" : undefined),
+      showCancelButton: true,
+      confirmButtonText: "Revert Selected",
+      confirmButtonColor: "#fa541c",
+    });
+    if (!isConfirmed) return;
+    try {
+      const { data: result } = await api.patch("/data-slf/bulk-revert", {
+        ids: selectedRowKeys,
+        reason: reason.trim(),
+        performedBy: "EMBR3 ESWMP Admin",
+      });
+      setData((prev) => prev.map((entry) => result.data.find((updated) => updated._id === entry._id) || entry));
+      secureStorage.remove(CACHE_KEY);
+      secureStorage.invalidateDashboard();
+      setSelectedRowKeys([]);
+      Swal.fire({ icon: "success", title: result.message || "Selected entries reverted", timer: 1800, showConfirmButton: false });
+    } catch (err) {
+      Swal.fire("Error", err.response?.data?.message || "Could not revert selected entries", "error");
+    }
+  };
+
   // ── Address cascading helpers ──
   const fetchAddrRegions = async () => {
     try {
@@ -791,14 +846,30 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, is
             <Option value="editApproved">Edit Approved</Option>
           </Select>
           {selectedRowKeys.length > 0 && (
-            <Button
-              type="primary"
-              icon={<CheckOutlined />}
-              style={{ background: "#52c41a", borderColor: "#52c41a" }}
-              onClick={handleBulkAcknowledge}
-            >
-              Acknowledge Selected ({selectedRowKeys.length})
-            </Button>
+            <>
+              <Button
+                type="primary"
+                icon={<CheckOutlined />}
+                style={{ background: "#52c41a", borderColor: "#52c41a" }}
+                onClick={handleBulkAcknowledge}
+              >
+                Acknowledge Selected ({selectedRowKeys.length})
+              </Button>
+              {canEdit && (
+                <Button
+                  icon={<UndoOutlined />}
+                  style={{ color: "#fa541c", borderColor: "#fa541c" }}
+                  onClick={handleBulkRevert}
+                >
+                  Revert Selected
+                </Button>
+              )}
+              {canDelete && (
+                <Button danger icon={<DeleteOutlined />} onClick={handleBulkDelete}>
+                  Delete Selected
+                </Button>
+              )}
+            </>
           )}
         </Space>
 

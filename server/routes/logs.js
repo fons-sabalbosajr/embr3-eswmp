@@ -1,7 +1,34 @@
 const express = require("express");
 const AppLog = require("../models/AppLog");
+const { writeLog } = require("../utils/logger");
 
 const router = express.Router();
+
+router.post("/client-error", async (req, res) => {
+  try {
+    const {
+      message = "Client error",
+      source = "portal",
+      user = "",
+      path = "",
+      stack = "",
+      meta = {},
+    } = req.body || {};
+    await writeLog("error", `${source}.client-error`, {
+      message,
+      user,
+      ip: req.ip,
+      meta: {
+        path,
+        stack: stack ? String(stack).slice(0, 4000) : "",
+        ...meta,
+      },
+    });
+    res.json({ message: "Logged" });
+  } catch (error) {
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+});
 
 // Get logs (paginated, filterable)
 router.get("/", async (req, res) => {

@@ -44,6 +44,19 @@ const userPortalSchema = new mongoose.Schema(
     verificationFileUrl: { type: String, default: "" },
     verificationFileDriveId: { type: String, default: "" },
     verificationFileType: { type: String, default: "" }, // "image" | "document"
+    verificationSubmissionHistory: [
+      {
+        fileUrl: { type: String, default: "" },
+        fileDriveId: { type: String, default: "" },
+        fileType: { type: String, default: "" },
+        officeEmail: { type: String, trim: true, lowercase: true, default: "" },
+        pcoEmail: { type: String, trim: true, lowercase: true, default: "" },
+        action: { type: String, enum: ["submitted", "archived"], default: "submitted" },
+        note: { type: String, trim: true, default: "" },
+        performedBy: { type: String, trim: true, default: "" },
+        submittedAt: { type: Date, default: Date.now },
+      },
+    ],
     // Admin-triggered re-verification flow
     verificationRequired: { type: Boolean, default: false },
     verificationSubmitted: { type: Boolean, default: false }, // user has re-submitted docs

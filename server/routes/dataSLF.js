@@ -8,6 +8,7 @@ const { sendAcknowledgementEmail, sendBulkAcknowledgeEmail, sendSubmissionEmail 
 const { writeLog } = require("../utils/logger");
 const Transaction = require("../models/Transaction");
 const Notification = require("../models/Notification");
+const UserPortal = require("../models/UserPortal");
 const { notifyAdmin, notifyPortal, refreshAdmin } = require("../utils/socketEmit");
 
 // Province code mapping (mirrors DataSLF model)
@@ -171,10 +172,29 @@ function hasBaselineData(entry) {
   );
 }
 
+async function ensurePortalAccountCanSubmit(email) {
+  const normalizedEmail = String(email || "").trim().toLowerCase();
+  if (!normalizedEmail) return null;
+  const portalUser = await UserPortal.findOne({ email: normalizedEmail }).select("verificationRequired verificationSubmitted status");
+  if (!portalUser) return null;
+  if (portalUser.status !== "approved") {
+    const error = new Error("Your portal account is not approved for submissions.");
+    error.statusCode = 403;
+    throw error;
+  }
+  if (portalUser.verificationRequired) {
+    const error = new Error("Your account is on hold for verification. Please complete the verification process before using the portal.");
+    error.statusCode = 403;
+    throw error;
+  }
+  return portalUser;
+}
+
 // Submit SLF data — batch (client portal)
 router.post("/", async (req, res) => {
   try {
     const { entries, submittedBy } = req.body || {};
+    await ensurePortalAccountCanSubmit(submittedBy);
     const items = Array.isArray(entries) ? entries : [req.body];
     const submissionId = `SUB-${Date.now()}-${crypto.randomBytes(3).toString("hex")}`;
 
@@ -239,6 +259,7 @@ router.post("/", async (req, res) => {
       meta: { submissionId: saved[0]?.submissionId, count: saved.length },
     });
   } catch (error) {
+    if (error.statusCode) return res.status(error.statusCode).json({ message: error.message });
     res.status(500).json({ message: "Server error", error: error.message });
   }
 });
@@ -248,6 +269,7 @@ router.put("/:id", async (req, res) => {
   try {
     const entry = await DataSLF.findById(req.params.id);
     if (!entry) return res.status(404).json({ message: "Entry not found" });
+    await ensurePortalAccountCanSubmit(entry.submittedBy);
     if (entry.status !== "reverted" && entry.status !== "pending") {
       return res.status(400).json({ message: "Only reverted or pending entries can be updated" });
     }
@@ -339,6 +361,7 @@ router.put("/:id", async (req, res) => {
       meta: { id: entry._id },
     });
   } catch (error) {
+    if (error.statusCode) return res.status(error.statusCode).json({ message: error.message });
     res.status(500).json({ message: "Server error", error: error.message });
   }
 });
@@ -409,6 +432,7 @@ router.get("/baseline/:slfName", async (req, res) => {
       savedAt: latest.updatedAt || latest.createdAt,
     });
   } catch (error) {
+    if (error.statusCode) return res.status(error.statusCode).json({ message: error.message });
     res.status(500).json({ message: "Server error", error: error.message });
   }
 });
@@ -494,6 +518,7 @@ router.get("/baselines", async (req, res) => {
 
     res.json(results);
   } catch (error) {
+    if (error.statusCode) return res.status(error.statusCode).json({ message: error.message });
     res.status(500).json({ message: "Server error", error: error.message });
   }
 });
@@ -542,6 +567,7 @@ router.put("/baselines/:id", async (req, res) => {
 
     res.json({ message: "Baseline updated", data: entry });
   } catch (error) {
+    if (error.statusCode) return res.status(error.statusCode).json({ message: error.message });
     res.status(500).json({ message: "Server error", error: error.message });
   }
 });
@@ -612,6 +638,7 @@ router.delete("/baselines/:id", async (req, res) => {
 
     res.json({ message: "Baseline data cleared" });
   } catch (error) {
+    if (error.statusCode) return res.status(error.statusCode).json({ message: error.message });
     res.status(500).json({ message: "Server error", error: error.message });
   }
 });
@@ -802,6 +829,7 @@ router.patch("/:id/request-edit", async (req, res) => {
     }
 
     const { reason, requestedBy } = req.body || {};
+    await ensurePortalAccountCanSubmit(requestedBy || entry.submittedBy);
     entry.revertRequested = true;
     entry.revertReason = reason;
     entry.revertRequestedAt = new Date();
@@ -839,6 +867,7 @@ router.patch("/:id/request-edit", async (req, res) => {
 
     res.json({ message: "Edit request submitted", data: entry });
   } catch (error) {
+    if (error.statusCode) return res.status(error.statusCode).json({ message: error.message });
     res.status(500).json({ message: "Server error", error: error.message });
   }
 });
@@ -1276,6 +1305,113 @@ router.patch("/bulk-status", async (req, res) => {
       ip: req.ip,
       meta: { status, count: updated.length, ids: updated.map((e) => e.idNo) },
     });
+  } catch (error) {
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+});
+
+// Bulk soft-delete selected submissions
+router.post("/bulk-delete", async (req, res) => {
+  try {
+    const { ids, performedBy } = req.body || {};
+    if (!Array.isArray(ids) || ids.length === 0) {
+      return res.status(400).json({ message: "No entries selected" });
+    }
+
+    const entries = await DataSLF.find({ _id: { $in: ids }, deletedAt: null });
+    for (const entry of entries) {
+      entry.deletedAt = new Date();
+      entry.deletedBy = performedBy || req.logUser || "admin";
+      await entry.save();
+      try {
+        await Transaction.create({
+          submissionId: entry.submissionId,
+          dataEntry: entry._id,
+          companyName: entry.lguCompanyName,
+          companyType: entry.companyType,
+          submittedBy: entry.submittedBy,
+          type: "deleted",
+          description: `Entry ${entry.idNo} deleted (bulk)`,
+          performedBy: performedBy || req.logUser || "admin",
+          meta: { idNo: entry.idNo, bulk: true },
+        });
+      } catch { /* silent */ }
+    }
+
+    refreshAdmin(req, "submissions");
+    writeLog("warn", "submission.bulk-delete", {
+      message: `Bulk deleted ${entries.length} submissions`,
+      user: performedBy || req.logUser || "admin",
+      ip: req.ip,
+      meta: { count: entries.length, ids: entries.map((entry) => entry.idNo) },
+    });
+    res.json({ message: `${entries.length} entries moved to trash`, data: entries });
+  } catch (error) {
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+});
+
+// Bulk admin revert selected submissions back to the portal user
+router.patch("/bulk-revert", async (req, res) => {
+  try {
+    const { ids, reason, performedBy } = req.body || {};
+    if (!Array.isArray(ids) || ids.length === 0) {
+      return res.status(400).json({ message: "No entries selected" });
+    }
+    if (!reason?.trim()) {
+      return res.status(400).json({ message: "Reason is required" });
+    }
+
+    const entries = await DataSLF.find({ _id: { $in: ids }, deletedAt: null });
+    const updated = [];
+    for (const entry of entries) {
+      entry.status = "reverted";
+      entry.revertReason = reason.trim();
+      entry.revertedBy = performedBy || ADMIN_DISPLAY_NAME;
+      entry.revertedAt = new Date();
+      entry.revertRequested = false;
+      await entry.save();
+      updated.push(entry);
+
+      try {
+        await Transaction.create({
+          submissionId: entry.submissionId,
+          dataEntry: entry._id,
+          companyName: entry.lguCompanyName,
+          companyType: entry.companyType,
+          submittedBy: entry.submittedBy,
+          type: "status_change",
+          description: `Admin reverted submission ${entry.idNo} (bulk): ${reason.trim()}`,
+          performedBy: performedBy || ADMIN_DISPLAY_NAME,
+          meta: { idNo: entry.idNo, reason: reason.trim(), bulk: true },
+        });
+      } catch { /* silent */ }
+
+      if (entry.submittedBy) {
+        try {
+          await Notification.create({
+            recipient: entry.submittedBy,
+            type: "reverted",
+            title: "Submission Reverted",
+            message: `Your submission ${entry.idNo} has been reverted. Reason: ${reason.trim()}`,
+            submissionId: entry.submissionId,
+            dataEntry: entry._id,
+            meta: { idNo: entry.idNo, reason: reason.trim(), bulk: true },
+          });
+        } catch { /* silent */ }
+        notifyPortal(req, entry.submittedBy, { type: "reverted", title: "Submission Reverted" });
+      }
+    }
+
+    const populated = await DataSLF.find({ _id: { $in: updated.map((entry) => entry._id) } }).populate("slfGenerator");
+    refreshAdmin(req, "submissions");
+    writeLog("info", "submission.bulk-revert", {
+      message: `Bulk reverted ${updated.length} submissions`,
+      user: performedBy || ADMIN_DISPLAY_NAME,
+      ip: req.ip,
+      meta: { reason: reason.trim(), ids: updated.map((entry) => entry.idNo) },
+    });
+    res.json({ message: `${updated.length} entries reverted`, data: populated });
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });
   }
@@ -1751,6 +1887,7 @@ router.patch("/portal-save-baseline/:slfName", async (req, res) => {
     } = req.body || {};
 
     if (!slfName) return res.status(400).json({ message: "slfName is required" });
+    await ensurePortalAccountCanSubmit(submittedBy);
 
     // Broad filter — match any DataSLF entry for this SLF regardless of existing baseline data
     const filter = {
@@ -1888,6 +2025,7 @@ router.patch("/portal-save-baseline/:slfName", async (req, res) => {
 
     res.json({ message: "Baseline saved and locked" });
   } catch (error) {
+    if (error.statusCode) return res.status(error.statusCode).json({ message: error.message });
     res.status(500).json({ message: "Server error", error: error.message });
   }
 });
@@ -1899,6 +2037,7 @@ router.post("/baseline-update-request", async (req, res) => {
     if (!slfName || !requestedBy) {
       return res.status(400).json({ message: "slfName and requestedBy are required" });
     }
+    await ensurePortalAccountCanSubmit(requestedBy);
 
     // Upsert notification — update existing unread one instead of creating duplicates
     await Notification.findOneAndUpdate(
@@ -1950,6 +2089,7 @@ router.post("/baseline-update-request", async (req, res) => {
 
     res.json({ message: "Request sent to admin" });
   } catch (error) {
+    if (error.statusCode) return res.status(error.statusCode).json({ message: error.message });
     res.status(500).json({ message: "Server error", error: error.message });
   }
 });

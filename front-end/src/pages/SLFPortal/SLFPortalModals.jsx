@@ -8,7 +8,7 @@ import {
 import {
   AuditOutlined, BankOutlined, BarChartOutlined, CarOutlined, CheckCircleOutlined,
   CloseCircleOutlined, ContainerOutlined, DatabaseOutlined, DeleteOutlined,
-  EditOutlined, EnvironmentOutlined, EyeOutlined, FileTextOutlined,
+  EditOutlined, EnvironmentOutlined, ExclamationCircleOutlined, EyeOutlined, FileTextOutlined,
   InfoCircleOutlined, MailOutlined, MessageOutlined, PieChartOutlined,
   PlusOutlined, QuestionCircleOutlined, SaveOutlined, SendOutlined,
   TeamOutlined, UndoOutlined, UploadOutlined, UserOutlined, WifiOutlined,
@@ -69,8 +69,10 @@ export default function SLFPortalModals({
   uploadGuideType, setUploadGuideType,
   uploadPreviewData,
   uploadPreviewColumns,
+  uploadMissingColumns,
   setUploadPreviewData,
   setUploadPreviewColumns,
+  setUploadMissingColumns,
   activeCellModalOpen, setActiveCellModalOpen,
   activeCellDraft, setActiveCellDraft,
   editingActiveCellKey, setEditingActiveCellKey,
@@ -3257,11 +3259,15 @@ export default function SLFPortalModals({
           setUploadModalOpen(false);
           setUploadPreviewData([]);
           setUploadPreviewColumns([]);
+          setUploadMissingColumns([]);
           setUploadType(null);
         }}
         onOk={handleConfirmUpload}
         okText={`Import ${uploadPreviewData.length} ${uploadType === "hauler" ? "Hauler(s)" : "Entry/Entries"}`}
-        okButtonProps={{ className: "slf-primary-btn" }}
+        okButtonProps={{
+          className: "slf-primary-btn",
+          disabled: (uploadMissingColumns || []).length > 0 || uploadPreviewData.some((row) => row._errors?.length),
+        }}
         width={900}
       >
         <div style={{ marginBottom: 12 }}>
@@ -3269,6 +3275,15 @@ export default function SLFPortalModals({
             Review the data below. Click on any cell to edit before importing.
           </Text>
         </div>
+        {((uploadMissingColumns || []).length > 0 || uploadPreviewData.some((row) => row._errors?.length)) && (
+          <div style={{ marginBottom: 12, padding: "8px 12px", borderRadius: 6, border: "1px solid #ffccc7", background: "#fff2f0" }}>
+            <Text style={{ fontSize: 12, color: "#a8071a", whiteSpace: "normal", overflowWrap: "anywhere" }}>
+              <ExclamationCircleOutlined style={{ marginRight: 6 }} />
+              Import is disabled until all missing data is fixed.
+              {(uploadMissingColumns || []).length > 0 ? ` Missing columns: ${uploadMissingColumns.join(", ")}.` : ""}
+            </Text>
+          </div>
+        )}
         <Table
           dataSource={uploadPreviewData}
           columns={(uploadPreviewColumns || []).map((col) => {

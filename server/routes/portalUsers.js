@@ -18,6 +18,32 @@ const {
 
 const router = express.Router();
 
+function archiveCurrentVerificationAttachment(user, { note = "", performedBy = "" } = {}) {
+  if (!user?.verificationFileUrl) return false;
+  const history = Array.isArray(user.verificationSubmissionHistory)
+    ? user.verificationSubmissionHistory
+    : [];
+  const alreadyRecorded = history.some((item) => item.fileUrl === user.verificationFileUrl);
+  if (!alreadyRecorded) {
+    history.push({
+      fileUrl: user.verificationFileUrl,
+      fileDriveId: user.verificationFileDriveId || "",
+      fileType: user.verificationFileType || "",
+      officeEmail: user.officeEmail || "",
+      pcoEmail: user.pcoEmail || "",
+      action: "archived",
+      note,
+      performedBy,
+      submittedAt: new Date(),
+    });
+    user.verificationSubmissionHistory = history;
+  }
+  user.verificationFileUrl = "";
+  user.verificationFileDriveId = "";
+  user.verificationFileType = "";
+  return true;
+}
+
 // All routes require admin auth
 router.use(authMiddleware, adminOnly);
 
@@ -175,15 +201,27 @@ router.patch("/:id/hold", async (req, res) => {
       return res.status(400).json({ message: "Only approved accounts can be put on hold." });
     }
 
+    const archived = archiveCurrentVerificationAttachment(user, {
+      note: user.verificationRequired
+        ? "Attachment marked incorrect; new verification attachment required"
+        : "Attachment archived when account was put on hold",
+      performedBy: req.logUser || req.user?.email || req.user?.id || "admin",
+    });
     user.verificationRequired = true;
     user.verificationSubmitted = false;
     await user.save();
 
-    res.json({ message: "Account put on hold. User will be prompted to re-verify on next login.", data: user });
+    res.json({
+      message: archived
+        ? "Account put on hold. Previous attachment was moved to submission history."
+        : "Account put on hold. User will be prompted to re-verify on next login.",
+      data: user,
+    });
     writeLog("info", "portal.hold", {
       message: `Portal user held for re-verification: ${user.email}`,
       user: req.user.id,
       ip: req.ip,
+      meta: { archivedAttachment: archived },
     });
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });
@@ -310,7 +348,12 @@ router.get("/:id/submission-history", async (req, res) => {
       ? await Transaction.find({ submissionId: { $in: submissionIds } }).sort({ createdAt: -1 }).lean()
       : [];
 
-    res.json({ submissions, transactions, conversations });
+    res.json({
+      submissions,
+      transactions,
+      conversations,
+      verificationHistory: user.verificationSubmissionHistory || [],
+    });
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });
   }

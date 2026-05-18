@@ -56,6 +56,29 @@ async function saveVerificationAttachment(req, file, email, logContext) {
   }
 }
 
+function recordVerificationSubmission(user, { action = "submitted", note = "", performedBy = "" } = {}) {
+  if (!user.verificationFileUrl) return;
+  const history = Array.isArray(user.verificationSubmissionHistory)
+    ? user.verificationSubmissionHistory
+    : [];
+  const alreadyRecorded = history.some(
+    (item) => item.fileUrl === user.verificationFileUrl && item.action === action
+  );
+  if (alreadyRecorded) return;
+  history.push({
+    fileUrl: user.verificationFileUrl,
+    fileDriveId: user.verificationFileDriveId || "",
+    fileType: user.verificationFileType || "",
+    officeEmail: user.officeEmail || "",
+    pcoEmail: user.pcoEmail || "",
+    action,
+    note,
+    performedBy,
+    submittedAt: new Date(),
+  });
+  user.verificationSubmissionHistory = history;
+}
+
 router.get("/verification-files/:fileName", (req, res) => {
   try {
     const filePath = resolveVerificationFile(req.params.fileName);
@@ -143,6 +166,11 @@ router.post("/signup", upload.single("verificationFile"), async (req, res) => {
       status: "pending",
       isVerified: true, // auto-verified; admin approval is the gate
     });
+    recordVerificationSubmission(user, {
+      action: "submitted",
+      note: "Initial portal registration attachment",
+      performedBy: email,
+    });
     await user.save();
 
     // Send signup confirmation email (non-blocking)
@@ -212,8 +240,8 @@ router.post("/login", async (req, res) => {
     res.json({
       message: "Login successful",
       token,
-      // Flag so the front-end can redirect held users to the verification form
-      needsVerification: user.verificationRequired && !user.verificationSubmitted,
+      // Flag so the front-end can keep held users out of the portal until admin review clears the hold.
+      needsVerification: user.verificationRequired,
       user: {
         id: user._id,
         firstName: user.firstName,
@@ -393,29 +421,38 @@ router.post("/submit-verification", upload.single("verificationFile"), async (re
     if (!user.verificationRequired) {
       return res.status(400).json({ message: "No verification update is required for this account." });
     }
+    if (user.verificationSubmitted) {
+      return res.status(400).json({ message: "Your verification documents are already submitted and awaiting admin review." });
+    }
+    if (!req.file) {
+      return res.status(400).json({ message: "Please upload a verification attachment before submitting." });
+    }
 
     const { officeEmail, pcoEmail } = req.body;
 
     // Upload new verification file if provided
-    if (req.file) {
-      try {
-        const storedFile = await saveVerificationAttachment(req, req.file, user.email, "portal.verification");
-        user.verificationFileUrl = storedFile.url;
-        user.verificationFileDriveId = storedFile.driveId;
-        user.verificationFileType = storedFile.fileType;
-      } catch (fileErr) {
-        writeLog("error", "portal.verification.file", {
-          message: `Verification file storage failed for ${user.email}: ${fileErr.message}`,
-          user: user.email,
-          ip: req.ip,
-        });
-        return res.status(500).json({ message: "File upload failed. Please try again." });
-      }
+    try {
+      const storedFile = await saveVerificationAttachment(req, req.file, user.email, "portal.verification");
+      user.verificationFileUrl = storedFile.url;
+      user.verificationFileDriveId = storedFile.driveId;
+      user.verificationFileType = storedFile.fileType;
+    } catch (fileErr) {
+      writeLog("error", "portal.verification.file", {
+        message: `Verification file storage failed for ${user.email}: ${fileErr.message}`,
+        user: user.email,
+        ip: req.ip,
+      });
+      return res.status(500).json({ message: "File upload failed. Please try again." });
     }
 
     if (officeEmail) user.officeEmail = officeEmail.trim().toLowerCase();
     if (pcoEmail) user.pcoEmail = pcoEmail.trim().toLowerCase();
     user.verificationSubmitted = true;
+    recordVerificationSubmission(user, {
+      action: "submitted",
+      note: "Re-verification attachment submitted for admin review",
+      performedBy: user.email,
+    });
 
     await user.save();
 
@@ -437,7 +474,7 @@ router.post("/submit-verification", upload.single("verificationFile"), async (re
       ip: req.ip,
     });
 
-    res.json({ message: "Verification information submitted. The admin will review your update." });
+    res.json({ message: "Verification information submitted. Please wait for admin review before accessing the portal." });
   } catch (error) {
     if (error.message?.includes("Unsupported file type")) {
       return res.status(400).json({ message: error.message });

@@ -1,6 +1,21 @@
 import { useState, useEffect } from "react";
-import { Form, Input, Button, Card, Typography, Upload, message as antMessage, Alert } from "antd";
-import { MailOutlined, UploadOutlined, FileProtectOutlined, WarningOutlined, LogoutOutlined } from "@ant-design/icons";
+import {
+  Form,
+  Input,
+  Button,
+  Card,
+  Typography,
+  Upload,
+  message as antMessage,
+  Alert,
+} from "antd";
+import {
+  MailOutlined,
+  UploadOutlined,
+  FileProtectOutlined,
+  WarningOutlined,
+  LogoutOutlined,
+} from "@ant-design/icons";
 import { useNavigate } from "react-router-dom";
 import Swal from "sweetalert2";
 import api from "../api";
@@ -12,7 +27,10 @@ import "./Auth.css";
 const { Title, Text } = Typography;
 
 const ALLOWED_TYPES = [
-  "image/jpeg", "image/png", "image/gif", "image/webp",
+  "image/jpeg",
+  "image/png",
+  "image/gif",
+  "image/webp",
   "application/pdf",
   "application/msword",
   "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -21,19 +39,44 @@ const MAX_FILE_MB = 20;
 
 export default function PortalVerificationUpdate() {
   const [loading, setLoading] = useState(false);
+  const [checkingStatus, setCheckingStatus] = useState(true);
+  const [verificationSubmitted, setVerificationSubmitted] = useState(false);
   const [form] = Form.useForm();
   const navigate = useNavigate();
   const [verificationFile, setVerificationFile] = useState(null);
 
-  // Redirect to login if no token
+  // Redirect to login if no token, otherwise check whether the hold is still active.
   useEffect(() => {
     const token = secureStorage.get("portal_token");
-    if (!token) navigate("/slfportal/login", { replace: true });
+    if (!token) {
+      navigate("/slfportal/login", { replace: true });
+      return;
+    }
+    api
+      .get("/portal-auth/me", { headers: { Authorization: `Bearer ${token}` } })
+      .then(({ data }) => {
+        const stored = secureStorage.getJSON("portal_user") || {};
+        const refreshed = {
+          ...stored,
+          verificationRequired: data.verificationRequired,
+          verificationSubmitted: data.verificationSubmitted,
+          status: data.status,
+          isVerified: data.isVerified,
+        };
+        secureStorage.setJSON("portal_user", refreshed);
+        setVerificationSubmitted(!!data.verificationSubmitted);
+        if (!data.verificationRequired)
+          navigate("/slfportal", { replace: true });
+      })
+      .catch(() => {})
+      .finally(() => setCheckingStatus(false));
   }, [navigate]);
 
   const beforeUpload = (file) => {
     if (!ALLOWED_TYPES.includes(file.type)) {
-      antMessage.error("Only images (JPG/PNG/GIF/WEBP) or documents (PDF/DOC/DOCX) are allowed.");
+      antMessage.error(
+        "Only images (JPG/PNG/GIF/WEBP) or documents (PDF/DOC/DOCX) are allowed.",
+      );
       return Upload.LIST_IGNORE;
     }
     if (file.size / 1024 / 1024 > MAX_FILE_MB) {
@@ -70,7 +113,8 @@ export default function PortalVerificationUpdate() {
     try {
       const token = secureStorage.get("portal_token");
       const formData = new FormData();
-      if (values.officeEmail) formData.append("officeEmail", values.officeEmail);
+      if (values.officeEmail)
+        formData.append("officeEmail", values.officeEmail);
       if (values.pcoEmail) formData.append("pcoEmail", values.pcoEmail);
       formData.append("verificationFile", verificationFile);
 
@@ -80,20 +124,29 @@ export default function PortalVerificationUpdate() {
           Authorization: `Bearer ${token}`,
         },
       });
+      const stored = secureStorage.getJSON("portal_user") || {};
+      secureStorage.setJSON("portal_user", {
+        ...stored,
+        verificationRequired: true,
+        verificationSubmitted: true,
+      });
+      setVerificationSubmitted(true);
+      setVerificationFile(null);
+      form.resetFields();
 
       Swal.fire({
         icon: "success",
         title: "Verification Submitted!",
-        html: "Your information has been sent for admin review.<br/>You can now continue using the portal.",
+        html: "Your information has been sent for admin review.<br/>Portal access will reopen after the administrator marks your verification as reviewed.",
         confirmButtonColor: "#1a3353",
-      }).then(() => {
-        navigate("/slfportal");
       });
     } catch (err) {
       Swal.fire({
         icon: "error",
         title: "Submission Failed",
-        text: err.response?.data?.message || "Something went wrong. Please try again.",
+        text:
+          err.response?.data?.message ||
+          "Something went wrong. Please try again.",
         confirmButtonColor: "#1a3353",
       });
     } finally {
@@ -103,7 +156,10 @@ export default function PortalVerificationUpdate() {
 
   return (
     <div className="auth-page">
-      <div className="auth-page-bg" style={{ backgroundImage: `url(${bgEmb})` }} />
+      <div
+        className="auth-page-bg"
+        style={{ backgroundImage: `url(${bgEmb})` }}
+      />
       <div className="auth-page-overlay" />
       <div className="auth-page-sweep" />
       <div className="auth-page-grid" />
@@ -116,8 +172,12 @@ export default function PortalVerificationUpdate() {
           <div className="auth-brand-logo-circle">
             <img src={embLogo} alt="EMBR3 Logo" />
           </div>
-          <Title level={2} className="auth-brand-title">SLF Portal</Title>
-          <Text className="auth-brand-subtitle">Sanitary Landfill Generators Portal</Text>
+          <Title level={2} className="auth-brand-title">
+            SLF Portal
+          </Title>
+          <Text className="auth-brand-subtitle">
+            Sanitary Landfill Generators Portal
+          </Text>
         </div>
 
         <div className="auth-card-wrapper auth-card-wrapper-login">
@@ -126,26 +186,49 @@ export default function PortalVerificationUpdate() {
               <div className="auth-avatar" style={{ background: "#fa8c16" }}>
                 <WarningOutlined />
               </div>
-              <Title level={3} className="auth-card-title">Verification Required</Title>
-              <Text className="auth-card-subtitle">Please update your information to continue</Text>
+              <Title level={3} className="auth-card-title">
+                Verification Required
+              </Title>
+              <Text className="auth-card-subtitle">
+                Please update your information to continue
+              </Text>
             </div>
 
             <Alert
-              type="warning"
+              type={verificationSubmitted ? "info" : "warning"}
               showIcon
               style={{ marginBottom: 20 }}
-              title="Action Required"
-              description="The administrator requires you to update your verification details. Please fill in the fields below and upload your authorization letter before proceeding."
+              title={
+                verificationSubmitted
+                  ? "Pending Admin Review"
+                  : "Action Required"
+              }
+              description={
+                verificationSubmitted
+                  ? "Your latest verification attachment has been submitted. Please wait for admin review before accessing the portal."
+                  : "The administrator requires you to update your verification details. Please fill in the fields below and upload your authorization letter before proceeding."
+              }
             />
 
-            <Form form={form} name="verify-update" size="large" onFinish={onFinish} layout="vertical" requiredMark={false} className="auth-form">
-
+            <Form
+              form={form}
+              name="verify-update"
+              size="large"
+              onFinish={onFinish}
+              layout="vertical"
+              requiredMark={false}
+              className="auth-form"
+            >
               <Form.Item
                 name="officeEmail"
                 label="Office Email Address"
                 rules={[{ type: "email", message: "Enter a valid email" }]}
               >
-                <Input prefix={<MailOutlined style={{ color: "#1a3353" }} />} placeholder="office@example.com" />
+                <Input
+                  disabled={checkingStatus || verificationSubmitted}
+                  prefix={<MailOutlined style={{ color: "#1a3353" }} />}
+                  placeholder="office@example.com"
+                />
               </Form.Item>
 
               <Form.Item
@@ -153,13 +236,19 @@ export default function PortalVerificationUpdate() {
                 label="PCO Email Address"
                 rules={[{ type: "email", message: "Enter a valid email" }]}
               >
-                <Input prefix={<MailOutlined style={{ color: "#1a3353" }} />} placeholder="pco@example.com" />
+                <Input
+                  disabled={checkingStatus || verificationSubmitted}
+                  prefix={<MailOutlined style={{ color: "#1a3353" }} />}
+                  placeholder="pco@example.com"
+                />
               </Form.Item>
 
               <Form.Item
                 label={
                   <span>
-                    <FileProtectOutlined style={{ marginRight: 6, color: "#fa8c16" }} />
+                    <FileProtectOutlined
+                      style={{ marginRight: 6, color: "#fa8c16" }}
+                    />
                     Authorization Letter / Proof of Identity
                     <span style={{ color: "#ff4d4f", marginLeft: 4 }}>*</span>
                   </span>
@@ -171,11 +260,21 @@ export default function PortalVerificationUpdate() {
                   onRemove={onRemoveFile}
                   fileList={verificationFile ? [verificationFile] : []}
                   accept=".jpg,.jpeg,.png,.gif,.webp,.pdf,.doc,.docx"
+                  disabled={checkingStatus || verificationSubmitted}
                 >
-                  <Button icon={<UploadOutlined />}>Select File</Button>
+                  <Button
+                    disabled={checkingStatus || verificationSubmitted}
+                    icon={<UploadOutlined />}
+                  >
+                    Select File
+                  </Button>
                 </Upload>
-                <Text type="secondary" style={{ fontSize: 12, marginTop: 4, display: "block" }}>
-                  Upload the letter you received from the office confirming your authorization. Max {MAX_FILE_MB} MB.
+                <Text
+                  type="secondary"
+                  style={{ fontSize: 12, marginTop: 4, display: "block" }}
+                >
+                  Upload the letter you received from the office confirming your
+                  authorization. Max {MAX_FILE_MB} MB.
                 </Text>
               </Form.Item>
 
@@ -184,10 +283,13 @@ export default function PortalVerificationUpdate() {
                   className="auth-btn-primary"
                   type="primary"
                   htmlType="submit"
-                  loading={loading}
+                  loading={loading || checkingStatus}
+                  disabled={verificationSubmitted}
                   block
                 >
-                  Submit Verification
+                  {verificationSubmitted
+                    ? "Awaiting Admin Review"
+                    : "Submit Verification"}
                 </Button>
               </Form.Item>
               <Form.Item style={{ marginBottom: 0, marginTop: 10 }}>
@@ -200,7 +302,9 @@ export default function PortalVerificationUpdate() {
         </div>
       </div>
 
-      <div className="auth-page-footer">&copy; 2026 EMBR3 &mdash; Environmental Management Bureau Region III</div>
+      <div className="auth-page-footer">
+        &copy; 2026 EMBR3 &mdash; Environmental Management Bureau Region III
+      </div>
     </div>
   );
 }

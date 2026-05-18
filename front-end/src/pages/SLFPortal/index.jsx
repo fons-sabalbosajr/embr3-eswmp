@@ -230,6 +230,38 @@ const isUnavailableCellStatus = (status) =>
     String(status || ""),
   );
 
+const UPLOAD_REQUIRED_FIELDS = {
+  truck: [
+    { field: "disposalTicketNo", label: "Ticket No.", matches: (key) => key.includes("ticket") || key.includes("disposal") },
+    { field: "hauler", label: "Hauler", matches: (key) => key.includes("hauler") },
+    { field: "plateNumber", label: "Plate No.", matches: (key) => key.includes("plate") },
+    { field: "actualVolume", label: "Actual Volume", matches: (key) => key.includes("volume") && !key.includes("unit") },
+    { field: "wasteType", label: "Waste Type", matches: (key) => key.includes("waste") && key.includes("type") },
+  ],
+  hauler: [
+    { field: "haulerName", label: "Hauler Name", matches: (key) => key.includes("hauler") || key.includes("name") },
+    { field: "numberOfTrucks", label: "Number of Trucks", matches: (key) => key.includes("truck") || key.includes("number") },
+    { field: "plateNumber", label: "Plate No.", matches: (key) => key.includes("plate") },
+    { field: "vehicleType", label: "Vehicle Type", matches: (key) => key.includes("vehicle") || key.includes("type") },
+    { field: "capacity", label: "Capacity", matches: (key) => key.includes("capacity") && !key.includes("unit") },
+  ],
+};
+
+const isEmptyUploadValue = (value) =>
+  value === undefined || value === null || (typeof value === "string" && value.trim() === "");
+
+const getUploadMissingColumns = (headers, type) => {
+  const normalizedHeaders = headers.map((header) => String(header || "").toLowerCase().trim());
+  return (UPLOAD_REQUIRED_FIELDS[type] || []).filter(
+    (field) => !normalizedHeaders.some((header) => field.matches(header)),
+  ).map((field) => field.label);
+};
+
+const getUploadRowErrors = (row, type) =>
+  (UPLOAD_REQUIRED_FIELDS[type] || [])
+    .filter((field) => isEmptyUploadValue(row[field.field]))
+    .map((field) => field.label);
+
 
 export default function SLFPortal() {
   const navigate = useNavigate();
@@ -262,6 +294,7 @@ export default function SLFPortal() {
   const [baselineSaved, setBaselineSaved] = useState(false);
   const [baselineUpdatePending, setBaselineUpdatePending] = useState(false);
   const [baselineUpdateLoading, setBaselineUpdateLoading] = useState(false);
+  const [baselineRefreshLoading, setBaselineRefreshLoading] = useState(false);
   const [baselineSavingLoading, setBaselineSavingLoading] = useState(false);
   const [slfInfo, setSlfInfo] = useState(null);
   const [slfInfoLoading, setSlfInfoLoading] = useState(false);
@@ -351,6 +384,7 @@ export default function SLFPortal() {
   const [uploadGuideType, setUploadGuideType] = useState(null); // pending type for guide → pick
   const [uploadPreviewData, setUploadPreviewData] = useState([]);
   const [uploadPreviewColumns, setUploadPreviewColumns] = useState([]);
+  const [uploadMissingColumns, setUploadMissingColumns] = useState([]);
   // My Requests / Activity Log states
   const [myRequests, setMyRequests] = useState([]);
   const [myRequestsLoading, setMyRequestsLoading] = useState(false);
@@ -358,6 +392,9 @@ export default function SLFPortal() {
   const [faqActiveKey, setFaqActiveKey] = useState([]);
   // Profile modal
   const [profileModalOpen, setProfileModalOpen] = useState(false);
+  const watchedCompanyName = Form.useWatch("lguCompanyName", companyForm);
+  const watchedDisposalDate = Form.useWatch("dateOfDisposal", entryForm);
+  const reviewSubmitDisabled = !String(watchedCompanyName || "").trim() || !watchedDisposalDate || trucks.length === 0;
   // Facility management modals (Leachate, Gas Management, Trash Slide, Fire Prevention)
   const [leachateModalOpen, setLeachateModalOpen] = useState(false);
   const [gasVentModalOpen, setGasVentModalOpen] = useState(false);
@@ -628,6 +665,10 @@ export default function SLFPortal() {
       navigate("/slfportal/login");
       return;
     }
+    if (user.verificationRequired) {
+      navigate("/slfportal/verify-update", { replace: true });
+      return;
+    }
     setPortalUser(user);
     setLoadingUser(false);
 
@@ -639,8 +680,14 @@ export default function SLFPortal() {
           ...user,
           status: data.status,
           isVerified: data.isVerified,
+          verificationRequired: data.verificationRequired,
+          verificationSubmitted: data.verificationSubmitted,
         };
         secureStorage.setJSON("portal_user", refreshed);
+        if (data.verificationRequired) {
+          navigate("/slfportal/verify-update", { replace: true });
+          return;
+        }
         setPortalUser(refreshed);
       })
       .catch(() => {});
@@ -1557,6 +1604,29 @@ export default function SLFPortal() {
     }
   };
 
+  const refreshBaselineStatus = async () => {
+    if (!activeSlfName) return;
+    setBaselineRefreshLoading(true);
+    try {
+      const { data } = await api.get(`/data-slf/baseline/${encodeURIComponent(activeSlfName)}`);
+      if (data && (data.totalVolumeAccepted != null || data.activeCellEntries?.length || data.closedCellEntries?.length)) {
+        if (data.baselineUpdateApproved) {
+          setBaselineSaved(false);
+          setBaselineUpdatePending(false);
+          Swal.fire({ icon: "success", title: "Baseline Editing Unlocked", timer: 1400, showConfirmButton: false });
+        } else {
+          setBaselineSaved(true);
+          setBaselineUpdatePending(!!data.baselineUpdateRequested);
+          Swal.fire({ icon: "info", title: data.baselineUpdateRequested ? "Still Awaiting Approval" : "Baseline Still Locked", timer: 1400, showConfirmButton: false });
+        }
+      }
+    } catch (err) {
+      Swal.fire({ icon: "error", title: "Refresh Failed", text: err.response?.data?.message || "Could not refresh baseline status." });
+    } finally {
+      setBaselineRefreshLoading(false);
+    }
+  };
+
   // ── Save Portal Baseline Update (after admin approval) ──
   const handleSaveBaselinePortal = async () => {
     const confirm = await Swal.fire({
@@ -1922,6 +1992,9 @@ export default function SLFPortal() {
           });
           return;
         }
+        const headers = Object.keys(jsonData[0] || {});
+        const missingColumns = getUploadMissingColumns(headers, effectiveType);
+        setUploadMissingColumns(missingColumns);
         // Normalize column names
         const normalized = jsonData.map((row, i) => {
           const normalized = { key: `upload-${i}-${Date.now()}` };
@@ -1966,7 +2039,10 @@ export default function SLFPortal() {
                   .filter(Boolean);
             }
           }
-          return normalized;
+          return {
+            ...normalized,
+            _errors: getUploadRowErrors(normalized, effectiveType),
+          };
         });
         setUploadPreviewData(normalized);
 
@@ -1992,6 +2068,14 @@ export default function SLFPortal() {
             },
             { title: "Volume", dataIndex: "actualVolume", key: "actualVolume" },
             { title: "Waste Type", dataIndex: "wasteType", key: "wasteType" },
+            {
+              title: "Validation",
+              key: "validation",
+              width: 180,
+              render: (_, row) => row._errors?.length
+                ? <Tag color="red">Missing: {row._errors.join(", ")}</Tag>
+                : <Tag color="green">Ready</Tag>,
+            },
             {
               title: "Actions",
               key: "actions",
@@ -2040,6 +2124,14 @@ export default function SLFPortal() {
               key: "vehicleType",
             },
             { title: "Capacity", dataIndex: "capacity", key: "capacity" },
+            {
+              title: "Validation",
+              key: "validation",
+              width: 180,
+              render: (_, row) => row._errors?.length
+                ? <Tag color="red">Missing: {row._errors.join(", ")}</Tag>
+                : <Tag color="green">Ready</Tag>,
+            },
             {
               title: "Actions",
               key: "actions",
@@ -2092,6 +2184,16 @@ export default function SLFPortal() {
 
   const handleConfirmUpload = () => {
     if (uploadPreviewData.length === 0) return;
+    const invalidRows = uploadPreviewData.filter((row) => row._errors?.length);
+    if (uploadMissingColumns.length > 0 || invalidRows.length > 0) {
+      Swal.fire({
+        icon: "warning",
+        title: "Preview Has Missing Data",
+        text: "Please fix the missing columns or row values shown in the preview before importing.",
+        confirmButtonColor: "#1a3353",
+      });
+      return;
+    }
     if (uploadType === "truck") {
       const newTrucks = uploadPreviewData.map((d) => ({
         key: d.key,
@@ -2139,6 +2241,7 @@ export default function SLFPortal() {
     }
     setUploadModalOpen(false);
     setUploadPreviewData([]);
+    setUploadMissingColumns([]);
     Swal.fire({
       icon: "success",
       title: "Data Imported",
@@ -2151,7 +2254,11 @@ export default function SLFPortal() {
   // Update preview data cell
   const updateUploadCell = (key, field, value) => {
     setUploadPreviewData((prev) =>
-      prev.map((r) => (r.key === key ? { ...r, [field]: value } : r)),
+      prev.map((row) => {
+        if (row.key !== key) return row;
+        const updated = { ...row, [field]: value };
+        return { ...updated, _errors: getUploadRowErrors(updated, uploadType || "truck") };
+      }),
     );
   };
 
@@ -3257,6 +3364,7 @@ export default function SLFPortal() {
               icon={<SendOutlined />}
               onClick={handleReviewOpen}
               loading={loading}
+              disabled={reviewSubmitDisabled}
               className="slf-primary-btn"
               size={isMobile ? "middle" : "large"}
               style={{
@@ -4480,6 +4588,7 @@ export default function SLFPortal() {
                               : "Baseline data is locked after your first submission. To request changes, click the button."}
                           </Text>
                         </div>
+                        <Space wrap>
                         {!baselineUpdatePending && (
                           <Button
                             type="primary"
@@ -4503,6 +4612,15 @@ export default function SLFPortal() {
                             Awaiting Approval
                           </Tag>
                         )}
+                          <Button
+                            size="small"
+                            icon={<ReloadOutlined />}
+                            loading={baselineRefreshLoading}
+                            onClick={refreshBaselineStatus}
+                          >
+                            Refresh
+                          </Button>
+                        </Space>
                       </div>
                     )}
                     <Form
@@ -6075,8 +6193,10 @@ export default function SLFPortal() {
         setUploadGuideType={setUploadGuideType}
         uploadPreviewData={uploadPreviewData}
         uploadPreviewColumns={uploadPreviewColumns}
+        uploadMissingColumns={uploadMissingColumns}
         setUploadPreviewData={setUploadPreviewData}
         setUploadPreviewColumns={setUploadPreviewColumns}
+        setUploadMissingColumns={setUploadMissingColumns}
         activeCellModalOpen={activeCellModalOpen}
         setActiveCellModalOpen={setActiveCellModalOpen}
         activeCellDraft={activeCellDraft}
