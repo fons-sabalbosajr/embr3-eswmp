@@ -63,8 +63,8 @@ const { Option } = Select;
 const ACCENT = "#2f54eb";
 const CACHE_KEY = "submissions-cache";
 const CACHE_TTL = 10 * 60 * 1000;
-const SUBMISSION_MODAL_WIDTH = 1120;
-const TRANSACTION_HISTORY_MODAL_WIDTH = 1180;
+const SUBMISSION_MODAL_WIDTH = 1220;
+const TRANSACTION_HISTORY_MODAL_WIDTH = 1400;
 
 export default function SubmissionSettings({canEdit = true, canDelete = true, isDark}) {
   const [data, setData] = useState([]);
@@ -482,7 +482,7 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, is
     }
   };
 
-  const getTxnHistoryKey = (record) => record?.submissionId || record?.idNo || record?._id || null;
+  const getTxnHistoryKey = (record) => record?.idNo || record?.submissionId || record?._id || null;
 
   const handleAdminRevert = async () => {
     if (!revertReason.trim()) {
@@ -957,7 +957,7 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, is
                   </Button>
                 </>
               )}
-              <Button onClick={() => setViewRecord(null)}>Close</Button>
+              <Button type="primary" onClick={() => setViewRecord(null)}>Close</Button>
             </Space>
           </div>
         }
@@ -1472,6 +1472,8 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, is
                                     rowKey={(_, i) => i}
                                     size="small"
                                     pagination={false}
+                                    style={{ fontSize: 11 }}
+                                    className="hauler-wrap-table"
                                     expandable={{
                                       expandedRowRender: (h) => {
                                         const vehicles =
@@ -1486,6 +1488,8 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, is
                                             rowKey={(_, vi) => vi}
                                             size="small"
                                             pagination={false}
+                                            style={{ fontSize: 11 }}
+                                            className="hauler-wrap-table"
                                             columns={[
                                               { title: "#", key: "idx", width: 40, render: (_, __, vi) => vi + 1 },
                                               { title: "Plate Number", dataIndex: "plateNumber", key: "plate", render: (v) => v || "—" },
@@ -2735,7 +2739,7 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, is
         open={txnHistoryModal.open}
         onCancel={() => setTxnHistoryModal({ open: false, submissionId: null })}
         footer={
-          <Button block onClick={() => setTxnHistoryModal({ open: false, submissionId: null })}>
+          <Button type="primary" block onClick={() => setTxnHistoryModal({ open: false, submissionId: null })}>
             Close
           </Button>
         }

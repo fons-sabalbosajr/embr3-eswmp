@@ -553,8 +553,7 @@ export default function SupportTab({ isDark, canEdit = true, canDelete = true })
                   <Button
                     type="primary"
                     icon={<SendOutlined />}
-                    style={{ background: "#1a3353", borderColor: "#1a3353", borderRadius: 6 }}
-                    loading={replying}
+                    xloading={replying}
                     disabled={!replyText.trim()}
                     onClick={handleReply}
                   >

@@ -17,10 +17,13 @@ const PROVINCE_CODES = {
   "nueva ecija": "NE", nueva_ecija: "NE",
   pampanga: "PA", tarlac: "TA", zambales: "ZA",
 };
+const PSGC_PROVINCE_CODES = DataSLF.PSGC_PROVINCE_CODES || {};
 function getProvinceCode(province) {
   if (!province) return "XX";
-  const key = province.toLowerCase().replace(/^province of\s+/i, "").trim();
-  return PROVINCE_CODES[key] || province.substring(0, 2).toUpperCase();
+  const raw = String(province).trim();
+  if (PSGC_PROVINCE_CODES[raw]) return PSGC_PROVINCE_CODES[raw];
+  const key = raw.toLowerCase().replace(/^province of\s+/i, "").replace(/[_-]+/g, " ").trim();
+  return PROVINCE_CODES[key] || raw.substring(0, 2).toUpperCase();
 }
 
 function getNameVariants(value) {
@@ -1094,6 +1097,52 @@ router.get("/", async (req, res) => {
   }
 });
 
+// Admin: assign submitted truck volumes to specific active SLF cells.
+router.patch("/:id/cell-assignments", async (req, res) => {
+  try {
+    const entry = await DataSLF.findOne({ _id: req.params.id, deletedAt: null });
+    if (!entry) return res.status(404).json({ message: "Entry not found" });
+
+    const assignments = Array.isArray(req.body?.assignments) ? req.body.assignments : [];
+    assignments.forEach((assignment) => {
+      const truckIndex = Number(assignment.truckIndex);
+      if (!Number.isInteger(truckIndex) || truckIndex < 0 || truckIndex >= entry.trucks.length) return;
+      const cellIndex = assignment.cellIndex === null || assignment.cellIndex === undefined || assignment.cellIndex === ""
+        ? undefined
+        : Number(assignment.cellIndex);
+      if (cellIndex !== undefined && (!Number.isInteger(cellIndex) || cellIndex < 0)) return;
+      entry.trucks[truckIndex].cellIndex = cellIndex;
+      entry.trucks[truckIndex].cellName = cellIndex === undefined ? "" : (assignment.cellName || `Cell ${cellIndex + 1}`);
+      entry.trucks[truckIndex].cellType = assignment.cellType || "";
+    });
+    entry.markModified("trucks");
+    await entry.save();
+
+    await Transaction.create({
+      submissionId: entry.submissionId || entry.idNo,
+      dataEntry: entry._id,
+      companyName: entry.lguCompanyName,
+      companyType: entry.companyType,
+      submittedBy: entry.submittedBy || "",
+      type: "cell_assignment",
+      description: `Updated cell assignment for ${entry.idNo || entry.lguCompanyName}`,
+      performedBy: req.logUser || "admin",
+      meta: { idNo: entry.idNo, assignments },
+    });
+
+    notifyAdmin(req, {
+      type: "baseline_update",
+      title: "SLF Cell Assignment Updated",
+      message: `${entry.idNo || entry.lguCompanyName} waste placement was assigned to active cells`,
+      meta: { idNo: entry.idNo, dataEntry: entry._id },
+    });
+    refreshAdmin(req, "submissions");
+    res.json({ message: "Cell assignments updated", data: entry });
+  } catch (error) {
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+});
+
 // Update a submission (admin edit)
 router.patch("/:id/admin-edit", async (req, res) => {
   try {
@@ -1484,7 +1533,8 @@ router.post("/repair-xx-ids", async (req, res) => {
 
         if (!provCode) continue; // skip if still unknown
 
-        const parts = doc.idNo.split("-"); // ["SLF", typeCode, "XX", seq]
+        const oldIdNo = doc.idNo;
+        const parts = oldIdNo.split("-"); // ["SLF", typeCode, "XX", seq]
         if (parts.length < 4) continue;
         const typeCode = parts[1];
         const seq = parts[3];
@@ -1496,7 +1546,44 @@ router.post("/repair-xx-ids", async (req, res) => {
           .lean();
         const finalIdNo = existing ? `${newIdNo}-R` : newIdNo;
 
-        await DataSLF.updateOne({ _id: doc._id }, { $set: { idNo: finalIdNo } });
+        const submissionId = doc.submissionId || doc._id.toString();
+        await DataSLF.updateOne(
+          { _id: doc._id },
+          {
+            $set: { idNo: finalIdNo, submissionId },
+            $addToSet: { previousIdNos: oldIdNo },
+          }
+        );
+        await Transaction.updateMany(
+          {
+            $or: [
+              { dataEntry: doc._id },
+              { submissionId: oldIdNo },
+              { submissionId: doc._id.toString() },
+              { "meta.idNo": oldIdNo },
+              { "meta.ids": oldIdNo },
+            ],
+          },
+          {
+            $set: {
+              dataEntry: doc._id,
+              submissionId,
+              "meta.idNo": finalIdNo,
+            },
+            $addToSet: { "meta.previousIdNos": oldIdNo },
+          }
+        );
+        await Transaction.create({
+          submissionId,
+          dataEntry: doc._id,
+          companyName: doc.lguCompanyName,
+          companyType: doc.companyType,
+          submittedBy: doc.submittedBy,
+          type: "admin_edit",
+          description: `Fixed province code ID from ${oldIdNo} to ${finalIdNo}`,
+          performedBy: ADMIN_DISPLAY_NAME,
+          meta: { idNo: finalIdNo, previousIdNo: oldIdNo, repairXX: true },
+        });
         updated++;
       } catch (err) {
         errors.push({ id: doc._id, error: err.message });

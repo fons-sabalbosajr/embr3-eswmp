@@ -13,6 +13,7 @@ const notificationSchema = new mongoose.Schema(
         "status_change",      // admin changed status (acknowledged/rejected)
         "reverted",           // admin reverted a submission
         "new_portal_user",    // new portal user registered
+        "portal_verification_submitted", // portal user submitted/re-submitted verification docs
         "baseline_update_request", // portal user requests baseline field update
         "baseline_update", // portal user/admin saved baseline changes
         "baseline_update_approved", // admin approved baseline update

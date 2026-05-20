@@ -44,6 +44,113 @@ function archiveCurrentVerificationAttachment(user, { note = "", performedBy = "
   return true;
 }
 
+function recordVerificationActivity(user, { action = "reviewed", note = "", performedBy = "" } = {}) {
+  const history = Array.isArray(user.verificationSubmissionHistory)
+    ? user.verificationSubmissionHistory
+    : [];
+  history.push({
+    fileUrl: user.verificationFileUrl || "",
+    fileDriveId: user.verificationFileDriveId || "",
+    fileType: user.verificationFileType || "",
+    officeEmail: user.officeEmail || "",
+    pcoEmail: user.pcoEmail || "",
+    action,
+    note,
+    performedBy,
+    submittedAt: new Date(),
+  });
+  user.verificationSubmissionHistory = history;
+}
+
+function buildPortalActivity(user, submissions = [], transactions = [], conversations = []) {
+  const items = [
+    {
+      type: "account_registered",
+      title: "Account registered",
+      description: `${user.firstName || ""} ${user.lastName || ""}`.trim() || user.email,
+      createdAt: user.createdAt,
+      actor: user.email,
+    },
+  ];
+  if (user.approvedAt) {
+    items.push({
+      type: "account_approved",
+      title: "Account approved",
+      description: Array.isArray(user.assignedSlfName) ? user.assignedSlfName.join(", ") : user.assignedSlfName || "",
+      createdAt: user.approvedAt,
+      actor: "admin",
+    });
+  }
+  if (user.rejectedReason) {
+    items.push({
+      type: "account_rejected",
+      title: "Account rejected",
+      description: user.rejectedReason,
+      createdAt: user.updatedAt,
+      actor: "admin",
+    });
+  }
+  (user.verificationSubmissionHistory || []).forEach((entry) => {
+    items.push({
+      type: `verification_${entry.action || "submitted"}`,
+      title: entry.action === "archived" ? "Verification attachment archived" : entry.action === "reviewed" ? "Verification reviewed" : "Verification attachment submitted",
+      description: entry.note || "",
+      createdAt: entry.submittedAt,
+      actor: entry.performedBy || user.email,
+      attachment: entry.fileUrl ? entry : null,
+    });
+  });
+  submissions.forEach((submission) => {
+    items.push({
+      type: "submission",
+      title: `Submission ${submission.idNo || submission.submissionId || ""}`.trim(),
+      description: `${submission.lguCompanyName || ""} ${submission.status ? `(${submission.status})` : ""}`.trim(),
+      createdAt: submission.createdAt,
+      actor: submission.submittedBy || user.email,
+    });
+  });
+  transactions.forEach((txn) => {
+    items.push({
+      type: txn.type || "transaction",
+      title: txn.description || txn.type || "Transaction",
+      description: txn.companyName || "",
+      createdAt: txn.createdAt,
+      actor: txn.performedBy || txn.submittedBy || "",
+    });
+  });
+  conversations.forEach((thread) => {
+    items.push({
+      type: "conversation",
+      title: `${thread.ticketNo || "Thread"} - ${thread.subject || "Conversation"}`,
+      description: thread.message || "",
+      createdAt: thread.createdAt,
+      actor: thread.source === "admin_message" ? "admin" : thread.portalUserEmail,
+      attachments: thread.attachments || [],
+    });
+    (thread.replies || []).forEach((reply) => {
+      items.push({
+        type: "conversation_reply",
+        title: `Reply to ${thread.ticketNo || thread.subject || "conversation"}`,
+        description: reply.message || "",
+        createdAt: reply.createdAt,
+        actor: reply.repliedByName || reply.repliedBy || "",
+        attachments: reply.attachments || [],
+      });
+    });
+  });
+  return items
+    .filter((item) => item.createdAt)
+    .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+}
+
+function getXXAlias(idNo = "") {
+  const parts = String(idNo || "").split("-");
+  if (parts.length >= 4 && parts[0] === "SLF" && parts[2] && parts[2] !== "XX") {
+    return `SLF-${parts[1]}-XX-${parts[3]}`;
+  }
+  return null;
+}
+
 // All routes require admin auth
 router.use(authMiddleware, adminOnly);
 
@@ -252,12 +359,18 @@ router.patch("/:id/unhold", async (req, res) => {
 // Mark verification as reviewed (admin acknowledges the re-submitted docs)
 router.patch("/:id/review-verification", async (req, res) => {
   try {
-    const user = await UserPortal.findByIdAndUpdate(
-      req.params.id,
-      { verificationRequired: false, verificationSubmitted: false },
-      { returnDocument: "after", runValidators: true }
-    ).select("-password");
+    const user = await UserPortal.findById(req.params.id).select("-password");
     if (!user) return res.status(404).json({ message: "User not found" });
+    if (user.verificationSubmitted || user.verificationRequired) {
+      recordVerificationActivity(user, {
+        action: "reviewed",
+        note: "Admin reviewed the latest verification attachment",
+        performedBy: req.logUser || req.user?.email || req.user?.id || "admin",
+      });
+    }
+    user.verificationRequired = false;
+    user.verificationSubmitted = false;
+    await user.save();
 
     res.json({ message: "Verification reviewed. Account hold cleared.", data: user });
     writeLog("info", "portal.review-verification", {
@@ -344,14 +457,23 @@ router.get("/:id/submission-history", async (req, res) => {
       SupportTicket.find({ $or: [{ portalUser: user._id }, { portalUserEmail: user.email }] }).sort({ updatedAt: -1 }).lean(),
     ]);
     const submissionIds = submissions.map((submission) => submission.submissionId).filter(Boolean);
-    const transactions = submissionIds.length
-      ? await Transaction.find({ submissionId: { $in: submissionIds } }).sort({ createdAt: -1 }).lean()
+    const idNos = submissions.flatMap((submission) => [submission.idNo, getXXAlias(submission.idNo), ...(submission.previousIdNos || [])]).filter(Boolean);
+    const dataEntryIds = submissions.map((submission) => submission._id).filter(Boolean);
+    const txFilters = [];
+    if (submissionIds.length || idNos.length) txFilters.push({ submissionId: { $in: [...submissionIds, ...idNos] } });
+    if (dataEntryIds.length) txFilters.push({ dataEntry: { $in: dataEntryIds } });
+    if (idNos.length) txFilters.push({ "meta.idNo": { $in: idNos } });
+    if (idNos.length) txFilters.push({ "meta.ids": { $in: idNos } });
+    if (idNos.length) txFilters.push({ "meta.previousIdNos": { $in: idNos } });
+    const transactions = txFilters.length
+      ? await Transaction.find({ $or: txFilters }).sort({ createdAt: -1 }).lean()
       : [];
 
     res.json({
       submissions,
       transactions,
       conversations,
+      activity: buildPortalActivity(user, submissions, transactions, conversations),
       verificationHistory: user.verificationSubmissionHistory || [],
     });
   } catch (error) {
@@ -406,7 +528,7 @@ router.post("/:id/message-threads", async (req, res) => {
     const user = await UserPortal.findById(req.params.id).select("-password");
     if (!user) return res.status(404).json({ message: "User not found" });
 
-    const { subject, message, category = "Requirements / Compliance", priority = "Medium" } = req.body || {};
+    const { subject, message, category = "Requirements / Compliance", priority = "Medium", attachments = [] } = req.body || {};
     if (!subject?.trim() || !message?.trim()) {
       return res.status(400).json({ message: "Subject and message are required" });
     }
@@ -422,6 +544,7 @@ router.post("/:id/message-threads", async (req, res) => {
       category,
       priority,
       message: message.trim(),
+      attachments: Array.isArray(attachments) ? attachments : [],
       source: "admin_message",
       status: "in_progress",
     });
@@ -465,7 +588,7 @@ router.post("/:id/message-threads/:threadId/reply", async (req, res) => {
     });
     if (!thread) return res.status(404).json({ message: "Message thread not found" });
 
-    const { message } = req.body || {};
+    const { message, attachments = [] } = req.body || {};
     if (!message?.trim()) return res.status(400).json({ message: "Message is required" });
 
     thread.replies.push({
@@ -473,6 +596,7 @@ router.post("/:id/message-threads/:threadId/reply", async (req, res) => {
       repliedBy: req.user?.email || req.user?.id || "admin",
       repliedByName: req.user?.username || "Admin",
       isAdmin: true,
+      attachments: Array.isArray(attachments) ? attachments : [],
     });
     if (thread.status === "open") thread.status = "in_progress";
     await thread.save();

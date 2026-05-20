@@ -8,6 +8,71 @@ const { authMiddleware, adminOnly } = require("../middleware/auth");
 
 const router = express.Router();
 
+function serializeAnnouncement(item = {}) {
+  return {
+    _id: item._id,
+    enabled: item.enabled !== false,
+    type: item.type || item.portalAnnouncementType || "info",
+    title: item.title || item.portalAnnouncementTitle || "",
+    message: item.message || item.portalAnnouncementMessage || "",
+    startAt: item.startAt ?? item.portalAnnouncementStartAt ?? null,
+    endAt: item.endAt ?? item.portalAnnouncementEndAt ?? null,
+    showOnLogin: item.showOnLogin ?? item.portalAnnouncementShowOnLogin ?? true,
+    showInPortal: item.showInPortal ?? item.portalAnnouncementShowInPortal ?? true,
+    dismissible: item.dismissible ?? item.portalAnnouncementDismissible ?? true,
+    emailSubject: item.emailSubject || item.portalAnnouncementEmailSubject || "",
+    emailMessage: item.emailMessage || item.portalAnnouncementEmailMessage || "",
+    emailLastSentAt: item.emailLastSentAt || item.portalAnnouncementEmailLastSentAt || null,
+  };
+}
+
+function syncCurrentAnnouncement(settings, item) {
+  const ann = serializeAnnouncement(item || {});
+  settings.portalAnnouncementActiveId = item?._id || null;
+  settings.portalAnnouncementEnabled = !!ann.enabled;
+  settings.portalAnnouncementType = ann.type;
+  settings.portalAnnouncementTitle = ann.title;
+  settings.portalAnnouncementMessage = ann.message;
+  settings.portalAnnouncementStartAt = ann.startAt || null;
+  settings.portalAnnouncementEndAt = ann.endAt || null;
+  settings.portalAnnouncementShowOnLogin = ann.showOnLogin !== false;
+  settings.portalAnnouncementShowInPortal = ann.showInPortal !== false;
+  settings.portalAnnouncementDismissible = ann.dismissible !== false;
+  settings.portalAnnouncementCtaLabel = "";
+  settings.portalAnnouncementCtaUrl = "";
+  settings.portalAnnouncementEmailSubject = ann.emailSubject || "";
+  settings.portalAnnouncementEmailMessage = ann.emailMessage || "";
+}
+
+function clearCurrentAnnouncement(settings) {
+  settings.portalAnnouncementActiveId = null;
+  settings.portalAnnouncementEnabled = false;
+  settings.portalAnnouncementTitle = "";
+  settings.portalAnnouncementMessage = "";
+  settings.portalAnnouncementCtaLabel = "";
+  settings.portalAnnouncementCtaUrl = "";
+}
+
+function migrateLegacyAnnouncement(settings) {
+  if ((settings.portalAnnouncements || []).length || !settings.portalAnnouncementTitle && !settings.portalAnnouncementMessage) return;
+  const legacy = {
+    enabled: !!settings.portalAnnouncementEnabled,
+    type: settings.portalAnnouncementType || "info",
+    title: settings.portalAnnouncementTitle || "",
+    message: settings.portalAnnouncementMessage || "",
+    startAt: settings.portalAnnouncementStartAt || null,
+    endAt: settings.portalAnnouncementEndAt || null,
+    showOnLogin: settings.portalAnnouncementShowOnLogin !== false,
+    showInPortal: settings.portalAnnouncementShowInPortal !== false,
+    dismissible: settings.portalAnnouncementDismissible !== false,
+    emailSubject: settings.portalAnnouncementEmailSubject || "",
+    emailMessage: settings.portalAnnouncementEmailMessage || "",
+    emailLastSentAt: settings.portalAnnouncementEmailLastSentAt || null,
+  };
+  settings.portalAnnouncements.push(legacy);
+  if (legacy.enabled) settings.portalAnnouncementActiveId = settings.portalAnnouncements[0]._id;
+}
+
 // ── Portal Fields ──
 
 // Get all active fields (for client portal)
@@ -100,6 +165,8 @@ router.get("/app", async (req, res) => {
     if (!settings) {
       settings = await AppSettings.create({});
     }
+    migrateLegacyAnnouncement(settings);
+    if (settings.isModified?.()) await settings.save();
     res.json(settings);
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });
@@ -131,6 +198,77 @@ router.put("/app", async (req, res) => {
   }
 });
 
+router.get("/app/portal-announcements", authMiddleware, adminOnly, async (_req, res) => {
+  try {
+    let settings = await AppSettings.findOne();
+    if (!settings) settings = await AppSettings.create({});
+    migrateLegacyAnnouncement(settings);
+    await settings.save();
+    res.json((settings.portalAnnouncements || []).sort((a, b) => new Date(b.updatedAt || 0) - new Date(a.updatedAt || 0)));
+  } catch (error) {
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+});
+
+router.post("/app/portal-announcements", authMiddleware, adminOnly, async (req, res) => {
+  try {
+    let settings = await AppSettings.findOne();
+    if (!settings) settings = await AppSettings.create({});
+    const item = serializeAnnouncement(req.body);
+    if (!item.title?.trim() || !item.message?.trim()) {
+      return res.status(400).json({ message: "Title and message are required." });
+    }
+    if (item.enabled) settings.portalAnnouncements.forEach((ann) => { ann.enabled = false; });
+    settings.portalAnnouncements.push(item);
+    const savedItem = settings.portalAnnouncements[settings.portalAnnouncements.length - 1];
+    if (item.enabled) syncCurrentAnnouncement(settings, savedItem);
+    await settings.save();
+    clearYearVisibilityCache();
+    res.status(201).json({ message: "Announcement created", data: savedItem, settings });
+  } catch (error) {
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+});
+
+router.put("/app/portal-announcements/:id", authMiddleware, adminOnly, async (req, res) => {
+  try {
+    let settings = await AppSettings.findOne();
+    if (!settings) settings = await AppSettings.create({});
+    const item = settings.portalAnnouncements.id(req.params.id);
+    if (!item) return res.status(404).json({ message: "Announcement not found" });
+    const update = serializeAnnouncement(req.body);
+    if (!update.title?.trim() || !update.message?.trim()) {
+      return res.status(400).json({ message: "Title and message are required." });
+    }
+    if (update.enabled) settings.portalAnnouncements.forEach((ann) => { if (!ann._id.equals(item._id)) ann.enabled = false; });
+    Object.assign(item, update);
+    if (item.enabled) syncCurrentAnnouncement(settings, item);
+    else if (String(settings.portalAnnouncementActiveId || "") === String(item._id)) clearCurrentAnnouncement(settings);
+    await settings.save();
+    clearYearVisibilityCache();
+    res.json({ message: "Announcement updated", data: item, settings });
+  } catch (error) {
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+});
+
+router.delete("/app/portal-announcements/:id", authMiddleware, adminOnly, async (req, res) => {
+  try {
+    let settings = await AppSettings.findOne();
+    if (!settings) settings = await AppSettings.create({});
+    const item = settings.portalAnnouncements.id(req.params.id);
+    if (!item) return res.status(404).json({ message: "Announcement not found" });
+    const wasActive = String(settings.portalAnnouncementActiveId || "") === String(item._id);
+    item.deleteOne();
+    if (wasActive) clearCurrentAnnouncement(settings);
+    await settings.save();
+    clearYearVisibilityCache();
+    res.json({ message: "Announcement deleted" });
+  } catch (error) {
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+});
+
 // Email current or supplied portal announcement to approved portal users
 router.post("/app/portal-announcement/email", authMiddleware, adminOnly, async (req, res) => {
   try {
@@ -138,6 +276,7 @@ router.post("/app/portal-announcement/email", authMiddleware, adminOnly, async (
     if (!settings) settings = await AppSettings.create({});
 
     const announcement = {
+      id: req.body.announcementId,
       title: req.body.title ?? settings.portalAnnouncementTitle,
       message: req.body.message ?? settings.portalAnnouncementMessage,
       subject:
@@ -175,7 +314,12 @@ router.post("/app/portal-announcement/email", authMiddleware, adminOnly, async (
       ),
     );
 
-    settings.portalAnnouncementEmailLastSentAt = new Date();
+    const sentAt = new Date();
+    settings.portalAnnouncementEmailLastSentAt = sentAt;
+    if (announcement.id) {
+      const item = settings.portalAnnouncements.id(announcement.id);
+      if (item) item.emailLastSentAt = sentAt;
+    }
     await settings.save();
 
     const sent = results.filter((result) => result.status === "fulfilled").length;

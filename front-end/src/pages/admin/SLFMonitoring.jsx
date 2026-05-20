@@ -7,6 +7,7 @@ import {
 } from "react";
 import {
   Card,
+  List,
   Table,
   Button,
   Modal,
@@ -38,6 +39,7 @@ import {
   Image,
   message,
   Checkbox,
+  Avatar,
 } from "antd";
 import {
   PlusOutlined,
@@ -267,7 +269,7 @@ const formatVolume = (value, unit = "tons") => {
   return `${number.toLocaleString(undefined, { maximumFractionDigits: number >= 100 ? 0 : 2 })} ${normalizeUnit(unit)}`;
 };
 
-const CACHE_KEY = "slf-facility-cache-v5";
+const CACHE_KEY = "slf-facility-cache-v6";
 const CACHE_TTL = 5 * 60 * 1000;
 
 const R3_PROVINCES = [
@@ -403,6 +405,18 @@ const getPortalVolumeUnit = (baseline, submissions = [], record) =>
 const parseCellIndex = (cellName) => {
   const match = String(cellName || "").match(/(?:cell\s*)?(\d+)/i);
   return match ? Number(match[1]) - 1 : null;
+};
+
+const getTruckCellIndex = (truck) => {
+  if (Number.isInteger(truck?.cellIndex)) return truck.cellIndex;
+  const numericIndex = Number(truck?.cellIndex);
+  if (Number.isInteger(numericIndex) && numericIndex >= 0) return numericIndex;
+  return parseCellIndex(
+    truck?.cellName ||
+      truck?.activeCell ||
+      truck?.cellPlacement ||
+      truck?.submissionCellPlacement,
+  );
 };
 
 const buildBaselineMap = (baselines = []) => {
@@ -558,7 +572,8 @@ const buildFacilityCellUsage = (record, baseline, submissions = []) => {
 
   matchingSubmissions.forEach((submission) => {
     (submission.trucks || []).forEach((truck) => {
-      const targetIndex = findBestCellIndex(rows, truck.wasteType);
+      const explicitIndex = getTruckCellIndex(truck);
+      const targetIndex = findBestCellIndex(rows, truck.wasteType, explicitIndex);
       addVolumeToCell(
         rows[targetIndex] || rows[0],
         Number(truck.actualVolume || 0),
@@ -1742,7 +1757,7 @@ function PortalGenerators({
         if (!st)
           return (
             <Text type="secondary" style={{ fontSize: 11 }}>
-              —
+              -
             </Text>
           );
         return (
@@ -2029,7 +2044,7 @@ function PortalGenerators({
             )}
             {haz.length > 0 && (
               <Tag color="red" style={{ fontSize: 10 }}>
-                Ã¢Å¡Â  {haz.length} Haz/Inert
+                <WarningOutlined /> {haz.length} Haz/Inert
               </Tag>
             )}
           </Space>
@@ -3295,7 +3310,12 @@ export default function SLFMonitoring({
   const [capacityAlertSending, setCapacityAlertSending] = useState(false);
   const [mapPreview, setMapPreview] = useState(null);
   const [slfSubmissions, setSlfSubmissions] = useState([]);
+  const [cellAssignmentModal, setCellAssignmentModal] = useState(null);
+  const [cellAssignmentSaving, setCellAssignmentSaving] = useState(false);
   const [form] = Form.useForm();
+
+  const normalizeSlfSubmissions = (items = []) =>
+    (items || []).map(normalizeSubmissionRecord);
 
   const fetchRecords = useCallback(async (skipCache = false) => {
     await fetchWithCache(
@@ -3310,21 +3330,28 @@ export default function SLFMonitoring({
           api.get("/data-slf/baselines"),
           api.get("/data-slf"),
         ]);
-        setSlfSubmissions(submissions || []);
+        const normalizedSubmissions = normalizeSlfSubmissions(submissions);
+        setSlfSubmissions(normalizedSubmissions);
         const baselineMap = buildBaselineMap(baselines || []);
-        return (facilities || []).map((record) =>
-          enrichFacilityWithBaseline(
-            record,
-            findBaselineForFacility(record, baselineMap),
-            submissions || [],
+        return {
+          records: (facilities || []).map((record) =>
+            enrichFacilityWithBaseline(
+              record,
+              findBaselineForFacility(record, baselineMap),
+              normalizedSubmissions,
+            ),
           ),
-        );
+          submissions: normalizedSubmissions,
+        };
       },
       {
         ttl: CACHE_TTL,
         force: skipCache,
-        onData: (data) =>
-          setRecords(data.map((r) => ({ ...r, ...computeFields(r) }))),
+        onData: (data) => {
+          const rows = Array.isArray(data) ? data : data?.records || [];
+          setSlfSubmissions(Array.isArray(data) ? [] : data?.submissions || []);
+          setRecords(rows.map((r) => ({ ...r, ...computeFields(r) })));
+        },
         onError: () => Swal.fire("Error", "Failed to load records", "error"),
         onStart: () => setLoading(true),
         onEnd: () => setLoading(false),
@@ -3681,6 +3708,79 @@ export default function SLFMonitoring({
         scrpDetails: [],
         galleryItems: [],
       });
+    }
+  };
+
+  const getActiveCellOptions = () => {
+    const count = Number(form.getFieldValue("numberOfCell") || editing?.numberOfCell || 0);
+    const statuses = form.getFieldValue("cellStatuses") || editing?.cellStatuses || [];
+    const types = form.getFieldValue("cellTypes") || editing?.cellTypes || [];
+    return Array.from({ length: count }, (_, index) => {
+      const status = normalizeCellStatus(statuses[index]);
+      return {
+        index,
+        label: `Cell ${index + 1} - ${types[index] || "Residual"} (${status})`,
+        name: `Cell ${index + 1}`,
+        type: types[index] || "Residual",
+        status,
+      };
+    }).filter((cell) => isActiveCellStatus(cell.status));
+  };
+
+  const getEditingSubmissions = () => {
+    const record = editing || {};
+    return (slfSubmissions || [])
+      .filter((submission) => submissionMatchesFacility(record, submission) && hasTruckVolume(submission))
+      .sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0));
+  };
+
+  const openCellAssignmentModal = () => {
+    const submissions = getEditingSubmissions();
+    setCellAssignmentModal({ submissions, selectedId: submissions[0]?._id || null });
+  };
+
+  const updateCellAssignmentLocal = (submissionId, truckIndex, cellIndex) => {
+    const cell = getActiveCellOptions().find((item) => item.index === cellIndex);
+    setCellAssignmentModal((prev) => ({
+      ...prev,
+      submissions: (prev?.submissions || []).map((submission) => {
+        if (submission._id !== submissionId) return submission;
+        const trucks = (submission.trucks || []).map((truck, index) =>
+          index === truckIndex
+            ? { ...truck, cellIndex, cellName: cell?.name || "", cellType: cell?.type || "" }
+            : truck,
+        );
+        return { ...submission, trucks };
+      }),
+    }));
+  };
+
+  const saveCellAssignments = async () => {
+    const submission = (cellAssignmentModal?.submissions || []).find(
+      (item) => item._id === cellAssignmentModal.selectedId,
+    );
+    if (!submission) return;
+    setCellAssignmentSaving(true);
+    try {
+      const assignments = (submission.trucks || []).map((truck, truckIndex) => ({
+        truckIndex,
+        cellIndex: truck.cellIndex,
+        cellName: truck.cellName,
+        cellType: truck.cellType,
+      }));
+      const { data } = await api.patch(`/data-slf/${submission._id}/cell-assignments`, { assignments });
+      const updated = data.data || submission;
+      setSlfSubmissions((prev) => prev.map((item) => item._id === updated._id ? updated : item));
+      setCellAssignmentModal((prev) => ({
+        ...prev,
+        submissions: (prev?.submissions || []).map((item) => item._id === updated._id ? updated : item),
+      }));
+      await fetchRecords(true);
+      Swal.fire("Saved", "Submission waste placement was updated.", "success");
+    } catch (error) {
+      Swal.fire("Error", error.response?.data?.message || "Failed to update cell assignments", "error");
+    } finally {
+      setCellAssignmentSaving(false);
     }
   };
 
@@ -4649,7 +4749,7 @@ export default function SLFMonitoring({
                         size="small"
                       />
                       <Text type="secondary" style={{ fontSize: 11 }}>
-                        {item.province} Ã¢â‚¬Â¢ {item.ownership} Ã¢â‚¬Â¢ {item.status}
+                        {item.province} - {item.ownership} - {item.status}
                       </Text>
                     </div>
                   ))}
@@ -6026,7 +6126,7 @@ export default function SLFMonitoring({
                                             borderRadius: 10,
                                           }}
                                         >
-                                          Ã¢Å“â€œ matches saved
+                                          matches saved
                                         </Tag>
                                       )}
                                   </Space>
@@ -6212,7 +6312,7 @@ export default function SLFMonitoring({
                                             borderRadius: 10,
                                           }}
                                         >
-                                          Ã¢Å“â€œ matches saved
+                                          matches saved
                                         </Tag>
                                       )}
                                   </Space>
@@ -6747,13 +6847,27 @@ export default function SLFMonitoring({
                           />
                         </Form.Item>
                       </Col>
+                      <Col span={16}>
+                        <Form.Item label="Submission Cell Placement">
+                          <Button
+                            icon={<HistoryOutlined />}
+                            onClick={openCellAssignmentModal}
+                            disabled={!editing}
+                          >
+                            View Submission History and Assign Active Cells
+                          </Button>
+                        </Form.Item>
+                      </Col>
                     </Row>
 
                     <Form.Item
                       noStyle
                       dependencies={[
                         "numberOfCell",
+                        "cellCapacities",
                         "cellStatuses",
+                        "cellTypes",
+                        "cellNotes",
                         "cellFillValues",
                         "cellCapacityUnits",
                         "cellFillUnits",
@@ -6786,37 +6900,54 @@ export default function SLFMonitoring({
                                   CELL_STATUS_COLORS["Active Cell"];
                                 return (
                                   <Col span={8} key={i}>
-                                    <Card
+                                    <Collapse
                                       size="small"
+                                      bordered={false}
+                                      defaultActiveKey={[]}
+                                      destroyOnHidden
+                                      expandIconPosition="end"
                                       style={{
                                         borderRadius: 8,
                                         borderLeft: `4px solid ${sc.border}`,
                                         background: isDark ? sc.dark : sc.bg,
                                       }}
-                                      bodyStyle={{ padding: "10px 12px" }}
-                                      title={
-                                        <Space size={6}>
-                                          <div
-                                            style={{
-                                              width: 10,
-                                              height: 10,
-                                              borderRadius: "50%",
-                                              background: sc.border,
-                                              flexShrink: 0,
-                                            }}
-                                          />
-                                          <Text strong style={{ fontSize: 12 }}>
-                                            Cell {i + 1}
-                                          </Text>
-                                          <Tag
-                                            color={sc.tag}
-                                            style={{ fontSize: 10, margin: 0 }}
-                                          >
-                                            {cellStatus}
-                                          </Tag>
-                                        </Space>
-                                      }
-                                    >
+                                      styles={{
+                                        header: { padding: "8px 10px" },
+                                        body: { padding: "10px 12px" },
+                                      }}
+                                      items={[
+                                        {
+                                          key: `cell-${i}`,
+                                          label: (
+                                            <Space size={6} wrap>
+                                              <div
+                                                style={{
+                                                  width: 10,
+                                                  height: 10,
+                                                  borderRadius: "50%",
+                                                  background: sc.border,
+                                                  flexShrink: 0,
+                                                }}
+                                              />
+                                              <Text
+                                                strong
+                                                style={{ fontSize: 12 }}
+                                              >
+                                                Cell {i + 1}
+                                              </Text>
+                                              <Tag
+                                                color={sc.tag}
+                                                style={{
+                                                  fontSize: 10,
+                                                  margin: 0,
+                                                }}
+                                              >
+                                                {cellStatus}
+                                              </Tag>
+                                            </Space>
+                                          ),
+                                          children: (
+                                            <>
                                       <Form.Item
                                         label="Capacity"
                                         style={{ marginBottom: 8 }}
@@ -6971,7 +7102,11 @@ export default function SLFMonitoring({
                                           </Form.Item>
                                         </Space.Compact>
                                       </Form.Item>
-                                    </Card>
+                                            </>
+                                          ),
+                                        },
+                                      ]}
+                                    />
                                   </Col>
                                 );
                               })}
@@ -7207,7 +7342,7 @@ export default function SLFMonitoring({
                                     <div
                                       style={{ fontSize: 10, color: "#8c8c8c" }}
                                     >
-                                      Ã¢â€°Ë†{" "}
+                                      approx.{" "}
                                       {convertVolume(wasteRaw, wasteUnit, "m³").toLocaleString(undefined, {
                                         maximumFractionDigits: 0,
                                       })}{" "}
@@ -7490,7 +7625,7 @@ export default function SLFMonitoring({
                                                 chartData.length > 1 ? 2 : 0
                                               }
                                               dataKey="value"
-                                              isAnimationActive
+                                              isAnimationActive={false}
                                               animationBegin={80}
                                               animationDuration={650}
                                             >
@@ -9112,9 +9247,17 @@ export default function SLFMonitoring({
                               const cellCapacityUnits =
                                 detailViewRecord.cellCapacityUnits || [];
                               const hasAnyBaselineData = Boolean(baselineData);
+                              const hasCellUsageRows =
+                                (detailViewRecord._cellUsageRows || []).some(
+                                  (row) =>
+                                    Number(row?.baseline || 0) > 0 ||
+                                    Number(row?.submissions || 0) > 0 ||
+                                    Number(row?.total || 0) > 0,
+                                );
                               const hasCellBaseline =
-                                baselineData &&
-                                (activeCellEntries.some(
+                                hasCellUsageRows ||
+                                (baselineData &&
+                                  (activeCellEntries.some(
                                   (entry) => Number(entry?.volume || 0) > 0,
                                 ) ||
                                   closedCellEntries.some(
@@ -9123,7 +9266,7 @@ export default function SLFMonitoring({
                                   baselineData.activeCellResidualVolume > 0 ||
                                   baselineData.activeCellInertVolume > 0 ||
                                   baselineData.closedCellResidualVolume > 0 ||
-                                  baselineData.closedCellInertVolume > 0);
+                                    baselineData.closedCellInertVolume > 0));
                               return (
                                 <>
                                   <Divider plain orientation="left">
@@ -9165,7 +9308,7 @@ export default function SLFMonitoring({
                                                     : 0
                                                 }
                                                 dataKey="value"
-                                                isAnimationActive
+                                                isAnimationActive={false}
                                                 animationBegin={80}
                                                 animationDuration={650}
                                               >
@@ -9652,10 +9795,14 @@ export default function SLFMonitoring({
                                                   cellName:
                                                     entry.cellName ||
                                                     `Cell ${i + 1}`,
-                                                  cellStatus: "Active Cell",
-                                                  wasteType:
+                                                  status: "Active Cell",
+                                                  type:
                                                     entry.wasteType ||
                                                     "Residual",
+                                                  isHazardous:
+                                                    isHazardousCellType(
+                                                      entry.wasteType,
+                                                    ),
                                                   baseline: Number(
                                                     entry.volume || 0,
                                                   ),
@@ -9680,10 +9827,14 @@ export default function SLFMonitoring({
                                                   cellName:
                                                     entry.cellName ||
                                                     `Closed Cell ${i + 1}`,
-                                                  cellStatus: "Used/Completed",
-                                                  wasteType:
+                                                  status: "Used/Completed",
+                                                  type:
                                                     entry.wasteType ||
                                                     "Residual",
+                                                  isHazardous:
+                                                    isHazardousCellType(
+                                                      entry.wasteType,
+                                                    ),
                                                   baseline: Number(
                                                     entry.volume || 0,
                                                   ),
@@ -9731,37 +9882,46 @@ export default function SLFMonitoring({
                                           title: "Status",
                                           dataIndex: "status",
                                           width: 130,
-                                          render: (v) => (
+                                          render: (v, row) => {
+                                            const status = normalizeCellStatus(
+                                              v || row.cellStatus,
+                                            );
+                                            return (
                                             <Tag
                                               color={
-                                                v === "Operational"
+                                                isActiveCellStatus(status)
                                                   ? "green"
-                                                  : v === "Closed"
+                                                  : isCompletedCellStatus(status)
                                                     ? "default"
                                                     : "gold"
                                               }
                                             >
-                                              {v || "Operational"}
+                                              {status || "Active Cell"}
                                             </Tag>
-                                          ),
+                                            );
+                                          },
                                         },
                                         {
                                           title: "Type",
                                           dataIndex: "type",
                                           width: 120,
-                                          render: (v) => (
-                                            <Tag
-                                              color={
-                                                isHazardousCellType(v)
-                                                  ? "red"
-                                                  : "blue"
-                                              }
-                                            >
-                                              {isHazardousCellType(v)
-                                                ? "Treated Haz Waste"
-                                                : "Residual"}
-                                            </Tag>
-                                          ),
+                                          render: (v, row) => {
+                                            const type =
+                                              v || row.wasteType || "Residual";
+                                            return (
+                                              <Tag
+                                                color={
+                                                  isHazardousCellType(type)
+                                                    ? "red"
+                                                    : "blue"
+                                                }
+                                              >
+                                                {isHazardousCellType(type)
+                                                  ? "Treated Haz Waste"
+                                                  : "Residual"}
+                                              </Tag>
+                                            );
+                                          },
                                         },
                                         {
                                           title: "Baseline Volume",
@@ -9886,6 +10046,7 @@ export default function SLFMonitoring({
                                         <Collapse
                                           size="small"
                                           bordered={false}
+                                          destroyOnHidden
                                           style={{ marginBottom: 8 }}
                                           items={[
                                             {
@@ -9896,7 +10057,7 @@ export default function SLFMonitoring({
                                                     style={{ color: "#2f54eb" }}
                                                   />
                                                   <Text strong>
-                                                    Baseline Cell Volumes
+                                                    Submission Cell Placement
                                                   </Text>
                                                   <Tag color="blue">
                                                     {cellRows.length} cell
@@ -10215,7 +10376,7 @@ export default function SLFMonitoring({
                                               capacityData.length > 1 ? 3 : 0
                                             }
                                             dataKey="value"
-                                            isAnimationActive
+                                            isAnimationActive={false}
                                             animationBegin={80}
                                             animationDuration={650}
                                             label={({ name, value }) =>
@@ -10369,7 +10530,7 @@ export default function SLFMonitoring({
                                             outerRadius={80}
                                             paddingAngle={3}
                                             dataKey="value"
-                                            isAnimationActive
+                                            isAnimationActive={false}
                                             animationBegin={80}
                                             animationDuration={650}
                                             label={({ name, value }) =>
@@ -11187,6 +11348,7 @@ export default function SLFMonitoring({
                                                   Registered Vehicles
                                                 </Text>
                                                 <Table
+                                                  className="hauler-wrap-table"
                                                   dataSource={vehicles}
                                                   rowKey={(_, vi) => vi}
                                                   size="small"
@@ -11239,6 +11401,7 @@ export default function SLFMonitoring({
                                                   Private Sector Clients
                                                 </Text>
                                                 <Table
+                                                  className="hauler-wrap-table"
                                                   dataSource={clients}
                                                   rowKey={(_, ci) => ci}
                                                   size="small"
@@ -11949,6 +12112,125 @@ export default function SLFMonitoring({
                 },
               ]}
             />
+          );
+        })()}
+      </Modal>
+      <Modal
+        title={<Space><HistoryOutlined />Submission History and Cell Placement</Space>}
+        open={!!cellAssignmentModal}
+        onCancel={() => setCellAssignmentModal(null)}
+        width={980}
+        footer={[
+          <Button key="close" onClick={() => setCellAssignmentModal(null)}>Close</Button>,
+          <Button
+            key="save"
+            type="primary"
+            loading={cellAssignmentSaving}
+            onClick={saveCellAssignments}
+            disabled={
+              !cellAssignmentModal?.selectedId ||
+              getActiveCellOptions().length === 0
+            }
+          >
+            Save Placement
+          </Button>,
+        ]}
+        destroyOnHidden
+      >
+        {cellAssignmentModal && (() => {
+          const activeCells = getActiveCellOptions();
+          const selected = (cellAssignmentModal.submissions || []).find(
+            (submission) => submission._id === cellAssignmentModal.selectedId,
+          );
+          return (
+            <Space direction="vertical" size={12} style={{ width: "100%" }}>
+              <Alert
+                type={activeCells.length === 0 ? "warning" : "info"}
+                showIcon
+                message={
+                  activeCells.length === 0
+                    ? "No active cells are available. Turn on at least one cell before assigning submitted truck volumes."
+                    : "Assign each submitted truck volume to the active cell where the waste was actually placed."
+                }
+              />
+              <Row gutter={12}>
+                <Col xs={24} md={9}>
+                  <List
+                    size="small"
+                    bordered
+                    dataSource={cellAssignmentModal.submissions || []}
+                    locale={{ emptyText: "No portal submissions found for this SLF" }}
+                    renderItem={(submission) => (
+                      <List.Item
+                        onClick={() => setCellAssignmentModal((prev) => ({ ...prev, selectedId: submission._id }))}
+                        style={{
+                          cursor: "pointer",
+                          background: submission._id === cellAssignmentModal.selectedId
+                            ? (isDark ? "rgba(22,119,255,0.16)" : "#e6f4ff")
+                            : "transparent",
+                        }}
+                      >
+                        <List.Item.Meta
+                          avatar={<Avatar icon={<FileTextOutlined />} />}
+                          title={<Text strong>{submission.idNo || "No ID"}</Text>}
+                          description={`${submission.lguCompanyName || "Unnamed"} - ${submission.createdAt ? dayjs(submission.createdAt).format("MM/DD/YYYY") : "No date"}`}
+                        />
+                      </List.Item>
+                    )}
+                  />
+                </Col>
+                <Col xs={24} md={15}>
+                  {!selected ? (
+                    <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="Select a submission" />
+                  ) : (
+                    <Table
+                      className="portal-user-wrap-table"
+                      size="small"
+                      rowKey={(truck, index) =>
+                        truck._id ||
+                        truck.key ||
+                        `${truck.disposalTicketNo || truck.plateNumber || "truck"}-${index}`
+                      }
+                      pagination={false}
+                      dataSource={selected.trucks || []}
+                      locale={{
+                        emptyText: "No truck records found in this portal submission",
+                      }}
+                      columns={[
+                        { title: "Truck / Plate", width: 150, render: (_, truck) => <Text>{truck.plateNumber || truck.disposalTicketNo || "-"}</Text> },
+                        { title: "Waste Type", width: 150, render: (_, truck) => <Tag>{truck.wasteType || "Residual"}</Tag> },
+                        {
+                          title: "Volume",
+                          width: 120,
+                          render: (_, truck) => `${Number(truck.actualVolume || 0).toLocaleString()} ${normalizeUnit(truck.actualVolumeUnit || "tons")}`,
+                        },
+                        {
+                          title: "Active Cell",
+                          render: (_, truck, truckIndex) => (
+                            <Select
+                              style={{ width: "100%" }}
+                              placeholder="Select active cell"
+                              value={(() => {
+                                const index = getTruckCellIndex(truck);
+                                return activeCells.some(
+                                  (cell) => cell.index === index,
+                                )
+                                  ? index
+                                  : undefined;
+                              })()}
+                              options={activeCells.map((cell) => ({ label: cell.label, value: cell.index }))}
+                              onChange={(value) => updateCellAssignmentLocal(selected._id, truckIndex, value)}
+                              allowClear
+                              disabled={activeCells.length === 0}
+                            />
+                          ),
+                        },
+                      ]}
+                    />
+                  )}
+                </Col>
+              </Row>
+            </Space>
           );
         })()}
       </Modal>

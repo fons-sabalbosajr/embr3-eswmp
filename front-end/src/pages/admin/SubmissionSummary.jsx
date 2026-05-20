@@ -548,13 +548,6 @@ export default function SubmissionSummary({ isDark }) {
                   <Tag color="green">{formatVolume(selectedDayTotals.m3, selectedDayTotals.tons)}</Tag>
                   <Tag color="purple">Baseline + submissions: {formatVolume(selectedCumulativeTotals.m3, selectedCumulativeTotals.tons)}</Tag>
                 </Space>
-                <Alert
-                  type="info"
-                  showIcon
-                  style={{ marginBottom: 12, borderRadius: 8 }}
-                  message="Current Cell Status"
-                  description="Fill is calculated from encoded baseline cell volume plus submissions up to the selected date."
-                />
                 <Table
                   size="small"
                   pagination={false}

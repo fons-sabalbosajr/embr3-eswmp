@@ -37,6 +37,9 @@ const truckSchema = new mongoose.Schema(
     actualVolume: { type: Number },
     actualVolumeUnit: { type: String, enum: ["tons", "m³", "m3"], default: "tons" },
     wasteType: { type: String, enum: ["Residual", "Hazardous Waste", "Treated Hazardous Waste"] },
+    cellIndex: { type: Number },
+    cellName: { type: String, trim: true },
+    cellType: { type: String, trim: true },
     hazWasteCode: [{ type: String, trim: true }],
     lguCompanyName: { type: String, trim: true },
     companyType: { type: String, trim: true },
@@ -73,6 +76,7 @@ const dataSLFSchema = new mongoose.Schema(
     slfName: { type: String, trim: true },
     submissionId: { type: String, trim: true },
     idNo: { type: String, trim: true },
+    previousIdNos: [{ type: String, trim: true }],
 
     // Cell Operations
     currentCellVolume: { type: Number },
@@ -180,8 +184,10 @@ const PSGC_PROVINCE_CODES = {
 
 function getProvinceCode(province) {
   if (!province) return "XX";
-  const key = province.toLowerCase().replace(/^province of\s+/i, "").trim();
-  return PROVINCE_CODES[key] || province.substring(0, 2).toUpperCase();
+  const raw = String(province).trim();
+  if (PSGC_PROVINCE_CODES[raw]) return PSGC_PROVINCE_CODES[raw];
+  const key = raw.toLowerCase().replace(/^province of\s+/i, "").replace(/[_-]+/g, " ").trim();
+  return PROVINCE_CODES[key] || raw.substring(0, 2).toUpperCase();
 }
 
 // Auto-generate the ID No based on province of the SLF
@@ -196,12 +202,20 @@ dataSLFSchema.pre("save", async function () {
       const facility = await SlfFacility.findById(this.slfGenerator).select("province");
       if (facility) province = facility.province || "";
     }
+    if (!province && this.slfName) {
+      const rawName = String(this.slfName).replace(/\s*\(.*?\)\s*/g, " ").trim();
+      const nameRx = new RegExp(`^${rawName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "i");
+      const facility = await SlfFacility.findOne({
+        deletedAt: null,
+        $or: [{ lgu: nameRx }, { province: nameRx }],
+      }).sort({ dataYear: -1 }).select("province");
+      if (facility) province = facility.province || "";
+    }
     let provCode = getProvinceCode(province);
 
     // Fallback 1: use PSGC province code stored on the submission itself
     if (provCode === "XX" && this.companyProvince) {
-      const psgcCode = PSGC_PROVINCE_CODES[this.companyProvince];
-      if (psgcCode) provCode = psgcCode;
+      provCode = getProvinceCode(this.companyProvince);
     }
 
     // Fallback 2: inherit province code from a previous submission for this SLF

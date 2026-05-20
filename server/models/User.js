@@ -16,6 +16,7 @@ const userSchema = new mongoose.Schema(
       default: () => ({
         dashboard: { view: true, edit: true, delete: true },
         submissions: { view: true, edit: true, delete: true },
+        sanitaryLandfills: { view: true, edit: true, delete: true },
         slfMonitoring: { view: true, edit: true, delete: true },
         messaging: { view: true, edit: true, delete: true },
         reports: { view: true, edit: true, delete: true },
@@ -32,8 +33,8 @@ const userSchema = new mongoose.Schema(
         lguAssistDiversion: { view: true, edit: true, delete: true },
         accountSettings: { view: true, edit: true, delete: true },
         portalUsers: { view: true, edit: true, delete: true },
+        portalData: { view: true, edit: true, delete: true },
         portalUserEmail: { view: true, edit: true, delete: true },
-        portalSubmissionHistory: { view: true, edit: true, delete: true },
         portalFields: { view: true, edit: true, delete: true },
         dataReferences: { view: true, edit: true, delete: true },
         baselineData: { view: true, edit: true, delete: true },

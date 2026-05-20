@@ -10,7 +10,7 @@ const router = express.Router();
 // Portal: Create a support ticket
 router.post("/", async (req, res) => {
   try {
-    const { portalUser, portalUserEmail, portalUserName, companyName, slfName, subject, category, priority, message } = req.body;
+    const { portalUser, portalUserEmail, portalUserName, companyName, slfName, subject, category, priority, message, attachments = [] } = req.body;
     if (!portalUserEmail || !subject || !message) {
       return res.status(400).json({ message: "Email, subject, and message are required" });
     }
@@ -25,6 +25,7 @@ router.post("/", async (req, res) => {
       category: category || "General Inquiry",
       priority: priority || "Medium",
       message,
+      attachments: Array.isArray(attachments) ? attachments : [],
     });
     await ticket.save();
 
@@ -120,10 +121,10 @@ router.post("/:id/reply", async (req, res) => {
     const ticket = await SupportTicket.findById(req.params.id);
     if (!ticket) return res.status(404).json({ message: "Ticket not found" });
 
-    const { message, repliedBy, repliedByName, isAdmin } = req.body;
+    const { message, repliedBy, repliedByName, isAdmin, attachments = [] } = req.body;
     if (!message) return res.status(400).json({ message: "Message is required" });
 
-    ticket.replies.push({ message, repliedBy, repliedByName, isAdmin: isAdmin !== false });
+    ticket.replies.push({ message, repliedBy, repliedByName, isAdmin: isAdmin !== false, attachments: Array.isArray(attachments) ? attachments : [] });
     if (ticket.status === "open") ticket.status = "in_progress";
     await ticket.save();
 
@@ -198,10 +199,10 @@ router.post("/:id/portal-reply", async (req, res) => {
     const ticket = await SupportTicket.findById(req.params.id);
     if (!ticket) return res.status(404).json({ message: "Ticket not found" });
 
-    const { message, repliedBy, repliedByName } = req.body;
+    const { message, repliedBy, repliedByName, attachments = [] } = req.body;
     if (!message) return res.status(400).json({ message: "Message is required" });
 
-    ticket.replies.push({ message, repliedBy, repliedByName, isAdmin: false });
+    ticket.replies.push({ message, repliedBy, repliedByName, isAdmin: false, attachments: Array.isArray(attachments) ? attachments : [] });
     await ticket.save();
 
     // Notify admin

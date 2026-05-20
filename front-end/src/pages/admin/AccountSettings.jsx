@@ -50,6 +50,7 @@ const { Option } = Select;
 const PERMISSION_GROUPS = [
   { group: "General", icon: <DashboardOutlined />, color: "#1890ff", items: [
     { key: "dashboard", label: "Dashboard" },
+    { key: "sanitaryLandfills", label: "Sanitary Landfills Menu" },
     { key: "submissions", label: "SLF Submissions" },
     { key: "slfMonitoring", label: "SLF Monitoring" },
     { key: "messaging", label: "Messaging" },
@@ -73,8 +74,8 @@ const PERMISSION_GROUPS = [
   { group: "Settings", icon: <SettingOutlined />, color: "#fa8c16", items: [
     { key: "accountSettings", label: "Accounts & Roles" },
     { key: "portalUsers", label: "Portal User Management" },
+    { key: "portalData", label: "See Portal Data" },
     { key: "portalUserEmail", label: "Portal User Email Menu" },
-    { key: "portalSubmissionHistory", label: "Submission History" },
     { key: "portalFields", label: "Portal Fields" },
     { key: "dataReferences", label: "Data References" },
     { key: "orgChart", label: "Org Chart" },
@@ -106,6 +107,18 @@ export default function AccountSettings({ isDark }) {
   const currentUser = secureStorage.getJSON("user");
   const isDeveloper = currentUser?.role === "developer";
 
+  const buildRolePermissions = (role) => {
+    const updated = {};
+    PERMISSION_GROUPS.forEach((g) =>
+      g.items.forEach((i) => {
+        updated[i.key] = role === "user"
+          ? { view: true, edit: false, delete: false }
+          : { view: true, edit: true, delete: true };
+      })
+    );
+    return updated;
+  };
+
   useEffect(() => {
     fetchUsers();
     const interval = setInterval(fetchUsers, 10000);
@@ -126,8 +139,10 @@ export default function AccountSettings({ isDark }) {
   const handleRoleChange = async (userId, role) => {
     try {
       await api.patch(`/users/${userId}/role`, { role });
+      const permissions = buildRolePermissions(role);
+      await api.patch(`/users/${userId}/permissions`, { permissions });
       setUsers((prev) =>
-        prev.map((u) => (u._id === userId ? { ...u, role } : u))
+        prev.map((u) => (u._id === userId ? { ...u, role, permissions } : u))
       );
       Swal.fire({ icon: "success", title: "Role Updated", timer: 1000, showConfirmButton: false });
     } catch {
@@ -231,10 +246,19 @@ export default function AccountSettings({ isDark }) {
   };
 
   const togglePerm = (key, level) => {
-    setPermEdits((prev) => ({
-      ...prev,
-      [key]: { ...prev[key], [level]: !prev[key]?.[level] },
-    }));
+    setPermEdits((prev) => {
+      const current = prev[key] || { view: true, edit: true, delete: true };
+      const nextValue = !current[level];
+      const next = { ...current, [level]: nextValue };
+      if (level === "view" && !nextValue) {
+        next.edit = false;
+        next.delete = false;
+      }
+      if ((level === "edit" || level === "delete") && nextValue) {
+        next.view = true;
+      }
+      return { ...prev, [key]: next };
+    });
   };
 
   const setAllPerms = (val) => {
@@ -336,7 +360,7 @@ export default function AccountSettings({ isDark }) {
       title: "Role",
       key: "role",
       render: (_, r) => (
-        <Select value={r.role} onChange={(val) => handleRoleChange(r._id, val)} style={{ width: 140 }} size="small">
+        <Select value={r.role} onChange={(val) => handleRoleChange(r._id, val)} style={{ width: 140 }} size="small" disabled={!isDeveloper || r.role === "developer"}>
           <Option value="developer"><CodeOutlined style={{ color: "#722ed1" }} /> Developer</Option>
           <Option value="admin"><CrownOutlined style={{ color: "#faad14" }} /> Admin</Option>
           <Option value="user"><UserOutlined /> User</Option>

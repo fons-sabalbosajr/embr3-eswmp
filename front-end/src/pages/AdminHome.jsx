@@ -33,6 +33,7 @@ import {
   Skeleton,
   List,
   Collapse,
+  Alert,
 } from "antd";
 import {
   DashboardOutlined,
@@ -125,6 +126,20 @@ import {
   GeoJSON,
   useMap,
 } from "react-leaflet";
+import {
+  BarChart,
+  Bar,
+  CartesianGrid,
+  Cell,
+  Line,
+  LineChart,
+  Pie,
+  PieChart as RePieChart,
+  ResponsiveContainer,
+  Tooltip as RechartsTooltip,
+  XAxis,
+  YAxis,
+} from "recharts";
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
 import dayjs from "dayjs";
@@ -322,6 +337,8 @@ export default function AdminHome() {
   const [headerColorDark, setHeaderColorDark] = useState("#141414");
   const [sidebarStyle, setSidebarStyle] = useState("gradient");
   const [portalAnnouncementActive, setPortalAnnouncementActive] = useState(false);
+  const [portalAnnouncementModalOpen, setPortalAnnouncementModalOpen] = useState(false);
+  const [currentPortalAnnouncement, setCurrentPortalAnnouncement] = useState(null);
   const [developerSettingsInitialTab, setDeveloperSettingsInitialTab] = useState("general");
   const [currentTime, setCurrentTime] = useState(dayjs());
   const [profileModalOpen, setProfileModalOpen] = useState(false);
@@ -356,6 +373,7 @@ export default function AdminHome() {
         (!startsAt || startsAt <= now) &&
         (!endsAt || endsAt >= now),
     );
+    setCurrentPortalAnnouncement(settings);
   };
 
   const syncCurrentUser = useCallback(async () => {
@@ -545,6 +563,23 @@ export default function AdminHome() {
     return "No messages yet";
   };
 
+  const applyRealtimeNotification = useCallback((payload = {}) => {
+    fetchNotifications();
+    if (!payload?.title) return;
+    const realtimeItem = {
+      _id: `rt-${Date.now()}`,
+      recipient: "admin",
+      type: payload.type || "notification",
+      title: payload.title,
+      message: payload.message || "",
+      meta: payload.meta || {},
+      read: false,
+      createdAt: new Date().toISOString(),
+    };
+    setNotifications((prev) => [realtimeItem, ...prev].slice(0, 10));
+    setUnreadCount((prev) => prev + 1);
+  }, [fetchNotifications]);
+
   const senderName = (sender) => {
     if (!sender) return "Unknown User";
     return `${sender.firstName || ""} ${sender.lastName || ""}`.trim() || sender.username || sender.email || "Unknown User";
@@ -565,8 +600,13 @@ export default function AdminHome() {
     fetchNotifications();
     fetchMessagePreview();
     const socket = connectSocket("admin", { email: user?.email, userId: user?.id || user?._id });
-    socket.on("notification", () => fetchNotifications());
-    socket.on("data-refresh", () => fetchNotifications());
+    socket.on("notification", applyRealtimeNotification);
+    socket.on("data-refresh", ({ target } = {}) => {
+      fetchNotifications();
+      if (["submissions", "baselines", "tickets", "portal-users", "notifications"].includes(target)) {
+        fetchMessagePreview();
+      }
+    });
     socket.on("internal-message", () => fetchMessagePreview());
     socket.on("message-refresh", () => fetchMessagePreview());
     return () => {
@@ -576,7 +616,7 @@ export default function AdminHome() {
       socket.off("message-refresh");
       disconnectSocket();
     };
-  }, [fetchNotifications, fetchMessagePreview, user?.email, user?.id, user?._id]);
+  }, [applyRealtimeNotification, fetchNotifications, fetchMessagePreview, user?.email, user?.id, user?._id]);
 
   const markMessageThreadRead = async (threadId) => {
     const threadUnread = quickMessages.find((thread) => thread._id === threadId)?.unreadCount || 0;
@@ -600,14 +640,19 @@ export default function AdminHome() {
     if (type === "new_submission") return <InboxOutlined style={{ color: "#2f54eb" }} />;
     if (type === "resubmission") return <ReconciliationOutlined style={{ color: "#13c2c2" }} />;
     if (type === "new_portal_user") return <TeamOutlined style={{ color: "#52c41a" }} />;
+    if (type === "portal_verification_submitted") return <SafetyCertificateOutlined style={{ color: "#722ed1" }} />;
+    if (type === "support_ticket" || type === "support_ticket_reply") return <CustomerServiceOutlined style={{ color: "#fa8c16" }} />;
+    if (type?.includes("baseline")) return <DatabaseOutlined style={{ color: "#1677ff" }} />;
+    if (type?.includes("edit_request")) return <FormOutlined style={{ color: "#eb2f96" }} />;
+    if (type === "cell_capacity_alert") return <WarningOutlined style={{ color: "#faad14" }} />;
     if (type === "portal_user_email") return <MailOutlined style={{ color: "#1677ff" }} />;
     return <BellOutlined style={{ color: "#fa8c16" }} />;
   };
 
   const getNotifTarget = (type) => {
-    if (["new_submission", "resubmission", "baseline_update_request", "baseline_update", "submission_revert_followup", "submission_temp_deleted"].includes(type)) return "slf-waste-generators";
+    if (["new_submission", "resubmission", "baseline_update_request", "baseline_update", "submission_revert_followup", "submission_temp_deleted", "submission_edit_request", "cell_capacity_alert"].includes(type)) return "slf-waste-generators";
     if (["new_portal_user", "portal_verification_submitted", "portal_user_email"].includes(type)) return "settings-portal-users";
-    if (type === "support_ticket") return "dev-support";
+    if (type === "support_ticket" || type === "support_ticket_reply") return "dev-support";
     return null;
   };
 
@@ -679,21 +724,21 @@ export default function AdminHome() {
 
     // ── Sanitary Landfill Monitoring ──
     const slfChildren = [];
-    if (hasAccess("slfMonitoring")) {
+    if (hasAccess("sanitaryLandfills") && hasAccess("slfMonitoring")) {
       slfChildren.push({
         key: "slf-monitoring",
         icon: <ReconciliationOutlined />,
         label: "SLF Data Table",
       });
     }
-    if (hasAccess("submissions") || hasAccess("reports") || hasAccess("baselineData")) {
+    if (hasAccess("sanitaryLandfills") && (hasAccess("submissions") || hasAccess("reports") || hasAccess("baselineData"))) {
       slfChildren.push({
         key: "slf-waste-generators",
         icon: <InboxOutlined />,
         label: "Portal Submissions",
       });
     }
-    if (slfChildren.length > 0) {
+    if (hasAccess("sanitaryLandfills") && slfChildren.length > 0) {
       items.push({
         key: "slf-group",
         icon: <SafetyCertificateOutlined />,
@@ -882,7 +927,7 @@ export default function AdminHome() {
             canEdit={isDeveloper || canEdit("portalUsers")}
             canDelete={isDeveloper || canDelete("portalUsers")}
             canEmail={isDeveloper || hasExplicitAccess("portalUserEmail", "edit")}
-            canViewHistory={isDeveloper || hasExplicitAccess("portalSubmissionHistory")}
+            canSeePortalData={isDeveloper || hasExplicitAccess("portalData")}
           />
         ) : denied;
       case "messaging":
@@ -1124,10 +1169,7 @@ export default function AdminHome() {
                 <Tag
                   color={portalAnnouncementActive ? "green" : "default"}
                   icon={<BellOutlined />}
-                  onClick={() => {
-                    setDeveloperSettingsInitialTab("announcements");
-                    setActiveMenu("dev-settings");
-                  }}
+                  onClick={() => setPortalAnnouncementModalOpen(true)}
                   style={{
                     cursor: "pointer",
                     marginRight: 12,
@@ -1358,6 +1400,54 @@ export default function AdminHome() {
           </div>
         </Layout>
       </Layout>
+
+      <Modal
+        title={<Space><BellOutlined />Portal Announcement</Space>}
+        open={portalAnnouncementModalOpen}
+        onCancel={() => setPortalAnnouncementModalOpen(false)}
+        footer={
+          <Space>
+            <Button
+              onClick={() => {
+                setPortalAnnouncementModalOpen(false);
+                setDeveloperSettingsInitialTab("announcements");
+                setActiveMenu("dev-settings");
+              }}
+            >
+              Manage Announcement
+            </Button>
+            <Button type="primary" onClick={() => setPortalAnnouncementModalOpen(false)}>Close</Button>
+          </Space>
+        }
+        width={620}
+      >
+        {currentPortalAnnouncement?.portalAnnouncementEnabled ? (
+          <Space direction="vertical" size={12} style={{ width: "100%" }}>
+            <Alert
+              type={currentPortalAnnouncement.portalAnnouncementType || "info"}
+              showIcon
+              message={currentPortalAnnouncement.portalAnnouncementTitle || "SLF Portal Announcement"}
+              description={<div style={{ whiteSpace: "pre-wrap" }}>{currentPortalAnnouncement.portalAnnouncementMessage || "No announcement message set."}</div>}
+            />
+            <Descriptions column={1} size="small">
+              <Descriptions.Item label="Login Page">
+                {currentPortalAnnouncement.portalAnnouncementShowOnLogin !== false ? "Shown" : "Hidden"}
+              </Descriptions.Item>
+              <Descriptions.Item label="SLF Portal">
+                {currentPortalAnnouncement.portalAnnouncementShowInPortal !== false ? "Shown" : "Hidden"}
+              </Descriptions.Item>
+              <Descriptions.Item label="Valid From">
+                {currentPortalAnnouncement.portalAnnouncementStartAt ? dayjs(currentPortalAnnouncement.portalAnnouncementStartAt).format("MMM D, YYYY h:mm A") : "Always"}
+              </Descriptions.Item>
+              <Descriptions.Item label="Valid Until">
+                {currentPortalAnnouncement.portalAnnouncementEndAt ? dayjs(currentPortalAnnouncement.portalAnnouncementEndAt).format("MMM D, YYYY h:mm A") : "No end date"}
+              </Descriptions.Item>
+            </Descriptions>
+          </Space>
+        ) : (
+          <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No published portal announcement" />
+        )}
+      </Modal>
 
       <Modal
         title={
@@ -2046,6 +2136,25 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
       render: (v) => dayjs(v).format("MM/DD/YYYY h:mm A"),
     },
   ];
+  const statusChartData = Object.entries(stats?.byStatus || {}).map(([name, value]) => ({
+    name: name ? name.charAt(0).toUpperCase() + name.slice(1) : "Unspecified",
+    value,
+  }));
+  const companyTypeChartData = Object.entries(stats?.byCompanyType || {}).map(([name, value]) => ({
+    name: name || "Unspecified",
+    value,
+  }));
+  const wasteTypeChartData = (stats?.wasteByType || []).map((item) => ({
+    name: item._id || "Unspecified",
+    volume: Number(item.totalVolume || 0),
+    count: item.count || 0,
+  }));
+  const monthlyChartData = months.map((item) => ({
+    name: item.label,
+    submissions: item.count,
+    volume: Number(item.volume || 0),
+  }));
+  const chartPalette = ["#2f54eb", "#52c41a", "#faad14", "#ff4d4f", "#13c2c2", "#722ed1"];
 
   const CURRENT_YEAR = new Date().getFullYear();
 
@@ -8506,6 +8615,78 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                     </Col>
                   </Row>
 
+                  <Row gutter={[16, 16]} style={{ marginBottom: 16 }}>
+                    <Col xs={24} lg={12}>
+                      <Card title={<><BarChartOutlined /> Monthly Submissions</>} size="small" style={{ borderRadius: 10 }} loading={loading}>
+                        <div style={{ height: 260 }}>
+                          <ResponsiveContainer width="100%" height="100%">
+                            <LineChart data={monthlyChartData} margin={{ top: 10, right: 12, left: -12, bottom: 8 }}>
+                              <CartesianGrid strokeDasharray="3 3" stroke={isDark ? "#303030" : "#f0f0f0"} />
+                              <XAxis dataKey="name" tick={{ fontSize: 11 }} />
+                              <YAxis allowDecimals={false} tick={{ fontSize: 11 }} />
+                              <RechartsTooltip />
+                              <Line type="monotone" dataKey="submissions" stroke="#2f54eb" strokeWidth={2.5} dot={{ r: 3 }} name="Submissions" />
+                            </LineChart>
+                          </ResponsiveContainer>
+                        </div>
+                      </Card>
+                    </Col>
+                    <Col xs={24} lg={12}>
+                      <Card title={<><BarChartOutlined /> Waste Volume by Type</>} size="small" style={{ borderRadius: 10 }} loading={loading}>
+                        <div style={{ height: 260 }}>
+                          <ResponsiveContainer width="100%" height="100%">
+                            <BarChart data={wasteTypeChartData} margin={{ top: 10, right: 12, left: -12, bottom: 8 }}>
+                              <CartesianGrid strokeDasharray="3 3" stroke={isDark ? "#303030" : "#f0f0f0"} />
+                              <XAxis dataKey="name" tick={{ fontSize: 11 }} />
+                              <YAxis tick={{ fontSize: 11 }} />
+                              <RechartsTooltip />
+                              <Bar dataKey="volume" name="Volume" radius={[4, 4, 0, 0]}>
+                                {wasteTypeChartData.map((_, index) => (
+                                  <Cell key={index} fill={chartPalette[index % chartPalette.length]} />
+                                ))}
+                              </Bar>
+                            </BarChart>
+                          </ResponsiveContainer>
+                        </div>
+                      </Card>
+                    </Col>
+                    <Col xs={24} lg={12}>
+                      <Card title={<><PieChartOutlined /> Submission Status Share</>} size="small" style={{ borderRadius: 10 }} loading={loading}>
+                        <div style={{ height: 240 }}>
+                          <ResponsiveContainer width="100%" height="100%">
+                            <RePieChart>
+                              <Pie data={statusChartData} dataKey="value" nameKey="name" innerRadius={54} outerRadius={84} paddingAngle={2} label>
+                                {statusChartData.map((_, index) => (
+                                  <Cell key={index} fill={chartPalette[index % chartPalette.length]} />
+                                ))}
+                              </Pie>
+                              <RechartsTooltip />
+                            </RePieChart>
+                          </ResponsiveContainer>
+                        </div>
+                      </Card>
+                    </Col>
+                    <Col xs={24} lg={12}>
+                      <Card title={<><ApartmentOutlined /> Generator Type Mix</>} size="small" style={{ borderRadius: 10 }} loading={loading}>
+                        <div style={{ height: 240 }}>
+                          <ResponsiveContainer width="100%" height="100%">
+                            <BarChart data={companyTypeChartData} layout="vertical" margin={{ top: 10, right: 20, left: 20, bottom: 8 }}>
+                              <CartesianGrid strokeDasharray="3 3" stroke={isDark ? "#303030" : "#f0f0f0"} />
+                              <XAxis type="number" allowDecimals={false} tick={{ fontSize: 11 }} />
+                              <YAxis type="category" dataKey="name" tick={{ fontSize: 11 }} width={80} />
+                              <RechartsTooltip />
+                              <Bar dataKey="value" name="Records" radius={[0, 4, 4, 0]}>
+                                {companyTypeChartData.map((_, index) => (
+                                  <Cell key={index} fill={chartPalette[(index + 2) % chartPalette.length]} />
+                                ))}
+                              </Bar>
+                            </BarChart>
+                          </ResponsiveContainer>
+                        </div>
+                      </Card>
+                    </Col>
+                  </Row>
+
                   <Row gutter={[16, 16]}>
                     <Col xs={24} lg={8}>
                       <Card
@@ -9709,6 +9890,10 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
         )}
       </Modal>
       <div style={{ marginBottom: 16, display: "flex", alignItems: "center", justifyContent: "flex-end", flexWrap: "wrap", gap: 8 }}>
+        <div style={{ marginRight: "auto" }}>
+          <Title level={3} style={{ margin: 0, color: textColor }}>Dashboard</Title>
+          <Text type="secondary">System overview, monitoring summaries, and current portal activity.</Text>
+        </div>
         <Space size="middle">
           {loading && <Spin size="small" />}
         </Space>

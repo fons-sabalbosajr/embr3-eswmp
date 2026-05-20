@@ -3,14 +3,14 @@ import {
   Table, Tag, Button, Space, Modal, Select, Typography,
   Empty, Tooltip, Badge, Card, Descriptions, Avatar,
   Divider, Row, Col, Timeline, Alert, Dropdown, Form,
-  Input, List, Spin, Tabs,
+  Input, List, Spin, Tabs, Collapse,
 } from "antd";
 import {
   CheckCircleOutlined, CloseCircleOutlined, DeleteOutlined,
   EditOutlined, EyeOutlined, ReloadOutlined, UserOutlined,
   MailOutlined, PhoneOutlined, BankOutlined, CalendarOutlined,
   EnvironmentOutlined, ClockCircleOutlined, LockOutlined,
-  UnlockOutlined, BellOutlined, FileDoneOutlined, LinkOutlined,
+  UnlockOutlined, FileDoneOutlined, LinkOutlined,
   FileTextOutlined, FileImageOutlined, SafetyCertificateOutlined,
   MessageOutlined, MoreOutlined, SendOutlined, SearchOutlined,
   HistoryOutlined
@@ -70,7 +70,7 @@ function normalizeVerificationFileUrl(url) {
   return normalized;
 }
 
-export default function PortalUsers({ isDark, canEdit = true, canDelete = true, canEmail = true, canViewHistory = true }) {
+export default function PortalUsers({ isDark, canEdit = true, canDelete = true, canEmail = true, canSeePortalData = true }) {
   const [users, setUsers] = useState([]);
   const [generators, setGenerators] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -85,7 +85,6 @@ export default function PortalUsers({ isDark, canEdit = true, canDelete = true, 
   const [editSlfValue, setEditSlfValue] = useState([]);
   const [editingSlfLoading, setEditingSlfLoading] = useState(false);
   const [holdLoading, setHoldLoading] = useState(false);
-  const [reminderLoading, setReminderLoading] = useState(false);
   const [messageModal, setMessageModal] = useState({ open: false, user: null });
   const [messageThreads, setMessageThreads] = useState([]);
   const [messageLoading, setMessageLoading] = useState(false);
@@ -96,7 +95,8 @@ export default function PortalUsers({ isDark, canEdit = true, canDelete = true, 
   const [emailSending, setEmailSending] = useState(false);
   const [historyModal, setHistoryModal] = useState({ open: false, user: null });
   const [historyLoading, setHistoryLoading] = useState(false);
-  const [historyData, setHistoryData] = useState({ submissions: [], transactions: [], conversations: [], verificationHistory: [] });
+  const [historyData, setHistoryData] = useState({ submissions: [], transactions: [], conversations: [], verificationHistory: [], activity: [] });
+  const [detailActivity, setDetailActivity] = useState({ loading: false, items: [] });
   const [searchText, setSearchText] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
   const [assignmentFilter, setAssignmentFilter] = useState("all");
@@ -323,48 +323,6 @@ export default function PortalUsers({ isDark, canEdit = true, canDelete = true, 
     }
   };
 
-  const handleSendHoldFollowUp = async (record) => {
-    const result = await Swal.fire({
-      title: "Send Hold Account Follow-Up?",
-      html: `A follow-up email with document requirements will be sent to <strong>${record.email}</strong>.`,
-      icon: "info",
-      showCancelButton: true,
-      confirmButtonColor: "#1a3353",
-      confirmButtonText: "Send Email",
-    });
-    if (!result.isConfirmed) return;
-    setReminderLoading(true);
-    try {
-      await api.post(`/portal-users/${record._id}/send-hold-followup`);
-      Swal.fire({ icon: "success", title: "Follow-Up Email Sent", text: `Email sent to ${record.email}.`, confirmButtonColor: "#1a3353" });
-    } catch (err) {
-      Swal.fire("Error", err.response?.data?.message || "Failed to send follow-up email", "error");
-    } finally {
-      setReminderLoading(false);
-    }
-  };
-
-  const handleSendReminder = async (record) => {
-    const result = await Swal.fire({
-      title: "Send Verification Reminder?",
-      html: `An email reminder will be sent to <strong>${record.email}</strong> asking them to update their verification information.`,
-      icon: "info",
-      showCancelButton: true,
-      confirmButtonColor: "#1a3353",
-      confirmButtonText: "Send Email",
-    });
-    if (!result.isConfirmed) return;
-    setReminderLoading(true);
-    try {
-      await api.post(`/portal-users/${record._id}/send-reminder`);
-      Swal.fire({ icon: "success", title: "Reminder Sent", text: `Email sent to ${record.email}.`, confirmButtonColor: "#1a3353" });
-    } catch (err) {
-      Swal.fire("Error", err.response?.data?.message || "Failed to send reminder", "error");
-    } finally {
-      setReminderLoading(false);
-    }
-  };
-
   const handleReviewVerification = async (record) => {
     const result = await Swal.fire({
       title: "Mark Verification as Reviewed?",
@@ -457,7 +415,7 @@ export default function PortalUsers({ isDark, canEdit = true, canDelete = true, 
 
   const openSubmissionHistory = async (record) => {
     setHistoryModal({ open: true, user: record });
-    setHistoryData({ submissions: [], transactions: [], conversations: [], verificationHistory: [] });
+    setHistoryData({ submissions: [], transactions: [], conversations: [], verificationHistory: [], activity: [] });
     setHistoryLoading(true);
     try {
       const { data } = await api.get(`/portal-users/${record._id}/submission-history`);
@@ -466,11 +424,23 @@ export default function PortalUsers({ isDark, canEdit = true, canDelete = true, 
         transactions: data.transactions || [],
         conversations: data.conversations || [],
         verificationHistory: data.verificationHistory || [],
+        activity: data.activity || [],
       });
     } catch (err) {
       Swal.fire("Error", err.response?.data?.message || "Failed to load submission history", "error");
     } finally {
       setHistoryLoading(false);
+    }
+  };
+
+  const openDetails = async (record) => {
+    setDetailModal({ open: true, user: record });
+    setDetailActivity({ loading: true, items: [] });
+    try {
+      const { data } = await api.get(`/portal-users/${record._id}/submission-history`);
+      setDetailActivity({ loading: false, items: data.activity || [] });
+    } catch {
+      setDetailActivity({ loading: false, items: [] });
     }
   };
 
@@ -481,9 +451,9 @@ export default function PortalUsers({ isDark, canEdit = true, canDelete = true, 
       <Space direction="vertical" size={4} style={{ marginTop: 6 }}>
         {list.map((attachment, index) => {
           const url = typeof attachment === "string" ? attachment : attachment.url || attachment.href;
-          const name = typeof attachment === "string" ? `Attachment ${index + 1}` : attachment.name || attachment.fileName || `Attachment ${index + 1}`;
+          const name = typeof attachment === "string" ? `Attachment ${index + 1}` : attachment.name || attachment.fileName || attachment.title || `Attachment ${index + 1}`;
           return url ? (
-            <a key={`${url}-${index}`} href={url} target="_blank" rel="noopener noreferrer">
+            <a key={`${url}-${index}`} href={normalizeVerificationFileUrl(url)} target="_blank" rel="noopener noreferrer">
               <Button size="small" icon={<LinkOutlined />}>{name}</Button>
             </a>
           ) : (
@@ -502,9 +472,82 @@ export default function PortalUsers({ isDark, canEdit = true, canDelete = true, 
     lineHeight: 1.35,
   };
 
+  const cleanText = (value, fallback = "-") => {
+    if (value == null || value === "") return fallback;
+    return String(value)
+      .replace(/m(?:\u00c3\u0192\u00e2\u20ac\u0161\u00c3\u201a\u00c2\u00b3|\u00c3\u201a\u00c2\u00b3|\u00c2\u00b3|\u00b3)/gi, "m3")
+      .replace(/(?:\u00c3\u0192\u00c2\u00a2\u00c3\u00a2\u00e2\u20ac\u0161\u00c2\u00ac\u00c3\u00a2\u00e2\u201a\u00ac\u00c2\u009d|\u00c3\u00a2\u00e2\u201a\u00ac\u00e2\u20ac\u009d|\u00e2\u20ac\u201d|\u2014)/g, "-")
+      .replace(/(?:\u00c3\u201a\u00c2\u00b7|\u00c2\u00b7|\u00b7)/g, "-")
+      .replace(/(?:\u00c3\u0192\u00c2\u00a2\u00c3\u00a2\u00e2\u20ac\u0161\u00c2\u00ac\u00c3\u00a2\u00e2\u20ac\u017e\u00c2\u00a2|\u00c3\u00a2\u00e2\u201a\u00ac\u00e2\u20ac\u017e\u00c2\u00a2|\u2019)/g, "'")
+      .replace(/(?:\u00c3\u00a2\u00e2\u201a\u00ac\u00c5\u201c|\u00c3\u00a2\u00e2\u201a\u00ac\u00c2\u009d|\u201c|\u201d)/g, '"')
+      .replace(/Treated\s+Haz(?:ardous)?\s+Waste/gi, "Treated Hazardous Waste")
+      .trim() || fallback;
+  };
+
   const wrapHistoryText = (value, strong = false) => (
-    <Text strong={strong} style={historyCellStyle}>{value || "—"}</Text>
+    <Text strong={strong} style={historyCellStyle}>{cleanText(value)}</Text>
   );
+
+  const unitText = (unit) => cleanText(unit || "m3").replace(/^m3$/i, "m3");
+  const numText = (value, unit) => value != null && value !== "" ? `${Number(value).toLocaleString()} ${unitText(unit)}` : "-";
+
+  const renderEncodedSubmission = (record) => {
+    const trucks = record.trucks || [];
+    const haulers = record.accreditedHaulers || [];
+    const activeCells = record.activeCellEntries || [];
+    const closedCells = record.closedCellEntries || [];
+    return (
+      <Space direction="vertical" size={12} style={{ width: "100%" }}>
+        <Descriptions size="small" bordered column={{ xs: 1, md: 2 }} className="portal-user-wrap-table">
+          <Descriptions.Item label="ID No.">{cleanText(record.idNo)}</Descriptions.Item>
+          <Descriptions.Item label="Status">{cleanText(record.status || "pending")}</Descriptions.Item>
+          <Descriptions.Item label="SLF">{cleanText(record.slfName || record.slfGenerator?.lgu)}</Descriptions.Item>
+          <Descriptions.Item label="Date of Disposal">{record.dateOfDisposal ? dayjs(record.dateOfDisposal).format("MM/DD/YYYY") : "-"}</Descriptions.Item>
+          <Descriptions.Item label="Company/LGU">{cleanText(record.lguCompanyName)}</Descriptions.Item>
+          <Descriptions.Item label="Company Type">{cleanText(record.companyType)}</Descriptions.Item>
+          <Descriptions.Item label="Address" span={2}>{cleanText(record.address)}</Descriptions.Item>
+          <Descriptions.Item label="Submitted">{record.createdAt ? dayjs(record.createdAt).format("MM/DD/YYYY h:mm A") : "-"}</Descriptions.Item>
+          <Descriptions.Item label="Submitted By">{cleanText(record.submittedBy)}</Descriptions.Item>
+        </Descriptions>
+        <Row gutter={[12, 12]}>
+          <Col xs={24} md={8}><Card size="small"><Text type="secondary">Total Accepted</Text><br /><Text strong>{numText(record.totalVolumeAccepted, record.totalVolumeAcceptedUnit || record.baselineUnit)}</Text></Card></Col>
+          <Col xs={24} md={8}><Card size="small"><Text type="secondary">Active Residual</Text><br /><Text strong>{numText(record.activeCellResidualVolume, record.activeCellResidualUnit || record.baselineUnit)}</Text></Card></Col>
+          <Col xs={24} md={8}><Card size="small"><Text type="secondary">Closed Residual</Text><br /><Text strong>{numText(record.closedCellResidualVolume, record.closedCellResidualUnit || record.baselineUnit)}</Text></Card></Col>
+        </Row>
+        <ResponsiveTable className="portal-user-wrap-table" dataSource={trucks} rowKey={(_, index) => index} size="small" pagination={false} locale={{ emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No encoded trucks" /> }} columns={[
+          { title: "Ticket No.", dataIndex: "disposalTicketNo", width: 130, render: (value) => wrapHistoryText(value) },
+          { title: "Hauler", dataIndex: "hauler", width: 170, render: (value) => wrapHistoryText(value) },
+          { title: "Plate", dataIndex: "plateNumber", width: 130, render: (value) => wrapHistoryText(value) },
+          { title: "Capacity", width: 130, render: (_, row) => wrapHistoryText(row.truckCapacity != null ? `${row.truckCapacity} ${unitText(row.truckCapacityUnit)}` : "") },
+          { title: "Actual Volume", width: 140, render: (_, row) => wrapHistoryText(numText(row.actualVolume, row.actualVolumeUnit || "tons")) },
+          { title: "Waste Type", dataIndex: "wasteType", width: 170, render: (value) => wrapHistoryText(value) },
+        ]} />
+        {(activeCells.length > 0 || closedCells.length > 0) && (
+          <Row gutter={[12, 12]}>
+            <Col xs={24} md={12}><ResponsiveTable className="portal-user-wrap-table" title={() => "Active Cell Entries"} dataSource={activeCells} rowKey={(_, index) => index} pagination={false} columns={[
+              { title: "Cell", dataIndex: "cellName", render: (value) => wrapHistoryText(value) },
+              { title: "Waste", dataIndex: "wasteType", render: (value) => wrapHistoryText(value) },
+              { title: "Volume", render: (_, row) => wrapHistoryText(numText(row.volume, row.unit)) },
+            ]} /></Col>
+            <Col xs={24} md={12}><ResponsiveTable className="portal-user-wrap-table" title={() => "Closed Cell Entries"} dataSource={closedCells} rowKey={(_, index) => index} pagination={false} columns={[
+              { title: "Cell", dataIndex: "cellName", render: (value) => wrapHistoryText(value) },
+              { title: "Waste", dataIndex: "wasteType", render: (value) => wrapHistoryText(value) },
+              { title: "Volume", render: (_, row) => wrapHistoryText(numText(row.volume, row.unit)) },
+            ]} /></Col>
+          </Row>
+        )}
+        <ResponsiveTable className="portal-user-wrap-table" dataSource={haulers} rowKey={(_, index) => index} size="small" pagination={false} locale={{ emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No accredited haulers encoded" /> }} columns={[
+          { title: "Hauler", dataIndex: "haulerName", width: 180, render: (value) => wrapHistoryText(value, true) },
+          { title: "Trucks", dataIndex: "numberOfTrucks", width: 90, render: (value) => wrapHistoryText(value ?? "") },
+          { title: "Office Address", dataIndex: "officeAddress", width: 240, render: (value) => wrapHistoryText(value) },
+          { title: "Clients", dataIndex: "privateSectorClients", width: 280, render: (value) => {
+            const list = Array.isArray(value) ? value : value ? [value] : [];
+            return wrapHistoryText(list.map((item) => typeof item === "string" ? item : item.clientName || "-").join(", "));
+          } },
+        ]} />
+      </Space>
+    );
+  };
 
   const handleCreateMessageThread = async (values) => {
     const user = messageModal.user;
@@ -649,7 +692,7 @@ export default function PortalUsers({ isDark, canEdit = true, canDelete = true, 
           ? names.map((n, i) => <Tag key={i} color="blue" style={{ marginBottom: 2 }}>{n}</Tag>)
           : <Text type="secondary">Not assigned</Text>;
       },
-      width: 240,
+      width: 180,
     },
     {
       title: "Status & Files",
@@ -705,7 +748,7 @@ export default function PortalUsers({ isDark, canEdit = true, canDelete = true, 
           { key: "view", icon: <EyeOutlined />, label: "View Details" },
           { key: "message", icon: <MessageOutlined />, label: "Message User" },
           canEmail && { key: "email-user", icon: <MailOutlined />, label: "Email Portal User" },
-          canViewHistory && { key: "submission-history", icon: <HistoryOutlined />, label: "Submission History" },
+          canSeePortalData && { key: "see-portal-data", icon: <HistoryOutlined />, label: "See Portal Data" },
           { type: "divider" },
           canEdit && record.status === "pending" && { key: "approve", icon: <CheckCircleOutlined />, label: "Approve" },
           canEdit && record.status === "pending" && { key: "reject", icon: <CloseCircleOutlined />, label: "Reject", danger: true },
@@ -720,8 +763,6 @@ export default function PortalUsers({ isDark, canEdit = true, canDelete = true, 
             icon: <UnlockOutlined />,
             label: "Remove Hold",
           },
-          canEmail && record.status === "approved" && { key: "reminder", icon: <BellOutlined />, label: "Send Reminder Email" },
-          canEmail && record.verificationRequired && !record.verificationSubmitted && { key: "hold-followup", icon: <MailOutlined />, label: "Send Hold Follow-Up" },
           canEdit && record.verificationSubmitted && { key: "review", icon: <FileDoneOutlined />, label: "Mark Verification Reviewed" },
           { type: "divider" },
           canDelete && { key: "delete", icon: <DeleteOutlined />, label: "Delete", danger: true },
@@ -733,17 +774,15 @@ export default function PortalUsers({ isDark, canEdit = true, canDelete = true, 
             menu={{
               items: actionItems,
               onClick: ({ key }) => {
-                if (key === "view") setDetailModal({ open: true, user: record });
+                if (key === "view") openDetails(record);
                 if (key === "message") openMessageManager(record);
                 if (key === "email-user") openEmailPortalUser(record);
-                if (key === "submission-history") openSubmissionHistory(record);
+                if (key === "see-portal-data") openSubmissionHistory(record);
                 if (key === "approve") { setSelectedSlf([]); setApproveModal({ open: true, user: record }); }
                 if (key === "reject") handleReject(record);
                 if (key === "edit-slf") openEditSlfAssignment(record);
                 if (key === "hold") handleHold(record);
                 if (key === "unhold") handleUnhold(record);
-                if (key === "reminder") handleSendReminder(record);
-                if (key === "hold-followup") handleSendHoldFollowUp(record);
                 if (key === "review") handleReviewVerification(record);
                 if (key === "delete") handleDelete(record);
               },
@@ -850,12 +889,17 @@ export default function PortalUsers({ isDark, canEdit = true, canDelete = true, 
       </Card>
 
       <ResponsiveTable
+        className="portal-user-wrap-table"
         dataSource={filteredUsers}
         columns={columns}
         rowKey="_id"
         loading={loading}
         size="small"
-        pagination={{ pageSize: 15 }}
+        pagination={{
+          defaultPageSize: 15,
+          pageSizeOptions: ["10", "15", "25", "50"],
+          showTotal: (total, range) => `${range[0]}-${range[1]} of ${total} portal users`,
+        }}
         locale={{
           emptyText: (
             <Empty
@@ -1179,7 +1223,7 @@ export default function PortalUsers({ isDark, canEdit = true, canDelete = true, 
 
       {/* Submission History */}
       <Modal
-        title={<Space><HistoryOutlined style={{ color: "#1a3353" }} />Submission History</Space>}
+        title={<Space><HistoryOutlined style={{ color: "#1a3353" }} />See Portal Data</Space>}
         open={historyModal.open}
         onCancel={() => setHistoryModal({ open: false, user: null })}
         footer={<Button type="primary" onClick={() => setHistoryModal({ open: false, user: null })}>Close</Button>}
@@ -1195,10 +1239,80 @@ export default function PortalUsers({ isDark, canEdit = true, canDelete = true, 
             <Tabs
               items={[
                 {
+                  key: "activity",
+                  label: "Portal Activity",
+                  children: (
+                    <Space direction="vertical" size={14} style={{ width: "100%" }}>
+                      <Row gutter={[12, 12]}>
+                        <Col xs={24} md={6}><Card size="small"><Text type="secondary">Submissions</Text><br /><Text strong style={{ fontSize: 20 }}>{historyData.submissions.length}</Text></Card></Col>
+                        <Col xs={24} md={6}><Card size="small"><Text type="secondary">Transactions</Text><br /><Text strong style={{ fontSize: 20 }}>{historyData.transactions.length}</Text></Card></Col>
+                        <Col xs={24} md={6}><Card size="small"><Text type="secondary">Conversations</Text><br /><Text strong style={{ fontSize: 20 }}>{historyData.conversations.length}</Text></Card></Col>
+                        <Col xs={24} md={6}><Card size="small"><Text type="secondary">Verification Files</Text><br /><Text strong style={{ fontSize: 20 }}>{(historyData.verificationHistory || []).length}</Text></Card></Col>
+                      </Row>
+
+                      {historyData.submissions.length === 0 ? (
+                        <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No encoded submission data yet" />
+                      ) : (
+                        <Collapse
+                          accordion
+                          items={historyData.submissions.map((record, index) => ({
+                            key: record._id || index,
+                            label: (
+                              <Space wrap>
+                                <Text strong>{record.idNo || `Submission ${index + 1}`}</Text>
+                                <Tag color={record.status === "acknowledged" ? "green" : record.status === "rejected" ? "red" : record.status === "reverted" ? "volcano" : "orange"}>{record.status || "pending"}</Tag>
+                                <Text type="secondary">{record.lguCompanyName || record.slfName || "Encoded SLF Data"}</Text>
+                              </Space>
+                            ),
+                            children: renderEncodedSubmission(record),
+                          }))}
+                        />
+                      )}
+
+                      <Collapse
+                        defaultActiveKey={["recent-actions"]}
+                        items={[{
+                          key: "recent-actions",
+                          label: (
+                            <Space>
+                              <ClockCircleOutlined />
+                              <Text strong>Recent Actions</Text>
+                              <Badge count={historyData.activity.length} style={{ backgroundColor: "#1677ff" }} />
+                            </Space>
+                          ),
+                          children: historyData.activity.length === 0 ? (
+                            <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No activity recorded" />
+                          ) : (
+                            <ResponsiveTable
+                              className="portal-user-wrap-table"
+                              dataSource={historyData.activity.slice(0, 12)}
+                              rowKey={(row, index) => `${row.type}-${row.createdAt}-${index}`}
+                              pagination={false}
+                              columns={[
+                                { title: "Date", dataIndex: "createdAt", width: 150, render: (value) => wrapHistoryText(value ? dayjs(value).format("MM/DD/YYYY h:mm A") : "") },
+                                { title: "Action", dataIndex: "title", width: 230, render: (value) => wrapHistoryText(value, true) },
+                                { title: "Details", dataIndex: "description", width: 360, render: (value, row) => (
+                                  <Space direction="vertical" size={3}>
+                                    {wrapHistoryText(value)}
+                                    {row.attachment && renderAttachments([row.attachment])}
+                                    {renderAttachments(row.attachments)}
+                                  </Space>
+                                ) },
+                                { title: "Actor", dataIndex: "actor", width: 180, render: (value) => wrapHistoryText(value) },
+                              ]}
+                            />
+                          ),
+                        }]}
+                      />
+                    </Space>
+                  ),
+                },
+                {
                   key: "tracker",
                   label: "Submission Tracker",
                   children: (
                     <Table
+                      className="portal-user-wrap-table"
                       dataSource={historyData.submissions}
                       rowKey="_id"
                       size="small"
@@ -1214,7 +1328,15 @@ export default function PortalUsers({ isDark, canEdit = true, canDelete = true, 
                       ]}
                       expandable={{
                         expandedRowRender: (record) => {
-                          const transactions = historyData.transactions.filter((txn) => txn.submissionId === record.submissionId);
+                          const xxAlias = record.idNo?.replace(/^(SLF-[^-]+-)[^-]+(-.+)$/i, "$1XX$2");
+                          const keys = [record.submissionId, record.idNo, xxAlias, ...(record.previousIdNos || [])].filter(Boolean);
+                          const transactions = historyData.transactions.filter((txn) =>
+                            keys.includes(txn.submissionId) ||
+                            keys.includes(txn.meta?.idNo) ||
+                            (txn.meta?.ids || []).some((id) => keys.includes(id)) ||
+                            (txn.meta?.previousIdNos || []).some((id) => keys.includes(id)) ||
+                            String(txn.dataEntry || "") === String(record._id || ""),
+                          );
                           return transactions.length ? (
                             <Timeline
                               items={transactions.map((txn) => ({
@@ -1238,6 +1360,7 @@ export default function PortalUsers({ isDark, canEdit = true, canDelete = true, 
                   label: "Verification Attachments",
                   children: (
                     <Table
+                      className="portal-user-wrap-table"
                       dataSource={historyData.verificationHistory || []}
                       rowKey={(row, index) => row._id || `${row.fileUrl}-${index}`}
                       size="small"
@@ -1283,30 +1406,63 @@ export default function PortalUsers({ isDark, canEdit = true, canDelete = true, 
                   children: historyData.conversations.length === 0 ? (
                     <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No conversations yet" />
                   ) : (
-                    <List
-                      dataSource={historyData.conversations}
-                      renderItem={(thread) => (
-                        <List.Item style={{ alignItems: "stretch" }}>
-                          <Card size="small" style={{ width: "100%", borderRadius: 8 }} title={`${thread.ticketNo || "Thread"} — ${thread.subject}`} extra={<Tag>{thread.status}</Tag>}>
-                            <Space direction="vertical" size={10} style={{ width: "100%" }}>
-                              <div>
-                                <Text strong>{thread.source === "admin_message" ? "Admin" : thread.portalUserName || historyModal.user.firstName}</Text>
-                                <Text type="secondary" style={{ marginLeft: 8, fontSize: 12 }}>{dayjs(thread.createdAt).format("MMM D, YYYY h:mm A")}</Text>
-                                <div style={{ whiteSpace: "pre-wrap", marginTop: 4 }}>{thread.message}</div>
-                                {renderAttachments(thread.attachments)}
+                    <Collapse
+                      accordion
+                      items={historyData.conversations.map((thread, index) => ({
+                        key: thread._id || `${thread.ticketNo}-${index}`,
+                        label: (
+                          <Space wrap>
+                            <MessageOutlined style={{ color: "#1677ff" }} />
+                            <Text strong>{cleanText(thread.ticketNo || `Thread ${index + 1}`)}</Text>
+                            <Text>{cleanText(thread.subject || "Conversation")}</Text>
+                            <Tag>{cleanText(thread.status || "open")}</Tag>
+                            {!!(thread.attachments || []).length && <Tag icon={<FileTextOutlined />}>{thread.attachments.length}</Tag>}
+                          </Space>
+                        ),
+                        children: (
+                          <Space direction="vertical" size={10} style={{ width: "100%" }}>
+                            <div
+                              style={{
+                                padding: "10px 12px",
+                                borderRadius: 8,
+                                border: isDark ? "1px solid rgba(255,255,255,0.12)" : "1px solid #f0f0f0",
+                                background: isDark ? "rgba(255,255,255,0.04)" : "#fafafa",
+                              }}
+                            >
+                              <Space size={6} wrap>
+                                <UserOutlined />
+                                <Text strong>{cleanText(thread.source === "admin_message" ? "Admin" : thread.portalUserName || historyModal.user.firstName)}</Text>
+                                <Text type="secondary" style={{ fontSize: 12 }}>{dayjs(thread.createdAt).format("MMM D, YYYY h:mm A")}</Text>
+                              </Space>
+                              <div style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere", marginTop: 6 }}>{cleanText(thread.message)}</div>
+                              {renderAttachments(thread.attachments)}
+                            </div>
+                            {(thread.replies || []).map((reply) => (
+                              <div
+                                key={reply._id || `${reply.createdAt}-${reply.message}`}
+                                style={{
+                                  padding: "10px 12px",
+                                  borderRadius: 8,
+                                  border: reply.isAdmin
+                                    ? (isDark ? "1px solid rgba(22,119,255,0.35)" : "1px solid #91caff")
+                                    : (isDark ? "1px solid rgba(82,196,26,0.35)" : "1px solid #b7eb8f"),
+                                  background: reply.isAdmin
+                                    ? (isDark ? "rgba(22,119,255,0.14)" : "#e6f4ff")
+                                    : (isDark ? "rgba(82,196,26,0.14)" : "#f6ffed"),
+                                }}
+                              >
+                                <Space size={6} wrap>
+                                  {reply.isAdmin ? <SendOutlined /> : <MessageOutlined />}
+                                  <Text strong>{cleanText(reply.isAdmin ? "Admin" : reply.repliedByName || historyModal.user.firstName)}</Text>
+                                  <Text type="secondary" style={{ fontSize: 12 }}>{dayjs(reply.createdAt).format("MMM D, YYYY h:mm A")}</Text>
+                                </Space>
+                                <div style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere", marginTop: 6 }}>{cleanText(reply.message)}</div>
+                                {renderAttachments(reply.attachments)}
                               </div>
-                              {(thread.replies || []).map((reply) => (
-                                <div key={reply._id || `${reply.createdAt}-${reply.message}`} style={{ padding: "8px 10px", borderRadius: 6, background: reply.isAdmin ? "#e6f4ff" : "#f6ffed" }}>
-                                  <Text strong>{reply.isAdmin ? "Admin" : reply.repliedByName || historyModal.user.firstName}</Text>
-                                  <Text type="secondary" style={{ marginLeft: 8, fontSize: 12 }}>{dayjs(reply.createdAt).format("MMM D, YYYY h:mm A")}</Text>
-                                  <div style={{ whiteSpace: "pre-wrap", marginTop: 4 }}>{reply.message}</div>
-                                  {renderAttachments(reply.attachments)}
-                                </div>
-                              ))}
-                            </Space>
-                          </Card>
-                        </List.Item>
-                      )}
+                            ))}
+                          </Space>
+                        ),
+                      }))}
                     />
                   ),
                 },
@@ -1324,7 +1480,7 @@ export default function PortalUsers({ isDark, canEdit = true, canDelete = true, 
         open={detailModal.open}
         onCancel={() => setDetailModal({ open: false, user: null })}
         footer={
-          <Button block onClick={() => setDetailModal({ open: false, user: null })}>
+          <Button type="primary" block onClick={() => setDetailModal({ open: false, user: null })}>
             Close
           </Button>
         }
@@ -1477,7 +1633,7 @@ export default function PortalUsers({ isDark, canEdit = true, canDelete = true, 
                     {slfNames.length > 0 ? (
                       <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
                         {slfNames.map((n, i) => (
-                          <Tag key={i} color="blue" style={{ margin: 0, fontSize: 12, padding: "2px 10px" }}>{n}</Tag>
+                          <Tag key={i} color="blue" style={{ margin: 0, fontSize: 12, padding: "2px 10px", whiteSpace: "normal", overflowWrap: "anywhere", lineHeight: 1.45 }}>{n}</Tag>
                         ))}
                       </div>
                     ) : (
@@ -1564,58 +1720,37 @@ export default function PortalUsers({ isDark, canEdit = true, canDelete = true, 
                   <Text type="secondary" style={{ fontSize: 11, fontWeight: 600, letterSpacing: 0.8, textTransform: "uppercase" }}>
                     <ClockCircleOutlined style={{ marginRight: 4 }} />Activity
                   </Text>
-                  <Card size="small" style={{ borderRadius: 8, marginTop: 6 }} bodyStyle={{ padding: "12px 14px 4px" }}>
-                    <Timeline
-                      size="small"
-                      items={[
-                        {
-                          color: "blue",
-                          children: (
-                            <>
-                              <Text style={{ fontSize: 12, fontWeight: 500 }}>Registered</Text>
-                              <div><Text type="secondary" style={{ fontSize: 11 }}>{dayjs(u.createdAt).format("MMM D, YYYY h:mm A")}</Text></div>
-                            </>
-                          ),
-                        },
-                        ...(u.approvedAt ? [{
-                          color: "green",
-                          children: (
-                            <>
-                              <Text style={{ fontSize: 12, fontWeight: 500 }}>Approved</Text>
-                              <div><Text type="secondary" style={{ fontSize: 11 }}>{dayjs(u.approvedAt).format("MMM D, YYYY h:mm A")}</Text></div>
-                            </>
-                          ),
-                        }] : []),
-                        ...(u.rejectedReason ? [{
-                          color: "red",
-                          children: (
-                            <>
-                              <Text style={{ fontSize: 12, fontWeight: 500 }}>Rejected</Text>
-                              <div><Text type="secondary" style={{ fontSize: 11 }}>{u.rejectedReason}</Text></div>
-                            </>
-                          ),
-                        }] : []),
-                        ...(u.verificationRequired ? [{
-                          color: "orange",
-                          children: (
-                            <>
-                              <Text style={{ fontSize: 12, fontWeight: 500 }}>Put On Hold</Text>
-                              <div><Text type="secondary" style={{ fontSize: 11 }}>Admin required re-verification</Text></div>
-                            </>
-                          ),
-                        }] : []),
-                        ...(u.verificationSubmitted ? [{
-                          color: "cyan",
-                          children: (
-                            <>
-                              <Text style={{ fontSize: 12, fontWeight: 500 }}>Docs Submitted</Text>
-                              <div><Text type="secondary" style={{ fontSize: 11 }}>Awaiting admin review</Text></div>
-                            </>
-                          ),
-                        }] : []),
-                      ]}
-                    />
-                  </Card>
+                  <Collapse
+                    defaultActiveKey={["activity"]}
+                    style={{ marginTop: 6 }}
+                    items={[{
+                      key: "activity",
+                      label: <Text strong style={{ fontSize: 12 }}>Account and portal activity</Text>,
+                      children: detailActivity.loading ? (
+                        <div style={{ textAlign: "center", padding: "16px 0" }}><Spin size="small" /></div>
+                      ) : (
+                        <Timeline
+                          size="small"
+                          items={(detailActivity.items.length ? detailActivity.items.slice(0, 8) : [
+                            { type: "account_registered", title: "Registered", createdAt: u.createdAt },
+                            ...(u.approvedAt ? [{ type: "account_approved", title: "Approved", createdAt: u.approvedAt }] : []),
+                            ...(u.rejectedReason ? [{ type: "account_rejected", title: "Rejected", description: u.rejectedReason, createdAt: u.updatedAt }] : []),
+                          ]).map((item, index) => ({
+                            color: item.type?.includes("verification") ? "cyan" : item.type?.includes("conversation") ? "blue" : item.type?.includes("rejected") ? "red" : "green",
+                            children: (
+                              <div key={`${item.type}-${item.createdAt}-${index}`}>
+                                <Text style={{ fontSize: 12, fontWeight: 500 }}>{cleanText(item.title)}</Text>
+                                {item.description && (
+                                  <div style={{ fontSize: 11, whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{cleanText(item.description)}</div>
+                                )}
+                                <div><Text type="secondary" style={{ fontSize: 11 }}>{item.createdAt ? dayjs(item.createdAt).format("MMM D, YYYY h:mm A") : ""}</Text></div>
+                              </div>
+                            ),
+                          }))}
+                        />
+                      ),
+                    }]}
+                  />
                 </div>
 
               </div>{/* /body */}

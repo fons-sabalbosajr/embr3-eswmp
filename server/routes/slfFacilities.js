@@ -177,7 +177,8 @@ async function enrichPortalFacilityVolumes(facilityDoc, requestedSlfName) {
 
   matchingSubmissions.forEach((entry) => {
       (entry.trucks || []).forEach((truck) => {
-        addVolume(rows, findBestCellIndex(rows, truck.wasteType), truck.actualVolume, truck.actualVolumeUnit || "tons", targetUnit);
+        const explicitIndex = Number.isInteger(truck.cellIndex) ? truck.cellIndex : parseCellIndex(truck.cellName);
+        addVolume(rows, findBestCellIndex(rows, truck.wasteType, explicitIndex), truck.actualVolume, truck.actualVolumeUnit || "tons", targetUnit);
       });
     });
 

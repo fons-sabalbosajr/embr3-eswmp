@@ -28,6 +28,39 @@ body {
   font-size: 12px;
 }
 
+.hauler-wrap-table .ant-table-cell {
+  font-size: 11px;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  line-height: 1.35;
+}
+
+.portal-user-wrap-table .ant-table-cell,
+.portal-user-wrap-table .ant-descriptions-item-content,
+.portal-user-wrap-table .ant-descriptions-item-label {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  line-height: 1.35;
+}
+
+.portal-user-wrap-table .ant-table-cell {
+  font-size: 12px;
+}
+
+[data-theme="dark"] .portal-user-wrap-table .ant-table-cell,
+[data-theme="dark"] .portal-user-wrap-table .ant-descriptions-item-content,
+[data-theme="dark"] .portal-user-wrap-table .ant-descriptions-item-label {
+  border-color: #303030;
+}
+
+[data-theme="dark"] .ant-modal-content,
+[data-theme="dark"] .ant-card,
+[data-theme="dark"] .ant-collapse {
+  box-shadow: none;
+}
+
 /* Status badge animations */
 .status-badge {
   display: inline-flex;

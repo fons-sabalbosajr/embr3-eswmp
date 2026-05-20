@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Form, Input, Button, Card, Typography, Divider, Alert, Space, Tag } from "antd";
+import { Form, Input, Button, Card, Typography, Divider, Alert, Space, Tag, Collapse } from "antd";
 import { UserOutlined, LockOutlined } from "@ant-design/icons";
 import { Link, useNavigate } from "react-router-dom";
 import { useErrorCard } from "../utils/ErrorHandler";
@@ -88,39 +88,33 @@ export default function PortalLogin() {
 
         <div className="auth-card-wrapper auth-card-wrapper-login">
           {announcement && (
-            <Alert
-              type={announcement.portalAnnouncementType || "info"}
-              showIcon
-              style={{
-                marginBottom: 14,
-                borderRadius: 10,
-                textAlign: "left",
-              }}
-              message={
-                <Space size={8} wrap>
-                  <span>{announcement.portalAnnouncementTitle || "SLF Portal Announcement"}</span>
-                  <Tag color="blue">Announcement</Tag>
-                </Space>
-              }
-              description={
-                <div>
-                  <div style={{ whiteSpace: "pre-wrap" }}>
-                    {announcement.portalAnnouncementMessage}
-                  </div>
-                  {announcement.portalAnnouncementCtaUrl && (
-                    <Button
-                      size="small"
-                      type="link"
-                      href={announcement.portalAnnouncementCtaUrl}
-                      target="_blank"
-                      rel="noreferrer"
-                      style={{ paddingLeft: 0, marginTop: 6 }}
-                    >
-                      {announcement.portalAnnouncementCtaLabel || "Read more"}
-                    </Button>
-                  )}
-                </div>
-              }
+            <Collapse
+              size="small"
+              defaultActiveKey={["announcement"]}
+              style={{ marginBottom: 14, textAlign: "left", borderRadius: 10 }}
+              items={[{
+                key: "announcement",
+                label: (
+                  <Space size={8} wrap>
+                    <span>{announcement.portalAnnouncementTitle || "SLF Portal Announcement"}</span>
+                    <Tag color="blue">Announcement</Tag>
+                  </Space>
+                ),
+                children: (
+                  <Alert
+                    type={announcement.portalAnnouncementType || "info"}
+                    showIcon
+                    message={null}
+                    description={
+                      <div>
+                        <div style={{ whiteSpace: "pre-wrap" }}>
+                          {announcement.portalAnnouncementMessage}
+                        </div>
+                      </div>
+                    }
+                  />
+                ),
+              }]}
             />
           )}
           <Card className="auth-card" variant="borderless">

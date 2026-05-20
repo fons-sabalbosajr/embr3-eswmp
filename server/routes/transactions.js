@@ -5,6 +5,14 @@ const DataSLF = require("../models/DataSLF");
 const router = express.Router();
 const ADMIN_DISPLAY_NAME = "EMBR3 ESWMP Admin";
 
+function getXXAlias(idNo = "") {
+  const parts = String(idNo || "").split("-");
+  if (parts.length >= 4 && parts[0] === "SLF" && parts[2] && parts[2] !== "XX") {
+    return `SLF-${parts[1]}-XX-${parts[3]}`;
+  }
+  return null;
+}
+
 // Backfill transactions from existing data-slf entries that have no transaction records
 router.post("/seed", async (req, res) => {
   try {
@@ -130,12 +138,15 @@ router.get("/companies", async (req, res) => {
 router.get("/thread/:submissionId", async (req, res) => {
   try {
     const key = req.params.submissionId;
-    const dataEntryFilters = [{ submissionId: key }, { idNo: key }];
+    const dataEntryFilters = [{ submissionId: key }, { idNo: key }, { previousIdNos: key }];
     if (/^[a-f\d]{24}$/i.test(key)) dataEntryFilters.push({ _id: key });
-    const entry = await DataSLF.findOne({ $or: dataEntryFilters }).select("_id submissionId idNo").lean();
-    const submissionKeys = [...new Set([key, entry?.submissionId, entry?.idNo].filter(Boolean))];
+    const entry = await DataSLF.findOne({ $or: dataEntryFilters }).select("_id submissionId idNo previousIdNos").lean();
+    const submissionKeys = [...new Set([key, getXXAlias(key), entry?.submissionId, entry?.idNo, getXXAlias(entry?.idNo), ...(entry?.previousIdNos || [])].filter(Boolean))];
     const filters = [{ submissionId: { $in: submissionKeys } }];
     if (entry?._id) filters.push({ dataEntry: entry._id });
+    if (submissionKeys.length) filters.push({ "meta.idNo": { $in: submissionKeys } });
+    if (submissionKeys.length) filters.push({ "meta.ids": { $in: submissionKeys } });
+    if (submissionKeys.length) filters.push({ "meta.previousIdNos": { $in: submissionKeys } });
     const transactions = await Transaction.find({ $or: filters }).sort({ createdAt: 1 });
     res.json(transactions);
   } catch (error) {

@@ -1,5 +1,23 @@
 const mongoose = require("mongoose");
 
+const portalAnnouncementSchema = new mongoose.Schema(
+  {
+    enabled: { type: Boolean, default: false },
+    type: { type: String, enum: ["info", "warning", "success", "error"], default: "info" },
+    title: { type: String, default: "" },
+    message: { type: String, default: "" },
+    startAt: { type: Date, default: null },
+    endAt: { type: Date, default: null },
+    showOnLogin: { type: Boolean, default: true },
+    showInPortal: { type: Boolean, default: true },
+    dismissible: { type: Boolean, default: true },
+    emailSubject: { type: String, default: "" },
+    emailMessage: { type: String, default: "" },
+    emailLastSentAt: { type: Date, default: null },
+  },
+  { timestamps: true }
+);
+
 const appSettingsSchema = new mongoose.Schema(
   {
     // General
@@ -27,6 +45,8 @@ const appSettingsSchema = new mongoose.Schema(
     portalMaintenanceMessage: { type: String, default: "The portal is currently under maintenance. Please try again later." },
 
     // Portal Announcements
+    portalAnnouncementActiveId: { type: mongoose.Schema.Types.ObjectId, default: null },
+    portalAnnouncements: { type: [portalAnnouncementSchema], default: [] },
     portalAnnouncementEnabled: { type: Boolean, default: false },
     portalAnnouncementType: { type: String, enum: ["info", "warning", "success", "error"], default: "info" },
     portalAnnouncementTitle: { type: String, default: "" },

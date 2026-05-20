@@ -51,7 +51,7 @@ const userPortalSchema = new mongoose.Schema(
         fileType: { type: String, default: "" },
         officeEmail: { type: String, trim: true, lowercase: true, default: "" },
         pcoEmail: { type: String, trim: true, lowercase: true, default: "" },
-        action: { type: String, enum: ["submitted", "archived"], default: "submitted" },
+        action: { type: String, enum: ["submitted", "archived", "reviewed"], default: "submitted" },
         note: { type: String, trim: true, default: "" },
         performedBy: { type: String, trim: true, default: "" },
         submittedAt: { type: Date, default: Date.now },

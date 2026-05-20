@@ -6345,41 +6345,50 @@ export default function SLFPortal() {
             </div>
           )}
           {portalAnnouncement && !announcementDismissed && (
-            <Alert
-              type={portalAnnouncement.portalAnnouncementType || "info"}
-              showIcon
-              closable={portalAnnouncement.portalAnnouncementDismissible !== false}
-              onClose={() => setAnnouncementDismissed(true)}
+            <Collapse
+              size="small"
+              defaultActiveKey={["announcement"]}
               style={{
                 marginBottom: 12,
                 borderRadius: 8,
               }}
-              message={
-                <Space wrap>
-                  <Text strong>
-                    {portalAnnouncement.portalAnnouncementTitle || "SLF Portal Announcement"}
-                  </Text>
-                  <Tag color="blue">Announcement</Tag>
-                </Space>
-              }
-              description={
-                <Space direction="vertical" size={8} style={{ width: "100%" }}>
-                  <div style={{ whiteSpace: "pre-wrap" }}>
-                    {portalAnnouncement.portalAnnouncementMessage}
-                  </div>
-                  {portalAnnouncement.portalAnnouncementCtaUrl && (
-                    <Button
-                      size="small"
-                      type="primary"
-                      href={portalAnnouncement.portalAnnouncementCtaUrl}
-                      target="_blank"
-                      rel="noreferrer"
-                    >
-                      {portalAnnouncement.portalAnnouncementCtaLabel || "Read more"}
-                    </Button>
-                  )}
-                </Space>
-              }
+              items={[{
+                key: "announcement",
+                label: (
+                  <Space wrap>
+                    <Text strong>
+                      {portalAnnouncement.portalAnnouncementTitle || "SLF Portal Announcement"}
+                    </Text>
+                    <Tag color="blue">Announcement</Tag>
+                  </Space>
+                ),
+                extra: portalAnnouncement.portalAnnouncementDismissible !== false ? (
+                  <Button
+                    size="small"
+                    type="text"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      setAnnouncementDismissed(true);
+                    }}
+                  >
+                    Dismiss
+                  </Button>
+                ) : null,
+                children: (
+                  <Alert
+                    type={portalAnnouncement.portalAnnouncementType || "info"}
+                    showIcon
+                    message={null}
+                    description={
+                      <Space direction="vertical" size={8} style={{ width: "100%" }}>
+                        <div style={{ whiteSpace: "pre-wrap" }}>
+                          {portalAnnouncement.portalAnnouncementMessage}
+                        </div>
+                      </Space>
+                    }
+                  />
+                ),
+              }]}
             />
           )}
           {(portalNotificationCounts.messages > 0 || portalNotificationCounts.support > 0) && (
