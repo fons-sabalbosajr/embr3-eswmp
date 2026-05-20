@@ -17,6 +17,18 @@ function resolveKeyFile(candidate) {
   return fs.existsSync(resolved) ? resolved : null;
 }
 
+function loadOAuthClientJson() {
+  const filePath = resolveKeyFile(process.env.GDRIVE_OAUTH_CLIENT_JSON);
+  if (!filePath) return null;
+  const json = JSON.parse(fs.readFileSync(filePath, "utf8"));
+  const config = json.web || json.installed;
+  if (!config?.client_id || !config?.client_secret) return null;
+  return {
+    clientId: config.client_id,
+    clientSecret: config.client_secret,
+  };
+}
+
 function getServiceAccountKeyFile() {
   return (
     resolveKeyFile(process.env.GDRIVE_SERVICE_ACCOUNT_KEY_FILE) ||
@@ -31,9 +43,11 @@ function getServiceAccountKeyFile() {
  * fallback when the refresh token is revoked or expired.
  */
 function getOAuthDriveClient() {
-  const { GDRIVE_CLIENT_ID, GDRIVE_CLIENT_SECRET, GDRIVE_REFRESH_TOKEN } = process.env;
-  const auth = new google.auth.OAuth2(GDRIVE_CLIENT_ID, GDRIVE_CLIENT_SECRET);
-  auth.setCredentials({ refresh_token: GDRIVE_REFRESH_TOKEN });
+  const jsonClient = loadOAuthClientJson();
+  const clientId = jsonClient?.clientId || process.env.GDRIVE_CLIENT_ID;
+  const clientSecret = jsonClient?.clientSecret || process.env.GDRIVE_CLIENT_SECRET;
+  const auth = new google.auth.OAuth2(clientId, clientSecret);
+  auth.setCredentials({ refresh_token: process.env.GDRIVE_REFRESH_TOKEN });
   return google.drive({ version: "v3", auth });
 }
 
@@ -47,9 +61,15 @@ function getServiceAccountDriveClient(keyFile) {
 
 function getDriveClients() {
   const clients = [];
-  const oauthMissing = ["GDRIVE_CLIENT_ID", "GDRIVE_CLIENT_SECRET", "GDRIVE_REFRESH_TOKEN"].filter(
-    (k) => !hasValue(process.env[k])
-  );
+  const jsonClient = loadOAuthClientJson();
+  const hasOAuthClient =
+    jsonClient ||
+    (hasValue(process.env.GDRIVE_CLIENT_ID) &&
+      hasValue(process.env.GDRIVE_CLIENT_SECRET));
+  const oauthMissing = [
+    !hasOAuthClient ? "GDRIVE_CLIENT_ID/GDRIVE_CLIENT_SECRET or GDRIVE_OAUTH_CLIENT_JSON" : null,
+    !hasValue(process.env.GDRIVE_REFRESH_TOKEN) ? "GDRIVE_REFRESH_TOKEN" : null,
+  ].filter(Boolean);
 
   if (oauthMissing.length === 0) {
     clients.push({ name: "OAuth2 refresh token", drive: getOAuthDriveClient() });
@@ -143,20 +163,28 @@ async function uploadFileToDrive(fileBuffer, mimeType, originalName, isImage, ov
     : process.env.GDRIVE_DOCS_FOLDER_ID;
 
   let lastError;
+  const attempts = [];
   for (let index = 0; index < clients.length; index += 1) {
     const client = clients[index];
     try {
       return await createDriveFile(client.drive, fileBuffer, mimeType, originalName, folderId);
     } catch (error) {
       lastError = error;
+      attempts.push(`${client.name}: ${error.message || error}`);
       const hasFallback = index < clients.length - 1;
       if (!hasFallback || !isRetryableAuthError(error)) {
+        if (attempts.length > 1) {
+          error.message = `Google Drive upload failed after ${attempts.length} attempts. ${attempts.join(" | ")}`;
+        }
         throw error;
       }
       // Auth error on this client — try next client silently; caller handles Drive failure logging
     }
   }
 
+  if (lastError && attempts.length > 1) {
+    lastError.message = `Google Drive upload failed after ${attempts.length} attempts. ${attempts.join(" | ")}`;
+  }
   throw lastError;
 }
 

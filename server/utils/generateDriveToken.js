@@ -15,16 +15,62 @@
 require("dotenv").config();
 
 const http = require("http");
+const fs = require("fs");
+const path = require("path");
 const { google } = require("googleapis");
 
-const CLIENT_ID = process.env.GDRIVE_CLIENT_ID;
-const CLIENT_SECRET = process.env.GDRIVE_CLIENT_SECRET;
 const PORT = Number(process.env.GDRIVE_TOKEN_PORT || 3000);
 const REDIRECT_URI = `http://localhost:${PORT}/oauth2callback`;
 const SCOPES = ["https://www.googleapis.com/auth/drive"];
 
+function resolveCandidate(candidate) {
+  if (!candidate) return null;
+  return path.isAbsolute(candidate)
+    ? candidate
+    : path.resolve(process.cwd(), candidate);
+}
+
+function findNewestOAuthClientJson() {
+  const secretsDir = path.resolve(process.cwd(), "secrets");
+  if (!fs.existsSync(secretsDir)) return null;
+
+  const files = fs
+    .readdirSync(secretsDir)
+    .filter((fileName) => /^client[-_]secret.*[.]json$/i.test(fileName))
+    .map((fileName) => {
+      const filePath = path.join(secretsDir, fileName);
+      return { filePath, mtimeMs: fs.statSync(filePath).mtimeMs };
+    })
+    .sort((a, b) => b.mtimeMs - a.mtimeMs);
+
+  return files[0]?.filePath || null;
+}
+
+function loadOAuthClientFromJson(filePath) {
+  if (!filePath || !fs.existsSync(filePath)) return null;
+  const json = JSON.parse(fs.readFileSync(filePath, "utf8"));
+  const config = json.web || json.installed;
+  if (!config?.client_id || !config?.client_secret) return null;
+  return {
+    clientId: config.client_id,
+    clientSecret: config.client_secret,
+    source: filePath,
+  };
+}
+
+const jsonPath =
+  resolveCandidate(process.argv[2]) ||
+  resolveCandidate(process.env.GDRIVE_OAUTH_CLIENT_JSON) ||
+  findNewestOAuthClientJson();
+
+const jsonClient = loadOAuthClientFromJson(jsonPath);
+const CLIENT_ID = jsonClient?.clientId || process.env.GDRIVE_CLIENT_ID;
+const CLIENT_SECRET = jsonClient?.clientSecret || process.env.GDRIVE_CLIENT_SECRET;
+
 if (!CLIENT_ID || !CLIENT_SECRET) {
-  console.error("GDRIVE_CLIENT_ID and GDRIVE_CLIENT_SECRET must be set in server/.env");
+  console.error(
+    "Google OAuth client credentials were not found. Set GDRIVE_CLIENT_ID and GDRIVE_CLIENT_SECRET in server/.env, or pass a client_secret JSON path.",
+  );
   process.exit(1);
 }
 
@@ -71,6 +117,11 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.listen(PORT, () => {
+  if (jsonClient?.source) {
+    console.log(`\nUsing OAuth client JSON: ${jsonClient.source}`);
+  } else {
+    console.log("\nUsing OAuth client credentials from server/.env");
+  }
   console.log("\nOpen this URL in your browser and sign in with the Google Drive upload account:\n");
   console.log(authUrl);
   console.log("\nWaiting for Google OAuth callback on " + REDIRECT_URI + " ...\n");

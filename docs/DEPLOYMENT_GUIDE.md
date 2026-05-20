@@ -74,9 +74,12 @@ sudo chown -R www-data:www-data /var/www/eswm-pipeline/
 pm2 restart embr3-eswmp-api --update-env && pm2 save
 
 # Verify
-curl http://localhost:5006/api/health
+curl -sS --ipv4 --max-time 5 -w '\nHTTP %{http_code}\n' http://127.0.0.1:5006/api/health
+curl -sS --max-time 10 -w '\nHTTP %{http_code}\n' https://embr3-onlinesystems.cloud/eswm-pipeline/api/health
 pm2 logs embr3-eswmp-api --lines 20
 ```
+
+> If your shell prompt still starts with `root@...` when you run PM2, you are managing the root PM2 instance (`/root/.pm2`). The intended deployment user is `embr3_eswm`, so run `su - embr3_eswm` before `pm2 restart`, `pm2 save`, and `pm2 logs` unless the live process was intentionally created under root.
 
 ---
 
@@ -279,6 +282,20 @@ JWT_SECRET=generate-a-long-random-string-here
 EMAIL_USER=your-gmail@gmail.com
 EMAIL_APP_PASS=your-gmail-app-password
 CLIENT_URL=https://embr3-onlinesystems.cloud/eswm-pipeline
+PUBLIC_API_BASE_PATH=/eswm-pipeline/api
+
+# Google Drive upload storage
+GDRIVE_CLIENT_ID=your-google-oauth-client-id
+GDRIVE_CLIENT_SECRET=your-google-oauth-client-secret
+GDRIVE_REFRESH_TOKEN=your-google-oauth-refresh-token
+GDRIVE_OAUTH_CLIENT_JSON=/home/embr3_eswm/apps/embr3-eswmp/server/secrets/client_secret_xxx.apps.googleusercontent.com.json
+GDRIVE_IMAGE_FOLDER_ID=google-drive-folder-id-for-images
+GDRIVE_DOCS_FOLDER_ID=google-drive-folder-id-for-documents
+GDRIVE_HAULER_LOI_FOLDER_ID=google-drive-folder-id-for-hauler-loi
+
+# Optional service-account fallback. Share the folders above with the service
+# account email, then point this to the JSON key file.
+# GDRIVE_SERVICE_ACCOUNT_KEY_FILE=/home/embr3_eswm/apps/embr3-eswmp/server/secrets/embr3-eswm-account.json
 ```
 
 Generate a secure JWT secret:
@@ -288,6 +305,67 @@ node -e "console.log(require('crypto').randomBytes(64).toString('hex'))"
 ```
 
 > **Port 5006** is used for ESWMP on the live VPS.
+
+### Google Drive Upload Configuration
+
+The front-end `.env` is only for browser-safe Vite values, such as `VITE_GOOGLE_MAPS_API_KEY`. Google Drive upload is handled by the Express server, so the `GDRIVE_*` values must be set in:
+
+```bash
+/home/embr3_eswm/apps/embr3-eswmp/server/.env
+```
+
+The upload code first tries OAuth:
+
+```env
+GDRIVE_CLIENT_ID=...
+GDRIVE_CLIENT_SECRET=...
+GDRIVE_REFRESH_TOKEN=...
+# Or point the runtime to the downloaded OAuth client JSON:
+GDRIVE_OAUTH_CLIENT_JSON=/home/embr3_eswm/apps/embr3-eswmp/server/secrets/client_secret_xxx.apps.googleusercontent.com.json
+```
+
+Then it requires these target folders:
+
+```env
+GDRIVE_IMAGE_FOLDER_ID=...
+GDRIVE_DOCS_FOLDER_ID=...
+GDRIVE_HAULER_LOI_FOLDER_ID=...
+```
+
+If OAuth fails with `invalid_grant`, the refresh token is expired/revoked. Common causes are regenerating the OAuth client secret, revoking account access, or leaving the OAuth consent app in Testing mode. For production, publish the OAuth consent screen to Production or configure the service-account fallback.
+
+For service-account fallback:
+
+1. Create a Google Cloud service account with Drive API enabled.
+2. Download the JSON key to a private server path, for example:
+
+```bash
+mkdir -p /home/embr3_eswm/apps/embr3-eswmp/server/secrets
+nano /home/embr3_eswm/apps/embr3-eswmp/server/secrets/embr3-eswm-account.json
+chmod 600 /home/embr3_eswm/apps/embr3-eswmp/server/secrets/embr3-eswm-account.json
+```
+
+3. Share each Google Drive target folder with the service account email from the JSON file.
+4. Add this to `server/.env`:
+
+```env
+GDRIVE_SERVICE_ACCOUNT_KEY_FILE=/home/embr3_eswm/apps/embr3-eswmp/server/secrets/embr3-eswm-account.json
+```
+
+After editing `server/.env`, restart PM2 with the updated environment:
+
+```bash
+cd /home/embr3_eswm/apps/embr3-eswmp/server
+pm2 restart embr3-eswmp-api --update-env
+pm2 save
+```
+
+Quick Drive configuration check without printing secret values:
+
+```bash
+cd /home/embr3_eswm/apps/embr3-eswmp/server
+node -e 'require("dotenv").config(); const keys=["GDRIVE_CLIENT_ID","GDRIVE_CLIENT_SECRET","GDRIVE_REFRESH_TOKEN","GDRIVE_IMAGE_FOLDER_ID","GDRIVE_DOCS_FOLDER_ID","GDRIVE_HAULER_LOI_FOLDER_ID","GDRIVE_SERVICE_ACCOUNT_KEY_FILE"]; for (const k of keys) console.log(k, process.env[k] ? "set" : "missing")'
+```
 
 ---
 
@@ -541,7 +619,8 @@ pm2 restart embr3-eswmp-api --update-env      # subsequent deploys
 pm2 save
 
 # 7. Verify
-curl http://localhost:5006/api/health
+curl -sS --ipv4 --max-time 5 -w '\nHTTP %{http_code}\n' http://127.0.0.1:5006/api/health
+curl -sS --max-time 10 -w '\nHTTP %{http_code}\n' https://embr3-onlinesystems.cloud/eswm-pipeline/api/health
 pm2 logs embr3-eswmp-api --lines 20
 ```
 
@@ -565,8 +644,10 @@ node seeds/seedDataReferences.js
 ### Checking Server Health
 
 ```bash
-curl http://localhost:5006/api/health
+curl -sS --ipv4 --max-time 5 -w '\nHTTP %{http_code}\n' http://127.0.0.1:5006/api/health
 # Should return: {"status":"ok","message":"Server is running"}
+curl -sS --max-time 10 -w '\nHTTP %{http_code}\n' https://embr3-onlinesystems.cloud/eswm-pipeline/api/health
+# Should also return HTTP 200 through Nginx
 ```
 
 ### Monitoring
@@ -598,9 +679,34 @@ mongosh                                # Can you connect locally?
 ### Nginx 502 Bad Gateway
 ```bash
 pm2 list                              # Is embr3-eswmp-api running?
-curl http://localhost:5006/api/health  # Can Express respond?
+curl -sS --ipv4 --max-time 5 -w '\nHTTP %{http_code}\n' http://127.0.0.1:5006/api/health  # Can Express respond?
 sudo nginx -t                         # Config valid?
 sudo tail -f /var/log/nginx/error.log # Check Nginx errors
+```
+
+### Health check prints nothing
+```bash
+# Force IPv4 and show the HTTP status/body
+curl -i --ipv4 --max-time 5 http://127.0.0.1:5006/api/health
+
+# Check whether PM2 is being managed by root or the app user
+whoami
+pm2 list
+pm2 describe embr3-eswmp-api | grep -E "cwd|script path|interpreter|status"
+```
+
+If `whoami` prints `root` and PM2 logs live under `/root/.pm2`, you are using root's PM2 process list. Either continue consistently as root for this existing process, or migrate it once to the app user:
+
+```bash
+# As root, stop only this app's root-owned process
+pm2 stop embr3-eswmp-api
+pm2 delete embr3-eswmp-api
+
+# Start it under the intended app user
+su - embr3_eswm
+cd /home/embr3_eswm/apps/embr3-eswmp/server
+pm2 start server.js --name embr3-eswmp-api --update-env
+pm2 save
 ```
 
 ### Port already in use
