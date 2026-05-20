@@ -488,7 +488,7 @@ pm2 set pm2-logrotate:retain 7
 ### Deploying Updates
 
 ```bash
-cd ~/apps/embr3-eswmp
+cd /home/embr3_eswm/apps/embr3-eswmp
 
 # Pull latest code
 git pull origin main
