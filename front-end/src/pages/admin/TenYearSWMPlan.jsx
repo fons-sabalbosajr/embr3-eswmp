@@ -1,7 +1,6 @@
 import { useState, useEffect, useCallback, useMemo } from "react";
 import {
   Card,
-  Table,
   Button,
   Modal,
   Form,
@@ -60,6 +59,7 @@ import dayjs from "dayjs";
 import { MapContainer, TileLayer, Marker, Popup } from "react-leaflet";
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
+import ResponsiveTable from "./shared/ResponsiveTable";
 
 // Fix default Leaflet marker icons
 delete L.Icon.Default.prototype._getIconUrl;
@@ -1089,12 +1089,11 @@ export default function TenYearSWMPlan({canEdit = true, canDelete = true, isDark
       </Row>
 
       <Card style={{ borderRadius: 10 }}>
-        <Table
+        <ResponsiveTable
           dataSource={filtered}
           columns={columns}
           rowKey="_id"
           loading={loading}
-          scroll={{ x: 1460 }}
           pagination={{
             defaultPageSize: 15,
             pageSizeOptions: ["10", "15", "20", "50", "100"],

@@ -1,5 +1,5 @@
-import { useState } from "react";
-import { Form, Input, Button, Card, Typography, Divider } from "antd";
+import { useEffect, useState } from "react";
+import { Form, Input, Button, Card, Typography, Divider, Alert, Space, Tag } from "antd";
 import { UserOutlined, LockOutlined } from "@ant-design/icons";
 import { Link, useNavigate } from "react-router-dom";
 import { useErrorCard } from "../utils/ErrorHandler";
@@ -13,8 +13,30 @@ const { Title, Text } = Typography;
 
 export default function PortalLogin() {
   const [loading, setLoading] = useState(false);
+  const [announcement, setAnnouncement] = useState(null);
   const navigate = useNavigate();
   const { showError, card: errorCard } = useErrorCard();
+
+  useEffect(() => {
+    api
+      .get("/settings/app")
+      .then(({ data }) => {
+        const now = Date.now();
+        const startsAt = data.portalAnnouncementStartAt
+          ? new Date(data.portalAnnouncementStartAt).getTime()
+          : null;
+        const endsAt = data.portalAnnouncementEndAt
+          ? new Date(data.portalAnnouncementEndAt).getTime()
+          : null;
+        const isActive =
+          data.portalAnnouncementEnabled &&
+          data.portalAnnouncementShowOnLogin !== false &&
+          (!startsAt || startsAt <= now) &&
+          (!endsAt || endsAt >= now);
+        setAnnouncement(isActive ? data : null);
+      })
+      .catch(() => {});
+  }, []);
 
   const onFinish = async (values) => {
     setLoading(true);
@@ -65,6 +87,42 @@ export default function PortalLogin() {
         </div>
 
         <div className="auth-card-wrapper auth-card-wrapper-login">
+          {announcement && (
+            <Alert
+              type={announcement.portalAnnouncementType || "info"}
+              showIcon
+              style={{
+                marginBottom: 14,
+                borderRadius: 10,
+                textAlign: "left",
+              }}
+              message={
+                <Space size={8} wrap>
+                  <span>{announcement.portalAnnouncementTitle || "SLF Portal Announcement"}</span>
+                  <Tag color="blue">Announcement</Tag>
+                </Space>
+              }
+              description={
+                <div>
+                  <div style={{ whiteSpace: "pre-wrap" }}>
+                    {announcement.portalAnnouncementMessage}
+                  </div>
+                  {announcement.portalAnnouncementCtaUrl && (
+                    <Button
+                      size="small"
+                      type="link"
+                      href={announcement.portalAnnouncementCtaUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                      style={{ paddingLeft: 0, marginTop: 6 }}
+                    >
+                      {announcement.portalAnnouncementCtaLabel || "Read more"}
+                    </Button>
+                  )}
+                </div>
+              }
+            />
+          )}
           <Card className="auth-card" variant="borderless">
             <div className="auth-card-header">
               <div className="auth-avatar"><UserOutlined /></div>

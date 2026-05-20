@@ -1,7 +1,10 @@
 const express = require("express");
 const PortalField = require("../models/PortalField");
 const AppSettings = require("../models/AppSettings");
+const UserPortal = require("../models/UserPortal");
 const { clearYearVisibilityCache } = require("../utils/yearVisibility");
+const { sendPortalAnnouncementEmail } = require("../utils/email");
+const { authMiddleware, adminOnly } = require("../middleware/auth");
 
 const router = express.Router();
 
@@ -123,6 +126,61 @@ router.put("/app", async (req, res) => {
     await settings.save();
     clearYearVisibilityCache();
     res.json({ message: "Settings updated", data: settings });
+  } catch (error) {
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+});
+
+// Email current or supplied portal announcement to approved portal users
+router.post("/app/portal-announcement/email", authMiddleware, adminOnly, async (req, res) => {
+  try {
+    let settings = await AppSettings.findOne();
+    if (!settings) settings = await AppSettings.create({});
+
+    const announcement = {
+      title: req.body.title ?? settings.portalAnnouncementTitle,
+      message: req.body.message ?? settings.portalAnnouncementMessage,
+      subject:
+        req.body.subject ||
+        settings.portalAnnouncementEmailSubject ||
+        settings.portalAnnouncementTitle ||
+        "SLF Portal Announcement",
+      emailMessage:
+        req.body.emailMessage ||
+        settings.portalAnnouncementEmailMessage ||
+        settings.portalAnnouncementMessage,
+      ctaLabel: req.body.ctaLabel ?? settings.portalAnnouncementCtaLabel,
+      ctaUrl: req.body.ctaUrl ?? settings.portalAnnouncementCtaUrl,
+    };
+
+    if (!announcement.emailMessage || !String(announcement.emailMessage).trim()) {
+      return res.status(400).json({ message: "Announcement email message is required." });
+    }
+
+    const users = await UserPortal.find({
+      status: "approved",
+      email: { $exists: true, $ne: "" },
+    }).select("email firstName");
+
+    const results = await Promise.allSettled(
+      users.map((user) =>
+        sendPortalAnnouncementEmail(user.email, {
+          subject: announcement.subject,
+          title: announcement.title,
+          message: announcement.emailMessage,
+          firstName: user.firstName,
+          ctaLabel: announcement.ctaLabel,
+          ctaUrl: announcement.ctaUrl,
+        }),
+      ),
+    );
+
+    settings.portalAnnouncementEmailLastSentAt = new Date();
+    await settings.save();
+
+    const sent = results.filter((result) => result.status === "fulfilled").length;
+    const failed = results.length - sent;
+    res.json({ message: "Announcement email processed", sent, failed, total: users.length });
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });
   }

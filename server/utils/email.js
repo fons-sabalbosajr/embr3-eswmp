@@ -267,7 +267,7 @@ async function sendPortalSignupEmail(email, firstName) {
       </p>
     </div>`;
 
-  await transporter.sendMail({
+  return transporter.sendMail({
     from: `"EMBR3 ESWMP" <${process.env.EMAIL_USER}>`,
     to: email,
     subject: "Registration Received — SLF Generators Portal",
@@ -504,7 +504,7 @@ async function sendSubmissionEmail(email, { subject, message, submissionId, comp
       If you have questions, please reply to this email or contact the administrator.
     </p>`;
 
-  await transporter.sendMail({
+  return transporter.sendMail({
     from: `"EMBR3 ESWMP" <${process.env.EMAIL_USER}>`,
     to: email,
     subject: `${subject} — EMBR3 ESWMP`,
@@ -739,6 +739,35 @@ async function sendPortalCustomEmail(email, { subject, message, firstName }) {
   });
 }
 
+async function sendPortalAnnouncementEmail(email, { subject, message, title, firstName, ctaLabel, ctaUrl }) {
+  const loginLink = ctaUrl || `${getClientUrl()}/slfportal/login`;
+  const body = `
+    <h2 style="margin:0 0 8px;color:#1a3353;font-size:22px;">${title || subject || "SLF Portal Announcement"}</h2>
+    <p style="margin:0 0 16px;color:#666;font-size:15px;line-height:1.6;">
+      Hi <strong>${firstName || "there"}</strong>,
+    </p>
+    <div style="padding:18px;background:#f0f5ff;border-radius:10px;border:1px solid #adc6ff;margin-bottom:24px;">
+      <p style="margin:0;color:#1f1f1f;font-size:14px;line-height:1.8;white-space:pre-wrap;">${message}</p>
+    </div>
+    <table width="100%" cellpadding="0" cellspacing="0">
+      <tr><td align="center" style="padding:4px 0 22px;">
+        <a href="${loginLink}" target="_blank" style="display:inline-block;background:#1a3353;color:#fff;text-decoration:none;padding:13px 34px;border-radius:8px;font-size:15px;font-weight:600;">
+          ${ctaLabel || "Open SLF Portal"}
+        </a>
+      </td></tr>
+    </table>
+    <p style="margin:0;color:#999;font-size:13px;line-height:1.5;">
+      This announcement was posted by the EMBR3 ESWMP administration.
+    </p>`;
+
+  return transporter.sendMail({
+    from: `"EMBR3 ESWMP" <${process.env.EMAIL_USER}>`,
+    to: email,
+    subject: `${subject || title || "SLF Portal Announcement"} - EMBR3 ESWMP`,
+    html: portalEmailWrapper(body),
+  });
+}
+
 async function sendInternalMessageEmail(email, firstName, senderName, subject, preview) {
   const appLink = `${getClientUrl()}/admin`;
   const body = `
@@ -783,6 +812,7 @@ module.exports = {
   sendPortalVerificationReminderEmail,
   sendHoldAccountFollowUpEmail,
   sendPortalCustomEmail,
+  sendPortalAnnouncementEmail,
   sendInternalMessageEmail,
   sendAdminResetPasswordEmail,
   sendSubmissionEmail,

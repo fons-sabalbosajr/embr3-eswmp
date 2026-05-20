@@ -4,6 +4,29 @@ const { notifyPortal } = require("../utils/socketEmit");
 
 const router = express.Router();
 
+const TEST_ADMIN_MESSAGE_REGEX =
+  /^(admin (sent you a message|replied to .*?):\s*)?(test|testing|test message|test notification|sample message)(\s*\d*)?$/i;
+
+function excludeTestAdminMessages(filter = {}) {
+  return {
+    ...filter,
+    $and: [
+      ...(filter.$and || []),
+      {
+        $nor: [
+          {
+            type: { $in: ["admin_message", "message_from_admin", "support_ticket_reply"] },
+            $or: [
+              { title: TEST_ADMIN_MESSAGE_REGEX },
+              { message: TEST_ADMIN_MESSAGE_REGEX },
+            ],
+          },
+        ],
+      },
+    ],
+  };
+}
+
 // Admin: Get all notifications (paginated, filterable) — must be before /:recipient
 router.get("/all/manage", async (req, res) => {
   try {
@@ -23,11 +46,12 @@ router.get("/all/manage", async (req, res) => {
       if (dateFrom) filter.createdAt.$gte = new Date(dateFrom);
       if (dateTo) filter.createdAt.$lte = new Date(dateTo);
     }
+    const query = excludeTestAdminMessages(filter);
     const skip = (Number(page) - 1) * Number(limit);
     const [notifications, total, unreadCount] = await Promise.all([
-      Notification.find(filter).sort({ createdAt: -1 }).skip(skip).limit(Number(limit)),
-      Notification.countDocuments(filter),
-      Notification.countDocuments({ recipient: "admin", read: false }),
+      Notification.find(query).sort({ createdAt: -1 }).skip(skip).limit(Number(limit)),
+      Notification.countDocuments(query),
+      Notification.countDocuments(excludeTestAdminMessages({ recipient: "admin", read: false })),
     ]);
     res.json({ notifications, total, unreadCount, page: Number(page), limit: Number(limit) });
   } catch (error) {
@@ -59,7 +83,7 @@ router.get("/:recipient", async (req, res) => {
     const { recipient } = req.params;
     const { page = 1, limit = 30, dateFrom, dateTo } = req.query;
     const skip = (Number(page) - 1) * Number(limit);
-    const filter = { recipient };
+    const filter = excludeTestAdminMessages({ recipient });
     if (dateFrom || dateTo) {
       filter.createdAt = {};
       if (dateFrom) filter.createdAt.$gte = new Date(dateFrom);
@@ -84,10 +108,10 @@ router.get("/:recipient", async (req, res) => {
 // Get unread count only
 router.get("/:recipient/unread-count", async (req, res) => {
   try {
-    const count = await Notification.countDocuments({
+    const count = await Notification.countDocuments(excludeTestAdminMessages({
       recipient: req.params.recipient,
       read: false,
-    });
+    }));
     res.json({ count });
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });

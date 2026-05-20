@@ -91,7 +91,7 @@ router.patch("/:id/approve", async (req, res) => {
         approvedBy: req.user.id,
         approvedAt: new Date(),
       },
-      { returnDocument: "after" }
+      { returnDocument: "after", runValidators: true }
     ).select("-password");
 
     if (!user) return res.status(404).json({ message: "User not found" });
@@ -132,7 +132,7 @@ router.patch("/:id/update-slf", async (req, res) => {
     const user = await UserPortal.findByIdAndUpdate(
       req.params.id,
       { assignedSlf: slfs.map((s) => s._id), assignedSlfName: slfDisplayNames },
-      { returnDocument: "after" }
+      { returnDocument: "after", runValidators: true }
     ).select("-password");
     if (!user) return res.status(404).json({ message: "User not found" });
     res.json({ message: "Assigned SLF updated", data: user });
@@ -157,7 +157,7 @@ router.patch("/:id/reject", async (req, res) => {
         status: "rejected",
         rejectedReason: reason || "",
       },
-      { returnDocument: "after" }
+      { returnDocument: "after", runValidators: true }
     ).select("-password");
 
     if (!user) return res.status(404).json({ message: "User not found" });
@@ -234,7 +234,7 @@ router.patch("/:id/unhold", async (req, res) => {
     const user = await UserPortal.findByIdAndUpdate(
       req.params.id,
       { verificationRequired: false, verificationSubmitted: false },
-      { returnDocument: "after" }
+      { returnDocument: "after", runValidators: true }
     ).select("-password");
     if (!user) return res.status(404).json({ message: "User not found" });
 
@@ -255,7 +255,7 @@ router.patch("/:id/review-verification", async (req, res) => {
     const user = await UserPortal.findByIdAndUpdate(
       req.params.id,
       { verificationRequired: false, verificationSubmitted: false },
-      { returnDocument: "after" }
+      { returnDocument: "after", runValidators: true }
     ).select("-password");
     if (!user) return res.status(404).json({ message: "User not found" });
 
@@ -370,7 +370,11 @@ router.post("/:id/send-email", async (req, res) => {
       return res.status(400).json({ message: "Subject and message are required" });
     }
 
-    await sendPortalCustomEmail(user.email, { subject: subject.trim(), message: message.trim(), firstName: user.firstName });
+    const emailResult = await sendPortalCustomEmail(user.email, {
+      subject: subject.trim(),
+      message: message.trim(),
+      firstName: user.firstName,
+    });
     await Notification.create({
       recipient: "admin",
       type: "portal_user_email",
@@ -379,12 +383,17 @@ router.post("/:id/send-email", async (req, res) => {
       meta: { portalUserId: user._id, portalUserEmail: user.email, templateType, subject: subject.trim() },
     });
     refreshAdmin(req, "notifications");
-    res.json({ message: `Email sent to ${user.email}.` });
+    res.json({
+      message: `Email sent to ${user.email}.`,
+      messageId: emailResult?.messageId || null,
+      accepted: emailResult?.accepted || [],
+      rejected: emailResult?.rejected || [],
+    });
     writeLog("info", "portal.send-email", {
       message: `Custom portal email sent to ${user.email}`,
       user: req.user.id,
       ip: req.ip,
-      meta: { templateType, subject: subject.trim() },
+      meta: { templateType, subject: subject.trim(), messageId: emailResult?.messageId || null },
     });
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });

@@ -31,6 +31,16 @@ const appSettingsSchema = new mongoose.Schema(
     portalAnnouncementType: { type: String, enum: ["info", "warning", "success", "error"], default: "info" },
     portalAnnouncementTitle: { type: String, default: "" },
     portalAnnouncementMessage: { type: String, default: "" },
+    portalAnnouncementStartAt: { type: Date, default: null },
+    portalAnnouncementEndAt: { type: Date, default: null },
+    portalAnnouncementShowOnLogin: { type: Boolean, default: true },
+    portalAnnouncementShowInPortal: { type: Boolean, default: true },
+    portalAnnouncementDismissible: { type: Boolean, default: true },
+    portalAnnouncementCtaLabel: { type: String, default: "" },
+    portalAnnouncementCtaUrl: { type: String, default: "" },
+    portalAnnouncementEmailSubject: { type: String, default: "" },
+    portalAnnouncementEmailMessage: { type: String, default: "" },
+    portalAnnouncementEmailLastSentAt: { type: Date, default: null },
 
     // Email
     emailNotificationsEnabled: { type: Boolean, default: true },

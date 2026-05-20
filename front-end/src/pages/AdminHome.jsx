@@ -321,6 +321,8 @@ export default function AdminHome() {
   const [headerColor, setHeaderColor] = useState("#ffffff");
   const [headerColorDark, setHeaderColorDark] = useState("#141414");
   const [sidebarStyle, setSidebarStyle] = useState("gradient");
+  const [portalAnnouncementActive, setPortalAnnouncementActive] = useState(false);
+  const [developerSettingsInitialTab, setDeveloperSettingsInitialTab] = useState("general");
   const [currentTime, setCurrentTime] = useState(dayjs());
   const [profileModalOpen, setProfileModalOpen] = useState(false);
   const [drawerOpen, setDrawerOpen] = useState(false);
@@ -340,6 +342,21 @@ export default function AdminHome() {
   const screens = useBreakpoint();
   const isMobile = !screens.md;
   const navigate = useNavigate();
+
+  const syncPortalAnnouncementFlag = (settings = {}) => {
+    const now = Date.now();
+    const startsAt = settings.portalAnnouncementStartAt
+      ? new Date(settings.portalAnnouncementStartAt).getTime()
+      : null;
+    const endsAt = settings.portalAnnouncementEndAt
+      ? new Date(settings.portalAnnouncementEndAt).getTime()
+      : null;
+    setPortalAnnouncementActive(
+      !!settings.portalAnnouncementEnabled &&
+        (!startsAt || startsAt <= now) &&
+        (!endsAt || endsAt >= now),
+    );
+  };
 
   const syncCurrentUser = useCallback(async () => {
     try {
@@ -395,6 +412,7 @@ export default function AdminHome() {
         if (data.headerColor) setHeaderColor(data.headerColor);
         if (data.headerColorDark) setHeaderColorDark(data.headerColorDark);
         if (data.sidebarStyle) setSidebarStyle(data.sidebarStyle);
+        syncPortalAnnouncementFlag(data);
       })
       .catch(() => {});
   }, [navigate, syncCurrentUser]);
@@ -409,9 +427,9 @@ export default function AdminHome() {
     };
   }, [syncCurrentUser]);
 
-  // ── Idle auto-logout (5 minutes of inactivity) ──
+  // ── Idle auto-logout (10 minutes of inactivity) ──
   useEffect(() => {
-    const IDLE_MS = 5 * 60 * 1000;
+    const IDLE_MS = 10 * 60 * 1000;
     let timer;
     let idledOut = false;
 
@@ -900,7 +918,9 @@ export default function AdminHome() {
         return (isDeveloper || hasExplicitAccess("notificationManagement")) ? <NotificationManagement isDark={isDark} /> : denied;
       case "dev-settings":
         return (isDeveloper || hasExplicitAccess("developerSettings")) ? (
-          <DeveloperSettings isDark={isDark}
+          <DeveloperSettings
+            isDark={isDark}
+            initialActiveKey={developerSettingsInitialTab}
             onSettingsSaved={(s) => {
               if (s.primaryColor) {
                 setPrimaryColor(s.primaryColor);
@@ -915,6 +935,7 @@ export default function AdminHome() {
               if (s.headerColor) setHeaderColor(s.headerColor);
               if (s.headerColorDark) setHeaderColorDark(s.headerColorDark);
               if (s.sidebarStyle) setSidebarStyle(s.sidebarStyle);
+              syncPortalAnnouncementFlag(s);
             }}
           />
         ) : (
@@ -1099,6 +1120,24 @@ export default function AdminHome() {
                   </Text>
                 </div>
               )}
+              <Tooltip title="Check SLF portal announcements">
+                <Tag
+                  color={portalAnnouncementActive ? "green" : "default"}
+                  icon={<BellOutlined />}
+                  onClick={() => {
+                    setDeveloperSettingsInitialTab("announcements");
+                    setActiveMenu("dev-settings");
+                  }}
+                  style={{
+                    cursor: "pointer",
+                    marginRight: 12,
+                    display: "inline-flex",
+                    alignItems: "center",
+                  }}
+                >
+                  Portal Announcements
+                </Tag>
+              </Tooltip>
               <Switch
                 checked={!isDark}
                 onChange={toggleTheme}

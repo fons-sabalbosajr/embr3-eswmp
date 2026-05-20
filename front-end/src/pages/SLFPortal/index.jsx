@@ -33,6 +33,7 @@ import {
   List,
   Progress,
   Checkbox,
+  Alert,
 } from "antd";
 import {
   CheckCircleOutlined,
@@ -105,6 +106,20 @@ const { TextArea } = Input;
 const TON_PER_M3 = 0.2;
 
 const normalizeUnit = (unit) => String(unit || "m³").replace("m3", "m³");
+
+const isTestAdminNotice = (item = {}) => {
+  const isAdminNotice =
+    ["admin_message", "message_from_admin", "support_ticket_reply"].includes(item.type) ||
+    item.source === "admin_message" ||
+    /message from admin|admin sent you a message/i.test(
+      `${item.title || ""} ${item.subject || ""} ${item.message || ""}`,
+    );
+  if (!isAdminNotice) return false;
+  const content = `${item.subject || ""} ${item.title || ""} ${item.message || ""}`
+    .replace(/admin (sent you a message|replied to .*?):/gi, "")
+    .trim();
+  return /^(test|testing|test message|test notification|sample message)(\s*\d*)?$/i.test(content);
+};
 
 const normalizeVehicleRecord = (vehicle = {}, fallbackUnit = "m³") => ({
   plateNumber: vehicle.plateNumber || vehicle.plateNo || vehicle.plate || "",
@@ -377,6 +392,9 @@ export default function SLFPortal() {
   const [supportReplyText, setSupportReplyText] = useState("");
   const [portalNotifications, setPortalNotifications] = useState([]);
   const [portalUnreadCount, setPortalUnreadCount] = useState(0);
+  const [notificationPanelOpen, setNotificationPanelOpen] = useState(false);
+  const [portalAnnouncement, setPortalAnnouncement] = useState(null);
+  const [announcementDismissed, setAnnouncementDismissed] = useState(false);
   // Excel/CSV upload states
   const [uploadModalOpen, setUploadModalOpen] = useState(false);
   const [uploadType, setUploadType] = useState("truck"); // "truck" or "hauler"
@@ -656,6 +674,48 @@ export default function SLFPortal() {
   // Helper: get select options from settings, with fallback
   const opts = (key, fallback = []) =>
     fieldLabels[key]?.options?.length > 0 ? fieldLabels[key].options : fallback;
+
+  const isAnnouncementActive = (settings) => {
+    const now = Date.now();
+    const startsAt = settings?.portalAnnouncementStartAt
+      ? new Date(settings.portalAnnouncementStartAt).getTime()
+      : null;
+    const endsAt = settings?.portalAnnouncementEndAt
+      ? new Date(settings.portalAnnouncementEndAt).getTime()
+      : null;
+    return (
+      settings?.portalAnnouncementEnabled &&
+      settings?.portalAnnouncementShowInPortal !== false &&
+      (!startsAt || startsAt <= now) &&
+      (!endsAt || endsAt >= now)
+    );
+  };
+
+  useEffect(() => {
+    api
+      .get("/settings/app")
+      .then(({ data }) => {
+        setPortalAnnouncement(isAnnouncementActive(data) ? data : null);
+      })
+      .catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    if (!portalAnnouncement || !portalUser) return;
+    const key = `portal-announcement-seen-${portalAnnouncement.updatedAt || portalAnnouncement._id || portalAnnouncement.portalAnnouncementTitle}`;
+    if (sessionStorage.getItem(key) === "1") return;
+    sessionStorage.setItem(key, "1");
+    Modal.info({
+      title: portalAnnouncement.portalAnnouncementTitle || "SLF Portal Announcement",
+      content: (
+        <div style={{ whiteSpace: "pre-wrap" }}>
+          {portalAnnouncement.portalAnnouncementMessage}
+        </div>
+      ),
+      okText: "Got it",
+      width: 560,
+    });
+  }, [portalAnnouncement, portalUser]);
 
   // Load portal user from storage, then refresh from server for latest status/isVerified
   useEffect(() => {
@@ -1831,7 +1891,7 @@ export default function SLFPortal() {
       const { data } = await api.get(
         `/support-tickets/my-tickets/${encodeURIComponent(portalUser.email)}`,
       );
-      setSupportTickets(data);
+      setSupportTickets((data || []).filter((ticket) => !isTestAdminNotice(ticket)));
     } catch {
       /* silent */
     } finally {
@@ -1853,7 +1913,9 @@ export default function SLFPortal() {
       const notificationMap = new Map();
       responses.forEach(({ data }) => {
         (data.notifications || []).forEach((notification) => {
-          notificationMap.set(notification._id, notification);
+          if (!isTestAdminNotice(notification)) {
+            notificationMap.set(notification._id, notification);
+          }
         });
       });
       const notifications = Array.from(notificationMap.values()).sort(
@@ -1867,10 +1929,11 @@ export default function SLFPortal() {
   }, [portalUser?.email, portalUser?._id]);
 
   const isMessageNotification = (notification = {}) =>
-    notification.type === "support_ticket_reply" &&
+    ["admin_message", "message_from_admin"].includes(notification.type) ||
+    (notification.type === "support_ticket_reply" &&
     /message from admin|admin sent you a message|admin replied/i.test(
       `${notification.title || ""} ${notification.message || ""}`,
-    );
+    ));
 
   const isSupportNotification = (notification = {}) =>
     notification.type === "support_ticket_reply" && !isMessageNotification(notification);
@@ -1892,6 +1955,7 @@ export default function SLFPortal() {
         if (category === "requests") {
           return ["baseline_update_approved", "baseline_update_rejected"].includes(notification.type);
         }
+        if (category === "all") return true;
         return false;
       });
       if (unread.length === 0) return;
@@ -1905,6 +1969,19 @@ export default function SLFPortal() {
       }
     },
     [portalNotifications, fetchPortalNotifications],
+  );
+
+  const markPortalNotificationRead = useCallback(
+    async (notification) => {
+      if (!notification?._id || notification.read) return;
+      try {
+        await api.patch(`/notifications/${notification._id}/read`);
+        await fetchPortalNotifications();
+      } catch {
+        /* silent */
+      }
+    },
+    [fetchPortalNotifications],
   );
 
   useEffect(() => {
@@ -3091,6 +3168,134 @@ export default function SLFPortal() {
     ).length,
   };
   const historyBadgeCount = revertedCount + portalNotificationCounts.history;
+  const getPortalNotificationMeta = (notification = {}) => {
+    if (isMessageNotification(notification)) {
+      return { label: "Admin Message", color: "blue", icon: <MessageOutlined />, action: "messages" };
+    }
+    if (isSupportNotification(notification)) {
+      return { label: "Support Ticket", color: "purple", icon: <CustomerServiceOutlined />, action: "support" };
+    }
+    if (
+      [
+        "reverted",
+        "status_change",
+        "submission_edit_approved",
+        "submission_edit_rejected",
+      ].includes(notification.type)
+    ) {
+      const rejected = /rejected|reverted/i.test(`${notification.type} ${notification.title || ""}`);
+      return {
+        label: rejected ? "Submission Update" : "Submission Status",
+        color: rejected ? "red" : "green",
+        icon: rejected ? <CloseCircleOutlined /> : <HistoryOutlined />,
+        action: "history",
+      };
+    }
+    if (["baseline_update_approved", "baseline_update_rejected"].includes(notification.type)) {
+      return { label: "Request Update", color: "geekblue", icon: <AuditOutlined />, action: "requests" };
+    }
+    return { label: "Admin Update", color: "default", icon: <BellOutlined />, action: "none" };
+  };
+
+  const openPortalNotification = async (notification) => {
+    const meta = getPortalNotificationMeta(notification);
+    if (meta.action === "messages") {
+      setMessageDrawerOpen(true);
+      if (supportTickets.length === 0) fetchSupportTickets();
+      markPortalNotificationsRead("messages");
+    } else if (meta.action === "support") {
+      setSupportDrawerOpen(true);
+      setSupportTab("my-tickets");
+      if (supportTickets.length === 0) fetchSupportTickets();
+      markPortalNotificationsRead("support");
+    } else if (meta.action === "history") {
+      setActiveMenu("history");
+      markPortalNotificationsRead("history");
+    } else if (meta.action === "requests") {
+      setActiveMenu("requests");
+      markPortalNotificationsRead("requests");
+    } else {
+      await markPortalNotificationRead(notification);
+    }
+    setNotificationPanelOpen(false);
+  };
+
+  const portalNotificationPanel = (
+    <div style={{ width: isMobile ? 300 : 380, maxWidth: "calc(100vw - 32px)" }}>
+      <Space style={{ width: "100%", justifyContent: "space-between", marginBottom: 8 }}>
+        <Space size={6}>
+          <BellOutlined style={{ color: "#1677ff" }} />
+          <Text strong>Notifications</Text>
+          {portalNotificationCounts.total > 0 && (
+            <Badge count={portalNotificationCounts.total} size="small" />
+          )}
+        </Space>
+        {portalNotificationCounts.total > 0 && (
+          <Button size="small" type="link" onClick={() => markPortalNotificationsRead("all")}>
+            Mark all read
+          </Button>
+        )}
+      </Space>
+      {portalNotifications.length === 0 ? (
+        <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No notifications yet" />
+      ) : (
+        <List
+          size="small"
+          dataSource={portalNotifications.slice(0, 8)}
+          style={{ maxHeight: 420, overflowY: "auto" }}
+          renderItem={(notification) => {
+            const meta = getPortalNotificationMeta(notification);
+            return (
+              <List.Item
+                onClick={() => openPortalNotification(notification)}
+                style={{
+                  cursor: "pointer",
+                  padding: "10px 8px",
+                  borderRadius: 8,
+                  background: notification.read ? "#fff" : "#f0f7ff",
+                  marginBottom: 4,
+                }}
+              >
+                <List.Item.Meta
+                  avatar={
+                    <Badge dot={!notification.read}>
+                      <Avatar
+                        size="small"
+                        style={{ background: notification.read ? "#f0f0f0" : "#e6f4ff", color: "#1677ff" }}
+                        icon={meta.icon}
+                      />
+                    </Badge>
+                  }
+                  title={
+                    <Space size={6} wrap>
+                      <Text strong style={{ fontSize: 13 }}>
+                        {notification.title || meta.label}
+                      </Text>
+                      <Tag color={meta.color} bordered={false} style={{ marginInlineEnd: 0 }}>
+                        {meta.label}
+                      </Tag>
+                    </Space>
+                  }
+                  description={
+                    <div>
+                      <Text type="secondary" style={{ fontSize: 12, whiteSpace: "normal" }}>
+                        {notification.message || "Open this update for more details."}
+                      </Text>
+                      <div>
+                        <Text type="secondary" style={{ fontSize: 11 }}>
+                          {notification.createdAt ? dayjs(notification.createdAt).fromNow() : ""}
+                        </Text>
+                      </div>
+                    </div>
+                  }
+                />
+              </List.Item>
+            );
+          }}
+        />
+      )}
+    </div>
+  );
 
   const menuItems = [
     {
@@ -6038,6 +6243,50 @@ export default function SLFPortal() {
             </Text>
           </Space>
           <Space size={8}>
+            <Popover
+              trigger="click"
+              placement="bottomRight"
+              open={notificationPanelOpen}
+              onOpenChange={setNotificationPanelOpen}
+              content={portalNotificationPanel}
+            >
+              <Badge count={portalNotificationCounts.total} size="small">
+                <Button
+                  type={portalNotificationCounts.total > 0 ? "primary" : "default"}
+                  shape="circle"
+                  icon={<BellOutlined />}
+                  aria-label="Open notifications"
+                />
+              </Badge>
+            </Popover>
+            <Tooltip title="Messages from admin">
+              <Badge count={portalNotificationCounts.messages} size="small">
+                <Button
+                  type={portalNotificationCounts.messages > 0 ? "primary" : "default"}
+                  shape="circle"
+                  icon={<MessageOutlined />}
+                  onClick={() => {
+                    setMessageDrawerOpen(true);
+                    if (supportTickets.length === 0) fetchSupportTickets();
+                    markPortalNotificationsRead("messages");
+                  }}
+                />
+              </Badge>
+            </Tooltip>
+            <Tooltip title="Support tickets">
+              <Badge count={portalNotificationCounts.support} size="small">
+                <Button
+                  shape="circle"
+                  icon={<CustomerServiceOutlined />}
+                  onClick={() => {
+                    setSupportDrawerOpen(true);
+                    setSupportTab("my-tickets");
+                    if (supportTickets.length === 0) fetchSupportTickets();
+                    markPortalNotificationsRead("support");
+                  }}
+                />
+              </Badge>
+            </Tooltip>
             <Dropdown
               menu={{
                 items: userMenuItems,
@@ -6094,6 +6343,104 @@ export default function SLFPortal() {
               You are currently offline. Some features may be unavailable. Data
               will be sent once your connection is restored.
             </div>
+          )}
+          {portalAnnouncement && !announcementDismissed && (
+            <Alert
+              type={portalAnnouncement.portalAnnouncementType || "info"}
+              showIcon
+              closable={portalAnnouncement.portalAnnouncementDismissible !== false}
+              onClose={() => setAnnouncementDismissed(true)}
+              style={{
+                marginBottom: 12,
+                borderRadius: 8,
+              }}
+              message={
+                <Space wrap>
+                  <Text strong>
+                    {portalAnnouncement.portalAnnouncementTitle || "SLF Portal Announcement"}
+                  </Text>
+                  <Tag color="blue">Announcement</Tag>
+                </Space>
+              }
+              description={
+                <Space direction="vertical" size={8} style={{ width: "100%" }}>
+                  <div style={{ whiteSpace: "pre-wrap" }}>
+                    {portalAnnouncement.portalAnnouncementMessage}
+                  </div>
+                  {portalAnnouncement.portalAnnouncementCtaUrl && (
+                    <Button
+                      size="small"
+                      type="primary"
+                      href={portalAnnouncement.portalAnnouncementCtaUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      {portalAnnouncement.portalAnnouncementCtaLabel || "Read more"}
+                    </Button>
+                  )}
+                </Space>
+              }
+            />
+          )}
+          {(portalNotificationCounts.messages > 0 || portalNotificationCounts.support > 0) && (
+            <Card
+              size="small"
+              style={{
+                marginBottom: 12,
+                borderRadius: 8,
+                borderColor: "#91caff",
+                background: "#e6f4ff",
+              }}
+              bodyStyle={{ padding: "10px 14px" }}
+            >
+              <Space
+                wrap
+                style={{ width: "100%", justifyContent: "space-between" }}
+              >
+                <Space>
+                  <BellOutlined style={{ color: "#1677ff" }} />
+                  <Text strong>
+                    You have unread admin updates
+                  </Text>
+                  {portalNotificationCounts.messages > 0 && (
+                    <Tag color="blue">{portalNotificationCounts.messages} message(s)</Tag>
+                  )}
+                  {portalNotificationCounts.support > 0 && (
+                    <Tag color="purple">{portalNotificationCounts.support} ticket update(s)</Tag>
+                  )}
+                </Space>
+                <Space>
+                  {portalNotificationCounts.messages > 0 && (
+                    <Button
+                      size="small"
+                      type="primary"
+                      icon={<MessageOutlined />}
+                      onClick={() => {
+                        setMessageDrawerOpen(true);
+                        if (supportTickets.length === 0) fetchSupportTickets();
+                        markPortalNotificationsRead("messages");
+                      }}
+                    >
+                      Open Messages
+                    </Button>
+                  )}
+                  {portalNotificationCounts.support > 0 && (
+                    <Button
+                      size="small"
+                      icon={<CustomerServiceOutlined />}
+                      onClick={() => {
+                        setSupportDrawerOpen(true);
+                        setSupportTab("my-tickets");
+                        if (supportTickets.length === 0) fetchSupportTickets();
+                        markPortalNotificationsRead("support");
+                      }}
+                    >
+                      View Tickets
+                    </Button>
+                  )}
+                </Space>
+              </Space>
+            </Card>
           )}
           {activeMenu === "data-entry" && renderDataEntry()}
           {activeMenu === "history" && renderHistory()}

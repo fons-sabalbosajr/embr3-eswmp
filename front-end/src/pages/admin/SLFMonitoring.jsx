@@ -4,8 +4,6 @@ import {
   useCallback,
   useMemo,
   useRef,
-  Suspense,
-  lazy,
 } from "react";
 import {
   Card,
@@ -80,6 +78,8 @@ import {
   FolderOutlined,
   FilePdfOutlined,
   ContainerOutlined,
+  CalculatorOutlined,
+  CopyOutlined,
 } from "@ant-design/icons";
 import Swal from "sweetalert2";
 import api from "../../api";
@@ -101,6 +101,13 @@ import {
   Legend,
   ResponsiveContainer,
 } from "recharts";
+import ResponsiveTable from "./shared/ResponsiveTable";
+import {
+  getSubmissionVolumeSummary,
+  getTruckCapacityText,
+  getTruckPlateText,
+  normalizeSubmissionRecord,
+} from "./shared/submissionRecords";
 
 const { Title, Text } = Typography;
 const ACCENT = "#2f54eb";
@@ -113,6 +120,17 @@ const CHART_COLORS = [
   "#722ed1",
   "#eb2f96",
 ];
+
+const managementStatusSummary = (items = []) => {
+  const counts = items.reduce((acc, item) => {
+    const status = item.status || item.condition || item.remarks || "Recorded";
+    acc[status] = (acc[status] || 0) + 1;
+    return acc;
+  }, {});
+  return Object.entries(counts)
+    .map(([status, count]) => `${status}: ${count}`)
+    .join("\n");
+};
 const UNIT_OPTIONS = [
   { label: "m³", value: "m³" },
   { label: "tons", value: "tons" },
@@ -733,7 +751,7 @@ function InsightStat({ title, value, suffix, color }) {
 
 function buildFilters(records, key) {
   const vals = [...new Set(records.map((r) => r[key]).filter(Boolean))].sort();
-  return vals.map((v) => ({ text: v, value: v }));
+  return vals.map((v) => ({ text: v, label: v, value: v }));
 }
 
 function networkDays(startDate, endDate) {
@@ -790,7 +808,7 @@ function getStatusTag(v) {
   return <Tag bordered={false}>{v}</Tag>;
 }
 
-// ── SLF Waste Baseline Info Sub-Tab ──
+// -- SLF Waste Baseline Info Sub-Tab --
 function WasteBaselineInfo() {
   const [baselines, setBaselines] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -1143,7 +1161,7 @@ function WasteBaselineInfo() {
   );
 }
 
-// ── Portal Generators Sub-Tab ──
+// -- Portal Generators Sub-Tab --
 function PortalGenerators({
   generators,
   loadingGen,
@@ -1193,13 +1211,17 @@ function PortalGenerators({
     },
   ];
 
-  const fetchSubmissions = useCallback(() => {
-    setLoadingSub(true);
+  const fetchSubmissions = useCallback((showLoading = true) => {
+    if (showLoading) setLoadingSub(true);
     api
       .get("/data-slf")
-      .then(({ data }) => setSubmissions(data))
+      .then(({ data }) =>
+        setSubmissions((data || []).map(normalizeSubmissionRecord)),
+      )
       .catch(() => {})
-      .finally(() => setLoadingSub(false));
+      .finally(() => {
+        if (showLoading) setLoadingSub(false);
+      });
   }, []);
 
   useEffect(() => {
@@ -1210,9 +1232,9 @@ function PortalGenerators({
     fetchSubmissions();
   }, [fetchSubmissions]);
 
-  // Real-time polling every 8 seconds
+  // Refresh quietly in the background so the table does not keep entering a loading state.
   useEffect(() => {
-    const interval = setInterval(fetchSubmissions, 8000);
+    const interval = setInterval(() => fetchSubmissions(false), 30000);
     return () => clearInterval(interval);
   }, [fetchSubmissions]);
 
@@ -1733,7 +1755,7 @@ function PortalGenerators({
                 color="orange"
                 style={{ margin: "2px 0 0", fontSize: 10, display: "block" }}
               >
-                ⏳ {st.pendingCount} pending
+                Pending: {st.pendingCount} pending
               </Tag>
             )}
           </div>
@@ -1796,6 +1818,82 @@ function PortalGenerators({
     { label: "Reverted", value: "reverted", color: "volcano" },
   ];
 
+  const getSubmissionSlfLabel = (record) =>
+    record.slfGenerator?.slfName ||
+    record.slfGenerator?.lgu ||
+    record.slfName ||
+    "Unassigned SLF";
+
+  const submittedDataSummary = useMemo(() => {
+    const statusCounts = submissions.reduce((acc, submission) => {
+      const status = submission.status || "pending";
+      acc[status] = (acc[status] || 0) + 1;
+      return acc;
+    }, {});
+    const companySet = new Set();
+    const haulerSet = new Set();
+    const volumeByUnit = {};
+    const generatorMap = new Map();
+    let totalTrucks = 0;
+    let latestSubmission = null;
+
+    submissions.forEach((submission) => {
+      if (submission.lguCompanyName) {
+        companySet.add(submission.lguCompanyName.trim().toLowerCase());
+      }
+      const slfName = getSubmissionSlfLabel(submission);
+      const current = generatorMap.get(slfName) || {
+        name: slfName,
+        submissions: 0,
+        trucks: 0,
+        volume: 0,
+      };
+      current.submissions += 1;
+      if (
+        !latestSubmission ||
+        dayjs(submission.createdAt).isAfter(dayjs(latestSubmission.createdAt))
+      ) {
+        latestSubmission = submission;
+      }
+
+      (submission.trucks || []).forEach((truck) => {
+        totalTrucks += 1;
+        current.trucks += 1;
+        if (truck.hauler) {
+          haulerSet.add(truck.hauler.trim().toLowerCase());
+        }
+        const volume = Number(truck.actualVolume || 0);
+        if (volume > 0) {
+          const unit = normalizeUnit(truck.actualVolumeUnit || "tons");
+          volumeByUnit[unit] = (volumeByUnit[unit] || 0) + volume;
+          current.volume += volume;
+        }
+      });
+
+      generatorMap.set(slfName, current);
+    });
+
+    const volumeText = Object.entries(volumeByUnit)
+      .sort((a, b) => b[1] - a[1])
+      .map(([unit, value]) => `${value.toLocaleString()} ${unit}`)
+      .join(" / ");
+
+    return {
+      statusCounts,
+      uniqueCompanies: companySet.size,
+      uniqueHaulers: haulerSet.size,
+      totalTrucks,
+      averageTrucks: submissions.length
+        ? (totalTrucks / submissions.length).toFixed(1)
+        : "0",
+      volumeText: volumeText || "No volume yet",
+      latestSubmission,
+      topGenerators: [...generatorMap.values()]
+        .sort((a, b) => b.submissions - a.submissions || b.volume - a.volume)
+        .slice(0, 5),
+    };
+  }, [submissions]);
+
   const subColumns = [
     {
       title: "ID No.",
@@ -1811,20 +1909,22 @@ function PortalGenerators({
       title: "SLF / Generator",
       key: "slfName",
       width: 150,
-      render: (_, r) =>
-        r.slfGenerator?.slfName ? (
+      render: (_, r) => {
+        const label = getSubmissionSlfLabel(r);
+        return label !== "Unassigned SLF" ? (
           <Tag
             icon={<BankOutlined />}
             color="geekblue"
             style={{ fontSize: 10 }}
           >
-            {r.slfGenerator.slfName}
+            {label}
           </Tag>
         ) : (
           <Text type="secondary" style={{ fontSize: 11 }}>
             —
           </Text>
-        ),
+        );
+      },
       filters: generators.map((g) => ({ text: g.slfName, value: g._id })),
       onFilter: (val, r) => (r.slfGenerator?._id || r.slfGenerator) === val,
     },
@@ -1878,16 +1978,10 @@ function PortalGenerators({
       title: "Volume",
       width: 110,
       render: (_, r) => {
-        const vol = (r.trucks || []).reduce(
-          (s, t) => s + (t.actualVolume || 0),
-          0,
-        );
-        return vol > 0 ? (
+        const summary = getSubmissionVolumeSummary(r);
+        return summary ? (
           <Text strong style={{ fontSize: 12, color: "#2f54eb" }}>
-            {vol.toLocaleString()}{" "}
-            <Text type="secondary" style={{ fontSize: 10 }}>
-              tons
-            </Text>
+            {summary}
           </Text>
         ) : (
           "—"
@@ -1935,7 +2029,7 @@ function PortalGenerators({
             )}
             {haz.length > 0 && (
               <Tag color="red" style={{ fontSize: 10 }}>
-                ⚠ {haz.length} Haz/Inert
+                Ã¢Å¡Â  {haz.length} Haz/Inert
               </Tag>
             )}
           </Space>
@@ -2097,7 +2191,7 @@ function PortalGenerators({
 
   return (
     <>
-      {/* ── Summary Stats ──────────────────────────────────────────── */}
+      {/* -- Summary Stats -------------------------------------------- */}
       <Row gutter={[10, 10]} style={{ marginBottom: 16 }}>
         <Col xs={12} sm={8} md={4}>
           <Card
@@ -2226,314 +2320,238 @@ function PortalGenerators({
         </Col>
       </Row>
 
-      {/* ── Generator Registry ───────────────────────────────────────── */}
       <Card
         size="small"
-        style={{ borderRadius: 10, marginBottom: 16 }}
-        bodyStyle={{ padding: 0 }}
-        title={
-          <Space>
-            <DatabaseOutlined style={{ color: ACCENT }} />
-            <Text strong>SLF Generator Registry</Text>
-            <Tag bordered={false} color="blue">
-              {generators.length} generators
-            </Tag>
-          </Space>
-        }
-        extra={
-          canEdit && (
-            <Button
-              type="primary"
-              size="small"
-              icon={<PlusOutlined />}
-              onClick={openAdd}
-              style={{ background: ACCENT, borderColor: ACCENT }}
-            >
-              Add Generator
-            </Button>
-          )
-        }
-      >
-        <Table
-          dataSource={generators}
-          columns={genColumns}
-          rowKey="_id"
-          loading={loadingGen}
-          size="small"
-          pagination={{
-            pageSize: 10,
-            showSizeChanger: true,
-            showTotal: (t) => `${t} generators`,
-          }}
-          scroll={{ x: 800 }}
-          expandable={{
-            expandedRowRender: (g) => {
-              const st = statsMap[g._id];
-              const facList = slfRecords.filter((sr) => {
-                const gid =
-                  typeof sr.slfGenerator === "object"
-                    ? sr.slfGenerator?._id
-                    : sr.slfGenerator;
-                return gid === g._id;
-              });
-              return (
-                <div
-                  style={{
-                    padding: "10px 16px",
-                    background: isDark ? "rgba(47,84,235,0.04)" : "#f8faff",
-                    borderRadius: 8,
-                  }}
-                >
-                  <Row gutter={[16, 12]}>
-                    {st && (
-                      <Col xs={24} sm={12}>
-                        <Text
-                          type="secondary"
-                          style={{
-                            fontSize: 11,
-                            fontWeight: 600,
-                            textTransform: "uppercase",
-                            letterSpacing: 0.5,
-                          }}
-                        >
-                          Submission Stats
-                        </Text>
-                        <Row gutter={8} style={{ marginTop: 6 }}>
-                          {[
-                            {
-                              label: "Total",
-                              value: st.totalEntries,
-                              color: "#1677ff",
-                            },
-                            {
-                              label: "Pending",
-                              value: st.pendingCount,
-                              color: "#faad14",
-                            },
-                            {
-                              label: "Acknowledged",
-                              value: st.acknowledgedCount,
-                              color: "#52c41a",
-                            },
-                            {
-                              label: "Volume",
-                              value: `${(st.totalVolume || 0).toLocaleString()} t`,
-                              color: "#722ed1",
-                            },
-                          ].map((item, idx) => (
-                            <Col key={idx} xs={12} sm={6}>
-                              <div
-                                style={{
-                                  background: `${item.color}10`,
-                                  borderRadius: 6,
-                                  padding: "6px 10px",
-                                  border: `1px solid ${item.color}25`,
-                                }}
-                              >
-                                <div
-                                  style={{
-                                    fontSize: 9,
-                                    color: "#8c8c8c",
-                                    textTransform: "uppercase",
-                                  }}
-                                >
-                                  {item.label}
-                                </div>
-                                <div
-                                  style={{
-                                    fontSize: 14,
-                                    fontWeight: 700,
-                                    color: item.color,
-                                  }}
-                                >
-                                  {item.value}
-                                </div>
-                              </div>
-                            </Col>
-                          ))}
-                        </Row>
-                      </Col>
-                    )}
-                    {facList.length > 0 && (
-                      <Col xs={24} sm={12}>
-                        <Text
-                          type="secondary"
-                          style={{
-                            fontSize: 11,
-                            fontWeight: 600,
-                            textTransform: "uppercase",
-                            letterSpacing: 0.5,
-                          }}
-                        >
-                          Linked SLF Facilities
-                        </Text>
-                        <div style={{ marginTop: 6 }}>
-                          {facList.slice(0, 3).map((fac) => (
-                            <div
-                              key={fac._id}
-                              style={{
-                                fontSize: 11,
-                                display: "flex",
-                                alignItems: "center",
-                                gap: 6,
-                                marginBottom: 4,
-                              }}
-                            >
-                              <BankOutlined style={{ color: ACCENT }} />
-                              <Text style={{ fontSize: 11 }}>
-                                {fac.lgu}, {fac.province}
-                              </Text>
-                              {fac.statusOfSLF && (
-                                <Tag
-                                  style={{ fontSize: 9 }}
-                                  color={
-                                    fac.statusOfSLF
-                                      .toLowerCase()
-                                      .includes("non")
-                                      ? "red"
-                                      : "green"
-                                  }
-                                >
-                                  {fac.statusOfSLF}
-                                </Tag>
-                              )}
-                              {fac.numberOfCell > 0 && (
-                                <Tag style={{ fontSize: 9 }} color="cyan">
-                                  {fac.numberOfCell} cell
-                                  {fac.numberOfCell > 1 ? "s" : ""}
-                                </Tag>
-                              )}
-                            </div>
-                          ))}
-                          {facList.length > 3 && (
-                            <Text type="secondary" style={{ fontSize: 10 }}>
-                              +{facList.length - 3} more
-                            </Text>
-                          )}
-                        </div>
-                      </Col>
-                    )}
-                    {(g.accreditedHaulers || []).length > 0 && (
-                      <Col xs={24}>
-                        <Text
-                          type="secondary"
-                          style={{
-                            fontSize: 11,
-                            fontWeight: 600,
-                            textTransform: "uppercase",
-                            letterSpacing: 0.5,
-                          }}
-                        >
-                          Accredited Haulers
-                        </Text>
-                        <Space size={4} wrap style={{ marginTop: 6 }}>
-                          {g.accreditedHaulers.map((h, i) => (
-                            <Tag key={i} color="blue" style={{ fontSize: 10 }}>
-                              {h.haulerName}{" "}
-                              {h.numberOfTrucks
-                                ? `(${h.numberOfTrucks} trucks)`
-                                : ""}
-                            </Tag>
-                          ))}
-                        </Space>
-                      </Col>
-                    )}
-                  </Row>
-                </div>
-              );
-            },
-            rowExpandable: (g) =>
-              !!(
-                statsMap[g._id] ||
-                linkedFacilities[g._id] ||
-                (g.accreditedHaulers || []).length
-              ),
-          }}
-        />
-      </Card>
-
-      <Card
-        size="small"
-        style={{ borderRadius: 10, marginBottom: 16 }}
-        bodyStyle={{ padding: 0 }}
+        style={{ borderRadius: 10, marginBottom: 18 }}
+        bodyStyle={{ padding: 18 }}
         title={
           <Space wrap>
-            <PieChartOutlined style={{ color: "#13c2c2" }} />
-            <Text strong>Portal Submission Volume by Active Cell</Text>
-            <Tag bordered={false} color="cyan">
-              {portalCellSummaries.length} SLFs
+            <BarChartOutlined style={{ color: ACCENT }} />
+            <Text strong>Submission Summary</Text>
+            <Tag bordered={false} color="blue">
+              Based on submitted portal data
             </Tag>
           </Space>
         }
       >
-        {portalCellSummaries.length === 0 ? (
-          <Empty
-            image={Empty.PRESENTED_IMAGE_SIMPLE}
-            description="No portal submission volume data yet"
-            style={{ padding: 24 }}
-          />
-        ) : (
-          <Collapse
-            size="small"
-            bordered={false}
-            items={portalCellSummaries.map((summary) => ({
-              key: summary.key,
-              label: (
-                <Space wrap>
-                  <BankOutlined />
-                  <Text strong>{summary.slfName}</Text>
-                  <Tag color="blue">
-                    {summary.submissionCount} submission
-                    {summary.submissionCount === 1 ? "" : "s"}
+        <Row gutter={[18, 18]} align="stretch">
+          <Col xs={24} md={8}>
+            <div
+              style={{
+                border: "1px solid #f0f0f0",
+                borderRadius: 8,
+                height: "100%",
+                padding: 14,
+              }}
+            >
+            <Space direction="vertical" size={10} style={{ width: "100%" }}>
+              <Statistic
+                title="Encoded Waste Volume"
+                value={submittedDataSummary.volumeText}
+                valueStyle={{ fontSize: 18, color: "#722ed1" }}
+                prefix={<DatabaseOutlined />}
+              />
+              <Space size={[6, 6]} wrap>
+                <Tag color="green">
+                  Residual: {submissionWasteStats.residual.toLocaleString()}
+                </Tag>
+                <Tag color="red">
+                  Haz/Inert: {submissionWasteStats.haz.toLocaleString()}
+                </Tag>
+                {submissionWasteStats.other > 0 && (
+                  <Tag color="default">
+                    Other: {submissionWasteStats.other.toLocaleString()}
                   </Tag>
-                  <Tag color="green">
-                    Baseline {formatVolume(summary.totalBaseline, summary.unit)}
-                  </Tag>
-                  <Tag color="geekblue">
-                    Submissions{" "}
-                    {formatVolume(summary.totalSubmissions, summary.unit)}
-                  </Tag>
-                </Space>
-              ),
-              children: (
-                <Table
-                  dataSource={summary.rows}
-                  columns={portalCellColumns}
-                  rowKey={(row) => row.key}
-                  size="small"
-                  pagination={false}
-                  scroll={{ x: 900 }}
-                  summary={() => (
-                    <Table.Summary.Row>
-                      <Table.Summary.Cell index={0} colSpan={3}>
-                        <Text strong>Total</Text>
-                      </Table.Summary.Cell>
-                      <Table.Summary.Cell index={3} align="right">
-                        <Text strong>
-                          {formatVolume(summary.totalBaseline, summary.unit)}
-                        </Text>
-                      </Table.Summary.Cell>
-                      <Table.Summary.Cell index={4} align="right">
-                        <Text strong style={{ color: "#2f54eb" }}>
-                          {formatVolume(summary.totalSubmissions, summary.unit)}
-                        </Text>
-                      </Table.Summary.Cell>
-                      <Table.Summary.Cell index={5} align="right">
-                        <Text strong>
-                          {formatVolume(summary.total, summary.unit)}
-                        </Text>
-                      </Table.Summary.Cell>
-                      <Table.Summary.Cell index={6} />
-                    </Table.Summary.Row>
-                  )}
+                )}
+              </Space>
+            </Space>
+            </div>
+          </Col>
+          <Col xs={24} md={8}>
+            <div
+              style={{
+                border: "1px solid #f0f0f0",
+                borderRadius: 8,
+                height: "100%",
+                padding: 14,
+              }}
+            >
+            <Row gutter={[10, 10]}>
+              {[
+                {
+                  label: "Companies",
+                  value: submittedDataSummary.uniqueCompanies,
+                  icon: <TeamOutlined />,
+                  color: "#1677ff",
+                },
+                {
+                  label: "Haulers",
+                  value: submittedDataSummary.uniqueHaulers,
+                  icon: <ContainerOutlined />,
+                  color: "#13c2c2",
+                },
+                {
+                  label: "Truck Trips",
+                  value: submittedDataSummary.totalTrucks,
+                  icon: <TableOutlined />,
+                  color: "#fa8c16",
+                },
+                {
+                  label: "Avg Trips",
+                  value: submittedDataSummary.averageTrucks,
+                  icon: <BarChartOutlined />,
+                  color: "#52c41a",
+                },
+              ].map((item) => (
+                <Col xs={12} key={item.label}>
+                  <div
+                    style={{
+                      border: "1px solid #f0f0f0",
+                      borderRadius: 8,
+                      padding: "10px 12px",
+                      height: "100%",
+                    }}
+                  >
+                    <Space size={6}>
+                      <span style={{ color: item.color }}>{item.icon}</span>
+                      <Text type="secondary" style={{ fontSize: 11 }}>
+                        {item.label}
+                      </Text>
+                    </Space>
+                    <div
+                      style={{
+                        fontSize: 18,
+                        fontWeight: 700,
+                        color: item.color,
+                        lineHeight: 1.2,
+                      }}
+                    >
+                      {item.value}
+                    </div>
+                  </div>
+                </Col>
+              ))}
+            </Row>
+            </div>
+          </Col>
+          <Col xs={24} md={8}>
+            <div
+              style={{
+                border: "1px solid #f0f0f0",
+                borderRadius: 8,
+                height: "100%",
+                padding: 14,
+              }}
+            >
+            <Space direction="vertical" size={10} style={{ width: "100%" }}>
+              <Text strong>Submission Status</Text>
+              {STATUS_OPTS.filter((opt) => opt.value).map((opt) => {
+                const count = submittedDataSummary.statusCounts[opt.value] || 0;
+                const percent = submissions.length
+                  ? Math.round((count / submissions.length) * 100)
+                  : 0;
+                return (
+                  <div key={opt.value}>
+                    <div
+                      style={{
+                        display: "flex",
+                        justifyContent: "space-between",
+                        marginBottom: 3,
+                      }}
+                    >
+                      <Text style={{ fontSize: 12 }}>{opt.label}</Text>
+                      <Text type="secondary" style={{ fontSize: 12 }}>
+                        {count}
+                      </Text>
+                    </div>
+                    <Progress
+                      percent={percent}
+                      size="small"
+                      showInfo={false}
+                      strokeColor={
+                        opt.color === "green"
+                          ? "#52c41a"
+                          : opt.color === "red"
+                            ? "#ff4d4f"
+                            : opt.color === "volcano"
+                              ? "#fa541c"
+                              : "#faad14"
+                      }
+                    />
+                  </div>
+                );
+              })}
+            </Space>
+            </div>
+          </Col>
+        </Row>
+        <Divider style={{ margin: "18px 0" }} />
+        <Row gutter={[18, 18]}>
+          <Col xs={24} lg={14}>
+            <Text strong>Top SLFs by Submitted Entries</Text>
+            <Space
+              direction="vertical"
+              size={8}
+              style={{ width: "100%", marginTop: 8 }}
+            >
+              {submittedDataSummary.topGenerators.length ? (
+                submittedDataSummary.topGenerators.map((item, index) => (
+                  <div key={item.name}>
+                    <div
+                      style={{
+                        display: "flex",
+                        justifyContent: "space-between",
+                        gap: 10,
+                      }}
+                    >
+                      <Text style={{ fontSize: 12 }}>
+                        {index + 1}. {item.name}
+                      </Text>
+                      <Text strong style={{ fontSize: 12, color: ACCENT }}>
+                        {item.submissions} submissions
+                      </Text>
+                    </div>
+                    <Progress
+                      percent={Math.round(
+                        (item.submissions /
+                          Math.max(
+                            submittedDataSummary.topGenerators[0]
+                              ?.submissions || 1,
+                            1,
+                          )) *
+                          100,
+                      )}
+                      showInfo={false}
+                      size="small"
+                      strokeColor={ACCENT}
+                    />
+                  </div>
+                ))
+              ) : (
+                <Empty
+                  image={Empty.PRESENTED_IMAGE_SIMPLE}
+                  description="No submitted entries yet"
                 />
-              ),
-            }))}
-          />
-        )}
+              )}
+            </Space>
+          </Col>
+          <Col xs={24} lg={10}>
+            <Alert
+              type="info"
+              showIcon
+              message="Latest Submitted Record"
+              description={
+                submittedDataSummary.latestSubmission
+                  ? `${submittedDataSummary.latestSubmission.idNo || "No ID"} - ${submittedDataSummary.latestSubmission.lguCompanyName || "Unnamed company"} submitted ${dayjs(submittedDataSummary.latestSubmission.createdAt).format("MM/DD/YYYY hh:mm A")}`
+                  : "No portal submissions loaded yet."
+              }
+              style={{ borderRadius: 8 }}
+            />
+          </Col>
+        </Row>
       </Card>
 
-      {/* ── Portal Submissions ────────────────────────────────────────── */}
+      {/* -- Portal Submissions ------------------------------------------ */}
       <Card
         size="small"
         style={{ borderRadius: 10 }}
@@ -2559,7 +2577,7 @@ function PortalGenerators({
             <Button
               size="small"
               icon={<ReloadOutlined />}
-              onClick={fetchSubmissions}
+              onClick={() => fetchSubmissions(true)}
               loading={loadingSub}
             />
           </Tooltip>
@@ -2618,7 +2636,7 @@ function PortalGenerators({
             ))}
           </Space>
         </div>
-        <Table
+        <ResponsiveTable
           dataSource={filteredSubmissions}
           rowKey="_id"
           loading={loadingSub}
@@ -2629,7 +2647,6 @@ function PortalGenerators({
             showTotal: (t) => `${t} entries`,
             pageSizeOptions: ["10", "20", "50"],
           }}
-          scroll={{ x: 1200 }}
           expandedRowKeys={expandedRowKeys}
           onExpandedRowsChange={setExpandedRowKeys}
           expandable={{
@@ -2670,16 +2687,13 @@ function PortalGenerators({
                       },
                       {
                         title: "Plate No.",
-                        dataIndex: "plateNumber",
                         width: 110,
+                        render: (_, t) => getTruckPlateText(t),
                       },
                       {
                         title: "Truck Cap.",
                         width: 100,
-                        render: (_, t) =>
-                          t.truckCapacity
-                            ? `${t.truckCapacity} ${(t.truckCapacityUnit || "m³").replace("m3", "m³")}`
-                            : "—",
+                        render: (_, t) => getTruckCapacityText(t),
                       },
                       {
                         title: "Actual Volume",
@@ -3179,7 +3193,7 @@ function PortalGenerators({
   );
 }
 
-// ── Main Component ──
+// -- Main Component --
 export default function SLFMonitoring({
   canEdit = true,
   canDelete = true,
@@ -3680,15 +3694,31 @@ export default function SLFMonitoring({
       return;
     }
     let saved = false;
+    const wasEditing = Boolean(editing?._id);
     setSaving(true);
     try {
       const values = await form.validateFields();
       const fromFileList = (fl) =>
         (fl || [])
           .filter((f) => f.status !== "error" && f.status !== "uploading")
-          .map((f) => f.response?.url || f.url || f.name || "")
+          .map((f) =>
+            typeof f === "string" ? f : f.response?.url || f.url || f.name || "",
+          )
           .filter(Boolean);
-      const dischargePermits = (values.dischargePermits || [])
+      const existingRecord = editing || {};
+      const fieldValue = (key, fallback) =>
+        values[key] !== undefined ? values[key] : existingRecord[key] ?? fallback;
+      const fileFieldValue = (key) =>
+        values[key] !== undefined
+          ? fromFileList(values[key])
+          : existingRecord[key] || [];
+      const dateFieldValue = (key) =>
+        values[key] !== undefined
+          ? values[key]?.toISOString?.() ?? null
+          : existingRecord[key] || null;
+      const existingLeachateDetails = existingRecord.leachatePondDetails || [];
+      const existingGasVentDetails = existingRecord.gasVentDetails || [];
+      const dischargePermits = fieldValue("dischargePermits", [])
         .map((permit) => ({
           ...permit,
           validity: permit.validity?.toISOString?.() ?? null,
@@ -3700,7 +3730,7 @@ export default function SLFMonitoring({
             permit.validity ||
             permit.status,
         );
-      const permitToOperatePermits = (values.permitToOperatePermits || [])
+      const permitToOperatePermits = fieldValue("permitToOperatePermits", [])
         .map((permit) => ({
           ...permit,
           validity: permit.validity?.toISOString?.() ?? null,
@@ -3708,7 +3738,7 @@ export default function SLFMonitoring({
         .filter(
           (permit) => permit.permitNo || permit.validity || permit.status,
         );
-      const receivingFacilities = (values.receivingFacilities || [])
+      const receivingFacilities = fieldValue("receivingFacilities", [])
         .map((facility) => ({
           mrfTypes: facility.mrfTypes || [],
           mrfName: facility.mrfName || "",
@@ -3722,45 +3752,59 @@ export default function SLFMonitoring({
             facility.status ||
             facility.description,
         );
-          const existingLeachateDetails = editing?.leachatePondDetails || [];
-          const existingGasVentDetails = editing?.gasVentDetails || [];
+      const hasWastewaterTreatmentFacility = fieldValue(
+        "hasWastewaterTreatmentFacility",
+        false,
+      );
+      const leachatePondDetails = fieldValue("leachatePondDetails", []).map((p, index) => ({
+        ...p,
+        wastewaterTreatmentFacilityType: asStringArray(p.wastewaterTreatmentFacilityType),
+        attachments: p.attachments !== undefined
+          ? fromFileList(p.attachments)
+          : existingLeachateDetails[index]?.attachments || [],
+      }));
+      const gasVentDetails = fieldValue("gasVentDetails", []).map((v, index) => ({
+        ...v,
+        attachments: v.attachments !== undefined
+          ? fromFileList(v.attachments)
+          : existingGasVentDetails[index]?.attachments || [],
+      }));
+      const lguServedList = fieldValue("lguServedList", []);
+      const privateCompaniesServed = fieldValue("privateCompaniesServed", []);
+      const ownership = fieldValue("ownership", "");
       const payload = {
         ...values,
         dataYear: editYear,
         // Auto-compute noOfLGUServed from the multi-select lists
-        noOfLGUServed: /private/i.test(values.ownership || "")
-          ? (values.privateCompaniesServed || []).length
-          : (values.lguServedList || []).length,
-        cellStatuses: (values.cellStatuses || []).map(normalizeCellStatus),
-        wastewaterTreatmentFacilityType: values.hasWastewaterTreatmentFacility
-          ? asStringArray(values.wastewaterTreatmentFacilityType)
+        noOfLGUServed: /private/i.test(ownership || "")
+          ? privateCompaniesServed.length
+          : lguServedList.length,
+        lguServedList,
+        privateCompaniesServed,
+        cellStatuses: fieldValue("cellStatuses", []).map(normalizeCellStatus),
+        cellCapacities: fieldValue("cellCapacities", []),
+        cellCapacityUnits: fieldValue("cellCapacityUnits", []),
+        cellTypes: fieldValue("cellTypes", []),
+        cellNotes: fieldValue("cellNotes", []),
+        cellFillValues: fieldValue("cellFillValues", []),
+        cellFillUnits: fieldValue("cellFillUnits", []),
+        hasWastewaterTreatmentFacility,
+        wastewaterTreatmentFacilityType: hasWastewaterTreatmentFacility
+          ? asStringArray(fieldValue("wastewaterTreatmentFacilityType", []))
           : [],
-        wastewaterTreatmentFacilityRemarks: values.hasWastewaterTreatmentFacility
-          ? values.wastewaterTreatmentFacilityRemarks || ""
+        wastewaterTreatmentFacilityRemarks: hasWastewaterTreatmentFacility
+          ? fieldValue("wastewaterTreatmentFacilityRemarks", "") || ""
           : "",
         receivingFacilities,
-        leachatePondDetails: (values.leachatePondDetails || []).map((p, index) => ({
-          ...p,
-          wastewaterTreatmentFacilityType: asStringArray(p.wastewaterTreatmentFacilityType),
-          attachments: p.attachments !== undefined
-            ? fromFileList(p.attachments)
-            : existingLeachateDetails[index]?.attachments || [],
-        })),
-        gasVentDetails: (values.gasVentDetails || []).map((v, index) => ({
-          ...v,
-          attachments: v.attachments !== undefined
-            ? fromFileList(v.attachments)
-            : existingGasVentDetails[index]?.attachments || [],
-        })),
-        dateOfMonitoring: values.dateOfMonitoring?.toISOString(),
-        dateReportPrepared: values.dateReportPrepared?.toISOString(),
-        dateReportReviewedStaff:
-          values.dateReportReviewedStaff?.toISOString?.() ?? null,
-        dateReportReviewedFocal:
-          values.dateReportReviewedFocal?.toISOString?.() ?? null,
-        noOfLeachatePond: (values.leachatePondDetails || []).length,
-        numberOfGasVents: (values.gasVentDetails || []).length,
-        dateReportApproved: values.dateReportApproved?.toISOString(),
+        leachatePondDetails,
+        gasVentDetails,
+        dateOfMonitoring: dateFieldValue("dateOfMonitoring"),
+        dateReportPrepared: dateFieldValue("dateReportPrepared"),
+        dateReportReviewedStaff: dateFieldValue("dateReportReviewedStaff"),
+        dateReportReviewedFocal: dateFieldValue("dateReportReviewedFocal"),
+        noOfLeachatePond: leachatePondDetails.length,
+        numberOfGasVents: gasVentDetails.length,
+        dateReportApproved: dateFieldValue("dateReportApproved"),
         dischargePermits,
         dischargePermit: dischargePermits[0]?.permitNo || "",
         dischargePermitValidity: dischargePermits[0]?.validity || null,
@@ -3769,13 +3813,16 @@ export default function SLFMonitoring({
         permitToOperate: permitToOperatePermits[0]?.permitNo || "",
         permitToOperateValidity: permitToOperatePermits[0]?.validity || null,
         permitToOperateStatus: permitToOperatePermits[0]?.status || "",
-        commitmentFiles: fromFileList(values.commitmentFiles),
-        progressReportFiles: fromFileList(values.progressReportFiles),
-        preventiveMeasureFiles: fromFileList(values.preventiveMeasureFiles),
-        scrpDetails: (values.scrpDetails || [])
+        commitmentFiles: fileFieldValue("commitmentFiles"),
+        progressReportFiles: fileFieldValue("progressReportFiles"),
+        preventiveMeasureFiles: fileFieldValue("preventiveMeasureFiles"),
+        scrpDetails: fieldValue("scrpDetails", [])
           .map((row) => ({
             ...row,
-            attachments: fromFileList(row.attachments),
+            attachments:
+              row.attachments !== undefined
+                ? fromFileList(row.attachments)
+                : row.attachments || [],
           }))
           .filter(
             (row) =>
@@ -3784,8 +3831,8 @@ export default function SLFMonitoring({
               row.remarks ||
               row.attachments?.length,
           ),
-        galleryPhotos: fromFileList(values.galleryPhotos),
-        galleryItems: (values.galleryItems || [])
+        galleryPhotos: fileFieldValue("galleryPhotos"),
+        galleryItems: fieldValue("galleryItems", [])
           .map((item) => ({
             ...item,
             url: Array.isArray(item.url)
@@ -3798,7 +3845,7 @@ export default function SLFMonitoring({
           .filter(
             (item) => item.url || item.caption || item.folder || item.component,
           ),
-        slfDocuments: (values.slfDocuments || [])
+        slfDocuments: fieldValue("slfDocuments", [])
           .map((d) => ({
             ...d,
             url: Array.isArray(d.url)
@@ -3813,17 +3860,23 @@ export default function SLFMonitoring({
           `/slf-facilities/${editing._id}`,
           payload,
         );
+        const updatedRecord = { ...data, ...computeFields(data) };
         setRecords((prev) => {
           const exists = prev.some((r) => r._id === data._id);
           if (exists)
-            return prev.map((r) =>
-              r._id === data._id ? { ...data, ...computeFields(data) } : r,
-            );
-          return [...prev, { ...data, ...computeFields(data) }];
+            return prev.map((r) => (r._id === data._id ? updatedRecord : r));
+          return [...prev, updatedRecord];
         });
+        setEditYearRecords((prev) => {
+          const exists = prev.some((r) => r._id === data._id);
+          if (exists)
+            return prev.map((r) => (r._id === data._id ? updatedRecord : r));
+          return [...prev, updatedRecord];
+        });
+        setEditing(updatedRecord);
+        setDetailModal((prev) => (prev?._id === data._id ? updatedRecord : prev));
         invalidateCache(CACHE_KEY);
         secureStorage.invalidateDashboard();
-        await fetchRecords(true);
         Swal.fire(
           "Saved",
           `${payload.lgu || "SLF"} data records successfully saved!`,
@@ -3831,10 +3884,13 @@ export default function SLFMonitoring({
         );
         saved = true;
       } else {
-        await api.post("/slf-facilities", payload);
+        const { data } = await api.post("/slf-facilities", payload);
+        const createdRecord = { ...data, ...computeFields(data) };
+        setRecords((prev) => [...prev, createdRecord]);
+        setEditYearRecords((prev) => [...prev, createdRecord]);
+        setEditing(createdRecord);
         invalidateCache(CACHE_KEY);
         secureStorage.invalidateDashboard();
-        await fetchRecords(true);
         Swal.fire(
           "Saved",
           `${payload.lgu || "SLF"} data records successfully saved!`,
@@ -3861,14 +3917,16 @@ export default function SLFMonitoring({
     }
     setSaving(false);
     if (!saved) return;
-    setModalOpen(false);
-    setConvArea(null);
-    setConvDepth(null);
-    setConvVol(null);
-    setConvDensity(0.2);
-    setConvM3ToTons(null);
-    setConvModalOpen(false);
-    setUnitToolOpen(false);
+    if (!wasEditing) {
+      setModalOpen(false);
+      setConvArea(null);
+      setConvDepth(null);
+      setConvVol(null);
+      setConvDensity(0.2);
+      setConvM3ToTons(null);
+      setConvModalOpen(false);
+      setUnitToolOpen(false);
+    }
   };
 
   const syncWasteReceivedFromCellFills = (nextFills, nextUnits) => {
@@ -3995,6 +4053,29 @@ export default function SLFMonitoring({
     setUnitToolOpen(false);
   };
 
+  const copyText = async (value, label = "Value") => {
+    const text = String(value ?? "");
+    if (!text) return;
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text);
+      } else {
+        const textarea = document.createElement("textarea");
+        textarea.value = text;
+        textarea.setAttribute("readonly", "");
+        textarea.style.position = "fixed";
+        textarea.style.opacity = "0";
+        document.body.appendChild(textarea);
+        textarea.select();
+        document.execCommand("copy");
+        document.body.removeChild(textarea);
+      }
+      message.success(`${label} copied`);
+    } catch {
+      message.error("Copy failed. Please select and copy the value manually.");
+    }
+  };
+
   const reviewAndDeleteRecord = async (record) => {
     const reviewHtml = `
       <div style="text-align:left;font-size:13px;line-height:1.7;">
@@ -4097,7 +4178,10 @@ export default function SLFMonitoring({
     // Deduplicate by LGU — keep only the latest dataYear record per facility
     const map = new Map();
     for (const r of data) {
-      const key = (r.lgu || "").toLowerCase();
+      const key = [r.province, r.lgu, r.barangay]
+        .filter(Boolean)
+        .join("|")
+        .toLowerCase() || r._id;
       const existing = map.get(key);
       if (!existing || (r.dataYear || 0) > (existing.dataYear || 0)) {
         map.set(key, r);
@@ -4565,7 +4649,7 @@ export default function SLFMonitoring({
                         size="small"
                       />
                       <Text type="secondary" style={{ fontSize: 11 }}>
-                        {item.province} • {item.ownership} • {item.status}
+                        {item.province} Ã¢â‚¬Â¢ {item.ownership} Ã¢â‚¬Â¢ {item.status}
                       </Text>
                     </div>
                   ))}
@@ -4643,19 +4727,20 @@ export default function SLFMonitoring({
     "Cat 4": "> 150 TPD",
   };
 
+  const getCategoryLabel = (value) => {
+    const match = String(value || "").match(/^cat\s*(\d+)$/i);
+    return match ? `Category ${match[1]}` : value;
+  };
+
   const columns = [
     {
       title: "#",
       key: "idx",
-      width: 50,
+      width: 40,
       render: (_, __, i) => i + 1,
     },
     {
-      title: (
-        <>
-          <EnvironmentOutlined style={{ color: ACCENT }} /> LGU
-        </>
-      ),
+      title: "LGU",
       key: "lgu",
       width: 150,
       filters: buildFilters(records, "province"),
@@ -4679,30 +4764,44 @@ export default function SLFMonitoring({
       ),
     },
     {
-      title: "MBA",
-      dataIndex: "manilaBayArea",
-      width: 70,
-      filters: buildFilters(records, "manilaBayArea"),
-      onFilter: (v, r) => r.manilaBayArea === v,
-    },
-    {
       title: "Ownership",
       dataIndex: "ownership",
-      width: 100,
+      width: 110,
+      align: "center",
       filters: buildFilters(records, "ownership"),
       onFilter: (v, r) => r.ownership === v,
     },
     {
       title: "Category",
       dataIndex: "category",
-      width: 130,
+      width: 100,
       render: (v) =>
         v ? (
           <Tooltip title={CATEGORY_DESC[v] || v}>
-            <Tag color="blue" bordered={false}>
-              {v}
-              {CATEGORY_DESC[v] ? ` — ${CATEGORY_DESC[v]}` : ""}
-            </Tag>
+            <div
+              style={{
+                maxWidth: "100%",
+                whiteSpace: "normal",
+                wordBreak: "break-word",
+                lineHeight: 1.25,
+              }}
+            >
+              <Tag
+                color="blue"
+                bordered={false}
+                style={{
+                  marginInlineEnd: 0,
+                  maxWidth: "100%",
+                  whiteSpace: "normal",
+                  wordBreak: "break-word",
+                  lineHeight: 1.3,
+                  padding: "2px 6px",
+                }}
+              >
+                {getCategoryLabel(v)}
+                {CATEGORY_DESC[v] ? ` - ${CATEGORY_DESC[v]}` : ""}
+              </Tag>
+            </div>
           </Tooltip>
         ) : (
           "—"
@@ -4711,17 +4810,13 @@ export default function SLFMonitoring({
       onFilter: (v, r) => r.category === v,
     },
     {
-      title: (
-        <>
-          <SafetyCertificateOutlined style={{ color: "#52c41a" }} /> Status
-        </>
-      ),
+      title: "Status",
       key: "status",
       width: 140,
       filters: buildFilters(records, "statusOfSLF"),
       onFilter: (v, r) => r.statusOfSLF === v,
       sorter: (a, b) =>
-        (a.yearStartedOperation || 0) - (b.yearStartedOperation || 0),
+        (a.statusOfSLF || "").localeCompare(b.statusOfSLF || ""),
       render: (_, r) => (
         <div style={{ lineHeight: 1.3 }}>
           {getStatusTag(r.statusOfSLF)}
@@ -4737,18 +4832,33 @@ export default function SLFMonitoring({
       ),
     },
     {
-      title: "Capacity",
-      dataIndex: "volumeCapacity",
-      width: 100,
-      sorter: (a, b) => (a.volumeCapacity || 0) - (b.volumeCapacity || 0),
-      render: (v) =>
-        v != null ? (
-          <Text strong style={{ color: ACCENT }}>
-            {Number(v).toLocaleString()}
-          </Text>
+      title: "Capacity per day",
+      key: "capacityPerDay",
+      width: 110,
+      sorter: (a, b) =>
+        (a.receivingVolumeCapacity ?? a.volumeCapacity ?? 0) -
+        (b.receivingVolumeCapacity ?? b.volumeCapacity ?? 0),
+      render: (_, r) => {
+        const value = r.receivingVolumeCapacity ?? r.volumeCapacity;
+        const unit = normalizeUnit(
+          r.receivingVolumeCapacity != null
+            ? r.receivingVolumeCapacityUnit || r.volumeCapacityUnit || "m³"
+            : r.volumeCapacityUnit || "m³",
+        );
+        return value != null ? (
+          <div style={{ lineHeight: 1.25 }}>
+            <Text strong style={{ color: ACCENT }}>
+              {Number(value).toLocaleString()}
+            </Text>
+            <br />
+            <Text type="secondary" style={{ fontSize: 11 }}>
+              {unit}/day
+            </Text>
+          </div>
         ) : (
           "—"
-        ),
+        );
+      },
     },
     {
       title: "LGUs Served",
@@ -4756,9 +4866,44 @@ export default function SLFMonitoring({
       width: 100,
       sorter: (a, b) => (a.noOfLGUServed || 0) - (b.noOfLGUServed || 0),
     },
-    { title: "Cells", dataIndex: "numberOfCell", width: 70 },
-    { title: "Leachate", dataIndex: "noOfLeachatePond", width: 80 },
-    { title: "Gas Management", dataIndex: "numberOfGasVents", width: 120 },
+    {
+      title: "Cells",
+      dataIndex: "numberOfCell",
+      width: 80,
+    },
+    {
+      title: "Leachate & Gas Management",
+      key: "managementSummary",
+      width: 170,
+      render: (_, r) => {
+        const leachateCount =
+          Number(r.noOfLeachatePond || 0) || (r.leachatePondDetails || []).length;
+        const gasCount =
+          Number(r.numberOfGasVents || 0) || (r.gasVentDetails || []).length;
+        const tooltip = [
+          leachateCount
+            ? `Leachate\n${managementStatusSummary(r.leachatePondDetails || []) || `${leachateCount} recorded`}`
+            : "No leachate treatment plant recorded",
+          gasCount
+            ? `Gas Management\n${managementStatusSummary(r.gasVentDetails || []) || `${gasCount} recorded`}`
+            : "No gas management details recorded",
+        ].join("\n\n");
+        return (
+          <Tooltip title={<pre style={{ margin: 0, whiteSpace: "pre-wrap" }}>{tooltip}</pre>}>
+            <Space direction="vertical" size={2}>
+              <Text style={{ fontSize: 12 }}>
+                <AlertOutlined style={{ color: "#fa8c16", marginRight: 4 }} />
+                Leachate <Tag color={leachateCount ? "orange" : "default"}>{leachateCount || 0}</Tag>
+              </Text>
+              <Text style={{ fontSize: 12 }}>
+                <ExperimentOutlined style={{ color: "#13c2c2", marginRight: 4 }} />
+                Gas <Tag color={gasCount ? "cyan" : "default"}>{gasCount || 0}</Tag>
+              </Text>
+            </Space>
+          </Tooltip>
+        );
+      },
+    },
     {
       title: "Waste Received",
       dataIndex: "actualResidualWasteReceived",
@@ -4771,34 +4916,32 @@ export default function SLFMonitoring({
           ? `${Number(v).toLocaleString()} ${normalizeUnit(record.wasteReceivedUnit || "m³")}`
           : "—",
     },
-    { title: "Lifespan", dataIndex: "remainingLifeSpan", width: 100 },
     {
-      title: (
-        <>
-          <CalendarOutlined style={{ color: "#13c2c2" }} /> Target Month
-        </>
-      ),
+      title: "Target Month",
       dataIndex: "targetMonth",
       key: "targetMonth",
-      width: 220,
-      ellipsis: true,
+      width: 150,
+      align: "center",
+      ellipsis: false,
       filters: buildFilters(records, "targetMonth"),
       onFilter: (v, r) => r.targetMonth === v,
       render: (v) =>
         v ? (
-          <Tag bordered={false} color="cyan">
-            {v.replace(/^\d+\./, "")}
-          </Tag>
+          <div style={{ whiteSpace: "normal", wordBreak: "break-word", lineHeight: 1.25 }}>
+            <Tag
+              bordered={false}
+              color="cyan"
+              style={{ whiteSpace: "normal", wordBreak: "break-word", lineHeight: 1.3 }}
+            >
+              {v.replace(/^\d+\./, "")}
+            </Tag>
+          </div>
         ) : (
           "—"
         ),
     },
     {
-      title: (
-        <>
-          <TeamOutlined style={{ color: "#722ed1" }} /> Personnel
-        </>
-      ),
+      title: "Personnel",
       key: "personnel",
       width: 170,
       ellipsis: false,
@@ -4838,7 +4981,7 @@ export default function SLFMonitoring({
     {
       title: "Actions",
       key: "actions",
-      width: 130,
+      width: 120,
       render: (_, r) => (
         <Space size={4}>
           <Tooltip title="View">
@@ -4881,19 +5024,21 @@ export default function SLFMonitoring({
       Province: r.province,
       LGU: r.lgu,
       Barangay: r.barangay,
-      MBA: r.manilaBayArea,
       Ownership: r.ownership,
       Category: r.category,
       Status: r.statusOfSLF,
       "Year Started": r.yearStartedOperation,
-      Capacity: r.volumeCapacity,
+      "Capacity per day": r.receivingVolumeCapacity ?? r.volumeCapacity,
+      "Capacity Unit": normalizeUnit(
+        r.receivingVolumeCapacity != null
+          ? r.receivingVolumeCapacityUnit || r.volumeCapacityUnit || "m³"
+          : r.volumeCapacityUnit || "m³",
+      ),
       "LGUs Served": r.noOfLGUServed,
       Cells: r.numberOfCell,
-      Leachate: r.noOfLeachatePond,
-      "Gas Management": r.numberOfGasVents,
+      "Leachate & Gas": `Leachate: ${r.noOfLeachatePond || 0}; Gas: ${r.numberOfGasVents || 0}`,
       "Waste Received": r.actualResidualWasteReceived,
       "Waste Received Unit": normalizeUnit(r.wasteReceivedUnit || "m³"),
-      Lifespan: r.remainingLifeSpan,
       "Target Month": r.targetMonth,
       ENMO: r.enmo,
       Focal: r.focalPerson,
@@ -4901,21 +5046,8 @@ export default function SLFMonitoring({
     exportToExcel(rows, "SLF_Facilities_Data");
   };
 
-  return (
-    <div style={{ padding: 0 }}>
-      {/* Record count */}
-      <div
-        style={{
-          display: "flex",
-          justifyContent: "flex-end",
-          marginBottom: 10,
-        }}
-      >
-        <Tag bordered={false} color={hasFilters ? "blue" : "default"}>
-          {filtered.length} / {records.length} records
-        </Tag>
-      </div>
-
+  const renderSlfSummaryTiles = () => (
+    <>
       {/* Summary tiles */}
       {loading ? (
         <Row gutter={[8, 8]} style={{ marginBottom: 12 }}>
@@ -5106,6 +5238,45 @@ export default function SLFMonitoring({
           </Col>
         </Row>
       )}
+    </>
+  );
+  return (
+    <div style={{ padding: 0 }}>
+      <div
+        style={{
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "flex-start",
+          gap: 12,
+          flexWrap: "wrap",
+          marginBottom: 16,
+        }}
+      >
+        <div>
+          <Title level={3} style={{ margin: 0 }}>
+            SLF Data Table
+          </Title>
+          <Text type="secondary">
+            Sanitary landfill facility records and portal-submitted waste
+            generator data.
+          </Text>
+        </div>
+        <Space wrap>
+          <Tag bordered={false} color={hasFilters ? "blue" : "default"}>
+            {filtered.length} / {records.length} records
+          </Tag>
+          {hasFilters && (
+            <Button
+              size="small"
+              type="link"
+              icon={<ClearOutlined />}
+              onClick={clearFilters}
+            >
+              Clear filters
+            </Button>
+          )}
+        </Space>
+      </div>
 
       <Tabs
         defaultActiveKey="facilities"
@@ -5120,6 +5291,8 @@ export default function SLFMonitoring({
             ),
             children: (
               <>
+                {renderSlfSummaryTiles()}
+
                 {/* Header with Search + Export */}
                 <div
                   style={{
@@ -5266,14 +5439,13 @@ export default function SLFMonitoring({
 
                 {/* Table */}
                 <Card size="small" style={{ borderRadius: 10 }}>
-                  <Table
+                  <ResponsiveTable
                     className="slf-table"
                     dataSource={filtered}
                     columns={columns}
                     rowKey="_id"
                     loading={loading}
                     size="small"
-                    scroll={{ x: 1800 }}
                     pagination={{
                       pageSize: 50,
                       showSizeChanger: true,
@@ -5347,7 +5519,7 @@ export default function SLFMonitoring({
             <Space size={6}>
               <Button
                 size="small"
-                icon={<span style={{ fontWeight: 700 }}>📐</span>}
+                icon={<CalculatorOutlined />}
                 onClick={() => setConvModalOpen(true)}
                 style={{
                   fontSize: 11,
@@ -5854,7 +6026,7 @@ export default function SLFMonitoring({
                                             borderRadius: 10,
                                           }}
                                         >
-                                          ✓ matches saved
+                                          Ã¢Å“â€œ matches saved
                                         </Tag>
                                       )}
                                   </Space>
@@ -6040,7 +6212,7 @@ export default function SLFMonitoring({
                                             borderRadius: 10,
                                           }}
                                         >
-                                          ✓ matches saved
+                                          Ã¢Å“â€œ matches saved
                                         </Tag>
                                       )}
                                   </Space>
@@ -7035,7 +7207,7 @@ export default function SLFMonitoring({
                                     <div
                                       style={{ fontSize: 10, color: "#8c8c8c" }}
                                     >
-                                      ≈{" "}
+                                      Ã¢â€°Ë†{" "}
                                       {convertVolume(wasteRaw, wasteUnit, "m³").toLocaleString(undefined, {
                                         maximumFractionDigits: 0,
                                       })}{" "}
@@ -7318,7 +7490,9 @@ export default function SLFMonitoring({
                                                 chartData.length > 1 ? 2 : 0
                                               }
                                               dataKey="value"
-                                              isAnimationActive={false}
+                                              isAnimationActive
+                                              animationBegin={80}
+                                              animationDuration={650}
                                             >
                                               {chartData.map((_, j) => (
                                                 <RCell
@@ -8288,242 +8462,245 @@ export default function SLFMonitoring({
         )}
       </Modal>
 
-      {/* ── Capacity Converter Modal ── */}
+      {/* -- Capacity Converter Modal -- */}
       <Modal
         title={
           <Space>
-            <span style={{ fontSize: 16 }}>📐</span>
+            <CalculatorOutlined style={{ color: ACCENT }} />
             <span>Capacity Converter</span>
           </Space>
         }
         open={convModalOpen}
         onCancel={() => setConvModalOpen(false)}
         footer={<Button onClick={() => setConvModalOpen(false)}>Close</Button>}
-        width={600}
+        width={680}
         zIndex={1600}
         destroyOnHidden={false}
       >
-        <div style={{ display: "flex", flexDirection: "column", gap: 0 }}>
-          {/* Row 1: Area × Depth → m³ */}
-          <Divider
-            plain
-            style={{ margin: "4px 0 10px", fontSize: 12, color: "#8c8c8c" }}
-          >
-            Area × Depth → Volume (m³)
-          </Divider>
-          <Row gutter={12} align="middle">
-            <Col span={7}>
-              <Space.Compact style={{ width: "100%" }}>
-                <InputNumber
-                  style={{ width: "100%" }}
-                  min={0}
-                  step={0.01}
-                  placeholder="Area"
-                  value={convArea}
-                  onChange={setConvArea}
-                />
-                <span className="ant-input-group-addon">m²</span>
-              </Space.Compact>
-            </Col>
-            <Col span={1} style={{ textAlign: "center" }}>
-              <Text type="secondary">×</Text>
-            </Col>
-            <Col span={7}>
-              <Space.Compact style={{ width: "100%" }}>
-                <InputNumber
-                  style={{ width: "100%" }}
-                  min={0}
-                  step={0.01}
-                  placeholder="Depth"
-                  value={convDepth}
-                  onChange={setConvDepth}
-                />
-                <span className="ant-input-group-addon">m</span>
-              </Space.Compact>
-            </Col>
-            <Col span={1} style={{ textAlign: "center" }}>
-              <Text type="secondary">=</Text>
-            </Col>
-            <Col span={8}>
-              <Input
-                readOnly
-                value={
-                  convArea != null && convDepth != null
-                    ? `${(convArea * convDepth).toLocaleString(undefined, { maximumFractionDigits: 2 })} m³`
-                    : ""
-                }
-                placeholder="Result"
-                addonAfter={
-                  <Button
-                    size="small"
-                    type="link"
-                    style={{ padding: 0, height: "auto", color: "#389e0d" }}
-                    disabled={convArea == null || convDepth == null}
-                    onClick={() => {
-                      navigator.clipboard.writeText(
-                        (convArea * convDepth).toLocaleString(undefined, {
+        <Space direction="vertical" size={14} style={{ width: "100%" }}>
+          <Text type="secondary">
+            Convert common SLF capacity values. Each result can be copied for
+            quick encoding in the form.
+          </Text>
+
+          <Card size="small" title="Area x Depth = Volume">
+            <Row gutter={[12, 12]} align="middle">
+              <Col xs={24} sm={10} md={7}>
+                <Text type="secondary">Area</Text>
+                <Space.Compact style={{ width: "100%", marginTop: 4 }}>
+                  <InputNumber
+                    style={{ width: "100%" }}
+                    min={0}
+                    step={0.01}
+                    placeholder="0.00"
+                    value={convArea}
+                    onChange={setConvArea}
+                  />
+                  <span className="ant-input-group-addon">m2</span>
+                </Space.Compact>
+              </Col>
+              <Col xs={24} sm={4} md={2} style={{ textAlign: "center" }}>
+                <Text strong>x</Text>
+              </Col>
+              <Col xs={24} sm={10} md={7}>
+                <Text type="secondary">Depth</Text>
+                <Space.Compact style={{ width: "100%", marginTop: 4 }}>
+                  <InputNumber
+                    style={{ width: "100%" }}
+                    min={0}
+                    step={0.01}
+                    placeholder="0.00"
+                    value={convDepth}
+                    onChange={setConvDepth}
+                  />
+                  <span className="ant-input-group-addon">m</span>
+                </Space.Compact>
+              </Col>
+              <Col xs={24} md={8}>
+                <Text type="secondary">Volume</Text>
+                <Input
+                  readOnly
+                  value={
+                    convArea != null && convDepth != null
+                      ? `${(convArea * convDepth).toLocaleString(undefined, {
                           maximumFractionDigits: 2,
-                        }),
-                      );
-                      message.success("Copied!");
-                    }}
-                  >
-                    Copy
-                  </Button>
-                }
-                style={{ fontWeight: 600, color: "#389e0d" }}
-              />
-            </Col>
-          </Row>
+                        })} m3`
+                      : ""
+                  }
+                  placeholder="Result"
+                  style={{ marginTop: 4, fontWeight: 600, color: "#389e0d" }}
+                  addonAfter={
+                    <Tooltip title="Copy volume">
+                      <Button
+                        size="small"
+                        type="text"
+                        icon={<CopyOutlined />}
+                        disabled={convArea == null || convDepth == null}
+                        onClick={() =>
+                          copyText(
+                            `${(convArea * convDepth).toLocaleString(
+                              undefined,
+                              { maximumFractionDigits: 2 },
+                            )} m3`,
+                            "Volume",
+                          )
+                        }
+                      />
+                    </Tooltip>
+                  }
+                />
+              </Col>
+            </Row>
+          </Card>
 
-          {/* Row 2: Volume (m³) × Density → tons */}
-          <Divider
-            plain
-            style={{ margin: "14px 0 10px", fontSize: 12, color: "#8c8c8c" }}
-          >
-            Volume × Density → Weight (tons)
-          </Divider>
-          <Row gutter={12} align="middle">
-            <Col span={7}>
-              <Space.Compact style={{ width: "100%" }}>
-                <InputNumber
-                  style={{ width: "100%" }}
-                  min={0}
-                  step={0.01}
-                  placeholder="Volume"
-                  value={convVol}
-                  onChange={setConvVol}
-                />
-                <span className="ant-input-group-addon">m³</span>
-              </Space.Compact>
-            </Col>
-            <Col span={1} style={{ textAlign: "center" }}>
-              <Text type="secondary">×</Text>
-            </Col>
-            <Col span={7}>
-              <Space.Compact style={{ width: "100%" }}>
-                <InputNumber
-                  style={{ width: "100%" }}
-                  min={0}
-                  step={0.001}
-                  placeholder="Density"
-                  value={convDensity}
-                  onChange={setConvDensity}
-                />
-                <span className="ant-input-group-addon">t/m³</span>
-              </Space.Compact>
-            </Col>
-            <Col span={1} style={{ textAlign: "center" }}>
-              <Text type="secondary">=</Text>
-            </Col>
-            <Col span={8}>
-              <Input
-                readOnly
-                value={
-                  convVol != null && convDensity != null
-                    ? `${(convVol * convDensity).toLocaleString(undefined, { maximumFractionDigits: 3 })} tons`
-                    : ""
-                }
-                placeholder="Result"
-                addonAfter={
-                  <Button
-                    size="small"
-                    type="link"
-                    style={{ padding: 0, height: "auto", color: "#1677ff" }}
-                    disabled={convVol == null || convDensity == null}
-                    onClick={() => {
-                      navigator.clipboard.writeText(
-                        (convVol * convDensity).toLocaleString(undefined, {
+          <Card size="small" title="Volume x Density = Weight">
+            <Row gutter={[12, 12]} align="middle">
+              <Col xs={24} sm={10} md={7}>
+                <Text type="secondary">Volume</Text>
+                <Space.Compact style={{ width: "100%", marginTop: 4 }}>
+                  <InputNumber
+                    style={{ width: "100%" }}
+                    min={0}
+                    step={0.01}
+                    placeholder="0.00"
+                    value={convVol}
+                    onChange={setConvVol}
+                  />
+                  <span className="ant-input-group-addon">m3</span>
+                </Space.Compact>
+              </Col>
+              <Col xs={24} sm={4} md={2} style={{ textAlign: "center" }}>
+                <Text strong>x</Text>
+              </Col>
+              <Col xs={24} sm={10} md={7}>
+                <Text type="secondary">Density</Text>
+                <Space.Compact style={{ width: "100%", marginTop: 4 }}>
+                  <InputNumber
+                    style={{ width: "100%" }}
+                    min={0}
+                    step={0.001}
+                    placeholder="0.20"
+                    value={convDensity}
+                    onChange={setConvDensity}
+                  />
+                  <span className="ant-input-group-addon">t/m3</span>
+                </Space.Compact>
+              </Col>
+              <Col xs={24} md={8}>
+                <Text type="secondary">Weight</Text>
+                <Input
+                  readOnly
+                  value={
+                    convVol != null && convDensity != null
+                      ? `${(convVol * convDensity).toLocaleString(undefined, {
                           maximumFractionDigits: 3,
-                        }),
-                      );
-                      message.success("Copied!");
-                    }}
-                  >
-                    Copy
-                  </Button>
-                }
-                style={{ fontWeight: 600, color: "#1677ff" }}
-              />
-              <div style={{ fontSize: 10, color: "#8c8c8c", marginTop: 2 }}>
-                Default: 0.20 t/m³ (MSW)
-              </div>
-            </Col>
-          </Row>
-
-          {/* Row 3: m³ → tons (direct, using stored density) */}
-          <Divider
-            plain
-            style={{ margin: "14px 0 10px", fontSize: 12, color: "#8c8c8c" }}
-          >
-            m³ → tons (using density above)
-          </Divider>
-          <Row gutter={12} align="middle">
-            <Col span={7}>
-              <Space.Compact style={{ width: "100%" }}>
-                <InputNumber
-                  style={{ width: "100%" }}
-                  min={0}
-                  step={0.01}
-                  placeholder="Volume"
-                  value={convM3ToTons}
-                  onChange={setConvM3ToTons}
+                        })} tons`
+                      : ""
+                  }
+                  placeholder="Result"
+                  style={{ marginTop: 4, fontWeight: 600, color: ACCENT }}
+                  addonAfter={
+                    <Tooltip title="Copy weight">
+                      <Button
+                        size="small"
+                        type="text"
+                        icon={<CopyOutlined />}
+                        disabled={convVol == null || convDensity == null}
+                        onClick={() =>
+                          copyText(
+                            `${(convVol * convDensity).toLocaleString(
+                              undefined,
+                              { maximumFractionDigits: 3 },
+                            )} tons`,
+                            "Weight",
+                          )
+                        }
+                      />
+                    </Tooltip>
+                  }
                 />
-                <span className="ant-input-group-addon">m³</span>
-              </Space.Compact>
-            </Col>
-            <Col span={1} style={{ textAlign: "center" }}>
-              <Text type="secondary">×</Text>
-            </Col>
-            <Col span={7}>
-              <Input
-                readOnly
-                value={`${convDensity ?? 0.2} t/m³`}
-                style={{ color: "#8c8c8c", textAlign: "center" }}
-              />
-            </Col>
-            <Col span={1} style={{ textAlign: "center" }}>
-              <Text type="secondary">=</Text>
-            </Col>
-            <Col span={8}>
-              <Input
-                readOnly
-                value={
-                  convM3ToTons != null && convDensity != null
-                    ? `${(convM3ToTons * (convDensity ?? 0.2)).toLocaleString(undefined, { maximumFractionDigits: 3 })} tons`
-                    : ""
-                }
-                placeholder="Result (tons)"
-                addonAfter={
-                  <Button
-                    size="small"
-                    type="link"
-                    style={{ padding: 0, height: "auto", color: "#fa8c16" }}
-                    disabled={convM3ToTons == null}
-                    onClick={() => {
-                      navigator.clipboard.writeText(
-                        (convM3ToTons * (convDensity ?? 0.2)).toLocaleString(
-                          undefined,
-                          { maximumFractionDigits: 3 },
-                        ),
-                      );
-                      message.success("Copied!");
-                    }}
-                  >
-                    Copy
-                  </Button>
-                }
-                style={{ fontWeight: 600, color: "#fa8c16" }}
-              />
-            </Col>
-          </Row>
-          <div style={{ marginTop: 8, fontSize: 11, color: "#8c8c8c" }}>
-            💡 Change the density in Row 2 above to affect the m³ → tons
-            conversion here.
-          </div>
-        </div>
-      </Modal>
+                <Text type="secondary" style={{ fontSize: 11 }}>
+                  Typical MSW density starts at 0.20 t/m3.
+                </Text>
+              </Col>
+            </Row>
+          </Card>
 
+          <Card size="small" title="m3 to Tons">
+            <Row gutter={[12, 12]} align="middle">
+              <Col xs={24} sm={10} md={7}>
+                <Text type="secondary">Volume</Text>
+                <Space.Compact style={{ width: "100%", marginTop: 4 }}>
+                  <InputNumber
+                    style={{ width: "100%" }}
+                    min={0}
+                    step={0.01}
+                    placeholder="0.00"
+                    value={convM3ToTons}
+                    onChange={setConvM3ToTons}
+                  />
+                  <span className="ant-input-group-addon">m3</span>
+                </Space.Compact>
+              </Col>
+              <Col xs={24} sm={4} md={2} style={{ textAlign: "center" }}>
+                <Text strong>x</Text>
+              </Col>
+              <Col xs={24} sm={10} md={7}>
+                <Text type="secondary">Density used</Text>
+                <Input
+                  readOnly
+                  value={`${convDensity ?? 0.2} t/m3`}
+                  style={{ marginTop: 4, color: "#595959" }}
+                />
+              </Col>
+              <Col xs={24} md={8}>
+                <Text type="secondary">Weight</Text>
+                <Input
+                  readOnly
+                  value={
+                    convM3ToTons != null
+                      ? `${(
+                          convM3ToTons *
+                          (convDensity ?? 0.2)
+                        ).toLocaleString(undefined, {
+                          maximumFractionDigits: 3,
+                        })} tons`
+                      : ""
+                  }
+                  placeholder="Result"
+                  style={{ marginTop: 4, fontWeight: 600, color: "#fa8c16" }}
+                  addonAfter={
+                    <Tooltip title="Copy weight">
+                      <Button
+                        size="small"
+                        type="text"
+                        icon={<CopyOutlined />}
+                        disabled={convM3ToTons == null}
+                        onClick={() =>
+                          copyText(
+                            `${(
+                              convM3ToTons *
+                              (convDensity ?? 0.2)
+                            ).toLocaleString(undefined, {
+                              maximumFractionDigits: 3,
+                            })} tons`,
+                            "Weight",
+                          )
+                        }
+                      />
+                    </Tooltip>
+                  }
+                />
+              </Col>
+            </Row>
+            <Divider style={{ margin: "12px 0" }} />
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              Change the density above when using a site-specific conversion
+              factor.
+            </Text>
+          </Card>
+        </Space>
+      </Modal>
       <Modal
         title={
           <Space>
@@ -8934,6 +9111,7 @@ export default function SLFMonitoring({
                                 detailViewRecord.cellTypes || [];
                               const cellCapacityUnits =
                                 detailViewRecord.cellCapacityUnits || [];
+                              const hasAnyBaselineData = Boolean(baselineData);
                               const hasCellBaseline =
                                 baselineData &&
                                 (activeCellEntries.some(
@@ -8987,6 +9165,9 @@ export default function SLFMonitoring({
                                                     : 0
                                                 }
                                                 dataKey="value"
+                                                isAnimationActive
+                                                animationBegin={80}
+                                                animationDuration={650}
                                               >
                                                 {capacityData.map(
                                                   (entry, i) => (
@@ -9827,6 +10008,12 @@ export default function SLFMonitoring({
                                         />
                                       );
                                     })()
+                                  ) : hasAnyBaselineData ? (
+                                    <Empty
+                                      image={Empty.PRESENTED_IMAGE_SIMPLE}
+                                      description="No baseline cell volumes encoded yet"
+                                      style={{ marginBottom: 8 }}
+                                    />
                                   ) : (
                                     <Alert
                                       type="warning"
@@ -10028,6 +10215,9 @@ export default function SLFMonitoring({
                                               capacityData.length > 1 ? 3 : 0
                                             }
                                             dataKey="value"
+                                            isAnimationActive
+                                            animationBegin={80}
+                                            animationDuration={650}
                                             label={({ name, value }) =>
                                               `${name}: ${value.toLocaleString()}`
                                             }
@@ -10179,6 +10369,9 @@ export default function SLFMonitoring({
                                             outerRadius={80}
                                             paddingAngle={3}
                                             dataKey="value"
+                                            isAnimationActive
+                                            animationBegin={80}
+                                            animationDuration={650}
                                             label={({ name, value }) =>
                                               `${name}: ${value.toLocaleString()}`
                                             }
@@ -11213,7 +11406,7 @@ export default function SLFMonitoring({
 
       {renderInsightModal()}
 
-      {/* ── LGU Served Drill-Down Modal ── */}
+      {/* -- LGU Served Drill-Down Modal -- */}
       <Modal
         open={slfLguModal}
         onCancel={() => setSlfLguModal(false)}
@@ -11543,7 +11736,7 @@ export default function SLFMonitoring({
         })()}
       </Modal>
 
-      {/* ── Waste Received Drill-Down Modal ── */}
+      {/* -- Waste Received Drill-Down Modal -- */}
       <Modal
         open={slfWasteModal}
         onCancel={() => setSlfWasteModal(false)}
@@ -11762,3 +11955,4 @@ export default function SLFMonitoring({
     </div>
   );
 }
+

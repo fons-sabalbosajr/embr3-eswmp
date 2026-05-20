@@ -1,7 +1,6 @@
 import { useState, useEffect, useCallback, useMemo } from "react";
 import {
   Card,
-  Table,
   Button,
   Modal,
   Form,
@@ -60,6 +59,7 @@ import secureStorage from "../../utils/secureStorage";
 import { fetchWithCache, invalidateCache } from "../../utils/pageCache";
 import { useDataRef } from "../../utils/dataRef";
 import dayjs from "dayjs";
+import ResponsiveTable from "./shared/ResponsiveTable";
 
 const { Title, Text } = Typography;
 
@@ -517,13 +517,12 @@ export default function LguInitiatedMRF({canEdit = true, canDelete = true, isDar
 
       {/* Table */}
       <Card style={{ borderRadius: 10 }} bodyStyle={{ padding: 0 }}>
-        <Table
+        <ResponsiveTable
           dataSource={filtered}
           columns={columns}
           rowKey="_id"
           size="small"
           loading={loading}
-          scroll={{ x: 1400 }}
           pagination={{ defaultPageSize: 15, pageSizeOptions: ["10", "15", "25", "50", "100"], showSizeChanger: true, showTotal: (t, r) => `${r[0]}-${r[1]} of ${t}` }}
         />
       </Card>

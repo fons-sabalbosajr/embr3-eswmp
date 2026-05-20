@@ -51,6 +51,12 @@ import api from "../../api";
 import secureStorage from "../../utils/secureStorage";
 import { fetchWithCache, invalidateCache } from "../../utils/pageCache";
 import dayjs from "dayjs";
+import ResponsiveTable from "./shared/ResponsiveTable";
+import {
+  getTruckCapacityText,
+  getTruckPlateText,
+  normalizeSubmissionRecord,
+} from "./shared/submissionRecords";
 
 const { Title, Text } = Typography;
 const { Option } = Select;
@@ -132,10 +138,10 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, is
     if (fetchingRef.current) return;
     fetchingRef.current = true;
     try {
-      await fetchWithCache(CACHE_KEY, () => api.get("/data-slf").then(({ data }) => data), {
+      await fetchWithCache(CACHE_KEY, () => api.get("/data-slf").then(({ data }) => (data || []).map(normalizeSubmissionRecord)), {
         ttl: CACHE_TTL,
         force: skipCache,
-        onData:  (data) => { setData(data); setLoading(false); },
+        onData:  (data) => { setData((data || []).map(normalizeSubmissionRecord)); setLoading(false); },
         onError: ()     => Swal.fire("Error", "Could not load submissions", "error"),
         onStart: ()     => setLoading(true),
         onEnd:   ()     => setLoading(false),
@@ -150,7 +156,9 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, is
       const { data: updated } = await api.patch(`/data-slf/${id}/status`, {
         status,
       });
-      setData((prev) => prev.map((d) => (d._id === id ? updated : d)));
+      setData((prev) =>
+        prev.map((d) => (d._id === id ? normalizeSubmissionRecord(updated) : d)),
+      );
       secureStorage.remove(CACHE_KEY);
       secureStorage.invalidateDashboard();
       Swal.fire({
@@ -873,14 +881,13 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, is
           )}
         </Space>
 
-        <Table
+        <ResponsiveTable
           dataSource={filtered}
           columns={columns}
           rowKey="_id"
           loading={loading}
           pagination={{ pageSize: 15 }}
           size="middle"
-          scroll={{ x: 900 }}
           rowSelection={{ selectedRowKeys, onChange: setSelectedRowKeys }}
         />
       </Card>

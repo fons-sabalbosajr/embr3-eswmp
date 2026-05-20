@@ -18,6 +18,7 @@ import {
 import Swal from "sweetalert2";
 import dayjs from "dayjs";
 import api from "../../api";
+import ResponsiveTable from "./shared/ResponsiveTable";
 
 const { Text, Title } = Typography;
 const { Option } = Select;
@@ -30,6 +31,26 @@ const getPortalEmailTemplates = (user = {}) => ({
   followup: {
     subject: "Follow-Up: Pending SLF Portal Action Required",
     message: `Dear ${user.firstName || "Portal User"},\n\nWe are following up on your pending SLF Portal action. Please review the latest instructions, submit the required data or attachments, and reply through the portal if you need assistance.\n\nThank you.`,
+  },
+  holdFollowup: {
+    subject: "Follow-Up: Account Verification Requirements",
+    message: `Dear ${user.firstName || "Portal User"},\n\nThis is a follow-up regarding your SLF Portal account verification. Please log in to the portal and submit the required authorization or verification documents so your account can be reviewed.\n\nIf you already submitted the documents, please wait for admin review or reply through the portal if you need assistance.\n\nThank you.`,
+  },
+  newAttachment: {
+    subject: "New Attachment Required for SLF Portal Account",
+    message: `Dear ${user.firstName || "Portal User"},\n\nYour latest verification attachment needs to be updated. Please log in to the SLF Portal and upload a corrected authorization document or proof of affiliation.\n\nYour account access may remain limited until the corrected attachment is submitted and reviewed.\n\nThank you.`,
+  },
+  revalidation: {
+    subject: "Account Revalidation Required",
+    message: `Dear ${user.firstName || "Portal User"},\n\nEMB R3 is requesting revalidation of your SLF Portal account details. Please review your account information, office email, PCO email, and verification attachment in the portal.\n\nSubmit the updated details as soon as possible so your access and assigned SLF records remain valid.\n\nThank you.`,
+  },
+  approvalNotice: {
+    subject: "SLF Portal Account Approved",
+    message: `Dear ${user.firstName || "Portal User"},\n\nYour SLF Portal account has been approved. You may now log in and access your assigned SLF records and submission tools.\n\nPlease keep your account and contact information updated.\n\nThank you.`,
+  },
+  correctionRequest: {
+    subject: "Correction Required for SLF Portal Information",
+    message: `Dear ${user.firstName || "Portal User"},\n\nPlease review and correct the information in your SLF Portal account or recent submission. Some details require clarification before admin review can be completed.\n\nLog in to the portal, apply the needed corrections, and submit the updated information.\n\nThank you.`,
   },
   custom: {
     subject: "",
@@ -85,6 +106,25 @@ export default function PortalUsers({ isDark, canEdit = true, canDelete = true, 
   const [messageForm] = Form.useForm();
   const [emailForm] = Form.useForm();
 
+  const mergePortalUser = (updatedUser) => {
+    if (!updatedUser?._id) return;
+    setUsers((prev) =>
+      prev.map((user) =>
+        user._id === updatedUser._id ? { ...user, ...updatedUser } : user,
+      ),
+    );
+    setDetailModal((prev) =>
+      prev.user?._id === updatedUser._id
+        ? { ...prev, user: { ...prev.user, ...updatedUser } }
+        : prev,
+    );
+    setHistoryModal((prev) =>
+      prev.user?._id === updatedUser._id
+        ? { ...prev, user: { ...prev.user, ...updatedUser } }
+        : prev,
+    );
+  };
+
   useEffect(() => {
     fetchData();
   }, []);
@@ -128,9 +168,10 @@ export default function PortalUsers({ isDark, canEdit = true, canDelete = true, 
     }
     setApproving(true);
     try {
-      await api.patch(`/portal-users/${approveModal.user._id}/approve`, {
+      const { data } = await api.patch(`/portal-users/${approveModal.user._id}/approve`, {
         assignedSlf: selectedSlf,
       });
+      mergePortalUser(data.data);
       Swal.fire({
         icon: "success",
         title: "Approved",
@@ -139,7 +180,6 @@ export default function PortalUsers({ isDark, canEdit = true, canDelete = true, 
       });
       setApproveModal({ open: false, user: null });
       setSelectedSlf([]);
-      fetchData();
     } catch (err) {
       Swal.fire(
         "Error",
@@ -163,14 +203,14 @@ export default function PortalUsers({ isDark, canEdit = true, canDelete = true, 
     });
     if (!isConfirmed) return;
     try {
-      await api.patch(`/portal-users/${record._id}/reject`, { reason });
+      const { data } = await api.patch(`/portal-users/${record._id}/reject`, { reason });
+      mergePortalUser(data.data);
       Swal.fire({
         icon: "info",
         title: "Rejected",
         text: `${record.firstName} ${record.lastName} has been rejected.`,
         confirmButtonColor: "#1a3353",
       });
-      fetchData();
     } catch (err) {
       Swal.fire(
         "Error",
@@ -192,12 +232,12 @@ export default function PortalUsers({ isDark, canEdit = true, canDelete = true, 
     if (!result.isConfirmed) return;
     try {
       await api.delete(`/portal-users/${record._id}`);
+      setUsers((prev) => prev.filter((user) => user._id !== record._id));
       Swal.fire({
         icon: "success",
         title: "Deleted",
         confirmButtonColor: "#1a3353",
       });
-      fetchData();
     } catch {
       Swal.fire("Error", "Failed to delete user", "error");
     }
@@ -210,9 +250,10 @@ export default function PortalUsers({ isDark, canEdit = true, canDelete = true, 
     }
     setEditingSlfLoading(true);
     try {
-      await api.patch(`/portal-users/${editSlfModal.user._id}/update-slf`, {
+      const { data } = await api.patch(`/portal-users/${editSlfModal.user._id}/update-slf`, {
         assignedSlf: editSlfValue,
       });
+      mergePortalUser(data.data);
       Swal.fire({
         icon: "success",
         title: "Updated",
@@ -221,7 +262,6 @@ export default function PortalUsers({ isDark, canEdit = true, canDelete = true, 
       });
       setEditSlfModal({ open: false, user: null });
       setEditSlfValue([]);
-      fetchData();
     } catch (err) {
       Swal.fire(
         "Error",
@@ -254,9 +294,9 @@ export default function PortalUsers({ isDark, canEdit = true, canDelete = true, 
     if (!result.isConfirmed) return;
     setHoldLoading(true);
     try {
-      await api.patch(`/portal-users/${record._id}/hold`);
+      const { data } = await api.patch(`/portal-users/${record._id}/hold`);
+      mergePortalUser(data.data);
       Swal.fire({ icon: "success", title: needsCorrectedAttachment ? "New Attachment Required" : "Account On Hold", text: "The user will be prompted to verify before accessing the portal.", confirmButtonColor: "#1a3353" });
-      fetchData();
     } catch (err) {
       Swal.fire("Error", err.response?.data?.message || "Failed to hold account", "error");
     } finally {
@@ -275,9 +315,9 @@ export default function PortalUsers({ isDark, canEdit = true, canDelete = true, 
     });
     if (!result.isConfirmed) return;
     try {
-      await api.patch(`/portal-users/${record._id}/unhold`);
+      const { data } = await api.patch(`/portal-users/${record._id}/unhold`);
+      mergePortalUser(data.data);
       Swal.fire({ icon: "success", title: "Hold Removed", confirmButtonColor: "#1a3353" });
-      fetchData();
     } catch (err) {
       Swal.fire("Error", err.response?.data?.message || "Failed to remove hold", "error");
     }
@@ -336,9 +376,9 @@ export default function PortalUsers({ isDark, canEdit = true, canDelete = true, 
     });
     if (!result.isConfirmed) return;
     try {
-      await api.patch(`/portal-users/${record._id}/review-verification`);
+      const { data } = await api.patch(`/portal-users/${record._id}/review-verification`);
+      mergePortalUser(data.data);
       Swal.fire({ icon: "success", title: "Verification Reviewed", confirmButtonColor: "#1a3353" });
-      fetchData();
       setDetailModal({ open: false, user: null });
     } catch (err) {
       Swal.fire("Error", err.response?.data?.message || "Failed to review", "error");
@@ -397,8 +437,15 @@ export default function PortalUsers({ isDark, canEdit = true, canDelete = true, 
     if (!user?._id) return;
     setEmailSending(true);
     try {
-      await api.post(`/portal-users/${user._id}/send-email`, values);
-      Swal.fire({ icon: "success", title: "Email Sent", text: `Email sent to ${user.email}.`, confirmButtonColor: "#1a3353" });
+      const { data } = await api.post(`/portal-users/${user._id}/send-email`, values);
+      Swal.fire({
+        icon: "success",
+        title: "Email Sent",
+        text: data?.messageId
+          ? `Email sent to ${user.email}. Message ID: ${data.messageId}`
+          : `Email sent to ${user.email}.`,
+        confirmButtonColor: "#1a3353",
+      });
       setEmailUserModal({ open: false, user: null });
       emailForm.resetFields();
     } catch (err) {
@@ -802,14 +849,13 @@ export default function PortalUsers({ isDark, canEdit = true, canDelete = true, 
         </Row>
       </Card>
 
-      <Table
+      <ResponsiveTable
         dataSource={filteredUsers}
         columns={columns}
         rowKey="_id"
         loading={loading}
         size="small"
         pagination={{ pageSize: 15 }}
-        scroll={{ x: 1000 }}
         locale={{
           emptyText: (
             <Empty
@@ -1113,6 +1159,11 @@ export default function PortalUsers({ isDark, canEdit = true, canDelete = true, 
               <Select onChange={handlePortalEmailTemplateChange}>
                 <Option value="reminder">Send Reminder Email</Option>
                 <Option value="followup">Follow-Up Email</Option>
+                <Option value="holdFollowup">Send Follow-Up Requirements</Option>
+                <Option value="newAttachment">New Attachment Request</Option>
+                <Option value="revalidation">Revalidation Account Email</Option>
+                <Option value="approvalNotice">Account Approval Notice</Option>
+                <Option value="correctionRequest">Correction Request</Option>
                 <Option value="custom">Custom Email</Option>
               </Select>
             </Form.Item>

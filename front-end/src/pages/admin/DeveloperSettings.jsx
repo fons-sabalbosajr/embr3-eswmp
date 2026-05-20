@@ -15,12 +15,13 @@ import {
   Tag,
   Descriptions,
   Space,
-  Table,
   Badge,
   Popconfirm,
   Tabs,
   Tooltip,
   Empty,
+  Alert,
+  DatePicker,
 } from "antd";
 import {
   SettingOutlined,
@@ -51,21 +52,24 @@ import {
   BarChartOutlined,
   EnvironmentOutlined,
   HistoryOutlined,
+  SendOutlined,
 } from "@ant-design/icons";
 import AccountSettings from "./AccountSettings";
 import Swal from "sweetalert2";
 import api from "../../api";
 import secureStorage from "../../utils/secureStorage";
 import dayjs from "dayjs";
+import ResponsiveTable from "./shared/ResponsiveTable";
 
 const { Title, Text } = Typography;
 const { Option } = Select;
 const { TextArea } = Input;
 
-export default function DeveloperSettings({onSettingsSaved, isDark}) {
+export default function DeveloperSettings({onSettingsSaved, isDark, initialActiveKey = "general"}) {
   const [settings, setSettings] = useState(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [announcementEmailSending, setAnnouncementEmailSending] = useState(false);
   const [form] = Form.useForm();
 
   // Logs state
@@ -119,7 +123,22 @@ export default function DeveloperSettings({onSettingsSaved, isDark}) {
     try {
       const { data } = await api.get("/settings/app");
       setSettings(data);
-      form.setFieldsValue(data);
+      form.setFieldsValue({
+        ...data,
+        portalAnnouncementType: data.portalAnnouncementType || "info",
+        portalAnnouncementShowOnLogin:
+          data.portalAnnouncementShowOnLogin !== false,
+        portalAnnouncementShowInPortal:
+          data.portalAnnouncementShowInPortal !== false,
+        portalAnnouncementDismissible:
+          data.portalAnnouncementDismissible !== false,
+        portalAnnouncementStartAt: data.portalAnnouncementStartAt
+          ? dayjs(data.portalAnnouncementStartAt)
+          : null,
+        portalAnnouncementEndAt: data.portalAnnouncementEndAt
+          ? dayjs(data.portalAnnouncementEndAt)
+          : null,
+      });
       // Parse dashboardTabs map
       if (data.dashboardTabs) {
         const parsed = typeof data.dashboardTabs === "object" ? data.dashboardTabs : {};
@@ -253,8 +272,31 @@ export default function DeveloperSettings({onSettingsSaved, isDark}) {
   const handleSave = async (values) => {
     setSaving(true);
     try {
-      const { data } = await api.put("/settings/app", values);
+      const payload = {
+        ...values,
+        portalAnnouncementStartAt:
+          values.portalAnnouncementStartAt?.toISOString?.() || null,
+        portalAnnouncementEndAt:
+          values.portalAnnouncementEndAt?.toISOString?.() || null,
+      };
+      const { data } = await api.put("/settings/app", payload);
       setSettings(data.data);
+      form.setFieldsValue({
+        ...data.data,
+        portalAnnouncementType: data.data.portalAnnouncementType || "info",
+        portalAnnouncementShowOnLogin:
+          data.data.portalAnnouncementShowOnLogin !== false,
+        portalAnnouncementShowInPortal:
+          data.data.portalAnnouncementShowInPortal !== false,
+        portalAnnouncementDismissible:
+          data.data.portalAnnouncementDismissible !== false,
+        portalAnnouncementStartAt: data.data.portalAnnouncementStartAt
+          ? dayjs(data.data.portalAnnouncementStartAt)
+          : null,
+        portalAnnouncementEndAt: data.data.portalAnnouncementEndAt
+          ? dayjs(data.data.portalAnnouncementEndAt)
+          : null,
+      });
       if (onSettingsSaved) onSettingsSaved(data.data);
       // Invalidate ALL data caches so every page re-fetches fresh data
       // with the updated year-visibility settings applied.
@@ -273,6 +315,47 @@ export default function DeveloperSettings({onSettingsSaved, isDark}) {
     }
   };
 
+  const sendAnnouncementEmail = async () => {
+    setAnnouncementEmailSending(true);
+    try {
+      const values = await form.validateFields([
+        "portalAnnouncementTitle",
+        "portalAnnouncementMessage",
+        "portalAnnouncementEmailSubject",
+        "portalAnnouncementEmailMessage",
+        "portalAnnouncementCtaLabel",
+        "portalAnnouncementCtaUrl",
+      ]);
+      const { data } = await api.post("/settings/app/portal-announcement/email", {
+        title: values.portalAnnouncementTitle,
+        message: values.portalAnnouncementMessage,
+        subject: values.portalAnnouncementEmailSubject,
+        emailMessage:
+          values.portalAnnouncementEmailMessage ||
+          values.portalAnnouncementMessage,
+        ctaLabel: values.portalAnnouncementCtaLabel,
+        ctaUrl: values.portalAnnouncementCtaUrl,
+      });
+      await fetchSettings();
+      Swal.fire({
+        icon: data.failed ? "warning" : "success",
+        title: "Announcement Email Sent",
+        text: `${data.sent || 0} sent${data.failed ? `, ${data.failed} failed` : ""}.`,
+        timer: 2200,
+        showConfirmButton: false,
+      });
+    } catch (err) {
+      if (err?.errorFields) return;
+      Swal.fire(
+        "Error",
+        err.response?.data?.message || "Could not send announcement email",
+        "error",
+      );
+    } finally {
+      setAnnouncementEmailSending(false);
+    }
+  };
+
   if (loading) {
     return (
       <div style={{ textAlign: "center", padding: 80 }}>
@@ -284,7 +367,7 @@ export default function DeveloperSettings({onSettingsSaved, isDark}) {
   return (
     <div>
       <Tabs
-        defaultActiveKey="general"
+        defaultActiveKey={initialActiveKey}
         size="large"
         style={{ marginTop: 8 }}
         onChange={(key) => {
@@ -513,47 +596,6 @@ export default function DeveloperSettings({onSettingsSaved, isDark}) {
                   </Row>
                 </Card>
 
-                {/* Portal Announcements */}
-                <Card
-                  style={{ marginTop: 16, borderRadius: 10 }}
-                  title={
-                    <Space>
-                      <NotificationOutlined style={{ color: "#52c41a" }} />
-                      <Text strong>Portal Announcements</Text>
-                    </Space>
-                  }
-                >
-                  <Row gutter={[16, 0]}>
-                    <Col xs={24} md={12}>
-                      <Form.Item name="portalAnnouncementEnabled" label="Show Announcement" valuePropName="checked">
-                        <Switch checkedChildren="On" unCheckedChildren="Off" />
-                      </Form.Item>
-                    </Col>
-                    <Col xs={24} md={12}>
-                      <Form.Item name="portalAnnouncementType" label="Announcement Type">
-                        <Select placeholder="Select type" allowClear options={[
-                          { label: "Info", value: "info" },
-                          { label: "Warning", value: "warning" },
-                          { label: "Success", value: "success" },
-                          { label: "Error", value: "error" },
-                        ]} />
-                      </Form.Item>
-                    </Col>
-                  </Row>
-                  <Row gutter={[16, 0]}>
-                    <Col xs={24}>
-                      <Form.Item name="portalAnnouncementTitle" label="Announcement Title">
-                        <Input placeholder="Important Notice" />
-                      </Form.Item>
-                    </Col>
-                    <Col xs={24}>
-                      <Form.Item name="portalAnnouncementMessage" label="Announcement Message">
-                        <TextArea rows={3} placeholder="Enter announcement content..." />
-                      </Form.Item>
-                    </Col>
-                  </Row>
-                </Card>
-
                 {/* Email Settings */}
                 <Card
                   style={{ marginTop: 16, borderRadius: 10 }}
@@ -588,6 +630,156 @@ export default function DeveloperSettings({onSettingsSaved, isDark}) {
             ),
           },
           {
+            key: "announcements",
+            label: <span><NotificationOutlined /> Announcements</span>,
+            children: (
+              <Form form={form} layout="vertical" onFinish={handleSave} initialValues={settings}>
+                <Card
+                  style={{ borderRadius: 10 }}
+                  title={
+                    <Space>
+                      <NotificationOutlined style={{ color: "#52c41a" }} />
+                      <Text strong>SLF Portal Announcement Page</Text>
+                    </Space>
+                  }
+                  extra={
+                    <Tag color={settings?.portalAnnouncementEnabled ? "green" : "default"}>
+                      {settings?.portalAnnouncementEnabled ? "Visible" : "Hidden"}
+                    </Tag>
+                  }
+                >
+                  <Alert
+                    type="info"
+                    showIcon
+                    style={{ marginBottom: 16, borderRadius: 8 }}
+                    message="Post announcements for SLF portal users"
+                    description="Announcements can appear on the portal login page, inside the portal after login, and can optionally be sent by email to approved portal users."
+                  />
+                  <Row gutter={[16, 0]}>
+                    <Col xs={24} md={8}>
+                      <Form.Item name="portalAnnouncementEnabled" label="Publish Announcement" valuePropName="checked">
+                        <Switch checkedChildren="Published" unCheckedChildren="Hidden" />
+                      </Form.Item>
+                    </Col>
+                    <Col xs={24} md={8}>
+                      <Form.Item name="portalAnnouncementType" label="Format">
+                        <Select options={[
+                          { label: "Information", value: "info" },
+                          { label: "Warning", value: "warning" },
+                          { label: "Success", value: "success" },
+                          { label: "Critical", value: "error" },
+                        ]} />
+                      </Form.Item>
+                    </Col>
+                    <Col xs={24} md={8}>
+                      <Form.Item name="portalAnnouncementDismissible" label="Allow user to dismiss" valuePropName="checked">
+                        <Switch checkedChildren="Yes" unCheckedChildren="No" />
+                      </Form.Item>
+                    </Col>
+                  </Row>
+
+                  <Row gutter={[16, 0]}>
+                    <Col xs={24} md={12}>
+                      <Form.Item name="portalAnnouncementShowOnLogin" label="Show on Login Page" valuePropName="checked">
+                        <Switch checkedChildren="Show" unCheckedChildren="Hide" />
+                      </Form.Item>
+                    </Col>
+                    <Col xs={24} md={12}>
+                      <Form.Item name="portalAnnouncementShowInPortal" label="Show Inside SLF Portal" valuePropName="checked">
+                        <Switch checkedChildren="Show" unCheckedChildren="Hide" />
+                      </Form.Item>
+                    </Col>
+                  </Row>
+
+                  <Row gutter={[16, 0]}>
+                    <Col xs={24} md={12}>
+                      <Form.Item name="portalAnnouncementStartAt" label="Valid From">
+                        <DatePicker showTime style={{ width: "100%" }} />
+                      </Form.Item>
+                    </Col>
+                    <Col xs={24} md={12}>
+                      <Form.Item name="portalAnnouncementEndAt" label="Valid Until">
+                        <DatePicker showTime style={{ width: "100%" }} />
+                      </Form.Item>
+                    </Col>
+                  </Row>
+
+                  <Form.Item
+                    name="portalAnnouncementTitle"
+                    label="Announcement Title"
+                    rules={[{ required: true, message: "Please enter an announcement title" }]}
+                  >
+                    <Input placeholder="Important SLF Portal Notice" />
+                  </Form.Item>
+                  <Form.Item
+                    name="portalAnnouncementMessage"
+                    label="Announcement Message"
+                    rules={[{ required: true, message: "Please enter the announcement message" }]}
+                  >
+                    <TextArea rows={5} placeholder="Write the announcement shown on the login page and portal dashboard..." />
+                  </Form.Item>
+
+                  <Divider titlePlacement="left">Optional action button</Divider>
+                  <Row gutter={[16, 0]}>
+                    <Col xs={24} md={10}>
+                      <Form.Item name="portalAnnouncementCtaLabel" label="Button Label">
+                        <Input placeholder="Read more" />
+                      </Form.Item>
+                    </Col>
+                    <Col xs={24} md={14}>
+                      <Form.Item name="portalAnnouncementCtaUrl" label="Button Link">
+                        <Input placeholder="https://..." />
+                      </Form.Item>
+                    </Col>
+                  </Row>
+                </Card>
+
+                <Card
+                  style={{ marginTop: 16, borderRadius: 10 }}
+                  title={
+                    <Space>
+                      <MailOutlined style={{ color: "#1677ff" }} />
+                      <Text strong>Email Template</Text>
+                    </Space>
+                  }
+                  extra={settings?.portalAnnouncementEmailLastSentAt ? (
+                    <Text type="secondary" style={{ fontSize: 12 }}>
+                      Last sent {dayjs(settings.portalAnnouncementEmailLastSentAt).format("MM/DD/YYYY hh:mm A")}
+                    </Text>
+                  ) : null}
+                >
+                  <Form.Item name="portalAnnouncementEmailSubject" label="Email Subject">
+                    <Input placeholder="SLF Portal Announcement" />
+                  </Form.Item>
+                  <Form.Item name="portalAnnouncementEmailMessage" label="Email Message">
+                    <TextArea rows={5} placeholder="Leave blank to use the announcement message." />
+                  </Form.Item>
+                  <Alert
+                    type="warning"
+                    showIcon
+                    style={{ marginBottom: 16, borderRadius: 8 }}
+                    message="Email sending uses the approved SLF portal user list."
+                    description="Save the announcement first if you changed validity, placement, or message details, then send the email template when ready."
+                  />
+                  <Space wrap style={{ width: "100%", justifyContent: "flex-end" }}>
+                    <Button icon={<SaveOutlined />} loading={saving} onClick={() => form.submit()}>
+                      Save Announcement
+                    </Button>
+                    <Popconfirm
+                      title="Send announcement email?"
+                      description="This will email all approved SLF portal users."
+                      okText="Send Email"
+                      onConfirm={sendAnnouncementEmail}
+                    >
+                      <Button type="primary" icon={<SendOutlined />} loading={announcementEmailSending}>
+                        Send to Portal Users
+                      </Button>
+                    </Popconfirm>
+                  </Space>
+                </Card>
+              </Form>
+            ),
+          },          {
             key: "security",
             label: <span><LockOutlined /> Security</span>,
             children: (
@@ -750,7 +942,7 @@ export default function DeveloperSettings({onSettingsSaved, isDark}) {
                     </Space>
                   }
                 >
-                  <Table
+                  <ResponsiveTable
                     dataSource={logs}
                     rowKey="_id"
                     size="small"
@@ -841,7 +1033,7 @@ export default function DeveloperSettings({onSettingsSaved, isDark}) {
                     <Button type="link" size="small" onClick={fetchDeletedEntries} style={{ marginTop: 8 }}>Load deleted submissions</Button>
                   </div>
                 ) : (
-                  <Table
+                  <ResponsiveTable
                     dataSource={deletedEntries}
                     rowKey="_id"
                     size="small"
@@ -1009,7 +1201,7 @@ export default function DeveloperSettings({onSettingsSaved, isDark}) {
                     <Button type="link" size="small" onClick={fetchDeletedSlfEntries} style={{ marginTop: 8 }}>Load deleted SLF data</Button>
                   </div>
                 ) : (
-                  <Table
+                  <ResponsiveTable
                     dataSource={deletedSlfEntries}
                     rowKey="_id"
                     size="small"
