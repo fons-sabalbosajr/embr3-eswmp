@@ -1496,6 +1496,43 @@ router.post("/repair-xx-ids", async (req, res) => {
 
     let updated = 0;
     const errors = [];
+    const sequenceCache = new Map();
+    const assignedIds = new Set();
+
+    const getSequenceKey = (typeCode, provCode) => `${typeCode}-${provCode}`;
+    const getMaxSequence = async (typeCode, provCode) => {
+      const key = getSequenceKey(typeCode, provCode);
+      if (sequenceCache.has(key)) return sequenceCache.get(key);
+
+      const pattern = new RegExp(`^SLF-${typeCode}-${provCode}-(\\d{4,})(?:\\D.*)?$`);
+      const docs = await DataSLF.find({ idNo: pattern })
+        .setOptions({ includeHiddenYears: true })
+        .select("idNo")
+        .lean();
+      const maxSeq = docs.reduce((max, item) => {
+        const match = String(item.idNo || "").match(pattern);
+        const seq = match ? Number(match[1]) : 0;
+        return Number.isFinite(seq) && seq > max ? seq : max;
+      }, 0);
+      sequenceCache.set(key, maxSeq);
+      return maxSeq;
+    };
+
+    const getNextIdNo = async (typeCode, provCode) => {
+      const key = getSequenceKey(typeCode, provCode);
+      let seq = await getMaxSequence(typeCode, provCode);
+      let candidate;
+      do {
+        seq += 1;
+        candidate = `SLF-${typeCode}-${provCode}-${String(seq).padStart(4, "0")}`;
+      } while (
+        assignedIds.has(candidate) ||
+        (await DataSLF.exists({ idNo: candidate }).setOptions({ includeHiddenYears: true }))
+      );
+      sequenceCache.set(key, seq);
+      assignedIds.add(candidate);
+      return candidate;
+    };
 
     for (const doc of xxDocs) {
       try {
@@ -1537,14 +1574,7 @@ router.post("/repair-xx-ids", async (req, res) => {
         const parts = oldIdNo.split("-"); // ["SLF", typeCode, "XX", seq]
         if (parts.length < 4) continue;
         const typeCode = parts[1];
-        const seq = parts[3];
-        const newIdNo = `SLF-${typeCode}-${provCode}-${seq}`;
-
-        // Avoid collisions — if a doc already has this exact idNo, keep a suffix
-        const existing = await DataSLF.findOne({ _id: { $ne: doc._id }, idNo: newIdNo })
-          .setOptions({ includeHiddenYears: true })
-          .lean();
-        const finalIdNo = existing ? `${newIdNo}-R` : newIdNo;
+        const finalIdNo = await getNextIdNo(typeCode, provCode);
 
         const submissionId = doc.submissionId || doc._id.toString();
         await DataSLF.updateOne(
