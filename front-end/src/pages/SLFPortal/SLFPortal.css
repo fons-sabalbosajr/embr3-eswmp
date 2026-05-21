@@ -304,3 +304,17 @@
 .status-pending {
   animation: pendingPulse 1.8s ease-in-out infinite;
 }
+
+@keyframes guideIconFloat {
+  0%,
+  100% {
+    transform: translateY(0) scale(1);
+  }
+  50% {
+    transform: translateY(-2px) scale(1.08);
+  }
+}
+
+.slf-guide-icon {
+  animation: guideIconFloat 1.7s ease-in-out infinite;
+}

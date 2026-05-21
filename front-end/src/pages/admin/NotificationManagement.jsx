@@ -30,7 +30,6 @@ import {
   ReloadOutlined,
   ExclamationCircleOutlined,
   ClearOutlined,
-  InboxOutlined,
   UserOutlined,
   TeamOutlined,
 } from "@ant-design/icons";
@@ -42,6 +41,13 @@ import { getSocket } from "../../utils/socket";
 const { Text, Title, Paragraph } = Typography;
 const { Option } = Select;
 const { RangePicker } = DatePicker;
+
+const wrapCellStyle = {
+  whiteSpace: "normal",
+  overflowWrap: "anywhere",
+  wordBreak: "break-word",
+  lineHeight: 1.35,
+};
 
 const TYPE_CONFIG = {
   new_submission: { label: "New Submission", color: "blue" },
@@ -158,19 +164,27 @@ export default function NotificationManagement({ isDark }) {
     } catch { /* silent */ }
   };
 
-  const handleClearAdminRead = async () => {
+  const handleMarkSelectedRead = async () => {
+    const ids = selectedRows.length
+      ? selectedRows
+      : notifications.filter((n) => !n.read).map((n) => n._id);
+    if (!ids.length) {
+      Swal.fire({ icon: "info", title: "No unread notifications", timer: 1200, showConfirmButton: false });
+      return;
+    }
     try {
-      await api.delete("/notifications/admin/clear-read");
-      Swal.fire({ icon: "success", title: "Read admin notifications cleared", timer: 1500, showConfirmButton: false });
+      await api.patch("/notifications/bulk-read", { ids });
+      Swal.fire({ icon: "success", title: `${ids.length} notification${ids.length === 1 ? "" : "s"} marked read`, timer: 1500, showConfirmButton: false });
       setSelectedRows([]);
-      fetchNotifications(1, pagination.pageSize);
+      fetchNotifications(pagination.current, pagination.pageSize);
     } catch {
-      Swal.fire("Error", "Could not clear notifications", "error");
+      Swal.fire("Error", "Could not mark notifications as read", "error");
     }
   };
 
   // Stats from current page
   const unreadCount = notifications.filter((n) => !n.read).length;
+  const readCount = notifications.filter((n) => n.read).length;
   const adminCount = notifications.filter((n) => n.recipient === "admin").length;
   const portalCount = notifications.filter((n) => n.recipient !== "admin").length;
   const isCompact = !screens.md;
@@ -183,17 +197,16 @@ export default function NotificationManagement({ isDark }) {
       minWidth: isCompact ? 116 : 150,
       render: (t) => {
         const cfg = TYPE_CONFIG[t] || { label: t, color: "default" };
-        return <Tag color={cfg.color} style={{ borderRadius: 4, whiteSpace: "normal" }}>{cfg.label}</Tag>;
+        return <Tag color={cfg.color} style={{ borderRadius: 4, fontSize: 11, ...wrapCellStyle }}>{cfg.label}</Tag>;
       },
     },
     {
       title: "Title",
       dataIndex: "title",
       key: "title",
-      ellipsis: true,
       render: (v, r) => (
-        <Space direction="vertical" size={2} style={{ width: "100%" }}>
-          <Text strong={!r.read} style={{ fontSize: isCompact ? 12 : 13 }}>{v}</Text>
+        <Space direction="vertical" size={2} style={{ width: "100%", ...wrapCellStyle }}>
+          <Text strong={!r.read} style={{ fontSize: isCompact ? 11 : 12, ...wrapCellStyle }}>{v}</Text>
           {!r.read && <Badge dot style={{ marginLeft: 6 }} />}
           {isCompact && (
             <Text type="secondary" style={{ fontSize: 11 }}>
@@ -208,8 +221,8 @@ export default function NotificationManagement({ isDark }) {
       title: "Message",
       dataIndex: "message",
       key: "message",
-      responsive: ["md"],
-      minWidth: 200,
+      minWidth: 150,
+      onCell: () => ({ style: wrapCellStyle }),
       render: (v) => <Text type="secondary" style={{ fontSize: 12 }}>{v || "—"}</Text>,
     },
     {
@@ -221,7 +234,7 @@ export default function NotificationManagement({ isDark }) {
       render: (v) => (
         <Space size={4}>
           {v === "admin" ? <TeamOutlined style={{ color: "#1a3353" }} /> : <UserOutlined style={{ color: "#52c41a" }} />}
-          <Text style={{ fontSize: 12 }}>{v === "admin" ? "Admin" : v}</Text>
+          <Text style={{ fontSize: 11, ...wrapCellStyle }}>{v === "admin" ? "Admin" : v}</Text>
         </Space>
       ),
     },
@@ -297,30 +310,34 @@ export default function NotificationManagement({ isDark }) {
           Notification Management
         </Title>
         <Paragraph type="secondary" style={{ marginBottom: 0 }}>
-          Review, filter, clear, and audit system notifications across admin and portal activity.
+          Review, filter, mark read, and audit system notifications across admin and portal activity.
         </Paragraph>
       </div>
 
       {/* Summary Stats */}
-      <Row gutter={[16, 16]} style={{ marginBottom: 20 }}>
+      <Row gutter={[12, 12]} style={{ marginBottom: 16 }}>
         <Col xs={12} sm={6}>
-          <Card size="small" style={{ borderLeft: "3px solid #1677ff", borderRadius: 8 }}>
-            <Statistic title="Total" value={pagination.total} valueStyle={{ fontSize: 22, color: "#1677ff" }} prefix={<BellOutlined />} />
+          <Card size="small" style={{ borderLeft: "3px solid #1677ff", borderRadius: 8, minHeight: 82 }}>
+            <Statistic title="Rows in Table" value={notifications.length} valueStyle={{ fontSize: 20, color: "#1677ff" }} prefix={<BellOutlined />} />
+            <Text type="secondary" style={{ fontSize: 11 }}>{pagination.total} matching records</Text>
           </Card>
         </Col>
         <Col xs={12} sm={6}>
-          <Card size="small" style={{ borderLeft: "3px solid #fa8c16", borderRadius: 8 }}>
-            <Statistic title="Unread (All)" value={globalUnread} valueStyle={{ fontSize: 22, color: "#fa8c16" }} prefix={<ExclamationCircleOutlined />} />
+          <Card size="small" style={{ borderLeft: "3px solid #fa8c16", borderRadius: 8, minHeight: 82 }}>
+            <Statistic title="Unread Rows" value={unreadCount} valueStyle={{ fontSize: 20, color: "#fa8c16" }} prefix={<ExclamationCircleOutlined />} />
+            <Text type="secondary" style={{ fontSize: 11 }}>{globalUnread} unread admin alerts</Text>
           </Card>
         </Col>
         <Col xs={12} sm={6}>
-          <Card size="small" style={{ borderLeft: "3px solid #1a3353", borderRadius: 8 }}>
-            <Statistic title="Admin (This Page)" value={adminCount} valueStyle={{ fontSize: 22, color: "#1a3353" }} prefix={<TeamOutlined />} />
+          <Card size="small" style={{ borderLeft: "3px solid #52c41a", borderRadius: 8, minHeight: 82 }}>
+            <Statistic title="Read Rows" value={readCount} valueStyle={{ fontSize: 20, color: "#52c41a" }} prefix={<CheckCircleOutlined />} />
+            <Text type="secondary" style={{ fontSize: 11 }}>Visible read notifications</Text>
           </Card>
         </Col>
         <Col xs={12} sm={6}>
-          <Card size="small" style={{ borderLeft: "3px solid #52c41a", borderRadius: 8 }}>
-            <Statistic title="Portal (This Page)" value={portalCount} valueStyle={{ fontSize: 22, color: "#52c41a" }} prefix={<UserOutlined />} />
+          <Card size="small" style={{ borderLeft: "3px solid #1a3353", borderRadius: 8, minHeight: 82 }}>
+            <Statistic title="Recipients" value={`${adminCount}/${portalCount}`} valueStyle={{ fontSize: 20, color: "#1a3353" }} prefix={<TeamOutlined />} />
+            <Text type="secondary" style={{ fontSize: 11 }}>Admin / Portal rows</Text>
           </Card>
         </Col>
       </Row>
@@ -369,9 +386,13 @@ export default function NotificationManagement({ isDark }) {
                   </Button>
                 </Popconfirm>
               )}
-              <Popconfirm title="Delete all read admin notifications?" onConfirm={handleClearAdminRead} okText="Clear Read" okButtonProps={{ danger: true }}>
+              <Popconfirm
+                title={selectedRows.length ? "Mark selected notifications as read?" : "Mark all visible unread notifications as read?"}
+                onConfirm={handleMarkSelectedRead}
+                okText="Mark Read"
+              >
                 <Button icon={<ClearOutlined />} size="small">
-                  Clear Read (Admin)
+                  Mark Read {selectedRows.length ? `(${selectedRows.length})` : "(Visible)"}
                 </Button>
               </Popconfirm>
             </Space>
@@ -395,8 +416,8 @@ export default function NotificationManagement({ isDark }) {
           pagination={{
             ...pagination,
             showSizeChanger: true,
-            pageSizeOptions: ["15", "30", "50", "100"],
-            showTotal: (total, range) => `${range[0]}–${range[1]} of ${total}`,
+            pageSizeOptions: ["10", "15", "30", "50", "100"],
+            showTotal: (total, range) => `${range[0]}-${range[1]} of ${total}`,
             onChange: (page, pageSize) => {
               setSelectedRows([]);
               fetchNotifications(page, pageSize);

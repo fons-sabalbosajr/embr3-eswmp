@@ -52,9 +52,11 @@ import secureStorage from "../../utils/secureStorage";
 import { fetchWithCache, invalidateCache } from "../../utils/pageCache";
 import dayjs from "dayjs";
 import ResponsiveTable from "./shared/ResponsiveTable";
+import { matchesFilter, rowMatchesSearch } from "./shared/tableFilters";
 import {
   getTruckCapacityText,
   getTruckPlateText,
+  getSubmissionVolumeSummary,
   normalizeSubmissionRecord,
 } from "./shared/submissionRecords";
 
@@ -435,6 +437,14 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, is
       );
       const payload = {
         ...values,
+        activeCellEntries: (values.activeCellEntries || []).map((entry) => ({
+          ...entry,
+          unit: (entry.unit || values.baselineUnit || values.totalVolumeAcceptedUnit || "m³").replace("m3", "m³"),
+        })),
+        closedCellEntries: (values.closedCellEntries || []).map((entry) => ({
+          ...entry,
+          unit: (entry.unit || values.baselineUnit || values.totalVolumeAcceptedUnit || "m³").replace("m3", "m³"),
+        })),
         updatedBy: "EMBR3 ESWMP Admin",
         dateOfDisposal: values.dateOfDisposal?.toISOString(),
         address:
@@ -574,12 +584,8 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, is
   };
 
   const filtered = data.filter((d) => {
-    const matchSearch =
-      d.idNo?.toLowerCase().includes(search.toLowerCase()) ||
-      d.lguCompanyName?.toLowerCase().includes(search.toLowerCase()) ||
-      d.submittedBy?.toLowerCase().includes(search.toLowerCase());
-    const matchStatus = statusFilter === "all" || d.status === statusFilter;
-    return matchSearch && matchStatus;
+    const matchStatus = statusFilter === "all" || matchesFilter(d.status, statusFilter);
+    return matchStatus && rowMatchesSearch(d, search);
   });
 
   const statusColors = {
@@ -638,6 +644,14 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, is
       key: "dateOfDisposal",
       width: 130,
       render: (val) => (val ? dayjs(val).format("MM/DD/YYYY") : "—"),
+    },
+    {
+      title: "Date & Time Submitted",
+      dataIndex: "createdAt",
+      key: "createdAt",
+      width: 175,
+      sorter: (a, b) => new Date(a.createdAt || 0) - new Date(b.createdAt || 0),
+      render: (val) => (val ? dayjs(val).format("MM/DD/YYYY hh:mm A") : "—"),
     },
     {
       title: (
@@ -968,10 +982,7 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, is
         {viewRecord &&
           (() => {
             const r = viewRecord;
-            const totalVolume = (r.trucks || []).reduce(
-              (s, t) => s + (t.actualVolume || 0),
-              0,
-            );
+            const totalVolumeSummary = getSubmissionVolumeSummary(r) || "0";
             return (
               <div>
                 {/* Header Banner */}
@@ -1140,16 +1151,8 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, is
                           Total Volume
                         </Text>
                         <div style={{ marginTop: 4 }}>
-                          <Text
-                            strong
-                            style={{ fontSize: 18, color: isDark ? "#ffc53d" : "#fa8c16" }}
-                          >
-                            {totalVolume > 0
-                              ? totalVolume.toLocaleString()
-                              : "0"}
-                          </Text>{" "}
-                          <Text style={{ fontSize: 11, color: isDark ? "rgba(255,255,255,0.45)" : "rgba(0,0,0,0.45)" }}>
-                            tons
+                          <Text strong style={{ fontSize: 14, color: isDark ? "#ffc53d" : "#fa8c16" }}>
+                            {totalVolumeSummary}
                           </Text>
                         </div>
                       </div>
@@ -1392,10 +1395,10 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, is
                           const hasAC = (r.activeCellEntries || []).length > 0;
                           const hasCC = (r.closedCellEntries || []).length > 0;
                           const cellTableCols = [
-                            { title: "#", key: "i", width: 40, render: (_, __, i) => <Text type="secondary" style={{ fontSize: 12 }}>{i + 1}</Text> },
-                            { title: "Cell Name", dataIndex: "cellName", render: (v) => <Text style={{ fontSize: 12 }}>{v || "—"}</Text> },
-                            { title: "Waste Type", dataIndex: "wasteType", width: 110, render: (v) => <Tag color={v === "Residual" ? "blue" : v === "Inert" ? "green" : v === "Hazardous" ? "red" : "default"} bordered={false} style={{ fontSize: 11 }}>{v || "—"}</Tag> },
-                            { title: "Volume", dataIndex: "volume", width: 140, render: (v) => <Text strong style={{ fontSize: 12 }}>{v != null ? v.toLocaleString() + " m³" : "—"}</Text> },
+                            { title: "#", key: "i", width: 40, render: (_, __, i) => <Text type="secondary" style={{ fontSize: 11 }}>{i + 1}</Text> },
+                            { title: "Cell Name", dataIndex: "cellName", render: (v) => <Text style={{ fontSize: 11, whiteSpace: "normal", overflowWrap: "anywhere", wordBreak: "break-word" }}>{v || "—"}</Text> },
+                            { title: "Waste Type", dataIndex: "wasteType", width: 120, render: (v) => <Tag color={v === "Residual" ? "blue" : v === "Inert" ? "green" : /hazardous/i.test(v || "") ? "red" : "default"} bordered={false} style={{ fontSize: 10, whiteSpace: "normal" }}>{v || "—"}</Tag> },
+                            { title: "Volume", dataIndex: "volume", width: 140, render: (v, row) => <Text strong style={{ fontSize: 11 }}>{v != null ? `${Number(v).toLocaleString()} ${(row.unit || r.baselineUnit || "m³").replace("m3", "m³")}` : "—"}</Text> },
                           ];
                           return (
                             <div>
@@ -1420,10 +1423,14 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, is
                                   <Text strong style={{ fontSize: 12, color: "#52c41a" }}>Active Cell{hasAC ? ` Entries (${r.activeCellEntries.length})` : " — Legacy"}</Text>
                                 </div>
                                 {hasAC ? (
-                                  <Table dataSource={r.activeCellEntries} rowKey={(_, i) => i} size="small" pagination={false} columns={cellTableCols} />
+                                  <Table dataSource={r.activeCellEntries} rowKey={(_, i) => i} size="small" pagination={false} columns={cellTableCols} style={{ fontSize: 11 }} />
                                 ) : (
                                   <Row gutter={8}>
-                                    {[["Residual", r.activeCellResidualVolume, r.activeCellResidualUnit], ["Inert", r.activeCellInertVolume, r.activeCellInertUnit]].map(([label, val, unit]) => (
+                                    {[
+                                      ["Residual", r.activeCellResidualVolume, r.activeCellResidualUnit],
+                                      ["Inert", r.activeCellInertVolume, r.activeCellInertUnit],
+                                      ["Hazardous", r.activeCellHazardousVolume, r.activeCellHazardousUnit],
+                                    ].map(([label, val, unit]) => (
                                       <Col key={label} xs={12}>
                                         <Text type="secondary" style={{ fontSize: 11, display: "block" }}>{label}</Text>
                                         <Text strong style={{ fontSize: 13 }}>
@@ -1442,10 +1449,14 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, is
                                   <Text strong style={{ fontSize: 12, color: "#fa8c16" }}>Closed Cell{hasCC ? ` Entries (${r.closedCellEntries.length})` : " — Legacy"}</Text>
                                 </div>
                                 {hasCC ? (
-                                  <Table dataSource={r.closedCellEntries} rowKey={(_, i) => i} size="small" pagination={false} columns={cellTableCols} />
+                                  <Table dataSource={r.closedCellEntries} rowKey={(_, i) => i} size="small" pagination={false} columns={cellTableCols} style={{ fontSize: 11 }} />
                                 ) : (
                                   <Row gutter={8}>
-                                    {[["Residual", r.closedCellResidualVolume, r.closedCellResidualUnit], ["Inert", r.closedCellInertVolume, r.closedCellInertUnit]].map(([label, val, unit]) => (
+                                    {[
+                                      ["Residual", r.closedCellResidualVolume, r.closedCellResidualUnit],
+                                      ["Inert", r.closedCellInertVolume, r.closedCellInertUnit],
+                                      ["Hazardous", r.closedCellHazardousVolume, r.closedCellHazardousUnit],
+                                    ].map(([label, val, unit]) => (
                                       <Col key={label} xs={12}>
                                         <Text type="secondary" style={{ fontSize: 11, display: "block" }}>{label}</Text>
                                         <Text strong style={{ fontSize: 13 }}>
@@ -1734,7 +1745,7 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, is
                                       <div>
                                         <Text style={{ fontSize: 13 }}>
                                           {truckVol > 0
-                                            ? `${truckVol.toLocaleString()} tons`
+                                            ? totalVolumeSummary
                                             : "0"}
                                         </Text>
                                       </div>
@@ -1819,6 +1830,7 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, is
                               size="small"
                               pagination={false}
                               scroll={{ x: 700 }}
+                              style={{ fontSize: 11 }}
                               columns={[
                                 {
                                   title: "#",
@@ -2324,9 +2336,17 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, is
                                       </Select>
                                     </Form.Item>
                                   </Col>
-                                  <Col xs={20} sm={6}>
+                                  <Col xs={12} sm={4}>
                                     <Form.Item {...rest} name={[name, "volume"]} label="Volume">
                                       <InputNumber min={0} style={{ width: "100%" }} />
+                                    </Form.Item>
+                                  </Col>
+                                  <Col xs={8} sm={4}>
+                                    <Form.Item {...rest} name={[name, "unit"]} label="Unit" initialValue="m³">
+                                      <Select>
+                                        <Option value="m³">m³</Option>
+                                        <Option value="tons">tons</Option>
+                                      </Select>
                                     </Form.Item>
                                   </Col>
                                   <Col xs={4} sm={2} style={{ paddingTop: 22 }}>
@@ -2334,7 +2354,7 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, is
                                   </Col>
                                 </Row>
                               ))}
-                              <Button type="dashed" block onClick={() => add({ wasteType: "Residual" })}>
+                              <Button type="dashed" block onClick={() => add({ wasteType: "Residual", unit: "m³" })}>
                                 Add Active Cell Entry
                               </Button>
                             </>
@@ -2364,9 +2384,17 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, is
                                       </Select>
                                     </Form.Item>
                                   </Col>
-                                  <Col xs={20} sm={6}>
+                                  <Col xs={12} sm={4}>
                                     <Form.Item {...rest} name={[name, "volume"]} label="Volume">
                                       <InputNumber min={0} style={{ width: "100%" }} />
+                                    </Form.Item>
+                                  </Col>
+                                  <Col xs={8} sm={4}>
+                                    <Form.Item {...rest} name={[name, "unit"]} label="Unit" initialValue="m³">
+                                      <Select>
+                                        <Option value="m³">m³</Option>
+                                        <Option value="tons">tons</Option>
+                                      </Select>
                                     </Form.Item>
                                   </Col>
                                   <Col xs={4} sm={2} style={{ paddingTop: 22 }}>
@@ -2374,7 +2402,7 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, is
                                   </Col>
                                 </Row>
                               ))}
-                              <Button type="dashed" block onClick={() => add({ wasteType: "Residual" })}>
+                              <Button type="dashed" block onClick={() => add({ wasteType: "Residual", unit: "m³" })}>
                                 Add Closed Cell Entry
                               </Button>
                             </>

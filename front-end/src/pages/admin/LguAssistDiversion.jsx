@@ -17,15 +17,12 @@ import secureStorage from "../../utils/secureStorage";
 import { fetchWithCache, invalidateCache } from "../../utils/pageCache";
 import { useDataRef } from "../../utils/dataRef";
 import dayjs from "dayjs";
+import { buildFilters, matchesFilter, rowMatchesSearch } from "./shared/tableFilters";
 
 const { Title, Text } = Typography;
 const CACHE_KEY = "lgu-assist-diversion-cache";
 const CACHE_TTL = 5 * 60 * 1000;
 
-function buildFilters(records, key) {
-  const vals = [...new Set(records.map((r) => r[key]).filter(Boolean))].sort();
-  return vals.map((v) => ({ text: v, value: v }));
-}
 function networkDays(s, e) {
   if (!s || !e) return null;
   const sd = dayjs(s).startOf("day"); const ed = dayjs(e).startOf("day");
@@ -151,10 +148,10 @@ export default function LguAssistDiversion({canEdit = true, canDelete = true, is
 
   const filtered = useMemo(() => {
     let data = records;
-    if (searchText) { const s = searchText.toLowerCase(); data = data.filter((r) => [r.province, r.lgu, r.focalPerson, r.enmoAssigned, r.statusAccomplishment].some((v) => v && v.toLowerCase().includes(s))); }
-    if (filterProvince) data = data.filter((r) => r.province === filterProvince);
-    if (filterStatus) data = data.filter((r) => r.statusAccomplishment === filterStatus);
-    if (filterMonth) data = data.filter((r) => r.targetMonth === filterMonth);
+    if (searchText) data = data.filter((r) => rowMatchesSearch(r, searchText));
+    if (filterProvince) data = data.filter((r) => matchesFilter(r.province, filterProvince));
+    if (filterStatus) data = data.filter((r) => matchesFilter(r.statusAccomplishment, filterStatus));
+    if (filterMonth) data = data.filter((r) => matchesFilter(r.targetMonth, filterMonth));
     return data;
   }, [records, searchText, filterProvince, filterStatus, filterMonth]);
 
@@ -167,7 +164,7 @@ export default function LguAssistDiversion({canEdit = true, canDelete = true, is
   const columns = [
     {
       title: <span><EnvironmentOutlined style={{ color: isDark ? "#7eb8da" : "#1a3353" }} /> LGU</span>, key: "lgu", width: 180, fixed: "left",
-      filters: filters.province, onFilter: (v, r) => r.province === v,
+      filters: filters.province, onFilter: (v, r) => matchesFilter(r.province, v),
       sorter: (a, b) => (a.lgu || "").localeCompare(b.lgu || ""),
       render: (_, r) => (
         <Tooltip title={`${r.province} — ${r.lgu}`}>
@@ -179,7 +176,7 @@ export default function LguAssistDiversion({canEdit = true, canDelete = true, is
       ),
     },
     { title: "Status", dataIndex: "statusAccomplishment", key: "status", width: 140,
-      filters: filters.statusAccomplishment, onFilter: (v, r) => r.statusAccomplishment === v,
+      filters: filters.statusAccomplishment, onFilter: (v, r) => matchesFilter(r.statusAccomplishment, v),
       render: (v) => getStatusTag(v),
     },
     {
@@ -205,7 +202,7 @@ export default function LguAssistDiversion({canEdit = true, canDelete = true, is
       ),
     },
     { title: "Target Month", dataIndex: "targetMonth", key: "targetMonth", width: 110,
-      filters: filters.targetMonth, onFilter: (v, r) => r.targetMonth === v,
+      filters: filters.targetMonth, onFilter: (v, r) => matchesFilter(r.targetMonth, v),
       render: (v) => v ? <Tag bordered={false} color="cyan">{v.replace(/^\d+\./, "")}</Tag> : "—",
     },
     {

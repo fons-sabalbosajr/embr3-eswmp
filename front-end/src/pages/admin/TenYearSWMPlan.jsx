@@ -56,6 +56,7 @@ import secureStorage from "../../utils/secureStorage";
 import { fetchWithCache, invalidateCache } from "../../utils/pageCache";
 import { useDataRef } from "../../utils/dataRef";
 import dayjs from "dayjs";
+import { buildFilters, matchesFilter, rowMatchesSearch } from "./shared/tableFilters";
 import { MapContainer, TileLayer, Marker, Popup } from "react-leaflet";
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
@@ -74,11 +75,6 @@ const { Title, Text } = Typography;
 
 const CACHE_KEY = "ten-year-swm-cache";
 const CACHE_TTL = 5 * 60 * 1000;
-
-function buildFilters(records, key) {
-  const vals = [...new Set(records.map((r) => r[key]).filter(Boolean))].sort();
-  return vals.map((v) => ({ text: v, value: v }));
-}
 
 // Replicate Excel NETWORKDAYS (weekdays only, no holiday list)
 function networkDays(startDate, endDate) {
@@ -372,22 +368,7 @@ export default function TenYearSWMPlan({canEdit = true, canDelete = true, isDark
   const filtered = useMemo(
     () =>
       records.filter((r) => {
-        if (searchText) {
-          const s = searchText.toLowerCase();
-          const match = [
-            r.province,
-            r.municipality,
-            r.enmoAssigned,
-            r.eswmStaff,
-            r.iisNumber,
-            r.resolutionNo,
-            r.focalPerson,
-            r.lguFinalDisposal,
-          ]
-            .filter(Boolean)
-            .some((v) => v.toLowerCase().includes(s));
-          if (!match) return false;
-        }
+        if (searchText && !rowMatchesSearch(r, searchText)) return false;
         if (filterProvince && r.province !== filterProvince) return false;
         if (filterMBA && r.manilaBayArea !== filterMBA) return false;
         if (filterCompliance) {
@@ -467,7 +448,7 @@ export default function TenYearSWMPlan({canEdit = true, canDelete = true, isDark
       width: 130,
       fixed: "left",
       filters: filters.province,
-      onFilter: (v, r) => r.province === v,
+      onFilter: (v, r) => matchesFilter(r.province, v),
       sorter: (a, b) =>
         (a.municipality || "").localeCompare(b.municipality || ""),
       render: (_, r) => (
@@ -493,7 +474,7 @@ export default function TenYearSWMPlan({canEdit = true, canDelete = true, isDark
       key: "mba",
       width: 90,
       filters: filters.manilaBayArea,
-      onFilter: (v, r) => r.manilaBayArea === v,
+      onFilter: (v, r) => matchesFilter(r.manilaBayArea, v),
       render: (v) =>
         v === "MBA" ? (
           <Tag color="blue" bordered={false}>
@@ -514,7 +495,7 @@ export default function TenYearSWMPlan({canEdit = true, canDelete = true, isDark
       key: "planResolution",
       width: 150,
       filters: filters.typeOfSWMPlan,
-      onFilter: (v, r) => r.typeOfSWMPlan === v,
+      onFilter: (v, r) => matchesFilter(r.typeOfSWMPlan, v),
       render: (_, r) => (
         <Tooltip title={r.resolutionNo || "No resolution"}>
           <div style={{ lineHeight: 1.3 }}>
@@ -549,7 +530,7 @@ export default function TenYearSWMPlan({canEdit = true, canDelete = true, isDark
       width: 120,
       filters: filters.periodCovered,
       filterSearch: true,
-      onFilter: (v, r) => r.periodCovered === v,
+      onFilter: (v, r) => matchesFilter(r.periodCovered, v),
       sorter: (a, b) => (a.yearApproved || 0) - (b.yearApproved || 0),
       render: (_, r) => (
         <Tooltip
@@ -571,7 +552,7 @@ export default function TenYearSWMPlan({canEdit = true, canDelete = true, isDark
       key: "status",
       width: 100,
       filters: filters.forRenewal,
-      onFilter: (v, r) => r.forRenewal === v,
+      onFilter: (v, r) => matchesFilter(r.forRenewal, v),
       render: (v) => getRenewalTag(v),
     },
     {
@@ -584,7 +565,7 @@ export default function TenYearSWMPlan({canEdit = true, canDelete = true, isDark
       width: 190,
       filters: filters.focalPerson,
       filterSearch: true,
-      onFilter: (v, r) => r.focalPerson === v,
+      onFilter: (v, r) => matchesFilter(r.focalPerson, v),
       render: (_, r) => (
         <Tooltip
           title={
@@ -626,7 +607,7 @@ export default function TenYearSWMPlan({canEdit = true, canDelete = true, isDark
       key: "targetMonth",
       width: 110,
       filters: filters.targetMonth,
-      onFilter: (v, r) => r.targetMonth === v,
+      onFilter: (v, r) => matchesFilter(r.targetMonth, v),
       render: (v) =>
         v ? (
           <Tag bordered={false} color="cyan">
@@ -644,7 +625,7 @@ export default function TenYearSWMPlan({canEdit = true, canDelete = true, isDark
       ellipsis: { showTitle: false },
       filters: filters.lguFinalDisposal,
       filterSearch: true,
-      onFilter: (v, r) => r.lguFinalDisposal === v,
+      onFilter: (v, r) => matchesFilter(r.lguFinalDisposal, v),
       render: (v) => (
         <Tooltip title={v}>
           <Text style={{ fontSize: 11 }}>{v || "—"}</Text>
@@ -689,7 +670,7 @@ export default function TenYearSWMPlan({canEdit = true, canDelete = true, isDark
       key: "compliance",
       width: 120,
       filters: filters.remarksAndRecommendation,
-      onFilter: (v, r) => r.remarksAndRecommendation === v,
+      onFilter: (v, r) => matchesFilter(r.remarksAndRecommendation, v),
       render: (v) => getComplianceTag(v),
     },
     {
@@ -1690,7 +1671,7 @@ export default function TenYearSWMPlan({canEdit = true, canDelete = true, isDark
                         >
                           <InputNumber
                             style={{ width: "100%" }}
-                            step={0.0001} precision={4}
+                            step={0.001} precision={3}
                           />
                         </Form.Item>
                       </Col>
@@ -1705,7 +1686,7 @@ export default function TenYearSWMPlan({canEdit = true, canDelete = true, isDark
                         >
                           <InputNumber
                             style={{ width: "100%" }}
-                            step={0.0001} precision={4}
+                            step={0.001} precision={3}
                           />
                         </Form.Item>
                       </Col>

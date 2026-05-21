@@ -151,6 +151,42 @@ function getXXAlias(idNo = "") {
   return null;
 }
 
+async function notifyPortalUserSecurityChange(req, user, { subject, message, previousEmail = "" } = {}) {
+  const cleanSubject = subject || "SLF Portal Account Security Update";
+  const cleanMessage =
+    message ||
+    "Your SLF portal account security settings were updated by the administrator. Please review your account access and contact EMB Region III if you did not expect this change.";
+  const recipients = [...new Set([user.email, previousEmail].filter(Boolean))];
+  await Promise.allSettled(
+    recipients.map((recipient) =>
+      sendPortalCustomEmail(recipient, {
+        subject: cleanSubject,
+        message: cleanMessage,
+        firstName: user.firstName,
+      }),
+    ),
+  );
+  await Notification.create({
+    recipient: user.email,
+    type: "portal_user_email",
+    title: cleanSubject,
+    message: cleanMessage,
+    meta: { portalUserId: user._id, portalUserEmail: user.email, previousEmail },
+  });
+  notifyPortal(req, user.email, {
+    type: "portal_user_email",
+    title: cleanSubject,
+    message: cleanMessage,
+  });
+  if (previousEmail && previousEmail !== user.email) {
+    notifyPortal(req, previousEmail, {
+      type: "portal_user_email",
+      title: cleanSubject,
+      message: cleanMessage,
+    });
+  }
+}
+
 // All routes require admin auth
 router.use(authMiddleware, adminOnly);
 
@@ -348,6 +384,166 @@ router.patch("/:id/unhold", async (req, res) => {
     res.json({ message: "Account hold removed.", data: user });
     writeLog("info", "portal.unhold", {
       message: `Portal user hold removed: ${user.email}`,
+      user: req.user.id,
+      ip: req.ip,
+    });
+  } catch (error) {
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+});
+
+// Update portal user security settings
+router.patch("/:id/security", async (req, res) => {
+  try {
+    const {
+      username,
+      email,
+      blocked,
+      blockedReason,
+      maintenanceMode,
+      maintenanceReason,
+      verificationRequired,
+      allowCredentialSelfService,
+    } = req.body || {};
+    const user = await UserPortal.findById(req.params.id);
+    if (!user) return res.status(404).json({ message: "User not found" });
+    const previousEmail = user.email;
+    const previousUsername = user.username || "";
+    const changedFields = [];
+
+    if (username != null && String(username).trim().toLowerCase() !== (user.username || "")) {
+      const nextUsername = String(username).trim().toLowerCase();
+      if (!nextUsername) return res.status(400).json({ message: "Username is required" });
+      const exists = await UserPortal.findOne({ username: nextUsername, _id: { $ne: user._id } });
+      if (exists) return res.status(400).json({ message: "Username is already registered" });
+      user.username = nextUsername;
+      changedFields.push("username");
+    }
+
+    if (email && email.trim().toLowerCase() !== user.email) {
+      const nextEmail = email.trim().toLowerCase();
+      const exists = await UserPortal.findOne({ email: nextEmail, _id: { $ne: user._id } });
+      if (exists) return res.status(400).json({ message: "Email is already registered" });
+      user.email = nextEmail;
+      changedFields.push("email");
+    }
+    if (typeof blocked === "boolean") {
+      if (user.blocked !== blocked || user.blockedReason !== (blocked ? (blockedReason || "") : "")) changedFields.push(blocked ? "account blocked" : "account unblocked");
+      user.blocked = blocked;
+      user.blockedReason = blocked ? (blockedReason || "") : "";
+      user.blockedAt = blocked ? new Date() : null;
+      user.blockedBy = blocked ? req.user.id : null;
+    }
+    if (typeof maintenanceMode === "boolean") {
+      if (user.maintenanceMode !== maintenanceMode || user.maintenanceReason !== (maintenanceMode ? (maintenanceReason || "") : "")) changedFields.push(maintenanceMode ? "maintenance enabled" : "maintenance disabled");
+      user.maintenanceMode = maintenanceMode;
+      user.maintenanceReason = maintenanceMode ? (maintenanceReason || "") : "";
+      user.maintenanceAt = maintenanceMode ? new Date() : null;
+    }
+    if (typeof verificationRequired === "boolean") {
+      if (user.verificationRequired !== verificationRequired) changedFields.push(verificationRequired ? "account hold enabled" : "account hold cleared");
+      user.verificationRequired = verificationRequired;
+      user.verificationSubmitted = false;
+    }
+    if (typeof allowCredentialSelfService === "boolean") {
+      if (user.allowCredentialSelfService !== allowCredentialSelfService) {
+        changedFields.push(allowCredentialSelfService ? "credential updates enabled" : "credential updates disabled");
+      }
+      user.allowCredentialSelfService = allowCredentialSelfService;
+    }
+
+    await user.save();
+    if (previousEmail !== user.email) {
+      await Promise.all([
+        DataSLF.updateMany({ submittedBy: previousEmail }, { submittedBy: user.email }),
+        SupportTicket.updateMany({ portalUserEmail: previousEmail }, { portalUserEmail: user.email }),
+        Notification.updateMany({ recipient: previousEmail }, { recipient: user.email }),
+      ]);
+    }
+    if (changedFields.length > 0) {
+      await notifyPortalUserSecurityChange(req, user, {
+        previousEmail,
+        subject: "SLF Portal Account Security Settings Updated",
+        message: [
+          `Hello ${user.firstName || "Portal User"},`,
+          "",
+          "Your SLF portal account security settings were updated by the administrator.",
+          `Updated setting(s): ${[...new Set(changedFields)].join(", ")}.`,
+          previousUsername && previousUsername !== user.username ? `Previous username: ${previousUsername}` : "",
+          previousEmail !== user.email ? `Previous email: ${previousEmail}` : "",
+          "",
+          "If you did not expect this update, please contact EMB Region III.",
+        ].filter(Boolean).join("\n"),
+      });
+    }
+    const safeUser = user.toObject();
+    delete safeUser.password;
+    res.json({ message: "Portal user security settings updated", data: safeUser });
+    writeLog("info", "portal.security-update", {
+      message: `Portal user security settings updated: ${user.email}`,
+      user: req.user.id,
+      ip: req.ip,
+    });
+  } catch (error) {
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+});
+
+// Admin reset portal user password
+router.patch("/:id/reset-password", async (req, res) => {
+  try {
+    const { password } = req.body || {};
+    if (!password || String(password).length < 6) {
+      return res.status(400).json({ message: "Password must be at least 6 characters" });
+    }
+    const user = await UserPortal.findById(req.params.id);
+    if (!user) return res.status(404).json({ message: "User not found" });
+    user.password = password;
+    user.resetToken = null;
+    user.resetTokenExpiry = null;
+    await user.save();
+    await notifyPortalUserSecurityChange(req, user, {
+      subject: "SLF Portal Password Reset by Administrator",
+      message: `Hello ${user.firstName || "Portal User"},\n\nYour SLF portal password was reset by the administrator. Please use the new password provided to you and update it if required.\n\nIf you did not expect this update, please contact EMB Region III.`,
+    });
+    res.json({ message: "Portal user password reset successfully" });
+    writeLog("warn", "portal.password-reset", {
+      message: `Portal user password reset by admin: ${user.email}`,
+      user: req.user.id,
+      ip: req.ip,
+    });
+  } catch (error) {
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+});
+
+// Admin security warning email
+router.post("/:id/security-warning", async (req, res) => {
+  try {
+    const user = await UserPortal.findById(req.params.id).select("-password");
+    if (!user) return res.status(404).json({ message: "User not found" });
+    const { subject = "Portal Account Security Notice", message = "" } = req.body || {};
+    if (!message.trim()) return res.status(400).json({ message: "Warning message is required" });
+
+    await sendPortalCustomEmail(user.email, {
+      subject: subject.trim(),
+      message: message.trim(),
+      firstName: user.firstName,
+    });
+    user.securityWarningCount = Number(user.securityWarningCount || 0) + 1;
+    user.lastSecurityWarningAt = new Date();
+    await user.save();
+    await Notification.create({
+      recipient: "admin",
+      type: "portal_user_email",
+      title: "Portal Security Warning Sent",
+      message: `Security warning sent to ${user.email}: ${subject.trim()}`,
+      meta: { portalUserId: user._id, portalUserEmail: user.email, subject: subject.trim() },
+    });
+    refreshAdmin(req, "notifications");
+    res.json({ message: `Security warning sent to ${user.email}.`, data: user });
+    writeLog("warn", "portal.security-warning", {
+      message: `Security warning sent to portal user: ${user.email}`,
       user: req.user.id,
       ip: req.ip,
     });

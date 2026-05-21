@@ -77,6 +77,21 @@ router.post("/bulk-delete", async (req, res) => {
   }
 });
 
+// Bulk mark notifications as read
+router.patch("/bulk-read", async (req, res) => {
+  try {
+    const { ids } = req.body;
+    if (!ids || !Array.isArray(ids)) return res.status(400).json({ message: "ids array required" });
+    const result = await Notification.updateMany(
+      { _id: { $in: ids }, read: false },
+      { read: true }
+    );
+    res.json({ success: true, modified: result.modifiedCount || 0 });
+  } catch (error) {
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+});
+
 // Get notifications for a recipient (admin or portal user id)
 router.get("/:recipient", async (req, res) => {
   try {

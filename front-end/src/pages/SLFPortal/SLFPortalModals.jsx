@@ -1,9 +1,10 @@
+import { useState } from "react";
 import dayjs from "dayjs";
 import {
   Avatar, Badge, Button, Checkbox, Col, Collapse, DatePicker, Descriptions, Divider,
-  Drawer, Empty, Form, Input, InputNumber, List,
+  Empty, Form, Input, InputNumber, List,
   Modal, Progress, Row, Select, Space, Spin, Table, Tabs, Tag, Upload,
-  Typography, Card
+  Typography, Card, Alert
 } from "antd";
 import {
   AuditOutlined, BankOutlined, BarChartOutlined, CarOutlined, CheckCircleOutlined,
@@ -15,10 +16,12 @@ import {
 } from "@ant-design/icons";
 import { EMPTY_VEHICLE } from "./constants";
 import api from "../../api";
+import secureStorage from "../../utils/secureStorage";
 
 const { Text } = Typography;
 const { Option } = Select;
 const { TextArea } = Input;
+const normalizeUnitLabel = (unit) => String(unit || "m³").replace("m3", "m³");
 
 // All SLF Portal modals — receives all state/handlers via props
 export default function SLFPortalModals({
@@ -105,6 +108,8 @@ export default function SLFPortalModals({
   baselineSaved,
   submissions,
   portalUser,
+  portalCredentialSelfServiceEnabled = false,
+  onCredentialUpdated,
   activeSlfId,
   activeSlfName,
   slfInfo,
@@ -146,6 +151,9 @@ export default function SLFPortalModals({
   resubmitComment, setResubmitComment,
   editingRevertedId, setEditingRevertedId,
 }) {
+  const [credentialForm] = Form.useForm();
+  const [credentialCodeRequested, setCredentialCodeRequested] = useState(false);
+  const [credentialLoading, setCredentialLoading] = useState(false);
   const haulerFieldErr = (name) =>
     haulerErrors[name]
       ? { validateStatus: "error", help: haulerErrors[name] }
@@ -161,6 +169,56 @@ export default function SLFPortalModals({
   );
   const messageUnreadCount = portalNotificationCounts.messages || 0;
   const supportUnreadCount = portalNotificationCounts.support || 0;
+
+  const requestCredentialCode = async () => {
+    setCredentialLoading(true);
+    try {
+      const values = await credentialForm.validateFields(["username", "password"]);
+      await api.post(
+        "/portal-auth/credentials/request-code",
+        values,
+        { headers: { Authorization: `Bearer ${secureStorage.get("portal_token")}` } },
+      );
+      setCredentialCodeRequested(true);
+      Modal.success({
+        title: "Verification code sent",
+        content: "Check your registered email for the 6-digit verification code.",
+      });
+    } catch (err) {
+      if (err?.errorFields) return;
+      Modal.error({
+        title: "Could not send code",
+        content: err.response?.data?.message || "Please try again.",
+      });
+    } finally {
+      setCredentialLoading(false);
+    }
+  };
+
+  const saveCredentials = async () => {
+    setCredentialLoading(true);
+    try {
+      const values = await credentialForm.validateFields();
+      await api.post(
+        "/portal-auth/credentials/update",
+        values,
+        { headers: { Authorization: `Bearer ${secureStorage.get("portal_token")}` } },
+      );
+      Modal.success({
+        title: "Credentials updated",
+        content: "Please log in again using your updated credentials.",
+        onOk: () => onCredentialUpdated?.(),
+      });
+    } catch (err) {
+      if (err?.errorFields) return;
+      Modal.error({
+        title: "Could not update credentials",
+        content: err.response?.data?.message || "Please check the code and try again.",
+      });
+    } finally {
+      setCredentialLoading(false);
+    }
+  };
   const formatClientVolume = (row = {}) => {
     const parts = [];
     const m3 = Number(row.totalM3 ?? row.m3 ?? 0);
@@ -1144,6 +1202,8 @@ export default function SLFPortalModals({
               <Form.Item
                 label="Hazardous Waste Code (DENR EMB)"
                 tooltip="Applicable only for Treated Hazardous Waste"
+                required={String(truckDraft.wasteType || "").trim().toLowerCase() === "treated hazardous waste"}
+                {...fieldErr("hazWasteCode")}
               >
                 <Select
                   mode="multiple"
@@ -2332,7 +2392,7 @@ export default function SLFPortalModals({
                           </Col>
                           <Col xs={24} sm={8}>
                             <Text type="secondary" style={{ fontSize: 10 }}>Volume</Text>
-                            <Input size="small" value={e.volume != null ? `${e.volume} ${baselineUnit || "m³"}` : "—"} readOnly style={{ background: "#fafafa", cursor: "default" }} />
+                            <Input size="small" value={e.volume != null ? `${e.volume} ${normalizeUnitLabel(e.unit || baselineUnit || "m³")}` : "—"} readOnly style={{ background: "#fafafa", cursor: "default" }} />
                           </Col>
                         </Row>
                       ))}
@@ -2353,7 +2413,7 @@ export default function SLFPortalModals({
                           </Col>
                           <Col xs={24} sm={8}>
                             <Text type="secondary" style={{ fontSize: 10 }}>Volume</Text>
-                            <Input size="small" value={e.volume != null ? `${e.volume} ${baselineUnit || "m³"}` : "—"} readOnly style={{ background: "#fafafa", cursor: "default" }} />
+                            <Input size="small" value={e.volume != null ? `${e.volume} ${normalizeUnitLabel(e.unit || baselineUnit || "m³")}` : "—"} readOnly style={{ background: "#fafafa", cursor: "default" }} />
                           </Col>
                         </Row>
                       ))}
@@ -2518,7 +2578,7 @@ export default function SLFPortalModals({
         footer={
           <Button onClick={() => setProfileModalOpen(false)}>Close</Button>
         }
-        width={480}
+        width={700}
         destroyOnHidden
       >
         <div style={{ textAlign: "center", marginBottom: 20 }}>
@@ -2539,6 +2599,9 @@ export default function SLFPortalModals({
           </div>
         </div>
         <Descriptions bordered column={1} size="small">
+          <Descriptions.Item label="Username">
+            {portalUser?.username || portalUser?.email?.split("@")?.[0] || "—"}
+          </Descriptions.Item>
           <Descriptions.Item label="Email">
             {portalUser?.email || "—"}
           </Descriptions.Item>
@@ -2596,6 +2659,24 @@ export default function SLFPortalModals({
             )}
           </Descriptions.Item>
         </Descriptions>
+        <Divider orientation="left" plain>
+          Account Credentials
+        </Divider>
+        <Alert
+          type={portalCredentialSelfServiceEnabled ? "info" : "warning"}
+          showIcon
+          style={{ borderRadius: 8 }}
+          message={
+            portalCredentialSelfServiceEnabled
+              ? "Credential updates are available before login."
+              : "Credential self-service is disabled."
+          }
+          description={
+            portalCredentialSelfServiceEnabled
+              ? "Log out and use Update credentials on the login page. A verification code will be sent to your registered email before changes are saved."
+              : "Please contact the administrator if you need to change your username or password."
+          }
+        />
       </Modal>
 
       {/* ── Admin Messages Floating Button ── */}
@@ -2660,13 +2741,14 @@ export default function SLFPortalModals({
         {supportUnreadCount > 0 && <Badge count={supportUnreadCount} size="small" />}
       </Button>
 
-      {/* ── Admin Messages Drawer ── */}
-      <Drawer
+      {/* ── Admin Messages Popup ── */}
+      <Modal
         title={<Space><MessageOutlined /> Messages from Admin</Space>}
-        placement="right"
-        size={isMobile ? "100%" : 520}
-        onClose={() => setMessageDrawerOpen(false)}
         open={messageDrawerOpen}
+        onCancel={() => setMessageDrawerOpen(false)}
+        footer={null}
+        centered
+        width={isMobile ? "96%" : 620}
         styles={{ body: { padding: 16 } }}
       >
         {supportLoading ? (
@@ -2704,15 +2786,16 @@ export default function SLFPortalModals({
             )}
           />
         )}
-      </Drawer>
+      </Modal>
 
-      {/* ── Support Drawer ── */}
-      <Drawer
-        title="Support & FAQ"
-        placement="right"
-        size={isMobile ? "100%" : 520}
-        onClose={() => setSupportDrawerOpen(false)}
+      {/* ── Support Popup ── */}
+      <Modal
+        title={<Space><QuestionCircleOutlined /> Support &amp; FAQ</Space>}
         open={supportDrawerOpen}
+        onCancel={() => setSupportDrawerOpen(false)}
+        footer={null}
+        centered
+        width={isMobile ? "96%" : 660}
         styles={{ body: { padding: 0 } }}
       >
         <Tabs
@@ -2929,7 +3012,7 @@ export default function SLFPortalModals({
             },
           ]}
         />
-      </Drawer>
+      </Modal>
 
       {/* ── Support Ticket Detail Modal ── */}
       <Modal
@@ -3368,15 +3451,14 @@ export default function SLFPortalModals({
                   setActiveCellDraft((d) => ({ ...d, volume: v }))
                 }
               />
-              <span className="ant-input-group-addon">
-                {baselineUnit === "m³" ? (
-                  <>
-                    m<sup>3</sup>
-                  </>
-                ) : (
-                  "tons"
-                )}
-              </span>
+              <Select
+                value={normalizeUnitLabel(activeCellDraft.unit || baselineUnit || "m³")}
+                onChange={(unit) => setActiveCellDraft((d) => ({ ...d, unit }))}
+                style={{ width: 96 }}
+              >
+                <Option value="m³">m³</Option>
+                <Option value="tons">tons</Option>
+              </Select>
             </Space.Compact>
           </Form.Item>
         </Form>
@@ -3434,15 +3516,14 @@ export default function SLFPortalModals({
                   setClosedCellDraft((d) => ({ ...d, volume: v }))
                 }
               />
-              <span className="ant-input-group-addon">
-                {baselineUnit === "m³" ? (
-                  <>
-                    m<sup>3</sup>
-                  </>
-                ) : (
-                  "tons"
-                )}
-              </span>
+              <Select
+                value={normalizeUnitLabel(closedCellDraft.unit || baselineUnit || "m³")}
+                onChange={(unit) => setClosedCellDraft((d) => ({ ...d, unit }))}
+                style={{ width: 96 }}
+              >
+                <Option value="m³">m³</Option>
+                <Option value="tons">tons</Option>
+              </Select>
             </Space.Compact>
           </Form.Item>
         </Form>

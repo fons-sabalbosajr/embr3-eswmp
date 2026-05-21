@@ -43,6 +43,7 @@ import Swal from "sweetalert2";
 import api from "../../api";
 import { exportToExcel } from "../../utils/exportExcel";
 import secureStorage from "../../utils/secureStorage";
+import { rowMatchesSearch } from "./shared/tableFilters";
 
 const { Title, Text } = Typography;
 const { Option } = Select;
@@ -289,13 +290,7 @@ export default function AccountSettings({ isDark }) {
     setPermEdits(updated);
   };
 
-  const filtered = users.filter(
-    (u) =>
-      u.firstName?.toLowerCase().includes(search.toLowerCase()) ||
-      u.lastName?.toLowerCase().includes(search.toLowerCase()) ||
-      u.email?.toLowerCase().includes(search.toLowerCase()) ||
-      u.username?.toLowerCase().includes(search.toLowerCase())
-  );
+  const filtered = users.filter((u) => rowMatchesSearch(u, search));
 
   const columns = [
     {

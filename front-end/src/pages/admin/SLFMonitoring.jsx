@@ -90,6 +90,7 @@ import secureStorage from "../../utils/secureStorage";
 import { fetchWithCache, invalidateCache } from "../../utils/pageCache";
 import { useDataRef } from "../../utils/dataRef";
 import dayjs from "dayjs";
+import { buildFilters, matchesFilter, rowMatchesSearch } from "./shared/tableFilters";
 import {
   PieChart,
   Pie,
@@ -700,30 +701,32 @@ function DashboardMetricCard({
       onClick={onClick}
       style={{
         borderRadius: 8,
-        borderLeft: `3px solid ${color}`,
+        border: active ? `1px solid ${color}` : "1px solid #f0f0f0",
+        borderTop: `3px solid ${color}`,
         height: "100%",
+        minHeight: 118,
         cursor: "pointer",
-        boxShadow: active ? `0 0 0 1px ${color} inset` : undefined,
+        boxShadow: active ? `0 0 0 1px ${color}33` : "0 1px 3px rgba(15, 23, 42, 0.06)",
       }}
-      bodyStyle={{ padding: "10px 12px" }}
+      bodyStyle={{ padding: "10px 12px", height: "100%" }}
     >
       <div
         style={{
           display: "flex",
-          justifyContent: "space-between",
+          flexDirection: "column",
           gap: 10,
-          alignItems: "flex-start",
+          height: "100%",
         }}
       >
         <Statistic
           title={<span style={{ fontSize: 11 }}>{title}</span>}
           value={value}
           suffix={suffix}
-          valueStyle={{ fontSize: 19, lineHeight: 1.1 }}
+          valueStyle={{ fontSize: 18, lineHeight: 1.1 }}
           prefix={icon}
           formatter={formatter}
         />
-        <div style={{ textAlign: "right", minWidth: 76, paddingTop: 2 }}>
+        <div style={{ marginTop: "auto", minHeight: 34 }}>
           <Text strong style={{ display: "block", fontSize: 11, color }}>
             {summary}
           </Text>
@@ -762,11 +765,6 @@ function InsightStat({ title, value, suffix, color }) {
       />
     </Card>
   );
-}
-
-function buildFilters(records, key) {
-  const vals = [...new Set(records.map((r) => r[key]).filter(Boolean))].sort();
-  return vals.map((v) => ({ text: v, label: v, value: v }));
 }
 
 function networkDays(startDate, endDate) {
@@ -1189,6 +1187,7 @@ function PortalGenerators({
   const [modalOpen, setModalOpen] = useState(false);
   const [editing, setEditing] = useState(null);
   const [portalStats, setPortalStats] = useState([]);
+  const [portalUsers, setPortalUsers] = useState([]);
   const [submissions, setSubmissions] = useState([]);
   const [loadingSub, setLoadingSub] = useState(false);
   const [form] = Form.useForm();
@@ -1244,6 +1243,10 @@ function PortalGenerators({
       .get("/data-slf/generator-summary")
       .then(({ data }) => setPortalStats(data))
       .catch(() => {});
+    api
+      .get("/portal-users")
+      .then(({ data }) => setPortalUsers(Array.isArray(data) ? data : []))
+      .catch(() => setPortalUsers([]));
     fetchSubmissions();
   }, [fetchSubmissions]);
 
@@ -1412,17 +1415,32 @@ function PortalGenerators({
     );
   }, [portalStats]);
 
+  const portalGeneratorCount = useMemo(
+    () =>
+      portalUsers.length
+        ? portalUsers.filter((user) => user.status === "approved").length
+        : generators.length,
+    [generators.length, portalUsers],
+  );
+
+  const activePortalGeneratorCount = useMemo(
+    () =>
+      portalUsers.length
+        ? portalUsers.filter(
+            (user) =>
+              user.status === "approved" &&
+              !user.blocked &&
+              !user.maintenanceMode,
+          ).length
+        : generators.filter((g) => g.isActive).length,
+    [generators, portalUsers],
+  );
+
   const filteredSubmissions = useMemo(() => {
     return submissions.filter((s) => {
       const matchStatus =
         !submissionStatusFilter || s.status === submissionStatusFilter;
-      const q = submissionSearch.toLowerCase();
-      const matchSearch =
-        !q ||
-        (s.lguCompanyName || "").toLowerCase().includes(q) ||
-        (s.idNo || "").toLowerCase().includes(q) ||
-        (s.submittedBy || "").toLowerCase().includes(q) ||
-        (s.slfGenerator?.slfName || "").toLowerCase().includes(q);
+      const matchSearch = rowMatchesSearch(s, submissionSearch);
       return matchStatus && matchSearch;
     });
   }, [submissions, submissionSearch, submissionStatusFilter]);
@@ -1941,7 +1959,7 @@ function PortalGenerators({
         );
       },
       filters: generators.map((g) => ({ text: g.slfName, value: g._id })),
-      onFilter: (val, r) => (r.slfGenerator?._id || r.slfGenerator) === val,
+      onFilter: (val, r) => matchesFilter(r.slfGenerator?._id || r.slfGenerator, val),
     },
     {
       title: "Company",
@@ -2088,7 +2106,7 @@ function PortalGenerators({
         { text: "Rejected", value: "rejected" },
         { text: "Reverted", value: "reverted" },
       ],
-      onFilter: (val, r) => r.status === val,
+      onFilter: (val, r) => matchesFilter(r.status, val),
     },
     {
       title: "Submitted",
@@ -2216,14 +2234,14 @@ function PortalGenerators({
           >
             <Statistic
               title={<span style={{ fontSize: 11 }}>Total Generators</span>}
-              value={generators.length}
+              value={portalGeneratorCount}
               valueStyle={{ fontSize: 20 }}
               prefix={
                 <DatabaseOutlined style={{ color: ACCENT, fontSize: 13 }} />
               }
             />
             <Text type="secondary" style={{ fontSize: 10 }}>
-              {generators.filter((g) => g.isActive).length} active
+              {activePortalGeneratorCount} active portal accounts
             </Text>
           </Card>
         </Col>
@@ -3312,6 +3330,11 @@ export default function SLFMonitoring({
   const [slfSubmissions, setSlfSubmissions] = useState([]);
   const [cellAssignmentModal, setCellAssignmentModal] = useState(null);
   const [cellAssignmentSaving, setCellAssignmentSaving] = useState(false);
+  const [dailySubmissionsModal, setDailySubmissionsModal] = useState({
+    open: false,
+    cell: null,
+    rows: [],
+  });
   const [form] = Form.useForm();
 
   const normalizeSlfSubmissions = (items = []) =>
@@ -3450,6 +3473,38 @@ export default function SLFMonitoring({
     detailYear,
     slfSubmissions,
   ]);
+
+  const openDailySubmissionsModal = (cellRow) => {
+    if (!detailViewRecord) return;
+    const targetIndex =
+      cellRow?.index != null ? cellRow.index : parseCellIndex(cellRow?.cellName);
+    const fallbackIndex = targetIndex != null ? targetIndex : 0;
+    const rows = slfSubmissions
+      .filter(
+        (submission) =>
+          ACTIVE_VOLUME_STATUSES.has(submission.status || "pending") &&
+          submissionMatchesFacility(detailViewRecord, submission),
+      )
+      .flatMap((submission) =>
+        (submission.trucks || []).map((truck, truckIndex) => ({
+          key: `${submission._id}-${truckIndex}`,
+          submission,
+          truck,
+          truckIndex,
+          cellIndex: getTruckCellIndex(truck),
+        })),
+      )
+      .filter((item) => {
+        if (!hasTruckVolume({ trucks: [item.truck] })) return false;
+        const placedIndex = findBestCellIndex(
+          detailViewRecord._cellUsageRows || [],
+          item.truck?.wasteType,
+          item.cellIndex,
+        );
+        return placedIndex === fallbackIndex;
+      });
+    setDailySubmissionsModal({ open: true, cell: cellRow, rows });
+  };
 
   const generatorOptions = useMemo(
     () => generators.map((g) => ({ label: g.slfName, value: g._id })),
@@ -4226,25 +4281,13 @@ export default function SLFMonitoring({
 
   const filtered = useMemo(() => {
     let data = records;
-    if (searchText) {
-      const q = searchText.toLowerCase();
-      data = data.filter((r) =>
-        [
-          r.province,
-          r.lgu,
-          r.barangay,
-          r.enmo,
-          r.focalPerson,
-          r.ownership,
-        ].some((v) => v && v.toLowerCase().includes(q)),
-      );
-    }
+    if (searchText) data = data.filter((r) => rowMatchesSearch(r, searchText));
     if (filterProvince)
-      data = data.filter((r) => r.province === filterProvince);
-    if (filterStatus) data = data.filter((r) => r.statusOfSLF === filterStatus);
+      data = data.filter((r) => matchesFilter(r.province, filterProvince));
+    if (filterStatus) data = data.filter((r) => matchesFilter(r.statusOfSLF, filterStatus));
     if (filterCategory)
-      data = data.filter((r) => r.category === filterCategory);
-    if (filterMonth) data = data.filter((r) => r.targetMonth === filterMonth);
+      data = data.filter((r) => matchesFilter(r.category, filterCategory));
+    if (filterMonth) data = data.filter((r) => matchesFilter(r.targetMonth, filterMonth));
 
     if (quickFilter === "operational") {
       data = data.filter(
@@ -4844,7 +4887,7 @@ export default function SLFMonitoring({
       key: "lgu",
       width: 150,
       filters: buildFilters(records, "province"),
-      onFilter: (v, r) => r.province === v,
+      onFilter: (v, r) => matchesFilter(r.province, v),
       sorter: (a, b) => (a.lgu || "").localeCompare(b.lgu || ""),
       render: (_, r) => (
         <Tooltip
@@ -4869,7 +4912,7 @@ export default function SLFMonitoring({
       width: 110,
       align: "center",
       filters: buildFilters(records, "ownership"),
-      onFilter: (v, r) => r.ownership === v,
+      onFilter: (v, r) => matchesFilter(r.ownership, v),
     },
     {
       title: "Category",
@@ -4907,14 +4950,14 @@ export default function SLFMonitoring({
           "—"
         ),
       filters: buildFilters(records, "category"),
-      onFilter: (v, r) => r.category === v,
+      onFilter: (v, r) => matchesFilter(r.category, v),
     },
     {
       title: "Status",
       key: "status",
       width: 140,
       filters: buildFilters(records, "statusOfSLF"),
-      onFilter: (v, r) => r.statusOfSLF === v,
+      onFilter: (v, r) => matchesFilter(r.statusOfSLF, v),
       sorter: (a, b) =>
         (a.statusOfSLF || "").localeCompare(b.statusOfSLF || ""),
       render: (_, r) => (
@@ -5024,7 +5067,7 @@ export default function SLFMonitoring({
       align: "center",
       ellipsis: false,
       filters: buildFilters(records, "targetMonth"),
-      onFilter: (v, r) => r.targetMonth === v,
+      onFilter: (v, r) => matchesFilter(r.targetMonth, v),
       render: (v) =>
         v ? (
           <div style={{ whiteSpace: "normal", wordBreak: "break-word", lineHeight: 1.25 }}>
@@ -5773,8 +5816,7 @@ export default function SLFMonitoring({
                       <Form.Item name="latitude" label="Latitude">
                         <InputNumber
                           style={{ width: "100%" }}
-                          step={0.0001}
-                          precision={4}
+                          step={0.001} precision={3}
                         />
                       </Form.Item>
                     </Col>
@@ -5782,8 +5824,7 @@ export default function SLFMonitoring({
                       <Form.Item name="longitude" label="Longitude">
                         <InputNumber
                           style={{ width: "100%" }}
-                          step={0.0001}
-                          precision={4}
+                          step={0.001} precision={3}
                         />
                       </Form.Item>
                     </Col>
@@ -9145,12 +9186,12 @@ export default function SLFMonitoring({
                         ...activeCellEntries.map((entry, i) => ({
                           name: `Active ${entry.cellName || `Cell ${i + 1}`}`,
                           value: Number(entry.volume || 0),
-                          unit: baselineEntryUnit,
+                          unit: normalizeUnit(entry.unit || baselineEntryUnit),
                         })),
                         ...closedCellEntries.map((entry, i) => ({
                           name: `Closed ${entry.cellName || `Cell ${i + 1}`}`,
                           value: Number(entry.volume || 0),
-                          unit: baselineEntryUnit,
+                          unit: normalizeUnit(entry.unit || baselineEntryUnit),
                         })),
                       ].filter((item) => item.value > 0);
                       // Cell volume data from baseline
@@ -10027,6 +10068,23 @@ export default function SLFMonitoring({
                                         },
                                       ];
 
+                                      cellTableCols.push({
+                                        title: "Daily Submissions",
+                                        key: "dailySubmissions",
+                                        width: 150,
+                                        align: "center",
+                                        render: (_, row) => (
+                                          <Button
+                                            size="small"
+                                            icon={<EyeOutlined />}
+                                            disabled={Number(row.submissions || 0) <= 0}
+                                            onClick={() => openDailySubmissionsModal(row)}
+                                          >
+                                            View
+                                          </Button>
+                                        ),
+                                      });
+
                                       const totalBaseline = cellRows.reduce(
                                         (s, r) => s + (r.baseline || 0),
                                         0,
@@ -10159,6 +10217,9 @@ export default function SLFMonitoring({
                                                       </Table.Summary.Cell>
                                                       <Table.Summary.Cell
                                                         index={6}
+                                                      />
+                                                      <Table.Summary.Cell
+                                                        index={7}
                                                       />
                                                     </Table.Summary.Row>
                                                   )}
@@ -12116,6 +12177,76 @@ export default function SLFMonitoring({
         })()}
       </Modal>
       <Modal
+        title={
+          <Space>
+            <DatabaseOutlined />
+            Daily Submissions - {dailySubmissionsModal.cell?.cellName || "Cell"}
+          </Space>
+        }
+        open={dailySubmissionsModal.open}
+        onCancel={() => setDailySubmissionsModal({ open: false, cell: null, rows: [] })}
+        footer={<Button onClick={() => setDailySubmissionsModal({ open: false, cell: null, rows: [] })}>Close</Button>}
+        width={980}
+        destroyOnHidden
+      >
+        <Table
+          className="portal-user-wrap-table"
+          size="small"
+          rowKey="key"
+          dataSource={dailySubmissionsModal.rows}
+          pagination={{ pageSize: 8, size: "small" }}
+          scroll={{ x: 900 }}
+          locale={{ emptyText: "No daily portal submissions found for this cell" }}
+          columns={[
+            {
+              title: "Date Submitted",
+              width: 150,
+              render: (_, row) => row.submission?.createdAt ? dayjs(row.submission.createdAt).format("MM/DD/YYYY h:mm A") : "—",
+            },
+            {
+              title: "Submission ID",
+              width: 160,
+              render: (_, row) => <Text strong style={{ fontSize: 12 }}>{row.submission?.idNo || row.submission?.submissionId || "—"}</Text>,
+            },
+            {
+              title: "Waste Generator",
+              width: 190,
+              render: (_, row) => (
+                <Text style={{ fontSize: 12, whiteSpace: "normal", wordBreak: "break-word" }}>
+                  {row.submission?.lguCompanyName || row.submission?.companyName || "—"}
+                </Text>
+              ),
+            },
+            {
+              title: "Truck / Ticket",
+              width: 160,
+              render: (_, row) => (
+                <Space direction="vertical" size={0}>
+                  <Text style={{ fontSize: 12 }}>{row.truck?.plateNumber || "No plate"}</Text>
+                  <Text type="secondary" style={{ fontSize: 11 }}>{row.truck?.disposalTicketNo || row.truck?.ticketNo || "No ticket"}</Text>
+                </Space>
+              ),
+            },
+            {
+              title: "Waste Type",
+              width: 160,
+              render: (_, row) => <Tag color={isHazardousCellType(row.truck?.wasteType) ? "red" : "blue"}>{row.truck?.wasteType || "Residual"}</Tag>,
+            },
+            {
+              title: "Volume",
+              width: 130,
+              align: "right",
+              render: (_, row) => `${Number(row.truck?.actualVolume || 0).toLocaleString(undefined, { maximumFractionDigits: 3 })} ${normalizeUnit(row.truck?.actualVolumeUnit || dailySubmissionsModal.cell?.unit || "tons")}`,
+            },
+            {
+              title: "Status",
+              width: 120,
+              render: (_, row) => <Tag>{row.submission?.status || "pending"}</Tag>,
+            },
+          ]}
+        />
+      </Modal>
+      <Modal
         title={<Space><HistoryOutlined />Submission History and Cell Placement</Space>}
         open={!!cellAssignmentModal}
         onCancel={() => setCellAssignmentModal(null)}
@@ -12237,4 +12368,3 @@ export default function SLFMonitoring({
     </div>
   );
 }
-

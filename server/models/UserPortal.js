@@ -12,6 +12,13 @@ const userPortalSchema = new mongoose.Schema(
       lowercase: true,
       trim: true,
     },
+    username: {
+      type: String,
+      unique: true,
+      sparse: true,
+      lowercase: true,
+      trim: true,
+    },
     password: { type: String, required: true, minlength: 6 },
     contactNumber: { type: String, trim: true, default: "" },
     companyName: { type: String, trim: true, default: "" },
@@ -60,6 +67,17 @@ const userPortalSchema = new mongoose.Schema(
     // Admin-triggered re-verification flow
     verificationRequired: { type: Boolean, default: false },
     verificationSubmitted: { type: Boolean, default: false }, // user has re-submitted docs
+    // Admin security controls
+    blocked: { type: Boolean, default: false },
+    blockedReason: { type: String, trim: true, default: "" },
+    blockedAt: { type: Date, default: null },
+    blockedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User", default: null },
+    maintenanceMode: { type: Boolean, default: false },
+    maintenanceReason: { type: String, trim: true, default: "" },
+    maintenanceAt: { type: Date, default: null },
+    allowCredentialSelfService: { type: Boolean, default: false },
+    securityWarningCount: { type: Number, default: 0 },
+    lastSecurityWarningAt: { type: Date, default: null },
     // Password reset
     resetToken: { type: String, default: null },
     resetTokenExpiry: { type: Date, default: null },

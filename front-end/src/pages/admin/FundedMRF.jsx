@@ -57,17 +57,13 @@ import secureStorage from "../../utils/secureStorage";
 import { fetchWithCache, invalidateCache } from "../../utils/pageCache";
 import { useDataRef } from "../../utils/dataRef";
 import dayjs from "dayjs";
+import { buildFilters, matchesFilter, rowMatchesSearch } from "./shared/tableFilters";
 import ResponsiveTable from "./shared/ResponsiveTable";
 
 const { Title, Text } = Typography;
 
 const CACHE_KEY = "funded-mrf-cache";
 const CACHE_TTL = 5 * 60 * 1000;
-
-function buildFilters(records, key) {
-  const vals = [...new Set(records.map((r) => r[key]).filter(Boolean))].sort();
-  return vals.map((v) => ({ text: v, value: v }));
-}
 
 function networkDays(startDate, endDate) {
   if (!startDate || !endDate) return null;
@@ -239,22 +235,16 @@ export default function FundedMRF({canEdit = true, canDelete = true, isDark}) {
     let data = records;
     if (filterYear)
       data = data.filter((r) => (r.dataYear || new Date().getFullYear()) === filterYear);
-    if (searchText) {
-      const s = searchText.toLowerCase();
-      data = data.filter((r) =>
-        [r.province, r.municipality, r.barangay, r.focalPerson, r.enmoAssigned, r.typeOfMRF, r.statusOfMRF]
-          .some((v) => v && v.toLowerCase().includes(s))
-      );
-    }
-    if (filterProvince) data = data.filter((r) => r.province === filterProvince);
-    if (filterMBA) data = data.filter((r) => r.manilaBayArea === filterMBA);
+    if (searchText) data = data.filter((r) => rowMatchesSearch(r, searchText));
+    if (filterProvince) data = data.filter((r) => matchesFilter(r.province, filterProvince));
+    if (filterMBA) data = data.filter((r) => matchesFilter(r.manilaBayArea, filterMBA));
     if (filterStatus) {
       if (filterStatus === "Operational") data = data.filter((r) => /operational/i.test(r.statusOfMRF) && !/non/i.test(r.statusOfMRF));
       else if (filterStatus === "Non-Operational") data = data.filter((r) => /non/i.test(r.statusOfMRF));
       else data = data.filter((r) => !r.statusOfMRF);
     }
-    if (filterType) data = data.filter((r) => r.typeOfMRF === filterType);
-    if (filterMonth) data = data.filter((r) => r.targetMonth === filterMonth);
+    if (filterType) data = data.filter((r) => matchesFilter(r.typeOfMRF, filterType));
+    if (filterMonth) data = data.filter((r) => matchesFilter(r.targetMonth, filterMonth));
     // Deduplicate by municipality — keep only latest dataYear per municipality
     const map = new Map();
     for (const r of data) {
@@ -282,7 +272,7 @@ export default function FundedMRF({canEdit = true, canDelete = true, isDark}) {
       title: <span><EnvironmentOutlined style={{ color: isDark ? "#7eb8da" : "#1a3353" }} /> LGU</span>,
       key: "lgu", width: 140, fixed: "left",
       filters: filters.province,
-      onFilter: (v, r) => r.province === v,
+      onFilter: (v, r) => matchesFilter(r.province, v),
       sorter: (a, b) => (a.municipality || "").localeCompare(b.municipality || ""),
       render: (_, r) => (
         <Tooltip title={`${r.province} — ${r.municipality}${r.barangay ? ` (${r.barangay})` : ""}`}>
@@ -296,14 +286,14 @@ export default function FundedMRF({canEdit = true, canDelete = true, isDark}) {
     {
       title: "MBA", dataIndex: "manilaBayArea", key: "mba", width: 90,
       filters: filters.manilaBayArea,
-      onFilter: (v, r) => r.manilaBayArea === v,
+      onFilter: (v, r) => matchesFilter(r.manilaBayArea, v),
       render: (v) => v === "MBA" ? <Tag color="blue" bordered={false}>MBA</Tag> : <Tag color="default" bordered={false}>{v || "—"}</Tag>,
     },
     {
       title: <span><BankOutlined style={{ color: "#2f54eb" }} /> MRF Type</span>,
       dataIndex: "typeOfMRF", key: "typeOfMRF", width: 150,
       filters: filters.typeOfMRF,
-      onFilter: (v, r) => r.typeOfMRF === v,
+      onFilter: (v, r) => matchesFilter(r.typeOfMRF, v),
       render: (v) => v ? <Tag color="geekblue" bordered={false}>{v}</Tag> : <Text type="secondary">—</Text>,
     },
     {
@@ -320,14 +310,14 @@ export default function FundedMRF({canEdit = true, canDelete = true, isDark}) {
     {
       title: "Status", dataIndex: "statusOfMRF", key: "status", width: 120,
       filters: filters.statusOfMRF,
-      onFilter: (v, r) => r.statusOfMRF === v,
+      onFilter: (v, r) => matchesFilter(r.statusOfMRF, v),
       render: (v) => getStatusTag(v),
     },
     {
       title: <span><TeamOutlined style={{ color: "#722ed1" }} /> Personnel</span>,
       key: "personnel", width: 190,
       filters: filters.focalPerson, filterSearch: true,
-      onFilter: (v, r) => r.focalPerson === v,
+      onFilter: (v, r) => matchesFilter(r.focalPerson, v),
       render: (_, r) => (
         <Tooltip title={<div><div><UserOutlined /> Focal: {r.focalPerson || "—"}</div><div><UserOutlined /> Staff: {r.eswmStaff || "—"}</div><div><SolutionOutlined /> ENMO: {r.enmoAssigned || "—"}</div></div>}>
           <div style={{ lineHeight: 1.3 }}>
@@ -340,7 +330,7 @@ export default function FundedMRF({canEdit = true, canDelete = true, isDark}) {
     {
       title: "Target Month", dataIndex: "targetMonth", key: "targetMonth", width: 110,
       filters: filters.targetMonth,
-      onFilter: (v, r) => r.targetMonth === v,
+      onFilter: (v, r) => matchesFilter(r.targetMonth, v),
       render: (v) => v ? <Tag bordered={false} color="cyan">{v.replace(/^\d+\./, "")}</Tag> : "—",
     },
     {
@@ -626,8 +616,8 @@ export default function FundedMRF({canEdit = true, canDelete = true, isDark}) {
                 <Col xs={24} sm={12}><Form.Item name="barangay" label="Barangay"><Input /></Form.Item></Col>
                 <Col xs={24} sm={12}><Form.Item name="manilaBayArea" label="Manila Bay Area"><Select options={mbaOptions} allowClear /></Form.Item></Col>
                 <Col xs={24} sm={12}><Form.Item name="congressionalDistrict" label="Congressional District"><Input /></Form.Item></Col>
-                <Col xs={12} sm={6}><Form.Item name="latitude" label="Latitude"><InputNumber style={{ width: "100%" }} step={0.0001} precision={4} /></Form.Item></Col>
-                <Col xs={12} sm={6}><Form.Item name="longitude" label="Longitude"><InputNumber style={{ width: "100%" }} step={0.0001} precision={4} /></Form.Item></Col>
+                <Col xs={12} sm={6}><Form.Item name="latitude" label="Latitude"><InputNumber style={{ width: "100%" }} step={0.001} precision={3} /></Form.Item></Col>
+                <Col xs={12} sm={6}><Form.Item name="longitude" label="Longitude"><InputNumber style={{ width: "100%" }} step={0.001} precision={3} /></Form.Item></Col>
               </Row>
             )},
             { key: "mrf", label: <span style={{ color: "#fa8c16" }}><BankOutlined /> MRF Details</span>, children: (

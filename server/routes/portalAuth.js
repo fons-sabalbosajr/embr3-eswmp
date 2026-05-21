@@ -12,11 +12,52 @@ const {
 const {
   sendPortalSignupEmail,
   sendPortalResetPasswordEmail,
+  sendPortalCustomEmail,
 } = require("../utils/email");
 const { notifyAdmin } = require("../utils/socketEmit");
 const Notification = require("../models/Notification");
 
 const router = express.Router();
+
+async function getPortalUserFromToken(req, res) {
+  const token = req.headers.authorization?.split(" ")[1];
+  if (!token) {
+    res.status(401).json({ message: "No token provided" });
+    return null;
+  }
+  const decoded = jwt.verify(token, process.env.JWT_SECRET);
+  const user = await UserPortal.findById(decoded.id);
+  if (!user) {
+    res.status(404).json({ message: "User not found" });
+    return null;
+  }
+  return user;
+}
+
+async function getCredentialUpdateUser(req, res) {
+  const token = req.headers.authorization?.split(" ")[1];
+  if (token) return getPortalUserFromToken(req, res);
+
+  const email = String(req.body?.email || "").trim().toLowerCase();
+  if (!email) {
+    res.status(400).json({ message: "Registered email is required" });
+    return null;
+  }
+  const user = await UserPortal.findOne({ email });
+  if (!user) {
+    res.status(404).json({ message: "Portal user account not found" });
+    return null;
+  }
+  return user;
+}
+
+function ensureCredentialSelfServiceEnabled(user, res) {
+  if (!user?.allowCredentialSelfService) {
+    res.status(403).json({ message: "Portal credential updates are currently disabled." });
+    return false;
+  }
+  return true;
+}
 
 async function saveVerificationAttachment(req, file, email, logContext) {
   const isImage = file.mimetype.startsWith("image/");
@@ -117,6 +158,7 @@ router.post("/signup", upload.single("verificationFile"), async (req, res) => {
       firstName,
       lastName,
       email,
+      username,
       password,
       contactNumber,
       companyName,
@@ -124,9 +166,18 @@ router.post("/signup", upload.single("verificationFile"), async (req, res) => {
       pcoEmail,
     } = req.body;
 
-    const existing = await UserPortal.findOne({ email: email?.toLowerCase() });
+    const normalizedEmail = String(email || "").trim().toLowerCase();
+    const normalizedUsername = String(username || normalizedEmail.split("@")[0] || "")
+      .trim()
+      .toLowerCase();
+    const existing = await UserPortal.findOne({
+      $or: [
+        { email: normalizedEmail },
+        ...(normalizedUsername ? [{ username: normalizedUsername }] : []),
+      ],
+    });
     if (existing) {
-      return res.status(400).json({ message: "Email already registered" });
+      return res.status(400).json({ message: "Email or username already registered" });
     }
 
     // Upload verification file to Google Drive if provided
@@ -154,7 +205,8 @@ router.post("/signup", upload.single("verificationFile"), async (req, res) => {
     const user = new UserPortal({
       firstName,
       lastName,
-      email,
+      email: normalizedEmail,
+      username: normalizedUsername,
       password,
       contactNumber: contactNumber || "",
       companyName: companyName || "",
@@ -169,7 +221,7 @@ router.post("/signup", upload.single("verificationFile"), async (req, res) => {
     recordVerificationSubmission(user, {
       action: "submitted",
       note: "Initial portal registration attachment",
-      performedBy: email,
+      performedBy: normalizedEmail,
     });
     await user.save();
 
@@ -209,8 +261,11 @@ router.post("/signup", upload.single("verificationFile"), async (req, res) => {
 router.post("/login", async (req, res) => {
   try {
     const { email, password } = req.body;
+    const loginId = String(email || "").trim().toLowerCase();
 
-    const user = await UserPortal.findOne({ email });
+    const user = await UserPortal.findOne({
+      $or: [{ email: loginId }, { username: loginId }],
+    });
     if (!user) {
       return res.status(401).json({ message: "Invalid credentials" });
     }
@@ -223,6 +278,16 @@ router.post("/login", async (req, res) => {
     if (user.status === "rejected") {
       return res.status(403).json({
         message: "Your account registration has been rejected. Please contact the administrator.",
+      });
+    }
+    if (user.blocked) {
+      return res.status(403).json({
+        message: user.blockedReason || "Your portal account is blocked. Please contact the administrator.",
+      });
+    }
+    if (user.maintenanceMode) {
+      return res.status(403).json({
+        message: user.maintenanceReason || "Your portal account is temporarily under maintenance. Please contact the administrator.",
       });
     }
 
@@ -246,6 +311,7 @@ router.post("/login", async (req, res) => {
         id: user._id,
         firstName: user.firstName,
         lastName: user.lastName,
+        username: user.username,
         email: user.email,
         contactNumber: user.contactNumber,
         companyName: user.companyName,
@@ -255,6 +321,7 @@ router.post("/login", async (req, res) => {
         assignedSlfName: user.assignedSlfName,
         verificationRequired: user.verificationRequired,
         verificationSubmitted: user.verificationSubmitted,
+        allowCredentialSelfService: user.allowCredentialSelfService,
         status: user.status,
         isVerified: user.isVerified,
         role: "portal_user",
@@ -262,8 +329,8 @@ router.post("/login", async (req, res) => {
     });
 
     writeLog("info", "portal.login", {
-      message: `Portal login: ${email}`,
-      user: email,
+      message: `Portal login: ${loginId}`,
+      user: loginId,
       ip: req.ip,
     });
   } catch (error) {
@@ -280,6 +347,12 @@ router.get("/me", async (req, res) => {
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
     const user = await UserPortal.findById(decoded.id).select("-password");
     if (!user) return res.status(404).json({ message: "User not found" });
+    if (user.blocked) {
+      return res.status(403).json({ message: user.blockedReason || "Portal account blocked" });
+    }
+    if (user.maintenanceMode) {
+      return res.status(403).json({ message: user.maintenanceReason || "Portal account under maintenance" });
+    }
 
     res.json(user);
   } catch (error) {
@@ -409,6 +482,127 @@ router.post("/reset-password", async (req, res) => {
 
 // Submit Verification Update — for held accounts to re-upload docs + update info
 // Requires a valid portal JWT token.
+// Request verification code before changing logged-in portal credentials
+router.post("/credentials/request-code", async (req, res) => {
+  try {
+    const user = await getCredentialUpdateUser(req, res);
+    if (!user) return;
+    if (!ensureCredentialSelfServiceEnabled(user, res)) return;
+    if (user.blocked) {
+      return res.status(403).json({ message: user.blockedReason || "Portal account blocked" });
+    }
+    if (user.maintenanceMode) {
+      return res.status(403).json({ message: user.maintenanceReason || "Portal account under maintenance" });
+    }
+
+    const { username, password } = req.body || {};
+    const nextUsername = String(username || user.username || "").trim().toLowerCase();
+    if (!nextUsername) return res.status(400).json({ message: "Username is required" });
+    if (password && String(password).length < 6) {
+      return res.status(400).json({ message: "Password must be at least 6 characters" });
+    }
+    const existing = await UserPortal.findOne({ username: nextUsername, _id: { $ne: user._id } });
+    if (existing) return res.status(400).json({ message: "Username is already registered" });
+    if ((user.username || "") === nextUsername && !password) {
+      return res.status(400).json({ message: "Enter a new username or password before requesting a code" });
+    }
+
+    const resetCode = crypto.randomInt(100000, 999999).toString();
+    user.resetToken = resetCode;
+    user.resetTokenExpiry = new Date(Date.now() + 10 * 60 * 1000);
+    await user.save();
+
+    sendPortalCustomEmail(user.email, {
+      subject: "SLF Portal Credential Verification Code",
+      firstName: user.firstName,
+      message: `Use this verification code to update your SLF portal credentials: ${resetCode}\n\nThis code will expire in 10 minutes. If you did not request a credential update, please contact EMB Region III immediately.`,
+    }).catch((emailErr) => {
+      console.error("Failed to send portal credential verification code:", emailErr.message);
+    });
+
+    writeLog("info", "portal.credentials.request-code", {
+      message: `Credential change code sent: ${user.email}`,
+      user: user.email,
+      ip: req.ip,
+    });
+
+    res.json({ message: "Verification code sent to your registered email." });
+  } catch (error) {
+    res.status(error.name === "JsonWebTokenError" ? 401 : 500).json({
+      message: error.name === "JsonWebTokenError" ? "Invalid token" : "Server error",
+      error: error.message,
+    });
+  }
+});
+
+// Verify code and update logged-in portal credentials
+router.post("/credentials/update", async (req, res) => {
+  try {
+    const user = await getCredentialUpdateUser(req, res);
+    if (!user) return;
+    if (!ensureCredentialSelfServiceEnabled(user, res)) return;
+    if (user.blocked) {
+      return res.status(403).json({ message: user.blockedReason || "Portal account blocked" });
+    }
+    if (user.maintenanceMode) {
+      return res.status(403).json({ message: user.maintenanceReason || "Portal account under maintenance" });
+    }
+
+    const { username, password, code } = req.body || {};
+    const nextUsername = String(username || "").trim().toLowerCase();
+    if (!nextUsername || !code) {
+      return res.status(400).json({ message: "Username and verification code are required" });
+    }
+    if (password && String(password).length < 6) {
+      return res.status(400).json({ message: "Password must be at least 6 characters" });
+    }
+    if (user.resetToken !== String(code).trim() || !user.resetTokenExpiry || user.resetTokenExpiry <= new Date()) {
+      return res.status(400).json({ message: "Invalid or expired verification code" });
+    }
+    const existing = await UserPortal.findOne({ username: nextUsername, _id: { $ne: user._id } });
+    if (existing) return res.status(400).json({ message: "Username is already registered" });
+    if ((user.username || "") === nextUsername && !password) {
+      return res.status(400).json({ message: "Enter a new username or password before saving credentials" });
+    }
+
+    const changed = [];
+    if (user.username !== nextUsername) {
+      user.username = nextUsername;
+      changed.push("username");
+    }
+    if (password) {
+      user.password = password;
+      changed.push("password");
+    }
+    user.allowCredentialSelfService = false;
+    user.resetToken = null;
+    user.resetTokenExpiry = null;
+    await user.save();
+
+    await Notification.create({
+      recipient: user.email,
+      type: "portal_user_email",
+      title: "Portal Credentials Updated",
+      message: `Your SLF portal ${changed.join(" and ") || "credentials"} were updated successfully. Please log in again.`,
+      meta: { portalUserId: user._id, portalUserEmail: user.email, changed },
+    });
+
+    writeLog("info", "portal.credentials.update", {
+      message: `Portal credentials updated: ${user.email}`,
+      user: user.email,
+      ip: req.ip,
+      meta: { changed },
+    });
+
+    res.json({ message: "Credentials updated. Please log in again." });
+  } catch (error) {
+    res.status(error.name === "JsonWebTokenError" ? 401 : 500).json({
+      message: error.name === "JsonWebTokenError" ? "Invalid token" : "Server error",
+      error: error.message,
+    });
+  }
+});
+
 router.post("/submit-verification", upload.single("verificationFile"), async (req, res) => {
   try {
     const token = req.headers.authorization?.split(" ")[1];

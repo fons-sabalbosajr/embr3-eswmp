@@ -74,6 +74,9 @@ import {
   AuditOutlined,
   ClockCircleOutlined,
   SaveOutlined,
+  BulbOutlined,
+  RocketOutlined,
+  ThunderboltOutlined,
 } from "@ant-design/icons";
 import { useNavigate } from "react-router-dom";
 import Swal from "sweetalert2";
@@ -96,7 +99,13 @@ import { connectSocket, disconnectSocket } from "../../utils/socket";
 import embLogo from "../../assets/emblogo.svg";
 import "./SLFPortal.css";
 import SLFPortalModals from "./SLFPortalModals";
-import { EMPTY_TRUCK, EMPTY_HAULER, EMPTY_VEHICLE, KNOWN_TRANSPORT_KEYS, withRetry } from "./constants";
+import {
+  EMPTY_TRUCK,
+  EMPTY_HAULER,
+  EMPTY_VEHICLE,
+  KNOWN_TRANSPORT_KEYS,
+  withRetry,
+} from "./constants";
 
 const { Text } = Typography;
 const { Option } = Select;
@@ -106,27 +115,62 @@ const { TextArea } = Input;
 const TON_PER_M3 = 0.2;
 
 const normalizeUnit = (unit) => String(unit || "m³").replace("m3", "m³");
+const hasBaselinePayload = (data = {}) =>
+  !!(
+    data &&
+    (data.totalVolumeAccepted != null ||
+      data.activeCellResidualVolume != null ||
+      data.activeCellInertVolume != null ||
+      data.activeCellHazardousVolume != null ||
+      data.closedCellResidualVolume != null ||
+      data.closedCellInertVolume != null ||
+      data.closedCellHazardousVolume != null ||
+      data.activeCellEntries?.length ||
+      data.closedCellEntries?.length ||
+      data.accreditedHaulers?.length)
+  );
+const formatEntryVolumeSummary = (entries = [], fallbackUnit = "m³") => {
+  const totals = entries.reduce((acc, entry) => {
+    const unit = normalizeUnit(entry.unit || fallbackUnit);
+    acc[unit] = (acc[unit] || 0) + Number(entry.volume || 0);
+    return acc;
+  }, {});
+  const summary = Object.entries(totals)
+    .filter(([, volume]) => volume > 0)
+    .map(([unit, volume]) => `${volume.toLocaleString()} ${unit}`)
+    .join(", ");
+  return summary || `0 ${normalizeUnit(fallbackUnit)}`;
+};
 
 const isTestAdminNotice = (item = {}) => {
   const isAdminNotice =
-    ["admin_message", "message_from_admin", "support_ticket_reply"].includes(item.type) ||
+    ["admin_message", "message_from_admin", "support_ticket_reply"].includes(
+      item.type,
+    ) ||
     item.source === "admin_message" ||
     /message from admin|admin sent you a message/i.test(
       `${item.title || ""} ${item.subject || ""} ${item.message || ""}`,
     );
   if (!isAdminNotice) return false;
-  const content = `${item.subject || ""} ${item.title || ""} ${item.message || ""}`
-    .replace(/admin (sent you a message|replied to .*?):/gi, "")
-    .trim();
-  return /^(test|testing|test message|test notification|sample message)(\s*\d*)?$/i.test(content);
+  const content =
+    `${item.subject || ""} ${item.title || ""} ${item.message || ""}`
+      .replace(/admin (sent you a message|replied to .*?):/gi, "")
+      .trim();
+  return /^(test|testing|test message|test notification|sample message)(\s*\d*)?$/i.test(
+    content,
+  );
 };
 
 const normalizeVehicleRecord = (vehicle = {}, fallbackUnit = "m³") => ({
   plateNumber: vehicle.plateNumber || vehicle.plateNo || vehicle.plate || "",
   vehicleType: vehicle.vehicleType || vehicle.type || "",
   capacity: vehicle.capacity ?? vehicle.truckCapacity ?? null,
-  capacityUnit: normalizeUnit(vehicle.capacityUnit || vehicle.truckCapacityUnit || fallbackUnit),
-  selectedClients: Array.isArray(vehicle.selectedClients) ? vehicle.selectedClients : [],
+  capacityUnit: normalizeUnit(
+    vehicle.capacityUnit || vehicle.truckCapacityUnit || fallbackUnit,
+  ),
+  selectedClients: Array.isArray(vehicle.selectedClients)
+    ? vehicle.selectedClients
+    : [],
 });
 
 const normalizeClientRecord = (client, index = 0) => {
@@ -145,11 +189,16 @@ const normalizeClientRecord = (client, index = 0) => {
 
 const normalizeHaulerRecord = (hauler = {}, index = 0, fallbackUnit = "m³") => {
   let vehicles = Array.isArray(hauler.vehicles)
-    ? hauler.vehicles.map((vehicle) => normalizeVehicleRecord(vehicle, fallbackUnit))
+    ? hauler.vehicles.map((vehicle) =>
+        normalizeVehicleRecord(vehicle, fallbackUnit),
+      )
     : [];
   if (
     vehicles.length === 0 &&
-    (hauler.plateNumber || hauler.plateNo || hauler.vehicleType || hauler.capacity != null)
+    (hauler.plateNumber ||
+      hauler.plateNo ||
+      hauler.vehicleType ||
+      hauler.capacity != null)
   ) {
     vehicles = [normalizeVehicleRecord(hauler, fallbackUnit)];
   }
@@ -174,7 +223,8 @@ const mergeHaulersByName = (haulers = [], fallbackUnit = "m³") => {
   const merged = new Map();
   haulers.forEach((hauler, index) => {
     const normalized = normalizeHaulerRecord(hauler, index, fallbackUnit);
-    const nameKey = normalized.haulerName.trim().toLowerCase() || `hauler-${index}`;
+    const nameKey =
+      normalized.haulerName.trim().toLowerCase() || `hauler-${index}`;
     const existing = merged.get(nameKey);
     if (!existing) {
       merged.set(nameKey, normalized);
@@ -187,7 +237,9 @@ const mergeHaulersByName = (haulers = [], fallbackUnit = "m³") => {
       ]),
     );
     (normalized.vehicles || []).forEach((vehicle, vehicleIndex) => {
-      const plateKey = (vehicle.plateNumber || `new-${vehicleIndex}`).trim().toLowerCase();
+      const plateKey = (vehicle.plateNumber || `new-${vehicleIndex}`)
+        .trim()
+        .toLowerCase();
       if (!vehicleMap.has(plateKey)) vehicleMap.set(plateKey, vehicle);
     });
     const clientMap = new Map(
@@ -197,7 +249,9 @@ const mergeHaulersByName = (haulers = [], fallbackUnit = "m³") => {
       ]),
     );
     (normalized.privateSectorClients || []).forEach((client, clientIndex) => {
-      const clientKey = (client.clientName || `new-client-${clientIndex}`).trim().toLowerCase();
+      const clientKey = (client.clientName || `new-client-${clientIndex}`)
+        .trim()
+        .toLowerCase();
       if (!clientMap.has(clientKey)) clientMap.set(clientKey, client);
     });
     merged.set(nameKey, {
@@ -241,42 +295,92 @@ const isCompletedCellStatus = (status) =>
   ["Used/Completed", "Closed"].includes(String(status || ""));
 
 const isUnavailableCellStatus = (status) =>
-  ["Under Construction", "Reserved Area", "Reserved Cell", "Not Existed"].includes(
-    String(status || ""),
-  );
+  [
+    "Under Construction",
+    "Reserved Area",
+    "Reserved Cell",
+    "Not Existed",
+  ].includes(String(status || ""));
 
 const UPLOAD_REQUIRED_FIELDS = {
   truck: [
-    { field: "disposalTicketNo", label: "Ticket No.", matches: (key) => key.includes("ticket") || key.includes("disposal") },
-    { field: "hauler", label: "Hauler", matches: (key) => key.includes("hauler") },
-    { field: "plateNumber", label: "Plate No.", matches: (key) => key.includes("plate") },
-    { field: "actualVolume", label: "Actual Volume", matches: (key) => key.includes("volume") && !key.includes("unit") },
-    { field: "wasteType", label: "Waste Type", matches: (key) => key.includes("waste") && key.includes("type") },
+    {
+      field: "disposalTicketNo",
+      label: "Ticket No.",
+      matches: (key) => key.includes("ticket") || key.includes("disposal"),
+    },
+    {
+      field: "hauler",
+      label: "Hauler",
+      matches: (key) => key.includes("hauler"),
+    },
+    {
+      field: "plateNumber",
+      label: "Plate No.",
+      matches: (key) => key.includes("plate"),
+    },
+    {
+      field: "actualVolume",
+      label: "Actual Volume",
+      matches: (key) => key.includes("volume") && !key.includes("unit"),
+    },
+    {
+      field: "wasteType",
+      label: "Waste Type",
+      matches: (key) => key.includes("waste") && key.includes("type"),
+    },
   ],
   hauler: [
-    { field: "haulerName", label: "Hauler Name", matches: (key) => key.includes("hauler") || key.includes("name") },
-    { field: "numberOfTrucks", label: "Number of Trucks", matches: (key) => key.includes("truck") || key.includes("number") },
-    { field: "plateNumber", label: "Plate No.", matches: (key) => key.includes("plate") },
-    { field: "vehicleType", label: "Vehicle Type", matches: (key) => key.includes("vehicle") || key.includes("type") },
-    { field: "capacity", label: "Capacity", matches: (key) => key.includes("capacity") && !key.includes("unit") },
+    {
+      field: "haulerName",
+      label: "Hauler Name",
+      matches: (key) => key.includes("hauler") || key.includes("name"),
+    },
+    {
+      field: "numberOfTrucks",
+      label: "Number of Trucks",
+      matches: (key) => key.includes("truck") || key.includes("number"),
+    },
+    {
+      field: "plateNumber",
+      label: "Plate No.",
+      matches: (key) => key.includes("plate"),
+    },
+    {
+      field: "vehicleType",
+      label: "Vehicle Type",
+      matches: (key) => key.includes("vehicle") || key.includes("type"),
+    },
+    {
+      field: "capacity",
+      label: "Capacity",
+      matches: (key) => key.includes("capacity") && !key.includes("unit"),
+    },
   ],
 };
 
 const isEmptyUploadValue = (value) =>
-  value === undefined || value === null || (typeof value === "string" && value.trim() === "");
+  value === undefined ||
+  value === null ||
+  (typeof value === "string" && value.trim() === "");
 
 const getUploadMissingColumns = (headers, type) => {
-  const normalizedHeaders = headers.map((header) => String(header || "").toLowerCase().trim());
-  return (UPLOAD_REQUIRED_FIELDS[type] || []).filter(
-    (field) => !normalizedHeaders.some((header) => field.matches(header)),
-  ).map((field) => field.label);
+  const normalizedHeaders = headers.map((header) =>
+    String(header || "")
+      .toLowerCase()
+      .trim(),
+  );
+  return (UPLOAD_REQUIRED_FIELDS[type] || [])
+    .filter(
+      (field) => !normalizedHeaders.some((header) => field.matches(header)),
+    )
+    .map((field) => field.label);
 };
 
 const getUploadRowErrors = (row, type) =>
   (UPLOAD_REQUIRED_FIELDS[type] || [])
     .filter((field) => isEmptyUploadValue(row[field.field]))
     .map((field) => field.label);
-
 
 export default function SLFPortal() {
   const navigate = useNavigate();
@@ -393,6 +497,7 @@ export default function SLFPortal() {
   const [portalNotifications, setPortalNotifications] = useState([]);
   const [portalUnreadCount, setPortalUnreadCount] = useState(0);
   const [notificationPanelOpen, setNotificationPanelOpen] = useState(false);
+  const [portalSettings, setPortalSettings] = useState(null);
   const [portalAnnouncement, setPortalAnnouncement] = useState(null);
   const [announcementDismissed, setAnnouncementDismissed] = useState(false);
   // Excel/CSV upload states
@@ -412,7 +517,35 @@ export default function SLFPortal() {
   const [profileModalOpen, setProfileModalOpen] = useState(false);
   const watchedCompanyName = Form.useWatch("lguCompanyName", companyForm);
   const watchedDisposalDate = Form.useWatch("dateOfDisposal", entryForm);
-  const reviewSubmitDisabled = !String(watchedCompanyName || "").trim() || !watchedDisposalDate || trucks.length === 0;
+  const watchedTotalVolumeAccepted = Form.useWatch(
+    "totalVolumeAccepted",
+    baselineForm,
+  );
+  const isTreatedHazardousWaste = (value) =>
+    String(value || "")
+      .trim()
+      .toLowerCase() === "treated hazardous waste";
+  const hasHazardousWasteCode = (value) =>
+    Array.isArray(value) ? value.length > 0 : !!String(value || "").trim();
+  const missingHazardousCodeTrucks = trucks.filter(
+    (truck) =>
+      isTreatedHazardousWaste(truck.wasteType) &&
+      !hasHazardousWasteCode(truck.hazWasteCode),
+  );
+  const missingBasicInfo = !String(watchedCompanyName || "").trim();
+  const missingBaselineInfo =
+    !baselineSaved &&
+    (watchedTotalVolumeAccepted == null || watchedTotalVolumeAccepted === "");
+  const missingDisposalInfo = !watchedDisposalDate || trucks.length === 0;
+  const hasReviewMissing =
+    missingBasicInfo ||
+    missingBaselineInfo ||
+    missingDisposalInfo ||
+    missingHazardousCodeTrucks.length > 0;
+  const RequiredDot = ({ show }) =>
+    show ? (
+      <Badge dot offset={[2, -2]} style={{ backgroundColor: "#ff4d4f" }} />
+    ) : null;
   // Facility management modals (Leachate, Gas Management, Trash Slide, Fire Prevention)
   const [leachateModalOpen, setLeachateModalOpen] = useState(false);
   const [gasVentModalOpen, setGasVentModalOpen] = useState(false);
@@ -695,6 +828,7 @@ export default function SLFPortal() {
     api
       .get("/settings/app")
       .then(({ data }) => {
+        setPortalSettings(data);
         setPortalAnnouncement(isAnnouncementActive(data) ? data : null);
       })
       .catch(() => {});
@@ -706,7 +840,8 @@ export default function SLFPortal() {
     if (sessionStorage.getItem(key) === "1") return;
     sessionStorage.setItem(key, "1");
     Modal.info({
-      title: portalAnnouncement.portalAnnouncementTitle || "SLF Portal Announcement",
+      title:
+        portalAnnouncement.portalAnnouncementTitle || "SLF Portal Announcement",
       content: (
         <div style={{ whiteSpace: "pre-wrap" }}>
           {portalAnnouncement.portalAnnouncementMessage}
@@ -738,6 +873,8 @@ export default function SLFPortal() {
       .then(({ data }) => {
         const refreshed = {
           ...user,
+          username: data.username,
+          email: data.email,
           status: data.status,
           isVerified: data.isVerified,
           verificationRequired: data.verificationRequired,
@@ -776,7 +913,9 @@ export default function SLFPortal() {
       portalUser.assignedSlfName[0]
     : portalUser?.assignedSlfName;
   const activeCellOptions = (() => {
-    const count = Number(slfInfo?.numberOfCell || slfInfo?.cellStatuses?.length || 0);
+    const count = Number(
+      slfInfo?.numberOfCell || slfInfo?.cellStatuses?.length || 0,
+    );
     return Array.from({ length: count }, (_, index) => {
       const status = normalizeCellStatus(slfInfo?.cellStatuses?.[index]);
       const isOpen = isActiveCellStatus(status);
@@ -835,7 +974,7 @@ export default function SLFPortal() {
       { retries: 3, signal: ac.signal },
     )
       .then(({ data }) => {
-        if (data && (data.totalVolumeAccepted != null || data.activeCellEntries?.length || data.closedCellEntries?.length)) {
+        if (hasBaselinePayload(data)) {
           const unit =
             data.baselineUnit || data.totalVolumeAcceptedUnit || "m³";
           setBaselineUnit(unit);
@@ -843,19 +982,19 @@ export default function SLFPortal() {
           baselineForm.setFieldsValue({
             baselineUnit: unit,
             totalVolumeAccepted: data.totalVolumeAccepted,
-            totalVolumeAcceptedUnit: unit,
+            totalVolumeAcceptedUnit: data.totalVolumeAcceptedUnit || unit,
             activeCellResidualVolume: data.activeCellResidualVolume,
-            activeCellResidualUnit: unit,
+            activeCellResidualUnit: data.activeCellResidualUnit || unit,
             activeCellInertVolume: data.activeCellInertVolume,
-            activeCellInertUnit: unit,
+            activeCellInertUnit: data.activeCellInertUnit || unit,
             activeCellHazardousVolume: data.activeCellHazardousVolume,
-            activeCellHazardousUnit: unit,
+            activeCellHazardousUnit: data.activeCellHazardousUnit || unit,
             closedCellResidualVolume: data.closedCellResidualVolume,
-            closedCellResidualUnit: unit,
+            closedCellResidualUnit: data.closedCellResidualUnit || unit,
             closedCellInertVolume: data.closedCellInertVolume,
-            closedCellInertUnit: unit,
+            closedCellInertUnit: data.closedCellInertUnit || unit,
             closedCellHazardousVolume: data.closedCellHazardousVolume,
-            closedCellHazardousUnit: unit,
+            closedCellHazardousUnit: data.closedCellHazardousUnit || unit,
             acceptsHazardousWaste: data.acceptsHazardousWaste || false,
           });
           const savedCompanyValues = {
@@ -886,7 +1025,9 @@ export default function SLFPortal() {
                 }),
               { retries: 2, signal: ac.signal },
             )
-              .then(({ data: provinceData }) => setProvinces(provinceData || []))
+              .then(({ data: provinceData }) =>
+                setProvinces(provinceData || []),
+              )
               .then(() => companyForm.setFieldsValue(savedCompanyValues))
               .catch(() => {});
           }
@@ -908,12 +1049,17 @@ export default function SLFPortal() {
           if (data.companyMunicipality) {
             withRetry(
               () =>
-                api.get(`/settings/address/barangays/${data.companyMunicipality}`, {
-                  signal: ac.signal,
-                }),
+                api.get(
+                  `/settings/address/barangays/${data.companyMunicipality}`,
+                  {
+                    signal: ac.signal,
+                  },
+                ),
               { retries: 2, signal: ac.signal },
             )
-              .then(({ data: barangayData }) => setBarangays(barangayData || []))
+              .then(({ data: barangayData }) =>
+                setBarangays(barangayData || []),
+              )
               .then(() => companyForm.setFieldsValue(savedCompanyValues))
               .catch(() => {});
           }
@@ -921,7 +1067,11 @@ export default function SLFPortal() {
           // Load activeCellEntries from saved data (or migrate from flat fields)
           if (data.activeCellEntries?.length) {
             setActiveCellEntries(
-              data.activeCellEntries.map((e, i) => ({ ...e, unit: e.unit || unit, key: i })),
+              data.activeCellEntries.map((e, i) => ({
+                ...e,
+                unit: e.unit || unit,
+                key: i,
+              })),
             );
           } else {
             const entries = [];
@@ -932,7 +1082,7 @@ export default function SLFPortal() {
                 cellName: "",
                 wasteType: "Residual",
                 volume: data.activeCellResidualVolume,
-                unit,
+                unit: data.activeCellResidualUnit || unit,
               });
             if (data.activeCellInertVolume)
               entries.push({
@@ -940,14 +1090,26 @@ export default function SLFPortal() {
                 cellName: "",
                 wasteType: "Inert/Hazardous Waste",
                 volume: data.activeCellInertVolume,
-                unit,
+                unit: data.activeCellInertUnit || unit,
+              });
+            if (data.activeCellHazardousVolume)
+              entries.push({
+                key: k++,
+                cellName: "",
+                wasteType: "Inert/Hazardous Waste",
+                volume: data.activeCellHazardousVolume,
+                unit: data.activeCellHazardousUnit || unit,
               });
             setActiveCellEntries(entries);
           }
           // Load closedCellEntries from saved data (or migrate from flat fields)
           if (data.closedCellEntries?.length) {
             setClosedCellEntries(
-              data.closedCellEntries.map((e, i) => ({ ...e, unit: e.unit || unit, key: i })),
+              data.closedCellEntries.map((e, i) => ({
+                ...e,
+                unit: e.unit || unit,
+                key: i,
+              })),
             );
           } else {
             const cEntries = [];
@@ -958,7 +1120,7 @@ export default function SLFPortal() {
                 cellName: "",
                 wasteType: "Residual",
                 volume: data.closedCellResidualVolume,
-                unit,
+                unit: data.closedCellResidualUnit || unit,
               });
             if (data.closedCellInertVolume)
               cEntries.push({
@@ -966,7 +1128,15 @@ export default function SLFPortal() {
                 cellName: "",
                 wasteType: "Inert/Hazardous Waste",
                 volume: data.closedCellInertVolume,
-                unit,
+                unit: data.closedCellInertUnit || unit,
+              });
+            if (data.closedCellHazardousVolume)
+              cEntries.push({
+                key: ck++,
+                cellName: "",
+                wasteType: "Inert/Hazardous Waste",
+                volume: data.closedCellHazardousVolume,
+                unit: data.closedCellHazardousUnit || unit,
               });
             setClosedCellEntries(cEntries);
           }
@@ -1003,7 +1173,7 @@ export default function SLFPortal() {
         api
           .get(`/data-slf/baseline/${encodeURIComponent(activeSlfName)}`)
           .then(({ data }) => {
-            if (data && (data.totalVolumeAccepted != null || data.activeCellEntries?.length || data.closedCellEntries?.length)) {
+            if (hasBaselinePayload(data)) {
               if (data.baselineUpdateApproved) {
                 setBaselineSaved(false);
                 setBaselineUpdatePending(false);
@@ -1099,7 +1269,9 @@ export default function SLFPortal() {
       const filtered = (data.transactions || []).filter(
         (t) =>
           requestTypes.has(t.type) &&
-          !/^admin (started|replied to) conversation\b/i.test(t.description || "") &&
+          !/^admin (started|replied to) conversation\b/i.test(
+            t.description || "",
+          ) &&
           (t.submittedBy === portalUser.email ||
             t.performedBy === portalUser.email),
       );
@@ -1162,6 +1334,12 @@ export default function SLFPortal() {
       errs.actualVolume = "Required";
     if (isRequired("wasteType", true) && !truckDraft.wasteType)
       errs.wasteType = "Required";
+    if (
+      isTreatedHazardousWaste(truckDraft.wasteType) &&
+      !hasHazardousWasteCode(truckDraft.hazWasteCode)
+    ) {
+      errs.hazWasteCode = "Required for Treated Hazardous Waste";
+    }
     // Validate additional transport fields from Portal Field Settings
     extraTransportFields.forEach((f) => {
       if (f.required) {
@@ -1358,7 +1536,9 @@ export default function SLFPortal() {
     if (editingHaulerKey) {
       setHaulers((prev) =>
         mergeHaulersByName(
-          prev.map((h) => (h.key === editingHaulerKey ? { ...h, ...finalDraft } : h)),
+          prev.map((h) =>
+            h.key === editingHaulerKey ? { ...h, ...finalDraft } : h,
+          ),
           baselineUnit || "m³",
         ),
       );
@@ -1459,14 +1639,24 @@ export default function SLFPortal() {
       setActiveCellEntries((prev) =>
         prev.map((e) =>
           e.key === editingActiveCellKey
-            ? { ...activeCellDraft, unit: activeCellDraft.unit || baselineUnit || "m³", key: editingActiveCellKey }
+            ? {
+                ...activeCellDraft,
+                unit: normalizeUnit(
+                  activeCellDraft.unit || baselineUnit || "m³",
+                ),
+                key: editingActiveCellKey,
+              }
             : e,
         ),
       );
     } else {
       setActiveCellEntries((prev) => [
         ...prev,
-        { ...activeCellDraft, unit: activeCellDraft.unit || baselineUnit || "m³", key: Date.now() },
+        {
+          ...activeCellDraft,
+          unit: normalizeUnit(activeCellDraft.unit || baselineUnit || "m³"),
+          key: Date.now(),
+        },
       ]);
     }
     setActiveCellModalOpen(false);
@@ -1485,14 +1675,24 @@ export default function SLFPortal() {
       setClosedCellEntries((prev) =>
         prev.map((e) =>
           e.key === editingClosedCellKey
-            ? { ...closedCellDraft, unit: closedCellDraft.unit || baselineUnit || "m³", key: editingClosedCellKey }
+            ? {
+                ...closedCellDraft,
+                unit: normalizeUnit(
+                  closedCellDraft.unit || baselineUnit || "m³",
+                ),
+                key: editingClosedCellKey,
+              }
             : e,
         ),
       );
     } else {
       setClosedCellEntries((prev) => [
         ...prev,
-        { ...closedCellDraft, unit: closedCellDraft.unit || baselineUnit || "m³", key: Date.now() },
+        {
+          ...closedCellDraft,
+          unit: normalizeUnit(closedCellDraft.unit || baselineUnit || "m³"),
+          key: Date.now(),
+        },
       ]);
     }
     setClosedCellModalOpen(false);
@@ -1668,20 +1868,39 @@ export default function SLFPortal() {
     if (!activeSlfName) return;
     setBaselineRefreshLoading(true);
     try {
-      const { data } = await api.get(`/data-slf/baseline/${encodeURIComponent(activeSlfName)}`);
-      if (data && (data.totalVolumeAccepted != null || data.activeCellEntries?.length || data.closedCellEntries?.length)) {
+      const { data } = await api.get(
+        `/data-slf/baseline/${encodeURIComponent(activeSlfName)}`,
+      );
+      if (hasBaselinePayload(data)) {
         if (data.baselineUpdateApproved) {
           setBaselineSaved(false);
           setBaselineUpdatePending(false);
-          Swal.fire({ icon: "success", title: "Baseline Editing Unlocked", timer: 1400, showConfirmButton: false });
+          Swal.fire({
+            icon: "success",
+            title: "Baseline Editing Unlocked",
+            timer: 1400,
+            showConfirmButton: false,
+          });
         } else {
           setBaselineSaved(true);
           setBaselineUpdatePending(!!data.baselineUpdateRequested);
-          Swal.fire({ icon: "info", title: data.baselineUpdateRequested ? "Still Awaiting Approval" : "Baseline Still Locked", timer: 1400, showConfirmButton: false });
+          Swal.fire({
+            icon: "info",
+            title: data.baselineUpdateRequested
+              ? "Still Awaiting Approval"
+              : "Baseline Still Locked",
+            timer: 1400,
+            showConfirmButton: false,
+          });
         }
       }
     } catch (err) {
-      Swal.fire({ icon: "error", title: "Refresh Failed", text: err.response?.data?.message || "Could not refresh baseline status." });
+      Swal.fire({
+        icon: "error",
+        title: "Refresh Failed",
+        text:
+          err.response?.data?.message || "Could not refresh baseline status.",
+      });
     } finally {
       setBaselineRefreshLoading(false);
     }
@@ -1713,7 +1932,9 @@ export default function SLFPortal() {
         regions.find((r) => r.code === companyValues.companyRegion)?.name,
       ].filter(Boolean);
       const resolvedAddress =
-        disposalValues.address || companyValues.address || addressParts.join(", ");
+        disposalValues.address ||
+        companyValues.address ||
+        addressParts.join(", ");
       // Compute legacy totals from entries for backward compat
       const activeCellResidualVolume =
         activeCellEntries
@@ -1768,16 +1989,26 @@ export default function SLFPortal() {
           closedCellResidualUnit: baselineUnit,
           closedCellInertVolume,
           closedCellInertUnit: baselineUnit,
-          activeCellEntries: activeCellEntries.map(({ key, ...rest }) => ({ ...rest, unit: rest.unit || baselineUnit })),
-          closedCellEntries: closedCellEntries.map(({ key, ...rest }) => ({ ...rest, unit: rest.unit || baselineUnit })),
+          activeCellEntries: activeCellEntries.map(({ key, ...rest }) => ({
+            ...rest,
+            unit: rest.unit || baselineUnit,
+          })),
+          closedCellEntries: closedCellEntries.map(({ key, ...rest }) => ({
+            ...rest,
+            unit: rest.unit || baselineUnit,
+          })),
           accreditedHaulers: mergeHaulersByName(haulers, baselineUnit).map(
             ({ key, vehicles, privateSectorClients, ...rest }) => ({
               ...rest,
               numberOfTrucks: rest.numberOfTrucks || vehicles?.length || 0,
-              vehicles: (vehicles || []).map(({ key: vehicleKey, ...vehicle }) => ({
-                ...vehicle,
-                capacityUnit: normalizeUnit(vehicle.capacityUnit || baselineUnit),
-              })),
+              vehicles: (vehicles || []).map(
+                ({ key: vehicleKey, ...vehicle }) => ({
+                  ...vehicle,
+                  capacityUnit: normalizeUnit(
+                    vehicle.capacityUnit || baselineUnit,
+                  ),
+                }),
+              ),
               privateSectorClients: (privateSectorClients || []).map(
                 ({ key: clientKey, ...client }) => client,
               ),
@@ -1817,17 +2048,32 @@ export default function SLFPortal() {
     try {
       const payload = { slfName: activeSlfName };
       if (type === "leachate") {
-        payload.leachatePondDetails = data.map(({ _key, attachments, hasWastewaterTreatmentFacility, wastewaterTreatmentFacilityType, ...r }) => ({ ...r, attachments: [] }));
-        payload.hasWastewaterTreatmentFacility = !!slfInfo?.hasWastewaterTreatmentFacility;
-        payload.wastewaterTreatmentFacilityType = Array.isArray(slfInfo?.wastewaterTreatmentFacilityType)
+        payload.leachatePondDetails = data.map(
+          ({
+            _key,
+            attachments,
+            hasWastewaterTreatmentFacility,
+            wastewaterTreatmentFacilityType,
+            ...r
+          }) => ({ ...r, attachments: [] }),
+        );
+        payload.hasWastewaterTreatmentFacility =
+          !!slfInfo?.hasWastewaterTreatmentFacility;
+        payload.wastewaterTreatmentFacilityType = Array.isArray(
+          slfInfo?.wastewaterTreatmentFacilityType,
+        )
           ? slfInfo.wastewaterTreatmentFacilityType
           : slfInfo?.wastewaterTreatmentFacilityType
             ? [slfInfo.wastewaterTreatmentFacilityType]
             : [];
-        payload.wastewaterTreatmentFacilityRemarks = slfInfo?.wastewaterTreatmentFacilityRemarks || "";
+        payload.wastewaterTreatmentFacilityRemarks =
+          slfInfo?.wastewaterTreatmentFacilityRemarks || "";
       }
       if (type === "gasVent")
-        payload.gasVentDetails = data.map(({ _key, attachments, ...r }) => ({ ...r, attachments: [] }));
+        payload.gasVentDetails = data.map(({ _key, attachments, ...r }) => ({
+          ...r,
+          attachments: [],
+        }));
       if (type === "trashSlide")
         payload.trashSlideMeasures = data.map(({ _key, ...r }) => r);
       if (type === "firePrev")
@@ -1877,7 +2123,17 @@ export default function SLFPortal() {
         ...(data || {}),
       });
     } catch {
-      setWasteReceivedData({ lguR3: [], lguOutside: [], privateIndustry: [], baselineClients: [], baselineCellBreakdown: [], baselineTotals: { m3: 0, tons: 0 }, submissionClients: [], clientBreakdown: [], totals: { m3: 0, tons: 0, trucks: 0 } });
+      setWasteReceivedData({
+        lguR3: [],
+        lguOutside: [],
+        privateIndustry: [],
+        baselineClients: [],
+        baselineCellBreakdown: [],
+        baselineTotals: { m3: 0, tons: 0 },
+        submissionClients: [],
+        clientBreakdown: [],
+        totals: { m3: 0, tons: 0, trucks: 0 },
+      });
     } finally {
       setWasteReceivedLoading(false);
     }
@@ -1891,7 +2147,9 @@ export default function SLFPortal() {
       const { data } = await api.get(
         `/support-tickets/my-tickets/${encodeURIComponent(portalUser.email)}`,
       );
-      setSupportTickets((data || []).filter((ticket) => !isTestAdminNotice(ticket)));
+      setSupportTickets(
+        (data || []).filter((ticket) => !isTestAdminNotice(ticket)),
+      );
     } catch {
       /* silent */
     } finally {
@@ -1901,12 +2159,16 @@ export default function SLFPortal() {
 
   const fetchPortalNotifications = useCallback(async () => {
     if (!portalUser?.email) return;
-    const recipients = [...new Set([portalUser.email, portalUser._id].filter(Boolean))];
+    const recipients = [
+      ...new Set([portalUser.email, portalUser._id].filter(Boolean)),
+    ];
     try {
       const responses = await Promise.all(
         recipients.map((recipient) =>
           api.get(`/notifications/${encodeURIComponent(recipient)}`, {
-            params: { limit: 50 },
+            params: {
+              limit: 100,
+            },
           }),
         ),
       );
@@ -1922,7 +2184,9 @@ export default function SLFPortal() {
         (a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0),
       );
       setPortalNotifications(notifications);
-      setPortalUnreadCount(notifications.filter((notification) => !notification.read).length);
+      setPortalUnreadCount(
+        notifications.filter((notification) => !notification.read).length,
+      );
     } catch {
       /* silent */
     }
@@ -1931,12 +2195,13 @@ export default function SLFPortal() {
   const isMessageNotification = (notification = {}) =>
     ["admin_message", "message_from_admin"].includes(notification.type) ||
     (notification.type === "support_ticket_reply" &&
-    /message from admin|admin sent you a message|admin replied/i.test(
-      `${notification.title || ""} ${notification.message || ""}`,
-    ));
+      /message from admin|admin sent you a message|admin replied/i.test(
+        `${notification.title || ""} ${notification.message || ""}`,
+      ));
 
   const isSupportNotification = (notification = {}) =>
-    notification.type === "support_ticket_reply" && !isMessageNotification(notification);
+    notification.type === "support_ticket_reply" &&
+    !isMessageNotification(notification);
 
   const markPortalNotificationsRead = useCallback(
     async (category) => {
@@ -1953,7 +2218,10 @@ export default function SLFPortal() {
           ].includes(notification.type);
         }
         if (category === "requests") {
-          return ["baseline_update_approved", "baseline_update_rejected"].includes(notification.type);
+          return [
+            "baseline_update_approved",
+            "baseline_update_rejected",
+          ].includes(notification.type);
         }
         if (category === "all") return true;
         return false;
@@ -1961,7 +2229,9 @@ export default function SLFPortal() {
       if (unread.length === 0) return;
       try {
         await Promise.all(
-          unread.map((notification) => api.patch(`/notifications/${notification._id}/read`)),
+          unread.map((notification) =>
+            api.patch(`/notifications/${notification._id}/read`),
+          ),
         );
         await fetchPortalNotifications();
       } catch {
@@ -1988,7 +2258,14 @@ export default function SLFPortal() {
     if (!portalUser?.email) return;
     const sock = connectSocket("portal", portalUser.email);
     const refreshMessages = (payload) => {
-      if (!payload || ["support_ticket_reply", "admin_message", "message_from_admin"].includes(payload.type)) {
+      if (
+        !payload ||
+        [
+          "support_ticket_reply",
+          "admin_message",
+          "message_from_admin",
+        ].includes(payload.type)
+      ) {
         fetchSupportTickets();
       }
       fetchPortalNotifications();
@@ -2108,7 +2385,9 @@ export default function SLFPortal() {
               else if (k.includes("capacity") && !k.includes("unit"))
                 normalized.capacity = Number(value) || null;
               else if (k.includes("capacity") && k.includes("unit"))
-                normalized.capacityUnit = normalizeUnit(value || baselineUnit || "m³");
+                normalized.capacityUnit = normalizeUnit(
+                  value || baselineUnit || "m³",
+                );
               else if (k.includes("client"))
                 normalized.privateSectorClients = String(value)
                   .split(",")
@@ -2149,9 +2428,12 @@ export default function SLFPortal() {
               title: "Validation",
               key: "validation",
               width: 180,
-              render: (_, row) => row._errors?.length
-                ? <Tag color="red">Missing: {row._errors.join(", ")}</Tag>
-                : <Tag color="green">Ready</Tag>,
+              render: (_, row) =>
+                row._errors?.length ? (
+                  <Tag color="red">Missing: {row._errors.join(", ")}</Tag>
+                ) : (
+                  <Tag color="green">Ready</Tag>
+                ),
             },
             {
               title: "Actions",
@@ -2205,9 +2487,12 @@ export default function SLFPortal() {
               title: "Validation",
               key: "validation",
               width: 180,
-              render: (_, row) => row._errors?.length
-                ? <Tag color="red">Missing: {row._errors.join(", ")}</Tag>
-                : <Tag color="green">Ready</Tag>,
+              render: (_, row) =>
+                row._errors?.length ? (
+                  <Tag color="red">Missing: {row._errors.join(", ")}</Tag>
+                ) : (
+                  <Tag color="green">Ready</Tag>
+                ),
             },
             {
               title: "Actions",
@@ -2334,7 +2619,10 @@ export default function SLFPortal() {
       prev.map((row) => {
         if (row.key !== key) return row;
         const updated = { ...row, [field]: value };
-        return { ...updated, _errors: getUploadRowErrors(updated, uploadType || "truck") };
+        return {
+          ...updated,
+          _errors: getUploadRowErrors(updated, uploadType || "truck"),
+        };
       }),
     );
   };
@@ -2408,7 +2696,11 @@ export default function SLFPortal() {
   const [resubmitComment, setResubmitComment] = useState("");
 
   const handleEditReverted = (record) => {
-    const recordBaselineUnit = record.baselineUnit || record.totalVolumeAcceptedUnit || baselineUnit || "m³";
+    const recordBaselineUnit =
+      record.baselineUnit ||
+      record.totalVolumeAcceptedUnit ||
+      baselineUnit ||
+      "m³";
     setBaselineUnit(recordBaselineUnit);
     // Load record data into all forms
     entryForm.setFieldsValue({
@@ -2429,13 +2721,16 @@ export default function SLFPortal() {
     baselineForm.setFieldsValue({
       totalVolumeAccepted: record.totalVolumeAccepted,
       baselineUnit: recordBaselineUnit,
-      totalVolumeAcceptedUnit: record.totalVolumeAcceptedUnit || recordBaselineUnit,
+      totalVolumeAcceptedUnit:
+        record.totalVolumeAcceptedUnit || recordBaselineUnit,
       activeCellResidualVolume: record.activeCellResidualVolume,
-      activeCellResidualUnit: record.activeCellResidualUnit || recordBaselineUnit,
+      activeCellResidualUnit:
+        record.activeCellResidualUnit || recordBaselineUnit,
       activeCellInertVolume: record.activeCellInertVolume,
       activeCellInertUnit: record.activeCellInertUnit || recordBaselineUnit,
       closedCellResidualVolume: record.closedCellResidualVolume,
-      closedCellResidualUnit: record.closedCellResidualUnit || recordBaselineUnit,
+      closedCellResidualUnit:
+        record.closedCellResidualUnit || recordBaselineUnit,
       closedCellInertVolume: record.closedCellInertVolume,
       closedCellInertUnit: record.closedCellInertUnit || recordBaselineUnit,
     });
@@ -2460,7 +2755,9 @@ export default function SLFPortal() {
     }));
     setTrucks(loadedTrucks);
     // Load haulers
-    setHaulers(mergeHaulersByName(record.accreditedHaulers || [], recordBaselineUnit));
+    setHaulers(
+      mergeHaulersByName(record.accreditedHaulers || [], recordBaselineUnit),
+    );
     setEditingRevertedId(record._id);
     setSubmitted(false);
     setBaselineSaved(true);
@@ -2496,11 +2793,14 @@ export default function SLFPortal() {
       const entry = {
         ...disposalValues,
         ...companyValues,
-        lguCompanyName: companyValues.lguCompanyName || disposalValues.lguCompanyName || "",
+        lguCompanyName:
+          companyValues.lguCompanyName || disposalValues.lguCompanyName || "",
         companyType:
           companyValues.companyType ||
           disposalValues.companyType ||
-          ((slfInfo?.ownership || "").toLowerCase().includes("private") ? "Private" : "LGU"),
+          ((slfInfo?.ownership || "").toLowerCase().includes("private")
+            ? "Private"
+            : "LGU"),
         address: companyValues.address || disposalValues.address || "",
         slfName: activeSlfName,
         slfGenerator: activeSlfId || null,
@@ -2534,10 +2834,14 @@ export default function SLFPortal() {
           ({ key, vehicles, privateSectorClients, ...rest }) => ({
             ...rest,
             numberOfTrucks: rest.numberOfTrucks || vehicles?.length || 0,
-            vehicles: (vehicles || []).map(({ key: vehicleKey, ...vehicle }) => ({
-              ...vehicle,
-              capacityUnit: normalizeUnit(vehicle.capacityUnit || baselineUnit),
-            })),
+            vehicles: (vehicles || []).map(
+              ({ key: vehicleKey, ...vehicle }) => ({
+                ...vehicle,
+                capacityUnit: normalizeUnit(
+                  vehicle.capacityUnit || baselineUnit,
+                ),
+              }),
+            ),
             privateSectorClients: (privateSectorClients || []).map(
               ({ key: clientKey, ...client }) => client,
             ),
@@ -2593,16 +2897,18 @@ export default function SLFPortal() {
       setActiveTab("basic-info");
       return;
     }
-    try {
-      await baselineForm.validateFields();
-    } catch {
-      showError({
-        type: "warning",
-        title: "Incomplete Baseline",
-        message: "Please complete the Baseline Data tab first.",
-      });
-      setActiveTab("baseline");
-      return;
+    if (!baselineSaved) {
+      try {
+        await baselineForm.validateFields();
+      } catch {
+        showError({
+          type: "warning",
+          title: "Incomplete Baseline",
+          message: "Please complete the Baseline Data tab first.",
+        });
+        setActiveTab("baseline");
+        return;
+      }
     }
     try {
       await entryForm.validateFields();
@@ -2625,7 +2931,6 @@ export default function SLFPortal() {
       setActiveTab("disposal");
       return;
     }
-    const firstTruck = trucks[0];
     const companyVals = companyForm.getFieldsValue();
     if (!companyVals?.lguCompanyName) {
       showError({
@@ -2635,6 +2940,21 @@ export default function SLFPortal() {
           "Please fill in Company Name in the Waste Generator's Information tab.",
       });
       setActiveTab("basic-info");
+      return;
+    }
+    if (missingHazardousCodeTrucks.length > 0) {
+      const list = missingHazardousCodeTrucks
+        .map(
+          (truck, index) =>
+            truck.disposalTicketNo || truck.plateNumber || `Truck ${index + 1}`,
+        )
+        .join(", ");
+      showError({
+        type: "warning",
+        title: "Hazardous Waste Code Required",
+        message: `Please encode Hazardous Waste Code for Treated Hazardous Waste entries: ${list}.`,
+      });
+      setActiveTab("disposal");
       return;
     }
     setReviewModalOpen(true);
@@ -2663,7 +2983,9 @@ export default function SLFPortal() {
         companyType:
           companyValues.companyType ||
           disposalValues.companyType ||
-          ((slfInfo?.ownership || "").toLowerCase().includes("private") ? "Private" : "LGU"),
+          ((slfInfo?.ownership || "").toLowerCase().includes("private")
+            ? "Private"
+            : "LGU"),
         address: companyValues.address || disposalValues.address || "",
         slfName: activeSlfName,
         slfGenerator: activeSlfId || null,
@@ -2697,10 +3019,14 @@ export default function SLFPortal() {
           ({ key, vehicles, privateSectorClients, ...rest }) => ({
             ...rest,
             numberOfTrucks: rest.numberOfTrucks || vehicles?.length || 0,
-            vehicles: (vehicles || []).map(({ key: vehicleKey, ...vehicle }) => ({
-              ...vehicle,
-              capacityUnit: normalizeUnit(vehicle.capacityUnit || baselineUnit),
-            })),
+            vehicles: (vehicles || []).map(
+              ({ key: vehicleKey, ...vehicle }) => ({
+                ...vehicle,
+                capacityUnit: normalizeUnit(
+                  vehicle.capacityUnit || baselineUnit,
+                ),
+              }),
+            ),
             privateSectorClients: (privateSectorClients || []).map(
               ({ key: clientKey, ...client }) => client,
             ),
@@ -2929,14 +3255,19 @@ export default function SLFPortal() {
             onClick={() => openHaulerModal(h)}
             style={{ color: "#1a3353" }}
           />
-          <Tooltip title={baselineSaved ? "Request hauler deletion" : "Remove hauler"}>
+          <Tooltip
+            title={baselineSaved ? "Request hauler deletion" : "Remove hauler"}
+          >
             <Button
               type="text"
               danger
               size="small"
               icon={<DeleteOutlined />}
               onClick={() => {
-                if (!baselineSaved) { removeHauler(h.key); return; }
+                if (!baselineSaved) {
+                  removeHauler(h.key);
+                  return;
+                }
                 setHaulerDeleteReason("");
                 setHaulerDeleteFile(null);
                 setHaulerDeleteModal({ open: true, hauler: h });
@@ -3147,10 +3478,48 @@ export default function SLFPortal() {
     );
   };
 
+  const renderGuideItems = (items = [], color = "#1677ff") => (
+    <List
+      size="small"
+      dataSource={items}
+      renderItem={(item, index) => (
+        <List.Item
+          style={{ fontSize: 12, paddingLeft: 0, alignItems: "flex-start" }}
+        >
+          <Space size={8} align="start">
+            <Avatar
+              size={22}
+              className="slf-guide-icon"
+              style={{
+                background: `${color}18`,
+                color,
+                border: `1px solid ${color}33`,
+                flex: "0 0 auto",
+                animationDelay: `${index * 0.14}s`,
+              }}
+              icon={
+                index % 3 === 0 ? (
+                  <BulbOutlined />
+                ) : index % 3 === 1 ? (
+                  <ThunderboltOutlined />
+                ) : (
+                  <RocketOutlined />
+                )
+              }
+            />
+            <Text style={{ fontSize: 12, lineHeight: 1.45 }}>{item}</Text>
+          </Space>
+        </List.Item>
+      )}
+    />
+  );
+
   const revertedCount = submissions.filter(
     (s) => s.status === "reverted",
   ).length;
-  const unreadPortalNotifications = portalNotifications.filter((notification) => !notification.read);
+  const unreadPortalNotifications = portalNotifications.filter(
+    (notification) => !notification.read,
+  );
   const portalNotificationCounts = {
     total: portalUnreadCount,
     messages: unreadPortalNotifications.filter(isMessageNotification).length,
@@ -3164,16 +3533,28 @@ export default function SLFPortal() {
       ].includes(notification.type),
     ).length,
     requests: unreadPortalNotifications.filter((notification) =>
-      ["baseline_update_approved", "baseline_update_rejected"].includes(notification.type),
+      ["baseline_update_approved", "baseline_update_rejected"].includes(
+        notification.type,
+      ),
     ).length,
   };
   const historyBadgeCount = revertedCount + portalNotificationCounts.history;
   const getPortalNotificationMeta = (notification = {}) => {
     if (isMessageNotification(notification)) {
-      return { label: "Admin Message", color: "blue", icon: <MessageOutlined />, action: "messages" };
+      return {
+        label: "Admin Message",
+        color: "blue",
+        icon: <MessageOutlined />,
+        action: "messages",
+      };
     }
     if (isSupportNotification(notification)) {
-      return { label: "Support Ticket", color: "purple", icon: <CustomerServiceOutlined />, action: "support" };
+      return {
+        label: "Support Ticket",
+        color: "purple",
+        icon: <CustomerServiceOutlined />,
+        action: "support",
+      };
     }
     if (
       [
@@ -3183,7 +3564,9 @@ export default function SLFPortal() {
         "submission_edit_rejected",
       ].includes(notification.type)
     ) {
-      const rejected = /rejected|reverted/i.test(`${notification.type} ${notification.title || ""}`);
+      const rejected = /rejected|reverted/i.test(
+        `${notification.type} ${notification.title || ""}`,
+      );
       return {
         label: rejected ? "Submission Update" : "Submission Status",
         color: rejected ? "red" : "green",
@@ -3191,10 +3574,24 @@ export default function SLFPortal() {
         action: "history",
       };
     }
-    if (["baseline_update_approved", "baseline_update_rejected"].includes(notification.type)) {
-      return { label: "Request Update", color: "geekblue", icon: <AuditOutlined />, action: "requests" };
+    if (
+      ["baseline_update_approved", "baseline_update_rejected"].includes(
+        notification.type,
+      )
+    ) {
+      return {
+        label: "Request Update",
+        color: "geekblue",
+        icon: <AuditOutlined />,
+        action: "requests",
+      };
     }
-    return { label: "Admin Update", color: "default", icon: <BellOutlined />, action: "none" };
+    return {
+      label: "Admin Update",
+      color: "default",
+      icon: <BellOutlined />,
+      action: "none",
+    };
   };
 
   const openPortalNotification = async (notification) => {
@@ -3221,27 +3618,42 @@ export default function SLFPortal() {
   };
 
   const portalNotificationPanel = (
-    <div style={{ width: isMobile ? 300 : 380, maxWidth: "calc(100vw - 32px)" }}>
-      <Space style={{ width: "100%", justifyContent: "space-between", marginBottom: 8 }}>
+    <div
+      style={{ width: isMobile ? 300 : 380, maxWidth: "calc(100vw - 32px)" }}
+    >
+      <Space
+        style={{
+          width: "100%",
+          justifyContent: "space-between",
+          marginBottom: 8,
+        }}
+      >
         <Space size={6}>
           <BellOutlined style={{ color: "#1677ff" }} />
-          <Text strong>Notifications</Text>
+          <Text strong>Previous Notifications</Text>
           {portalNotificationCounts.total > 0 && (
             <Badge count={portalNotificationCounts.total} size="small" />
           )}
         </Space>
         {portalNotificationCounts.total > 0 && (
-          <Button size="small" type="link" onClick={() => markPortalNotificationsRead("all")}>
+          <Button
+            size="small"
+            type="link"
+            onClick={() => markPortalNotificationsRead("all")}
+          >
             Mark all read
           </Button>
         )}
       </Space>
       {portalNotifications.length === 0 ? (
-        <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No notifications yet" />
+        <Empty
+          image={Empty.PRESENTED_IMAGE_SIMPLE}
+          description="No notifications yet"
+        />
       ) : (
         <List
           size="small"
-          dataSource={portalNotifications.slice(0, 8)}
+          dataSource={portalNotifications}
           style={{ maxHeight: 420, overflowY: "auto" }}
           renderItem={(notification) => {
             const meta = getPortalNotificationMeta(notification);
@@ -3261,7 +3673,10 @@ export default function SLFPortal() {
                     <Badge dot={!notification.read}>
                       <Avatar
                         size="small"
-                        style={{ background: notification.read ? "#f0f0f0" : "#e6f4ff", color: "#1677ff" }}
+                        style={{
+                          background: notification.read ? "#f0f0f0" : "#e6f4ff",
+                          color: "#1677ff",
+                        }}
                         icon={meta.icon}
                       />
                     </Badge>
@@ -3271,19 +3686,29 @@ export default function SLFPortal() {
                       <Text strong style={{ fontSize: 13 }}>
                         {notification.title || meta.label}
                       </Text>
-                      <Tag color={meta.color} bordered={false} style={{ marginInlineEnd: 0 }}>
+                      <Tag
+                        color={meta.color}
+                        bordered={false}
+                        style={{ marginInlineEnd: 0 }}
+                      >
                         {meta.label}
                       </Tag>
                     </Space>
                   }
                   description={
                     <div>
-                      <Text type="secondary" style={{ fontSize: 12, whiteSpace: "normal" }}>
-                        {notification.message || "Open this update for more details."}
+                      <Text
+                        type="secondary"
+                        style={{ fontSize: 12, whiteSpace: "normal" }}
+                      >
+                        {notification.message ||
+                          "Open this update for more details."}
                       </Text>
                       <div>
                         <Text type="secondary" style={{ fontSize: 11 }}>
-                          {notification.createdAt ? dayjs(notification.createdAt).fromNow() : ""}
+                          {notification.createdAt
+                            ? dayjs(notification.createdAt).fromNow()
+                            : ""}
                         </Text>
                       </div>
                     </div>
@@ -3304,9 +3729,10 @@ export default function SLFPortal() {
       label: (
         <span>
           Data Entry
-          {portalNotificationCounts.total > 0 && activeMenu !== "data-entry" && (
-            <Badge dot style={{ marginLeft: 8 }} />
-          )}
+          {portalNotificationCounts.total > 0 &&
+            activeMenu !== "data-entry" && (
+              <Badge dot style={{ marginLeft: 8 }} />
+            )}
         </span>
       ),
     },
@@ -3444,7 +3870,7 @@ export default function SLFPortal() {
     }
 
     return (
-      <div style={{ maxWidth: 1200, margin: "0 auto" }}>
+      <div style={{ maxWidth: 1680, margin: "0 auto" }}>
         {/* SLF selector for users with multiple assigned SLFs */}
         {Array.isArray(portalUser?.assignedSlfName) &&
           portalUser.assignedSlfName.length > 1 && (
@@ -3494,1412 +3920,1061 @@ export default function SLFPortal() {
               </div>
             </Card>
           )}
-        {/* SLF Name (read-only, from assigned SLF) */}
-        <Card
-          className="slf-section slf-facility-card"
-          styles={{
-            header: {
-              background: "linear-gradient(135deg, #1a3353 0%, #2d5f8a 100%)",
-              borderRadius: "10px 10px 0 0",
-              padding: isMobile ? "14px 16px" : "16px 24px",
-              cursor: "pointer",
-            },
-            body: {
-              padding: slfCardExpanded ? (isMobile ? 16 : 24) : 0,
-              overflow: "hidden",
-              maxHeight: slfCardExpanded ? 3000 : 0,
-              transition: "max-height 0.35s ease, padding 0.35s ease",
-            },
-          }}
-          title={
-            <div
-              style={{ display: "flex", alignItems: "center", gap: 10 }}
-              onClick={() => setSlfCardExpanded((v) => !v)}
-            >
-              <div
-                style={{
-                  color: "rgba(255,255,255,0.8)",
-                  fontSize: 14,
-                  transition: "transform 0.3s",
-                  transform: slfCardExpanded
-                    ? "rotate(180deg)"
-                    : "rotate(0deg)",
-                  display: "flex",
-                  alignItems: "center",
-                }}
-              >
-                <DownOutlined />
-              </div>
-              <div
-                style={{
-                  width: 36,
-                  height: 36,
-                  borderRadius: 8,
-                  background: "rgba(255,255,255,0.15)",
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "center",
-                }}
-              >
-                <BankOutlined style={{ color: "#fff", fontSize: 18 }} />
-              </div>
-              <div style={{ flex: 1 }}>
-                <Text
-                  strong
-                  style={{
-                    fontSize: isMobile ? 14 : 16,
-                    color: "#fff",
-                    display: "block",
-                    lineHeight: 1.3,
-                  }}
-                >
-                  {isMobile
-                    ? "Assigned SLF"
-                    : "Assigned Sanitary Landfill Facility"}
-                </Text>
-                <Text style={{ fontSize: 12, color: "rgba(255,255,255,0.7)" }}>
-                  {activeSlfName}
-                </Text>
-              </div>
-            </div>
-          }
-          extra={
-            <Button
-              type="primary"
-              icon={<SendOutlined />}
-              onClick={handleReviewOpen}
-              loading={loading}
-              disabled={reviewSubmitDisabled}
-              className="slf-primary-btn"
-              size={isMobile ? "middle" : "large"}
-              style={{
-                background: "#fff",
-                color: "#1a3353",
-                fontWeight: 600,
-                border: "none",
-                boxShadow: "0 2px 8px rgba(0,0,0,0.15)",
+        <Row gutter={[16, 16]} align="top">
+          <Col xs={24} xl={19}>
+            {/* SLF Name (read-only, from assigned SLF) */}
+            <Card
+              className="slf-section slf-facility-card"
+              styles={{
+                header: {
+                  background:
+                    "linear-gradient(135deg, #1a3353 0%, #2d5f8a 100%)",
+                  borderRadius: "10px 10px 0 0",
+                  padding: isMobile ? "14px 16px" : "16px 24px",
+                  cursor: "pointer",
+                },
+                body: {
+                  padding: slfCardExpanded ? (isMobile ? 16 : 24) : 0,
+                  overflow: "hidden",
+                  maxHeight: slfCardExpanded ? 3000 : 0,
+                  transition: "max-height 0.35s ease, padding 0.35s ease",
+                },
               }}
-            >
-              {isMobile ? "Submit" : "Review & Submit"}
-            </Button>
-          }
-        >
-          {slfInfoLoading ? (
-            <div style={{ textAlign: "center", padding: "40px 0" }}>
-              <Spin size="large" />
-              <div style={{ marginTop: 12 }}>
-                <Text type="secondary">Loading facility data...</Text>
-              </div>
-            </div>
-          ) : slfInfo ? (
-            (() => {
-              const dashboardUnit = normalizeUnit(
-                slfInfo.volumeCapacityUnit ||
-                  slfInfo.cellCapacityUnits?.find(Boolean) ||
-                  slfInfo.cellFillUnits?.find(Boolean) ||
-                  baselineUnit ||
-                  "m³",
-              );
-              const cellCaps = slfInfo.cellCapacities || [];
-              const cellStatuses = slfInfo.cellStatuses || [];
-              const cellFillValues = slfInfo.cellFillValues || [];
-              const cellFillUnits = slfInfo.cellFillUnits || [];
-              const cellCapacityUnits = slfInfo.cellCapacityUnits || [];
-              const cells = Math.max(
-                Number(slfInfo.numberOfCell || 0),
-                cellCaps.length,
-                cellStatuses.length,
-                cellFillValues.length,
-              );
-              const cellTypes = slfInfo.cellTypes || [];
-              const adminCellRows = Array.from({ length: cells }, (_, index) => {
-                const status = normalizeCellStatus(cellStatuses[index]);
-                const capacityUnit = normalizeUnit(
-                  cellCapacityUnits[index] || slfInfo.volumeCapacityUnit || dashboardUnit,
-                );
-                const fillUnit = normalizeUnit(
-                  cellFillUnits[index] || slfInfo.wasteReceivedUnit || capacityUnit,
-                );
-                const capacity = Number(cellCaps[index] || 0);
-                const used = convertVolume(cellFillValues[index] || 0, fillUnit, capacityUnit);
-                const pct = capacity > 0
-                  ? Math.min(Math.round((Math.min(used, capacity) / capacity) * 100), 100)
-                  : 0;
-                return {
-                  index,
-                  status,
-                  type: cellTypes[index] || "Residual",
-                  capacity,
-                  capacityUnit,
-                  fillUnit,
-                  used,
-                  pct,
-                  remaining: capacity > 0 ? Math.max(0, capacity - used) : 0,
-                  isActive: isActiveCellStatus(status),
-                  isCompleted: isCompletedCellStatus(status),
-                  isUnavailable: isUnavailableCellStatus(status),
-                };
-              });
-              const capacity = adminCellRows.reduce(
-                (sum, row) => sum + convertVolume(row.capacity, row.capacityUnit, dashboardUnit),
-                0,
-              ) || convertVolume(
-                slfInfo.volumeCapacity || 0,
-                slfInfo.volumeCapacityUnit || dashboardUnit,
-                dashboardUnit,
-              );
-              const waste = adminCellRows.reduce(
-                (sum, row) => sum + convertVolume(row.used, row.capacityUnit, dashboardUnit),
-                0,
-              ) || convertVolume(
-                slfInfo.actualResidualWasteReceived || 0,
-                slfInfo.wasteReceivedUnit || dashboardUnit,
-                dashboardUnit,
-              );
-              const pct = capacity > 0
-                ? Math.min(Math.round((Math.min(waste, capacity) / capacity) * 100), 100)
-                : 0;
-              const operationalCells = adminCellRows.filter((row) => row.isActive).length;
-              const closedCells = adminCellRows.filter((row) => row.isCompleted).length;
-              const residualCells =
-                adminCellRows.filter((row) => row.type !== "Treated Haz Waste").length ||
-                cells;
-              const hazCells = adminCellRows.filter((row) => row.type === "Treated Haz Waste").length;
-              const capColor =
-                pct >= 90 ? "#ff4d4f" : pct >= 70 ? "#faad14" : "#52c41a";
-              const capLabel =
-                pct >= 90 ? "Critical" : pct >= 70 ? "Warning" : "Normal";
-              const isOp = !slfInfo.statusOfSLF?.toLowerCase().includes("non");
-              // Baseline cell breakdown
-              const isResidualEntry = (entry) => !/haz|inert/i.test(String(entry?.wasteType || "Residual"));
-              const sumEntryVolumes = (entries, predicate) =>
-                entries.filter(predicate).reduce((sum, entry) => sum + Number(entry?.volume || 0), 0);
-              const activeCellRes = activeCellEntries.length
-                ? sumEntryVolumes(activeCellEntries, isResidualEntry)
-                : baselineForm.getFieldValue("activeCellResidualVolume") || 0;
-              const activeCellInert = activeCellEntries.length
-                ? sumEntryVolumes(activeCellEntries, (entry) => !isResidualEntry(entry))
-                : baselineForm.getFieldValue("activeCellInertVolume") || 0;
-              const closedCellRes = closedCellEntries.length
-                ? sumEntryVolumes(closedCellEntries, isResidualEntry)
-                : baselineForm.getFieldValue("closedCellResidualVolume") || 0;
-              const closedCellInert = closedCellEntries.length
-                ? sumEntryVolumes(closedCellEntries, (entry) => !isResidualEntry(entry))
-                : baselineForm.getFieldValue("closedCellInertVolume") || 0;
-              const hasBaselineCell =
-                activeCellRes > 0 ||
-                activeCellInert > 0 ||
-                closedCellRes > 0 ||
-                closedCellInert > 0;
-              // LGU served split (from baseline hauler clients)
-              const allClients = haulers
-                .flatMap((h) => h.privateSectorClients || [])
-                .filter((c) => c.clientType === "LGU");
-              const lguR3Clients = allClients.filter(
-                (c) =>
-                  (c.region || "").startsWith("03") ||
-                  (c.regionName || "").toLowerCase().includes("iii") ||
-                  (c.regionName || "").toLowerCase().includes("central luzon"),
-              );
-              const lguOutsideClients = allClients.filter(
-                (c) =>
-                  !(
-                    (c.region || "").startsWith("03") ||
-                    (c.regionName || "").toLowerCase().includes("iii") ||
-                    (c.regionName || "").toLowerCase().includes("central luzon")
-                  ),
-              );
-              return (
-                <div>
-                  {/* Capacity overview banner */}
+              title={
+                <div
+                  style={{ display: "flex", alignItems: "center", gap: 10 }}
+                  onClick={() => setSlfCardExpanded((v) => !v)}
+                >
                   <div
                     style={{
-                      background: `linear-gradient(135deg, ${capColor}08 0%, ${capColor}15 100%)`,
-                      border: `1px solid ${capColor}30`,
-                      borderRadius: 12,
-                      padding: isMobile ? 16 : 20,
-                      marginBottom: 20,
+                      color: "rgba(255,255,255,0.8)",
+                      fontSize: 14,
+                      transition: "transform 0.3s",
+                      transform: slfCardExpanded
+                        ? "rotate(180deg)"
+                        : "rotate(0deg)",
+                      display: "flex",
+                      alignItems: "center",
                     }}
                   >
-                    <Row gutter={[20, 16]} align="middle">
-                      <Col xs={24} sm={6} style={{ textAlign: "center" }}>
-                        <Progress
-                          type="dashboard"
-                          percent={pct}
-                          size={isMobile ? 100 : 120}
-                          strokeColor={{ "0%": capColor, "100%": capColor }}
-                          strokeWidth={8}
-                          format={() => (
-                            <div style={{ lineHeight: 1.2 }}>
-                              <div
-                                style={{
-                                  fontSize: 22,
-                                  fontWeight: 800,
-                                  color: capColor,
-                                }}
-                              >
-                                {pct}%
-                              </div>
-                              <div
-                                style={{
-                                  fontSize: 10,
-                                  color: "#8c8c8c",
-                                  fontWeight: 500,
-                                }}
-                              >
-                                UTILIZATION
-                              </div>
-                            </div>
-                          )}
-                        />
-                        <Tag
-                          color={capColor}
-                          style={{
-                            marginTop: 6,
-                            fontWeight: 600,
-                            fontSize: 11,
-                          }}
-                        >
-                          {capLabel}
-                        </Tag>
-                      </Col>
-                      <Col xs={24} sm={18}>
-                        <Row gutter={[12, 12]}>
-                          {/* Status */}
-                          <Col xs={12} sm={12} md={6}>
-                            <div
-                              style={{
-                                background: isOp ? "#f6ffed" : "#fff2f0",
-                                borderRadius: 10,
-                                padding: "12px 14px",
-                                border: `1px solid ${isOp ? "#b7eb8f" : "#ffccc7"}`,
-                                height: "100%",
-                              }}
-                            >
-                              <div
-                                style={{
-                                  display: "flex",
-                                  alignItems: "center",
-                                  gap: 6,
-                                  marginBottom: 6,
-                                }}
-                              >
-                                <CheckCircleOutlined
-                                  style={{
-                                    color: isOp ? "#52c41a" : "#ff4d4f",
-                                    fontSize: 13,
-                                  }}
-                                />
-                                <span
-                                  style={{
-                                    fontSize: 10,
-                                    color: "#8c8c8c",
-                                    textTransform: "uppercase",
-                                    letterSpacing: 0.6,
-                                    fontWeight: 600,
-                                  }}
-                                >
-                                  Status
-                                </span>
-                              </div>
-                              <Tag
-                                color={isOp ? "success" : "error"}
-                                style={{
-                                  fontSize: 12,
-                                  fontWeight: 600,
-                                  padding: "2px 10px",
-                                }}
-                              >
-                                {slfInfo.statusOfSLF || "—"}
-                              </Tag>
-                            </div>
-                          </Col>
-                          {/* Cells: Operational / Closed */}
-                          <Col xs={12} sm={12} md={6}>
-                            <div
-                              style={{
-                                background: "#e6f7ff",
-                                borderRadius: 10,
-                                padding: "12px 14px",
-                                border: "1px solid #91d5ff",
-                                height: "100%",
-                              }}
-                            >
-                              <div
-                                style={{
-                                  display: "flex",
-                                  alignItems: "center",
-                                  gap: 6,
-                                  marginBottom: 6,
-                                }}
-                              >
-                                <ContainerOutlined
-                                  style={{ color: "#1890ff", fontSize: 13 }}
-                                />
-                                <span
-                                  style={{
-                                    fontSize: 10,
-                                    color: "#8c8c8c",
-                                    textTransform: "uppercase",
-                                    letterSpacing: 0.6,
-                                    fontWeight: 600,
-                                  }}
-                                >
-                                  Cells
-                                </span>
-                              </div>
-                              {cells > 0 ? (
-                                <div>
-                                  <Tag
-                                    color="success"
-                                    style={{ fontSize: 11, marginBottom: 2 }}
+                    <DownOutlined />
+                  </div>
+                  <div
+                    style={{
+                      width: 36,
+                      height: 36,
+                      borderRadius: 8,
+                      background: "rgba(255,255,255,0.15)",
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                    }}
+                  >
+                    <BankOutlined style={{ color: "#fff", fontSize: 18 }} />
+                  </div>
+                  <div style={{ flex: 1 }}>
+                    <Text
+                      strong
+                      style={{
+                        fontSize: isMobile ? 14 : 16,
+                        color: "#fff",
+                        display: "block",
+                        lineHeight: 1.3,
+                      }}
+                    >
+                      {isMobile
+                        ? "Assigned SLF"
+                        : "Assigned Sanitary Landfill Facility"}
+                    </Text>
+                    <Text
+                      style={{ fontSize: 12, color: "rgba(255,255,255,0.7)" }}
+                    >
+                      {activeSlfName}
+                    </Text>
+                  </div>
+                </div>
+              }
+              extra={
+                <Badge
+                  dot={hasReviewMissing}
+                  offset={[-2, 4]}
+                  style={{ backgroundColor: "#ff4d4f" }}
+                >
+                  <Button
+                    type="primary"
+                    icon={<SendOutlined />}
+                    onClick={handleReviewOpen}
+                    loading={loading}
+                    className="slf-primary-btn"
+                    size={isMobile ? "middle" : "large"}
+                    style={{
+                      background: "#fff",
+                      color: "#1a3353",
+                      fontWeight: 600,
+                      border: "none",
+                      boxShadow: "0 2px 8px rgba(0,0,0,0.15)",
+                    }}
+                  >
+                    {isMobile ? "Submit" : "Review & Submit"}
+                  </Button>
+                </Badge>
+              }
+            >
+              {slfInfoLoading ? (
+                <div style={{ textAlign: "center", padding: "40px 0" }}>
+                  <Spin size="large" />
+                  <div style={{ marginTop: 12 }}>
+                    <Text type="secondary">Loading facility data...</Text>
+                  </div>
+                </div>
+              ) : slfInfo ? (
+                (() => {
+                  const dashboardUnit = normalizeUnit(
+                    slfInfo.volumeCapacityUnit ||
+                      slfInfo.cellCapacityUnits?.find(Boolean) ||
+                      slfInfo.cellFillUnits?.find(Boolean) ||
+                      baselineUnit ||
+                      "m³",
+                  );
+                  const cellCaps = slfInfo.cellCapacities || [];
+                  const cellStatuses = slfInfo.cellStatuses || [];
+                  const cellFillValues = slfInfo.cellFillValues || [];
+                  const cellFillUnits = slfInfo.cellFillUnits || [];
+                  const cellCapacityUnits = slfInfo.cellCapacityUnits || [];
+                  const cells = Math.max(
+                    Number(slfInfo.numberOfCell || 0),
+                    cellCaps.length,
+                    cellStatuses.length,
+                    cellFillValues.length,
+                  );
+                  const cellTypes = slfInfo.cellTypes || [];
+                  const adminCellRows = Array.from(
+                    { length: cells },
+                    (_, index) => {
+                      const status = normalizeCellStatus(cellStatuses[index]);
+                      const capacityUnit = normalizeUnit(
+                        cellCapacityUnits[index] ||
+                          slfInfo.volumeCapacityUnit ||
+                          dashboardUnit,
+                      );
+                      const fillUnit = normalizeUnit(
+                        cellFillUnits[index] ||
+                          slfInfo.wasteReceivedUnit ||
+                          capacityUnit,
+                      );
+                      const capacity = Number(cellCaps[index] || 0);
+                      const used = convertVolume(
+                        cellFillValues[index] || 0,
+                        fillUnit,
+                        capacityUnit,
+                      );
+                      const pct =
+                        capacity > 0
+                          ? Math.min(
+                              Math.round(
+                                (Math.min(used, capacity) / capacity) * 100,
+                              ),
+                              100,
+                            )
+                          : 0;
+                      return {
+                        index,
+                        status,
+                        type: cellTypes[index] || "Residual",
+                        capacity,
+                        capacityUnit,
+                        fillUnit,
+                        used,
+                        pct,
+                        remaining:
+                          capacity > 0 ? Math.max(0, capacity - used) : 0,
+                        isActive: isActiveCellStatus(status),
+                        isCompleted: isCompletedCellStatus(status),
+                        isUnavailable: isUnavailableCellStatus(status),
+                      };
+                    },
+                  );
+                  const capacity =
+                    adminCellRows.reduce(
+                      (sum, row) =>
+                        sum +
+                        convertVolume(
+                          row.capacity,
+                          row.capacityUnit,
+                          dashboardUnit,
+                        ),
+                      0,
+                    ) ||
+                    convertVolume(
+                      slfInfo.volumeCapacity || 0,
+                      slfInfo.volumeCapacityUnit || dashboardUnit,
+                      dashboardUnit,
+                    );
+                  const waste =
+                    adminCellRows.reduce(
+                      (sum, row) =>
+                        sum +
+                        convertVolume(
+                          row.used,
+                          row.capacityUnit,
+                          dashboardUnit,
+                        ),
+                      0,
+                    ) ||
+                    convertVolume(
+                      slfInfo.actualResidualWasteReceived || 0,
+                      slfInfo.wasteReceivedUnit || dashboardUnit,
+                      dashboardUnit,
+                    );
+                  const pct =
+                    capacity > 0
+                      ? Math.min(
+                          Math.round(
+                            (Math.min(waste, capacity) / capacity) * 100,
+                          ),
+                          100,
+                        )
+                      : 0;
+                  const operationalCells = adminCellRows.filter(
+                    (row) => row.isActive,
+                  ).length;
+                  const closedCells = adminCellRows.filter(
+                    (row) => row.isCompleted,
+                  ).length;
+                  const residualCells =
+                    adminCellRows.filter(
+                      (row) => row.type !== "Treated Haz Waste",
+                    ).length || cells;
+                  const hazCells = adminCellRows.filter(
+                    (row) => row.type === "Treated Haz Waste",
+                  ).length;
+                  const capColor =
+                    pct >= 90 ? "#ff4d4f" : pct >= 70 ? "#faad14" : "#52c41a";
+                  const capLabel =
+                    pct >= 90 ? "Critical" : pct >= 70 ? "Warning" : "Normal";
+                  const isOp = !slfInfo.statusOfSLF
+                    ?.toLowerCase()
+                    .includes("non");
+                  // Baseline cell breakdown
+                  const isResidualEntry = (entry) =>
+                    !/haz|inert/i.test(String(entry?.wasteType || "Residual"));
+                  const sumEntryVolumes = (entries, predicate) =>
+                    entries
+                      .filter(predicate)
+                      .reduce(
+                        (sum, entry) => sum + Number(entry?.volume || 0),
+                        0,
+                      );
+                  const activeCellRes = activeCellEntries.length
+                    ? sumEntryVolumes(activeCellEntries, isResidualEntry)
+                    : baselineForm.getFieldValue("activeCellResidualVolume") ||
+                      0;
+                  const activeCellInert = activeCellEntries.length
+                    ? sumEntryVolumes(
+                        activeCellEntries,
+                        (entry) => !isResidualEntry(entry),
+                      )
+                    : baselineForm.getFieldValue("activeCellInertVolume") || 0;
+                  const closedCellRes = closedCellEntries.length
+                    ? sumEntryVolumes(closedCellEntries, isResidualEntry)
+                    : baselineForm.getFieldValue("closedCellResidualVolume") ||
+                      0;
+                  const closedCellInert = closedCellEntries.length
+                    ? sumEntryVolumes(
+                        closedCellEntries,
+                        (entry) => !isResidualEntry(entry),
+                      )
+                    : baselineForm.getFieldValue("closedCellInertVolume") || 0;
+                  const hasBaselineCell =
+                    activeCellRes > 0 ||
+                    activeCellInert > 0 ||
+                    closedCellRes > 0 ||
+                    closedCellInert > 0;
+                  // LGU served split (from baseline hauler clients)
+                  const allClients = haulers
+                    .flatMap((h) => h.privateSectorClients || [])
+                    .filter((c) => c.clientType === "LGU");
+                  const lguR3Clients = allClients.filter(
+                    (c) =>
+                      (c.region || "").startsWith("03") ||
+                      (c.regionName || "").toLowerCase().includes("iii") ||
+                      (c.regionName || "")
+                        .toLowerCase()
+                        .includes("central luzon"),
+                  );
+                  const lguOutsideClients = allClients.filter(
+                    (c) =>
+                      !(
+                        (c.region || "").startsWith("03") ||
+                        (c.regionName || "").toLowerCase().includes("iii") ||
+                        (c.regionName || "")
+                          .toLowerCase()
+                          .includes("central luzon")
+                      ),
+                  );
+                  return (
+                    <div>
+                      {/* Capacity overview banner */}
+                      <div
+                        style={{
+                          background: `linear-gradient(135deg, ${capColor}08 0%, ${capColor}15 100%)`,
+                          border: `1px solid ${capColor}30`,
+                          borderRadius: 12,
+                          padding: isMobile ? 16 : 20,
+                          marginBottom: 20,
+                        }}
+                      >
+                        <Row gutter={[20, 16]} align="middle">
+                          <Col xs={24} sm={6} style={{ textAlign: "center" }}>
+                            <Progress
+                              type="dashboard"
+                              percent={pct}
+                              size={isMobile ? 100 : 120}
+                              strokeColor={{ "0%": capColor, "100%": capColor }}
+                              strokeWidth={8}
+                              format={() => (
+                                <div style={{ lineHeight: 1.2 }}>
+                                  <div
+                                    style={{
+                                      fontSize: 22,
+                                      fontWeight: 800,
+                                      color: capColor,
+                                    }}
                                   >
-                                    Op: {operationalCells}
+                                    {pct}%
+                                  </div>
+                                  <div
+                                    style={{
+                                      fontSize: 10,
+                                      color: "#8c8c8c",
+                                      fontWeight: 500,
+                                    }}
+                                  >
+                                    UTILIZATION
+                                  </div>
+                                </div>
+                              )}
+                            />
+                            <Tag
+                              color={capColor}
+                              style={{
+                                marginTop: 6,
+                                fontWeight: 600,
+                                fontSize: 11,
+                              }}
+                            >
+                              {capLabel}
+                            </Tag>
+                          </Col>
+                          <Col xs={24} sm={18}>
+                            <Row gutter={[12, 12]}>
+                              {/* Status */}
+                              <Col xs={12} sm={12} md={6}>
+                                <div
+                                  style={{
+                                    background: isOp ? "#f6ffed" : "#fff2f0",
+                                    borderRadius: 10,
+                                    padding: "12px 14px",
+                                    border: `1px solid ${isOp ? "#b7eb8f" : "#ffccc7"}`,
+                                    height: "100%",
+                                  }}
+                                >
+                                  <div
+                                    style={{
+                                      display: "flex",
+                                      alignItems: "center",
+                                      gap: 6,
+                                      marginBottom: 6,
+                                    }}
+                                  >
+                                    <CheckCircleOutlined
+                                      style={{
+                                        color: isOp ? "#52c41a" : "#ff4d4f",
+                                        fontSize: 13,
+                                      }}
+                                    />
+                                    <span
+                                      style={{
+                                        fontSize: 10,
+                                        color: "#8c8c8c",
+                                        textTransform: "uppercase",
+                                        letterSpacing: 0.6,
+                                        fontWeight: 600,
+                                      }}
+                                    >
+                                      Status
+                                    </span>
+                                  </div>
+                                  <Tag
+                                    color={isOp ? "success" : "error"}
+                                    style={{
+                                      fontSize: 12,
+                                      fontWeight: 600,
+                                      padding: "2px 10px",
+                                    }}
+                                  >
+                                    {slfInfo.statusOfSLF || "—"}
+                                  </Tag>
+                                </div>
+                              </Col>
+                              {/* Cells: Operational / Closed */}
+                              <Col xs={12} sm={12} md={6}>
+                                <div
+                                  style={{
+                                    background: "#e6f7ff",
+                                    borderRadius: 10,
+                                    padding: "12px 14px",
+                                    border: "1px solid #91d5ff",
+                                    height: "100%",
+                                  }}
+                                >
+                                  <div
+                                    style={{
+                                      display: "flex",
+                                      alignItems: "center",
+                                      gap: 6,
+                                      marginBottom: 6,
+                                    }}
+                                  >
+                                    <ContainerOutlined
+                                      style={{ color: "#1890ff", fontSize: 13 }}
+                                    />
+                                    <span
+                                      style={{
+                                        fontSize: 10,
+                                        color: "#8c8c8c",
+                                        textTransform: "uppercase",
+                                        letterSpacing: 0.6,
+                                        fontWeight: 600,
+                                      }}
+                                    >
+                                      Cells
+                                    </span>
+                                  </div>
+                                  {cells > 0 ? (
+                                    <div>
+                                      <Tag
+                                        color="success"
+                                        style={{
+                                          fontSize: 11,
+                                          marginBottom: 2,
+                                        }}
+                                      >
+                                        Op: {operationalCells}
+                                      </Tag>
+                                      {closedCells > 0 && (
+                                        <Tag
+                                          color="default"
+                                          style={{ fontSize: 11 }}
+                                        >
+                                          Closed: {closedCells}
+                                        </Tag>
+                                      )}
+                                    </div>
+                                  ) : (
+                                    <div
+                                      style={{
+                                        fontSize: 16,
+                                        fontWeight: 700,
+                                        color: "#1890ff",
+                                      }}
+                                    >
+                                      —
+                                    </div>
+                                  )}
+                                  {cells > 0 && cellTypes.length > 0 && (
+                                    <div style={{ marginTop: 4 }}>
+                                      <Tag
+                                        color="blue"
+                                        style={{ fontSize: 10 }}
+                                      >
+                                        Res: {residualCells}
+                                      </Tag>
+                                      {hazCells > 0 && (
+                                        <Tag
+                                          color="red"
+                                          style={{ fontSize: 10 }}
+                                        >
+                                          THW: {hazCells}
+                                        </Tag>
+                                      )}
+                                    </div>
+                                  )}
+                                </div>
+                              </Col>
+                              {/* Waste Filled — clickable */}
+                              <Col xs={12} sm={12} md={6}>
+                                <div
+                                  style={{
+                                    background: "#fff7e6",
+                                    borderRadius: 10,
+                                    padding: "12px 14px",
+                                    border: "1px solid #ffd591",
+                                    height: "100%",
+                                    cursor: "pointer",
+                                    transition: "box-shadow 0.2s",
+                                  }}
+                                  onClick={handleOpenWasteReceived}
+                                  title="Click to view waste received breakdown"
+                                >
+                                  <div
+                                    style={{
+                                      display: "flex",
+                                      alignItems: "center",
+                                      gap: 6,
+                                      marginBottom: 6,
+                                    }}
+                                  >
+                                    <BarChartOutlined
+                                      style={{ color: "#fa8c16", fontSize: 13 }}
+                                    />
+                                    <span
+                                      style={{
+                                        fontSize: 10,
+                                        color: "#8c8c8c",
+                                        textTransform: "uppercase",
+                                        letterSpacing: 0.6,
+                                        fontWeight: 600,
+                                      }}
+                                    >
+                                      Waste Filled
+                                    </span>
+                                    <EyeOutlined
+                                      style={{
+                                        marginLeft: "auto",
+                                        color: "#fa8c16",
+                                        fontSize: 11,
+                                      }}
+                                    />
+                                  </div>
+                                  <div
+                                    style={{
+                                      fontSize: 16,
+                                      fontWeight: 700,
+                                      color: "#fa8c16",
+                                    }}
+                                  >
+                                    {waste > 0
+                                      ? `${waste.toLocaleString(undefined, { maximumFractionDigits: 2 })} ${dashboardUnit}`
+                                      : "—"}
+                                  </div>
+                                  {adminCellRows.some(
+                                    (row) => row.used > 0,
+                                  ) && (
+                                    <div
+                                      style={{
+                                        fontSize: 10,
+                                        color: "#8c8c8c",
+                                        fontWeight: 500,
+                                        marginTop: 2,
+                                      }}
+                                    >
+                                      From Cell Infrastructure • Tap for
+                                      breakdown
+                                    </div>
+                                  )}
+                                </div>
+                              </Col>
+                              {/* Volume Capacity + LGUs Served */}
+                              <Col xs={12} sm={12} md={6}>
+                                <div
+                                  style={{
+                                    background: "#f9f0ff",
+                                    borderRadius: 10,
+                                    padding: "12px 14px",
+                                    border: "1px solid #d3adf7",
+                                    height: "100%",
+                                  }}
+                                >
+                                  <div
+                                    style={{
+                                      display: "flex",
+                                      alignItems: "center",
+                                      gap: 6,
+                                      marginBottom: 6,
+                                    }}
+                                  >
+                                    <DatabaseOutlined
+                                      style={{ color: "#722ed1", fontSize: 13 }}
+                                    />
+                                    <span
+                                      style={{
+                                        fontSize: 10,
+                                        color: "#8c8c8c",
+                                        textTransform: "uppercase",
+                                        letterSpacing: 0.6,
+                                        fontWeight: 600,
+                                      }}
+                                    >
+                                      Capacity
+                                    </span>
+                                  </div>
+                                  <div
+                                    style={{
+                                      fontSize: 16,
+                                      fontWeight: 700,
+                                      color: "#722ed1",
+                                    }}
+                                  >
+                                    {capacity > 0
+                                      ? `${capacity.toLocaleString(undefined, { maximumFractionDigits: 2 })} ${dashboardUnit}`
+                                      : "—"}
+                                  </div>
+                                  {capacity > 0 && waste > 0 && (
+                                    <div
+                                      style={{
+                                        fontSize: 10,
+                                        color: "#8c8c8c",
+                                        fontWeight: 500,
+                                        marginTop: 2,
+                                      }}
+                                    >
+                                      {Math.max(
+                                        0,
+                                        capacity - waste,
+                                      ).toLocaleString(undefined, {
+                                        maximumFractionDigits: 2,
+                                      })}{" "}
+                                      {dashboardUnit} remaining
+                                    </div>
+                                  )}
+                                </div>
+                              </Col>
+                            </Row>
+                            {/* LGUs Served split */}
+                            {allClients.length > 0 && (
+                              <div
+                                style={{
+                                  marginTop: 12,
+                                  background: "#f0f5ff",
+                                  borderRadius: 10,
+                                  padding: "10px 14px",
+                                  border: "1px solid #adc6ff",
+                                }}
+                              >
+                                <div
+                                  style={{
+                                    display: "flex",
+                                    alignItems: "center",
+                                    gap: 6,
+                                    marginBottom: 6,
+                                  }}
+                                >
+                                  <TeamOutlined
+                                    style={{ color: "#2f54eb", fontSize: 13 }}
+                                  />
+                                  <span
+                                    style={{
+                                      fontSize: 10,
+                                      color: "#2f54eb",
+                                      textTransform: "uppercase",
+                                      letterSpacing: 0.6,
+                                      fontWeight: 600,
+                                    }}
+                                  >
+                                    LGUs Served
+                                  </span>
+                                </div>
+                                <Space size={8} wrap>
+                                  <Tag color="geekblue">
+                                    Region III: {lguR3Clients.length}
+                                  </Tag>
+                                  <Tag color="cyan">
+                                    Outside R3: {lguOutsideClients.length}
+                                  </Tag>
+                                  <Text
+                                    style={{ fontSize: 11, color: "#8c8c8c" }}
+                                  >
+                                    Total: {allClients.length}
+                                  </Text>
+                                </Space>
+                              </div>
+                            )}
+                          </Col>
+                        </Row>
+                      </div>
+
+                      {/* Cell Infrastructure & Baseline Utilization — side by side */}
+                      <Row gutter={[16, 16]} style={{ marginBottom: 20 }}>
+                        {adminCellRows.length > 0 && (
+                          <Col xs={24} md={baselineSaved ? 14 : 24}>
+                            <div
+                              style={{
+                                background: "#fff",
+                                borderRadius: 12,
+                                padding: isMobile ? 14 : 20,
+                                border: "1px solid #e8e8e8",
+                                boxShadow: "0 1px 4px rgba(0,0,0,0.04)",
+                                height: "100%",
+                              }}
+                            >
+                              <div
+                                style={{
+                                  display: "flex",
+                                  alignItems: "center",
+                                  gap: 8,
+                                  marginBottom: 16,
+                                }}
+                              >
+                                <div
+                                  style={{
+                                    width: 28,
+                                    height: 28,
+                                    borderRadius: 6,
+                                    background: "#1a3353",
+                                    display: "flex",
+                                    alignItems: "center",
+                                    justifyContent: "center",
+                                  }}
+                                >
+                                  <PieChartOutlined
+                                    style={{ color: "#fff", fontSize: 13 }}
+                                  />
+                                </div>
+                                <Text
+                                  strong
+                                  style={{ fontSize: 14, color: "#1a3353" }}
+                                >
+                                  Cell Infrastructure
+                                </Text>
+                                <Space size={4} style={{ marginLeft: "auto" }}>
+                                  <Tag color="success">
+                                    Operational: {operationalCells}
                                   </Tag>
                                   {closedCells > 0 && (
-                                    <Tag
-                                      color="default"
-                                      style={{ fontSize: 11 }}
-                                    >
+                                    <Tag color="default">
                                       Closed: {closedCells}
                                     </Tag>
                                   )}
+                                </Space>
+                              </div>
+                              <Row gutter={[12, 12]}>
+                                {adminCellRows.map((row) => {
+                                  const cap = row.capacity;
+                                  const cellSt = row.status;
+                                  const cellT = row.type;
+                                  const isClosed = row.isCompleted;
+                                  const isInactive =
+                                    row.isCompleted || row.isUnavailable;
+                                  const isHaz = cellT === "Treated Haz Waste";
+                                  const cellFillUnit = row.capacityUnit;
+                                  const cellFill = row.used;
+                                  const cellPct = row.pct;
+                                  const cellColor = isClosed
+                                    ? "#d9d9d9"
+                                    : isInactive
+                                      ? "#722ed1"
+                                      : isHaz
+                                        ? cellPct >= 90
+                                          ? "#ff4d4f"
+                                          : cellPct >= 70
+                                            ? "#faad14"
+                                            : "#f5222d"
+                                        : cellPct >= 90
+                                          ? "#ff4d4f"
+                                          : cellPct >= 70
+                                            ? "#faad14"
+                                            : "#52c41a";
+                                  const remaining = row.remaining;
+                                  return (
+                                    <Col
+                                      xs={12}
+                                      sm={8}
+                                      md={Math.min(8, Math.floor(24 / cells))}
+                                      key={row.index}
+                                    >
+                                      <div
+                                        style={{
+                                          background: isClosed
+                                            ? "#fafafa"
+                                            : "#fff",
+                                          borderRadius: 10,
+                                          padding: "14px 12px",
+                                          border: `1px solid ${isClosed ? "#e8e8e8" : cellColor}30`,
+                                          textAlign: "center",
+                                          opacity: isClosed ? 0.7 : 1,
+                                        }}
+                                      >
+                                        <Progress
+                                          type="dashboard"
+                                          percent={isInactive ? 0 : cellPct}
+                                          size={isMobile ? 64 : 80}
+                                          strokeWidth={6}
+                                          strokeColor={cellColor}
+                                          trailColor={
+                                            isClosed ? "#bfbfbf" : undefined
+                                          }
+                                          format={() => (
+                                            <span
+                                              style={{
+                                                fontSize: isMobile ? 13 : 15,
+                                                fontWeight: 700,
+                                                color: cellColor,
+                                              }}
+                                            >
+                                              {isClosed
+                                                ? "—"
+                                                : isInactive
+                                                  ? "N/A"
+                                                  : `${cellPct}%`}
+                                            </span>
+                                          )}
+                                        />
+                                        <div
+                                          style={{
+                                            fontWeight: 700,
+                                            fontSize: 13,
+                                            color: "#1a3353",
+                                            marginTop: 6,
+                                          }}
+                                        >
+                                          Cell {row.index + 1}
+                                        </div>
+                                        <Tag
+                                          color={
+                                            isClosed
+                                              ? "default"
+                                              : isInactive
+                                                ? "purple"
+                                                : "success"
+                                          }
+                                          style={{ fontSize: 10, marginTop: 4 }}
+                                        >
+                                          {cellSt}
+                                        </Tag>
+                                        <Tag
+                                          color={isHaz ? "red" : "blue"}
+                                          style={{ fontSize: 10, marginTop: 2 }}
+                                        >
+                                          {cellT}
+                                        </Tag>
+                                        <div
+                                          style={{
+                                            fontSize: 11,
+                                            color: "#8c8c8c",
+                                            marginTop: 4,
+                                            fontWeight: 500,
+                                          }}
+                                        >
+                                          {cap > 0
+                                            ? `${cap.toLocaleString(undefined, { maximumFractionDigits: 2 })} ${row.capacityUnit}`
+                                            : "—"}
+                                        </div>
+                                        {!isInactive && cellFill > 0 && (
+                                          <div
+                                            style={{
+                                              fontSize: 10,
+                                              marginTop: 3,
+                                            }}
+                                          >
+                                            <span
+                                              style={{
+                                                color: isHaz
+                                                  ? "#f5222d"
+                                                  : "#52c41a",
+                                                fontWeight: 600,
+                                              }}
+                                            >
+                                              {cellFill.toLocaleString(
+                                                undefined,
+                                                { maximumFractionDigits: 1 },
+                                              )}{" "}
+                                              {cellFillUnit}
+                                            </span>{" "}
+                                            <span style={{ color: "#8c8c8c" }}>
+                                              filled
+                                            </span>
+                                          </div>
+                                        )}
+                                        {!isInactive &&
+                                          cap > 0 &&
+                                          remaining > 0 && (
+                                            <div
+                                              style={{
+                                                fontSize: 10,
+                                                color: "#8c8c8c",
+                                                marginTop: 1,
+                                              }}
+                                            >
+                                              {remaining.toLocaleString(
+                                                undefined,
+                                                { maximumFractionDigits: 1 },
+                                              )}{" "}
+                                              {cellFillUnit} remaining
+                                            </div>
+                                          )}
+                                      </div>
+                                    </Col>
+                                  );
+                                })}
+                              </Row>
+                            </div>
+                          </Col>
+                        )}
+                        {/* Baseline Utilization Breakdown */}
+                        {baselineSaved && (
+                          <Col xs={24} md={cells > 0 ? 10 : 24}>
+                            <div
+                              style={{
+                                background: "#fff",
+                                borderRadius: 12,
+                                padding: isMobile ? 14 : 20,
+                                border: "1px solid #e8e8e8",
+                                boxShadow: "0 1px 4px rgba(0,0,0,0.04)",
+                                height: "100%",
+                              }}
+                            >
+                              <div
+                                style={{
+                                  display: "flex",
+                                  alignItems: "center",
+                                  gap: 8,
+                                  marginBottom: 16,
+                                }}
+                              >
+                                <div
+                                  style={{
+                                    width: 28,
+                                    height: 28,
+                                    borderRadius: 6,
+                                    background: "#722ed1",
+                                    display: "flex",
+                                    alignItems: "center",
+                                    justifyContent: "center",
+                                  }}
+                                >
+                                  <DatabaseOutlined
+                                    style={{ color: "#fff", fontSize: 13 }}
+                                  />
                                 </div>
+                                <Text
+                                  strong
+                                  style={{ fontSize: 14, color: "#1a3353" }}
+                                >
+                                  Baseline Utilization
+                                </Text>
+                                <Tag
+                                  color="purple"
+                                  style={{
+                                    marginLeft: "auto",
+                                    fontWeight: 500,
+                                  }}
+                                >
+                                  From Baseline Data
+                                </Tag>
+                              </div>
+                              {hasBaselineCell ? (
+                                <Row gutter={[12, 12]}>
+                                  {[
+                                    {
+                                      label: "Active Cell (Residual)",
+                                      value: activeCellRes,
+                                      unit: baselineUnit || "m³",
+                                      color: "#52c41a",
+                                    },
+                                    {
+                                      label: "Active Cell (Inert)",
+                                      value: activeCellInert,
+                                      unit: baselineUnit || "m³",
+                                      color: "#1890ff",
+                                    },
+                                    {
+                                      label: "Closed Cell (Residual)",
+                                      value: closedCellRes,
+                                      unit: baselineUnit || "m³",
+                                      color: "#fa8c16",
+                                    },
+                                    {
+                                      label: "Closed Cell (Inert)",
+                                      value: closedCellInert,
+                                      unit: baselineUnit || "m³",
+                                      color: "#8c8c8c",
+                                    },
+                                  ]
+                                    .filter((d) => d.value > 0)
+                                    .map((item, idx) => (
+                                      <Col xs={12} sm={12} md={6} key={idx}>
+                                        <div
+                                          style={{
+                                            background: `${item.color}08`,
+                                            borderRadius: 10,
+                                            padding: "12px 14px",
+                                            border: `1px solid ${item.color}30`,
+                                            textAlign: "center",
+                                          }}
+                                        >
+                                          <div
+                                            style={{
+                                              fontSize: 10,
+                                              color: "#8c8c8c",
+                                              textTransform: "uppercase",
+                                              letterSpacing: 0.5,
+                                              fontWeight: 600,
+                                              marginBottom: 4,
+                                            }}
+                                          >
+                                            {item.label}
+                                          </div>
+                                          <div
+                                            style={{
+                                              fontSize: 16,
+                                              fontWeight: 700,
+                                              color: item.color,
+                                            }}
+                                          >
+                                            {Number(
+                                              item.value,
+                                            ).toLocaleString()}
+                                          </div>
+                                          <div
+                                            style={{
+                                              fontSize: 10,
+                                              color: "#8c8c8c",
+                                            }}
+                                          >
+                                            {item.unit}
+                                          </div>
+                                        </div>
+                                      </Col>
+                                    ))}
+                                </Row>
                               ) : (
                                 <div
                                   style={{
-                                    fontSize: 16,
-                                    fontWeight: 700,
-                                    color: "#1890ff",
+                                    background: "#fff7e6",
+                                    border: "1px solid #ffe58f",
+                                    borderRadius: 8,
+                                    padding: "10px 14px",
+                                    display: "flex",
+                                    alignItems: "center",
+                                    gap: 8,
                                   }}
                                 >
-                                  —
-                                </div>
-                              )}
-                              {cells > 0 && cellTypes.length > 0 && (
-                                <div style={{ marginTop: 4 }}>
-                                  <Tag color="blue" style={{ fontSize: 10 }}>
-                                    Res: {residualCells}
-                                  </Tag>
-                                  {hazCells > 0 && (
-                                    <Tag color="red" style={{ fontSize: 10 }}>
-                                      THW: {hazCells}
-                                    </Tag>
-                                  )}
-                                </div>
-                              )}
-                            </div>
-                          </Col>
-                          {/* Waste Filled — clickable */}
-                          <Col xs={12} sm={12} md={6}>
-                            <div
-                              style={{
-                                background: "#fff7e6",
-                                borderRadius: 10,
-                                padding: "12px 14px",
-                                border: "1px solid #ffd591",
-                                height: "100%",
-                                cursor: "pointer",
-                                transition: "box-shadow 0.2s",
-                              }}
-                              onClick={handleOpenWasteReceived}
-                              title="Click to view waste received breakdown"
-                            >
-                              <div
-                                style={{
-                                  display: "flex",
-                                  alignItems: "center",
-                                  gap: 6,
-                                  marginBottom: 6,
-                                }}
-                              >
-                                <BarChartOutlined
-                                  style={{ color: "#fa8c16", fontSize: 13 }}
-                                />
-                                <span
-                                  style={{
-                                    fontSize: 10,
-                                    color: "#8c8c8c",
-                                    textTransform: "uppercase",
-                                    letterSpacing: 0.6,
-                                    fontWeight: 600,
-                                  }}
-                                >
-                                  Waste Filled
-                                </span>
-                                <EyeOutlined
-                                  style={{
-                                    marginLeft: "auto",
-                                    color: "#fa8c16",
-                                    fontSize: 11,
-                                  }}
-                                />
-                              </div>
-                              <div
-                                style={{
-                                  fontSize: 16,
-                                  fontWeight: 700,
-                                  color: "#fa8c16",
-                                }}
-                              >
-                                {waste > 0
-                                  ? `${waste.toLocaleString(undefined, { maximumFractionDigits: 2 })} ${dashboardUnit}`
-                                  : "—"}
-                              </div>
-                              {adminCellRows.some((row) => row.used > 0) && (
-                                <div
-                                  style={{
-                                    fontSize: 10,
-                                    color: "#8c8c8c",
-                                    fontWeight: 500,
-                                    marginTop: 2,
-                                  }}
-                                >
-                                  From Cell Infrastructure • Tap for breakdown
-                                </div>
-                              )}
-                            </div>
-                          </Col>
-                          {/* Volume Capacity + LGUs Served */}
-                          <Col xs={12} sm={12} md={6}>
-                            <div
-                              style={{
-                                background: "#f9f0ff",
-                                borderRadius: 10,
-                                padding: "12px 14px",
-                                border: "1px solid #d3adf7",
-                                height: "100%",
-                              }}
-                            >
-                              <div
-                                style={{
-                                  display: "flex",
-                                  alignItems: "center",
-                                  gap: 6,
-                                  marginBottom: 6,
-                                }}
-                              >
-                                <DatabaseOutlined
-                                  style={{ color: "#722ed1", fontSize: 13 }}
-                                />
-                                <span
-                                  style={{
-                                    fontSize: 10,
-                                    color: "#8c8c8c",
-                                    textTransform: "uppercase",
-                                    letterSpacing: 0.6,
-                                    fontWeight: 600,
-                                  }}
-                                >
-                                  Capacity
-                                </span>
-                              </div>
-                              <div
-                                style={{
-                                  fontSize: 16,
-                                  fontWeight: 700,
-                                  color: "#722ed1",
-                                }}
-                              >
-                                {capacity > 0
-                                  ? `${capacity.toLocaleString(undefined, { maximumFractionDigits: 2 })} ${dashboardUnit}`
-                                  : "—"}
-                              </div>
-                              {capacity > 0 && waste > 0 && (
-                                <div
-                                  style={{
-                                    fontSize: 10,
-                                    color: "#8c8c8c",
-                                    fontWeight: 500,
-                                    marginTop: 2,
-                                  }}
-                                >
-                                  {Math.max(
-                                    0,
-                                    capacity - waste,
-                                  ).toLocaleString(undefined, { maximumFractionDigits: 2 })}{" "}
-                                  {dashboardUnit} remaining
-                                </div>
-                              )}
-                            </div>
-                          </Col>
-                        </Row>
-                        {/* LGUs Served split */}
-                        {allClients.length > 0 && (
-                          <div
-                            style={{
-                              marginTop: 12,
-                              background: "#f0f5ff",
-                              borderRadius: 10,
-                              padding: "10px 14px",
-                              border: "1px solid #adc6ff",
-                            }}
-                          >
-                            <div
-                              style={{
-                                display: "flex",
-                                alignItems: "center",
-                                gap: 6,
-                                marginBottom: 6,
-                              }}
-                            >
-                              <TeamOutlined
-                                style={{ color: "#2f54eb", fontSize: 13 }}
-                              />
-                              <span
-                                style={{
-                                  fontSize: 10,
-                                  color: "#2f54eb",
-                                  textTransform: "uppercase",
-                                  letterSpacing: 0.6,
-                                  fontWeight: 600,
-                                }}
-                              >
-                                LGUs Served
-                              </span>
-                            </div>
-                            <Space size={8} wrap>
-                              <Tag color="geekblue">
-                                Region III: {lguR3Clients.length}
-                              </Tag>
-                              <Tag color="cyan">
-                                Outside R3: {lguOutsideClients.length}
-                              </Tag>
-                              <Text style={{ fontSize: 11, color: "#8c8c8c" }}>
-                                Total: {allClients.length}
-                              </Text>
-                            </Space>
-                          </div>
-                        )}
-                      </Col>
-                    </Row>
-                  </div>
-
-                  {/* Cell Infrastructure & Baseline Utilization — side by side */}
-                  <Row gutter={[16, 16]} style={{ marginBottom: 20 }}>
-                    {adminCellRows.length > 0 && (
-                      <Col xs={24} md={baselineSaved ? 14 : 24}>
-                        <div
-                          style={{
-                            background: "#fff",
-                            borderRadius: 12,
-                            padding: isMobile ? 14 : 20,
-                            border: "1px solid #e8e8e8",
-                            boxShadow: "0 1px 4px rgba(0,0,0,0.04)",
-                            height: "100%",
-                          }}
-                        >
-                          <div
-                            style={{
-                              display: "flex",
-                              alignItems: "center",
-                              gap: 8,
-                              marginBottom: 16,
-                            }}
-                          >
-                            <div
-                              style={{
-                                width: 28,
-                                height: 28,
-                                borderRadius: 6,
-                                background: "#1a3353",
-                                display: "flex",
-                                alignItems: "center",
-                                justifyContent: "center",
-                              }}
-                            >
-                              <PieChartOutlined
-                                style={{ color: "#fff", fontSize: 13 }}
-                              />
-                            </div>
-                            <Text
-                              strong
-                              style={{ fontSize: 14, color: "#1a3353" }}
-                            >
-                              Cell Infrastructure
-                            </Text>
-                            <Space size={4} style={{ marginLeft: "auto" }}>
-                              <Tag color="success">
-                                Operational: {operationalCells}
-                              </Tag>
-                              {closedCells > 0 && (
-                                <Tag color="default">Closed: {closedCells}</Tag>
-                              )}
-                            </Space>
-                          </div>
-                          <Row gutter={[12, 12]}>
-                            {adminCellRows.map((row) => {
-                                const cap = row.capacity;
-                                const cellSt = row.status;
-                                const cellT = row.type;
-                                const isClosed = row.isCompleted;
-                                const isInactive = row.isCompleted || row.isUnavailable;
-                                const isHaz = cellT === "Treated Haz Waste";
-                                const cellFillUnit = row.capacityUnit;
-                                const cellFill = row.used;
-                                const cellPct = row.pct;
-                                const cellColor = isClosed
-                                  ? "#d9d9d9"
-                                  : isInactive
-                                    ? "#722ed1"
-                                    : isHaz
-                                      ? (cellPct >= 90 ? "#ff4d4f" : cellPct >= 70 ? "#faad14" : "#f5222d")
-                                      : cellPct >= 90
-                                        ? "#ff4d4f"
-                                        : cellPct >= 70
-                                          ? "#faad14"
-                                          : "#52c41a";
-                                const remaining = row.remaining;
-                                return (
-                                  <Col
-                                    xs={12}
-                                    sm={8}
-                                    md={Math.min(8, Math.floor(24 / cells))}
-                                    key={row.index}
+                                  <InfoCircleOutlined
+                                    style={{ color: "#faad14" }}
+                                  />
+                                  <Text
+                                    style={{ color: "#ad6800", fontSize: 12 }}
                                   >
-                                    <div
-                                      style={{
-                                        background: isClosed ? "#fafafa" : "#fff",
-                                        borderRadius: 10,
-                                        padding: "14px 12px",
-                                        border: `1px solid ${isClosed ? "#e8e8e8" : cellColor}30`,
-                                        textAlign: "center",
-                                        opacity: isClosed ? 0.7 : 1,
-                                      }}
-                                    >
-                                      <Progress
-                                        type="dashboard"
-                                        percent={isInactive ? 0 : cellPct}
-                                        size={isMobile ? 64 : 80}
-                                        strokeWidth={6}
-                                        strokeColor={cellColor}
-                                        trailColor={isClosed ? "#bfbfbf" : undefined}
-                                        format={() => (
-                                          <span
-                                            style={{
-                                              fontSize: isMobile ? 13 : 15,
-                                              fontWeight: 700,
-                                              color: cellColor,
-                                            }}
-                                          >
-                                            {isClosed ? "—" : isInactive ? "N/A" : `${cellPct}%`}
-                                          </span>
-                                        )}
-                                      />
-                                      <div
-                                        style={{
-                                          fontWeight: 700,
-                                          fontSize: 13,
-                                          color: "#1a3353",
-                                          marginTop: 6,
-                                        }}
-                                      >
-                                        Cell {row.index + 1}
-                                      </div>
-                                      <Tag
-                                        color={isClosed ? "default" : isInactive ? "purple" : "success"}
-                                        style={{ fontSize: 10, marginTop: 4 }}
-                                      >
-                                        {cellSt}
-                                      </Tag>
-                                      <Tag
-                                        color={isHaz ? "red" : "blue"}
-                                        style={{ fontSize: 10, marginTop: 2 }}
-                                      >
-                                        {cellT}
-                                      </Tag>
-                                      <div
-                                        style={{
-                                          fontSize: 11,
-                                          color: "#8c8c8c",
-                                          marginTop: 4,
-                                          fontWeight: 500,
-                                        }}
-                                      >
-                                        {cap > 0
-                                          ? `${cap.toLocaleString(undefined, { maximumFractionDigits: 2 })} ${row.capacityUnit}`
-                                          : "—"}
-                                      </div>
-                                      {!isInactive && cellFill > 0 && (
-                                        <div style={{ fontSize: 10, marginTop: 3 }}>
-                                          <span style={{ color: isHaz ? "#f5222d" : "#52c41a", fontWeight: 600 }}>
-                                            {cellFill.toLocaleString(undefined, { maximumFractionDigits: 1 })} {cellFillUnit}
-                                          </span>
-                                          {" "}<span style={{ color: "#8c8c8c" }}>filled</span>
-                                        </div>
-                                      )}
-                                      {!isInactive && cap > 0 && remaining > 0 && (
-                                        <div style={{ fontSize: 10, color: "#8c8c8c", marginTop: 1 }}>
-                                          {remaining.toLocaleString(undefined, { maximumFractionDigits: 1 })} {cellFillUnit} remaining
-                                        </div>
-                                      )}
-                                    </div>
-                                  </Col>
-                                );
-                              })}
-                          </Row>
-                        </div>
-                      </Col>
-                    )}
-                    {/* Baseline Utilization Breakdown */}
-                    {baselineSaved && (
-                      <Col xs={24} md={cells > 0 ? 10 : 24}>
-                        <div
-                          style={{
-                            background: "#fff",
-                            borderRadius: 12,
-                            padding: isMobile ? 14 : 20,
-                            border: "1px solid #e8e8e8",
-                            boxShadow: "0 1px 4px rgba(0,0,0,0.04)",
-                            height: "100%",
-                          }}
-                        >
-                          <div
-                            style={{
-                              display: "flex",
-                              alignItems: "center",
-                              gap: 8,
-                              marginBottom: 16,
-                            }}
-                          >
-                            <div
-                              style={{
-                                width: 28,
-                                height: 28,
-                                borderRadius: 6,
-                                background: "#722ed1",
-                                display: "flex",
-                                alignItems: "center",
-                                justifyContent: "center",
-                              }}
-                            >
-                              <DatabaseOutlined
-                                style={{ color: "#fff", fontSize: 13 }}
-                              />
-                            </div>
-                            <Text
-                              strong
-                              style={{ fontSize: 14, color: "#1a3353" }}
-                            >
-                              Baseline Utilization
-                            </Text>
-                            <Tag
-                              color="purple"
-                              style={{ marginLeft: "auto", fontWeight: 500 }}
-                            >
-                              From Baseline Data
-                            </Tag>
-                          </div>
-                          {hasBaselineCell ? (
-                            <Row gutter={[12, 12]}>
-                              {[
-                                {
-                                  label: "Active Cell (Residual)",
-                                  value: activeCellRes,
-                                  unit: baselineUnit || "m³",
-                                  color: "#52c41a",
-                                },
-                                {
-                                  label: "Active Cell (Inert)",
-                                  value: activeCellInert,
-                                  unit: baselineUnit || "m³",
-                                  color: "#1890ff",
-                                },
-                                {
-                                  label: "Closed Cell (Residual)",
-                                  value: closedCellRes,
-                                  unit: baselineUnit || "m³",
-                                  color: "#fa8c16",
-                                },
-                                {
-                                  label: "Closed Cell (Inert)",
-                                  value: closedCellInert,
-                                  unit: baselineUnit || "m³",
-                                  color: "#8c8c8c",
-                                },
-                              ]
-                                .filter((d) => d.value > 0)
-                                .map((item, idx) => (
-                                  <Col xs={12} sm={12} md={6} key={idx}>
-                                    <div
-                                      style={{
-                                        background: `${item.color}08`,
-                                        borderRadius: 10,
-                                        padding: "12px 14px",
-                                        border: `1px solid ${item.color}30`,
-                                        textAlign: "center",
-                                      }}
-                                    >
-                                      <div
-                                        style={{
-                                          fontSize: 10,
-                                          color: "#8c8c8c",
-                                          textTransform: "uppercase",
-                                          letterSpacing: 0.5,
-                                          fontWeight: 600,
-                                          marginBottom: 4,
-                                        }}
-                                      >
-                                        {item.label}
-                                      </div>
-                                      <div
-                                        style={{
-                                          fontSize: 16,
-                                          fontWeight: 700,
-                                          color: item.color,
-                                        }}
-                                      >
-                                        {Number(item.value).toLocaleString()}
-                                      </div>
-                                      <div
-                                        style={{
-                                          fontSize: 10,
-                                          color: "#8c8c8c",
-                                        }}
-                                      >
-                                        {item.unit}
-                                      </div>
-                                    </div>
-                                  </Col>
-                                ))}
-                            </Row>
-                          ) : (
-                            <div
-                              style={{
-                                background: "#fff7e6",
-                                border: "1px solid #ffe58f",
-                                borderRadius: 8,
-                                padding: "10px 14px",
-                                display: "flex",
-                                alignItems: "center",
-                                gap: 8,
-                              }}
-                            >
-                              <InfoCircleOutlined
-                                style={{ color: "#faad14" }}
-                              />
-                              <Text style={{ color: "#ad6800", fontSize: 12 }}>
-                                Cell volume breakdown not yet encoded in
-                                baseline data. Request an update to provide
-                                active/closed cell volumes.
-                              </Text>
-                            </div>
-                          )}
-                        </div>
-                      </Col>
-                    )}
-                  </Row>
-
-                  {/* Facility Details */}
-                  <div
-                    style={{
-                      background: "#fff",
-                      borderRadius: 12,
-                      border: "1px solid #e8e8e8",
-                      boxShadow: "0 1px 4px rgba(0,0,0,0.04)",
-                      overflow: "hidden",
-                    }}
-                  >
-                    <div
-                      style={{
-                        display: "flex",
-                        alignItems: "center",
-                        gap: 8,
-                        padding: "12px 20px",
-                        borderBottom: "1px solid #f0f0f0",
-                        background: "#fafbfc",
-                      }}
-                    >
-                      <div
-                        style={{
-                          width: 28,
-                          height: 28,
-                          borderRadius: 6,
-                          background: "#1a3353",
-                          display: "flex",
-                          alignItems: "center",
-                          justifyContent: "center",
-                        }}
-                      >
-                        <FileTextOutlined
-                          style={{ color: "#fff", fontSize: 13 }}
-                        />
-                      </div>
-                      <Text strong style={{ fontSize: 14, color: "#1a3353" }}>
-                        Facility Details
-                      </Text>
-                    </div>
-                    <div style={{ padding: isMobile ? 12 : 16 }}>
-                      <Row gutter={[16, 12]}>
-                        {[
-                          slfInfo.category && {
-                            label: "Category",
-                            value: slfInfo.category,
-                          },
-                          slfInfo.yearStartedOperation && {
-                            label: "Year Started",
-                            value: slfInfo.yearStartedOperation,
-                          },
-                          slfInfo.remainingLifeSpan && {
-                            label: "Remaining Lifespan",
-                            value: slfInfo.remainingLifeSpan,
-                          },
-                          slfInfo.noOfLeachatePond != null && {
-                            label: "Leachate Treatment Plant",
-                            value: slfInfo.noOfLeachatePond,
-                          },
-                          slfInfo.numberOfGasVents != null && {
-                            label: "Gas Management",
-                            value: slfInfo.numberOfGasVents,
-                          },
-                          slfInfo.hasWastewaterTreatmentFacility != null && {
-                            label: "WWTF",
-                            value: slfInfo.hasWastewaterTreatmentFacility
-                              ? (Array.isArray(slfInfo.wastewaterTreatmentFacilityType)
-                                  ? slfInfo.wastewaterTreatmentFacilityType.join(", ")
-                                  : slfInfo.wastewaterTreatmentFacilityType) || "Yes"
-                              : "No",
-                          },
-                          [
-                            slfInfo.barangay,
-                            slfInfo.lgu,
-                            slfInfo.province,
-                          ].some(Boolean) && {
-                            label: "Location",
-                            value: [
-                              slfInfo.barangay,
-                              slfInfo.lgu,
-                              slfInfo.province,
-                            ]
-                              .filter(Boolean)
-                              .join(", "),
-                          },
-                          slfInfo.ownership && {
-                            label: "Ownership",
-                            value: slfInfo.ownership,
-                          },
-                          slfInfo.mrfEstablished && {
-                            label: "MRF Status",
-                            value: slfInfo.mrfEstablished,
-                          },
-                          slfInfo.eccNo && {
-                            label: "ECC No.",
-                            value: slfInfo.eccNo,
-                          },
-                          slfInfo.dischargePermit && {
-                            label: "Discharge Permit",
-                            value: slfInfo.dischargePermit,
-                          },
-                          slfInfo.permitToOperate && {
-                            label: "Permit to Operate",
-                            value: slfInfo.permitToOperate,
-                          },
-                          slfInfo.hazwasteGenerationId && {
-                            label: "Hazwaste Gen. ID",
-                            value: slfInfo.hazwasteGenerationId,
-                          },
-                        ]
-                          .filter(Boolean)
-                          .map((item, idx) => (
-                            <Col xs={24} sm={12} md={8} key={idx}>
-                              <div
-                                style={{
-                                  padding: "8px 12px",
-                                  borderRadius: 8,
-                                  background: "#f8f9fb",
-                                }}
-                              >
-                                <div
-                                  style={{
-                                    fontSize: 11,
-                                    color: "#8c8c8c",
-                                    textTransform: "uppercase",
-                                    letterSpacing: 0.5,
-                                    fontWeight: 600,
-                                    marginBottom: 2,
-                                  }}
-                                >
-                                  {item.label}
+                                    Cell volume breakdown not yet encoded in
+                                    baseline data. Request an update to provide
+                                    active/closed cell volumes.
+                                  </Text>
                                 </div>
-                                <div
-                                  style={{
-                                    fontSize: 13,
-                                    fontWeight: 600,
-                                    color: "#262626",
-                                    wordBreak: "break-word",
-                                  }}
-                                >
-                                  {item.value}
-                                </div>
-                              </div>
-                            </Col>
-                          ))}
+                              )}
+                            </div>
+                          </Col>
+                        )}
                       </Row>
-                    </div>
-                  </div>
-                </div>
-              );
-            })()
-          ) : (
-            <div
-              style={{
-                background: "linear-gradient(135deg, #fffbe6 0%, #fff8e1 100%)",
-                border: "1px solid #ffe58f",
-                borderRadius: 10,
-                padding: "16px 20px",
-                display: "flex",
-                alignItems: "center",
-                gap: 12,
-              }}
-            >
-              <InfoCircleOutlined style={{ color: "#faad14", fontSize: 20 }} />
-              <div>
-                <Text strong style={{ color: "#ad6800", display: "block" }}>
-                  Facility Data Unavailable
-                </Text>
-                <Text style={{ color: "#ad6800", fontSize: 12 }}>
-                  SLF operational data is currently being processed. Details
-                  will appear here once available.
-                </Text>
-              </div>
-            </div>
-          )}
-        </Card>
 
-        {/* Disposal Data Form */}
-        <Card className="slf-section" style={{ marginTop: 20 }}>
-          <Tabs
-            activeKey={activeTab}
-            onChange={setActiveTab}
-            items={[
-              {
-                key: "basic-info",
-                label: (
-                  <span>
-                    <InfoCircleOutlined />{" "}
-                    {isMobile ? "Basic Info" : "Basic Information"}
-                  </span>
-                ),
-                children: (
-                  <Form
-                    form={companyForm}
-                    layout="vertical"
-                    requiredMark={false}
-                    onValuesChange={(changed) => {
-                      const vals = companyForm.getFieldsValue();
-                      if ("lguCompanyName" in changed) {
-                        entryForm.setFieldsValue({
-                          lguCompanyName: changed.lguCompanyName,
-                        });
-                      }
-                      if (
-                        "companyRegion" in changed ||
-                        "companyProvince" in changed ||
-                        "companyMunicipality" in changed ||
-                        "companyBarangay" in changed
-                      ) {
-                        const parts = [
-                          barangays.find((b) => b.code === vals.companyBarangay)
-                            ?.name,
-                          municipalities.find(
-                            (m) => m.code === vals.companyMunicipality,
-                          )?.name,
-                          provinces.find((p) => p.code === vals.companyProvince)
-                            ?.name,
-                          regions.find((r) => r.code === vals.companyRegion)
-                            ?.name,
-                        ].filter(Boolean);
-                        entryForm.setFieldsValue({ address: parts.join(", ") });
-                      }
-                    }}
-                  >
-                    <Divider
-                      titlePlacement="left"
-                      className="slf-category-divider"
-                    >
-                      <EnvironmentOutlined /> Company Information
-                    </Divider>
-                    <Row gutter={[12, 0]}>
-                      <Col xs={24} sm={12}>
-                        <Form.Item
-                          name="lguCompanyName"
-                          label="Company Name"
-                          rules={[{ required: true, message: "Required" }]}
-                        >
-                          <Input placeholder="Enter company name" />
-                        </Form.Item>
-                      </Col>
-                    </Row>
-                    <Row gutter={[12, 0]}>
-                      <Col xs={24} sm={12} md={6}>
-                        <Form.Item
-                          name="companyRegion"
-                          label="Region"
-                          rules={[{ required: true, message: "Required" }]}
-                        >
-                          <Select
-                            placeholder="Select Region"
-                            showSearch
-                            optionFilterProp="children"
-                            onChange={(val) => fetchProvinces(val)}
-                          >
-                            {regions.map((r) => (
-                              <Option key={r.code} value={r.code}>
-                                {r.name}
-                              </Option>
-                            ))}
-                          </Select>
-                        </Form.Item>
-                      </Col>
-                      <Col xs={24} sm={12} md={6}>
-                        <Form.Item
-                          name="companyProvince"
-                          label="Province"
-                          rules={[{ required: true, message: "Required" }]}
-                        >
-                          <Select
-                            placeholder="Select Province"
-                            showSearch
-                            optionFilterProp="children"
-                            onChange={(val) => fetchMunicipalities(val)}
-                            disabled={
-                              provinces.length === 0 &&
-                              loadingAddress !== "province"
-                            }
-                            loading={loadingAddress === "province"}
-                            notFoundContent={
-                              loadingAddress === "province" ? (
-                                <Spin size="small" />
-                              ) : undefined
-                            }
-                          >
-                            {provinces.map((p) => (
-                              <Option key={p.code} value={p.code}>
-                                {p.name}
-                              </Option>
-                            ))}
-                          </Select>
-                        </Form.Item>
-                      </Col>
-                      <Col xs={24} sm={12} md={6}>
-                        <Form.Item
-                          name="companyMunicipality"
-                          label="City/Municipality"
-                          rules={[{ required: true, message: "Required" }]}
-                        >
-                          <Select
-                            placeholder="Select City/Municipality"
-                            showSearch
-                            optionFilterProp="children"
-                            onChange={(val) => fetchBarangays(val)}
-                            disabled={
-                              municipalities.length === 0 &&
-                              loadingAddress !== "municipality"
-                            }
-                            loading={loadingAddress === "municipality"}
-                            notFoundContent={
-                              loadingAddress === "municipality" ? (
-                                <Spin size="small" />
-                              ) : undefined
-                            }
-                          >
-                            {municipalities.map((m) => (
-                              <Option key={m.code} value={m.code}>
-                                {m.name}
-                              </Option>
-                            ))}
-                          </Select>
-                        </Form.Item>
-                      </Col>
-                      <Col xs={24} sm={12} md={6}>
-                        <Form.Item name="companyBarangay" label="Barangay">
-                          <Select
-                            placeholder="Select Barangay"
-                            showSearch
-                            optionFilterProp="children"
-                            disabled={
-                              barangays.length === 0 &&
-                              loadingAddress !== "barangay"
-                            }
-                            loading={loadingAddress === "barangay"}
-                            notFoundContent={
-                              loadingAddress === "barangay" ? (
-                                <Spin size="small" />
-                              ) : undefined
-                            }
-                          >
-                            {barangays.map((b) => (
-                              <Option key={b.code} value={b.code}>
-                                {b.name}
-                              </Option>
-                            ))}
-                          </Select>
-                        </Form.Item>
-                      </Col>
-                    </Row>
-                  </Form>
-                ),
-              },
-              {
-                key: "baseline",
-                label: (
-                  <span>
-                    <DatabaseOutlined />{" "}
-                    {isMobile ? "Baseline" : "Baseline Data"}
-                    {baselineSaved && (
-                      <CheckCircleOutlined
-                        style={{ color: "#52c41a", marginLeft: 6 }}
-                      />
-                    )}
-                  </span>
-                ),
-                children: (
-                  <>
-                    {baselineSaved && (
-                      <div
-                        style={{
-                          background: baselineUpdatePending
-                            ? "#e6f7ff"
-                            : "#fff7e6",
-                          border: `1px solid ${baselineUpdatePending ? "#91d5ff" : "#ffe58f"}`,
-                          borderRadius: 6,
-                          padding: "10px 14px",
-                          marginBottom: 16,
-                          display: "flex",
-                          alignItems: isMobile ? "flex-start" : "center",
-                          justifyContent: "space-between",
-                          flexWrap: "wrap",
-                          gap: 8,
-                        }}
-                      >
-                        <div>
-                          <InfoCircleOutlined
-                            style={{
-                              color: baselineUpdatePending
-                                ? "#1890ff"
-                                : "#faad14",
-                              marginRight: 8,
-                            }}
-                          />
-                          <Text
-                            style={{
-                              color: baselineUpdatePending
-                                ? "#096dd9"
-                                : "#ad6800",
-                            }}
-                          >
-                            {baselineUpdatePending
-                              ? "Your baseline update request is pending admin approval. Please wait for a response."
-                              : "Baseline data is locked after your first submission. To request changes, click the button."}
-                          </Text>
-                        </div>
-                        <Space wrap>
-                        {!baselineUpdatePending && (
-                          <Button
-                            type="primary"
-                            size="small"
-                            icon={<SendOutlined />}
-                            loading={baselineUpdateLoading}
-                            onClick={handleBaselineUpdateRequest}
-                            style={{
-                              background: "#fa8c16",
-                              borderColor: "#fa8c16",
-                            }}
-                          >
-                            Request Update
-                          </Button>
-                        )}
-                        {baselineUpdatePending && (
-                          <Tag
-                            color="processing"
-                            icon={<ClockCircleOutlined />}
-                          >
-                            Awaiting Approval
-                          </Tag>
-                        )}
-                          <Button
-                            size="small"
-                            icon={<ReloadOutlined />}
-                            loading={baselineRefreshLoading}
-                            onClick={refreshBaselineStatus}
-                          >
-                            Refresh
-                          </Button>
-                        </Space>
-                      </div>
-                    )}
-                    <Form
-                      form={baselineForm}
-                      layout="vertical"
-                      requiredMark={false}
-                      disabled={baselineSaved}
-                    >
-                      {/* ── Unit of Measurement ── */}
-                      <div
-                        style={{
-                          background:
-                            "linear-gradient(135deg, #e6f4ff 0%, #f0f5ff 100%)",
-                          border: "1px solid #91caff",
-                          borderRadius: 10,
-                          padding: "12px 16px",
-                          marginBottom: 16,
-                          display: "flex",
-                          alignItems: "center",
-                          gap: 12,
-                          flexWrap: "wrap",
-                        }}
-                      >
-                        <div
-                          style={{
-                            width: 32,
-                            height: 32,
-                            borderRadius: 8,
-                            background: "#1677ff",
-                            display: "flex",
-                            alignItems: "center",
-                            justifyContent: "center",
-                            flexShrink: 0,
-                          }}
-                        >
-                          <DatabaseOutlined
-                            style={{ color: "#fff", fontSize: 15 }}
-                          />
-                        </div>
-                        <div style={{ flex: 1, minWidth: 120 }}>
-                          <Text
-                            strong
-                            style={{
-                              fontSize: 13,
-                              color: "#003eb3",
-                              display: "block",
-                            }}
-                          >
-                            Unit of Measurement
-                          </Text>
-                          <Text type="secondary" style={{ fontSize: 11 }}>
-                            Applies to all volume fields below
-                          </Text>
-                        </div>
-                        <Select
-                          value={baselineUnit || "m³"}
-                          onChange={handleBaselineUnitChange}
-                          disabled={baselineSaved}
-                          placeholder="Select unit of measurement"
-                          style={{ width: 200 }}
-                        >
-                          <Option value="m³">m³ (cubic meters)</Option>
-                          <Option value="tons">tons</Option>
-                        </Select>
-                      </div>
-
-                      {/* ── Volume of Waste Accepted ── */}
+                      {/* Facility Details */}
                       <div
                         style={{
                           background: "#fff",
+                          borderRadius: 12,
                           border: "1px solid #e8e8e8",
-                          borderRadius: 10,
+                          boxShadow: "0 1px 4px rgba(0,0,0,0.04)",
                           overflow: "hidden",
-                          marginBottom: 14,
                         }}
                       >
                         <div
@@ -4907,992 +4982,1454 @@ export default function SLFPortal() {
                             display: "flex",
                             alignItems: "center",
                             gap: 8,
-                            padding: "10px 16px",
-                            background:
-                              "linear-gradient(90deg, #1a3353 0%, #244b7a 100%)",
+                            padding: "12px 20px",
+                            borderBottom: "1px solid #f0f0f0",
+                            background: "#fafbfc",
                           }}
                         >
-                          <BarChartOutlined
-                            style={{ color: "#fff", fontSize: 13 }}
-                          />
-                          <Text strong style={{ color: "#fff", fontSize: 13 }}>
-                            Volume of Waste Accepted
-                          </Text>
-                          <Text
-                            style={{
-                              color: "rgba(255,255,255,0.55)",
-                              fontSize: 11,
-                              marginLeft: 2,
-                            }}
-                          >
-                            (since start of operation)
-                          </Text>
-                        </div>
-                        <div style={{ padding: "14px 16px 8px" }}>
-                          <Row gutter={[12, 0]}>
-                            <Col xs={24} sm={14} md={10}>
-                              <Form.Item
-                                name="totalVolumeAccepted"
-                                label="Total Volume Accepted"
-                                required
-                                rules={[
-                                  { required: true, message: "Required" },
-                                ]}
-                              >
-                                <InputNumber
-                                  placeholder="0.00"
-                                  style={{ width: "100%" }}
-                                  min={0}
-                                  step={0.01}
-                                  precision={2}
-                                  addonAfter={
-                                    baselineUnit === "m³" ? "m³" : "tons"
-                                  }
-                                  formatter={(v) =>
-                                    v
-                                      ? Number(v).toLocaleString(undefined, {
-                                          maximumFractionDigits: 2,
-                                        })
-                                      : ""
-                                  }
-                                  parser={(v) => v?.replace(/,/g, "")}
-                                />
-                              </Form.Item>
-                            </Col>
-                          </Row>
-                        </div>
-                      </div>
-
-                      <Collapse
-                        defaultActiveKey={["active", "closed", "haulers"]}
-                        bordered={false}
-                        style={{ background: "transparent", marginBottom: 14 }}
-                        items={[
-                          {
-                            key: "active",
-                            label: (
-                              <Space>
-                                <CheckCircleOutlined
-                                  style={{ color: "#52c41a" }}
-                                />
-                                <Text strong style={{ color: "#135200" }}>
-                                  Active Cells
-                                  {activeCellEntries.length > 0
-                                    ? ` (${activeCellEntries.length})`
-                                    : ""}
-                                </Text>
-                                {activeCellEntries.length > 0 && (
-                                  <Text
-                                    type="secondary"
-                                    style={{ fontSize: 11 }}
-                                  >
-                                    Total:{" "}
-                                    {activeCellEntries
-                                      .reduce((s, e) => s + (e.volume || 0), 0)
-                                      .toLocaleString()}{" "}
-                                    {baselineUnit || "m³"}
-                                  </Text>
-                                )}
-                              </Space>
-                            ),
-                            extra: !baselineSaved && (
-                              <Button
-                                size="small"
-                                icon={<PlusOutlined />}
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  setEditingActiveCellKey(null);
-                                  setActiveCellDraft({
-                                    cellName: "",
-                                    wasteType: "Residual",
-                                    volume: null,
-                                  });
-                                  setActiveCellModalOpen(true);
-                                }}
-                              >
-                                Add Entry
-                              </Button>
-                            ),
-                            children: (
-                              <Table
-                                dataSource={activeCellEntries}
-                                rowKey="key"
-                                size="small"
-                                pagination={false}
-                                style={{ marginBottom: 0 }}
-                                locale={{
-                                  emptyText: (
-                                    <Text
-                                      type="secondary"
-                                      style={{ fontSize: 12 }}
-                                    >
-                                      No entries yet.
-                                      {!baselineSaved &&
-                                        ' Click "Add Entry" above to add cell data.'}
-                                    </Text>
-                                  ),
-                                }}
-                                columns={[
-                                  {
-                                    title: "#",
-                                    key: "idx",
-                                    width: 42,
-                                    render: (_, __, i) => (
-                                      <Text
-                                        style={{
-                                          fontSize: 12,
-                                          color: "#8c8c8c",
-                                        }}
-                                      >
-                                        {i + 1}
-                                      </Text>
-                                    ),
-                                  },
-                                  {
-                                    title: "Cell Name",
-                                    dataIndex: "cellName",
-                                    key: "cellName",
-                                    render: (v) =>
-                                      v || (
-                                        <Text
-                                          type="secondary"
-                                          style={{ fontSize: 12 }}
-                                        >
-                                          Unnamed Cell
-                                        </Text>
-                                      ),
-                                  },
-                                  {
-                                    title: "Waste Type",
-                                    dataIndex: "wasteType",
-                                    key: "wasteType",
-                                    width: 160,
-                                    render: (v) => {
-                                      const isHaz = v
-                                        ?.toLowerCase()
-                                        .includes("hazardous");
-                                      const isInert = v === "Inert";
-                                      return (
-                                        <Tag
-                                          color={
-                                            isHaz
-                                              ? "red"
-                                              : isInert
-                                                ? "blue"
-                                                : "green"
-                                          }
-                                          style={{ fontSize: 11 }}
-                                        >
-                                          {v}
-                                        </Tag>
-                                      );
-                                    },
-                                  },
-                                  {
-                                    title: `Volume (${baselineUnit || "m³"})`,
-                                    key: "vol",
-                                    width: 140,
-                                    render: (_, r) => (
-                                      <Text strong style={{ color: "#52c41a" }}>
-                                        {r.volume != null
-                                          ? r.volume.toLocaleString()
-                                          : "—"}
-                                      </Text>
-                                    ),
-                                  },
-                                  !baselineSaved && {
-                                    title: "",
-                                    key: "act",
-                                    width: 72,
-                                    render: (_, r) => (
-                                      <Space size={0}>
-                                        <Button
-                                          type="text"
-                                          size="small"
-                                          icon={<EditOutlined />}
-                                          style={{ color: "#1a3353" }}
-                                          onClick={() => {
-                                            setEditingActiveCellKey(r.key);
-                                            setActiveCellDraft({
-                                              cellName: r.cellName,
-                                              wasteType: r.wasteType,
-                                              volume: r.volume,
-                                            });
-                                            setActiveCellModalOpen(true);
-                                          }}
-                                        />
-                                        <Button
-                                          type="text"
-                                          danger
-                                          size="small"
-                                          icon={<DeleteOutlined />}
-                                          onClick={() =>
-                                            setActiveCellEntries((prev) =>
-                                              prev.filter(
-                                                (e) => e.key !== r.key,
-                                              ),
-                                            )
-                                          }
-                                        />
-                                      </Space>
-                                    ),
-                                  },
-                                ].filter(Boolean)}
-                              />
-                            ),
-                          },
-                          {
-                            key: "closed",
-                            label: (
-                              <Space>
-                                <CloseCircleOutlined
-                                  style={{ color: "#722ed1" }}
-                                />
-                                <Text strong style={{ color: "#391085" }}>
-                                  Closed Cells
-                                  {closedCellEntries.length > 0
-                                    ? ` (${closedCellEntries.length})`
-                                    : ""}
-                                </Text>
-                                {closedCellEntries.length > 0 && (
-                                  <Text
-                                    type="secondary"
-                                    style={{ fontSize: 11 }}
-                                  >
-                                    Total:{" "}
-                                    {closedCellEntries
-                                      .reduce((s, e) => s + (e.volume || 0), 0)
-                                      .toLocaleString()}{" "}
-                                    {baselineUnit || "m³"}
-                                  </Text>
-                                )}
-                              </Space>
-                            ),
-                            extra: !baselineSaved && (
-                              <Button
-                                size="small"
-                                icon={<PlusOutlined />}
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  setEditingClosedCellKey(null);
-                                  setClosedCellDraft({
-                                    cellName: "",
-                                    wasteType: "Residual",
-                                    volume: null,
-                                  });
-                                  setClosedCellModalOpen(true);
-                                }}
-                              >
-                                Add Entry
-                              </Button>
-                            ),
-                            children: (
-                              <Table
-                                dataSource={closedCellEntries}
-                                rowKey="key"
-                                size="small"
-                                pagination={false}
-                                style={{ marginBottom: 0 }}
-                                locale={{
-                                  emptyText: (
-                                    <Text
-                                      type="secondary"
-                                      style={{ fontSize: 12 }}
-                                    >
-                                      No entries yet.
-                                      {!baselineSaved &&
-                                        ' Click "Add Entry" above to add cell data.'}
-                                    </Text>
-                                  ),
-                                }}
-                                columns={[
-                                  {
-                                    title: "#",
-                                    key: "idx",
-                                    width: 42,
-                                    render: (_, __, i) => (
-                                      <Text
-                                        style={{
-                                          fontSize: 12,
-                                          color: "#8c8c8c",
-                                        }}
-                                      >
-                                        {i + 1}
-                                      </Text>
-                                    ),
-                                  },
-                                  {
-                                    title: "Cell Name",
-                                    dataIndex: "cellName",
-                                    key: "cellName",
-                                    render: (v) =>
-                                      v || (
-                                        <Text
-                                          type="secondary"
-                                          style={{ fontSize: 12 }}
-                                        >
-                                          Unnamed Cell
-                                        </Text>
-                                      ),
-                                  },
-                                  {
-                                    title: "Waste Type",
-                                    dataIndex: "wasteType",
-                                    key: "wasteType",
-                                    width: 160,
-                                    render: (v) => {
-                                      const isHaz = v
-                                        ?.toLowerCase()
-                                        .includes("hazardous");
-                                      const isInert = v === "Inert";
-                                      return (
-                                        <Tag
-                                          color={
-                                            isHaz
-                                              ? "red"
-                                              : isInert
-                                                ? "purple"
-                                                : "orange"
-                                          }
-                                          style={{ fontSize: 11 }}
-                                        >
-                                          {v}
-                                        </Tag>
-                                      );
-                                    },
-                                  },
-                                  {
-                                    title: `Volume (${baselineUnit || "m³"})`,
-                                    key: "vol",
-                                    width: 140,
-                                    render: (_, r) => (
-                                      <Text strong style={{ color: "#722ed1" }}>
-                                        {r.volume != null
-                                          ? r.volume.toLocaleString()
-                                          : "—"}
-                                      </Text>
-                                    ),
-                                  },
-                                  !baselineSaved && {
-                                    title: "",
-                                    key: "act",
-                                    width: 72,
-                                    render: (_, r) => (
-                                      <Space size={0}>
-                                        <Button
-                                          type="text"
-                                          size="small"
-                                          icon={<EditOutlined />}
-                                          style={{ color: "#1a3353" }}
-                                          onClick={() => {
-                                            setEditingClosedCellKey(r.key);
-                                            setClosedCellDraft({
-                                              cellName: r.cellName,
-                                              wasteType: r.wasteType,
-                                              volume: r.volume,
-                                            });
-                                            setClosedCellModalOpen(true);
-                                          }}
-                                        />
-                                        <Button
-                                          type="text"
-                                          danger
-                                          size="small"
-                                          icon={<DeleteOutlined />}
-                                          onClick={() =>
-                                            setClosedCellEntries((prev) =>
-                                              prev.filter(
-                                                (e) => e.key !== r.key,
-                                              ),
-                                            )
-                                          }
-                                        />
-                                      </Space>
-                                    ),
-                                  },
-                                ].filter(Boolean)}
-                              />
-                            ),
-                          },
-                          {
-                            key: "haulers",
-                            label: (
-                              <Space>
-                                <TeamOutlined style={{ color: "#614700" }} />
-                                <Text strong style={{ color: "#614700" }}>
-                                  Accredited Haulers
-                                  {haulers.length > 0
-                                    ? ` (${haulers.length})`
-                                    : ""}
-                                </Text>
-                              </Space>
-                            ),
-                            children: (
-                              <div>
-                                <div
-                                  style={{
-                                    marginBottom: 12,
-                                    display: "flex",
-                                    gap: 8,
-                                    flexWrap: "wrap",
-                                  }}
-                                >
-                                  <Button
-                                    type="primary"
-                                    icon={<PlusOutlined />}
-                                    className="slf-primary-btn"
-                                    onClick={() => openHaulerModal(null)}
-                                    disabled={baselineSaved}
-                                  >
-                                    Add Hauler
-                                  </Button>
-                                  <Button
-                                    icon={<UploadOutlined />}
-                                    onClick={() => openUploadGuide("hauler")}
-                                    disabled={baselineSaved}
-                                  >
-                                    Upload Excel/CSV
-                                  </Button>
-                                </div>
-                                <Table
-                                  dataSource={haulers}
-                                  columns={haulerColumns}
-                                  rowKey="key"
-                                  size="small"
-                                  pagination={false}
-                                  scroll={{ x: 700 }}
-                                  locale={{
-                                    emptyText: (
-                                      <Text
-                                        type="secondary"
-                                        style={{ fontSize: 13 }}
-                                      >
-                                        No haulers added.
-                                      </Text>
-                                    ),
-                                  }}
-                                />
-                              </div>
-                            ),
-                          },
-                        ]}
-                      />
-
-                      {/* ── Save Baseline Update Button (visible when admin approved editing) ── */}
-                      {!baselineSaved && (
-                        <div
-                          style={{
-                            marginTop: 24,
-                            paddingTop: 16,
-                            borderTop: "1px solid #e8e8e8",
-                            display: "flex",
-                            justifyContent: "flex-end",
-                          }}
-                        >
-                          <Button
-                            type="primary"
-                            size="large"
-                            icon={<SaveOutlined />}
-                            loading={baselineSavingLoading}
-                            onClick={handleSaveBaselinePortal}
-                            style={{
-                              background: "#1a3353",
-                              borderColor: "#1a3353",
-                              paddingLeft: 28,
-                              paddingRight: 28,
-                            }}
-                          >
-                            Save Baseline Update
-                          </Button>
-                        </div>
-                      )}
-                    </Form>
-                  </>
-                ),
-              },
-              {
-                key: "disposal",
-                label: (
-                  <span>
-                    <FileTextOutlined />{" "}
-                    {isMobile
-                      ? "Waste Generator Info"
-                      : "Waste Generator Information"}
-                  </span>
-                ),
-                children: (
-                  <Form form={entryForm} layout="vertical" requiredMark={false}>
-                    <Row gutter={[12, 0]}>
-                      <Col xs={24} sm={12} md={8}>
-                        <Form.Item
-                          name="dateOfDisposal"
-                          label={fl("dateOfDisposal", "Date of Disposal")}
-                          rules={[
-                            {
-                              required: isRequired("dateOfDisposal", true),
-                              message: "Required",
-                            },
-                          ]}
-                        >
-                          <DatePicker
-                            format="MM/DD/YYYY"
-                            style={{ width: "100%" }}
-                          />
-                        </Form.Item>
-                      </Col>
-                    </Row>
-
-                    {/* ── Transport & Disposal Information ── */}
-                    <div
-                      style={{
-                        background: "#fff",
-                        border: "1px solid #e8e8e8",
-                        borderRadius: 10,
-                        overflow: "hidden",
-                        marginTop: 4,
-                      }}
-                    >
-                      <div
-                        style={{
-                          display: "flex",
-                          alignItems: "center",
-                          gap: 8,
-                          padding: "10px 16px",
-                          background:
-                            "linear-gradient(90deg, #1a3353 0%, #244b7a 100%)",
-                          flexWrap: "wrap",
-                        }}
-                      >
-                        <div
-                          style={{
-                            width: 28,
-                            height: 28,
-                            borderRadius: 7,
-                            background: "rgba(255,255,255,0.15)",
-                            display: "flex",
-                            alignItems: "center",
-                            justifyContent: "center",
-                            flexShrink: 0,
-                          }}
-                        >
-                          <CarOutlined
-                            style={{ color: "#fff", fontSize: 14 }}
-                          />
-                        </div>
-                        <Text strong style={{ color: "#fff", fontSize: 13 }}>
-                          Transport &amp; Disposal Information
-                        </Text>
-                        <Badge
-                          count={trucks.length}
-                          showZero
-                          style={{
-                            backgroundColor:
-                              trucks.length > 0
-                                ? "rgba(255,255,255,0.25)"
-                                : "rgba(255,255,255,0.12)",
-                            color: "#fff",
-                            border: "none",
-                            boxShadow: "none",
-                          }}
-                        />
-                        {trucks.length > 0 && (
-                          <Text
-                            style={{
-                              color: "rgba(255,255,255,0.65)",
-                              fontSize: 11,
-                              marginLeft: 2,
-                            }}
-                          >
-                            · Total:{" "}
-                            <strong style={{ color: "#fff" }}>
-                              {trucks
-                                .reduce((s, t) => s + (t.actualVolume || 0), 0)
-                                .toLocaleString()}
-                            </strong>{" "}
-                            {trucks[0]?.actualVolumeUnit || "tons"}
-                          </Text>
-                        )}
-                        <Space style={{ marginLeft: "auto" }} wrap>
-                          <Button
-                            size="small"
-                            type="primary"
-                            icon={<PlusOutlined />}
-                            className="slf-primary-btn"
-                            onClick={() => openTruckModal(null)}
-                          >
-                            Add Entry
-                          </Button>
-                          <Button
-                            size="small"
-                            icon={<UploadOutlined />}
-                            style={{
-                              background: "rgba(255,255,255,0.12)",
-                              border: "1px solid rgba(255,255,255,0.3)",
-                              color: "#fff",
-                            }}
-                            onClick={() => openUploadGuide("truck")}
-                          >
-                            Upload Excel/CSV
-                          </Button>
-                        </Space>
-                      </div>
-                      <div
-                        style={{
-                          padding: trucks.length === 0 ? 0 : "10px 12px",
-                        }}
-                      >
-                        {trucks.length === 0 ? (
                           <div
                             style={{
-                              textAlign: "center",
-                              padding: "28px 16px",
-                              background: "#fafafa",
+                              width: 28,
+                              height: 28,
+                              borderRadius: 6,
+                              background: "#1a3353",
+                              display: "flex",
+                              alignItems: "center",
+                              justifyContent: "center",
                             }}
                           >
-                            <CarOutlined
-                              style={{
-                                fontSize: 28,
-                                color: "#d9d9d9",
-                                display: "block",
-                                marginBottom: 8,
-                              }}
+                            <FileTextOutlined
+                              style={{ color: "#fff", fontSize: 13 }}
                             />
-                            <Text type="secondary" style={{ fontSize: 13 }}>
-                              No entries added. Click &quot;Add Entry&quot; to
-                              add transport data.
-                            </Text>
                           </div>
-                        ) : (
-                          <Collapse
-                            bordered={false}
-                            style={{ background: "transparent" }}
-                            expandIconPlacement="start"
-                            items={trucks.map((t, i) => {
-                              const vehs = t.vehicles || [];
-                              const plateNos =
-                                vehs
-                                  .map((v) => v.plateNumber)
+                          <Text
+                            strong
+                            style={{ fontSize: 14, color: "#1a3353" }}
+                          >
+                            Facility Details
+                          </Text>
+                        </div>
+                        <div style={{ padding: isMobile ? 12 : 16 }}>
+                          <Row gutter={[16, 12]}>
+                            {[
+                              slfInfo.category && {
+                                label: "Category",
+                                value: slfInfo.category,
+                              },
+                              slfInfo.yearStartedOperation && {
+                                label: "Year Started",
+                                value: slfInfo.yearStartedOperation,
+                              },
+                              slfInfo.remainingLifeSpan && {
+                                label: "Remaining Lifespan",
+                                value: slfInfo.remainingLifeSpan,
+                              },
+                              slfInfo.noOfLeachatePond != null && {
+                                label: "Leachate Treatment Plant",
+                                value: slfInfo.noOfLeachatePond,
+                              },
+                              slfInfo.numberOfGasVents != null && {
+                                label: "Gas Management",
+                                value: slfInfo.numberOfGasVents,
+                              },
+                              slfInfo.hasWastewaterTreatmentFacility !=
+                                null && {
+                                label: "WWTF",
+                                value: slfInfo.hasWastewaterTreatmentFacility
+                                  ? (Array.isArray(
+                                      slfInfo.wastewaterTreatmentFacilityType,
+                                    )
+                                      ? slfInfo.wastewaterTreatmentFacilityType.join(
+                                          ", ",
+                                        )
+                                      : slfInfo.wastewaterTreatmentFacilityType) ||
+                                    "Yes"
+                                  : "No",
+                              },
+                              [
+                                slfInfo.barangay,
+                                slfInfo.lgu,
+                                slfInfo.province,
+                              ].some(Boolean) && {
+                                label: "Location",
+                                value: [
+                                  slfInfo.barangay,
+                                  slfInfo.lgu,
+                                  slfInfo.province,
+                                ]
                                   .filter(Boolean)
-                                  .join(", ") ||
-                                t.plateNumber ||
-                                "—";
-                              const capacities =
-                                vehs.length > 0
-                                  ? vehs
-                                      .filter((v) => v.capacity != null)
-                                      .map(
-                                        (v) =>
-                                          `${v.capacity} ${(v.capacityUnit || "m³").replace("m3", "m³")}`,
-                                      )
-                                      .join(", ")
-                                  : t.truckCapacity != null
-                                    ? `${t.truckCapacity} ${(t.truckCapacityUnit || "m³").replace("m3", "m³")}`
-                                    : "—";
-                              const isHaz = t.wasteType
-                                ?.toLowerCase()
-                                .includes("hazardous");
-                              const allClients = vehs.flatMap(
-                                (v) => v.selectedClients || [],
-                              );
-                              return {
-                                key: t.key,
-                                style: {
-                                  marginBottom: 6,
-                                  borderRadius: 8,
-                                  border: "1px solid #e8e8e8",
-                                  background: "#fff",
-                                  overflow: "hidden",
-                                },
-                                label: (
+                                  .join(", "),
+                              },
+                              slfInfo.ownership && {
+                                label: "Ownership",
+                                value: slfInfo.ownership,
+                              },
+                              slfInfo.mrfEstablished && {
+                                label: "MRF Status",
+                                value: slfInfo.mrfEstablished,
+                              },
+                              slfInfo.eccNo && {
+                                label: "ECC No.",
+                                value: slfInfo.eccNo,
+                              },
+                              slfInfo.dischargePermit && {
+                                label: "Discharge Permit",
+                                value: slfInfo.dischargePermit,
+                              },
+                              slfInfo.permitToOperate && {
+                                label: "Permit to Operate",
+                                value: slfInfo.permitToOperate,
+                              },
+                              slfInfo.hazwasteGenerationId && {
+                                label: "Hazwaste Gen. ID",
+                                value: slfInfo.hazwasteGenerationId,
+                              },
+                            ]
+                              .filter(Boolean)
+                              .map((item, idx) => (
+                                <Col xs={24} sm={12} md={8} key={idx}>
                                   <div
                                     style={{
-                                      display: "flex",
-                                      alignItems: "center",
-                                      gap: 8,
-                                      flexWrap: "wrap",
-                                      width: "100%",
-                                      paddingRight: 4,
+                                      padding: "8px 12px",
+                                      borderRadius: 8,
+                                      background: "#f8f9fb",
                                     }}
                                   >
                                     <div
                                       style={{
-                                        width: 22,
-                                        height: 22,
-                                        borderRadius: 5,
-                                        background: "#1a3353",
-                                        display: "flex",
-                                        alignItems: "center",
-                                        justifyContent: "center",
-                                        flexShrink: 0,
+                                        fontSize: 11,
+                                        color: "#8c8c8c",
+                                        textTransform: "uppercase",
+                                        letterSpacing: 0.5,
+                                        fontWeight: 600,
+                                        marginBottom: 2,
                                       }}
                                     >
-                                      <Text
-                                        style={{
-                                          color: "#fff",
-                                          fontSize: 10,
-                                          fontWeight: 700,
-                                        }}
-                                      >
-                                        {i + 1}
-                                      </Text>
+                                      {item.label}
                                     </div>
-                                    <Text
-                                      strong
+                                    <div
                                       style={{
                                         fontSize: 13,
-                                        color: "#1a3353",
-                                        flexShrink: 0,
-                                        maxWidth: 160,
-                                        overflow: "hidden",
-                                        textOverflow: "ellipsis",
-                                        whiteSpace: "nowrap",
+                                        fontWeight: 600,
+                                        color: "#262626",
+                                        wordBreak: "break-word",
                                       }}
                                     >
-                                      {t.disposalTicketNo || (
+                                      {item.value}
+                                    </div>
+                                  </div>
+                                </Col>
+                              ))}
+                          </Row>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })()
+              ) : (
+                <div
+                  style={{
+                    background:
+                      "linear-gradient(135deg, #fffbe6 0%, #fff8e1 100%)",
+                    border: "1px solid #ffe58f",
+                    borderRadius: 10,
+                    padding: "16px 20px",
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 12,
+                  }}
+                >
+                  <InfoCircleOutlined
+                    style={{ color: "#faad14", fontSize: 20 }}
+                  />
+                  <div>
+                    <Text strong style={{ color: "#ad6800", display: "block" }}>
+                      Facility Data Unavailable
+                    </Text>
+                    <Text style={{ color: "#ad6800", fontSize: 12 }}>
+                      SLF operational data is currently being processed. Details
+                      will appear here once available.
+                    </Text>
+                  </div>
+                </div>
+              )}
+            </Card>
+
+            {/* Disposal Data Form */}
+            <Card className="slf-section" style={{ marginTop: 20 }}>
+              <Tabs
+                activeKey={activeTab}
+                onChange={setActiveTab}
+                items={[
+                  {
+                    key: "basic-info",
+                    label: (
+                      <span>
+                        <InfoCircleOutlined />{" "}
+                        {isMobile ? "Basic Info" : "Basic Information"}
+                        <RequiredDot show={missingBasicInfo} />
+                      </span>
+                    ),
+                    children: (
+                      <Form
+                        form={companyForm}
+                        layout="vertical"
+                        requiredMark={false}
+                        onValuesChange={(changed) => {
+                          const vals = companyForm.getFieldsValue();
+                          if ("lguCompanyName" in changed) {
+                            entryForm.setFieldsValue({
+                              lguCompanyName: changed.lguCompanyName,
+                            });
+                          }
+                          if (
+                            "companyRegion" in changed ||
+                            "companyProvince" in changed ||
+                            "companyMunicipality" in changed ||
+                            "companyBarangay" in changed
+                          ) {
+                            const parts = [
+                              barangays.find(
+                                (b) => b.code === vals.companyBarangay,
+                              )?.name,
+                              municipalities.find(
+                                (m) => m.code === vals.companyMunicipality,
+                              )?.name,
+                              provinces.find(
+                                (p) => p.code === vals.companyProvince,
+                              )?.name,
+                              regions.find((r) => r.code === vals.companyRegion)
+                                ?.name,
+                            ].filter(Boolean);
+                            entryForm.setFieldsValue({
+                              address: parts.join(", "),
+                            });
+                          }
+                        }}
+                      >
+                        <Divider
+                          titlePlacement="left"
+                          className="slf-category-divider"
+                        >
+                          <EnvironmentOutlined /> Company Information
+                        </Divider>
+                        <Row gutter={[12, 0]}>
+                          <Col xs={24} sm={12}>
+                            <Form.Item
+                              name="lguCompanyName"
+                              label="Company Name"
+                              rules={[{ required: true, message: "Required" }]}
+                            >
+                              <Input placeholder="Enter company name" />
+                            </Form.Item>
+                          </Col>
+                        </Row>
+                        <Row gutter={[12, 0]}>
+                          <Col xs={24} sm={12} md={6}>
+                            <Form.Item
+                              name="companyRegion"
+                              label="Region"
+                              rules={[{ required: true, message: "Required" }]}
+                            >
+                              <Select
+                                placeholder="Select Region"
+                                showSearch
+                                optionFilterProp="children"
+                                onChange={(val) => fetchProvinces(val)}
+                              >
+                                {regions.map((r) => (
+                                  <Option key={r.code} value={r.code}>
+                                    {r.name}
+                                  </Option>
+                                ))}
+                              </Select>
+                            </Form.Item>
+                          </Col>
+                          <Col xs={24} sm={12} md={6}>
+                            <Form.Item
+                              name="companyProvince"
+                              label="Province"
+                              rules={[{ required: true, message: "Required" }]}
+                            >
+                              <Select
+                                placeholder="Select Province"
+                                showSearch
+                                optionFilterProp="children"
+                                onChange={(val) => fetchMunicipalities(val)}
+                                disabled={
+                                  provinces.length === 0 &&
+                                  loadingAddress !== "province"
+                                }
+                                loading={loadingAddress === "province"}
+                                notFoundContent={
+                                  loadingAddress === "province" ? (
+                                    <Spin size="small" />
+                                  ) : undefined
+                                }
+                              >
+                                {provinces.map((p) => (
+                                  <Option key={p.code} value={p.code}>
+                                    {p.name}
+                                  </Option>
+                                ))}
+                              </Select>
+                            </Form.Item>
+                          </Col>
+                          <Col xs={24} sm={12} md={6}>
+                            <Form.Item
+                              name="companyMunicipality"
+                              label="City/Municipality"
+                              rules={[{ required: true, message: "Required" }]}
+                            >
+                              <Select
+                                placeholder="Select City/Municipality"
+                                showSearch
+                                optionFilterProp="children"
+                                onChange={(val) => fetchBarangays(val)}
+                                disabled={
+                                  municipalities.length === 0 &&
+                                  loadingAddress !== "municipality"
+                                }
+                                loading={loadingAddress === "municipality"}
+                                notFoundContent={
+                                  loadingAddress === "municipality" ? (
+                                    <Spin size="small" />
+                                  ) : undefined
+                                }
+                              >
+                                {municipalities.map((m) => (
+                                  <Option key={m.code} value={m.code}>
+                                    {m.name}
+                                  </Option>
+                                ))}
+                              </Select>
+                            </Form.Item>
+                          </Col>
+                          <Col xs={24} sm={12} md={6}>
+                            <Form.Item name="companyBarangay" label="Barangay">
+                              <Select
+                                placeholder="Select Barangay"
+                                showSearch
+                                optionFilterProp="children"
+                                disabled={
+                                  barangays.length === 0 &&
+                                  loadingAddress !== "barangay"
+                                }
+                                loading={loadingAddress === "barangay"}
+                                notFoundContent={
+                                  loadingAddress === "barangay" ? (
+                                    <Spin size="small" />
+                                  ) : undefined
+                                }
+                              >
+                                {barangays.map((b) => (
+                                  <Option key={b.code} value={b.code}>
+                                    {b.name}
+                                  </Option>
+                                ))}
+                              </Select>
+                            </Form.Item>
+                          </Col>
+                        </Row>
+                      </Form>
+                    ),
+                  },
+                  {
+                    key: "baseline",
+                    label: (
+                      <span>
+                        <DatabaseOutlined />{" "}
+                        {isMobile ? "Baseline" : "Baseline Data"}
+                        <RequiredDot show={missingBaselineInfo} />
+                        {baselineSaved && (
+                          <CheckCircleOutlined
+                            style={{ color: "#52c41a", marginLeft: 6 }}
+                          />
+                        )}
+                      </span>
+                    ),
+                    children: (
+                      <>
+                        {baselineSaved && (
+                          <div
+                            style={{
+                              background: baselineUpdatePending
+                                ? "#e6f7ff"
+                                : "#fff7e6",
+                              border: `1px solid ${baselineUpdatePending ? "#91d5ff" : "#ffe58f"}`,
+                              borderRadius: 6,
+                              padding: "10px 14px",
+                              marginBottom: 16,
+                              display: "flex",
+                              alignItems: isMobile ? "flex-start" : "center",
+                              justifyContent: "space-between",
+                              flexWrap: "wrap",
+                              gap: 8,
+                            }}
+                          >
+                            <div>
+                              <InfoCircleOutlined
+                                style={{
+                                  color: baselineUpdatePending
+                                    ? "#1890ff"
+                                    : "#faad14",
+                                  marginRight: 8,
+                                }}
+                              />
+                              <Text
+                                style={{
+                                  color: baselineUpdatePending
+                                    ? "#096dd9"
+                                    : "#ad6800",
+                                }}
+                              >
+                                {baselineUpdatePending
+                                  ? "Your baseline update request is pending admin approval. Please wait for a response."
+                                  : "Baseline data is locked after your first submission. To request changes, click the button."}
+                              </Text>
+                            </div>
+                            <Space wrap>
+                              {!baselineUpdatePending && (
+                                <Button
+                                  type="primary"
+                                  size="small"
+                                  icon={<SendOutlined />}
+                                  loading={baselineUpdateLoading}
+                                  onClick={handleBaselineUpdateRequest}
+                                  style={{
+                                    background: "#fa8c16",
+                                    borderColor: "#fa8c16",
+                                  }}
+                                >
+                                  Request Update
+                                </Button>
+                              )}
+                              {baselineUpdatePending && (
+                                <Tag
+                                  color="processing"
+                                  icon={<ClockCircleOutlined />}
+                                >
+                                  Awaiting Approval
+                                </Tag>
+                              )}
+                              <Button
+                                size="small"
+                                icon={<ReloadOutlined />}
+                                loading={baselineRefreshLoading}
+                                onClick={refreshBaselineStatus}
+                              >
+                                Refresh
+                              </Button>
+                            </Space>
+                          </div>
+                        )}
+                        <Form
+                          form={baselineForm}
+                          layout="vertical"
+                          requiredMark={false}
+                          disabled={baselineSaved}
+                        >
+                          {/* ── Unit of Measurement ── */}
+                          <div
+                            style={{
+                              background:
+                                "linear-gradient(135deg, #e6f4ff 0%, #f0f5ff 100%)",
+                              border: "1px solid #91caff",
+                              borderRadius: 10,
+                              padding: "12px 16px",
+                              marginBottom: 16,
+                              display: "flex",
+                              alignItems: "center",
+                              gap: 12,
+                              flexWrap: "wrap",
+                            }}
+                          >
+                            <div
+                              style={{
+                                width: 32,
+                                height: 32,
+                                borderRadius: 8,
+                                background: "#1677ff",
+                                display: "flex",
+                                alignItems: "center",
+                                justifyContent: "center",
+                                flexShrink: 0,
+                              }}
+                            >
+                              <DatabaseOutlined
+                                style={{ color: "#fff", fontSize: 15 }}
+                              />
+                            </div>
+                            <div style={{ flex: 1, minWidth: 120 }}>
+                              <Text
+                                strong
+                                style={{
+                                  fontSize: 13,
+                                  color: "#003eb3",
+                                  display: "block",
+                                }}
+                              >
+                                Unit of Measurement
+                              </Text>
+                              <Text type="secondary" style={{ fontSize: 11 }}>
+                                Applies to all volume fields below
+                              </Text>
+                            </div>
+                            <Select
+                              value={baselineUnit || "m³"}
+                              onChange={handleBaselineUnitChange}
+                              disabled={baselineSaved}
+                              placeholder="Select unit of measurement"
+                              style={{ width: 200 }}
+                            >
+                              <Option value="m³">m³ (cubic meters)</Option>
+                              <Option value="tons">tons</Option>
+                            </Select>
+                          </div>
+
+                          {/* ── Volume of Waste Accepted ── */}
+                          <div
+                            style={{
+                              background: "#fff",
+                              border: "1px solid #e8e8e8",
+                              borderRadius: 10,
+                              overflow: "hidden",
+                              marginBottom: 14,
+                            }}
+                          >
+                            <div
+                              style={{
+                                display: "flex",
+                                alignItems: "center",
+                                gap: 8,
+                                padding: "10px 16px",
+                                background:
+                                  "linear-gradient(90deg, #1a3353 0%, #244b7a 100%)",
+                              }}
+                            >
+                              <BarChartOutlined
+                                style={{ color: "#fff", fontSize: 13 }}
+                              />
+                              <Text
+                                strong
+                                style={{ color: "#fff", fontSize: 13 }}
+                              >
+                                Volume of Waste Accepted
+                              </Text>
+                              <Text
+                                style={{
+                                  color: "rgba(255,255,255,0.55)",
+                                  fontSize: 11,
+                                  marginLeft: 2,
+                                }}
+                              >
+                                (since start of operation)
+                              </Text>
+                            </div>
+                            <div style={{ padding: "14px 16px 8px" }}>
+                              <Row gutter={[12, 0]}>
+                                <Col xs={24} sm={14} md={10}>
+                                  <Form.Item
+                                    name="totalVolumeAccepted"
+                                    label="Total Volume Accepted"
+                                    required
+                                    rules={[
+                                      { required: true, message: "Required" },
+                                    ]}
+                                  >
+                                    <InputNumber
+                                      placeholder="0.00"
+                                      style={{ width: "100%" }}
+                                      min={0}
+                                      step={0.01}
+                                      precision={2}
+                                      addonAfter={
+                                        baselineUnit === "m³" ? "m³" : "tons"
+                                      }
+                                      formatter={(v) =>
+                                        v
+                                          ? Number(v).toLocaleString(
+                                              undefined,
+                                              {
+                                                maximumFractionDigits: 2,
+                                              },
+                                            )
+                                          : ""
+                                      }
+                                      parser={(v) => v?.replace(/,/g, "")}
+                                    />
+                                  </Form.Item>
+                                </Col>
+                              </Row>
+                            </div>
+                          </div>
+
+                          <Collapse
+                            defaultActiveKey={["active", "closed", "haulers"]}
+                            bordered={false}
+                            style={{
+                              background: "transparent",
+                              marginBottom: 14,
+                            }}
+                            items={[
+                              {
+                                key: "active",
+                                label: (
+                                  <Space>
+                                    <CheckCircleOutlined
+                                      style={{ color: "#52c41a" }}
+                                    />
+                                    <Text strong style={{ color: "#135200" }}>
+                                      Active Cells
+                                      {activeCellEntries.length > 0
+                                        ? ` (${activeCellEntries.length})`
+                                        : ""}
+                                    </Text>
+                                    {activeCellEntries.length > 0 && (
+                                      <Text
+                                        type="secondary"
+                                        style={{ fontSize: 11 }}
+                                      >
+                                        Total:{" "}
+                                        {formatEntryVolumeSummary(
+                                          activeCellEntries,
+                                          baselineUnit || "m³",
+                                        )}
+                                      </Text>
+                                    )}
+                                  </Space>
+                                ),
+                                extra: !baselineSaved && (
+                                  <Button
+                                    size="small"
+                                    icon={<PlusOutlined />}
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      setEditingActiveCellKey(null);
+                                      setActiveCellDraft({
+                                        cellName: "",
+                                        wasteType: "Residual",
+                                        volume: null,
+                                        unit: baselineUnit || "m³",
+                                      });
+                                      setActiveCellModalOpen(true);
+                                    }}
+                                  >
+                                    Add Entry
+                                  </Button>
+                                ),
+                                children: (
+                                  <Table
+                                    dataSource={activeCellEntries}
+                                    rowKey="key"
+                                    size="small"
+                                    pagination={false}
+                                    style={{ marginBottom: 0 }}
+                                    locale={{
+                                      emptyText: (
                                         <Text
                                           type="secondary"
-                                          style={{
-                                            fontWeight: 400,
-                                            fontSize: 12,
-                                          }}
+                                          style={{ fontSize: 12 }}
                                         >
-                                          No Ticket No.
+                                          No entries yet.
+                                          {!baselineSaved &&
+                                            ' Click "Add Entry" above to add cell data.'}
                                         </Text>
-                                      )}
-                                    </Text>
-                                    {t.hauler && (
-                                      <Tag
-                                        color="blue"
-                                        style={{ margin: 0, fontSize: 11 }}
-                                      >
-                                        {t.hauler}
-                                      </Tag>
-                                    )}
-                                    {t.wasteType && (
-                                      <Tag
-                                        color={isHaz ? "red" : "green"}
-                                        style={{ margin: 0, fontSize: 11 }}
-                                      >
-                                        {t.wasteType}
-                                      </Tag>
-                                    )}
-                                    {t.actualVolume != null && (
-                                      <Tag
-                                        color="orange"
-                                        style={{
-                                          margin: 0,
-                                          fontSize: 11,
-                                          marginLeft: "auto",
-                                        }}
-                                      >
-                                        {t.actualVolume}{" "}
-                                        {t.actualVolumeUnit || "tons"}
-                                      </Tag>
-                                    )}
-                                  </div>
+                                      ),
+                                    }}
+                                    columns={[
+                                      {
+                                        title: "#",
+                                        key: "idx",
+                                        width: 42,
+                                        render: (_, __, i) => (
+                                          <Text
+                                            style={{
+                                              fontSize: 12,
+                                              color: "#8c8c8c",
+                                            }}
+                                          >
+                                            {i + 1}
+                                          </Text>
+                                        ),
+                                      },
+                                      {
+                                        title: "Cell Name",
+                                        dataIndex: "cellName",
+                                        key: "cellName",
+                                        render: (v) =>
+                                          v || (
+                                            <Text
+                                              type="secondary"
+                                              style={{ fontSize: 12 }}
+                                            >
+                                              Unnamed Cell
+                                            </Text>
+                                          ),
+                                      },
+                                      {
+                                        title: "Waste Type",
+                                        dataIndex: "wasteType",
+                                        key: "wasteType",
+                                        width: 160,
+                                        render: (v) => {
+                                          const isHaz = v
+                                            ?.toLowerCase()
+                                            .includes("hazardous");
+                                          const isInert = v === "Inert";
+                                          return (
+                                            <Tag
+                                              color={
+                                                isHaz
+                                                  ? "red"
+                                                  : isInert
+                                                    ? "blue"
+                                                    : "green"
+                                              }
+                                              style={{ fontSize: 11 }}
+                                            >
+                                              {v}
+                                            </Tag>
+                                          );
+                                        },
+                                      },
+                                      {
+                                        title: "Volume",
+                                        key: "vol",
+                                        width: 140,
+                                        render: (_, r) => (
+                                          <Text
+                                            strong
+                                            style={{ color: "#52c41a" }}
+                                          >
+                                            {r.volume != null
+                                              ? `${r.volume.toLocaleString()} ${normalizeUnit(r.unit || baselineUnit || "m³")}`
+                                              : "—"}
+                                          </Text>
+                                        ),
+                                      },
+                                      !baselineSaved && {
+                                        title: "",
+                                        key: "act",
+                                        width: 72,
+                                        render: (_, r) => (
+                                          <Space size={0}>
+                                            <Button
+                                              type="text"
+                                              size="small"
+                                              icon={<EditOutlined />}
+                                              style={{ color: "#1a3353" }}
+                                              onClick={() => {
+                                                setEditingActiveCellKey(r.key);
+                                                setActiveCellDraft({
+                                                  cellName: r.cellName,
+                                                  wasteType: r.wasteType,
+                                                  volume: r.volume,
+                                                  unit:
+                                                    r.unit ||
+                                                    baselineUnit ||
+                                                    "m³",
+                                                });
+                                                setActiveCellModalOpen(true);
+                                              }}
+                                            />
+                                            <Button
+                                              type="text"
+                                              danger
+                                              size="small"
+                                              icon={<DeleteOutlined />}
+                                              onClick={() =>
+                                                setActiveCellEntries((prev) =>
+                                                  prev.filter(
+                                                    (e) => e.key !== r.key,
+                                                  ),
+                                                )
+                                              }
+                                            />
+                                          </Space>
+                                        ),
+                                      },
+                                    ].filter(Boolean)}
+                                  />
                                 ),
-                                extra: (
-                                  <Space
-                                    size={0}
-                                    onClick={(e) => e.stopPropagation()}
+                              },
+                              {
+                                key: "closed",
+                                label: (
+                                  <Space>
+                                    <CloseCircleOutlined
+                                      style={{ color: "#722ed1" }}
+                                    />
+                                    <Text strong style={{ color: "#391085" }}>
+                                      Closed Cells
+                                      {closedCellEntries.length > 0
+                                        ? ` (${closedCellEntries.length})`
+                                        : ""}
+                                    </Text>
+                                    {closedCellEntries.length > 0 && (
+                                      <Text
+                                        type="secondary"
+                                        style={{ fontSize: 11 }}
+                                      >
+                                        Total:{" "}
+                                        {formatEntryVolumeSummary(
+                                          closedCellEntries,
+                                          baselineUnit || "m³",
+                                        )}
+                                      </Text>
+                                    )}
+                                  </Space>
+                                ),
+                                extra: !baselineSaved && (
+                                  <Button
+                                    size="small"
+                                    icon={<PlusOutlined />}
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      setEditingClosedCellKey(null);
+                                      setClosedCellDraft({
+                                        cellName: "",
+                                        wasteType: "Residual",
+                                        volume: null,
+                                        unit: baselineUnit || "m³",
+                                      });
+                                      setClosedCellModalOpen(true);
+                                    }}
                                   >
-                                    <Button
-                                      type="text"
-                                      size="small"
-                                      icon={<EditOutlined />}
-                                      onClick={() => openTruckModal(t)}
-                                      style={{ color: "#1a3353" }}
+                                    Add Entry
+                                  </Button>
+                                ),
+                                children: (
+                                  <Table
+                                    dataSource={closedCellEntries}
+                                    rowKey="key"
+                                    size="small"
+                                    pagination={false}
+                                    style={{ marginBottom: 0 }}
+                                    locale={{
+                                      emptyText: (
+                                        <Text
+                                          type="secondary"
+                                          style={{ fontSize: 12 }}
+                                        >
+                                          No entries yet.
+                                          {!baselineSaved &&
+                                            ' Click "Add Entry" above to add cell data.'}
+                                        </Text>
+                                      ),
+                                    }}
+                                    columns={[
+                                      {
+                                        title: "#",
+                                        key: "idx",
+                                        width: 42,
+                                        render: (_, __, i) => (
+                                          <Text
+                                            style={{
+                                              fontSize: 12,
+                                              color: "#8c8c8c",
+                                            }}
+                                          >
+                                            {i + 1}
+                                          </Text>
+                                        ),
+                                      },
+                                      {
+                                        title: "Cell Name",
+                                        dataIndex: "cellName",
+                                        key: "cellName",
+                                        render: (v) =>
+                                          v || (
+                                            <Text
+                                              type="secondary"
+                                              style={{ fontSize: 12 }}
+                                            >
+                                              Unnamed Cell
+                                            </Text>
+                                          ),
+                                      },
+                                      {
+                                        title: "Waste Type",
+                                        dataIndex: "wasteType",
+                                        key: "wasteType",
+                                        width: 160,
+                                        render: (v) => {
+                                          const isHaz = v
+                                            ?.toLowerCase()
+                                            .includes("hazardous");
+                                          const isInert = v === "Inert";
+                                          return (
+                                            <Tag
+                                              color={
+                                                isHaz
+                                                  ? "red"
+                                                  : isInert
+                                                    ? "purple"
+                                                    : "orange"
+                                              }
+                                              style={{ fontSize: 11 }}
+                                            >
+                                              {v}
+                                            </Tag>
+                                          );
+                                        },
+                                      },
+                                      {
+                                        title: "Volume",
+                                        key: "vol",
+                                        width: 140,
+                                        render: (_, r) => (
+                                          <Text
+                                            strong
+                                            style={{ color: "#722ed1" }}
+                                          >
+                                            {r.volume != null
+                                              ? `${r.volume.toLocaleString()} ${normalizeUnit(r.unit || baselineUnit || "m³")}`
+                                              : "—"}
+                                          </Text>
+                                        ),
+                                      },
+                                      !baselineSaved && {
+                                        title: "",
+                                        key: "act",
+                                        width: 72,
+                                        render: (_, r) => (
+                                          <Space size={0}>
+                                            <Button
+                                              type="text"
+                                              size="small"
+                                              icon={<EditOutlined />}
+                                              style={{ color: "#1a3353" }}
+                                              onClick={() => {
+                                                setEditingClosedCellKey(r.key);
+                                                setClosedCellDraft({
+                                                  cellName: r.cellName,
+                                                  wasteType: r.wasteType,
+                                                  volume: r.volume,
+                                                  unit:
+                                                    r.unit ||
+                                                    baselineUnit ||
+                                                    "m³",
+                                                });
+                                                setClosedCellModalOpen(true);
+                                              }}
+                                            />
+                                            <Button
+                                              type="text"
+                                              danger
+                                              size="small"
+                                              icon={<DeleteOutlined />}
+                                              onClick={() =>
+                                                setClosedCellEntries((prev) =>
+                                                  prev.filter(
+                                                    (e) => e.key !== r.key,
+                                                  ),
+                                                )
+                                              }
+                                            />
+                                          </Space>
+                                        ),
+                                      },
+                                    ].filter(Boolean)}
+                                  />
+                                ),
+                              },
+                              {
+                                key: "haulers",
+                                label: (
+                                  <Space>
+                                    <TeamOutlined
+                                      style={{ color: "#614700" }}
                                     />
-                                    <Button
-                                      type="text"
-                                      danger
-                                      size="small"
-                                      icon={<DeleteOutlined />}
-                                      onClick={() => removeTruck(t.key)}
-                                    />
+                                    <Text strong style={{ color: "#614700" }}>
+                                      Accredited Haulers
+                                      {haulers.length > 0
+                                        ? ` (${haulers.length})`
+                                        : ""}
+                                    </Text>
                                   </Space>
                                 ),
                                 children: (
-                                  <div style={{ padding: "4px 4px 8px" }}>
-                                    <Row gutter={[10, 8]}>
-                                      {t.lguCompanyName && (
-                                        <Col xs={24} sm={12} md={8}>
-                                          <div
-                                            style={{
-                                              background: "#f8faff",
-                                              borderRadius: 6,
-                                              padding: "6px 10px",
-                                            }}
+                                  <div>
+                                    <div
+                                      style={{
+                                        marginBottom: 12,
+                                        display: "flex",
+                                        gap: 8,
+                                        flexWrap: "wrap",
+                                      }}
+                                    >
+                                      <Button
+                                        type="primary"
+                                        icon={<PlusOutlined />}
+                                        className="slf-primary-btn"
+                                        onClick={() => openHaulerModal(null)}
+                                        disabled={baselineSaved}
+                                      >
+                                        Add Hauler
+                                      </Button>
+                                      <Button
+                                        icon={<UploadOutlined />}
+                                        onClick={() =>
+                                          openUploadGuide("hauler")
+                                        }
+                                        disabled={baselineSaved}
+                                      >
+                                        Upload Excel/CSV
+                                      </Button>
+                                    </div>
+                                    <Table
+                                      dataSource={haulers}
+                                      columns={haulerColumns}
+                                      rowKey="key"
+                                      size="small"
+                                      pagination={false}
+                                      scroll={{ x: 700 }}
+                                      locale={{
+                                        emptyText: (
+                                          <Text
+                                            type="secondary"
+                                            style={{ fontSize: 13 }}
                                           >
-                                            <div
-                                              style={{
-                                                fontSize: 10,
-                                                color: "#8c8c8c",
-                                                textTransform: "uppercase",
-                                                letterSpacing: 0.5,
-                                                fontWeight: 600,
-                                              }}
-                                            >
-                                              LGU / Company
-                                            </div>
-                                            <div
-                                              style={{
-                                                fontSize: 13,
-                                                fontWeight: 600,
-                                                color: "#262626",
-                                                marginTop: 2,
-                                              }}
-                                            >
-                                              {t.lguCompanyName}
-                                            </div>
-                                          </div>
-                                        </Col>
-                                      )}
-                                      {t.companyType && (
-                                        <Col xs={12} sm={6} md={4}>
-                                          <div
-                                            style={{
-                                              background: "#f8faff",
-                                              borderRadius: 6,
-                                              padding: "6px 10px",
-                                            }}
-                                          >
-                                            <div
-                                              style={{
-                                                fontSize: 10,
-                                                color: "#8c8c8c",
-                                                textTransform: "uppercase",
-                                                letterSpacing: 0.5,
-                                                fontWeight: 600,
-                                              }}
-                                            >
-                                              Type
-                                            </div>
-                                            <Tag
-                                              color={
-                                                t.companyType === "LGU"
-                                                  ? "blue"
-                                                  : "green"
-                                              }
-                                              style={{
-                                                margin: "4px 0 0",
-                                                fontWeight: 600,
-                                              }}
-                                            >
-                                              {t.companyType}
-                                            </Tag>
-                                          </div>
-                                        </Col>
-                                      )}
-                                      <Col xs={12} sm={6} md={4}>
+                                            No haulers added.
+                                          </Text>
+                                        ),
+                                      }}
+                                    />
+                                  </div>
+                                ),
+                              },
+                            ]}
+                          />
+
+                          {/* ── Save Baseline Update Button (visible when admin approved editing) ── */}
+                          {!baselineSaved && (
+                            <div
+                              style={{
+                                marginTop: 24,
+                                paddingTop: 16,
+                                borderTop: "1px solid #e8e8e8",
+                                display: "flex",
+                                justifyContent: "flex-end",
+                              }}
+                            >
+                              <Button
+                                type="primary"
+                                size="large"
+                                icon={<SaveOutlined />}
+                                loading={baselineSavingLoading}
+                                onClick={handleSaveBaselinePortal}
+                                style={{
+                                  background: "#1a3353",
+                                  borderColor: "#1a3353",
+                                  paddingLeft: 28,
+                                  paddingRight: 28,
+                                }}
+                              >
+                                Save Baseline Update
+                              </Button>
+                            </div>
+                          )}
+                        </Form>
+                      </>
+                    ),
+                  },
+                  {
+                    key: "disposal",
+                    label: (
+                      <span>
+                        <FileTextOutlined />{" "}
+                        {isMobile
+                          ? "Waste Generator Info"
+                          : "Waste Generator Information"}
+                        <RequiredDot
+                          show={
+                            missingDisposalInfo ||
+                            missingHazardousCodeTrucks.length > 0
+                          }
+                        />
+                      </span>
+                    ),
+                    children: (
+                      <Form
+                        form={entryForm}
+                        layout="vertical"
+                        requiredMark={false}
+                      >
+                        <Row gutter={[12, 0]}>
+                          <Col xs={24} sm={12} md={8}>
+                            <Form.Item
+                              name="dateOfDisposal"
+                              label={fl("dateOfDisposal", "Date of Disposal")}
+                              rules={[
+                                {
+                                  required: isRequired("dateOfDisposal", true),
+                                  message: "Required",
+                                },
+                              ]}
+                            >
+                              <DatePicker
+                                format="MM/DD/YYYY"
+                                style={{ width: "100%" }}
+                              />
+                            </Form.Item>
+                          </Col>
+                        </Row>
+
+                        {/* ── Transport & Disposal Information ── */}
+                        <div
+                          style={{
+                            background: "#fff",
+                            border: "1px solid #e8e8e8",
+                            borderRadius: 10,
+                            overflow: "hidden",
+                            marginTop: 4,
+                          }}
+                        >
+                          <div
+                            style={{
+                              display: "flex",
+                              alignItems: "center",
+                              gap: 8,
+                              padding: "10px 16px",
+                              background:
+                                "linear-gradient(90deg, #1a3353 0%, #244b7a 100%)",
+                              flexWrap: "wrap",
+                            }}
+                          >
+                            <div
+                              style={{
+                                width: 28,
+                                height: 28,
+                                borderRadius: 7,
+                                background: "rgba(255,255,255,0.15)",
+                                display: "flex",
+                                alignItems: "center",
+                                justifyContent: "center",
+                                flexShrink: 0,
+                              }}
+                            >
+                              <CarOutlined
+                                style={{ color: "#fff", fontSize: 14 }}
+                              />
+                            </div>
+                            <Text
+                              strong
+                              style={{ color: "#fff", fontSize: 13 }}
+                            >
+                              Transport &amp; Disposal Information
+                            </Text>
+                            <Badge
+                              count={trucks.length}
+                              showZero
+                              style={{
+                                backgroundColor:
+                                  trucks.length > 0
+                                    ? "rgba(255,255,255,0.25)"
+                                    : "rgba(255,255,255,0.12)",
+                                color: "#fff",
+                                border: "none",
+                                boxShadow: "none",
+                              }}
+                            />
+                            {trucks.length > 0 && (
+                              <Text
+                                style={{
+                                  color: "rgba(255,255,255,0.65)",
+                                  fontSize: 11,
+                                  marginLeft: 2,
+                                }}
+                              >
+                                · Total:{" "}
+                                <strong style={{ color: "#fff" }}>
+                                  {trucks
+                                    .reduce(
+                                      (s, t) => s + (t.actualVolume || 0),
+                                      0,
+                                    )
+                                    .toLocaleString()}
+                                </strong>{" "}
+                                {trucks[0]?.actualVolumeUnit || "tons"}
+                              </Text>
+                            )}
+                            <Space style={{ marginLeft: "auto" }} wrap>
+                              <Button
+                                size="small"
+                                type="primary"
+                                icon={<PlusOutlined />}
+                                className="slf-primary-btn"
+                                onClick={() => openTruckModal(null)}
+                              >
+                                Add Entry
+                              </Button>
+                              <Button
+                                size="small"
+                                icon={<UploadOutlined />}
+                                style={{
+                                  background: "rgba(255,255,255,0.12)",
+                                  border: "1px solid rgba(255,255,255,0.3)",
+                                  color: "#fff",
+                                }}
+                                onClick={() => openUploadGuide("truck")}
+                              >
+                                Upload Excel/CSV
+                              </Button>
+                            </Space>
+                          </div>
+                          <div
+                            style={{
+                              padding: trucks.length === 0 ? 0 : "10px 12px",
+                            }}
+                          >
+                            {trucks.length === 0 ? (
+                              <div
+                                style={{
+                                  textAlign: "center",
+                                  padding: "28px 16px",
+                                  background: "#fafafa",
+                                }}
+                              >
+                                <CarOutlined
+                                  style={{
+                                    fontSize: 28,
+                                    color: "#d9d9d9",
+                                    display: "block",
+                                    marginBottom: 8,
+                                  }}
+                                />
+                                <Text type="secondary" style={{ fontSize: 13 }}>
+                                  No entries added. Click &quot;Add Entry&quot;
+                                  to add transport data.
+                                </Text>
+                              </div>
+                            ) : (
+                              <Collapse
+                                bordered={false}
+                                style={{ background: "transparent" }}
+                                expandIconPlacement="start"
+                                items={trucks.map((t, i) => {
+                                  const vehs = t.vehicles || [];
+                                  const plateNos =
+                                    vehs
+                                      .map((v) => v.plateNumber)
+                                      .filter(Boolean)
+                                      .join(", ") ||
+                                    t.plateNumber ||
+                                    "—";
+                                  const capacities =
+                                    vehs.length > 0
+                                      ? vehs
+                                          .filter((v) => v.capacity != null)
+                                          .map(
+                                            (v) =>
+                                              `${v.capacity} ${(v.capacityUnit || "m³").replace("m3", "m³")}`,
+                                          )
+                                          .join(", ")
+                                      : t.truckCapacity != null
+                                        ? `${t.truckCapacity} ${(t.truckCapacityUnit || "m³").replace("m3", "m³")}`
+                                        : "—";
+                                  const isHaz = t.wasteType
+                                    ?.toLowerCase()
+                                    .includes("hazardous");
+                                  const allClients = vehs.flatMap(
+                                    (v) => v.selectedClients || [],
+                                  );
+                                  return {
+                                    key: t.key,
+                                    style: {
+                                      marginBottom: 6,
+                                      borderRadius: 8,
+                                      border: "1px solid #e8e8e8",
+                                      background: "#fff",
+                                      overflow: "hidden",
+                                    },
+                                    label: (
+                                      <div
+                                        style={{
+                                          display: "flex",
+                                          alignItems: "center",
+                                          gap: 8,
+                                          flexWrap: "wrap",
+                                          width: "100%",
+                                          paddingRight: 4,
+                                        }}
+                                      >
                                         <div
                                           style={{
-                                            background: "#f8faff",
-                                            borderRadius: 6,
-                                            padding: "6px 10px",
+                                            width: 22,
+                                            height: 22,
+                                            borderRadius: 5,
+                                            background: "#1a3353",
+                                            display: "flex",
+                                            alignItems: "center",
+                                            justifyContent: "center",
+                                            flexShrink: 0,
                                           }}
                                         >
-                                          <div
+                                          <Text
                                             style={{
+                                              color: "#fff",
                                               fontSize: 10,
-                                              color: "#8c8c8c",
-                                              textTransform: "uppercase",
-                                              letterSpacing: 0.5,
-                                              fontWeight: 600,
-                                            }}
-                                          >
-                                            Plate No.
-                                          </div>
-                                          <div
-                                            style={{
-                                              fontSize: 12,
-                                              fontWeight: 600,
-                                              color: "#262626",
-                                              marginTop: 2,
-                                            }}
-                                          >
-                                            {plateNos}
-                                          </div>
-                                        </div>
-                                      </Col>
-                                      <Col xs={12} sm={6} md={4}>
-                                        <div
-                                          style={{
-                                            background: "#f8faff",
-                                            borderRadius: 6,
-                                            padding: "6px 10px",
-                                          }}
-                                        >
-                                          <div
-                                            style={{
-                                              fontSize: 10,
-                                              color: "#8c8c8c",
-                                              textTransform: "uppercase",
-                                              letterSpacing: 0.5,
-                                              fontWeight: 600,
-                                            }}
-                                          >
-                                            Capacity
-                                          </div>
-                                          <div
-                                            style={{
-                                              fontSize: 12,
-                                              fontWeight: 600,
-                                              color: "#262626",
-                                              marginTop: 2,
-                                            }}
-                                          >
-                                            {capacities}
-                                          </div>
-                                        </div>
-                                      </Col>
-                                      <Col xs={12} sm={6} md={4}>
-                                        <div
-                                          style={{
-                                            background: "#fff7e6",
-                                            borderRadius: 6,
-                                            padding: "6px 10px",
-                                            border: "1px solid #ffe7ba",
-                                          }}
-                                        >
-                                          <div
-                                            style={{
-                                              fontSize: 10,
-                                              color: "#8c8c8c",
-                                              textTransform: "uppercase",
-                                              letterSpacing: 0.5,
-                                              fontWeight: 600,
-                                            }}
-                                          >
-                                            Actual Volume
-                                          </div>
-                                          <div
-                                            style={{
-                                              fontSize: 14,
                                               fontWeight: 700,
-                                              color: "#fa8c16",
-                                              marginTop: 2,
                                             }}
                                           >
-                                            {t.actualVolume != null
-                                              ? `${t.actualVolume} ${t.actualVolumeUnit || "tons"}`
-                                              : "—"}
-                                          </div>
+                                            {i + 1}
+                                          </Text>
                                         </div>
-                                      </Col>
-                                      {isHaz &&
-                                        t.hazWasteCode &&
-                                        (Array.isArray(t.hazWasteCode)
-                                          ? t.hazWasteCode
-                                          : [t.hazWasteCode]
-                                        ).length > 0 && (
-                                          <Col xs={24}>
+                                        <Text
+                                          strong
+                                          style={{
+                                            fontSize: 13,
+                                            color: "#1a3353",
+                                            flexShrink: 0,
+                                            maxWidth: 160,
+                                            overflow: "hidden",
+                                            textOverflow: "ellipsis",
+                                            whiteSpace: "nowrap",
+                                          }}
+                                        >
+                                          {t.disposalTicketNo || (
+                                            <Text
+                                              type="secondary"
+                                              style={{
+                                                fontWeight: 400,
+                                                fontSize: 12,
+                                              }}
+                                            >
+                                              No Ticket No.
+                                            </Text>
+                                          )}
+                                        </Text>
+                                        {t.hauler && (
+                                          <Tag
+                                            color="blue"
+                                            style={{ margin: 0, fontSize: 11 }}
+                                          >
+                                            {t.hauler}
+                                          </Tag>
+                                        )}
+                                        {t.wasteType && (
+                                          <Tag
+                                            color={isHaz ? "red" : "green"}
+                                            style={{ margin: 0, fontSize: 11 }}
+                                          >
+                                            {t.wasteType}
+                                          </Tag>
+                                        )}
+                                        {t.actualVolume != null && (
+                                          <Tag
+                                            color="orange"
+                                            style={{
+                                              margin: 0,
+                                              fontSize: 11,
+                                              marginLeft: "auto",
+                                            }}
+                                          >
+                                            {t.actualVolume}{" "}
+                                            {t.actualVolumeUnit || "tons"}
+                                          </Tag>
+                                        )}
+                                      </div>
+                                    ),
+                                    extra: (
+                                      <Space
+                                        size={0}
+                                        onClick={(e) => e.stopPropagation()}
+                                      >
+                                        <Button
+                                          type="text"
+                                          size="small"
+                                          icon={<EditOutlined />}
+                                          onClick={() => openTruckModal(t)}
+                                          style={{ color: "#1a3353" }}
+                                        />
+                                        <Button
+                                          type="text"
+                                          danger
+                                          size="small"
+                                          icon={<DeleteOutlined />}
+                                          onClick={() => removeTruck(t.key)}
+                                        />
+                                      </Space>
+                                    ),
+                                    children: (
+                                      <div style={{ padding: "4px 4px 8px" }}>
+                                        <Row gutter={[10, 8]}>
+                                          {t.lguCompanyName && (
+                                            <Col xs={24} sm={12} md={8}>
+                                              <div
+                                                style={{
+                                                  background: "#f8faff",
+                                                  borderRadius: 6,
+                                                  padding: "6px 10px",
+                                                }}
+                                              >
+                                                <div
+                                                  style={{
+                                                    fontSize: 10,
+                                                    color: "#8c8c8c",
+                                                    textTransform: "uppercase",
+                                                    letterSpacing: 0.5,
+                                                    fontWeight: 600,
+                                                  }}
+                                                >
+                                                  LGU / Company
+                                                </div>
+                                                <div
+                                                  style={{
+                                                    fontSize: 13,
+                                                    fontWeight: 600,
+                                                    color: "#262626",
+                                                    marginTop: 2,
+                                                  }}
+                                                >
+                                                  {t.lguCompanyName}
+                                                </div>
+                                              </div>
+                                            </Col>
+                                          )}
+                                          {t.companyType && (
+                                            <Col xs={12} sm={6} md={4}>
+                                              <div
+                                                style={{
+                                                  background: "#f8faff",
+                                                  borderRadius: 6,
+                                                  padding: "6px 10px",
+                                                }}
+                                              >
+                                                <div
+                                                  style={{
+                                                    fontSize: 10,
+                                                    color: "#8c8c8c",
+                                                    textTransform: "uppercase",
+                                                    letterSpacing: 0.5,
+                                                    fontWeight: 600,
+                                                  }}
+                                                >
+                                                  Type
+                                                </div>
+                                                <Tag
+                                                  color={
+                                                    t.companyType === "LGU"
+                                                      ? "blue"
+                                                      : "green"
+                                                  }
+                                                  style={{
+                                                    margin: "4px 0 0",
+                                                    fontWeight: 600,
+                                                  }}
+                                                >
+                                                  {t.companyType}
+                                                </Tag>
+                                              </div>
+                                            </Col>
+                                          )}
+                                          <Col xs={12} sm={6} md={4}>
                                             <div
                                               style={{
-                                                background: "#fff1f0",
+                                                background: "#f8faff",
                                                 borderRadius: 6,
                                                 padding: "6px 10px",
-                                                border: "1px solid #ffa39e",
                                               }}
                                             >
                                               <div
@@ -5902,96 +6439,276 @@ export default function SLFPortal() {
                                                   textTransform: "uppercase",
                                                   letterSpacing: 0.5,
                                                   fontWeight: 600,
-                                                  marginBottom: 4,
                                                 }}
                                               >
-                                                Haz. Waste Code(s)
+                                                Plate No.
                                               </div>
-                                              {(Array.isArray(t.hazWasteCode)
-                                                ? t.hazWasteCode
-                                                : [t.hazWasteCode]
-                                              ).map((code) => (
-                                                <Tag
-                                                  key={code}
-                                                  color="red"
-                                                  style={{
-                                                    fontSize: 11,
-                                                    marginBottom: 2,
-                                                  }}
-                                                >
-                                                  {code}
-                                                </Tag>
-                                              ))}
+                                              <div
+                                                style={{
+                                                  fontSize: 12,
+                                                  fontWeight: 600,
+                                                  color: "#262626",
+                                                  marginTop: 2,
+                                                }}
+                                              >
+                                                {plateNos}
+                                              </div>
                                             </div>
                                           </Col>
-                                        )}
-                                      {allClients.length > 0 && (
-                                        <Col xs={24}>
-                                          <div
-                                            style={{
-                                              background: "#f6ffed",
-                                              borderRadius: 6,
-                                              padding: "6px 10px",
-                                              border: "1px solid #b7eb8f",
-                                            }}
-                                          >
+                                          <Col xs={12} sm={6} md={4}>
                                             <div
                                               style={{
-                                                fontSize: 10,
-                                                color: "#8c8c8c",
-                                                textTransform: "uppercase",
-                                                letterSpacing: 0.5,
-                                                fontWeight: 600,
-                                                marginBottom: 4,
+                                                background: "#f8faff",
+                                                borderRadius: 6,
+                                                padding: "6px 10px",
                                               }}
                                             >
-                                              Clients ({allClients.length})
+                                              <div
+                                                style={{
+                                                  fontSize: 10,
+                                                  color: "#8c8c8c",
+                                                  textTransform: "uppercase",
+                                                  letterSpacing: 0.5,
+                                                  fontWeight: 600,
+                                                }}
+                                              >
+                                                Capacity
+                                              </div>
+                                              <div
+                                                style={{
+                                                  fontSize: 12,
+                                                  fontWeight: 600,
+                                                  color: "#262626",
+                                                  marginTop: 2,
+                                                }}
+                                              >
+                                                {capacities}
+                                              </div>
                                             </div>
-                                            {allClients.map((c, ci) => {
-                                              const name =
-                                                typeof c === "string"
-                                                  ? c
-                                                  : c.clientName;
-                                              const type =
-                                                typeof c === "string"
-                                                  ? null
-                                                  : c.clientType;
-                                              return (
-                                                <Tag
-                                                  key={ci}
-                                                  color={
-                                                    type === "LGU"
-                                                      ? "blue"
-                                                      : "green"
-                                                  }
+                                          </Col>
+                                          <Col xs={12} sm={6} md={4}>
+                                            <div
+                                              style={{
+                                                background: "#fff7e6",
+                                                borderRadius: 6,
+                                                padding: "6px 10px",
+                                                border: "1px solid #ffe7ba",
+                                              }}
+                                            >
+                                              <div
+                                                style={{
+                                                  fontSize: 10,
+                                                  color: "#8c8c8c",
+                                                  textTransform: "uppercase",
+                                                  letterSpacing: 0.5,
+                                                  fontWeight: 600,
+                                                }}
+                                              >
+                                                Actual Volume
+                                              </div>
+                                              <div
+                                                style={{
+                                                  fontSize: 14,
+                                                  fontWeight: 700,
+                                                  color: "#fa8c16",
+                                                  marginTop: 2,
+                                                }}
+                                              >
+                                                {t.actualVolume != null
+                                                  ? `${t.actualVolume} ${t.actualVolumeUnit || "tons"}`
+                                                  : "—"}
+                                              </div>
+                                            </div>
+                                          </Col>
+                                          {isHaz &&
+                                            t.hazWasteCode &&
+                                            (Array.isArray(t.hazWasteCode)
+                                              ? t.hazWasteCode
+                                              : [t.hazWasteCode]
+                                            ).length > 0 && (
+                                              <Col xs={24}>
+                                                <div
                                                   style={{
-                                                    fontSize: 11,
-                                                    marginBottom: 2,
+                                                    background: "#fff1f0",
+                                                    borderRadius: 6,
+                                                    padding: "6px 10px",
+                                                    border: "1px solid #ffa39e",
                                                   }}
                                                 >
-                                                  {name}
-                                                  {type ? ` (${type})` : ""}
-                                                </Tag>
-                                              );
-                                            })}
-                                          </div>
-                                        </Col>
-                                      )}
-                                    </Row>
-                                  </div>
-                                ),
-                              };
-                            })}
-                          />
-                        )}
-                      </div>
-                    </div>
-                  </Form>
-                ),
-              },
-            ]}
-          />
-        </Card>
+                                                  <div
+                                                    style={{
+                                                      fontSize: 10,
+                                                      color: "#8c8c8c",
+                                                      textTransform:
+                                                        "uppercase",
+                                                      letterSpacing: 0.5,
+                                                      fontWeight: 600,
+                                                      marginBottom: 4,
+                                                    }}
+                                                  >
+                                                    Haz. Waste Code(s)
+                                                  </div>
+                                                  {(Array.isArray(
+                                                    t.hazWasteCode,
+                                                  )
+                                                    ? t.hazWasteCode
+                                                    : [t.hazWasteCode]
+                                                  ).map((code) => (
+                                                    <Tag
+                                                      key={code}
+                                                      color="red"
+                                                      style={{
+                                                        fontSize: 11,
+                                                        marginBottom: 2,
+                                                      }}
+                                                    >
+                                                      {code}
+                                                    </Tag>
+                                                  ))}
+                                                </div>
+                                              </Col>
+                                            )}
+                                          {allClients.length > 0 && (
+                                            <Col xs={24}>
+                                              <div
+                                                style={{
+                                                  background: "#f6ffed",
+                                                  borderRadius: 6,
+                                                  padding: "6px 10px",
+                                                  border: "1px solid #b7eb8f",
+                                                }}
+                                              >
+                                                <div
+                                                  style={{
+                                                    fontSize: 10,
+                                                    color: "#8c8c8c",
+                                                    textTransform: "uppercase",
+                                                    letterSpacing: 0.5,
+                                                    fontWeight: 600,
+                                                    marginBottom: 4,
+                                                  }}
+                                                >
+                                                  Clients ({allClients.length})
+                                                </div>
+                                                {allClients.map((c, ci) => {
+                                                  const name =
+                                                    typeof c === "string"
+                                                      ? c
+                                                      : c.clientName;
+                                                  const type =
+                                                    typeof c === "string"
+                                                      ? null
+                                                      : c.clientType;
+                                                  return (
+                                                    <Tag
+                                                      key={ci}
+                                                      color={
+                                                        type === "LGU"
+                                                          ? "blue"
+                                                          : "green"
+                                                      }
+                                                      style={{
+                                                        fontSize: 11,
+                                                        marginBottom: 2,
+                                                      }}
+                                                    >
+                                                      {name}
+                                                      {type ? ` (${type})` : ""}
+                                                    </Tag>
+                                                  );
+                                                })}
+                                              </div>
+                                            </Col>
+                                          )}
+                                        </Row>
+                                      </div>
+                                    ),
+                                  };
+                                })}
+                              />
+                            )}
+                          </div>
+                        </div>
+                      </Form>
+                    ),
+                  },
+                ]}
+              />
+            </Card>
+          </Col>
+          <Col xs={24} xl={5}>
+            <Card
+              className="slf-section"
+              title={
+                <Space>
+                  <QuestionCircleOutlined style={{ color: "#1a3353" }} />
+                  <Text strong style={{ color: "#1a3353" }}>
+                    Encoding Guide
+                  </Text>
+                </Space>
+              }
+              style={{ position: isMobile ? "static" : "sticky", top: 76 }}
+            >
+              <Collapse
+                size="small"
+                bordered={false}
+                style={{ background: "transparent" }}
+                items={[
+                  {
+                    key: "baseline",
+                    label: (
+                      <Text strong style={{ fontSize: 12 }}>
+                        Baseline Data
+                      </Text>
+                    ),
+                    children: renderGuideItems(
+                      [
+                        "Select the unit that matches your encoded volume before adding cell entries.",
+                        "Encode total volume accepted since start of operation.",
+                        "Add active and closed cell entries with the correct waste type and unit.",
+                        "Add accredited haulers and vehicle/client details before the first submission.",
+                      ],
+                      "#1677ff",
+                    ),
+                  },
+                  {
+                    key: "generator",
+                    label: (
+                      <Text strong style={{ fontSize: 12 }}>
+                        Waste Generator Info
+                      </Text>
+                    ),
+                    children: renderGuideItems(
+                      [
+                        "Choose the disposal date and add each transport entry.",
+                        "Use Treated Hazardous Waste only for treated hazardous loads.",
+                        "Hazardous Waste Code is required for every Treated Hazardous Waste entry.",
+                        "Review truck plate, hauler, capacity, actual volume, and unit before submitting.",
+                      ],
+                      "#52c41a",
+                    ),
+                  },
+                  {
+                    key: "notes",
+                    label: (
+                      <Text strong style={{ fontSize: 12 }}>
+                        Other Notes
+                      </Text>
+                    ),
+                    children: renderGuideItems(
+                      [
+                        "Baseline data locks after submission unless an admin approves an update request.",
+                        "Use My Requests to track update and edit requests.",
+                        "Use Submission History to review submitted entries and status changes.",
+                      ],
+                      "#fa8c16",
+                    ),
+                  },
+                ]}
+              />
+            </Card>
+          </Col>
+        </Row>
       </div>
     );
   };
@@ -6014,7 +6731,7 @@ export default function SLFPortal() {
   };
 
   const renderRequests = () => (
-    <div style={{ maxWidth: 1400, margin: "0 auto" }}>
+    <div style={{ maxWidth: 1680, margin: "0 auto" }}>
       <Card
         className="slf-section"
         title={
@@ -6120,7 +6837,7 @@ export default function SLFPortal() {
 
   // ── History Content ──
   const renderHistory = () => (
-    <div style={{ maxWidth: 1400, margin: "0 auto" }}>
+    <div style={{ maxWidth: 1680, margin: "0 auto" }}>
       <Card
         className="slf-section"
         title={
@@ -6252,7 +6969,9 @@ export default function SLFPortal() {
             >
               <Badge count={portalNotificationCounts.total} size="small">
                 <Button
-                  type={portalNotificationCounts.total > 0 ? "primary" : "default"}
+                  type={
+                    portalNotificationCounts.total > 0 ? "primary" : "default"
+                  }
                   shape="circle"
                   icon={<BellOutlined />}
                   aria-label="Open notifications"
@@ -6262,7 +6981,11 @@ export default function SLFPortal() {
             <Tooltip title="Messages from admin">
               <Badge count={portalNotificationCounts.messages} size="small">
                 <Button
-                  type={portalNotificationCounts.messages > 0 ? "primary" : "default"}
+                  type={
+                    portalNotificationCounts.messages > 0
+                      ? "primary"
+                      : "default"
+                  }
                   shape="circle"
                   icon={<MessageOutlined />}
                   onClick={() => {
@@ -6347,51 +7070,60 @@ export default function SLFPortal() {
           {portalAnnouncement && !announcementDismissed && (
             <Collapse
               size="small"
-              defaultActiveKey={["announcement"]}
               style={{
                 marginBottom: 12,
                 borderRadius: 8,
               }}
-              items={[{
-                key: "announcement",
-                label: (
-                  <Space wrap>
-                    <Text strong>
-                      {portalAnnouncement.portalAnnouncementTitle || "SLF Portal Announcement"}
-                    </Text>
-                    <Tag color="blue">Announcement</Tag>
-                  </Space>
-                ),
-                extra: portalAnnouncement.portalAnnouncementDismissible !== false ? (
-                  <Button
-                    size="small"
-                    type="text"
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      setAnnouncementDismissed(true);
-                    }}
-                  >
-                    Dismiss
-                  </Button>
-                ) : null,
-                children: (
-                  <Alert
-                    type={portalAnnouncement.portalAnnouncementType || "info"}
-                    showIcon
-                    message={null}
-                    description={
-                      <Space direction="vertical" size={8} style={{ width: "100%" }}>
-                        <div style={{ whiteSpace: "pre-wrap" }}>
-                          {portalAnnouncement.portalAnnouncementMessage}
-                        </div>
-                      </Space>
-                    }
-                  />
-                ),
-              }]}
+              items={[
+                {
+                  key: "announcement",
+                  label: (
+                    <Space wrap>
+                      <Text strong>
+                        {portalAnnouncement.portalAnnouncementTitle ||
+                          "SLF Portal Announcement"}
+                      </Text>
+                      <Tag color="blue">Announcement</Tag>
+                    </Space>
+                  ),
+                  extra:
+                    portalAnnouncement.portalAnnouncementDismissible !==
+                    false ? (
+                      <Button
+                        size="small"
+                        type="text"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          setAnnouncementDismissed(true);
+                        }}
+                      >
+                        Dismiss
+                      </Button>
+                    ) : null,
+                  children: (
+                    <Alert
+                      type={portalAnnouncement.portalAnnouncementType || "info"}
+                      showIcon
+                      message={null}
+                      description={
+                        <Space
+                          direction="vertical"
+                          size={8}
+                          style={{ width: "100%" }}
+                        >
+                          <div style={{ whiteSpace: "pre-wrap" }}>
+                            {portalAnnouncement.portalAnnouncementMessage}
+                          </div>
+                        </Space>
+                      }
+                    />
+                  ),
+                },
+              ]}
             />
           )}
-          {(portalNotificationCounts.messages > 0 || portalNotificationCounts.support > 0) && (
+          {(portalNotificationCounts.messages > 0 ||
+            portalNotificationCounts.support > 0) && (
             <Card
               size="small"
               style={{
@@ -6408,14 +7140,16 @@ export default function SLFPortal() {
               >
                 <Space>
                   <BellOutlined style={{ color: "#1677ff" }} />
-                  <Text strong>
-                    You have unread admin updates
-                  </Text>
+                  <Text strong>You have unread admin updates</Text>
                   {portalNotificationCounts.messages > 0 && (
-                    <Tag color="blue">{portalNotificationCounts.messages} message(s)</Tag>
+                    <Tag color="blue">
+                      {portalNotificationCounts.messages} message(s)
+                    </Tag>
                   )}
                   {portalNotificationCounts.support > 0 && (
-                    <Tag color="purple">{portalNotificationCounts.support} ticket update(s)</Tag>
+                    <Tag color="purple">
+                      {portalNotificationCounts.support} ticket update(s)
+                    </Tag>
                   )}
                 </Space>
                 <Space>
@@ -6464,189 +7198,191 @@ export default function SLFPortal() {
           </Text>
         </div>
 
-      <SLFPortalModals
-        entryForm={entryForm}
-        baselineForm={baselineForm}
-        companyForm={companyForm}
-        haulerModalOpen={haulerModalOpen}
-        setHaulerModalOpen={setHaulerModalOpen}
-        haulerDraft={haulerDraft}
-        setHaulerDraft={setHaulerDraft}
-        editingHaulerKey={editingHaulerKey}
-        setEditingHaulerKey={setEditingHaulerKey}
-        haulerErrors={haulerErrors}
-        setHaulerErrors={setHaulerErrors}
-        haulerProvinces={haulerProvinces}
-        setHaulerProvinces={setHaulerProvinces}
-        haulerCities={haulerCities}
-        setHaulerCities={setHaulerCities}
-        haulerBarangayList={haulerBarangayList}
-        setHaulerBarangayList={setHaulerBarangayList}
-        loadingHaulerAddress={loadingHaulerAddress}
-        setLoadingHaulerAddress={setLoadingHaulerAddress}
-        fetchHaulerProvinces={fetchHaulerProvinces}
-        fetchHaulerCities={fetchHaulerCities}
-        fetchHaulerBarangays={fetchHaulerBarangays}
-        clientModalOpen={clientModalOpen}
-        setClientModalOpen={setClientModalOpen}
-        editingClientKey={editingClientKey}
-        setEditingClientKey={setEditingClientKey}
-        clientDraft={clientDraft}
-        setClientDraft={setClientDraft}
-        clientProvinces={clientProvinces}
-        setClientProvinces={setClientProvinces}
-        clientMunicipalities={clientMunicipalities}
-        setClientMunicipalities={setClientMunicipalities}
-        loadingClientAddress={loadingClientAddress}
-        setLoadingClientAddress={setLoadingClientAddress}
-        truckModalOpen={truckModalOpen}
-        setTruckModalOpen={setTruckModalOpen}
-        truckDraft={truckDraft}
-        setTruckDraft={setTruckDraft}
-        editingTruckKey={editingTruckKey}
-        setEditingTruckKey={setEditingTruckKey}
-        truckErrors={truckErrors}
-        setTruckErrors={setTruckErrors}
-        historyDetailModal={historyDetailModal}
-        setHistoryDetailModal={setHistoryDetailModal}
-        reviewModalOpen={reviewModalOpen}
-        setReviewModalOpen={setReviewModalOpen}
-        revertModalOpen={revertModalOpen}
-        setRevertModalOpen={setRevertModalOpen}
-        revertRecord={revertRecord}
-        setRevertRecord={setRevertRecord}
-        revertReason={revertReason}
-        setRevertReason={setRevertReason}
-        revertLoading={revertLoading}
-        loading={loading}
-        profileModalOpen={profileModalOpen}
-        setProfileModalOpen={setProfileModalOpen}
-        supportDrawerOpen={supportDrawerOpen}
-        setSupportDrawerOpen={setSupportDrawerOpen}
-        messageDrawerOpen={messageDrawerOpen}
-        setMessageDrawerOpen={setMessageDrawerOpen}
-        supportTab={supportTab}
-        setSupportTab={setSupportTab}
-        supportTickets={supportTickets}
-        portalNotificationCounts={portalNotificationCounts}
-        markPortalNotificationsRead={markPortalNotificationsRead}
-        supportLoading={supportLoading}
-        supportSubmitting={supportSubmitting}
-        fetchSupportTickets={fetchSupportTickets}
-        faqActiveKey={faqActiveKey}
-        setFaqActiveKey={setFaqActiveKey}
-        supportDetailModal={supportDetailModal}
-        setSupportDetailModal={setSupportDetailModal}
-        supportReplyText={supportReplyText}
-        setSupportReplyText={setSupportReplyText}
-        uploadModalOpen={uploadModalOpen}
-        setUploadModalOpen={setUploadModalOpen}
-        uploadType={uploadType}
-        setUploadType={setUploadType}
-        uploadGuideOpen={uploadGuideOpen}
-        setUploadGuideOpen={setUploadGuideOpen}
-        uploadGuideType={uploadGuideType}
-        setUploadGuideType={setUploadGuideType}
-        uploadPreviewData={uploadPreviewData}
-        uploadPreviewColumns={uploadPreviewColumns}
-        uploadMissingColumns={uploadMissingColumns}
-        setUploadPreviewData={setUploadPreviewData}
-        setUploadPreviewColumns={setUploadPreviewColumns}
-        setUploadMissingColumns={setUploadMissingColumns}
-        activeCellModalOpen={activeCellModalOpen}
-        setActiveCellModalOpen={setActiveCellModalOpen}
-        activeCellDraft={activeCellDraft}
-        setActiveCellDraft={setActiveCellDraft}
-        editingActiveCellKey={editingActiveCellKey}
-        setEditingActiveCellKey={setEditingActiveCellKey}
-        closedCellModalOpen={closedCellModalOpen}
-        setClosedCellModalOpen={setClosedCellModalOpen}
-        closedCellDraft={closedCellDraft}
-        setClosedCellDraft={setClosedCellDraft}
-        editingClosedCellKey={editingClosedCellKey}
-        setEditingClosedCellKey={setEditingClosedCellKey}
-        haulerDeleteModal={haulerDeleteModal}
-        setHaulerDeleteModal={setHaulerDeleteModal}
-        haulerDeleteReason={haulerDeleteReason}
-        setHaulerDeleteReason={setHaulerDeleteReason}
-        haulerDeleteFile={haulerDeleteFile}
-        setHaulerDeleteFile={setHaulerDeleteFile}
-        haulerDeleteLoading={haulerDeleteLoading}
-        setHaulerDeleteLoading={setHaulerDeleteLoading}
-        leachateModalOpen={leachateModalOpen}
-        setLeachateModalOpen={setLeachateModalOpen}
-        leachateDetails={leachateDetails}
-        setLeachateDetails={setLeachateDetails}
-        gasVentModalOpen={gasVentModalOpen}
-        setGasVentModalOpen={setGasVentModalOpen}
-        gasVentDetails={gasVentDetails}
-        setGasVentDetails={setGasVentDetails}
-        trashSlideModalOpen={trashSlideModalOpen}
-        setTrashSlideModalOpen={setTrashSlideModalOpen}
-        trashSlideDetails={trashSlideDetails}
-        setTrashSlideDetails={setTrashSlideDetails}
-        firePrevModalOpen={firePrevModalOpen}
-        setFirePrevModalOpen={setFirePrevModalOpen}
-        firePrevDetails={firePrevDetails}
-        setFirePrevDetails={setFirePrevDetails}
-        facilityMgmtSaving={facilityMgmtSaving}
-        wasteReceivedModalOpen={wasteReceivedModalOpen}
-        setWasteReceivedModalOpen={setWasteReceivedModalOpen}
-        wasteReceivedData={wasteReceivedData}
-        wasteReceivedLoading={wasteReceivedLoading}
-        activeCellEntries={activeCellEntries}
-        activeCellOptions={activeCellOptions}
-        closedCellEntries={closedCellEntries}
-        haulers={haulers}
-        trucks={trucks}
-        baselineUnit={baselineUnit}
-        baselineSaved={baselineSaved}
-        submissions={submissions}
-        portalUser={portalUser}
-        activeSlfId={activeSlfId}
-        activeSlfName={activeSlfName}
-        slfInfo={slfInfo}
-        regions={regions}
-        provinces={provinces}
-        municipalities={municipalities}
-        barangays={barangays}
-        extraTransportFields={extraTransportFields}
-        acceptsHazardousWaste={acceptsHazardousWaste}
-        hazWasteCodes={hazWasteCodes}
-        isMobile={isMobile}
-        handleSaveHauler={handleSaveHauler}
-        updateHaulerDraft={updateHaulerDraft}
-        updateHaulerDraftAddr={updateHaulerDraftAddr}
-        openHaulerModal={openHaulerModal}
-        handleSaveClient={handleSaveClient}
-        handleSaveTruck={handleSaveTruck}
-        updateTruckDraft={updateTruckDraft}
-        updateVehicle={updateVehicle}
-        openRevertModal={openRevertModal}
-        handleRequestRevert={handleRequestRevert}
-        handleConfirmSubmit={handleConfirmSubmit}
-        handleReviewOpen={handleReviewOpen}
-        handleSubmitTicket={handleSubmitTicket}
-        handleSupportReply={handleSupportReply}
-        handleSaveActiveCellEntry={handleSaveActiveCellEntry}
-        handleSaveClosedCellEntry={handleSaveClosedCellEntry}
-        handleConfirmUpload={handleConfirmUpload}
-        proceedToFilePicker={proceedToFilePicker}
-        updateUploadCell={updateUploadCell}
-        handleOpenWasteReceived={handleOpenWasteReceived}
-        handleSaveFacilityDetails={handleSaveFacilityDetails}
-        handleEditReverted={handleEditReverted}
-        handleResubmitReverted={handleResubmitReverted}
-        renderStatusTag={renderStatusTag}
-        fl={fl}
-        isRequired={isRequired}
-        opts={opts}
-        fieldErr={fieldErr}
-        resubmitComment={resubmitComment}
-        setResubmitComment={setResubmitComment}
-        editingRevertedId={editingRevertedId}
-        setEditingRevertedId={setEditingRevertedId}
-      />
+        <SLFPortalModals
+          entryForm={entryForm}
+          baselineForm={baselineForm}
+          companyForm={companyForm}
+          haulerModalOpen={haulerModalOpen}
+          setHaulerModalOpen={setHaulerModalOpen}
+          haulerDraft={haulerDraft}
+          setHaulerDraft={setHaulerDraft}
+          editingHaulerKey={editingHaulerKey}
+          setEditingHaulerKey={setEditingHaulerKey}
+          haulerErrors={haulerErrors}
+          setHaulerErrors={setHaulerErrors}
+          haulerProvinces={haulerProvinces}
+          setHaulerProvinces={setHaulerProvinces}
+          haulerCities={haulerCities}
+          setHaulerCities={setHaulerCities}
+          haulerBarangayList={haulerBarangayList}
+          setHaulerBarangayList={setHaulerBarangayList}
+          loadingHaulerAddress={loadingHaulerAddress}
+          setLoadingHaulerAddress={setLoadingHaulerAddress}
+          fetchHaulerProvinces={fetchHaulerProvinces}
+          fetchHaulerCities={fetchHaulerCities}
+          fetchHaulerBarangays={fetchHaulerBarangays}
+          clientModalOpen={clientModalOpen}
+          setClientModalOpen={setClientModalOpen}
+          editingClientKey={editingClientKey}
+          setEditingClientKey={setEditingClientKey}
+          clientDraft={clientDraft}
+          setClientDraft={setClientDraft}
+          clientProvinces={clientProvinces}
+          setClientProvinces={setClientProvinces}
+          clientMunicipalities={clientMunicipalities}
+          setClientMunicipalities={setClientMunicipalities}
+          loadingClientAddress={loadingClientAddress}
+          setLoadingClientAddress={setLoadingClientAddress}
+          truckModalOpen={truckModalOpen}
+          setTruckModalOpen={setTruckModalOpen}
+          truckDraft={truckDraft}
+          setTruckDraft={setTruckDraft}
+          editingTruckKey={editingTruckKey}
+          setEditingTruckKey={setEditingTruckKey}
+          truckErrors={truckErrors}
+          setTruckErrors={setTruckErrors}
+          historyDetailModal={historyDetailModal}
+          setHistoryDetailModal={setHistoryDetailModal}
+          reviewModalOpen={reviewModalOpen}
+          setReviewModalOpen={setReviewModalOpen}
+          revertModalOpen={revertModalOpen}
+          setRevertModalOpen={setRevertModalOpen}
+          revertRecord={revertRecord}
+          setRevertRecord={setRevertRecord}
+          revertReason={revertReason}
+          setRevertReason={setRevertReason}
+          revertLoading={revertLoading}
+          loading={loading}
+          profileModalOpen={profileModalOpen}
+          setProfileModalOpen={setProfileModalOpen}
+          supportDrawerOpen={supportDrawerOpen}
+          setSupportDrawerOpen={setSupportDrawerOpen}
+          messageDrawerOpen={messageDrawerOpen}
+          setMessageDrawerOpen={setMessageDrawerOpen}
+          supportTab={supportTab}
+          setSupportTab={setSupportTab}
+          supportTickets={supportTickets}
+          portalNotificationCounts={portalNotificationCounts}
+          markPortalNotificationsRead={markPortalNotificationsRead}
+          supportLoading={supportLoading}
+          supportSubmitting={supportSubmitting}
+          fetchSupportTickets={fetchSupportTickets}
+          faqActiveKey={faqActiveKey}
+          setFaqActiveKey={setFaqActiveKey}
+          supportDetailModal={supportDetailModal}
+          setSupportDetailModal={setSupportDetailModal}
+          supportReplyText={supportReplyText}
+          setSupportReplyText={setSupportReplyText}
+          uploadModalOpen={uploadModalOpen}
+          setUploadModalOpen={setUploadModalOpen}
+          uploadType={uploadType}
+          setUploadType={setUploadType}
+          uploadGuideOpen={uploadGuideOpen}
+          setUploadGuideOpen={setUploadGuideOpen}
+          uploadGuideType={uploadGuideType}
+          setUploadGuideType={setUploadGuideType}
+          uploadPreviewData={uploadPreviewData}
+          uploadPreviewColumns={uploadPreviewColumns}
+          uploadMissingColumns={uploadMissingColumns}
+          setUploadPreviewData={setUploadPreviewData}
+          setUploadPreviewColumns={setUploadPreviewColumns}
+          setUploadMissingColumns={setUploadMissingColumns}
+          activeCellModalOpen={activeCellModalOpen}
+          setActiveCellModalOpen={setActiveCellModalOpen}
+          activeCellDraft={activeCellDraft}
+          setActiveCellDraft={setActiveCellDraft}
+          editingActiveCellKey={editingActiveCellKey}
+          setEditingActiveCellKey={setEditingActiveCellKey}
+          closedCellModalOpen={closedCellModalOpen}
+          setClosedCellModalOpen={setClosedCellModalOpen}
+          closedCellDraft={closedCellDraft}
+          setClosedCellDraft={setClosedCellDraft}
+          editingClosedCellKey={editingClosedCellKey}
+          setEditingClosedCellKey={setEditingClosedCellKey}
+          haulerDeleteModal={haulerDeleteModal}
+          setHaulerDeleteModal={setHaulerDeleteModal}
+          haulerDeleteReason={haulerDeleteReason}
+          setHaulerDeleteReason={setHaulerDeleteReason}
+          haulerDeleteFile={haulerDeleteFile}
+          setHaulerDeleteFile={setHaulerDeleteFile}
+          haulerDeleteLoading={haulerDeleteLoading}
+          setHaulerDeleteLoading={setHaulerDeleteLoading}
+          leachateModalOpen={leachateModalOpen}
+          setLeachateModalOpen={setLeachateModalOpen}
+          leachateDetails={leachateDetails}
+          setLeachateDetails={setLeachateDetails}
+          gasVentModalOpen={gasVentModalOpen}
+          setGasVentModalOpen={setGasVentModalOpen}
+          gasVentDetails={gasVentDetails}
+          setGasVentDetails={setGasVentDetails}
+          trashSlideModalOpen={trashSlideModalOpen}
+          setTrashSlideModalOpen={setTrashSlideModalOpen}
+          trashSlideDetails={trashSlideDetails}
+          setTrashSlideDetails={setTrashSlideDetails}
+          firePrevModalOpen={firePrevModalOpen}
+          setFirePrevModalOpen={setFirePrevModalOpen}
+          firePrevDetails={firePrevDetails}
+          setFirePrevDetails={setFirePrevDetails}
+          facilityMgmtSaving={facilityMgmtSaving}
+          wasteReceivedModalOpen={wasteReceivedModalOpen}
+          setWasteReceivedModalOpen={setWasteReceivedModalOpen}
+          wasteReceivedData={wasteReceivedData}
+          wasteReceivedLoading={wasteReceivedLoading}
+          activeCellEntries={activeCellEntries}
+          activeCellOptions={activeCellOptions}
+          closedCellEntries={closedCellEntries}
+          haulers={haulers}
+          trucks={trucks}
+          baselineUnit={baselineUnit}
+          baselineSaved={baselineSaved}
+          submissions={submissions}
+          portalUser={portalUser}
+          portalCredentialSelfServiceEnabled={portalUser?.allowCredentialSelfService === true}
+          onCredentialUpdated={handleLogout}
+          activeSlfId={activeSlfId}
+          activeSlfName={activeSlfName}
+          slfInfo={slfInfo}
+          regions={regions}
+          provinces={provinces}
+          municipalities={municipalities}
+          barangays={barangays}
+          extraTransportFields={extraTransportFields}
+          acceptsHazardousWaste={acceptsHazardousWaste}
+          hazWasteCodes={hazWasteCodes}
+          isMobile={isMobile}
+          handleSaveHauler={handleSaveHauler}
+          updateHaulerDraft={updateHaulerDraft}
+          updateHaulerDraftAddr={updateHaulerDraftAddr}
+          openHaulerModal={openHaulerModal}
+          handleSaveClient={handleSaveClient}
+          handleSaveTruck={handleSaveTruck}
+          updateTruckDraft={updateTruckDraft}
+          updateVehicle={updateVehicle}
+          openRevertModal={openRevertModal}
+          handleRequestRevert={handleRequestRevert}
+          handleConfirmSubmit={handleConfirmSubmit}
+          handleReviewOpen={handleReviewOpen}
+          handleSubmitTicket={handleSubmitTicket}
+          handleSupportReply={handleSupportReply}
+          handleSaveActiveCellEntry={handleSaveActiveCellEntry}
+          handleSaveClosedCellEntry={handleSaveClosedCellEntry}
+          handleConfirmUpload={handleConfirmUpload}
+          proceedToFilePicker={proceedToFilePicker}
+          updateUploadCell={updateUploadCell}
+          handleOpenWasteReceived={handleOpenWasteReceived}
+          handleSaveFacilityDetails={handleSaveFacilityDetails}
+          handleEditReverted={handleEditReverted}
+          handleResubmitReverted={handleResubmitReverted}
+          renderStatusTag={renderStatusTag}
+          fl={fl}
+          isRequired={isRequired}
+          opts={opts}
+          fieldErr={fieldErr}
+          resubmitComment={resubmitComment}
+          setResubmitComment={setResubmitComment}
+          editingRevertedId={editingRevertedId}
+          setEditingRevertedId={setEditingRevertedId}
+        />
       </Layout>
     </Layout>
   );

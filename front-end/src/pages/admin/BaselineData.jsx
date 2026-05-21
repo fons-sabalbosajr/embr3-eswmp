@@ -98,6 +98,7 @@ function CellEntriesTable({ entries, unit = "m³" }) {
       rowKey={(_, i) => i}
       size="small"
       pagination={false}
+      style={{ fontSize: 11 }}
       columns={[
         {
           title: "#",
@@ -108,7 +109,7 @@ function CellEntriesTable({ entries, unit = "m³" }) {
         {
           title: "Cell Name",
           dataIndex: "cellName",
-          render: (v) => <Text strong>{v || "—"}</Text>,
+          render: (v) => <Text strong style={{ fontSize: 11, whiteSpace: "normal", overflowWrap: "anywhere", wordBreak: "break-word" }}>{v || "—"}</Text>,
         },
         {
           title: "Waste Type",
@@ -126,10 +127,10 @@ function CellEntriesTable({ entries, unit = "m³" }) {
           title: "Volume",
           dataIndex: "volume",
           align: "right",
-          render: (v) =>
+          render: (v, row) =>
             v != null ? (
-              <Text strong>
-                {Number(v).toLocaleString()} {normalizeUnit(unit)}
+              <Text strong style={{ fontSize: 11 }}>
+                {Number(v).toLocaleString()} {normalizeUnit(row.unit || unit)}
               </Text>
             ) : (
               "—"
@@ -144,7 +145,7 @@ function CellEntriesEditor({ cells, onChange }) {
   const add = () =>
     onChange([
       ...cells,
-      { key: `c_${Date.now()}`, cellName: "", wasteType: "", volume: 0 },
+      { key: `c_${Date.now()}`, cellName: "", wasteType: "", volume: 0, unit: "m³" },
     ]);
   const remove = (key) => onChange(cells.filter((c) => c.key !== key));
   const update = (key, field, value) =>
@@ -165,9 +166,14 @@ function CellEntriesEditor({ cells, onChange }) {
                 Waste Type
               </Text>
             </Col>
-            <Col span={5}>
+            <Col span={3}>
               <Text type="secondary" style={{ fontSize: 11 }}>
                 Volume
+              </Text>
+            </Col>
+            <Col span={2}>
+              <Text type="secondary" style={{ fontSize: 11 }}>
+                Unit
               </Text>
             </Col>
             <Col span={2} />
@@ -202,7 +208,7 @@ function CellEntriesEditor({ cells, onChange }) {
                   ))}
                 </Select>
               </Col>
-              <Col span={5}>
+              <Col span={3}>
                 <InputNumber
                   size="small"
                   min={0}
@@ -210,6 +216,20 @@ function CellEntriesEditor({ cells, onChange }) {
                   value={c.volume}
                   onChange={(v) => update(c.key, "volume", v)}
                 />
+              </Col>
+              <Col span={2}>
+                <Select
+                  size="small"
+                  style={{ width: "100%" }}
+                  value={normalizeUnit(c.unit || "m³")}
+                  onChange={(v) => update(c.key, "unit", v)}
+                >
+                  {UNIT_OPTIONS.map((u) => (
+                    <Select.Option key={u} value={u}>
+                      {u}
+                    </Select.Option>
+                  ))}
+                </Select>
               </Col>
               <Col span={2} style={{ textAlign: "right" }}>
                 <Popconfirm
@@ -295,6 +315,7 @@ export default function BaselineData({
         cellName: c.cellName || "",
         wasteType: c.wasteType || "",
         volume: c.volume ?? 0,
+        unit: normalizeUnit(c.unit || baselineUnit),
       })),
     );
     setClosedCells(
@@ -303,6 +324,7 @@ export default function BaselineData({
         cellName: c.cellName || "",
         wasteType: c.wasteType || "",
         volume: c.volume ?? 0,
+        unit: normalizeUnit(c.unit || baselineUnit),
       })),
     );
     setHaulers(
@@ -343,8 +365,14 @@ export default function BaselineData({
         activeCellInertUnit: vals.activeCellInertUnit || baselineUnit,
         closedCellResidualUnit: vals.closedCellResidualUnit || baselineUnit,
         closedCellInertUnit: vals.closedCellInertUnit || baselineUnit,
-        activeCellEntries: activeCells.map(({ key, ...c }) => c),
-        closedCellEntries: closedCells.map(({ key, ...c }) => c),
+        activeCellEntries: activeCells.map(({ key, ...c }) => ({
+          ...c,
+          unit: normalizeUnit(c.unit || baselineUnit),
+        })),
+        closedCellEntries: closedCells.map(({ key, ...c }) => ({
+          ...c,
+          unit: normalizeUnit(c.unit || baselineUnit),
+        })),
         accreditedHaulers: haulers.map(({ key, vehicles, ...rest }) => ({
           ...rest,
           vehicles: (vehicles || []).map(({ key: vk, ...vrest }) => vrest),
@@ -990,8 +1018,16 @@ export default function BaselineData({
         open={detailOpen}
         onCancel={() => setDetailOpen(false)}
         footer={<Button onClick={() => setDetailOpen(false)}>Close</Button>}
-        width={1100}
-        styles={{ body: { padding: 0 } }}
+        width={1300}
+        styles={{
+          body: {
+            padding: 0,
+            fontSize: 12,
+            whiteSpace: "normal",
+            overflowWrap: "anywhere",
+            wordBreak: "break-word",
+          },
+        }}
         destroyOnHidden
       >
         {selectedRecord &&
@@ -1269,7 +1305,7 @@ export default function BaselineData({
                               dataSource={r.accreditedHaulers}
                               rowKey={(h, i) => `${h.haulerName}-${i}`}
                               size="small"
-                              pagination={false}
+                              pagination={true}
                               expandable={{
                                 expandedRowRender: (h) => {
                                   const vehicles =
@@ -1290,7 +1326,7 @@ export default function BaselineData({
                                       dataSource={vehicles}
                                       rowKey={(_, vi) => vi}
                                       size="small"
-                                      pagination={false}
+                                      pagination={true}
                                       columns={[
                                         {
                                           title: "#",

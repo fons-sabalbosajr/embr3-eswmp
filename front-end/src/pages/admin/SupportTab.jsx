@@ -38,6 +38,7 @@ import {
 import Swal from "sweetalert2";
 import dayjs from "dayjs";
 import api from "../../api";
+import { matchesFilter } from "./shared/tableFilters";
 
 const { Text, Title } = Typography;
 const { Option } = Select;
@@ -180,7 +181,7 @@ export default function SupportTab({ isDark, canEdit = true, canDelete = true })
         { text: "Feature Request", value: "Feature Request" },
         { text: "Other", value: "Other" },
       ],
-      onFilter: (value, record) => record.category === value,
+      onFilter: (value, record) => matchesFilter(record.category, value),
     },
     {
       title: "Priority",
@@ -202,7 +203,7 @@ export default function SupportTab({ isDark, canEdit = true, canDelete = true })
         { text: "High", value: "High" },
         { text: "Urgent", value: "Urgent" },
       ],
-      onFilter: (value, record) => record.priority === value,
+      onFilter: (value, record) => matchesFilter(record.priority, value),
     },
     {
       title: "Status",

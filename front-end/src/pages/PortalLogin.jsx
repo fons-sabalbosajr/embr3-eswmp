@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
-import { Form, Input, Button, Card, Typography, Divider, Alert, Space, Tag, Collapse } from "antd";
-import { UserOutlined, LockOutlined } from "@ant-design/icons";
+import { Form, Input, Button, Card, Typography, Divider, Alert, Space, Tag, Collapse, Modal } from "antd";
+import { UserOutlined, LockOutlined, SafetyCertificateOutlined } from "@ant-design/icons";
 import { Link, useNavigate } from "react-router-dom";
 import { useErrorCard } from "../utils/ErrorHandler";
 import api from "../api";
@@ -14,6 +14,11 @@ const { Title, Text } = Typography;
 export default function PortalLogin() {
   const [loading, setLoading] = useState(false);
   const [announcement, setAnnouncement] = useState(null);
+  const [credentialModalOpen, setCredentialModalOpen] = useState(false);
+  const [credentialCodeRequested, setCredentialCodeRequested] = useState(false);
+  const [credentialLoading, setCredentialLoading] = useState(false);
+  const [pendingCredentialLogin, setPendingCredentialLogin] = useState(null);
+  const [credentialForm] = Form.useForm();
   const navigate = useNavigate();
   const { showError, card: errorCard } = useErrorCard();
 
@@ -42,6 +47,22 @@ export default function PortalLogin() {
     setLoading(true);
     try {
       const { data } = await api.post("/portal-auth/login", values);
+      if (data.user?.allowCredentialSelfService) {
+        setPendingCredentialLogin({
+          token: data.token,
+          user: data.user,
+          needsVerification: data.needsVerification,
+        });
+        credentialForm.setFieldsValue({
+          email: data.user.email || values.email,
+          username: data.user.username || data.user.email?.split("@")?.[0] || "",
+          password: "",
+          code: "",
+        });
+        setCredentialCodeRequested(false);
+        setCredentialModalOpen(true);
+        return;
+      }
       secureStorage.set("portal_token", data.token);
       secureStorage.setJSON("portal_user", data.user);
       // Redirect held users to the verification update form
@@ -58,6 +79,59 @@ export default function PortalLogin() {
       }
     } finally {
       setLoading(false);
+    }
+  };
+
+  const requestCredentialCode = async () => {
+    try {
+      const values = await credentialForm.validateFields(["email", "username", "password"]);
+      setCredentialLoading(true);
+      await api.post("/portal-auth/credentials/request-code", values, {
+        headers: pendingCredentialLogin?.token
+          ? { Authorization: `Bearer ${pendingCredentialLogin.token}` }
+          : undefined,
+      });
+      setCredentialCodeRequested(true);
+      Modal.success({
+        title: "Verification code sent",
+        content: "Please check your registered email for the 6-digit verification code.",
+      });
+    } catch (err) {
+      if (err?.errorFields) return;
+      Modal.error({
+        title: "Could not send code",
+        content: err.response?.data?.message || "Please check your registered email and try again.",
+      });
+    } finally {
+      setCredentialLoading(false);
+    }
+  };
+
+  const updateCredentials = async () => {
+    try {
+      const values = await credentialForm.validateFields();
+      setCredentialLoading(true);
+      await api.post("/portal-auth/credentials/update", values, {
+        headers: pendingCredentialLogin?.token
+          ? { Authorization: `Bearer ${pendingCredentialLogin.token}` }
+          : undefined,
+      });
+      setCredentialModalOpen(false);
+      setCredentialCodeRequested(false);
+      setPendingCredentialLogin(null);
+      credentialForm.resetFields();
+      Modal.success({
+        title: "Credentials updated",
+        content: "You can now log in using your updated username and password.",
+      });
+    } catch (err) {
+      if (err?.errorFields) return;
+      Modal.error({
+        title: "Could not update credentials",
+        content: err.response?.data?.message || "Please verify the code and try again.",
+      });
+    } finally {
+      setCredentialLoading(false);
     }
   };
 
@@ -135,7 +209,21 @@ export default function PortalLogin() {
               <Form.Item style={{ marginBottom: 16, marginTop: 8 }}>
                 <Button className="auth-btn-primary" type="primary" htmlType="submit" loading={loading} block>Sign In</Button>
               </Form.Item>
-              <div style={{ textAlign: "right", marginTop: -8, marginBottom: 8 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", gap: 12, marginTop: -8, marginBottom: 8, flexWrap: "wrap" }}>
+                {/* <Button
+                  type="link"
+                  size="small"
+                  className="auth-forgot-link"
+                  style={{ padding: 0 }}
+                  onClick={() => {
+                    setCredentialModalOpen(true);
+                    setCredentialCodeRequested(false);
+                    setPendingCredentialLogin(null);
+                    credentialForm.resetFields();
+                  }}
+                >
+                  Update credentials
+                </Button> */}
                 <Link to="/slfportal/forgot-password" className="auth-forgot-link">Forgot password?</Link>
               </div>
             </Form>
@@ -153,6 +241,93 @@ export default function PortalLogin() {
       </div>
 
       <div className="auth-page-footer">&copy; 2026 EMBR3 &mdash; Environmental Management Bureau Region III</div>
+      <Modal
+        title={
+          <Space>
+            <SafetyCertificateOutlined />
+            {pendingCredentialLogin ? "Credential Update Required" : "Update Portal Credentials"}
+          </Space>
+        }
+        open={credentialModalOpen}
+        maskClosable={!pendingCredentialLogin}
+        keyboard={!pendingCredentialLogin}
+        onCancel={() => {
+          setCredentialModalOpen(false);
+          setCredentialCodeRequested(false);
+          setPendingCredentialLogin(null);
+        }}
+        footer={[
+          <Button
+            key="cancel"
+            onClick={() => {
+              setCredentialModalOpen(false);
+              setCredentialCodeRequested(false);
+              setPendingCredentialLogin(null);
+            }}
+          >
+            {pendingCredentialLogin ? "Back to Login" : "Cancel"}
+          </Button>,
+          <Button key="code" loading={credentialLoading} onClick={requestCredentialCode}>
+            Send Code
+          </Button>,
+          <Button
+            key="update"
+            type="primary"
+            loading={credentialLoading}
+            disabled={!credentialCodeRequested}
+            onClick={updateCredentials}
+          >
+            Save Credentials
+          </Button>,
+        ]}
+        destroyOnHidden
+      >
+        <Alert
+          type="info"
+          showIcon
+          style={{ marginBottom: 14 }}
+          message="Email verification is required before saving credential changes."
+          description={
+            pendingCredentialLogin
+              ? "Your administrator enabled credential updating for this account. Please update your username and/or password before entering the portal."
+              : "This option is available only when the administrator enables credential updates for your portal account."
+          }
+        />
+        <Form form={credentialForm} layout="vertical" requiredMark={false}>
+          <Form.Item
+            name="email"
+            label="Registered Email"
+            rules={[
+              { required: true, message: "Enter your registered email" },
+              { type: "email", message: "Enter a valid email" },
+            ]}
+          >
+            <Input prefix={<UserOutlined />} placeholder="you@example.com" />
+          </Form.Item>
+          <Form.Item
+            name="username"
+            label="New Username"
+            rules={[{ required: true, message: "Username is required" }]}
+          >
+            <Input prefix={<UserOutlined />} placeholder="New username" />
+          </Form.Item>
+          <Form.Item
+            name="password"
+            label="New Password"
+            extra="Leave blank only if you want to update the username."
+            rules={[{ min: 6, message: "Password must be at least 6 characters" }]}
+          >
+            <Input.Password prefix={<LockOutlined />} placeholder="New password" />
+          </Form.Item>
+          <Form.Item
+            name="code"
+            label="Verification Code"
+            rules={[{ required: true, message: "Enter the verification code" }]}
+          >
+            <Input placeholder="6-digit code" disabled={!credentialCodeRequested} />
+          </Form.Item>
+        </Form>
+      </Modal>
     </div>
   );
 }

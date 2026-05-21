@@ -33,6 +33,7 @@ import {
   BgColorsOutlined,
   SaveOutlined,
   DatabaseOutlined,
+  UserOutlined,
   FileTextOutlined,
   ReloadOutlined,
   DeleteOutlined,
@@ -44,7 +45,7 @@ import {
   EyeOutlined,
   EyeInvisibleOutlined,
   ApartmentOutlined,
-
+  SearchOutlined,
   FundProjectionScreenOutlined,
   BankOutlined,
   CarOutlined,
@@ -56,6 +57,7 @@ import {
   SendOutlined,
   PlusOutlined,
   EditOutlined,
+  UnlockOutlined,
 } from "@ant-design/icons";
 import AccountSettings from "./AccountSettings";
 import Swal from "sweetalert2";
@@ -92,6 +94,16 @@ export default function DeveloperSettings({onSettingsSaved, isDark, initialActiv
   const [deletedLoading, setDeletedLoading] = useState(false);
   const [deletedSlfEntries, setDeletedSlfEntries] = useState([]);
   const [deletedSlfLoading, setDeletedSlfLoading] = useState(false);
+  const [portalSecurityUsers, setPortalSecurityUsers] = useState([]);
+  const [portalSecurityLoading, setPortalSecurityLoading] = useState(false);
+  const [portalSecuritySearch, setPortalSecuritySearch] = useState("");
+  const [portalSecurityModal, setPortalSecurityModal] = useState({ open: false, record: null });
+  const [portalPasswordModal, setPortalPasswordModal] = useState({ open: false, record: null });
+  const [portalWarningModal, setPortalWarningModal] = useState({ open: false, record: null });
+  const [portalSecuritySaving, setPortalSecuritySaving] = useState(false);
+  const [portalSecurityForm] = Form.useForm();
+  const [portalPasswordForm] = Form.useForm();
+  const [portalWarningForm] = Form.useForm();
 
   // Dashboard display settings
   const DASHBOARD_TABS = [
@@ -122,6 +134,7 @@ export default function DeveloperSettings({onSettingsSaved, isDark, initialActiv
   useEffect(() => {
     fetchSettings();
     fetchLogs({ showLoading: true });
+    if (initialActiveKey === "portal-security") fetchPortalSecurityUsers();
     const logInterval = setInterval(() => fetchLogs({ showLoading: false }), 8000);
     return () => clearInterval(logInterval);
   }, []);
@@ -261,6 +274,106 @@ export default function DeveloperSettings({onSettingsSaved, isDark, initialActiv
       Swal.fire("Error", "Could not delete SLF data", "error");
     }
   };
+
+  const fetchPortalSecurityUsers = async () => {
+    setPortalSecurityLoading(true);
+    try {
+      const { data } = await api.get("/portal-users");
+      setPortalSecurityUsers(Array.isArray(data) ? data : []);
+    } catch {
+      Swal.fire("Error", "Could not load portal users", "error");
+    } finally {
+      setPortalSecurityLoading(false);
+    }
+  };
+
+  const openPortalSecurityModal = (record) => {
+    setPortalSecurityModal({ open: true, record });
+    portalSecurityForm.setFieldsValue({
+      username: record.username || record.email?.split("@")?.[0] || "",
+      email: record.email || "",
+      blocked: !!record.blocked,
+      blockedReason: record.blockedReason || "",
+      maintenanceMode: !!record.maintenanceMode,
+      maintenanceReason: record.maintenanceReason || "",
+      verificationRequired: !!record.verificationRequired,
+      allowCredentialSelfService: !!record.allowCredentialSelfService,
+    });
+  };
+
+  const savePortalSecurity = async () => {
+    setPortalSecuritySaving(true);
+    try {
+      const values = await portalSecurityForm.validateFields();
+      const { data } = await api.patch(`/portal-users/${portalSecurityModal.record._id}/security`, values);
+      setPortalSecurityUsers((prev) => prev.map((u) => u._id === data.data._id ? data.data : u));
+      setPortalSecurityModal({ open: false, record: null });
+      Swal.fire({ icon: "success", title: "Security settings saved", timer: 1100, showConfirmButton: false });
+    } catch (err) {
+      if (err?.errorFields) return;
+      Swal.fire("Error", err.response?.data?.message || "Could not save security settings", "error");
+    } finally {
+      setPortalSecuritySaving(false);
+    }
+  };
+
+  const resetPortalPassword = async () => {
+    setPortalSecuritySaving(true);
+    try {
+      const values = await portalPasswordForm.validateFields();
+      await api.patch(`/portal-users/${portalPasswordModal.record._id}/reset-password`, {
+        password: values.password,
+      });
+      setPortalPasswordModal({ open: false, record: null });
+      portalPasswordForm.resetFields();
+      Swal.fire({ icon: "success", title: "Password reset", timer: 1100, showConfirmButton: false });
+    } catch (err) {
+      if (err?.errorFields) return;
+      Swal.fire("Error", err.response?.data?.message || "Could not reset password", "error");
+    } finally {
+      setPortalSecuritySaving(false);
+    }
+  };
+
+  const sendPortalWarning = async () => {
+    setPortalSecuritySaving(true);
+    try {
+      const values = await portalWarningForm.validateFields();
+      const { data } = await api.post(`/portal-users/${portalWarningModal.record._id}/security-warning`, values);
+      setPortalSecurityUsers((prev) => prev.map((u) => u._id === data.data._id ? data.data : u));
+      setPortalWarningModal({ open: false, record: null });
+      portalWarningForm.resetFields();
+      Swal.fire({ icon: "success", title: "Warning email sent", timer: 1100, showConfirmButton: false });
+    } catch (err) {
+      if (err?.errorFields) return;
+      Swal.fire("Error", err.response?.data?.message || "Could not send warning email", "error");
+    } finally {
+      setPortalSecuritySaving(false);
+    }
+  };
+
+  const togglePortalSecurityFlag = async (record, payload) => {
+    try {
+      const { data } = await api.patch(`/portal-users/${record._id}/security`, payload);
+      setPortalSecurityUsers((prev) => prev.map((u) => u._id === data.data._id ? data.data : u));
+      Swal.fire({ icon: "success", title: "Account updated", timer: 900, showConfirmButton: false });
+    } catch (err) {
+      Swal.fire("Error", err.response?.data?.message || "Could not update account", "error");
+    }
+  };
+
+  const filteredPortalSecurityUsers = portalSecurityUsers.filter((user) => {
+    const q = portalSecuritySearch.trim().toLowerCase();
+    if (!q) return true;
+    return [
+      user.firstName,
+      user.lastName,
+      user.username,
+      user.email,
+      user.companyName,
+      Array.isArray(user.assignedSlfName) ? user.assignedSlfName.join(" ") : user.assignedSlfName,
+    ].some((value) => String(value || "").toLowerCase().includes(q));
+  });
 
   const writeClientLog = (action) => {
     fetchLogs({ showLoading: true });
@@ -427,6 +540,7 @@ export default function DeveloperSettings({onSettingsSaved, isDark, initialActiv
         size="large"
         style={{ marginTop: 8 }}
         onChange={(key) => {
+          if (key === "portal-security" && portalSecurityUsers.length === 0) fetchPortalSecurityUsers();
           if (key === "deleted-submissions" && deletedEntries.length === 0) fetchDeletedEntries();
           if (key === "deleted-slf-data" && deletedSlfEntries.length === 0) fetchDeletedSlfEntries();
         }}
@@ -854,6 +968,180 @@ export default function DeveloperSettings({onSettingsSaved, isDark, initialActiv
             ),
           },
           {
+            key: "portal-security",
+            label: <span><SafetyCertificateOutlined /> Portal Users Security</span>,
+            children: (
+              <Card
+                style={{ borderRadius: 10 }}
+                title={
+                  <Space>
+                    <SafetyCertificateOutlined style={{ color: "#4096ff" }} />
+                    <Text strong>Portal Users Security Settings</Text>
+                    <Tag>{filteredPortalSecurityUsers.length}</Tag>
+                  </Space>
+                }
+                extra={
+                  <Space wrap>
+                    <Input
+                      size="small"
+                      allowClear
+                      prefix={<SearchOutlined />}
+                      placeholder="Search portal users"
+                      value={portalSecuritySearch}
+                      onChange={(e) => setPortalSecuritySearch(e.target.value)}
+                      style={{ width: 220 }}
+                    />
+                    <Button size="small" icon={<ReloadOutlined />} onClick={fetchPortalSecurityUsers} loading={portalSecurityLoading}>
+                      Refresh
+                    </Button>
+                  </Space>
+                }
+              >
+                <Alert
+                  type="info"
+                  showIcon
+                  style={{ marginBottom: 12, borderRadius: 8 }}
+                  message="Security controls here affect portal access immediately."
+                  description="Use these settings for username/email changes, password resets, account blocking, account maintenance, hold/re-verification, warning emails, and portal-user security review."
+                />
+                <Alert
+                  type="success"
+                  showIcon
+                  style={{ marginBottom: 12, borderRadius: 8 }}
+                  message="Credential update permission is now managed per portal user."
+                  description="Enable the credential switch only for users who are allowed to update their own username and password after email-code verification."
+                />
+                <ResponsiveTable
+                  dataSource={filteredPortalSecurityUsers}
+                  rowKey="_id"
+                  loading={portalSecurityLoading}
+                  pagination={{ pageSize: 15, size: "small" }}
+                  scroll={{ x: 1120 }}
+                  columns={[
+                    {
+                      title: "Portal User",
+                      key: "user",
+                      width: 240,
+                      render: (_, user) => (
+                        <Space direction="vertical" size={0}>
+                          <Text strong style={{ fontSize: 12 }}>{`${user.firstName || ""} ${user.lastName || ""}`.trim() || "Portal User"}</Text>
+                          <Text style={{ fontSize: 11, whiteSpace: "normal", wordBreak: "break-word" }}>@{user.username || user.email?.split("@")?.[0] || "username"}</Text>
+                          <Text type="secondary" style={{ fontSize: 11, whiteSpace: "normal", wordBreak: "break-word" }}>{user.email}</Text>
+                        </Space>
+                      ),
+                    },
+                    {
+                      title: "Company / SLF",
+                      key: "company",
+                      width: 260,
+                      render: (_, user) => (
+                        <Space direction="vertical" size={0}>
+                          <Text style={{ fontSize: 12 }}>{user.companyName || "—"}</Text>
+                          <Text type="secondary" style={{ fontSize: 11, whiteSpace: "normal", wordBreak: "break-word" }}>
+                            {Array.isArray(user.assignedSlfName) ? user.assignedSlfName.join(", ") : user.assignedSlfName || "No SLF assigned"}
+                          </Text>
+                        </Space>
+                      ),
+                    },
+                    {
+                      title: "Account State",
+                      key: "state",
+                      width: 230,
+                      render: (_, user) => (
+                        <Space size={[4, 4]} wrap>
+                          <Tag color={user.status === "approved" ? "green" : user.status === "pending" ? "gold" : "red"}>{user.status || "pending"}</Tag>
+                          {user.verificationRequired && <Tag color="orange">Hold</Tag>}
+                          {user.blocked && <Tag color="red">Blocked</Tag>}
+                          {user.maintenanceMode && <Tag color="blue">Maintenance</Tag>}
+                        </Space>
+                      ),
+                    },
+                    {
+                      title: "Warnings",
+                      key: "warnings",
+                      width: 150,
+                      render: (_, user) => (
+                        <Space direction="vertical" size={0}>
+                          <Text style={{ fontSize: 12 }}>{Number(user.securityWarningCount || 0)} sent</Text>
+                          <Text type="secondary" style={{ fontSize: 11 }}>
+                            {user.lastSecurityWarningAt ? dayjs(user.lastSecurityWarningAt).format("MM/DD/YYYY h:mm A") : "No warning email"}
+                          </Text>
+                        </Space>
+                      ),
+                    },
+                    {
+                      title: "Credential Updates",
+                      key: "credentialUpdates",
+                      width: 170,
+                      render: (_, user) => (
+                        <Switch
+                          size="small"
+                          checked={!!user.allowCredentialSelfService}
+                          checkedChildren="Allowed"
+                          unCheckedChildren="Blocked"
+                          onChange={(checked) =>
+                            togglePortalSecurityFlag(user, { allowCredentialSelfService: checked })
+                          }
+                        />
+                      ),
+                    },
+                    {
+                      title: "Actions",
+                      key: "actions",
+                      width: 230,
+                      fixed: "right",
+                      render: (_, user) => (
+                        <Space size={4} wrap>
+                          <Tooltip title="Edit security settings">
+                            <Button size="small" type="text" icon={<EditOutlined />} onClick={() => openPortalSecurityModal(user)} />
+                          </Tooltip>
+                          <Tooltip title="Reset password">
+                            <Button size="small" type="text" icon={<LockOutlined />} onClick={() => {
+                              setPortalPasswordModal({ open: true, record: user });
+                              portalPasswordForm.resetFields();
+                            }} />
+                          </Tooltip>
+                          <Tooltip title="Send warning email">
+                            <Button size="small" type="text" icon={<MailOutlined />} onClick={() => {
+                              setPortalWarningModal({ open: true, record: user });
+                              portalWarningForm.setFieldsValue({
+                                subject: "Portal Account Security Notice",
+                                message: `Hello ${user.firstName || "Portal User"},\n\nPlease review your SLF portal account activity and comply with the required portal account security measures.\n\nThank you.`,
+                              });
+                            }} />
+                          </Tooltip>
+                          <Tooltip title={user.blocked ? "Unblock account" : "Block account"}>
+                            <Button
+                              size="small"
+                              type="text"
+                              danger={!user.blocked}
+                              icon={user.blocked ? <UnlockOutlined /> : <LockOutlined />}
+                              onClick={() => togglePortalSecurityFlag(user, {
+                                blocked: !user.blocked,
+                                blockedReason: !user.blocked ? "Blocked by admin security settings" : "",
+                              })}
+                            />
+                          </Tooltip>
+                          <Tooltip title={user.maintenanceMode ? "End maintenance" : "Hold for maintenance"}>
+                            <Button
+                              size="small"
+                              type="text"
+                              icon={<ToolOutlined />}
+                              onClick={() => togglePortalSecurityFlag(user, {
+                                maintenanceMode: !user.maintenanceMode,
+                                maintenanceReason: !user.maintenanceMode ? "Account under maintenance by admin" : "",
+                              })}
+                            />
+                          </Tooltip>
+                        </Space>
+                      ),
+                    },
+                  ]}
+                />
+              </Card>
+            ),
+          },
+          {
             key: "system",
             label: <span><ToolOutlined /> System &amp; Logs</span>,
             children: (
@@ -1247,6 +1535,102 @@ export default function DeveloperSettings({onSettingsSaved, isDark, initialActiv
           // },
         ]}
       />
+      <Modal
+        title="Portal User Security"
+        open={portalSecurityModal.open}
+        onCancel={() => setPortalSecurityModal({ open: false, record: null })}
+        onOk={savePortalSecurity}
+        confirmLoading={portalSecuritySaving}
+        okText="Save Security Settings"
+        width={720}
+        destroyOnHidden
+      >
+        <Form form={portalSecurityForm} layout="vertical">
+          <Form.Item
+            name="username"
+            label="Username"
+            rules={[{ required: true, message: "Username is required" }]}
+          >
+            <Input prefix={<UserOutlined />} />
+          </Form.Item>
+          <Form.Item
+            name="email"
+            label="Email"
+            rules={[
+              { required: true, message: "Email is required" },
+              { type: "email", message: "Enter a valid email" },
+            ]}
+          >
+            <Input prefix={<MailOutlined />} />
+          </Form.Item>
+          <Row gutter={[16, 0]}>
+            <Col xs={24} md={6}>
+              <Form.Item name="blocked" label="Block Account" valuePropName="checked">
+                <Switch checkedChildren="Blocked" unCheckedChildren="Open" />
+              </Form.Item>
+            </Col>
+            <Col xs={24} md={6}>
+              <Form.Item name="maintenanceMode" label="Maintenance" valuePropName="checked">
+                <Switch checkedChildren="On" unCheckedChildren="Off" />
+              </Form.Item>
+            </Col>
+            <Col xs={24} md={6}>
+              <Form.Item name="verificationRequired" label="Hold / Re-verify" valuePropName="checked">
+                <Switch checkedChildren="Hold" unCheckedChildren="Clear" />
+              </Form.Item>
+            </Col>
+            <Col xs={24} md={6}>
+              <Form.Item name="allowCredentialSelfService" label="Credential Updates" valuePropName="checked">
+                <Switch checkedChildren="Allow" unCheckedChildren="Block" />
+              </Form.Item>
+            </Col>
+          </Row>
+          <Form.Item name="blockedReason" label="Blocking Reason">
+            <TextArea rows={2} placeholder="Reason shown to the portal user when blocked" />
+          </Form.Item>
+          <Form.Item name="maintenanceReason" label="Maintenance Note">
+            <TextArea rows={2} placeholder="Reason shown to the portal user during account maintenance" />
+          </Form.Item>
+        </Form>
+      </Modal>
+      <Modal
+        title="Reset Portal Password"
+        open={portalPasswordModal.open}
+        onCancel={() => setPortalPasswordModal({ open: false, record: null })}
+        onOk={resetPortalPassword}
+        confirmLoading={portalSecuritySaving}
+        okText="Reset Password"
+        destroyOnHidden
+      >
+        <Form form={portalPasswordForm} layout="vertical">
+          <Form.Item
+            name="password"
+            label="New Password"
+            rules={[{ required: true, min: 6, message: "Password must be at least 6 characters" }]}
+          >
+            <Input.Password prefix={<LockOutlined />} />
+          </Form.Item>
+        </Form>
+      </Modal>
+      <Modal
+        title="Send Security Warning Email"
+        open={portalWarningModal.open}
+        onCancel={() => setPortalWarningModal({ open: false, record: null })}
+        onOk={sendPortalWarning}
+        confirmLoading={portalSecuritySaving}
+        okText="Send Warning"
+        width={680}
+        destroyOnHidden
+      >
+        <Form form={portalWarningForm} layout="vertical">
+          <Form.Item name="subject" label="Subject" rules={[{ required: true, message: "Subject is required" }]}>
+            <Input prefix={<MailOutlined />} />
+          </Form.Item>
+          <Form.Item name="message" label="Message" rules={[{ required: true, message: "Message is required" }]}>
+            <TextArea rows={7} />
+          </Form.Item>
+        </Form>
+      </Modal>
       <Modal
         title={announcementModal.record ? "Edit Announcement" : "Create Announcement"}
         open={announcementModal.open}

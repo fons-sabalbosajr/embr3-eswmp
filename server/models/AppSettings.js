@@ -43,6 +43,7 @@ const appSettingsSchema = new mongoose.Schema(
     portalMaintenanceMode: { type: Boolean, default: false },
     portalMaintenanceReason: { type: String, default: "" },
     portalMaintenanceMessage: { type: String, default: "The portal is currently under maintenance. Please try again later." },
+    portalCredentialSelfServiceEnabled: { type: Boolean, default: false },
 
     // Portal Announcements
     portalAnnouncementActiveId: { type: mongoose.Schema.Types.ObjectId, default: null },

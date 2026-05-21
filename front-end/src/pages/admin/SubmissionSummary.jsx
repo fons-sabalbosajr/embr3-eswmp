@@ -21,6 +21,7 @@ import FullCalendar from "@fullcalendar/react";
 import dayGridPlugin from "@fullcalendar/daygrid";
 import interactionPlugin from "@fullcalendar/interaction";
 import api from "../../api";
+import { matchesFilter, rowMatchesSearch } from "./shared/tableFilters";
 
 const { Text } = Typography;
 const ACCENT = "#2f54eb";
@@ -224,14 +225,10 @@ export default function SubmissionSummary({ isDark }) {
   }, []);
 
   const filteredRecords = useMemo(() => {
-    const term = search.trim().toLowerCase();
     return records.filter((record) => {
-      const statusMatch = statusFilter === "all" || record.status === statusFilter;
+      const statusMatch = statusFilter === "all" || matchesFilter(record.status, statusFilter);
       if (!statusMatch) return false;
-      if (!term) return true;
-      return [record.idNo, record.slfName, record.lguCompanyName, record.submittedBy, record.companyType]
-        .filter(Boolean)
-        .some((value) => String(value).toLowerCase().includes(term));
+      return rowMatchesSearch(record, search);
     });
   }, [records, search, statusFilter]);
 

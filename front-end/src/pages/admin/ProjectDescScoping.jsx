@@ -16,15 +16,12 @@ import secureStorage from "../../utils/secureStorage";
 import { fetchWithCache, invalidateCache } from "../../utils/pageCache";
 import { useDataRef } from "../../utils/dataRef";
 import dayjs from "dayjs";
+import { buildFilters, matchesFilter, rowMatchesSearch } from "./shared/tableFilters";
 
 const { Title, Text } = Typography;
 const CACHE_KEY = "project-desc-scoping-cache";
 const CACHE_TTL = 5 * 60 * 1000;
 
-function buildFilters(records, key) {
-  const vals = [...new Set(records.map((r) => r[key]).filter(Boolean))].sort();
-  return vals.map((v) => ({ text: v, value: v }));
-}
 function networkDays(s, e) {
   if (!s || !e) return null;
   const sd = dayjs(s).startOf("day"); const ed = dayjs(e).startOf("day");
@@ -152,11 +149,11 @@ export default function ProjectDescScoping({canEdit = true, canDelete = true, is
 
   const filtered = useMemo(() => {
     let data = records;
-    if (searchText) { const s = searchText.toLowerCase(); data = data.filter((r) => [r.province, r.municipality, r.focalPerson, r.enmoAssigned, r.statusOfPDS, r.mailingAddress].some((v) => v && v.toLowerCase().includes(s))); }
-    if (filterProvince) data = data.filter((r) => r.province === filterProvince);
-    if (filterMBA) data = data.filter((r) => r.manilaBayArea === filterMBA);
-    if (filterStatus) data = data.filter((r) => r.statusOfPDS === filterStatus);
-    if (filterMonth) data = data.filter((r) => r.targetMonth === filterMonth);
+    if (searchText) data = data.filter((r) => rowMatchesSearch(r, searchText));
+    if (filterProvince) data = data.filter((r) => matchesFilter(r.province, filterProvince));
+    if (filterMBA) data = data.filter((r) => matchesFilter(r.manilaBayArea, filterMBA));
+    if (filterStatus) data = data.filter((r) => matchesFilter(r.statusOfPDS, filterStatus));
+    if (filterMonth) data = data.filter((r) => matchesFilter(r.targetMonth, filterMonth));
     return data;
   }, [records, searchText, filterProvince, filterMBA, filterStatus, filterMonth]);
 
@@ -171,7 +168,7 @@ export default function ProjectDescScoping({canEdit = true, canDelete = true, is
   const columns = [
     {
       title: <span><EnvironmentOutlined style={{ color: isDark ? "#7eb8da" : "#1a3353" }} /> LGU</span>, key: "lgu", width: 150, fixed: "left",
-      filters: filters.province, onFilter: (v, r) => r.province === v,
+      filters: filters.province, onFilter: (v, r) => matchesFilter(r.province, v),
       sorter: (a, b) => (a.municipality || "").localeCompare(b.municipality || ""),
       render: (_, r) => (
         <Tooltip title={`${r.province} — ${r.municipality}`}>
@@ -183,11 +180,11 @@ export default function ProjectDescScoping({canEdit = true, canDelete = true, is
       ),
     },
     { title: "MBA", dataIndex: "manilaBayArea", key: "mba", width: 80,
-      filters: filters.manilaBayArea, onFilter: (v, r) => r.manilaBayArea === v,
+      filters: filters.manilaBayArea, onFilter: (v, r) => matchesFilter(r.manilaBayArea, v),
       render: (v) => v === "MBA" ? <Tag color="blue" bordered={false}>MBA</Tag> : <Tag color="default" bordered={false}>{v || "—"}</Tag>,
     },
     { title: "Status", dataIndex: "statusOfPDS", key: "status", width: 130,
-      filters: filters.statusOfPDS, onFilter: (v, r) => r.statusOfPDS === v,
+      filters: filters.statusOfPDS, onFilter: (v, r) => matchesFilter(r.statusOfPDS, v),
       render: (v) => getStatusTag(v),
     },
     {
@@ -211,7 +208,7 @@ export default function ProjectDescScoping({canEdit = true, canDelete = true, is
       ),
     },
     { title: "Target Month", dataIndex: "targetMonth", key: "targetMonth", width: 110,
-      filters: filters.targetMonth, onFilter: (v, r) => r.targetMonth === v,
+      filters: filters.targetMonth, onFilter: (v, r) => matchesFilter(r.targetMonth, v),
       render: (v) => v ? <Tag bordered={false} color="cyan">{v.replace(/^\d+\./, "")}</Tag> : "—",
     },
     {
@@ -382,8 +379,8 @@ export default function ProjectDescScoping({canEdit = true, canDelete = true, is
                 <Col xs={24} sm={12}><Form.Item name="locationOfFacility" label="Facility Location"><Input /></Form.Item></Col>
                 <Col xs={24} sm={12}><Form.Item name="dateOfInstallation" label="Installation Date"><Input /></Form.Item></Col>
                 <Col xs={24} sm={12}><Form.Item name="manilaBayArea" label="Manila Bay Area"><Select options={mbaOptions} allowClear /></Form.Item></Col>
-                <Col xs={12} sm={6}><Form.Item name="latitude" label="Latitude"><InputNumber style={{ width: "100%" }} step={0.0001} precision={4} /></Form.Item></Col>
-                <Col xs={12} sm={6}><Form.Item name="longitude" label="Longitude"><InputNumber style={{ width: "100%" }} step={0.0001} precision={4} /></Form.Item></Col>
+                <Col xs={12} sm={6}><Form.Item name="latitude" label="Latitude"><InputNumber style={{ width: "100%" }} step={0.001} precision={3} /></Form.Item></Col>
+                <Col xs={12} sm={6}><Form.Item name="longitude" label="Longitude"><InputNumber style={{ width: "100%" }} step={0.001} precision={3} /></Form.Item></Col>
               </Row>
             )},
             { key: "permits", label: <span style={{ color: "#fa8c16" }}><FileDoneOutlined /> Permits</span>, children: (

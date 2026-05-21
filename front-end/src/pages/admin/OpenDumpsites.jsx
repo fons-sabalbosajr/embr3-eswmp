@@ -17,15 +17,12 @@ import secureStorage from "../../utils/secureStorage";
 import { fetchWithCache, invalidateCache } from "../../utils/pageCache";
 import { useDataRef } from "../../utils/dataRef";
 import dayjs from "dayjs";
+import { buildFilters, matchesFilter, rowMatchesSearch } from "./shared/tableFilters";
 
 const { Title, Text } = Typography;
 const CACHE_KEY = "open-dumpsites-cache";
 const CACHE_TTL = 5 * 60 * 1000;
 
-function buildFilters(records, key) {
-  const vals = [...new Set(records.map((r) => r[key]).filter(Boolean))].sort();
-  return vals.map((v) => ({ text: v, value: v }));
-}
 function networkDays(startDate, endDate) {
   if (!startDate || !endDate) return null;
   const s = dayjs(startDate).startOf("day");
@@ -163,11 +160,11 @@ export default function OpenDumpsites({canEdit = true, canDelete = true, isDark}
 
   const filtered = useMemo(() => {
     let data = records;
-    if (searchText) { const s = searchText.toLowerCase(); data = data.filter((r) => [r.province, r.municipality, r.barangay, r.focalPerson, r.enmoAssigned, r.statusOfSiteArea].some((v) => v && v.toLowerCase().includes(s))); }
-    if (filterProvince) data = data.filter((r) => r.province === filterProvince);
-    if (filterMBA) data = data.filter((r) => r.manilaBayArea === filterMBA);
-    if (filterStatus) data = data.filter((r) => r.statusOfSiteArea === filterStatus);
-    if (filterMonth) data = data.filter((r) => r.targetMonth === filterMonth);
+    if (searchText) data = data.filter((r) => rowMatchesSearch(r, searchText));
+    if (filterProvince) data = data.filter((r) => matchesFilter(r.province, filterProvince));
+    if (filterMBA) data = data.filter((r) => matchesFilter(r.manilaBayArea, filterMBA));
+    if (filterStatus) data = data.filter((r) => matchesFilter(r.statusOfSiteArea, filterStatus));
+    if (filterMonth) data = data.filter((r) => matchesFilter(r.targetMonth, filterMonth));
     return data;
   }, [records, searchText, filterProvince, filterMBA, filterStatus, filterMonth]);
 
@@ -182,7 +179,7 @@ export default function OpenDumpsites({canEdit = true, canDelete = true, isDark}
   const columns = [
     {
       title: <span><EnvironmentOutlined style={{ color: isDark ? "#7eb8da" : "#1a3353" }} /> LGU</span>, key: "lgu", width: 150, fixed: "left",
-      filters: filters.province, onFilter: (v, r) => r.province === v,
+      filters: filters.province, onFilter: (v, r) => matchesFilter(r.province, v),
       sorter: (a, b) => (a.municipality || "").localeCompare(b.municipality || ""),
       render: (_, r) => (
         <Tooltip title={`${r.province} — ${r.municipality}${r.barangay ? ` (${r.barangay})` : ""}`}>
@@ -194,7 +191,7 @@ export default function OpenDumpsites({canEdit = true, canDelete = true, isDark}
       ),
     },
     { title: "MBA", dataIndex: "manilaBayArea", key: "mba", width: 80,
-      filters: filters.manilaBayArea, onFilter: (v, r) => r.manilaBayArea === v,
+      filters: filters.manilaBayArea, onFilter: (v, r) => matchesFilter(r.manilaBayArea, v),
       render: (v) => v === "MBA" ? <Tag color="blue" bordered={false}>MBA</Tag> : <Tag color="default" bordered={false}>{v || "—"}</Tag>,
     },
     {
@@ -208,12 +205,12 @@ export default function OpenDumpsites({canEdit = true, canDelete = true, isDark}
       ),
     },
     { title: "Status", dataIndex: "statusOfSiteArea", key: "status", width: 130,
-      filters: filters.statusOfSiteArea, onFilter: (v, r) => r.statusOfSiteArea === v,
+      filters: filters.statusOfSiteArea, onFilter: (v, r) => matchesFilter(r.statusOfSiteArea, v),
       render: (v) => getStatusTag(v),
     },
     {
       title: <span><TeamOutlined style={{ color: "#722ed1" }} /> Personnel</span>, key: "personnel", width: 180,
-      filters: filters.focalPerson, filterSearch: true, onFilter: (v, r) => r.focalPerson === v,
+      filters: filters.focalPerson, filterSearch: true, onFilter: (v, r) => matchesFilter(r.focalPerson, v),
       render: (_, r) => (
         <Tooltip title={<div><div><UserOutlined /> Focal: {r.focalPerson || "—"}</div><div><UserOutlined /> Staff: {r.eswmStaff || "—"}</div><div><SolutionOutlined /> ENMO: {r.enmoAssigned || "—"}</div></div>}>
           <div style={{ lineHeight: 1.3 }}>
@@ -224,7 +221,7 @@ export default function OpenDumpsites({canEdit = true, canDelete = true, isDark}
       ),
     },
     { title: "Target Month", dataIndex: "targetMonth", key: "targetMonth", width: 110,
-      filters: filters.targetMonth, onFilter: (v, r) => r.targetMonth === v,
+      filters: filters.targetMonth, onFilter: (v, r) => matchesFilter(r.targetMonth, v),
       render: (v) => v ? <Tag bordered={false} color="cyan">{v.replace(/^\d+\./, "")}</Tag> : "—",
     },
     {
@@ -423,8 +420,8 @@ export default function OpenDumpsites({canEdit = true, canDelete = true, isDark}
                 <Col xs={24} sm={12}><Form.Item name="barangay" label="Barangay"><Input /></Form.Item></Col>
                 <Col xs={24} sm={12}><Form.Item name="manilaBayArea" label="Manila Bay Area"><Select options={mbaOptions} allowClear /></Form.Item></Col>
                 <Col xs={24} sm={12}><Form.Item name="congressionalDistrict" label="Congressional District"><Input /></Form.Item></Col>
-                <Col xs={12} sm={6}><Form.Item name="latitude" label="Latitude"><InputNumber style={{ width: "100%" }} step={0.0001} precision={4} /></Form.Item></Col>
-                <Col xs={12} sm={6}><Form.Item name="longitude" label="Longitude"><InputNumber style={{ width: "100%" }} step={0.0001} precision={4} /></Form.Item></Col>
+                <Col xs={12} sm={6}><Form.Item name="latitude" label="Latitude"><InputNumber style={{ width: "100%" }} step={0.001} precision={3} /></Form.Item></Col>
+                <Col xs={12} sm={6}><Form.Item name="longitude" label="Longitude"><InputNumber style={{ width: "100%" }} step={0.001} precision={3} /></Form.Item></Col>
               </Row>
             )},
             { key: "operations", label: <span style={{ color: "#fa8c16" }}><CalendarOutlined /> Operations</span>, children: (

@@ -17,15 +17,12 @@ import secureStorage from "../../utils/secureStorage";
 import { fetchWithCache, invalidateCache } from "../../utils/pageCache";
 import { useDataRef } from "../../utils/dataRef";
 import dayjs from "dayjs";
+import { buildFilters, matchesFilter, rowMatchesSearch } from "./shared/tableFilters";
 
 const { Title, Text } = Typography;
 const CACHE_KEY = "technical-assistance-cache";
 const CACHE_TTL = 5 * 60 * 1000;
 
-function buildFilters(records, key) {
-  const vals = [...new Set(records.map((r) => r[key]).filter(Boolean))].sort();
-  return vals.map((v) => ({ text: v, value: v }));
-}
 function networkDays(s, e) {
   if (!s || !e) return null;
   const sd = dayjs(s).startOf("day"); const ed = dayjs(e).startOf("day");
@@ -152,12 +149,12 @@ export default function TechnicalAssistance({canEdit = true, canDelete = true, i
 
   const filtered = useMemo(() => {
     let data = records;
-    if (searchText) { const s = searchText.toLowerCase(); data = data.filter((r) => [r.province, r.municipality, r.barangay, r.focalPerson, r.enmoAssigned, r.typeOfFacility, r.status].some((v) => v && v.toLowerCase().includes(s))); }
-    if (filterProvince) data = data.filter((r) => r.province === filterProvince);
-    if (filterMBA) data = data.filter((r) => r.manilaBayArea === filterMBA);
-    if (filterStatus) data = data.filter((r) => r.status === filterStatus);
-    if (filterMonth) data = data.filter((r) => r.targetMonth === filterMonth);
-    if (filterFacility) data = data.filter((r) => r.typeOfFacility === filterFacility);
+    if (searchText) data = data.filter((r) => rowMatchesSearch(r, searchText));
+    if (filterProvince) data = data.filter((r) => matchesFilter(r.province, filterProvince));
+    if (filterMBA) data = data.filter((r) => matchesFilter(r.manilaBayArea, filterMBA));
+    if (filterStatus) data = data.filter((r) => matchesFilter(r.status, filterStatus));
+    if (filterMonth) data = data.filter((r) => matchesFilter(r.targetMonth, filterMonth));
+    if (filterFacility) data = data.filter((r) => matchesFilter(r.typeOfFacility, filterFacility));
     return data;
   }, [records, searchText, filterProvince, filterMBA, filterStatus, filterMonth, filterFacility]);
 
@@ -172,7 +169,7 @@ export default function TechnicalAssistance({canEdit = true, canDelete = true, i
   const columns = [
     {
       title: <span><EnvironmentOutlined style={{ color: isDark ? "#7eb8da" : "#1a3353" }} /> Location</span>, key: "location", width: 180, fixed: "left",
-      filters: filters.province, onFilter: (v, r) => r.province === v,
+      filters: filters.province, onFilter: (v, r) => matchesFilter(r.province, v),
       sorter: (a, b) => (a.barangay || "").localeCompare(b.barangay || ""),
       render: (_, r) => (
         <Tooltip title={`${r.province} — ${r.municipality} — ${r.barangay || ""}`}>
@@ -184,15 +181,15 @@ export default function TechnicalAssistance({canEdit = true, canDelete = true, i
       ),
     },
     { title: "MBA", dataIndex: "manilaBayArea", key: "mba", width: 80,
-      filters: filters.manilaBayArea, onFilter: (v, r) => r.manilaBayArea === v,
+      filters: filters.manilaBayArea, onFilter: (v, r) => matchesFilter(r.manilaBayArea, v),
       render: (v) => v === "MBA" ? <Tag color="blue" bordered={false}>MBA</Tag> : <Tag color="default" bordered={false}>{v || "—"}</Tag>,
     },
     { title: <span><BankOutlined style={{ color: "#2f54eb" }} /> Facility Type</span>, dataIndex: "typeOfFacility", key: "facility", width: 140,
-      filters: filters.typeOfFacility, onFilter: (v, r) => r.typeOfFacility === v,
+      filters: filters.typeOfFacility, onFilter: (v, r) => matchesFilter(r.typeOfFacility, v),
       render: (v) => v ? <Tag bordered={false} color="geekblue">{v}</Tag> : "—",
     },
     { title: "Status", dataIndex: "status", key: "status", width: 130,
-      filters: filters.status, onFilter: (v, r) => r.status === v,
+      filters: filters.status, onFilter: (v, r) => matchesFilter(r.status, v),
       render: (v) => getStatusTag(v),
     },
     { title: "Year", dataIndex: "yearMonitored", key: "year", width: 70,
@@ -217,7 +214,7 @@ export default function TechnicalAssistance({canEdit = true, canDelete = true, i
       ),
     },
     { title: "Target Month", dataIndex: "targetMonth", key: "targetMonth", width: 100,
-      filters: filters.targetMonth, onFilter: (v, r) => r.targetMonth === v,
+      filters: filters.targetMonth, onFilter: (v, r) => matchesFilter(r.targetMonth, v),
       render: (v) => v ? <Tag bordered={false} color="cyan">{v.replace(/^\d+\./, "")}</Tag> : "—",
     },
     {

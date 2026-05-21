@@ -56,17 +56,13 @@ import secureStorage from "../../utils/secureStorage";
 import { fetchWithCache, invalidateCache } from "../../utils/pageCache";
 import { useDataRef } from "../../utils/dataRef";
 import dayjs from "dayjs";
+import { buildFilters, matchesFilter, rowMatchesSearch } from "./shared/tableFilters";
 import ResponsiveTable from "./shared/ResponsiveTable";
 
 const { Title, Text } = Typography;
 
 const CACHE_KEY = "swm-equip-cache";
 const CACHE_TTL = 5 * 60 * 1000;
-
-function buildFilters(records, key) {
-  const vals = [...new Set(records.map((r) => r[key]).filter(Boolean))].sort();
-  return vals.map((v) => ({ text: v, value: v }));
-}
 
 function networkDays(startDate, endDate) {
   if (!startDate || !endDate) return null;
@@ -265,24 +261,12 @@ export default function SwmEquipment({canEdit = true, canDelete = true, isDark})
 
   const filtered = useMemo(() => {
     let data = records;
-    if (searchText) {
-      const q = searchText.toLowerCase();
-      data = data.filter((r) =>
-        [
-          r.province,
-          r.municipality,
-          r.barangay,
-          r.enmoAssigned,
-          r.focalPerson,
-          r.typeOfEquipment,
-        ].some((v) => v && v.toLowerCase().includes(q)),
-      );
-    }
+    if (searchText) data = data.filter((r) => rowMatchesSearch(r, searchText));
     if (filterProvince)
-      data = data.filter((r) => r.province === filterProvince);
-    if (filterMBA) data = data.filter((r) => r.manilaBayArea === filterMBA);
-    if (filterType) data = data.filter((r) => r.typeOfEquipment === filterType);
-    if (filterMonth) data = data.filter((r) => r.targetMonth === filterMonth);
+      data = data.filter((r) => matchesFilter(r.province, filterProvince));
+    if (filterMBA) data = data.filter((r) => matchesFilter(r.manilaBayArea, filterMBA));
+    if (filterType) data = data.filter((r) => matchesFilter(r.typeOfEquipment, filterType));
+    if (filterMonth) data = data.filter((r) => matchesFilter(r.targetMonth, filterMonth));
     return data;
   }, [records, searchText, filterProvince, filterMBA, filterType, filterMonth]);
 
@@ -338,7 +322,7 @@ export default function SwmEquipment({canEdit = true, canDelete = true, isDark})
       width: 160,
       fixed: "left",
       filters: filters.province,
-      onFilter: (v, r) => r.province === v,
+      onFilter: (v, r) => matchesFilter(r.province, v),
       sorter: (a, b) =>
         (a.municipality || "").localeCompare(b.municipality || ""),
       render: (_, r) => (
@@ -364,7 +348,7 @@ export default function SwmEquipment({canEdit = true, canDelete = true, isDark})
       key: "mba",
       width: 100,
       filters: filters.manilaBayArea,
-      onFilter: (v, r) => r.manilaBayArea === v,
+      onFilter: (v, r) => matchesFilter(r.manilaBayArea, v),
       render: (v) =>
         v === "MBA" ? (
           <Tag color="blue" bordered={false}>
@@ -386,7 +370,7 @@ export default function SwmEquipment({canEdit = true, canDelete = true, isDark})
       key: "typeOfEquipment",
       width: 250,
       filters: filters.typeOfEquipment,
-      onFilter: (v, r) => r.typeOfEquipment === v,
+      onFilter: (v, r) => matchesFilter(r.typeOfEquipment, v),
       render: (v) =>
         v ? (
           <Tag color="orange" bordered={false}>
@@ -408,7 +392,7 @@ export default function SwmEquipment({canEdit = true, canDelete = true, isDark})
         ...(filters.statusOfBioShredder || []).map((f) => f.value),
         ...(filters.statusOfBioComposter || []).map((f) => f.value),
       ])].sort().map((v) => ({ text: v, value: v })),
-      onFilter: (v, r) => r.statusOfBioShredder === v || r.statusOfBioComposter === v,
+      onFilter: (v, r) => matchesFilter(r.statusOfBioShredder, v) || matchesFilter(r.statusOfBioComposter, v),
       render: (_, r) => (
         <Tooltip title={<div><div>Bio-Shredder: {r.statusOfBioShredder || "—"}</div><div>Bio-Composter: {r.statusOfBioComposter || "—"}</div></div>}>
           <div style={{ lineHeight: 1.5 }}>
@@ -520,7 +504,7 @@ export default function SwmEquipment({canEdit = true, canDelete = true, isDark})
       key: "targetMonth",
       width: 110,
       filters: filters.targetMonth,
-      onFilter: (v, r) => r.targetMonth === v,
+      onFilter: (v, r) => matchesFilter(r.targetMonth, v),
       render: (v) =>
         v ? (
           <Tag bordered={false} color="cyan">
@@ -1097,7 +1081,7 @@ export default function SwmEquipment({canEdit = true, canDelete = true, isDark})
                       <Form.Item name="latitude" label="Latitude">
                         <InputNumber
                           style={{ width: "100%" }}
-                          step={0.0001} precision={4}
+                          step={0.001} precision={3}
                         />
                       </Form.Item>
                     </Col>
@@ -1105,7 +1089,7 @@ export default function SwmEquipment({canEdit = true, canDelete = true, isDark})
                       <Form.Item name="longitude" label="Longitude">
                         <InputNumber
                           style={{ width: "100%" }}
-                          step={0.0001} precision={4}
+                          step={0.001} precision={3}
                         />
                       </Form.Item>
                     </Col>

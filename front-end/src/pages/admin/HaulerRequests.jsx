@@ -24,6 +24,7 @@ import {
 import Swal from "sweetalert2";
 import api from "../../api";
 import dayjs from "dayjs";
+import { matchesFilter, rowMatchesSearch } from "./shared/tableFilters";
 
 const { Text, Title } = Typography;
 const { Option } = Select;
@@ -139,14 +140,8 @@ export default function HaulerRequests({ isDark, canEdit = true }) {
   const pendingCount = data.filter((r) => r.status === "pending").length;
 
   const filtered = data.filter((r) => {
-    const s = search.toLowerCase();
-    if (!s) return true;
-    return (
-      r.haulerName?.toLowerCase().includes(s) ||
-      r.portalUserEmail?.toLowerCase().includes(s) ||
-      r.companyName?.toLowerCase().includes(s) ||
-      r.requestNo?.toLowerCase().includes(s)
-    );
+    if (statusFilter !== "all" && !matchesFilter(r.status, statusFilter)) return false;
+    return rowMatchesSearch(r, search);
   });
 
   const columns = [

@@ -1476,7 +1476,7 @@ export default function AdminHome() {
             }}
             allowClear
           />
-          <Button icon={<ReloadOutlined />} onClick={() => fetchNotificationHistory(1, notifHistoryPagination.pageSize)} loading={notifHistoryLoading}>
+          <Button icon={<ReloadOutlined />} onClick={() => fetchNotificationHistory(1, notifHistoryPagination.pageSize, notifHistoryDateRange)} loading={notifHistoryLoading}>
             Refresh
           </Button>
         </Space>
@@ -1493,7 +1493,7 @@ export default function AdminHome() {
                   showSizeChanger: true,
                   pageSizeOptions: ["10", "20", "50"],
                   showTotal: (total, range) => `${range[0]}-${range[1]} of ${total}`,
-                  onChange: (page, pageSize) => fetchNotificationHistory(page, pageSize),
+                  onChange: (page, pageSize) => fetchNotificationHistory(page, pageSize, notifHistoryDateRange),
                 }
               : false
           }
@@ -6459,7 +6459,7 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                               )}
                               <div style={{ display: "flex", alignItems: "center", gap: 5, marginTop: 4, color: "#8c8c8c", fontSize: 11 }}>
                                 <EnvironmentOutlined style={{ color: "#faad14" }} />
-                                <span>{pt.lat.toFixed(6)}, {pt.lng.toFixed(6)}</span>
+                                <span>{pt.lat.toFixed(3)}, {pt.lng.toFixed(3)}</span>
                               </div>
                               {/* Quick Actions */}
                               <div

@@ -33,6 +33,7 @@ import {
 } from "@ant-design/icons";
 import Swal from "sweetalert2";
 import api from "../../api";
+import { matchesFilter, rowMatchesSearch } from "./shared/tableFilters";
 
 const { Title, Text } = Typography;
 const { TextArea } = Input;
@@ -165,15 +166,9 @@ export default function DataReferences({canEdit = true, canDelete = true, isDark
 
   const filtered = useMemo(() => {
     let list = refs;
-    if (filterModule) list = list.filter((r) => r.module === filterModule);
+    if (filterModule) list = list.filter((r) => matchesFilter(r.module, filterModule));
     if (search) {
-      const q = search.toLowerCase();
-      list = list.filter(
-        (r) =>
-          r.label.toLowerCase().includes(q) ||
-          r.category.toLowerCase().includes(q) ||
-          r.values.some((v) => v.toLowerCase().includes(q)),
-      );
+      list = list.filter((r) => rowMatchesSearch(r, search));
     }
     return list;
   }, [refs, filterModule, search]);

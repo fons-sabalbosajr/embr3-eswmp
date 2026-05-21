@@ -19,6 +19,7 @@ import Swal from "sweetalert2";
 import dayjs from "dayjs";
 import api from "../../api";
 import ResponsiveTable from "./shared/ResponsiveTable";
+import { matchesFilter, rowMatchesSearch } from "./shared/tableFilters";
 
 const { Text, Title } = Typography;
 const { Option } = Select;
@@ -618,29 +619,17 @@ export default function PortalUsers({ isDark, canEdit = true, canDelete = true, 
   }, [users]);
 
   const filteredUsers = useMemo(() => {
-    const query = searchText.trim().toLowerCase();
     return users.filter((user) => {
       const assignedNames = Array.isArray(user.assignedSlfName)
         ? user.assignedSlfName
         : user.assignedSlfName ? [user.assignedSlfName] : [];
       const hasAssignedSlf = assignedNames.length > 0;
-      const haystack = [
-        user.firstName,
-        user.lastName,
-        user.email,
-        user.companyName,
-        user.contactNumber,
-        ...assignedNames,
-      ]
-        .filter(Boolean)
-        .join(" ")
-        .toLowerCase();
 
-      if (query && !haystack.includes(query)) return false;
-      if (statusFilter !== "all" && user.status !== statusFilter) return false;
+      if (!rowMatchesSearch(user, searchText)) return false;
+      if (statusFilter !== "all" && !matchesFilter(user.status, statusFilter)) return false;
       if (assignmentFilter === "assigned" && !hasAssignedSlf) return false;
       if (assignmentFilter === "unassigned" && hasAssignedSlf) return false;
-      if (slfFilter && !assignedNames.includes(slfFilter)) return false;
+      if (slfFilter && !assignedNames.some((name) => matchesFilter(name, slfFilter))) return false;
       if (fileFilter === "with-file" && !user.verificationFileUrl) return false;
       if (fileFilter === "no-file" && user.verificationFileUrl) return false;
       if (verificationFilter === "held" && !user.verificationRequired) return false;
@@ -703,7 +692,7 @@ export default function PortalUsers({ isDark, canEdit = true, canDelete = true, 
         { text: "Approved", value: "approved" },
         { text: "Rejected", value: "rejected" },
       ],
-      onFilter: (value, record) => record.status === value,
+      onFilter: (value, record) => matchesFilter(record.status, value),
       render: (_, record) => (
         <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
           <Space size={4} wrap>
@@ -1277,7 +1266,7 @@ export default function PortalUsers({ isDark, canEdit = true, canDelete = true, 
                             <Space>
                               <ClockCircleOutlined />
                               <Text strong>Recent Actions</Text>
-                              <Badge count={historyData.activity.length} style={{ backgroundColor: "#1677ff" }} />
+                              <Badge count={Math.min(historyData.activity.length, 12)} style={{ backgroundColor: "#1677ff" }} />
                             </Space>
                           ),
                           children: historyData.activity.length === 0 ? (
@@ -1287,7 +1276,7 @@ export default function PortalUsers({ isDark, canEdit = true, canDelete = true, 
                               className="portal-user-wrap-table"
                               dataSource={historyData.activity.slice(0, 12)}
                               rowKey={(row, index) => `${row.type}-${row.createdAt}-${index}`}
-                              pagination={false}
+                              pagination={true}
                               columns={[
                                 { title: "Date", dataIndex: "createdAt", width: 150, render: (value) => wrapHistoryText(value ? dayjs(value).format("MM/DD/YYYY h:mm A") : "") },
                                 { title: "Action", dataIndex: "title", width: 230, render: (value) => wrapHistoryText(value, true) },
@@ -1298,7 +1287,7 @@ export default function PortalUsers({ isDark, canEdit = true, canDelete = true, 
                                     {renderAttachments(row.attachments)}
                                   </Space>
                                 ) },
-                                { title: "Actor", dataIndex: "actor", width: 180, render: (value) => wrapHistoryText(value) },
+                                { title: "Assigned User", dataIndex: "actor", width: 180, render: (value) => wrapHistoryText(value) },
                               ]}
                             />
                           ),
@@ -1721,7 +1710,6 @@ export default function PortalUsers({ isDark, canEdit = true, canDelete = true, 
                     <ClockCircleOutlined style={{ marginRight: 4 }} />Activity
                   </Text>
                   <Collapse
-                    defaultActiveKey={["activity"]}
                     style={{ marginTop: 6 }}
                     items={[{
                       key: "activity",
