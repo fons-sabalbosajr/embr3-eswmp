@@ -9,6 +9,7 @@ const {
   saveVerificationFile,
   resolveVerificationFile,
 } = require("../utils/verificationFileStorage");
+const { uploadSingle } = require("../utils/uploadErrorHandler");
 const {
   sendPortalSignupEmail,
   sendPortalResetPasswordEmail,
@@ -152,7 +153,7 @@ const upload = multer({
 
 // Portal Sign Up — register as SLF portal user (pending approval)
 // Accepts multipart/form-data with an optional verificationFile field.
-router.post("/signup", upload.single("verificationFile"), async (req, res) => {
+router.post("/signup", uploadSingle(upload, "verificationFile"), async (req, res) => {
   try {
     const {
       firstName,
@@ -603,7 +604,7 @@ router.post("/credentials/update", async (req, res) => {
   }
 });
 
-router.post("/submit-verification", upload.single("verificationFile"), async (req, res) => {
+router.post("/submit-verification", uploadSingle(upload, "verificationFile"), async (req, res) => {
   try {
     const token = req.headers.authorization?.split(" ")[1];
     if (!token) return res.status(401).json({ message: "No token provided" });

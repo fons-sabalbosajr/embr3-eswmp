@@ -5,7 +5,9 @@ const DataSLF = require("../models/DataSLF");
 const Notification = require("../models/Notification");
 const Transaction = require("../models/Transaction");
 const { uploadFileToDrive } = require("../utils/googleDrive");
+const { saveLocalUpload } = require("../utils/localUploadStorage");
 const { writeLog } = require("../utils/logger");
+const { uploadSingle } = require("../utils/uploadErrorHandler");
 const { notifyAdmin, notifyPortal, refreshAdmin } = require("../utils/socketEmit");
 
 const router = express.Router();
@@ -27,7 +29,7 @@ const upload = multer({
 });
 
 // ── Portal: Submit hauler deletion request ──
-router.post("/", upload.single("letterOfIntent"), async (req, res) => {
+router.post("/", uploadSingle(upload, "letterOfIntent"), async (req, res) => {
   try {
     const {
       portalUserEmail,
@@ -60,30 +62,43 @@ router.post("/", upload.single("letterOfIntent"), async (req, res) => {
     let letterOfIntentFileId = null;
     let letterOfIntentFileName = null;
 
-    // Upload letter of intent to Google Drive if provided
+    // Prefer Drive, but keep the request usable when Drive quota/config fails.
     if (req.file) {
       const folderId = process.env.GDRIVE_HAULER_LOI_FOLDER_ID;
-      if (!folderId) {
-        return res.status(500).json({ message: "Hauler LOI Drive folder not configured." });
-      }
       try {
-        const driveResult = await uploadFileToDrive(
-          req.file.buffer,
-          req.file.mimetype,
-          `LOI_${haulerName}_${Date.now()}_${req.file.originalname}`,
-          false,
-          folderId
-        );
-        letterOfIntentUrl = driveResult.viewUrl;
-        letterOfIntentFileId = driveResult.fileId;
-        letterOfIntentFileName = req.file.originalname;
-      } catch (driveErr) {
-        writeLog("error", "hauler_delete_request.drive_upload", {
-          message: `Drive upload failed for ${portalUserEmail}: ${driveErr.message}`,
+        if (folderId) {
+          const driveResult = await uploadFileToDrive(
+            req.file.buffer,
+            req.file.mimetype,
+            `LOI_${haulerName}_${Date.now()}_${req.file.originalname}`,
+            false,
+            folderId
+          );
+          letterOfIntentUrl = driveResult.viewUrl;
+          letterOfIntentFileId = driveResult.fileId;
+        } else {
+          throw new Error("Hauler LOI Drive folder not configured.");
+        }
+      } catch (storageErr) {
+        writeLog("warn", "hauler_delete_request.drive_upload", {
+          message: `Drive unavailable for ${portalUserEmail}; saving LOI locally: ${storageErr.message}`,
           user: portalUserEmail,
         });
-        return res.status(502).json({ message: `File upload failed: ${driveErr.message}` });
+        try {
+          const localResult = await saveLocalUpload(req.file);
+          letterOfIntentUrl = localResult.url;
+          letterOfIntentFileId = "";
+        } catch (localErr) {
+          writeLog("error", "hauler_delete_request.local_upload", {
+            message: `Local LOI upload failed for ${portalUserEmail}: ${localErr.message}`,
+            user: portalUserEmail,
+          });
+          return res.status(503).json({
+            message: "File storage is temporarily unavailable. Please try again later.",
+          });
+        }
       }
+      letterOfIntentFileName = req.file.originalname;
     }
 
     const request = new HaulerDeleteRequest({

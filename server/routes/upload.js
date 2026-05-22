@@ -2,6 +2,7 @@ const express = require("express");
 const multer = require("multer");
 const { uploadFileToDrive } = require("../utils/googleDrive");
 const { saveLocalUpload, resolveLocalUpload } = require("../utils/localUploadStorage");
+const { uploadSingle } = require("../utils/uploadErrorHandler");
 const { authMiddleware } = require("../middleware/auth");
 
 const router = express.Router();
@@ -41,7 +42,7 @@ const upload = multer({
  * Accepts a single file and uploads it to Google Drive.
  * Returns: { url, fileId, name, mimeType }
  */
-router.post("/", authMiddleware, upload.single("file"), async (req, res) => {
+router.post("/", authMiddleware, uploadSingle(upload, "file"), async (req, res) => {
   try {
     if (!req.file) {
       return res.status(400).json({ message: "No file provided." });

@@ -29,15 +29,32 @@
 import secureStorage from "./secureStorage";
 
 export const DEFAULT_TTL = 5 * 60 * 1000; // 5 minutes
+const MAX_CACHE_CHARS = 2_500_000;
 
 /** Read a cache entry. Returns null when absent. */
 function readEntry(key) {
-  return secureStorage.getJSON(key); // { data, ts }
+  try {
+    return secureStorage.getJSON(key); // { data, ts }
+  } catch {
+    secureStorage.remove(key);
+    return null;
+  }
 }
 
 /** Write a cache entry with a fresh timestamp. */
 function writeEntry(key, data) {
-  secureStorage.setJSON(key, { data, ts: Date.now() });
+  const payload = JSON.stringify({ data, ts: Date.now() });
+  if (payload.length > MAX_CACHE_CHARS) {
+    secureStorage.remove(key);
+    return false;
+  }
+  try {
+    secureStorage.set(key, payload);
+    return true;
+  } catch {
+    secureStorage.remove(key);
+    return false;
+  }
 }
 
 /** Returns true when the entry exists and is within ttl. */
