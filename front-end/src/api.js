@@ -24,11 +24,18 @@ export function logClientError(payload = {}) {
 
 // Attach token to every request if available (skip if already set explicitly)
 api.interceptors.request.use((config) => {
+  config.headers = config.headers || {};
   if (!config.headers.Authorization) {
     const token = secureStorage.get("token");
     if (token) {
       config.headers.Authorization = `Bearer ${token}`;
     }
+  }
+  const adminUser = secureStorage.getJSON("user") || {};
+  const adminName = [adminUser.firstName, adminUser.lastName].filter(Boolean).join(" ").trim();
+  if (adminName || adminUser.email || adminUser.username) {
+    config.headers["X-User-Name"] = adminName || adminUser.username || adminUser.email;
+    config.headers["X-User-Email"] = adminUser.email || "";
   }
   return config;
 });

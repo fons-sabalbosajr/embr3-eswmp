@@ -11,10 +11,18 @@ const { uploadSingle } = require("../utils/uploadErrorHandler");
 const { notifyAdmin, notifyPortal, refreshAdmin } = require("../utils/socketEmit");
 
 const router = express.Router();
+const MAX_UPLOAD_MB = 200;
+const MAX_UPLOAD_BYTES = MAX_UPLOAD_MB * 1024 * 1024;
+
+function getRequestActor(req, fallback = "admin") {
+  const headerName = String(req.get("x-user-name") || "").trim();
+  const headerEmail = String(req.get("x-user-email") || "").trim();
+  return headerName || headerEmail || fallback;
+}
 
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 20 * 1024 * 1024 }, // 20 MB
+  limits: { fileSize: MAX_UPLOAD_BYTES },
   fileFilter(req, file, cb) {
     const allowed = [
       "application/pdf",
@@ -29,7 +37,7 @@ const upload = multer({
 });
 
 // ── Portal: Submit hauler deletion request ──
-router.post("/", uploadSingle(upload, "letterOfIntent"), async (req, res) => {
+router.post("/", uploadSingle(upload, "letterOfIntent", { maxSizeMb: MAX_UPLOAD_MB }), async (req, res) => {
   try {
     const {
       portalUserEmail,
@@ -205,7 +213,7 @@ router.patch("/:id/approve", async (req, res) => {
     }
 
     request.status = "approved";
-    request.reviewedBy = adminName || adminEmail || "admin";
+    request.reviewedBy = adminName || adminEmail || getRequestActor(req);
     request.reviewedAt = new Date();
     request.adminRemarks = remarks || adminRemarks || "";
     await request.save();
@@ -285,7 +293,7 @@ router.patch("/:id/reject", async (req, res) => {
     }
 
     request.status = "rejected";
-    request.reviewedBy = adminName || adminEmail || "admin";
+    request.reviewedBy = adminName || adminEmail || getRequestActor(req);
     request.reviewedAt = new Date();
     request.adminRemarks = remarks || adminRemarks || "";
     await request.save();

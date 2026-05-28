@@ -116,6 +116,8 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, ca
   const [revertReason, setRevertReason] = useState("");
   const [revertLoading, setRevertLoading] = useState(false);
   const [repairingXX, setRepairingXX] = useState(false);
+  const currentUser = secureStorage.getJSON("user") || {};
+  const currentActorName = [currentUser.firstName, currentUser.lastName].filter(Boolean).join(" ").trim() || currentUser.username || currentUser.email || "admin";
   const page = pagination.current;
   const pageSize = pagination.pageSize;
   const searchTerm = debouncedSearch.trim();
@@ -354,7 +356,7 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, ca
     try {
       const { data: result } = await api.post("/data-slf/bulk-delete", {
         ids: selectedRowKeys,
-        performedBy: "EMBR3 ESWMP Admin",
+        performedBy: currentActorName,
       });
       setData((prev) => prev.filter((entry) => !result.data.some((deleted) => deleted._id === entry._id)));
       bumpSubmissionsCache();
@@ -383,7 +385,7 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, ca
       const { data: result } = await api.patch("/data-slf/bulk-revert", {
         ids: selectedRowKeys,
         reason: reason.trim(),
-        performedBy: "EMBR3 ESWMP Admin",
+        performedBy: currentActorName,
       });
       setData((prev) => prev.map((entry) => result.data.find((updated) => updated._id === entry._id) || entry));
       bumpSubmissionsCache();
@@ -570,7 +572,7 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, ca
           ...entry,
           unit: (entry.unit || values.baselineUnit || values.totalVolumeAcceptedUnit || "m³").replace("m3", "m³"),
         })),
-        updatedBy: "EMBR3 ESWMP Admin",
+        updatedBy: currentActorName,
         dateOfDisposal: values.dateOfDisposal?.toISOString(),
         address:
           addressParts.length > 0 ? addressParts.join(", ") : values.address,
@@ -617,7 +619,7 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, ca
     }
   };
 
-  const getTxnHistoryKey = (record) => record?.idNo || record?.submissionId || record?._id || null;
+  const getTxnHistoryKey = (record) => record?._id || record?.idNo || record?.submissionId || null;
 
   const handleAdminRevert = async () => {
     if (!revertReason.trim()) {
@@ -647,7 +649,7 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, ca
     try {
       await api.patch(`/data-slf/${revertModal.record._id}/admin-revert`, {
         reason: revertReason,
-        performedBy: "EMBR3 ESWMP Admin",
+        performedBy: currentActorName,
       });
       Swal.fire({
         icon: "success",

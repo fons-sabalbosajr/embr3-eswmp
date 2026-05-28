@@ -138,14 +138,26 @@ router.get("/companies", async (req, res) => {
 router.get("/thread/:submissionId", async (req, res) => {
   try {
     const key = req.params.submissionId;
+    const isObjectId = /^[a-f\d]{24}$/i.test(key);
     const dataEntryFilters = [{ submissionId: key }, { idNo: key }, { previousIdNos: key }];
-    if (/^[a-f\d]{24}$/i.test(key)) dataEntryFilters.push({ _id: key });
+    if (isObjectId) dataEntryFilters.push({ _id: key });
     const entry = await DataSLF.findOne({ $or: dataEntryFilters }).select("_id submissionId idNo previousIdNos").lean();
+
+    if (isObjectId && entry?._id) {
+      const entryKeys = [entry.idNo, ...(entry.previousIdNos || [])].filter(Boolean);
+      const strictFilters = [
+        { dataEntry: entry._id },
+        ...(entryKeys.length ? [{ "meta.idNo": { $in: entryKeys } }] : []),
+      ];
+      const transactions = await Transaction.find({ $or: strictFilters }).sort({ createdAt: 1 });
+      res.json(transactions);
+      return;
+    }
+
     const submissionKeys = [...new Set([key, getXXAlias(key), entry?.submissionId, entry?.idNo, getXXAlias(entry?.idNo), ...(entry?.previousIdNos || [])].filter(Boolean))];
     const filters = [{ submissionId: { $in: submissionKeys } }];
     if (entry?._id) filters.push({ dataEntry: entry._id });
     if (submissionKeys.length) filters.push({ "meta.idNo": { $in: submissionKeys } });
-    if (submissionKeys.length) filters.push({ "meta.ids": { $in: submissionKeys } });
     if (submissionKeys.length) filters.push({ "meta.previousIdNos": { $in: submissionKeys } });
     const transactions = await Transaction.find({ $or: filters }).sort({ createdAt: 1 });
     res.json(transactions);

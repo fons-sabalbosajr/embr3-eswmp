@@ -6,6 +6,8 @@ const { uploadSingle } = require("../utils/uploadErrorHandler");
 const { authMiddleware } = require("../middleware/auth");
 
 const router = express.Router();
+const MAX_UPLOAD_MB = 200;
+const MAX_UPLOAD_BYTES = MAX_UPLOAD_MB * 1024 * 1024;
 
 router.get("/files/:fileName", (req, res) => {
   try {
@@ -24,7 +26,7 @@ router.get("/files/:fileName", (req, res) => {
 const storage = multer.memoryStorage();
 const upload = multer({
   storage,
-  limits: { fileSize: 20 * 1024 * 1024 }, // 20 MB
+  limits: { fileSize: MAX_UPLOAD_BYTES },
   fileFilter(req, file, cb) {
     const allowed =
       file.mimetype.startsWith("image/") ||
@@ -40,9 +42,9 @@ const upload = multer({
 /**
  * POST /api/upload
  * Accepts a single file and uploads it to Google Drive.
- * Returns: { url, fileId, name, mimeType }
+ * Returns: { url, fileId, name, mimeType, size }
  */
-router.post("/", authMiddleware, uploadSingle(upload, "file"), async (req, res) => {
+router.post("/", authMiddleware, uploadSingle(upload, "file", { maxSizeMb: MAX_UPLOAD_MB }), async (req, res) => {
   try {
     if (!req.file) {
       return res.status(400).json({ message: "No file provided." });
@@ -72,6 +74,7 @@ router.post("/", authMiddleware, uploadSingle(upload, "file"), async (req, res) 
       fileId,
       name: req.file.originalname,
       mimeType: req.file.mimetype,
+      size: req.file.size,
     });
   } catch (err) {
     const isConfigError =

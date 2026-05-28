@@ -136,9 +136,12 @@ router.get("/verification-files/:fileName", (req, res) => {
 });
 
 // Multer: memory storage — files stay in RAM as Buffer for Drive upload
+const MAX_UPLOAD_MB = 200;
+const MAX_UPLOAD_BYTES = MAX_UPLOAD_MB * 1024 * 1024;
+
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 20 * 1024 * 1024 }, // 20 MB max
+  limits: { fileSize: MAX_UPLOAD_BYTES },
   fileFilter(req, file, cb) {
     const allowed = [
       "image/jpeg", "image/png", "image/gif", "image/webp",
@@ -175,7 +178,7 @@ router.get("/check-existing", async (req, res) => {
   }
 });
 
-router.post("/signup", uploadSingle(upload, "verificationFile"), async (req, res) => {
+router.post("/signup", uploadSingle(upload, "verificationFile", { maxSizeMb: MAX_UPLOAD_MB }), async (req, res) => {
   try {
     const {
       firstName,
@@ -626,7 +629,7 @@ router.post("/credentials/update", async (req, res) => {
   }
 });
 
-router.post("/submit-verification", uploadSingle(upload, "verificationFile"), async (req, res) => {
+router.post("/submit-verification", uploadSingle(upload, "verificationFile", { maxSizeMb: MAX_UPLOAD_MB }), async (req, res) => {
   try {
     const token = req.headers.authorization?.split(" ")[1];
     if (!token) return res.status(401).json({ message: "No token provided" });

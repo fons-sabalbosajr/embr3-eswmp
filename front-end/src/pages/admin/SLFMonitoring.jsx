@@ -243,7 +243,64 @@ const isCompletedCellStatus = (status) =>
 
 const getUploadHeaders = () => {
   const token = secureStorage.get("token");
-  return token ? { Authorization: `Bearer ${token}` } : {};
+  const user = secureStorage.getJSON("user") || {};
+  const userName = [user.firstName, user.lastName].filter(Boolean).join(" ").trim();
+  return {
+    ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    ...(userName || user.username || user.email
+      ? { "X-User-Name": userName || user.username || user.email }
+      : {}),
+    ...(user.email ? { "X-User-Email": user.email } : {}),
+  };
+};
+
+const MAX_SLF_UPLOAD_MB = 200;
+const MAX_SLF_UPLOAD_BYTES = MAX_SLF_UPLOAD_MB * 1024 * 1024;
+
+const formatFileSize = (bytes) => {
+  const size = Number(bytes || 0);
+  if (!size) return "";
+  if (size >= 1024 * 1024) return `${(size / (1024 * 1024)).toFixed(size >= 10 * 1024 * 1024 ? 1 : 2)} MB`;
+  if (size >= 1024) return `${(size / 1024).toFixed(1)} KB`;
+  return `${size} B`;
+};
+
+const getUploadFileSize = (file) =>
+  file?.size || file?.originFileObj?.size || file?.response?.size || 0;
+
+const validateSlfUpload = (file) => {
+  if (file?.size > MAX_SLF_UPLOAD_BYTES) {
+    message.error(`${file.name} is larger than ${MAX_SLF_UPLOAD_MB} MB.`);
+    return Upload.LIST_IGNORE;
+  }
+  return true;
+};
+
+const renderSlfUploadItem = (originNode, file) => {
+  const sizeText = formatFileSize(getUploadFileSize(file));
+  const percent =
+    file?.status === "uploading" && Number.isFinite(file?.percent)
+      ? ` - ${Math.round(file.percent)}%`
+      : "";
+  if (!sizeText && !percent) return originNode;
+  return (
+    <div className="slf-upload-list-item">
+      {originNode}
+      <Text
+        type="secondary"
+        style={{ display: "block", fontSize: 11, lineHeight: 1.3, marginTop: 2 }}
+      >
+        {sizeText}
+        {percent}
+      </Text>
+    </div>
+  );
+};
+
+const slfUploadProps = {
+  beforeUpload: validateSlfUpload,
+  itemRender: renderSlfUploadItem,
+  progress: { showInfo: true },
 };
 
 const convertVolume = (value, fromUnit = "tons", toUnit = fromUnit) => {
@@ -8135,13 +8192,14 @@ export default function SLFMonitoring({
                         }
                       >
                         <Upload
+                          {...slfUploadProps}
                           action="/eswm-pipeline/api/upload"
                           headers={getUploadHeaders()}
                           multiple
                           accept=".pdf,.doc,.docx,.xls,.xlsx,image/*"
                         >
                           <Button icon={<UploadOutlined />}>
-                            Upload Commitment File
+                            Upload Commitment File (max 200 MB)
                           </Button>
                         </Upload>
                       </Form.Item>
@@ -8156,13 +8214,14 @@ export default function SLFMonitoring({
                         }
                       >
                         <Upload
+                          {...slfUploadProps}
                           action="/eswm-pipeline/api/upload"
                           headers={getUploadHeaders()}
                           multiple
                           accept=".pdf,.doc,.docx,.xls,.xlsx,image/*"
                         >
                           <Button icon={<UploadOutlined />}>
-                            Upload Progress Report
+                            Upload Progress Report (max 200 MB)
                           </Button>
                         </Upload>
                       </Form.Item>
@@ -8190,13 +8249,14 @@ export default function SLFMonitoring({
                       }
                     >
                       <Upload
+                        {...slfUploadProps}
                         action="/eswm-pipeline/api/upload"
                         headers={getUploadHeaders()}
                         multiple
                         accept=".pdf,.doc,.docx,.xls,.xlsx,image/*"
                       >
                         <Button icon={<UploadOutlined />}>
-                          Upload Preventive Measure Files
+                          Upload Preventive Measure Files (max 200 MB)
                         </Button>
                       </Upload>
                     </Form.Item>
@@ -8276,6 +8336,7 @@ export default function SLFMonitoring({
                                     style={{ margin: 0 }}
                                   >
                                     <Upload
+                                      {...slfUploadProps}
                                       action="/eswm-pipeline/api/upload"
                                       headers={getUploadHeaders()}
                                       multiple
@@ -8285,7 +8346,7 @@ export default function SLFMonitoring({
                                         size="small"
                                         icon={<UploadOutlined />}
                                       >
-                                        Upload
+                                        Upload (max 200 MB)
                                       </Button>
                                     </Upload>
                                   </Form.Item>
@@ -8401,6 +8462,7 @@ export default function SLFMonitoring({
                                     }
                                   >
                                     <Upload
+                                      {...slfUploadProps}
                                       listType="picture-card"
                                       maxCount={1}
                                       accept="image/*"
@@ -8413,6 +8475,10 @@ export default function SLFMonitoring({
                                           style={{ marginTop: 8, fontSize: 12 }}
                                         >
                                           Upload Photo
+                                          <br />
+                                          <Text type="secondary" style={{ fontSize: 11 }}>
+                                            Max 200 MB
+                                          </Text>
                                         </div>
                                       </div>
                                     </Upload>
@@ -8443,6 +8509,7 @@ export default function SLFMonitoring({
                       }
                     >
                       <Upload
+                        {...slfUploadProps}
                         listType="picture-card"
                         accept="image/*"
                         multiple
@@ -8453,6 +8520,10 @@ export default function SLFMonitoring({
                           <PlusOutlined />
                           <div style={{ marginTop: 8, fontSize: 12 }}>
                             Upload Photo
+                            <br />
+                            <Text type="secondary" style={{ fontSize: 11 }}>
+                              Max 200 MB
+                            </Text>
                           </div>
                         </div>
                       </Upload>
@@ -8555,13 +8626,14 @@ export default function SLFMonitoring({
                                     }
                                   >
                                     <Upload
+                                      {...slfUploadProps}
                                       maxCount={1}
                                       accept=".pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx"
                                       action="/eswm-pipeline/api/upload"
                                       headers={getUploadHeaders()}
                                     >
                                       <Button icon={<FilePdfOutlined />}>
-                                        Upload Document
+                                        Upload Document (max 200 MB)
                                       </Button>
                                     </Upload>
                                   </Form.Item>

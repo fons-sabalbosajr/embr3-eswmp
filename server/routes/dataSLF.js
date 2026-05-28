@@ -133,6 +133,12 @@ async function markSubmissionNotificationsRead(entries) {
 const router = express.Router();
 const ADMIN_DISPLAY_NAME = "EMBR3 ESWMP Admin";
 
+function getRequestActor(req, fallback = ADMIN_DISPLAY_NAME) {
+  const headerName = String(req.get("x-user-name") || "").trim();
+  const headerEmail = String(req.get("x-user-email") || "").trim();
+  return headerName || headerEmail || req.logUser || fallback;
+}
+
 const baselineDataMatch = {
   $or: [
     { totalVolumeAccepted: { $exists: true, $ne: null } },
@@ -558,13 +564,13 @@ router.put("/baselines/:id", async (req, res) => {
       submittedBy: entry.submittedBy,
       type: "baseline_update",
       description: `Admin updated baseline data for ${entry.slfName}`,
-      performedBy: req.body.updatedBy || ADMIN_DISPLAY_NAME,
+      performedBy: req.body.updatedBy || getRequestActor(req),
       meta: { entryId: entry._id, slfName: entry.slfName },
     });
 
     writeLog("info", "baseline.admin-update", {
       message: `Admin updated baseline for ${entry.slfName}`,
-      user: req.body.updatedBy || ADMIN_DISPLAY_NAME,
+      user: req.body.updatedBy || getRequestActor(req),
       meta: { entryId: entry._id, slfName: entry.slfName },
     });
 
@@ -629,13 +635,13 @@ router.delete("/baselines/:id", async (req, res) => {
       submittedBy: entry.submittedBy,
       type: "baseline_delete",
       description: `Admin cleared baseline data for ${slfName}`,
-      performedBy: ADMIN_DISPLAY_NAME,
+      performedBy: getRequestActor(req),
       meta: { entryId: entry._id, slfName },
     });
 
     writeLog("warn", "baseline.admin-delete", {
       message: `Admin cleared baseline data for ${slfName}`,
-      user: ADMIN_DISPLAY_NAME,
+      user: getRequestActor(req),
       meta: { entryId: entry._id, slfName },
     });
 
@@ -664,7 +670,7 @@ router.patch("/baseline-update-approve/:slfName", async (req, res) => {
       $set: {
         baselineUpdateApproved: true,
         baselineUpdateApprovedAt: new Date(),
-        baselineUpdateApprovedBy: approvedBy || ADMIN_DISPLAY_NAME,
+        baselineUpdateApprovedBy: approvedBy || getRequestActor(req),
         baselineUpdateRequested: false,
       },
     });
@@ -693,14 +699,14 @@ router.patch("/baseline-update-approve/:slfName", async (req, res) => {
         submittedBy: latest.submittedBy,
         type: "baseline_update_approved",
         description: `Admin approved baseline update request for ${slfName}`,
-        performedBy: approvedBy || ADMIN_DISPLAY_NAME,
+        performedBy: approvedBy || getRequestActor(req),
         meta: { slfName },
       });
     } catch { /* silent */ }
 
     writeLog("info", "baseline.update-approved", {
       message: `Baseline update approved for ${slfName}`,
-      user: approvedBy || ADMIN_DISPLAY_NAME,
+      user: approvedBy || getRequestActor(req),
     });
 
     res.json({ message: "Baseline update approved", data: latest });
@@ -753,14 +759,14 @@ router.patch("/baseline-update-lock/:slfName", async (req, res) => {
         submittedBy: latest?.submittedBy,
         type: "baseline_locked",
         description: `Admin locked baseline data for ${slfName}`,
-        performedBy: lockedBy || ADMIN_DISPLAY_NAME,
+        performedBy: lockedBy || getRequestActor(req),
         meta: { slfName },
       });
     } catch { /* silent */ }
 
     writeLog("info", "baseline.locked", {
       message: `Baseline locked for ${slfName}`,
-      user: lockedBy || ADMIN_DISPLAY_NAME,
+      user: lockedBy || getRequestActor(req),
     });
 
     res.json({ message: "Baseline re-locked" });
@@ -811,7 +817,7 @@ router.patch("/baseline-update-reject/:slfName", async (req, res) => {
         submittedBy: latest.submittedBy,
         type: "baseline_update_request",
         description: `Admin rejected baseline update request for ${slfName}${reason ? ": " + reason : ""}`,
-        performedBy: rejectedBy || ADMIN_DISPLAY_NAME,
+        performedBy: rejectedBy || getRequestActor(req),
         meta: { slfName, reason, action: "rejected" },
       });
     } catch { /* silent */ }
@@ -883,7 +889,7 @@ router.patch("/:id/approve-edit", async (req, res) => {
 
     const { approvedBy, reason } = req.body || {};
     entry.status = "reverted";
-    entry.revertedBy = approvedBy || ADMIN_DISPLAY_NAME;
+    entry.revertedBy = approvedBy || getRequestActor(req);
     entry.revertedAt = new Date();
     entry.revertReason = reason || entry.revertReason || "Edit request approved by admin";
     entry.revertRequested = false;
@@ -913,7 +919,7 @@ router.patch("/:id/approve-edit", async (req, res) => {
         submittedBy: entry.submittedBy,
         type: "submission_edit_approved",
         description: `Admin approved edit request for ${entry.idNo}`,
-        performedBy: approvedBy || ADMIN_DISPLAY_NAME,
+        performedBy: approvedBy || getRequestActor(req),
         meta: { idNo: entry.idNo },
       });
     } catch { /* silent */ }
@@ -960,7 +966,7 @@ router.patch("/:id/reject-edit", async (req, res) => {
         submittedBy: entry.submittedBy,
         type: "submission_edit_rejected",
         description: `Admin rejected edit request for ${entry.idNo}: ${reason || "No reason"}`,
-        performedBy: rejectedBy || ADMIN_DISPLAY_NAME,
+        performedBy: rejectedBy || getRequestActor(req),
         meta: { idNo: entry.idNo, reason },
       });
     } catch { /* silent */ }
@@ -1197,7 +1203,7 @@ router.post("/cell-capacity-alert", async (req, res) => {
       companyName: slfName || entries[0]?.slfName || entries[0]?.lguCompanyName || "",
       type: "cell_capacity_alert",
       description: `Cell capacity alert sent to ${recipients.length} portal user(s)${cellName ? ` for ${cellName}` : ""}`,
-      performedBy: performedBy || ADMIN_DISPLAY_NAME,
+      performedBy: performedBy || getRequestActor(req),
       meta: { recipients, cellName, slfName, submissionIds: ids },
     });
     notifyAdmin(req, {
@@ -1240,7 +1246,7 @@ router.patch("/:id/cell-assignments", async (req, res) => {
       submittedBy: entry.submittedBy || "",
       type: "cell_assignment",
       description: `Updated cell assignment for ${entry.idNo || entry.lguCompanyName}`,
-      performedBy: req.logUser || "admin",
+      performedBy: getRequestActor(req, "admin"),
       meta: { idNo: entry.idNo, assignments },
     });
 
@@ -1291,14 +1297,14 @@ router.patch("/:id/admin-edit", async (req, res) => {
         submittedBy: entry.submittedBy,
         type: "admin_edit",
         description: `Admin edited submission ${entry.idNo}`,
-        performedBy: req.body.updatedBy || ADMIN_DISPLAY_NAME,
+        performedBy: req.body.updatedBy || getRequestActor(req),
         meta: { idNo: entry.idNo, updatedFields },
       });
     } catch { /* silent */ }
     res.json(populated);
     writeLog("info", "submission.update", {
       message: `Submission ${entry.idNo} edited by admin`,
-      user: req.logUser || req.body.updatedBy || ADMIN_DISPLAY_NAME,
+      user: req.body.updatedBy || getRequestActor(req),
       ip: req.ip,
       meta: { id: entry._id, idNo: entry.idNo },
     });
@@ -1354,7 +1360,7 @@ router.patch("/:id/status", async (req, res) => {
         submittedBy: entry.submittedBy,
         type: "status_change",
         description: `Entry ${entry.idNo} marked as ${status}`,
-        performedBy: ADMIN_DISPLAY_NAME,
+        performedBy: getRequestActor(req),
         meta: { status, idNo: entry.idNo },
       });
     } catch { /* silent */ }
@@ -1384,7 +1390,7 @@ router.patch("/:id/status", async (req, res) => {
 
     writeLog("info", "submission.status", {
       message: `Submission ${entry.idNo} ${status}`,
-      user: req.logUser || "admin",
+      user: getRequestActor(req, "admin"),
       ip: req.ip,
       meta: { id: entry._id, status },
     });
@@ -1423,7 +1429,7 @@ router.patch("/bulk-status", async (req, res) => {
           submittedBy: entry.submittedBy,
           type: "status_change",
           description: `Entry ${entry.idNo} marked as ${status} (bulk)`,
-          performedBy: ADMIN_DISPLAY_NAME,
+          performedBy: getRequestActor(req),
           meta: { status, idNo: entry.idNo, bulk: true },
         });
       } catch { /* silent */ }
@@ -1464,7 +1470,7 @@ router.patch("/bulk-status", async (req, res) => {
     res.json({ message: `${updated.length} entries ${status}`, data: updated });
     writeLog("info", "submission.bulk-status", {
       message: `Bulk ${status}: ${updated.length} entries`,
-      user: req.logUser || "admin",
+      user: getRequestActor(req, "admin"),
       ip: req.ip,
       meta: { status, count: updated.length, ids: updated.map((e) => e.idNo) },
     });
@@ -1484,7 +1490,7 @@ router.post("/bulk-delete", async (req, res) => {
     const entries = await DataSLF.find({ _id: { $in: ids }, deletedAt: null });
     for (const entry of entries) {
       entry.deletedAt = new Date();
-      entry.deletedBy = performedBy || req.logUser || "admin";
+      entry.deletedBy = performedBy || getRequestActor(req, "admin");
       await entry.save();
       try {
         await Transaction.create({
@@ -1495,7 +1501,7 @@ router.post("/bulk-delete", async (req, res) => {
           submittedBy: entry.submittedBy,
           type: "deleted",
           description: `Entry ${entry.idNo} deleted (bulk)`,
-          performedBy: performedBy || req.logUser || "admin",
+          performedBy: performedBy || getRequestActor(req, "admin"),
           meta: { idNo: entry.idNo, bulk: true },
         });
       } catch { /* silent */ }
@@ -1504,7 +1510,7 @@ router.post("/bulk-delete", async (req, res) => {
     refreshAdmin(req, "submissions");
     writeLog("warn", "submission.bulk-delete", {
       message: `Bulk deleted ${entries.length} submissions`,
-      user: performedBy || req.logUser || "admin",
+      user: performedBy || getRequestActor(req, "admin"),
       ip: req.ip,
       meta: { count: entries.length, ids: entries.map((entry) => entry.idNo) },
     });
@@ -1530,7 +1536,7 @@ router.patch("/bulk-revert", async (req, res) => {
     for (const entry of entries) {
       entry.status = "reverted";
       entry.revertReason = reason.trim();
-      entry.revertedBy = performedBy || ADMIN_DISPLAY_NAME;
+      entry.revertedBy = performedBy || getRequestActor(req);
       entry.revertedAt = new Date();
       entry.revertRequested = false;
       await entry.save();
@@ -1545,7 +1551,7 @@ router.patch("/bulk-revert", async (req, res) => {
           submittedBy: entry.submittedBy,
           type: "status_change",
           description: `Admin reverted submission ${entry.idNo} (bulk): ${reason.trim()}`,
-          performedBy: performedBy || ADMIN_DISPLAY_NAME,
+          performedBy: performedBy || getRequestActor(req),
           meta: { idNo: entry.idNo, reason: reason.trim(), bulk: true },
         });
       } catch { /* silent */ }
@@ -1570,7 +1576,7 @@ router.patch("/bulk-revert", async (req, res) => {
     refreshAdmin(req, "submissions");
     writeLog("info", "submission.bulk-revert", {
       message: `Bulk reverted ${updated.length} submissions`,
-      user: performedBy || ADMIN_DISPLAY_NAME,
+      user: performedBy || getRequestActor(req),
       ip: req.ip,
       meta: { reason: reason.trim(), ids: updated.map((entry) => entry.idNo) },
     });
@@ -1725,7 +1731,7 @@ router.post("/repair-xx-ids", async (req, res) => {
           submittedBy: doc.submittedBy,
           type: "admin_edit",
           description: `Fixed province code ID from ${oldIdNo} to ${finalIdNo}`,
-          performedBy: ADMIN_DISPLAY_NAME,
+          performedBy: getRequestActor(req),
           meta: { idNo: finalIdNo, previousIdNo: oldIdNo, repairXX: true },
         });
         updated++;
@@ -1736,7 +1742,7 @@ router.post("/repair-xx-ids", async (req, res) => {
 
     writeLog("warn", "id.repair-xx", {
       message: `Repaired ${updated} XX province code records`,
-      user: ADMIN_DISPLAY_NAME,
+      user: getRequestActor(req),
       meta: { total: xxDocs.length, updated, errors: errors.length },
     });
 
@@ -1767,16 +1773,16 @@ router.delete("/:id", async (req, res) => {
         submittedBy: entry.submittedBy,
         type: "deleted",
         description: `Entry ${entry.idNo} deleted`,
-        performedBy: ADMIN_DISPLAY_NAME,
+        performedBy: getRequestActor(req),
         meta: { idNo: entry.idNo },
       });
     } catch { /* silent */ }
 
     entry.deletedAt = new Date();
-    entry.deletedBy = req.logUser || "admin";
+    entry.deletedBy = getRequestActor(req, "admin");
     await entry.save();
     res.json({ message: "Entry moved to trash" });
-    writeLog("warn", "submission.delete", { message: `Submission soft-deleted: ${req.params.id}`, user: req.logUser || "admin", ip: req.ip });
+    writeLog("warn", "submission.delete", { message: `Submission soft-deleted: ${req.params.id}`, user: getRequestActor(req, "admin"), ip: req.ip });
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });
   }
@@ -1815,12 +1821,12 @@ router.patch("/:id/restore", async (req, res) => {
         submittedBy: entry.submittedBy,
         type: "status_change",
         description: `Entry ${entry.idNo} restored from trash`,
-        performedBy: req.logUser || "admin",
+        performedBy: getRequestActor(req, "admin"),
       });
     } catch { /* silent */ }
     const populated = await DataSLF.findById(entry._id).populate("slfGenerator");
     res.json(populated);
-    writeLog("info", "submission.restore", { message: `Submission restored: ${entry.idNo}`, user: req.logUser || "admin", ip: req.ip });
+    writeLog("info", "submission.restore", { message: `Submission restored: ${entry.idNo}`, user: getRequestActor(req, "admin"), ip: req.ip });
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });
   }
@@ -1834,7 +1840,7 @@ router.delete("/:id/permanent", async (req, res) => {
     if (!entry.deletedAt) return res.status(400).json({ message: "Entry must be soft-deleted first" });
     await DataSLF.findByIdAndDelete(req.params.id).setOptions({ includeHiddenYears: true });
     res.json({ message: "Entry permanently deleted" });
-    writeLog("warn", "submission.permanent-delete", { message: `Submission permanently deleted: ${entry.idNo}`, user: req.logUser || "admin", ip: req.ip });
+    writeLog("warn", "submission.permanent-delete", { message: `Submission permanently deleted: ${entry.idNo}`, user: getRequestActor(req, "admin"), ip: req.ip });
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });
   }
@@ -1893,7 +1899,7 @@ router.patch("/:id/admin-revert", async (req, res) => {
 
     entry.status = "reverted";
     entry.revertReason = reason;
-    entry.revertedBy = performedBy || ADMIN_DISPLAY_NAME;
+    entry.revertedBy = performedBy || getRequestActor(req);
     entry.revertedAt = new Date();
     if (sendFollowUp) {
       const days = Math.max(1, Number(temporaryDeleteAfterDays) || 3);
@@ -1913,7 +1919,7 @@ router.patch("/:id/admin-revert", async (req, res) => {
         submittedBy: entry.submittedBy,
         type: "status_change",
         description: `Admin reverted submission ${entry.idNo}: ${reason}`,
-        performedBy: performedBy || ADMIN_DISPLAY_NAME,
+        performedBy: performedBy || getRequestActor(req),
         meta: { idNo: entry.idNo, reason },
       });
     } catch { /* silent */ }
@@ -1995,7 +2001,7 @@ router.patch("/:id/admin-revert", async (req, res) => {
 
     writeLog("info", "submission.admin-revert", {
       message: `Admin reverted ${entry.idNo}: ${reason}`,
-      user: req.logUser || performedBy || "admin",
+      user: performedBy || getRequestActor(req, "admin"),
       ip: req.ip,
       meta: { id: entry._id, reason },
     });
@@ -2028,7 +2034,7 @@ router.patch("/:id/approve-revert", async (req, res) => {
         submittedBy: entry.submittedBy,
         type: "revert_approved",
         description: `Revert approved for ${entry.idNo}, status set to pending`,
-        performedBy: ADMIN_DISPLAY_NAME,
+        performedBy: getRequestActor(req),
         meta: { idNo: entry.idNo },
       });
     } catch { /* silent */ }
@@ -2037,7 +2043,7 @@ router.patch("/:id/approve-revert", async (req, res) => {
     res.json(populated);
     writeLog("info", "submission.revert-approved", {
       message: `Revert approved for ${entry.idNo}`,
-      user: req.logUser || "admin",
+      user: getRequestActor(req, "admin"),
       ip: req.ip,
       meta: { id: entry._id },
     });
@@ -2074,13 +2080,13 @@ router.post("/:id/send-email", async (req, res) => {
       submittedBy: entry.submittedBy,
       type: "email_ack_sent",
       description: `Email sent to ${entry.submittedBy}: ${subject}`,
-      performedBy: req.logUser || "admin",
+      performedBy: getRequestActor(req, "admin"),
       meta: { email: entry.submittedBy, subject },
     });
 
     writeLog("info", "submission.email-sent", {
       message: `Email sent to ${entry.submittedBy} for ${entry.idNo}: ${subject}`,
-      user: req.logUser || "admin",
+      user: getRequestActor(req, "admin"),
       ip: req.ip,
     });
 
