@@ -163,9 +163,10 @@ export default function PortalLogin() {
         <div className="auth-card-wrapper auth-card-wrapper-login">
           {announcement && (
             <Collapse
+              className="auth-announcement-collapse"
               size="small"
-              defaultActiveKey={["announcement"]}
-              style={{ marginBottom: 14, textAlign: "left", borderRadius: 10 }}
+              defaultActiveKey={[]}
+              style={{ marginBottom: 14, textAlign: "left" }}
               items={[{
                 key: "announcement",
                 label: (

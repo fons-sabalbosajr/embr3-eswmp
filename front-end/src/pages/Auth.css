@@ -236,6 +236,23 @@
   max-width: 520px;
 }
 
+.auth-announcement-collapse {
+  border-radius: 10px !important;
+  overflow: hidden;
+  background: rgba(255,255,255,0.94) !important;
+  border: 1px solid rgba(255,255,255,0.45) !important;
+  box-shadow: 0 10px 28px rgba(0,0,0,0.14);
+}
+
+.auth-announcement-collapse .ant-collapse-header {
+  align-items: center !important;
+  padding: 10px 14px !important;
+}
+
+.auth-announcement-collapse .ant-collapse-content-box {
+  padding: 10px 12px 12px !important;
+}
+
 .auth-card-wrapper-signup {
   max-width: 560px;
 }

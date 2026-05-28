@@ -2203,8 +2203,8 @@ export default function SLFPortal() {
   };
 
   // ── Fetch waste received summary ──
-  const handleOpenWasteReceived = async () => {
-    setWasteReceivedModalOpen(true);
+  const handleOpenWasteReceived = async ({ openModal = true } = {}) => {
+    if (openModal) setWasteReceivedModalOpen(true);
     if (!activeSlfName) return;
     setWasteReceivedLoading(true);
     const cacheKey = `${PORTAL_WASTE_RECEIVED_CACHE_KEY}:${activeSlfId || activeSlfName}`;
@@ -2248,6 +2248,12 @@ export default function SLFPortal() {
       setWasteReceivedLoading(false);
     }
   };
+
+  useEffect(() => {
+    if (activeMenu === "overview" && activeSlfName) {
+      handleOpenWasteReceived({ openModal: false });
+    }
+  }, [activeMenu, activeSlfId, activeSlfName]);
 
   // ── Support Ticket Functions ──
   const fetchSupportTickets = useCallback(async () => {
@@ -3984,11 +3990,6 @@ export default function SLFPortal() {
 
   const renderOverview = () => {
     const ownSubmissions = Array.isArray(submissions) ? submissions : [];
-    const statusData = Object.entries(ownSubmissions.reduce((acc, item) => {
-      const key = item.status || "pending";
-      acc[key] = (acc[key] || 0) + 1;
-      return acc;
-    }, {})).map(([name, value]) => ({ name: name.replace("_", " "), value }));
     const volumeTotals = ownSubmissions.reduce((acc, item) => {
       (item.trucks || []).forEach((truck) => {
         const unit = normalizeUnit(truck.actualVolumeUnit || item.baselineUnit || baselineUnit || "m³");
@@ -4002,6 +4003,70 @@ export default function SLFPortal() {
       { name: "Active Cells", value: activeCellEntries.length || Number(slfInfo?.activeCells || 0) || 0 },
       { name: "Closed Cells", value: closedCellEntries.length || Number(slfInfo?.closedCells || 0) || 0 },
     ].filter((item) => item.value > 0);
+    const legacySubmissionRows = [
+      ...(wasteReceivedData.lguR3 || []).map((row) => ({ ...row, clientType: "LGU", region: row.region })),
+      ...(wasteReceivedData.lguOutside || []).map((row) => ({ ...row, clientType: "LGU", region: row.region })),
+      ...(wasteReceivedData.privateIndustry || []).map((row) => ({ ...row, clientType: "Private", region: row.region })),
+    ].filter((row) => Number(row.totalVolume || 0) > 0 || Number(row.entries || 0) > 0);
+    const submissionBreakdownRows = (wasteReceivedData.clientBreakdown || wasteReceivedData.submissionClients || []).length
+      ? (wasteReceivedData.clientBreakdown || wasteReceivedData.submissionClients || [])
+      : legacySubmissionRows;
+    const baselineBreakdownRows = (wasteReceivedData.baselineClients || []).length
+      ? wasteReceivedData.baselineClients
+      : wasteReceivedData.baselineCellBreakdown || [];
+    const getBreakdownCategory = (row = {}) => {
+      const type = row.clientType || row.companyType || "Private";
+      const region = row.region || row.companyRegion || "";
+      if (/baseline/i.test(type)) return "Baseline Utilization";
+      if (/lgu/i.test(type)) return String(region).startsWith("03") ? "LGU - Region III" : "LGU - Outside Region III";
+      return "Private Industry";
+    };
+    const toCategoryData = (rows) => Object.entries(rows.reduce((acc, row) => {
+      const key = getBreakdownCategory(row);
+      acc[key] = (acc[key] || 0) + 1;
+      return acc;
+    }, {})).map(([name, value]) => ({ name, value }));
+    const baselineCategoryData = toCategoryData(baselineBreakdownRows);
+    const submissionCategoryData = toCategoryData(submissionBreakdownRows);
+    const categoryColors = {
+      "LGU - Region III": "#1677ff",
+      "LGU - Outside Region III": "#722ed1",
+      "Private Industry": "#52c41a",
+      "Baseline Utilization": "#fa8c16",
+    };
+    const wasteFilledM3 = Number(wasteReceivedData.baselineTotals?.m3 || 0) + Number(wasteReceivedData.totals?.m3 || 0);
+    const wasteFilledTons = Number(wasteReceivedData.baselineTotals?.tons || 0) + Number(wasteReceivedData.totals?.tons || 0);
+    const formatWasteTotal = () => {
+      const parts = [];
+      if (wasteFilledM3 > 0) parts.push(`${wasteFilledM3.toLocaleString()} m³`);
+      if (wasteFilledTons > 0) parts.push(`${wasteFilledTons.toLocaleString()} tons`);
+      return parts.join(" / ") || "0";
+    };
+    const renderBreakdownChart = (title, data, total) => (
+      <Card
+        size="small"
+        title={<Text strong style={{ fontSize: 13 }}>{title}</Text>}
+        loading={wasteReceivedLoading}
+        style={{ borderRadius: 8, height: "100%" }}
+        bodyStyle={{ height: 250 }}
+      >
+        {data.length ? (
+          <ResponsiveContainer width="100%" height="100%">
+            <PieChart>
+              <Pie data={data} dataKey="value" nameKey="name" innerRadius={48} outerRadius={78} paddingAngle={3}>
+                {data.map((entry, index) => (
+                  <RCell key={`${title}-${entry.name}`} fill={categoryColors[entry.name] || statusColors[index % statusColors.length]} />
+                ))}
+              </Pie>
+              <RTooltip />
+              <Legend />
+            </PieChart>
+          </ResponsiveContainer>
+        ) : (
+          <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={total ? "No categorized breakdown" : "No breakdown data yet"} />
+        )}
+      </Card>
+    );
 
     return (
       <div style={{ maxWidth: 1680, margin: "0 auto" }}>
@@ -4012,39 +4077,43 @@ export default function SLFPortal() {
           <Col xs={24} md={6}><Card size="small" style={{ borderRadius: 8 }}><Statistic title="My Recorded Volume" value={`${volumeTotals.m3 ? `${volumeTotals.m3.toLocaleString()} m³` : ""}${volumeTotals.m3 && volumeTotals.tons ? " / " : ""}${volumeTotals.tons ? `${volumeTotals.tons.toLocaleString()} tons` : ""}` || "0"} valueStyle={{ fontSize: 16, color: "#52c41a" }} /></Card></Col>
         </Row>
         <Row gutter={[12, 12]}>
-          <Col xs={24} lg={14}>
-            <Card className="slf-section" title={<Space><DashboardOutlined /> <Text strong>SLF Overview</Text></Space>} style={{ borderRadius: 8 }}>
-              <Row gutter={[10, 10]}>
+          <Col xs={24}>
+            <Card
+              className="slf-section"
+              size="small"
+              title={<Space><DashboardOutlined /> <Text strong>SLF Overview</Text></Space>}
+              style={{ borderRadius: 8 }}
+              bodyStyle={{ padding: 12, overflowX: "auto" }}
+            >
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(8, minmax(130px, 1fr))", gap: 8, minWidth: 1080 }}>
                 {[["Facility", activeSlfName], ["Province", slfInfo?.province], ["Municipality", slfInfo?.municipality || slfInfo?.city], ["Classification", slfInfo?.category || slfInfo?.classification], ["Status", slfInfo?.operationalStatus || slfInfo?.status], ["Ownership", slfInfo?.ownership], ["ECC No.", slfInfo?.eccNo], ["Permit to Operate", slfInfo?.permitToOperate]].map(([label, value]) => (
-                  <Col xs={24} sm={12} md={8} key={label}>
-                    <div style={{ padding: 10, border: "1px solid #eef2f7", borderRadius: 8, minHeight: 66 }}>
-                      <Text type="secondary" style={{ fontSize: 11 }}>{label}</Text>
-                      <div style={{ fontSize: 13, fontWeight: 600, color: "#1a3353", overflowWrap: "anywhere" }}>{value || "Not encoded"}</div>
-                    </div>
-                  </Col>
+                  <div key={label} style={{ padding: "8px 10px", border: "1px solid #eef2f7", borderRadius: 8, minHeight: 58 }}>
+                    <Text type="secondary" style={{ fontSize: 10, textTransform: "uppercase", letterSpacing: 0.3 }}>{label}</Text>
+                    <div style={{ fontSize: 12, fontWeight: 600, color: "#1a3353", overflowWrap: "anywhere", lineHeight: 1.25 }}>{value || "Not encoded"}</div>
+                  </div>
                 ))}
-              </Row>
+              </div>
             </Card>
           </Col>
-          <Col xs={24} lg={10}>
-            <Card title={<Text strong style={{ fontSize: 14 }}>Submission Status</Text>} style={{ borderRadius: 8 }} bodyStyle={{ height: 270 }}>
-              {statusData.length ? <ResponsiveContainer width="100%" height="100%"><PieChart><Pie data={statusData} dataKey="value" nameKey="name" innerRadius={54} outerRadius={84} paddingAngle={3}>{statusData.map((_, index) => <RCell key={index} fill={statusColors[index % statusColors.length]} />)}</Pie><RTooltip /><Legend /></PieChart></ResponsiveContainer> : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No submissions yet" />}
-            </Card>
-          </Col>
-          <Col xs={24} lg={10}>
-            <Card title={<Text strong style={{ fontSize: 14 }}>Landfill Cells</Text>} style={{ borderRadius: 8 }} bodyStyle={{ height: 250 }}>
+          <Col xs={24} md={12} xl={6}>
+            <Card title={<Text strong style={{ fontSize: 14 }}>Landfill Cells</Text>} style={{ borderRadius: 8, height: "100%" }} bodyStyle={{ height: 250 }}>
               {cellData.length ? <ResponsiveContainer width="100%" height="100%"><PieChart><Pie data={cellData} dataKey="value" nameKey="name" innerRadius={48} outerRadius={78}>{cellData.map((_, index) => <RCell key={index} fill={index === 0 ? "#52c41a" : "#8c8c8c"} />)}</Pie><RTooltip /><Legend /></PieChart></ResponsiveContainer> : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No cell data encoded" />}
             </Card>
           </Col>
-          <Col xs={24} lg={14}>
-            <Card title={<Text strong style={{ fontSize: 14 }}>Recent Portal Submissions</Text>} style={{ borderRadius: 8 }}>
-              <Table size="small" rowKey={(row) => row._id} dataSource={ownSubmissions.slice(0, 6)} loading={loadingSubmissions} pagination={false} locale={{ emptyText: "No portal submissions yet" }} columns={[
-                { title: "ID", dataIndex: "idNo", width: 110, render: (value, row) => value || row.submissionId || "No ID" },
-                { title: "Disposal Date", dataIndex: "dateOfDisposal", width: 130, render: (value) => value ? dayjs(value).format("MM/DD/YYYY") : "Not encoded" },
-                { title: "Trucks", width: 80, align: "center", render: (_, row) => row.trucks?.length || 0 },
-                { title: "Status", dataIndex: "status", width: 120, render: (value) => <Tag color={value === "acknowledged" ? "green" : value === "rejected" ? "red" : "gold"}>{value || "pending"}</Tag> },
-              ]} />
+          <Col xs={24} md={12} xl={6}>
+            <Card title={<Text strong style={{ fontSize: 14 }}>Waste Received Totals</Text>} loading={wasteReceivedLoading} style={{ borderRadius: 8, height: "100%" }} bodyStyle={{ minHeight: 250, display: "flex", alignItems: "center" }}>
+              <Row gutter={[12, 14]} style={{ width: "100%" }}>
+                <Col xs={24}><Statistic title="Total Waste Filled" value={formatWasteTotal()} valueStyle={{ fontSize: 16, color: "#52c41a" }} /></Col>
+                <Col xs={12}><Statistic title="Baseline Categories" value={baselineBreakdownRows.length} valueStyle={{ color: "#1a3353" }} /></Col>
+                <Col xs={12}><Statistic title="Submission Groups" value={submissionBreakdownRows.length} valueStyle={{ color: "#fa8c16" }} /></Col>
+              </Row>
             </Card>
+          </Col>
+          <Col xs={24} md={12} xl={6}>
+            {renderBreakdownChart("Baseline Breakdown", baselineCategoryData, baselineBreakdownRows.length)}
+          </Col>
+          <Col xs={24} md={12} xl={6}>
+            {renderBreakdownChart("Submission Breakdown", submissionCategoryData, submissionBreakdownRows.length)}
           </Col>
         </Row>
       </div>
@@ -4140,19 +4209,16 @@ export default function SLFPortal() {
                     "linear-gradient(135deg, #1a3353 0%, #2d5f8a 100%)",
                   borderRadius: "10px 10px 0 0",
                   padding: isMobile ? "14px 16px" : "16px 24px",
-                  cursor: "pointer",
                 },
                 body: {
-                  padding: slfCardExpanded ? (isMobile ? 16 : 24) : 0,
+                  padding: 0,
                   overflow: "hidden",
-                  maxHeight: slfCardExpanded ? 3000 : 0,
-                  transition: "max-height 0.35s ease, padding 0.35s ease",
+                  maxHeight: 0,
                 },
               }}
               title={
                 <div
                   style={{ display: "flex", alignItems: "center", gap: 10 }}
-                  onClick={() => setSlfCardExpanded((v) => !v)}
                 >
                   <div
                     style={{
@@ -4162,7 +4228,7 @@ export default function SLFPortal() {
                       transform: slfCardExpanded
                         ? "rotate(180deg)"
                         : "rotate(0deg)",
-                      display: "flex",
+                      display: "none",
                       alignItems: "center",
                     }}
                   >

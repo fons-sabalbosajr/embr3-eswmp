@@ -3956,6 +3956,14 @@ export default function SLFPortalModals({
             </Col>
           </Row>
 
+          <Alert
+            type="info"
+            showIcon
+            message="Client-level names and submission volumes are hidden for confidentiality."
+            description="Only totals and category charts are shown in this breakdown."
+          />
+          {false && (
+          <>
           <Divider orientation="left" style={{ fontSize: 13 }}><TeamOutlined /> Baseline Client List</Divider>
           <Table
             size="small"
@@ -3991,6 +3999,8 @@ export default function SLFPortalModals({
               { title: "Volume", width: 90, align: "center", render: () => <Tag>Hidden</Tag> },
             ]}
           />
+          </>
+          )}
         </Spin>
       </Modal>
 
