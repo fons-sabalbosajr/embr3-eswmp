@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import { useCallback, useMemo, useState, useEffect, useRef } from "react";
 import {
   Table,
   Button,
@@ -25,6 +25,8 @@ import Swal from "sweetalert2";
 import api from "../../api";
 import dayjs from "dayjs";
 import { matchesFilter, rowMatchesSearch } from "./shared/tableFilters";
+import { fetchWithCache, invalidateCache } from "../../utils/pageCache";
+import { getSocket } from "../../utils/socket";
 
 const { Text, Title } = Typography;
 const { Option } = Select;
@@ -34,6 +36,8 @@ const STATUS_COLOR = {
   approved: "green",
   rejected: "red",
 };
+const HAULER_REQUESTS_CACHE_KEY = "hauler-requests-cache";
+const HAULER_REQUESTS_CACHE_TTL = 2 * 60 * 1000;
 
 export default function HaulerRequests({ isDark, canEdit = true }) {
   const [data, setData] = useState([]);
@@ -44,30 +48,56 @@ export default function HaulerRequests({ isDark, canEdit = true }) {
   const [actionLoading, setActionLoading] = useState(false);
   const fetchingRef = useRef(false);
 
-  const fetchData = async () => {
+  const fetchData = useCallback(async ({ force = false, silent = false } = {}) => {
     if (fetchingRef.current) return;
     fetchingRef.current = true;
-    setLoading(true);
     try {
-      const params = { limit: 100 };
-      if (statusFilter !== "all") params.status = statusFilter;
-      if (search) params.search = search;
-      const { data: res } = await api.get("/hauler-delete-requests", { params });
-      setData(res.requests || []);
+      const cacheKey = `${HAULER_REQUESTS_CACHE_KEY}-${statusFilter}-${search}`;
+      await fetchWithCache(
+        cacheKey,
+        async () => {
+          const params = { limit: 100 };
+          if (statusFilter !== "all") params.status = statusFilter;
+          if (search) params.search = search;
+          const { data: res } = await api.get("/hauler-delete-requests", { params });
+          return res.requests || [];
+        },
+        {
+          ttl: HAULER_REQUESTS_CACHE_TTL,
+          force,
+          onStart: () => !silent && setLoading(true),
+          onEnd: () => !silent && setLoading(false),
+          onData: (rows) => {
+            setData(Array.isArray(rows) ? rows : []);
+            setLoading(false);
+          },
+        },
+      );
     } catch {
       /* silent */
     } finally {
-      setLoading(false);
       fetchingRef.current = false;
     }
-  };
+  }, [search, statusFilter]);
 
   useEffect(() => {
     fetchData();
-    const interval = setInterval(fetchData, 30000);
+    const interval = setInterval(() => fetchData({ force: true, silent: true }), 30000);
     return () => clearInterval(interval);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [statusFilter]);
+  }, [fetchData]);
+
+  useEffect(() => {
+    const socket = getSocket();
+    if (!socket) return undefined;
+    const handler = ({ target } = {}) => {
+      if (!target || target === "hauler-requests") {
+        invalidateCache(`${HAULER_REQUESTS_CACHE_KEY}-${statusFilter}-${search}`);
+        fetchData({ force: true, silent: true });
+      }
+    };
+    socket.on("data-refresh", handler);
+    return () => socket.off("data-refresh", handler);
+  }, [fetchData, search, statusFilter]);
 
   const handleApprove = async (record) => {
     const result = await Swal.fire({
@@ -89,7 +119,7 @@ export default function HaulerRequests({ isDark, canEdit = true }) {
         adminRemarks: result.value || "",
       });
       Swal.fire("Approved!", `Hauler "${record.haulerName}" has been removed.`, "success");
-      fetchData();
+      fetchData({ force: true });
       setViewRecord(null);
     } catch (err) {
       Swal.fire("Error", err?.response?.data?.message || "Could not approve the request.", "error");
@@ -128,7 +158,7 @@ export default function HaulerRequests({ isDark, canEdit = true }) {
         adminRemarks: result.value || "",
       });
       Swal.fire("Rejected", "The deletion request has been rejected.", "success");
-      fetchData();
+      fetchData({ force: true });
       setViewRecord(null);
     } catch (err) {
       Swal.fire("Error", err?.response?.data?.message || "Could not reject the request.", "error");
@@ -139,10 +169,10 @@ export default function HaulerRequests({ isDark, canEdit = true }) {
 
   const pendingCount = data.filter((r) => r.status === "pending").length;
 
-  const filtered = data.filter((r) => {
+  const filtered = useMemo(() => data.filter((r) => {
     if (statusFilter !== "all" && !matchesFilter(r.status, statusFilter)) return false;
     return rowMatchesSearch(r, search);
-  });
+  }), [data, search, statusFilter]);
 
   const columns = [
     {
@@ -299,7 +329,7 @@ export default function HaulerRequests({ isDark, canEdit = true }) {
             allowClear
             style={{ width: 200 }}
           />
-          <Button icon={<ReloadOutlined />} onClick={fetchData} loading={loading}>
+          <Button icon={<ReloadOutlined />} onClick={() => fetchData({ force: true })} loading={loading}>
             Refresh
           </Button>
         </Space>

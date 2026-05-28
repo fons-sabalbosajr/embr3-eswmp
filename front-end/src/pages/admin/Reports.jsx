@@ -39,7 +39,7 @@ import {
 } from "@ant-design/icons";
 import dayjs from "dayjs";
 import api from "../../api";
-import { connectSocket } from "../../utils/socket";
+import { getSocket } from "../../utils/socket";
 import { exportToExcel } from "../../utils/exportExcel";
 import secureStorage from "../../utils/secureStorage";
 
@@ -47,6 +47,11 @@ const { Title, Text } = Typography;
 const { Option } = Select;
 const CACHE_KEY = "reports-txn-cache";
 const CACHE_TTL = 5 * 60 * 1000;
+const WRAP_CELL_STYLE = {
+  whiteSpace: "normal",
+  overflowWrap: "anywhere",
+  wordBreak: "break-word",
+};
 
 const TYPE_CONFIG = {
   submission: { color: "blue", icon: <SendOutlined />, label: "Submission" },
@@ -130,6 +135,11 @@ const TYPE_CONFIG = {
     color: "red",
     icon: <CloseCircleOutlined />,
     label: "Edit Rejected",
+  },
+  cell_capacity_alert: {
+    color: "orange",
+    icon: <ExclamationCircleOutlined />,
+    label: "Cell Capacity Alert",
   },
 };
 
@@ -216,7 +226,8 @@ export default function Reports({ canEdit = true, canDelete = true }) {
 
   useEffect(() => {
     fetchTransactions();
-    const socket = connectSocket("admin");
+    const socket = getSocket();
+    if (!socket) return undefined;
     const handler = () => fetchTransactions(true);
     socket.on("data-refresh", handler);
     return () => {
@@ -326,14 +337,14 @@ export default function Reports({ canEdit = true, canDelete = true }) {
     {
       title: "Company",
       dataIndex: "companyName",
-      width: 150,
-      ellipsis: true,
+      width: 130,
+      ellipsis: false,
       render: (v) => <span style={{ fontSize: 12 }}>{v || "—"}</span>,
     },
     {
       title: "Type",
       dataIndex: "type",
-      width: 200,
+      width: 170,
       render: (v) => {
         const cfg = TYPE_CONFIG[v] || {};
         return (
@@ -346,14 +357,16 @@ export default function Reports({ canEdit = true, canDelete = true }) {
     {
       title: "Description",
       dataIndex: "description",
+      width: 280,
       ellipsis: false,
+      onCell: () => ({ style: { maxWidth: 280, ...WRAP_CELL_STYLE } }),
       render: (v) => <span style={{ fontSize: 12 }}>{v || "—"}</span>,
     },
     {
       title: "Performed By",
       dataIndex: "performedBy",
-      width: 250,
-      ellipsis: true,
+      width: 170,
+      ellipsis: false,
       render: (v) => <span style={{ fontSize: 12 }}>{v || "—"}</span>,
     },
     {
@@ -497,7 +510,7 @@ export default function Reports({ canEdit = true, canDelete = true }) {
           rowKey="_id"
           loading={loading}
           size="small"
-          scroll={{ x: 750 }}
+          scroll={{ x: 980 }}
           style={{ fontSize: 12 }}
           pagination={{
             current: page,
@@ -544,7 +557,7 @@ export default function Reports({ canEdit = true, canDelete = true }) {
                     {TYPE_CONFIG[t.type]?.label || t.type}
                   </Text>
                   <br />
-                  <Text style={{ fontSize: 13 }}>{t.description}</Text>
+                  <Text style={{ fontSize: 13, ...WRAP_CELL_STYLE }}>{t.description}</Text>
                   <br />
                   <Text type="secondary" style={{ fontSize: 12 }}>
                     {dayjs(t.createdAt).format("MM/DD/YYYY HH:mm:ss")} —{" "}

@@ -318,3 +318,51 @@
 .slf-guide-icon {
   animation: guideIconFloat 1.7s ease-in-out infinite;
 }
+
+.slf-upload-row-error > td {
+  background: #fff2f0 !important;
+}
+
+.slf-upload-preview-modal .ant-modal-body {
+  padding-top: 14px;
+}
+
+.slf-upload-preview-table .ant-table {
+  font-size: 11px;
+}
+
+.slf-upload-preview-table .ant-table-thead > tr > th,
+.slf-upload-preview-table .ant-table-tbody > tr > td {
+  padding: 6px 8px !important;
+  font-size: 11px;
+  line-height: 1.25;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  vertical-align: top;
+}
+
+.slf-upload-preview-table .ant-input,
+.slf-upload-preview-table .ant-input-number,
+.slf-upload-preview-table .ant-input-number-input {
+  font-size: 11px;
+}
+
+.slf-waste-breakdown-table .ant-table {
+  font-size: 11px;
+}
+
+.slf-waste-breakdown-table .ant-table-thead > tr > th,
+.slf-waste-breakdown-table .ant-table-tbody > tr > td {
+  padding: 6px 8px !important;
+  font-size: 11px;
+  line-height: 1.3;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.slf-page .ant-table-cell {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}

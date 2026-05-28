@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useCallback, useState, useEffect } from "react";
 import {
   Table,
   Tag,
@@ -37,6 +37,8 @@ import {
 import Swal from "sweetalert2";
 import api from "../../api";
 import dayjs from "dayjs";
+import { fetchWithCache, invalidateCache } from "../../utils/pageCache";
+import { getSocket } from "../../utils/socket";
 
 const { Text } = Typography;
 const UNIT_OPTIONS = ["m³", "tons"];
@@ -46,6 +48,13 @@ const PURPLE = "#722ed1";
 const GREEN = "#52c41a";
 const ORANGE = "#fa8c16";
 const BLUE = "#1677ff";
+const BASELINE_CACHE_KEY = "baseline-data-cache";
+const BASELINE_CACHE_TTL = 5 * 60 * 1000;
+const WRAP_CELL_STYLE = {
+  whiteSpace: "normal",
+  overflowWrap: "anywhere",
+  wordBreak: "break-word",
+};
 
 const normalizeUnit = (unit) => (unit || "m³").replace("m3", "m³");
 const getBaselineUnit = (record) =>
@@ -98,6 +107,8 @@ function CellEntriesTable({ entries, unit = "m³" }) {
       rowKey={(_, i) => i}
       size="small"
       pagination={false}
+      tableLayout="fixed"
+      scroll={{ x: 520 }}
       style={{ fontSize: 11 }}
       columns={[
         {
@@ -109,11 +120,15 @@ function CellEntriesTable({ entries, unit = "m³" }) {
         {
           title: "Cell Name",
           dataIndex: "cellName",
+          width: 190,
+          onCell: () => ({ style: WRAP_CELL_STYLE }),
           render: (v) => <Text strong style={{ fontSize: 11, whiteSpace: "normal", overflowWrap: "anywhere", wordBreak: "break-word" }}>{v || "—"}</Text>,
         },
         {
           title: "Waste Type",
           dataIndex: "wasteType",
+          width: 150,
+          onCell: () => ({ style: WRAP_CELL_STYLE }),
           render: (v) =>
             v ? (
               <Tag color={WASTE_TAG_COLOR[v] || "default"} variant="filled">
@@ -126,6 +141,7 @@ function CellEntriesTable({ entries, unit = "m³" }) {
         {
           title: "Volume",
           dataIndex: "volume",
+          width: 130,
           align: "right",
           render: (v, row) =>
             v != null ? (
@@ -272,21 +288,39 @@ export default function BaselineData({
   const [activeCells, setActiveCells] = useState([]);
   const [closedCells, setClosedCells] = useState([]);
 
-  useEffect(() => {
-    fetchBaselines();
+  const fetchBaselines = useCallback(async ({ force = false, silent = false } = {}) => {
+    await fetchWithCache(
+      BASELINE_CACHE_KEY,
+      () => api.get("/data-slf/baselines").then(({ data }) => data || []),
+      {
+        ttl: BASELINE_CACHE_TTL,
+        force,
+        onStart: () => !silent && setLoading(true),
+        onEnd: () => !silent && setLoading(false),
+        onData: (data) => {
+          setBaselines(Array.isArray(data) ? data : []);
+          setLoading(false);
+        },
+      },
+    );
   }, []);
 
-  const fetchBaselines = async () => {
-    setLoading(true);
-    try {
-      const { data } = await api.get("/data-slf/baselines");
-      setBaselines(data);
-    } catch {
-      /* silent */
-    } finally {
-      setLoading(false);
-    }
-  };
+  useEffect(() => {
+    fetchBaselines({ force: true });
+  }, [fetchBaselines]);
+
+  useEffect(() => {
+    const socket = getSocket();
+    if (!socket) return undefined;
+    const handler = ({ target } = {}) => {
+      if (!target || target === "baselines") {
+        invalidateCache(BASELINE_CACHE_KEY);
+        fetchBaselines({ force: true, silent: true });
+      }
+    };
+    socket.on("data-refresh", handler);
+    return () => socket.off("data-refresh", handler);
+  }, [fetchBaselines]);
 
   const fmtVol = (val, unit) =>
     val != null
@@ -385,7 +419,7 @@ export default function BaselineData({
         showConfirmButton: false,
       });
       setEditOpen(false);
-      fetchBaselines();
+      fetchBaselines({ force: true });
     } catch {
       Swal.fire("Error", "Could not update baseline", "error");
     } finally {
@@ -422,7 +456,7 @@ export default function BaselineData({
         timer: 1200,
         showConfirmButton: false,
       });
-      fetchBaselines();
+      fetchBaselines({ force: true });
     } catch {
       Swal.fire("Error", "Could not delete baseline record", "error");
     }
@@ -450,7 +484,7 @@ export default function BaselineData({
         timer: 2000,
         showConfirmButton: false,
       });
-      fetchBaselines();
+      fetchBaselines({ force: true });
     } catch (err) {
       Swal.fire(
         "Error",
@@ -481,7 +515,7 @@ export default function BaselineData({
         timer: 1500,
         showConfirmButton: false,
       });
-      fetchBaselines();
+      fetchBaselines({ force: true });
     } catch (err) {
       Swal.fire(
         "Error",
@@ -514,7 +548,7 @@ export default function BaselineData({
         timer: 1500,
         showConfirmButton: false,
       });
-      fetchBaselines();
+      fetchBaselines({ force: true });
     } catch (err) {
       Swal.fire(
         "Error",
@@ -982,7 +1016,7 @@ export default function BaselineData({
           type="text"
           size="small"
           icon={<ReloadOutlined spin={loading} />}
-          onClick={fetchBaselines}
+          onClick={() => fetchBaselines({ force: true })}
         >
           Refresh
         </Button>
@@ -1305,7 +1339,9 @@ export default function BaselineData({
                               dataSource={r.accreditedHaulers}
                               rowKey={(h, i) => `${h.haulerName}-${i}`}
                               size="small"
-                              pagination={true}
+                              pagination={{ pageSize: 6, size: "small" }}
+                              tableLayout="fixed"
+                              scroll={{ x: 960 }}
                               expandable={{
                                 expandedRowRender: (h) => {
                                   const vehicles =
@@ -1326,7 +1362,9 @@ export default function BaselineData({
                                       dataSource={vehicles}
                                       rowKey={(_, vi) => vi}
                                       size="small"
-                                      pagination={true}
+                                      pagination={{ pageSize: 5, size: "small" }}
+                                      tableLayout="fixed"
+                                      scroll={{ x: 560 }}
                                       columns={[
                                         {
                                           title: "#",
@@ -1337,16 +1375,21 @@ export default function BaselineData({
                                         {
                                           title: "Plate No.",
                                           dataIndex: "plateNumber",
+                                          width: 150,
+                                          onCell: () => ({ style: WRAP_CELL_STYLE }),
                                           render: (v) => v || "—",
                                         },
                                         {
                                           title: "Vehicle Type",
                                           dataIndex: "vehicleType",
+                                          width: 190,
+                                          onCell: () => ({ style: WRAP_CELL_STYLE }),
                                           render: (v) => v || "—",
                                         },
                                         {
                                           title: "Capacity",
                                           key: "cap",
+                                          width: 140,
                                           render: (_, v) =>
                                             v.capacity != null
                                               ? `${v.capacity} ${(v.capacityUnit || "m³").replace("m3", "m³")}`
@@ -1366,6 +1409,8 @@ export default function BaselineData({
                                 {
                                   title: "Hauler Name",
                                   dataIndex: "haulerName",
+                                  width: 200,
+                                  onCell: () => ({ style: WRAP_CELL_STYLE }),
                                   render: (v) => <Text strong>{v || "—"}</Text>,
                                 },
                                 {
@@ -1378,12 +1423,14 @@ export default function BaselineData({
                                 {
                                   title: "Office Address",
                                   dataIndex: "officeAddress",
+                                  width: 260,
+                                  onCell: () => ({ style: WRAP_CELL_STYLE }),
                                   render: (v) => v || "—",
                                 },
                                 {
                                   title: "Private Clients",
                                   key: "clients",
-                                  width: 260,
+                                  width: 240,
                                   render: (_, h) => {
                                     const c = h.privateSectorClients || [];
                                     const text = c.length > 0

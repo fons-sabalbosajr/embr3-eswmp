@@ -4,7 +4,7 @@ import {
   Badge,
   Button,
   Col,
-  Divider,
+  Collapse,
   Drawer,
   Empty,
   Form,
@@ -92,6 +92,7 @@ function lastPreview(thread) {
 export default function Messaging({ isDark, currentUser }) {
   const [folder, setFolder] = useState("inbox");
   const [threads, setThreads] = useState([]);
+  const [folderSummary, setFolderSummary] = useState({});
   const [selectedThread, setSelectedThread] = useState(null);
   const [threadSearch, setThreadSearch] = useState("");
   const [users, setUsers] = useState([]);
@@ -130,17 +131,27 @@ export default function Messaging({ isDark, currentUser }) {
     }
   }, []);
 
+  const fetchFolderSummary = useCallback(async () => {
+    try {
+      const { data } = await api.get("/messages/folders/summary");
+      setFolderSummary(data || {});
+    } catch (error) {
+      setFolderSummary({});
+    }
+  }, []);
+
   const fetchThreads = useCallback(async (nextFolder = folder) => {
     try {
       setLoading(true);
       const { data } = await api.get(`/messages/conversations?folder=${nextFolder}`);
       setThreads(Array.isArray(data) ? data : []);
+      fetchFolderSummary();
     } catch (error) {
       antdMessage.error(error.response?.data?.message || "Unable to load messages");
     } finally {
       setLoading(false);
     }
-  }, [folder]);
+  }, [fetchFolderSummary, folder]);
 
   const openThread = useCallback(async (threadId) => {
     try {
@@ -150,17 +161,19 @@ export default function Messaging({ isDark, currentUser }) {
       if (data.unreadCount > 0) {
         await api.patch(`/messages/conversations/${threadId}/read`);
         fetchThreads();
+        fetchFolderSummary();
       }
     } catch (error) {
       antdMessage.error(error.response?.data?.message || "Unable to open conversation");
     } finally {
       setDetailLoading(false);
     }
-  }, [fetchThreads]);
+  }, [fetchFolderSummary, fetchThreads]);
 
   useEffect(() => {
     fetchUsers();
-  }, [fetchUsers]);
+    fetchFolderSummary();
+  }, [fetchFolderSummary, fetchUsers]);
 
   useEffect(() => {
     fetchThreads(folder);
@@ -175,6 +188,7 @@ export default function Messaging({ isDark, currentUser }) {
 
     const refreshMessages = (payload = {}) => {
       fetchThreads();
+      fetchFolderSummary();
       if (selectedThread?._id && (!payload.threadId || String(payload.threadId) === String(selectedThread._id))) {
         openThread(selectedThread._id);
       }
@@ -191,7 +205,7 @@ export default function Messaging({ isDark, currentUser }) {
       socket.off("internal-message", handleInternalMessage);
       socket.off("message-refresh", refreshMessages);
     };
-  }, [currentUser?.email, currentUserId, fetchThreads, openThread, selectedThread?._id]);
+  }, [currentUser?.email, currentUserId, fetchFolderSummary, fetchThreads, openThread, selectedThread?._id]);
 
   const uploadFile = async (file, target) => {
     try {
@@ -265,7 +279,7 @@ export default function Messaging({ isDark, currentUser }) {
       setComposeOpen(false);
       resetCompose();
       setFolder(asDraft ? "drafts" : "sent");
-      fetchThreads(asDraft ? "drafts" : "sent");
+      await Promise.all([fetchThreads(asDraft ? "drafts" : "sent"), fetchFolderSummary()]);
     } catch (error) {
       if (error.errorFields) return;
       antdMessage.error(error.response?.data?.message || "Unable to send message");
@@ -290,7 +304,7 @@ export default function Messaging({ isDark, currentUser }) {
       replyLinkForm.resetFields();
       antdMessage.success("Message sent");
       openThread(selectedThread._id);
-      fetchThreads();
+      await Promise.all([fetchThreads(), fetchFolderSummary()]);
     } catch (error) {
       antdMessage.error(error.response?.data?.message || "Unable to send reply");
     }
@@ -301,7 +315,7 @@ export default function Messaging({ isDark, currentUser }) {
       await api.post(`/messages/conversations/${thread._id}/send-draft`);
       antdMessage.success("Draft sent");
       setFolder("sent");
-      fetchThreads("sent");
+      await Promise.all([fetchThreads("sent"), fetchFolderSummary()]);
       setSelectedThread(null);
     } catch (error) {
       antdMessage.error(error.response?.data?.message || "Unable to send draft");
@@ -318,7 +332,7 @@ export default function Messaging({ isDark, currentUser }) {
         await api.patch(`/messages/conversations/${thread._id}/delete`);
         antdMessage.success("Conversation moved to deleted messages");
         setSelectedThread(null);
-        fetchThreads();
+        await Promise.all([fetchThreads(), fetchFolderSummary()]);
       },
     });
   };
@@ -328,7 +342,7 @@ export default function Messaging({ isDark, currentUser }) {
       await api.patch(`/messages/conversations/${thread._id}/restore`);
       antdMessage.success("Conversation restored");
       setSelectedThread(null);
-      fetchThreads();
+      await Promise.all([fetchThreads(), fetchFolderSummary()]);
     } catch (error) {
       antdMessage.error(error.response?.data?.message || "Unable to restore message");
     }
@@ -339,15 +353,19 @@ export default function Messaging({ isDark, currentUser }) {
       await api.delete(`/messages/conversations/${thread._id}/draft`);
       antdMessage.success("Draft discarded");
       setSelectedThread(null);
-      fetchThreads();
+      await Promise.all([fetchThreads(), fetchFolderSummary()]);
     } catch (error) {
       antdMessage.error(error.response?.data?.message || "Unable to discard draft");
     }
   };
 
   const folderCounts = useMemo(() => ({
-    inbox: threads.reduce((total, thread) => total + (thread.unreadCount || 0), 0),
-  }), [threads]);
+    inbox: folderSummary.inbox?.count || (folder === "inbox" ? threads.length : 0),
+    sent: folderSummary.sent?.count || (folder === "sent" ? threads.length : 0),
+    drafts: folderSummary.drafts?.count || (folder === "drafts" ? threads.length : 0),
+    deleted: folderSummary.deleted?.count || (folder === "deleted" ? threads.length : 0),
+    unread: folderSummary.inbox?.unread || (folder === "inbox" ? threads.reduce((total, thread) => total + (thread.unreadCount || 0), 0) : 0),
+  }), [folder, folderSummary, threads]);
 
   const filteredThreads = useMemo(() => {
     const query = threadSearch.trim().toLowerCase();
@@ -472,20 +490,32 @@ export default function Messaging({ isDark, currentUser }) {
         <Col xs={24} lg={8} xl={7}>
           <div style={{ background: isDark ? "#141414" : "#fff", border: isDark ? "1px solid #303030" : "1px solid #e6edf5", borderRadius: 8, minHeight: 650, overflow: "hidden", display: "flex", flexDirection: "column" }}>
             <div style={{ padding: 14, borderBottom: isDark ? "1px solid #303030" : "1px solid #eef2f7" }}>
-              <Space.Compact block style={{ marginBottom: 12 }}>
+              <div style={{ display: "grid", gap: 6, marginBottom: 12 }}>
                 {folders.map((item) => (
-                  <Tooltip title={item.label} key={item.key}>
-                    <Button
-                      type={folder === item.key ? "primary" : "default"}
-                      icon={item.icon}
-                      onClick={() => setFolder(item.key)}
-                      style={{ flex: 1 }}
-                    >
-                      {item.key === "inbox" && folderCounts.inbox > 0 ? <Badge count={folderCounts.inbox} size="small" /> : null}
-                    </Button>
-                  </Tooltip>
+                  <Button
+                    key={item.key}
+                    type={folder === item.key ? "primary" : "text"}
+                    icon={item.icon}
+                    onClick={() => setFolder(item.key)}
+                    style={{
+                      width: "100%",
+                      height: 36,
+                      display: "flex",
+                      justifyContent: "space-between",
+                      alignItems: "center",
+                      paddingInline: 12,
+                    }}
+                  >
+                    <span style={{ flex: 1, textAlign: "left" }}>{item.label}</span>
+                    <Badge
+                      count={item.key === "inbox" ? folderCounts.unread : folderCounts[item.key]}
+                      size="small"
+                      overflowCount={99}
+                      style={{ backgroundColor: item.key === "inbox" && folderCounts.unread ? "#ff4d4f" : "#8c8c8c" }}
+                    />
+                  </Button>
                 ))}
-              </Space.Compact>
+              </div>
               <Input.Search
                 allowClear
                 value={threadSearch}
@@ -526,7 +556,7 @@ export default function Messaging({ isDark, currentUser }) {
                         }}
                       >
                         <Badge dot={unread} offset={[-2, 4]}>
-                          <Avatar size={44} style={{ background: thread.type === "group" ? "#2f54eb" : "#13c2c2" }} icon={thread.type === "group" ? <TeamOutlined /> : <UserOutlined />}>
+                          <Avatar size={30} style={{ background: thread.type === "group" ? "#2f54eb" : "#13c2c2", fontSize: 11 }} icon={thread.type === "group" ? <TeamOutlined /> : <UserOutlined />}>
                             {recipients[0] ? initials(recipients[0]) : null}
                           </Avatar>
                         </Badge>
@@ -564,7 +594,7 @@ export default function Messaging({ isDark, currentUser }) {
               <>
                 <div style={{ padding: "14px 18px", borderBottom: isDark ? "1px solid #303030" : "1px solid #eef2f7", display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center" }}>
                   <Space size={12} style={{ minWidth: 0 }}>
-                    <Avatar size={44} style={{ background: selectedThread.type === "group" ? "#2f54eb" : "#13c2c2" }} icon={selectedThread.type === "group" ? <TeamOutlined /> : <UserOutlined />} />
+                    <Avatar size={32} style={{ background: selectedThread.type === "group" ? "#2f54eb" : "#13c2c2" }} icon={selectedThread.type === "group" ? <TeamOutlined /> : <UserOutlined />} />
                     <div style={{ minWidth: 0 }}>
                       <Text strong style={{ fontSize: 16 }} ellipsis>{selectedThread.subject}</Text>
                       <Text type="secondary" style={{ display: "block", fontSize: 12 }} ellipsis>
@@ -599,10 +629,10 @@ export default function Messaging({ isDark, currentUser }) {
                       return (
                         <List.Item style={{ border: 0, justifyContent: mine ? "flex-end" : "flex-start", padding: "7px 0" }}>
                           <div style={{ display: "flex", flexDirection: mine ? "row-reverse" : "row", gap: 10, maxWidth: "78%" }}>
-                            <Avatar size={34} style={{ background: mine ? "#1a3353" : "#1677ff", flexShrink: 0 }}>{initials(item.sender)}</Avatar>
+                            <Avatar size={26} style={{ background: mine ? "#1a3353" : "#1677ff", flexShrink: 0, fontSize: 10 }}>{initials(item.sender)}</Avatar>
                             <div>
                               <div style={{ display: "flex", justifyContent: mine ? "flex-end" : "flex-start", marginBottom: 3 }}>
-                                <Text type="secondary" style={{ fontSize: 11 }}>{mine ? "You" : userName(item.sender)} • {dayjs(item.createdAt).format("MMM D, h:mm A")}</Text>
+                                <Text type="secondary" style={{ fontSize: 11 }}>{mine ? "You" : userName(item.sender)} - {dayjs(item.createdAt).format("MMM D, h:mm A")}</Text>
                               </div>
                               <div style={{ background: mine ? "#1677ff" : (isDark ? "#1f1f1f" : "#fff"), color: mine ? "#fff" : undefined, border: mine ? "1px solid #1677ff" : (isDark ? "1px solid #303030" : "1px solid #e6edf5"), borderRadius: mine ? "18px 18px 4px 18px" : "18px 18px 18px 4px", padding: "10px 14px", minWidth: 140, boxShadow: isDark ? "none" : "0 1px 2px rgba(15, 23, 42, 0.05)" }}>
                                 {item.body && <Paragraph style={{ marginBottom: 8, whiteSpace: "pre-wrap", color: mine ? "#fff" : undefined }}>{item.body}</Paragraph>}
@@ -646,8 +676,16 @@ export default function Messaging({ isDark, currentUser }) {
                     </div>
                     {renderAttachmentTags(replyAttachments, "reply")}
                     {renderAppLinkTags(replyAppLinks, "reply")}
-                    <Divider style={{ margin: "12px 0 8px" }} />
-                    {appDataForm("reply")}
+                    <Collapse
+                      ghost
+                      size="small"
+                      items={[{
+                        key: "app-data",
+                        label: "Attach app data",
+                        children: appDataForm("reply"),
+                      }]}
+                      style={{ marginTop: 8 }}
+                    />
                   </div>
                 )}
               </>
@@ -688,9 +726,17 @@ export default function Messaging({ isDark, currentUser }) {
         </Space>
         {renderAttachmentTags(composeAttachments, "compose")}
 
-        <Divider orientation="left" style={{ marginTop: 20 }}>App Data Attachment</Divider>
-        {appDataForm("compose")}
         {renderAppLinkTags(composeAppLinks, "compose")}
+        <Collapse
+          ghost
+          size="small"
+          items={[{
+            key: "app-data",
+            label: "Attach app data",
+            children: appDataForm("compose"),
+          }]}
+          style={{ marginTop: 12 }}
+        />
       </Drawer>
     </div>
   );

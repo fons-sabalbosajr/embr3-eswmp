@@ -37,6 +37,7 @@ const transactionSchema = new mongoose.Schema(
         "hauler_delete_request",  // portal user submitted hauler deletion request
         "hauler_delete_approved", // admin approved hauler deletion request
         "hauler_delete_rejected", // admin rejected hauler deletion request
+        "cell_capacity_alert", // admin notified portal users that a cell is nearing capacity
       ],
       required: true,
       index: true,
@@ -56,5 +57,7 @@ const transactionSchema = new mongoose.Schema(
 
 // Compound index for company-thread queries
 transactionSchema.index({ companyName: 1, createdAt: -1 });
+transactionSchema.index({ type: 1, createdAt: -1 });
+transactionSchema.index({ createdAt: -1 });
 
 module.exports = mongoose.model("Transaction", transactionSchema, "transactions");

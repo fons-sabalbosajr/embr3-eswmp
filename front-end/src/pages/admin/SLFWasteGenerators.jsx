@@ -11,6 +11,7 @@ import SubmissionSummary from "./SubmissionSummary";
 import Reports from "./Reports";
 import BaselineData from "./BaselineData";
 import HaulerRequests from "./HaulerRequests";
+import CellWastePlacement from "./CellWastePlacement";
 import { useState, useEffect } from "react";
 import api from "../../api";
 
@@ -27,6 +28,9 @@ export default function SLFWasteGenerators({
   canViewBaseline = true,
   canEditBaseline = true,
   canDeleteBaseline = true,
+  canViewCellPlacement = true,
+  canEditCellPlacement = true,
+  canRepairIds = false,
 }) {
   const [pendingHaulerReqs, setPendingHaulerReqs] = useState(0);
 
@@ -71,6 +75,7 @@ export default function SLFWasteGenerators({
           isDark={isDark}
           canEdit={canEdit}
           canDelete={canDelete}
+          canRepairIds={canRepairIds}
         />
       ),
       hidden: !canViewSubmissions,
@@ -123,6 +128,16 @@ export default function SLFWasteGenerators({
       ),
       children: <HaulerRequests isDark={isDark} canEdit={canEdit} />,
       hidden: !canViewSubmissions,
+    },
+     {
+      key: "cell-placement",
+      label: (
+        <>
+          <DatabaseOutlined /> Cell Waste Placement
+        </>
+      ),
+      children: <CellWastePlacement canEdit={canEditCellPlacement} />,
+      hidden: !canViewCellPlacement,
     },
   ].filter((item) => !item.hidden);
 

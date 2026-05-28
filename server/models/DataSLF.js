@@ -262,6 +262,14 @@ dataSLFSchema.pre("save", async function () {
   }
 });
 
+dataSLFSchema.index({ deletedAt: 1, createdAt: -1 });
+dataSLFSchema.index({ deletedAt: 1, status: 1, createdAt: -1 });
+dataSLFSchema.index({ deletedAt: 1, idNo: 1 });
+dataSLFSchema.index({ deletedAt: 1, submissionId: 1 });
+dataSLFSchema.index({ deletedAt: 1, lguCompanyName: 1 });
+dataSLFSchema.index({ submissionId: 1 });
+dataSLFSchema.index({ submittedBy: 1, createdAt: -1 });
+
 dataSLFSchema.plugin(dateFieldYearVisibilityPlugin("dateOfDisposal"));
 
 const DataSLFModel = mongoose.model("DataSLF", dataSLFSchema, "data-slf");

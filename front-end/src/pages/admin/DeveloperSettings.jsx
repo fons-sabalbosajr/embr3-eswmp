@@ -535,10 +535,36 @@ export default function DeveloperSettings({onSettingsSaved, isDark, initialActiv
 
   return (
     <div>
+      <style>
+        {`
+          .developer-settings-tabs .ant-tabs-tab {
+            font-size: 12px;
+            padding: 8px 10px;
+          }
+          .developer-settings-tabs .ant-tabs-tab .anticon {
+            font-size: 13px;
+          }
+        `}
+      </style>
       <Tabs
         defaultActiveKey={initialActiveKey}
         size="large"
-        style={{ marginTop: 8 }}
+        tabPosition="left"
+        className="developer-settings-tabs"
+        style={{
+          marginTop: 8,
+          minHeight: 620,
+          background: isDark ? "#141414" : "#fff",
+          border: isDark ? "1px solid #303030" : "1px solid #f0f0f0",
+          borderRadius: 10,
+          padding: 12,
+        }}
+        tabBarStyle={{
+          width: 240,
+          fontSize: 12,
+          paddingRight: 8,
+          borderRight: isDark ? "1px solid #303030" : "1px solid #f0f0f0",
+        }}
         onChange={(key) => {
           if (key === "portal-security" && portalSecurityUsers.length === 0) fetchPortalSecurityUsers();
           if (key === "deleted-submissions" && deletedEntries.length === 0) fetchDeletedEntries();
@@ -671,6 +697,32 @@ export default function DeveloperSettings({onSettingsSaved, isDark, initialActiv
                           options={historicalYearOptions}
                           optionFilterProp="label"
                         />
+                      </Form.Item>
+                    </Col>
+                  </Row>
+                </Card>
+
+                <Card
+                  style={{ marginTop: 16, borderRadius: 10 }}
+                  title={
+                    <Space>
+                      <DatabaseOutlined style={{ color: "#52c41a" }} />
+                      <Text strong>Baseline & Submission Volume Analysis</Text>
+                    </Space>
+                  }
+                >
+                  <Text type="secondary" style={{ display: "block", marginBottom: 12 }}>
+                    Control how portal submission volumes are counted against SLF cells when baseline data was encoded after earlier disposal dates.
+                  </Text>
+                  <Row gutter={[16, 0]}>
+                    <Col xs={24} md={12}>
+                      <Form.Item name="excludePreBaselineDisposalFromCellFill" label="Exclude pre-baseline disposal from cell fill" valuePropName="checked">
+                        <Switch checkedChildren="On" unCheckedChildren="Off" />
+                      </Form.Item>
+                    </Col>
+                    <Col xs={24} md={12}>
+                      <Form.Item name="preBaselineDisposalDetectorEnabled" label="Enable detector badges" valuePropName="checked">
+                        <Switch checkedChildren="On" unCheckedChildren="Off" />
                       </Form.Item>
                     </Col>
                   </Row>
@@ -997,7 +1049,7 @@ export default function DeveloperSettings({onSettingsSaved, isDark, initialActiv
                   </Space>
                 }
               >
-                <Alert
+                {/* <Alert
                   type="info"
                   showIcon
                   style={{ marginBottom: 12, borderRadius: 8 }}
@@ -1010,7 +1062,7 @@ export default function DeveloperSettings({onSettingsSaved, isDark, initialActiv
                   style={{ marginBottom: 12, borderRadius: 8 }}
                   message="Credential update permission is now managed per portal user."
                   description="Enable the credential switch only for users who are allowed to update their own username and password after email-code verification."
-                />
+                /> */}
                 <ResponsiveTable
                   dataSource={filteredPortalSecurityUsers}
                   rowKey="_id"

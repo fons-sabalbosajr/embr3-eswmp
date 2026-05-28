@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import {
   Table,
   Button,
@@ -50,9 +50,9 @@ import Swal from "sweetalert2";
 import api from "../../api";
 import secureStorage from "../../utils/secureStorage";
 import { fetchWithCache, invalidateCache } from "../../utils/pageCache";
+import { getSocket } from "../../utils/socket";
 import dayjs from "dayjs";
 import ResponsiveTable from "./shared/ResponsiveTable";
-import { matchesFilter, rowMatchesSearch } from "./shared/tableFilters";
 import {
   getTruckCapacityText,
   getTruckPlateText,
@@ -65,15 +65,42 @@ const { Option } = Select;
 const ACCENT = "#2f54eb";
 const CACHE_KEY = "submissions-cache";
 const CACHE_TTL = 10 * 60 * 1000;
+const DEFAULT_PAGE_SIZE = 15;
 const SUBMISSION_MODAL_WIDTH = 1220;
 const TRANSACTION_HISTORY_MODAL_WIDTH = 1400;
+const WRAP_CELL_STYLE = {
+  whiteSpace: "normal",
+  overflowWrap: "anywhere",
+  wordBreak: "break-word",
+};
+const wrapColumn = (column) => ({
+  ...column,
+  ellipsis: false,
+  onCell: (...args) => ({
+    style: WRAP_CELL_STYLE,
+    ...(typeof column.onCell === "function" ? column.onCell(...args) : {}),
+  }),
+  onHeaderCell: (...args) => ({
+    style: WRAP_CELL_STYLE,
+    ...(typeof column.onHeaderCell === "function" ? column.onHeaderCell(...args) : {}),
+  }),
+});
 
-export default function SubmissionSettings({canEdit = true, canDelete = true, isDark}) {
+export default function SubmissionSettings({canEdit = true, canDelete = true, canRepairIds = false, isDark}) {
   const [data, setData] = useState([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
-  const fetchingRef = useRef(false);
+  const [debouncedSearch, setDebouncedSearch] = useState("");
+  const [cacheVersion, setCacheVersion] = useState(0);
+  const fetchingRef = useRef(null);
+  const pendingRefreshRef = useRef(false);
+  const latestRequestKeyRef = useRef("");
   const [statusFilter, setStatusFilter] = useState("all");
+  const [pagination, setPagination] = useState({
+    current: 1,
+    pageSize: DEFAULT_PAGE_SIZE,
+    total: 0,
+  });
   const [viewRecord, setViewRecord] = useState(null);
   const [editRecord, setEditRecord] = useState(null);
   const [editLoading, setEditLoading] = useState(false);
@@ -89,6 +116,24 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, is
   const [revertReason, setRevertReason] = useState("");
   const [revertLoading, setRevertLoading] = useState(false);
   const [repairingXX, setRepairingXX] = useState(false);
+  const page = pagination.current;
+  const pageSize = pagination.pageSize;
+  const searchTerm = debouncedSearch.trim();
+  const currentCacheKey = useMemo(
+    () => [
+      CACHE_KEY,
+      cacheVersion,
+      page,
+      pageSize,
+      statusFilter,
+      searchTerm.toLowerCase(),
+    ].join(":"),
+    [cacheVersion, page, pageSize, statusFilter, searchTerm],
+  );
+  const bumpSubmissionsCache = useCallback(() => {
+    setCacheVersion((version) => version + 1);
+    secureStorage.remove(CACHE_KEY);
+  }, []);
 
   const handleRepairXX = async () => {
     setRepairingXX(true);
@@ -103,7 +148,7 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, is
         </div>`,
         confirmButtonColor: "#2f54eb",
       });
-      fetchData(true);
+      fetchData({ force: true });
     } catch {
       Swal.fire("Error", "Could not repair XX IDs.", "error");
     } finally {
@@ -118,11 +163,89 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, is
   // Resolved address names for view details
   const [resolvedAddr, setResolvedAddr] = useState({});
 
+  const fetchData = useCallback(async ({ force = false, silent = false } = {}) => {
+    const requestKey = currentCacheKey;
+    if (fetchingRef.current === requestKey) {
+      if (force) pendingRefreshRef.current = true;
+      return;
+    }
+    latestRequestKeyRef.current = requestKey;
+    fetchingRef.current = requestKey;
+    try {
+      await fetchWithCache(requestKey, () => api.get("/data-slf", {
+        params: {
+          mode: "list",
+          page,
+          limit: pageSize,
+          status: statusFilter,
+          search: searchTerm || undefined,
+        },
+      }).then(({ data }) => ({
+        rows: (data?.data || []).map(normalizeSubmissionRecord),
+        total: Number(data?.total || 0),
+        page: Number(data?.page || page),
+        pageSize: Number(data?.limit || pageSize),
+      })), {
+        ttl: CACHE_TTL,
+        force,
+        onData:  (payload) => {
+          if (latestRequestKeyRef.current !== requestKey) return;
+          const rows = Array.isArray(payload) ? payload.map(normalizeSubmissionRecord) : (payload?.rows || []);
+          setData(rows);
+          setPagination((prev) => ({
+            ...prev,
+            current: payload?.page || prev.current,
+            pageSize: payload?.pageSize || prev.pageSize,
+            total: typeof payload?.total === "number" ? payload.total : rows.length,
+          }));
+          setLoading(false);
+        },
+        onError: ()     => {
+          if (!silent) Swal.fire("Error", "Could not load submissions", "error");
+        },
+        onStart: ()     => {
+          if (!silent) setLoading(true);
+        },
+        onEnd:   ()     => {
+          if (!silent) setLoading(false);
+        },
+      });
+    } finally {
+      if (fetchingRef.current === requestKey) fetchingRef.current = null;
+      if (pendingRefreshRef.current) {
+        pendingRefreshRef.current = false;
+        window.setTimeout(() => fetchData({ force: true, silent: true }), 0);
+      }
+    }
+  }, [currentCacheKey, page, pageSize, statusFilter, searchTerm]);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      setSelectedRowKeys([]);
+      setPagination((prev) => ({ ...prev, current: 1 }));
+      setDebouncedSearch(search.trim());
+    }, 350);
+    return () => window.clearTimeout(timer);
+  }, [search]);
+
   useEffect(() => {
     fetchData();
-    const interval = setInterval(fetchData, 20000);
+    const interval = setInterval(() => fetchData({ force: true, silent: true }), 60000);
     return () => clearInterval(interval);
-  }, []);
+  }, [fetchData]);
+
+  useEffect(() => {
+    const socket = getSocket();
+    if (!socket) return undefined;
+    const handleRefresh = ({ target } = {}) => {
+      if (!target || target === "submissions") {
+        invalidateCache(currentCacheKey);
+        fetchData({ force: true, silent: true });
+      }
+    };
+    socket.on("data-refresh", handleRefresh);
+    return () => socket.off("data-refresh", handleRefresh);
+  }, [currentCacheKey, fetchData]);
 
   // Resolve PSGC codes to names when viewing a record
   useEffect(() => {
@@ -136,23 +259,6 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, is
     }
   }, [viewRecord]);
 
-  const fetchData = async (skipCache = false) => {
-    if (fetchingRef.current) return;
-    fetchingRef.current = true;
-    try {
-      await fetchWithCache(CACHE_KEY, () => api.get("/data-slf").then(({ data }) => (data || []).map(normalizeSubmissionRecord)), {
-        ttl: CACHE_TTL,
-        force: skipCache,
-        onData:  (data) => { setData((data || []).map(normalizeSubmissionRecord)); setLoading(false); },
-        onError: ()     => Swal.fire("Error", "Could not load submissions", "error"),
-        onStart: ()     => setLoading(true),
-        onEnd:   ()     => setLoading(false),
-      });
-    } finally {
-      fetchingRef.current = false;
-    }
-  };
-
   const updateStatus = async (id, status) => {
     try {
       const { data: updated } = await api.patch(`/data-slf/${id}/status`, {
@@ -161,7 +267,7 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, is
       setData((prev) =>
         prev.map((d) => (d._id === id ? normalizeSubmissionRecord(updated) : d)),
       );
-      secureStorage.remove(CACHE_KEY);
+      bumpSubmissionsCache();
       secureStorage.invalidateDashboard();
       Swal.fire({
         icon: "success",
@@ -178,7 +284,7 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, is
     try {
       await api.delete(`/data-slf/${id}`);
       setData((prev) => prev.filter((d) => d._id !== id));
-      secureStorage.remove(CACHE_KEY);
+      bumpSubmissionsCache();
       secureStorage.invalidateDashboard();
       Swal.fire({
         icon: "success",
@@ -220,7 +326,7 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, is
           return updated || d;
         }),
       );
-      secureStorage.remove(CACHE_KEY);
+      bumpSubmissionsCache();
       secureStorage.invalidateDashboard();
       setSelectedRowKeys([]);
       Swal.fire({
@@ -251,7 +357,7 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, is
         performedBy: "EMBR3 ESWMP Admin",
       });
       setData((prev) => prev.filter((entry) => !result.data.some((deleted) => deleted._id === entry._id)));
-      secureStorage.remove(CACHE_KEY);
+      bumpSubmissionsCache();
       secureStorage.invalidateDashboard();
       setSelectedRowKeys([]);
       Swal.fire({ icon: "success", title: result.message || "Selected entries deleted", timer: 1500, showConfirmButton: false });
@@ -280,7 +386,7 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, is
         performedBy: "EMBR3 ESWMP Admin",
       });
       setData((prev) => prev.map((entry) => result.data.find((updated) => updated._id === entry._id) || entry));
-      secureStorage.remove(CACHE_KEY);
+      bumpSubmissionsCache();
       secureStorage.invalidateDashboard();
       setSelectedRowKeys([]);
       Swal.fire({ icon: "success", title: result.message || "Selected entries reverted", timer: 1800, showConfirmButton: false });
@@ -376,7 +482,26 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, is
     setResolvedAddr(result);
   };
 
-  const openEdit = (record) => {
+  const loadSubmissionDetail = async (record) => {
+    if (!record?._id) return record;
+    try {
+      const { data } = await api.get(`/data-slf/detail/${record._id}`);
+      const detailed = normalizeSubmissionRecord(data);
+      setData((prev) => prev.map((item) => (item._id === detailed._id ? { ...item, ...detailed } : item)));
+      return detailed;
+    } catch {
+      return record;
+    }
+  };
+
+  const openView = async (record) => {
+    setViewRecord(record);
+    const detailed = await loadSubmissionDetail(record);
+    setViewRecord(detailed);
+  };
+
+  const openEdit = async (record) => {
+    record = await loadSubmissionDetail(record);
     setEditRecord(record);
     // Pre-load address cascading dropdowns
     (async () => {
@@ -457,7 +582,7 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, is
       setData((prev) =>
         prev.map((d) => (d._id === editRecord._id ? updated : d)),
       );
-      secureStorage.remove(CACHE_KEY);
+      bumpSubmissionsCache();
       secureStorage.invalidateDashboard();
       setEditRecord(null);
       Swal.fire({
@@ -533,7 +658,7 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, is
       });
       setRevertModal({ open: false, record: null });
       setRevertReason("");
-      fetchData(true);
+      fetchData({ force: true });
     } catch (err) {
       Swal.fire(
         "Error",
@@ -558,7 +683,7 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, is
     try {
       await api.patch(`/data-slf/${id}/approve-edit`);
       Swal.fire({ icon: "success", title: "Edit Approved", timer: 1500, showConfirmButton: false });
-      fetchData(true);
+      fetchData({ force: true });
     } catch (err) {
       Swal.fire("Error", err.response?.data?.message || "Failed to approve edit", "error");
     }
@@ -577,16 +702,13 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, is
     try {
       await api.patch(`/data-slf/${id}/reject-edit`, { reason: reason || "" });
       Swal.fire({ icon: "success", title: "Edit Rejected", timer: 1500, showConfirmButton: false });
-      fetchData(true);
+      fetchData({ force: true });
     } catch (err) {
       Swal.fire("Error", err.response?.data?.message || "Failed to reject edit", "error");
     }
   };
 
-  const filtered = data.filter((d) => {
-    const matchStatus = statusFilter === "all" || matchesFilter(d.status, statusFilter);
-    return matchStatus && rowMatchesSearch(d, search);
-  });
+  const tableRows = data;
 
   const statusColors = {
     pending: "orange",
@@ -607,7 +729,7 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, is
       key: "idNo",
       width: 120,
       render: (text) => (
-        <Text strong style={{ fontSize: 12 }}>
+        <Text strong style={{ fontSize: 12, ...WRAP_CELL_STYLE }}>
           {text}
         </Text>
       ),
@@ -620,8 +742,8 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, is
       ),
       dataIndex: "lguCompanyName",
       key: "lguCompanyName",
-      ellipsis: true,
       width: 300,
+      render: (text) => <Text style={WRAP_CELL_STYLE}>{text || "—"}</Text>,
     },
     {
       title: "Type",
@@ -661,7 +783,7 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, is
       ),
       key: "trucks",
       width: 70,
-      render: (_, r) => r.trucks?.length || 0,
+      render: (_, r) => r.truckCount ?? r.trucks?.length ?? 0,
     },
     {
       title: "Status",
@@ -690,7 +812,7 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, is
               size="small"
               icon={<EyeOutlined />}
               style={{ borderColor: ACCENT, color: ACCENT }}
-              onClick={() => setViewRecord(r)}
+              onClick={() => openView(r)}
             />
           </Tooltip>
           {getTxnHistoryKey(r) && (
@@ -778,57 +900,16 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, is
         </Space>
       ),
     },
-  ];
+  ].map(wrapColumn);
 
   return (
     <div>
-      <div
-        style={{
-          display: "flex",
-          justifyContent: "space-between",
-          alignItems: "center",
-          marginBottom: 4,
-        }}
-      >
-        <div>
-        </div>
-        <Space>
-          {canDelete && (
-            <Popconfirm
-              title="Fix XX Province Codes"
-              description="This will update all ID Nos with 'XX' province code using the stored company province data."
-              onConfirm={handleRepairXX}
-              okText="Yes, Fix Now"
-              cancelText="Cancel"
-              okButtonProps={{ loading: repairingXX }}
-            >
-              <Button
-                icon={<ToolOutlined />}
-                size="small"
-                loading={repairingXX}
-                danger
-              >
-                Fix XX IDs
-              </Button>
-            </Popconfirm>
-          )}
-          <Button
-            icon={<ReloadOutlined />}
-            onClick={() => fetchData(true)}
-            loading={loading}
-            size="small"
-          >
-            Refresh
-          </Button>
-        </Space>
-      </div>
-
-      <Card style={{ marginTop: 16, borderRadius: 10 }}>
+      <Card style={{ marginTop: 0, borderRadius: 10 }}>
         <Space style={{ marginBottom: 16, flexWrap: "wrap" }}>
           <Button
             icon={<DownloadOutlined />}
             onClick={() => {
-              const rows = filtered.map((d) => ({
+              const rows = tableRows.map((d) => ({
                 "ID No.": d.idNo,
                 "LGU/Company": d.lguCompanyName,
                 "Company Type": d.companyType,
@@ -836,7 +917,7 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, is
                   ? dayjs(d.dateOfDisposal).format("YYYY-MM-DD")
                   : "",
                 Status: d.status,
-                Trucks: d.trucks?.length || 0,
+                Trucks: d.truckCount ?? d.trucks?.length ?? 0,
                 "Submitted By": d.submittedBy || "",
                 "Submitted At": d.createdAt
                   ? dayjs(d.createdAt).format("YYYY-MM-DD HH:mm")
@@ -857,7 +938,11 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, is
           />
           <Select
             value={statusFilter}
-            onChange={setStatusFilter}
+            onChange={(value) => {
+              setStatusFilter(value);
+              setSelectedRowKeys([]);
+              setPagination((prev) => ({ ...prev, current: 1 }));
+            }}
             style={{ width: "100%", maxWidth: 160 }}
           >
             <Option value="all">All Statuses</Option>
@@ -867,6 +952,27 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, is
             <Option value="reverted">Reverted</Option>
             <Option value="editApproved">Edit Approved</Option>
           </Select>
+          {canRepairIds && (
+            <Popconfirm
+              title="Fix XX Province Codes"
+              description="This will update all ID Nos with 'XX' province code using the stored company province data."
+              onConfirm={handleRepairXX}
+              okText="Yes, Fix Now"
+              cancelText="Cancel"
+              okButtonProps={{ loading: repairingXX }}
+            >
+              <Button icon={<ToolOutlined />} loading={repairingXX} danger>
+                Fix XX IDs
+              </Button>
+            </Popconfirm>
+          )}
+          <Button
+            icon={<ReloadOutlined />}
+            onClick={() => fetchData({ force: true })}
+            loading={loading}
+          >
+            Refresh
+          </Button>
           {selectedRowKeys.length > 0 && (
             <>
               <Button
@@ -896,13 +1002,30 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, is
         </Space>
 
         <ResponsiveTable
-          dataSource={filtered}
+          dataSource={tableRows}
           columns={columns}
           rowKey="_id"
           loading={loading}
-          pagination={{ pageSize: 15 }}
+          pagination={{
+            current: pagination.current,
+            pageSize: pagination.pageSize,
+            total: pagination.total,
+            showSizeChanger: true,
+            pageSizeOptions: ["15", "25", "50", "100"],
+            showTotal: (total, range) => `${range[0]}-${range[1]} of ${total}`,
+          }}
+          onChange={(nextPagination) => {
+            setSelectedRowKeys([]);
+            setPagination((prev) => ({
+              ...prev,
+              current: nextPagination.current || 1,
+              pageSize: nextPagination.pageSize || prev.pageSize,
+            }));
+          }}
           size="middle"
-          rowSelection={{ selectedRowKeys, onChange: setSelectedRowKeys }}
+          scroll={{ x: 1250, y: 640 }}
+          virtual
+          rowSelection={{ selectedRowKeys, onChange: setSelectedRowKeys, columnWidth: 42 }}
         />
       </Card>
 
@@ -2863,11 +2986,13 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, is
                   {
                     title: "Details",
                     key: "details",
+                    width: 360,
+                    onCell: () => ({ style: { maxWidth: 360, ...WRAP_CELL_STYLE } }),
                     render: (_, t) => (
-                      <div>
-                        <Text style={{ fontSize: 12, display: "block" }}>{t.description}</Text>
+                      <div style={WRAP_CELL_STYLE}>
+                        <Text style={{ fontSize: 12, display: "block", ...WRAP_CELL_STYLE }}>{t.description}</Text>
                         {(t.meta?.comment || t.meta?.reason) && (
-                          <Text type="secondary" style={{ fontSize: 11, fontStyle: "italic", display: "block", marginTop: 2 }}>
+                          <Text type="secondary" style={{ fontSize: 11, fontStyle: "italic", display: "block", marginTop: 2, ...WRAP_CELL_STYLE }}>
                             &ldquo;{t.meta.comment || t.meta.reason}&rdquo;
                           </Text>
                         )}
@@ -2878,7 +3003,8 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, is
                     title: "By",
                     dataIndex: "performedBy",
                     key: "by",
-                    width: 200,
+                    width: 170,
+                    onCell: () => ({ style: { maxWidth: 170, ...WRAP_CELL_STYLE } }),
                     render: (v) => {
                       const displayName = v === "admin" ? "EMBR3 ESWMP Admin" : (v || "system");
                       return (
@@ -2886,7 +3012,7 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, is
                         <div style={{ width: 22, height: 22, borderRadius: "50%", background: isDark ? "rgba(47,84,235,0.15)" : "#f0f5ff", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 10, color: ACCENT, fontWeight: 600, flexShrink: 0 }}>
                           {displayName.charAt(0).toUpperCase()}
                         </div>
-                        <Text type="secondary" style={{ fontSize: 12 }}>{displayName}</Text>
+                        <Text type="secondary" style={{ fontSize: 12, ...WRAP_CELL_STYLE }}>{displayName}</Text>
                       </div>
                     );
                     },

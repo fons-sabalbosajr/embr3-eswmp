@@ -153,6 +153,28 @@ const upload = multer({
 
 // Portal Sign Up — register as SLF portal user (pending approval)
 // Accepts multipart/form-data with an optional verificationFile field.
+router.get("/check-existing", async (req, res) => {
+  try {
+    const email = String(req.query.email || "").trim().toLowerCase();
+    const username = String(req.query.username || "").trim().toLowerCase();
+    if (!email && !username) return res.status(400).json({ message: "Email or username is required." });
+    const existing = await UserPortal.findOne({
+      $or: [
+        email ? { email } : null,
+        username ? { username } : null,
+      ].filter(Boolean),
+    }).select("email username status");
+    res.json({
+      exists: !!existing,
+      emailMatch: !!existing && !!email && existing.email === email,
+      usernameMatch: !!existing && !!username && existing.username === username,
+      status: existing?.status || null,
+    });
+  } catch (error) {
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+});
+
 router.post("/signup", uploadSingle(upload, "verificationFile"), async (req, res) => {
   try {
     const {

@@ -1087,11 +1087,125 @@ router.get("/", async (req, res) => {
   try {
     await softDeleteOverdueReverted(req);
     // Admin management view — respects App Settings year visibility filter
-    const entries = await DataSLF.find({ deletedAt: null })
+    const listMode = req.query.mode === "list";
+    const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
+    const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 0, 0), 100);
+    const paginated = listMode && limit > 0;
+    const filter = { deletedAt: null };
+    const status = String(req.query.status || "").trim();
+    const search = String(req.query.search || "").trim();
+    const includeTrucks = String(req.query.includeTrucks || "").toLowerCase() === "true";
+    const withTruckVolume = String(req.query.withTruckVolume || "").toLowerCase() === "true";
+
+    if (listMode && status && status !== "all") {
+      filter.status = status;
+    }
+    if (listMode && withTruckVolume) {
+      filter["trucks.actualVolume"] = { $gt: 0 };
+    }
+    if (listMode && search) {
+      const rx = new RegExp(escapeRegExp(search), "i");
+      filter.$or = [
+        { idNo: rx },
+        { submissionId: rx },
+        { lguCompanyName: rx },
+        { companyType: rx },
+        { slfName: rx },
+        { submittedBy: rx },
+      ];
+    }
+
+    let query = DataSLF.find(filter)
       .populate("slfGenerator")
-      .sort({ createdAt: -1 })
-      .lean();
+      .sort({ createdAt: -1 });
+    if (listMode) {
+      query = query.select(
+        "slfGenerator slfName submissionId idNo previousIdNos dateOfDisposal lguCompanyName companyType address companyRegion companyProvince companyMunicipality companyBarangay trucks status revertRequested editRequested submittedBy createdAt updatedAt baselineUnit totalVolumeAccepted totalVolumeAcceptedUnit activeCellEntries closedCellEntries",
+      );
+    }
+    if (paginated) {
+      query = query.skip((page - 1) * limit).limit(limit);
+    }
+    const [entries, total] = await Promise.all([
+      query.lean(),
+      paginated ? DataSLF.countDocuments(filter) : Promise.resolve(null),
+    ]);
+    if (paginated) {
+      res.json({
+        data: entries.map((entry) => ({
+          ...entry,
+          truckCount: Array.isArray(entry.trucks) ? entry.trucks.length : 0,
+          trucks: includeTrucks ? entry.trucks : [],
+        })),
+        total,
+        page,
+        limit,
+      });
+      return;
+    }
     res.json(entries);
+  } catch (error) {
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+});
+
+router.get("/detail/:id", async (req, res) => {
+  try {
+    const entry = await DataSLF.findOne({ _id: req.params.id, deletedAt: null })
+      .populate("slfGenerator")
+      .lean();
+    if (!entry) return res.status(404).json({ message: "Entry not found" });
+    res.json(entry);
+  } catch (error) {
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+});
+
+router.post("/cell-capacity-alert", async (req, res) => {
+  try {
+    const { submissionIds = [], message, cellName, slfName, performedBy } = req.body || {};
+    const ids = Array.isArray(submissionIds) ? submissionIds.filter(Boolean) : [];
+    if (ids.length === 0) return res.status(400).json({ message: "Select at least one submission." });
+
+    const entries = await DataSLF.find({ _id: { $in: ids }, deletedAt: null })
+      .select("idNo submissionId lguCompanyName submittedBy slfName")
+      .lean();
+    const recipients = [...new Set(entries.map((entry) => entry.submittedBy).filter(Boolean))];
+    if (recipients.length === 0) return res.status(400).json({ message: "No portal user email found for selected submissions." });
+
+    const text = message || `The landfill cell${cellName ? ` (${cellName})` : ""}${slfName ? ` at ${slfName}` : ""} is nearing capacity. Please coordinate with EMB Region III before the next disposal.`;
+    await Notification.insertMany(recipients.map((email) => ({
+      recipient: email,
+      type: "cell_capacity_alert",
+      title: "Landfill Cell Capacity Alert",
+      message: text,
+      submissionId: entries.find((entry) => entry.submittedBy === email)?.submissionId,
+      meta: {
+        cellName,
+        slfName,
+        submissionIds: entries.filter((entry) => entry.submittedBy === email).map((entry) => entry.submissionId || entry.idNo),
+      },
+    })));
+    recipients.forEach((email) => notifyPortal(req, email, {
+      type: "cell_capacity_alert",
+      title: "Landfill Cell Capacity Alert",
+      message: text,
+      meta: { cellName, slfName },
+    }));
+    await Transaction.create({
+      submissionId: entries[0]?.submissionId || entries[0]?.idNo || "cell-capacity-alert",
+      companyName: slfName || entries[0]?.slfName || entries[0]?.lguCompanyName || "",
+      type: "cell_capacity_alert",
+      description: `Cell capacity alert sent to ${recipients.length} portal user(s)${cellName ? ` for ${cellName}` : ""}`,
+      performedBy: performedBy || ADMIN_DISPLAY_NAME,
+      meta: { recipients, cellName, slfName, submissionIds: ids },
+    });
+    notifyAdmin(req, {
+      type: "cell_capacity_alert",
+      title: "Cell Capacity Alert Sent",
+      message: `Alert sent to ${recipients.length} portal user(s).`,
+    });
+    res.json({ message: "Cell capacity alert sent.", recipients: recipients.length });
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });
   }

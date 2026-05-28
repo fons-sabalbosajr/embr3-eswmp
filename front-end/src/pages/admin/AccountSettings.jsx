@@ -53,6 +53,7 @@ const PERMISSION_GROUPS = [
     { key: "dashboard", label: "Dashboard" },
     { key: "sanitaryLandfills", label: "Sanitary Landfills Menu" },
     { key: "submissions", label: "SLF Submissions" },
+    { key: "cellWastePlacement", label: "Cell Waste Placement" },
     { key: "slfMonitoring", label: "SLF Monitoring" },
     { key: "messaging", label: "Messaging" },
     { key: "reports", label: "Reports" },
@@ -89,9 +90,9 @@ const PERMISSION_GROUPS = [
 
 // Helper: normalize a permission value (handles old boolean format and new object format)
 function normPerm(val) {
-  if (val === undefined || val === null) return { view: true, edit: true, delete: true };
+  if (val === undefined || val === null) return { view: false, edit: false, delete: false };
   if (typeof val === "boolean") return { view: val, edit: val, delete: val };
-  return { view: val.view !== false, edit: val.edit !== false, delete: val.delete !== false };
+  return { view: val.view === true, edit: val.edit === true, delete: val.delete === true };
 }
 
 export default function AccountSettings({ isDark }) {

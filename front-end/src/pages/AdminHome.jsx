@@ -447,6 +447,7 @@ export default function AdminHome() {
 
   // ── Idle auto-logout (10 minutes of inactivity) ──
   useEffect(() => {
+    if (user?.role === "developer") return undefined;
     const IDLE_MS = 10 * 60 * 1000;
     let timer;
     let idledOut = false;
@@ -481,7 +482,7 @@ export default function AdminHome() {
       clearTimeout(timer);
       events.forEach((e) => document.removeEventListener(e, resetTimer));
     };
-  }, []);
+  }, [user?.role]);
 
   useEffect(() => {
     const timer = setInterval(() => setCurrentTime(dayjs()), 1000);
@@ -672,9 +673,9 @@ export default function AdminHome() {
   const hasAccess = (key, level = "view") => {
     if (isDeveloper) return true;
     const p = perms[key];
-    if (p === undefined) return true;
+    if (p === undefined) return false;
     if (typeof p === "boolean") return p; // backward compat
-    return p?.[level] !== false;
+    return p?.[level] === true;
   };
   const hasExplicitAccess = (key, level = "view") => {
     if (isDeveloper) return true;
@@ -731,7 +732,7 @@ export default function AdminHome() {
         label: "SLF Data Table",
       });
     }
-    if (hasAccess("sanitaryLandfills") && (hasAccess("submissions") || hasAccess("reports") || hasAccess("baselineData"))) {
+    if (hasAccess("sanitaryLandfills") && (hasAccess("submissions") || hasAccess("reports") || hasAccess("baselineData") || hasAccess("cellWastePlacement"))) {
       slfChildren.push({
         key: "slf-waste-generators",
         icon: <InboxOutlined />,
@@ -821,7 +822,7 @@ export default function AdminHome() {
           label: "App Settings",
         });
       }
-      if (isDeveloper) {
+      if (isDeveloper || hasExplicitAccess("accountSettings")) {
         devChildren.push({
           key: "settings-accounts",
           icon: <TeamOutlined />,
@@ -919,7 +920,7 @@ export default function AdminHome() {
       case "cs-tech-assist":
         return <TechnicalAssistance isDark={isDark} canEdit={canEdit("technicalAssistance")} canDelete={canDelete("technicalAssistance")} />;
       case "settings-accounts":
-        return isDeveloper && hasAccess("accountSettings") ? <AccountSettings isDark={isDark} /> : denied;
+        return (isDeveloper || hasExplicitAccess("accountSettings")) ? <AccountSettings isDark={isDark} /> : denied;
       case "settings-portal-users":
         return (isDeveloper || hasAccess("portalUsers")) ? (
           <PortalUsers
@@ -935,13 +936,13 @@ export default function AdminHome() {
       case "settings-fields":
         return hasAccess("portalFields") ? <FieldSettings isDark={isDark} canEdit={canEdit("portalFields")} canDelete={canDelete("portalFields")} /> : denied;
       case "settings-data-refs":
-        return <DataReferences isDark={isDark} canEdit={canEdit("dataReferences")} canDelete={canDelete("dataReferences")} />;
+        return hasAccess("dataReferences") ? <DataReferences isDark={isDark} canEdit={canEdit("dataReferences")} canDelete={canDelete("dataReferences")} /> : denied;
       case "settings-org-chart":
         return hasAccess("orgChart") ? <OrgChartSettings isDark={isDark} canEdit={canEdit("orgChart")} canDelete={canDelete("orgChart")} /> : denied;
       case "slf-monitoring":
         return hasAccess("slfMonitoring") ? <SLFMonitoring isDark={isDark} canEdit={canEdit("slfMonitoring")} canDelete={canDelete("slfMonitoring")} /> : denied;
       case "slf-waste-generators":
-        return hasAccess("submissions") || hasAccess("reports") || hasAccess("baselineData") ? (
+        return hasAccess("submissions") || hasAccess("reports") || hasAccess("baselineData") || hasAccess("cellWastePlacement") ? (
           <SLFWasteGenerators
             isDark={isDark}
             canViewSubmissions={hasAccess("submissions")}
@@ -953,6 +954,9 @@ export default function AdminHome() {
             canViewBaseline={hasAccess("baselineData")}
             canEditBaseline={canEdit("baselineData")}
             canDeleteBaseline={canDelete("baselineData")}
+            canViewCellPlacement={hasAccess("cellWastePlacement")}
+            canEditCellPlacement={canEdit("cellWastePlacement")}
+            canRepairIds={isDeveloper}
           />
         ) : (
           denied

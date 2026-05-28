@@ -9,7 +9,7 @@ import {
 import {
   AuditOutlined, BankOutlined, BarChartOutlined, CarOutlined, CheckCircleOutlined,
   CloseCircleOutlined, ContainerOutlined, DatabaseOutlined, DeleteOutlined,
-  EditOutlined, EnvironmentOutlined, ExclamationCircleOutlined, EyeOutlined, FileTextOutlined,
+  EditOutlined, EnvironmentOutlined, EyeOutlined, FileTextOutlined,
   InfoCircleOutlined, MailOutlined, MessageOutlined, PieChartOutlined,
   PlusOutlined, QuestionCircleOutlined, SaveOutlined, SendOutlined,
   TeamOutlined, UndoOutlined, UploadOutlined, UserOutlined, WifiOutlined,
@@ -256,6 +256,47 @@ export default function SLFPortalModals({
   const baselineBreakdownRows = (wasteReceivedData.baselineClients || []).length
     ? wasteReceivedData.baselineClients || []
     : wasteReceivedData.baselineCellBreakdown || [];
+  const baselineCategoryCounts = baselineBreakdownRows.reduce((acc, row) => {
+    const category = getClientCategory(row);
+    acc[category] = (acc[category] || 0) + 1;
+    return acc;
+  }, {});
+  const submissionCategoryCounts = submittedBreakdownRows.reduce((acc, row) => {
+    const category = getClientCategory(row);
+    acc[category] = (acc[category] || 0) + 1;
+    return acc;
+  }, {});
+  const categoryColors = {
+    "LGU - Region III": "#1677ff",
+    "LGU - Outside Region III": "#722ed1",
+    "Private Industry": "#52c41a",
+    "Baseline Utilization": "#fa8c16",
+  };
+  const renderCategoryDonuts = (counts, total, prefix) => (
+    <Row gutter={[8, 8]}>
+      {Object.entries(counts).length === 0 ? (
+        <Col span={24}>
+          <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No category data" />
+        </Col>
+      ) : Object.entries(counts).map(([label, count]) => {
+        const percent = total ? Math.round((count / total) * 100) : 0;
+        return (
+          <Col xs={12} md={6} key={`${prefix}-${label}`}>
+            <div style={{ textAlign: "center", padding: "8px 4px" }}>
+              <Progress
+                type="circle"
+                size={58}
+                percent={percent}
+                strokeColor={categoryColors[label] || "#8c8c8c"}
+                format={() => `${count}`}
+              />
+              <div style={{ marginTop: 6, fontSize: 10, lineHeight: 1.2, color: "#595959" }}>{label}</div>
+            </div>
+          </Col>
+        );
+      })}
+    </Row>
+  );
 
   return (
     <>
@@ -3336,7 +3377,12 @@ export default function SLFPortalModals({
 
       {/* ── Upload Preview Modal ── */}
       <Modal
-        title="Preview Uploaded Data"
+        title={
+          <Space>
+            <UploadOutlined />
+            <Text strong>Preview Uploaded Data</Text>
+          </Space>
+        }
         open={uploadModalOpen}
         onCancel={() => {
           setUploadModalOpen(false);
@@ -3351,23 +3397,35 @@ export default function SLFPortalModals({
           className: "slf-primary-btn",
           disabled: (uploadMissingColumns || []).length > 0 || uploadPreviewData.some((row) => row._errors?.length),
         }}
-        width={900}
+        width={1300}
+        className="slf-upload-preview-modal"
       >
         <div style={{ marginBottom: 12 }}>
-          <Text type="secondary" style={{ fontSize: 12 }}>
-            Review the data below. Click on any cell to edit before importing.
-          </Text>
+          <Space wrap>
+            <Tag color="blue">{uploadPreviewData.length} row(s)</Tag>
+            <Tag color="green">
+              {uploadPreviewData.filter((row) => !row._errors?.length).length} ready
+            </Tag>
+            <Tag color={uploadPreviewData.some((row) => row._errors?.length) || (uploadMissingColumns || []).length ? "red" : "default"}>
+              {(uploadMissingColumns || []).length + uploadPreviewData.filter((row) => row._errors?.length).length} issue(s)
+            </Tag>
+          </Space>
         </div>
         {((uploadMissingColumns || []).length > 0 || uploadPreviewData.some((row) => row._errors?.length)) && (
-          <div style={{ marginBottom: 12, padding: "8px 12px", borderRadius: 6, border: "1px solid #ffccc7", background: "#fff2f0" }}>
-            <Text style={{ fontSize: 12, color: "#a8071a", whiteSpace: "normal", overflowWrap: "anywhere" }}>
-              <ExclamationCircleOutlined style={{ marginRight: 6 }} />
-              Import is disabled until all missing data is fixed.
-              {(uploadMissingColumns || []).length > 0 ? ` Missing columns: ${uploadMissingColumns.join(", ")}.` : ""}
-            </Text>
-          </div>
+          <Alert
+            type="warning"
+            showIcon
+            style={{ marginBottom: 12 }}
+            message="Import is disabled until the preview is valid."
+            description={
+              (uploadMissingColumns || []).length > 0
+                ? `Missing columns: ${uploadMissingColumns.join(", ")}.`
+                : "Edit the highlighted row values in the preview table."
+            }
+          />
         )}
         <Table
+          className="slf-upload-preview-table"
           dataSource={uploadPreviewData}
           columns={(uploadPreviewColumns || []).map((col) => {
             // keep the row-number (#) and actions columns as-is
@@ -3376,25 +3434,51 @@ export default function SLFPortalModals({
             return {
               ...col,
               render: (text, record) => (
-                <Input
-                  size="small"
-                  value={text ?? ""}
-                  onChange={(e) =>
-                    updateUploadCell(record.key, col.dataIndex, e.target.value)
-                  }
-                  style={{
-                    border: "none",
-                    background: "transparent",
-                    padding: "2px 4px",
-                  }}
-                />
+                ["truckCapacity", "actualVolume", "numberOfTrucks", "capacity"].includes(col.dataIndex) ? (
+                  <InputNumber
+                    size="small"
+                    value={text ?? null}
+                    min={0}
+                    controls={false}
+                    onChange={(value) =>
+                      updateUploadCell(record.key, col.dataIndex, value)
+                    }
+                    style={{ width: "100%" }}
+                  />
+                ) : (
+                  <Input
+                    size="small"
+                    value={Array.isArray(text) ? text.join(", ") : text ?? ""}
+                    onChange={(e) =>
+                      updateUploadCell(record.key, col.dataIndex, e.target.value)
+                    }
+                    style={{
+                      border: "none",
+                      background: "transparent",
+                      padding: "2px 4px",
+                      fontSize: 11,
+                      lineHeight: 1.25,
+                    }}
+                  />
+                )
               ),
+              onCell: () => ({
+                style: {
+                  fontSize: 11,
+                  lineHeight: 1.25,
+                  whiteSpace: "normal",
+                  overflowWrap: "anywhere",
+                  wordBreak: "break-word",
+                  verticalAlign: "top",
+                },
+              }),
             };
           })}
-          rowKey={(_, i) => i}
+          rowKey="key"
           size="small"
-          pagination={false}
-          scroll={{ x: 700 }}
+          pagination={{ pageSize: 20, showSizeChanger: false }}
+          scroll={{ x: uploadType === "hauler" ? 1100 : 980, y: 420 }}
+          rowClassName={(record) => (record._errors?.length ? "slf-upload-row-error" : "")}
         />
       </Modal>
 
@@ -3831,21 +3915,21 @@ export default function SLFPortalModals({
             Close
           </Button>
         }
-        width={960}
+        width={1200}
         destroyOnHidden
       >
-        <Spin spinning={wasteReceivedLoading}>
+        <Spin spinning={wasteReceivedLoading} tip="Loading breakdown...">
           <Row gutter={[12, 12]} style={{ marginBottom: 16 }}>
             <Col xs={24} sm={8}>
               <Card size="small" style={{ borderRadius: 8 }}>
                 <Text type="secondary" style={{ fontSize: 11 }}>Baseline Clients</Text>
-                <div style={{ fontSize: 22, fontWeight: 700, color: "#1a3353" }}>{baselineBreakdownRows.length}</div>
+                <div style={{ fontSize: 18, fontWeight: 700, color: "#1a3353" }}>{baselineBreakdownRows.length}</div>
               </Card>
             </Col>
             <Col xs={24} sm={8}>
               <Card size="small" style={{ borderRadius: 8 }}>
                 <Text type="secondary" style={{ fontSize: 11 }}>Submission Clients</Text>
-                <div style={{ fontSize: 22, fontWeight: 700, color: "#fa8c16" }}>{submittedBreakdownRows.length}</div>
+                <div style={{ fontSize: 18, fontWeight: 700, color: "#fa8c16" }}>{submittedBreakdownRows.length}</div>
               </Card>
             </Col>
             <Col xs={24} sm={8}>
@@ -3859,9 +3943,23 @@ export default function SLFPortalModals({
             </Col>
           </Row>
 
+          <Row gutter={[12, 12]} style={{ marginBottom: 12 }}>
+            <Col xs={24} md={12}>
+              <Card size="small" title={<Text style={{ fontSize: 12 }}>Baseline Categories</Text>} bodyStyle={{ padding: 10 }}>
+                {renderCategoryDonuts(baselineCategoryCounts, baselineBreakdownRows.length, "baseline")}
+              </Card>
+            </Col>
+            <Col xs={24} md={12}>
+              <Card size="small" title={<Text style={{ fontSize: 12 }}>Submission Categories</Text>} bodyStyle={{ padding: 10 }}>
+                {renderCategoryDonuts(submissionCategoryCounts, submittedBreakdownRows.length, "submission")}
+              </Card>
+            </Col>
+          </Row>
+
           <Divider orientation="left" style={{ fontSize: 13 }}><TeamOutlined /> Baseline Client List</Divider>
           <Table
             size="small"
+            className="slf-waste-breakdown-table"
             dataSource={baselineBreakdownRows}
             rowKey={(row, index) => `${row.clientName || row.company || index}-baseline-${index}`}
             pagination={{ pageSize: 5, size: "small" }}
@@ -3870,7 +3968,7 @@ export default function SLFPortalModals({
               { title: "#", render: (_, __, index) => index + 1, width: 48 },
               { title: "Source", dataIndex: "clientName", ellipsis: true, render: (value, row) => value || row.company || "—" },
               { title: "Category", width: 180, render: (_, row) => <Tag color={/private/i.test(row.clientType || "") ? "green" : "blue"}>{getClientCategory(row)}</Tag> },
-              { title: "Baseline Volume", width: 160, align: "right", render: (_, row) => <Text strong>{formatClientVolume(row)}</Text> },
+              { title: "Volume", width: 90, align: "center", render: () => <Tag>Hidden</Tag> },
               { title: "Province", dataIndex: "province", width: 150, render: (_, row) => getAddressLabel(row, "province") },
               { title: "Municipality", dataIndex: "municipality", width: 150, render: (_, row) => getAddressLabel(row, "municipality") },
             ]}
@@ -3880,6 +3978,7 @@ export default function SLFPortalModals({
           <Divider orientation="left" style={{ fontSize: 13 }}><BarChartOutlined /> Submission Volume by Client</Divider>
           <Table
             size="small"
+            className="slf-waste-breakdown-table"
             dataSource={submittedBreakdownRows}
             rowKey={(row, index) => `${row.clientName || row.company || index}-submission-${index}`}
             pagination={{ pageSize: 6, size: "small" }}
@@ -3889,7 +3988,7 @@ export default function SLFPortalModals({
               { title: "Client", dataIndex: "clientName", ellipsis: true, render: (value, row) => value || row.company || "—" },
               { title: "Category", width: 180, render: (_, row) => <Tag color={/private/i.test(row.clientType || "") ? "green" : "blue"}>{getClientCategory(row)}</Tag> },
               { title: "Truck Entries", dataIndex: "truckCount", width: 120, align: "center", render: (value, row) => Number(value || row.entries || 0).toLocaleString(undefined, { maximumFractionDigits: 1 }) },
-              { title: "Total Volume", width: 180, align: "right", render: (_, row) => <Text strong style={{ color: "#fa8c16" }}>{formatClientVolume(row)}</Text> },
+              { title: "Volume", width: 90, align: "center", render: () => <Tag>Hidden</Tag> },
             ]}
           />
         </Spin>

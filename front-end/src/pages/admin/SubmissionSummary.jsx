@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Alert,
   Button,
@@ -21,11 +21,15 @@ import FullCalendar from "@fullcalendar/react";
 import dayGridPlugin from "@fullcalendar/daygrid";
 import interactionPlugin from "@fullcalendar/interaction";
 import api from "../../api";
+import { fetchWithCache, invalidateCache } from "../../utils/pageCache";
+import { getSocket } from "../../utils/socket";
 import { matchesFilter, rowMatchesSearch } from "./shared/tableFilters";
 
 const { Text } = Typography;
 const ACCENT = "#2f54eb";
 const TON_PER_M3 = 0.2;
+const SUMMARY_CACHE_KEY = "submission-summary-cache";
+const SUMMARY_CACHE_TTL = 10 * 60 * 1000;
 
 const normalizeUnit = (unit) => (unit || "m³").replace("m3", "m³");
 const normalizeKey = (value) => String(value || "")
@@ -140,7 +144,7 @@ function buildBaselineTotals(baseline) {
   return totals;
 }
 
-function buildCellStatusRows(summary, throughDate) {
+function buildCellStatusRows(summary, throughDate, settings = {}) {
   const facility = summary.facility;
   const baseline = summary.baseline;
   const cellCount = Math.max(
@@ -154,9 +158,16 @@ function buildCellStatusRows(summary, throughDate) {
   const capacityUnits = facility?.cellCapacityUnits || [];
   const fillValues = facility?.cellFillValues || [];
   const fillUnits = facility?.cellFillUnits || [];
-  const cumulativeRecords = summary.records.filter((record) =>
-    record.dateOfDisposal && dayjs(record.dateOfDisposal).startOf("day").valueOf() <= dayjs(throughDate).startOf("day").valueOf(),
-  );
+  const baselineDate = baseline?.lastUpdated || baseline?.createdAt;
+  const cumulativeRecords = summary.records.filter((record) => {
+    if (!record.dateOfDisposal) return false;
+    const withinDate = dayjs(record.dateOfDisposal).startOf("day").valueOf() <= dayjs(throughDate).startOf("day").valueOf();
+    if (!withinDate) return false;
+    if (!settings.excludePreBaselineDisposalFromCellFill || !baselineDate) return true;
+    const disposalBeforeBaseline = dayjs(record.dateOfDisposal).startOf("day").isBefore(dayjs(baselineDate).startOf("day"));
+    const submittedAfterBaseline = record.createdAt && dayjs(record.createdAt).isAfter(dayjs(baselineDate));
+    return !disposalBeforeBaseline || submittedAfterBaseline;
+  });
   const cumulative = getTruckTotals(cumulativeRecords);
 
   return Array.from({ length: cellCount }).map((_, index) => {
@@ -193,6 +204,7 @@ export default function SubmissionSummary({ isDark }) {
   const [records, setRecords] = useState([]);
   const [facilities, setFacilities] = useState([]);
   const [baselines, setBaselines] = useState([]);
+  const [settings, setSettings] = useState({});
   const [loading, setLoading] = useState(false);
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
@@ -200,29 +212,62 @@ export default function SubmissionSummary({ isDark }) {
   const [calendarDate, setCalendarDate] = useState(dayjs());
   const [submissionDetail, setSubmissionDetail] = useState(null);
 
-  const fetchRecords = async () => {
-    setLoading(true);
-    try {
-      const [recordsRes, facilitiesRes, baselinesRes] = await Promise.all([
-        api.get("/data-slf"),
-        api.get("/slf-facilities"),
-        api.get("/data-slf/baselines"),
-      ]);
-      setRecords(Array.isArray(recordsRes.data) ? recordsRes.data : []);
-      setFacilities(Array.isArray(facilitiesRes.data) ? facilitiesRes.data : []);
-      setBaselines(Array.isArray(baselinesRes.data) ? baselinesRes.data : []);
-    } catch {
-      setRecords([]);
-      setFacilities([]);
-      setBaselines([]);
-    } finally {
-      setLoading(false);
-    }
-  };
+  const fetchRecords = useCallback(async ({ force = false, silent = false } = {}) => {
+    await fetchWithCache(
+      SUMMARY_CACHE_KEY,
+      async () => {
+        const [recordsRes, facilitiesRes, baselinesRes, settingsRes] = await Promise.all([
+          api.get("/data-slf", { params: { mode: "list" } }),
+          api.get("/slf-facilities"),
+          api.get("/data-slf/baselines"),
+          api.get("/settings/app"),
+        ]);
+        return {
+          records: Array.isArray(recordsRes.data) ? recordsRes.data : [],
+          facilities: Array.isArray(facilitiesRes.data) ? facilitiesRes.data : [],
+          baselines: Array.isArray(baselinesRes.data) ? baselinesRes.data : [],
+          settings: settingsRes.data || {},
+        };
+      },
+      {
+        ttl: SUMMARY_CACHE_TTL,
+        force,
+        onStart: () => !silent && setLoading(true),
+        onEnd: () => !silent && setLoading(false),
+        onData: (payload = {}) => {
+          setRecords(payload.records || []);
+          setFacilities(payload.facilities || []);
+          setBaselines(payload.baselines || []);
+          setSettings(payload.settings || {});
+          setLoading(false);
+        },
+        onError: () => {
+          if (!silent) {
+            setRecords([]);
+            setFacilities([]);
+            setBaselines([]);
+          }
+        },
+      },
+    );
+  }, []);
 
   useEffect(() => {
     fetchRecords();
-  }, []);
+  }, [fetchRecords]);
+
+  useEffect(() => {
+    const socket = getSocket();
+    if (!socket) return undefined;
+    const handler = ({ target } = {}) => {
+      if (!target || ["submissions", "baselines"].includes(target)) {
+        invalidateCache(SUMMARY_CACHE_KEY);
+        fetchRecords({ force: true, silent: true });
+      }
+    };
+    socket.on("data-refresh", handler);
+    return () => socket.off("data-refresh", handler);
+  }, [fetchRecords]);
 
   const filteredRecords = useMemo(() => {
     return records.filter((record) => {
@@ -306,8 +351,8 @@ export default function SubmissionSummary({ isDark }) {
 
   const selectedCellRows = useMemo(() => {
     if (!calendarRecord) return [];
-    return buildCellStatusRows(calendarRecord, calendarDate);
-  }, [calendarRecord, calendarDate]);
+    return buildCellStatusRows(calendarRecord, calendarDate, settings);
+  }, [calendarRecord, calendarDate, settings]);
 
   const selectedCumulativeTotals = useMemo(() => {
     if (!calendarRecord) return { m3: 0, tons: 0 };
@@ -460,7 +505,7 @@ export default function SubmissionSummary({ isDark }) {
             <Select.Option value="revert_requested">Revert Requested</Select.Option>
             <Select.Option value="reverted">Reverted</Select.Option>
           </Select>
-          <Button icon={<ReloadOutlined />} loading={loading} onClick={fetchRecords}>Refresh</Button>
+          <Button icon={<ReloadOutlined />} loading={loading} onClick={() => fetchRecords({ force: true })}>Refresh</Button>
         </Space>
         <Table
           dataSource={summaryRows}
@@ -577,8 +622,8 @@ export default function SubmissionSummary({ isDark }) {
                   rowKey={(record) => record._id}
                   locale={{ emptyText: "No submissions on this date" }}
                   columns={[
-                    { title: "ID", dataIndex: "idNo", width: 80, render: (value) => <Text strong>{value || "—"}</Text> },
-                    { title: "Generator",  width: 90, dataIndex: "lguCompanyName", ellipsis: true, render: (value) => value || "—" },
+                    { title: "ID", dataIndex: "idNo", width: 90, render: (value, record) => <Text strong>{value || record.submissionId || "No ID"}</Text> },
+                    { title: "Generator",  width: 120, dataIndex: "lguCompanyName", ellipsis: true, render: (value, record) => value || record.companyName || record.generatorName || "Not encoded" },
                     { title: "Trucks", width: 70, align: "center", render: (_, record) => record.trucks?.length || 0 },
                     {
                       title: "Volume",
@@ -593,7 +638,7 @@ export default function SubmissionSummary({ isDark }) {
                         return formatVolume(dayTotal.m3, dayTotal.tons);
                       },
                     },
-                    { title: "Status", dataIndex: "status", width: 60, render: (value) => <Tag color={statusColor[value] || "default"}>{value?.replace("_", " ") || "—"}</Tag> },
+                    { title: "Status", dataIndex: "status", width: 90, render: (value) => <Tag color={statusColor[value] || "default"}>{value?.replace("_", " ") || "pending"}</Tag> },
                     { title: "", width: 54, render: (_, record) => <Button size="small" icon={<EyeOutlined />} onClick={() => setSubmissionDetail(record)} /> },
                   ]}
                 />
@@ -625,7 +670,7 @@ export default function SubmissionSummary({ isDark }) {
             <Row gutter={[12, 12]}>
               <Col xs={24} md={8}>
                 <Card size="small" style={{ borderRadius: 8 }}>
-                  <Statistic title="Generator" value={submissionDetail.lguCompanyName || "—"} valueStyle={{ fontSize: 16 }} />
+                  <Statistic title="Generator" value={submissionDetail.lguCompanyName || submissionDetail.companyName || "Not encoded"} valueStyle={{ fontSize: 16 }} />
                 </Card>
               </Col>
               <Col xs={24} md={8}>
@@ -635,7 +680,7 @@ export default function SubmissionSummary({ isDark }) {
               </Col>
               <Col xs={24} md={8}>
                 <Card size="small" style={{ borderRadius: 8 }}>
-                  <Statistic title="Status" value={submissionDetail.status?.replace("_", " ") || "—"} valueStyle={{ fontSize: 16 }} />
+                  <Statistic title="Status" value={submissionDetail.status?.replace("_", " ") || "pending"} valueStyle={{ fontSize: 16 }} />
                 </Card>
               </Col>
             </Row>
@@ -647,8 +692,9 @@ export default function SubmissionSummary({ isDark }) {
               locale={{ emptyText: "No truck entries recorded" }}
               columns={[
                 { title: "Truck", width: 80, render: (_, __, index) => index + 1 },
-                { title: "Plate No.", dataIndex: "plateNo", render: (value) => value || "—" },
-                { title: "Hauler", dataIndex: "haulerName", render: (value) => value || "—" },
+                { title: "Ticket", dataIndex: "disposalTicketNo", render: (value) => value || "Not encoded" },
+                { title: "Plate No.", dataIndex: "plateNumber", render: (value, truck) => value || truck.plateNo || "Not encoded" },
+                { title: "Hauler", dataIndex: "hauler", render: (value, truck) => value || truck.haulerName || "Not encoded" },
                 { title: "Waste Type", dataIndex: "wasteType", render: (value) => value || "Residual" },
                 {
                   title: "Actual Volume",

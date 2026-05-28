@@ -14,6 +14,7 @@ import {
   Row,
   Col,
   Space,
+  Statistic,
   Table,
   Spin,
   Empty,
@@ -47,6 +48,7 @@ import {
   MenuOutlined,
   UserOutlined,
   DatabaseOutlined,
+  DashboardOutlined,
   InfoCircleOutlined,
   CloseCircleOutlined,
   SyncOutlined,
@@ -95,6 +97,7 @@ import {
 import api from "../../api";
 import { useErrorCard } from "../../utils/ErrorHandler";
 import secureStorage from "../../utils/secureStorage";
+import { fetchWithCache, invalidateCache } from "../../utils/pageCache";
 import { connectSocket, disconnectSocket } from "../../utils/socket";
 import embLogo from "../../assets/emblogo.svg";
 import "./SLFPortal.css";
@@ -113,6 +116,10 @@ const { Header, Sider, Content } = Layout;
 const { useBreakpoint } = Grid;
 const { TextArea } = Input;
 const TON_PER_M3 = 0.2;
+const PORTAL_SETTINGS_CACHE_KEY = "portal-settings-cache";
+const PORTAL_SUBMISSIONS_CACHE_KEY = "portal-submissions-cache";
+const PORTAL_WASTE_RECEIVED_CACHE_KEY = "portal-waste-received-cache";
+const PORTAL_CACHE_TTL = 2 * 60 * 1000;
 
 const normalizeUnit = (unit) => String(unit || "m³").replace("m3", "m³");
 const hasBaselinePayload = (data = {}) =>
@@ -302,6 +309,41 @@ const isUnavailableCellStatus = (status) =>
     "Not Existed",
   ].includes(String(status || ""));
 
+const uploadHeaderKey = (header) =>
+  String(header || "")
+    .toLowerCase()
+    .replace(/[_-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+const compactUploadHeaderKey = (header) =>
+  uploadHeaderKey(header).replace(/[^a-z0-9]/g, "");
+
+const isHaulerNameHeader = (header) => {
+  const key = uploadHeaderKey(header);
+  const compact = compactUploadHeaderKey(header);
+  return (
+    compact === "haulername" ||
+    compact === "accreditedhauler" ||
+    compact === "accreditedhaulername" ||
+    (key.includes("hauler") && key.includes("name")) ||
+    (key.includes("hauler") && !key.includes("truck"))
+  );
+};
+
+const isNumberOfTrucksHeader = (header) => {
+  const key = uploadHeaderKey(header);
+  const compact = compactUploadHeaderKey(header);
+  return (
+    compact === "numberoftrucks" ||
+    compact === "nooftrucks" ||
+    compact === "truckcount" ||
+    compact === "totaltrucks" ||
+    compact === "numbertrucks" ||
+    (key.includes("truck") && (key.includes("number") || key.includes("no.") || key.includes("no ") || key.includes("count") || key.includes("total")))
+  );
+};
+
 const UPLOAD_REQUIRED_FIELDS = {
   truck: [
     {
@@ -334,27 +376,12 @@ const UPLOAD_REQUIRED_FIELDS = {
     {
       field: "haulerName",
       label: "Hauler Name",
-      matches: (key) => key.includes("hauler") || key.includes("name"),
+      matches: isHaulerNameHeader,
     },
     {
       field: "numberOfTrucks",
       label: "Number of Trucks",
-      matches: (key) => key.includes("truck") || key.includes("number"),
-    },
-    {
-      field: "plateNumber",
-      label: "Plate No.",
-      matches: (key) => key.includes("plate"),
-    },
-    {
-      field: "vehicleType",
-      label: "Vehicle Type",
-      matches: (key) => key.includes("vehicle") || key.includes("type"),
-    },
-    {
-      field: "capacity",
-      label: "Capacity",
-      matches: (key) => key.includes("capacity") && !key.includes("unit"),
+      matches: isNumberOfTrucksHeader,
     },
   ],
 };
@@ -364,12 +391,22 @@ const isEmptyUploadValue = (value) =>
   value === null ||
   (typeof value === "string" && value.trim() === "");
 
+const cleanUploadText = (value) =>
+  String(value ?? "")
+    .replace(/\s+/g, " ")
+    .trim();
+
+const parseUploadNumber = (value) => {
+  if (isEmptyUploadValue(value)) return null;
+  const parsed = Number(String(value).replace(/,/g, "").trim());
+  return Number.isFinite(parsed) ? parsed : Number.NaN;
+};
+
+const normalizeUploadHeaders = (headers) =>
+  headers.map(uploadHeaderKey);
+
 const getUploadMissingColumns = (headers, type) => {
-  const normalizedHeaders = headers.map((header) =>
-    String(header || "")
-      .toLowerCase()
-      .trim(),
-  );
+  const normalizedHeaders = normalizeUploadHeaders(headers);
   return (UPLOAD_REQUIRED_FIELDS[type] || [])
     .filter(
       (field) => !normalizedHeaders.some((header) => field.matches(header)),
@@ -377,17 +414,42 @@ const getUploadMissingColumns = (headers, type) => {
     .map((field) => field.label);
 };
 
-const getUploadRowErrors = (row, type) =>
-  (UPLOAD_REQUIRED_FIELDS[type] || [])
+const getUploadRowErrors = (row, type) => {
+  const errors = (UPLOAD_REQUIRED_FIELDS[type] || [])
     .filter((field) => isEmptyUploadValue(row[field.field]))
     .map((field) => field.label);
+  const actualVolume = parseUploadNumber(row.actualVolume);
+  const truckCapacity = parseUploadNumber(row.truckCapacity);
+  const numberOfTrucks = parseUploadNumber(row.numberOfTrucks);
+  const capacity = parseUploadNumber(row.capacity);
+
+  if (type === "truck") {
+    if (actualVolume == null || Number.isNaN(actualVolume) || actualVolume <= 0) {
+      errors.push("Actual Volume must be greater than 0");
+    }
+    if (!isEmptyUploadValue(row.truckCapacity) && (Number.isNaN(truckCapacity) || truckCapacity <= 0)) {
+      errors.push("Truck Capacity must be greater than 0");
+    }
+  }
+
+  if (type === "hauler") {
+    if (numberOfTrucks == null || Number.isNaN(numberOfTrucks) || numberOfTrucks <= 0) {
+      errors.push("Number of Trucks must be greater than 0");
+    }
+    if (!isEmptyUploadValue(row.capacity) && (Number.isNaN(capacity) || capacity <= 0)) {
+      errors.push("Capacity must be greater than 0");
+    }
+  }
+
+  return [...new Set(errors)];
+};
 
 export default function SLFPortal() {
   const navigate = useNavigate();
   const screens = useBreakpoint();
   const { showError, card: errorCard } = useErrorCard();
   const [portalUser, setPortalUser] = useState(null);
-  const [activeMenu, setActiveMenu] = useState("data-entry");
+  const [activeMenu, setActiveMenu] = useState("overview");
   const [submitted, setSubmitted] = useState(false);
   const [loading, setLoading] = useState(false);
   const [loadingUser, setLoadingUser] = useState(true);
@@ -825,13 +887,17 @@ export default function SLFPortal() {
   };
 
   useEffect(() => {
-    api
-      .get("/settings/app")
-      .then(({ data }) => {
+    fetchWithCache(
+      PORTAL_SETTINGS_CACHE_KEY,
+      () => api.get("/settings/app").then(({ data }) => data),
+      {
+        ttl: PORTAL_CACHE_TTL,
+        onData: (data) => {
         setPortalSettings(data);
         setPortalAnnouncement(isAnnouncementActive(data) ? data : null);
-      })
-      .catch(() => {});
+        },
+      },
+    ).catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -1201,26 +1267,37 @@ export default function SLFPortal() {
     fetchingRef.current = true;
     if (!silent) setLoadingSubmissions(true);
     try {
-      const { data } = await api.get("/portal-auth/my-submissions", {
-        headers: {
-          Authorization: `Bearer ${secureStorage.get("portal_token")}`,
+      await fetchWithCache(
+        `${PORTAL_SUBMISSIONS_CACHE_KEY}-${portalUser?.email || ""}`,
+        () => api.get("/portal-auth/my-submissions", {
+          headers: {
+            Authorization: `Bearer ${secureStorage.get("portal_token")}`,
+          },
+        }).then(({ data }) => data),
+        {
+          ttl: PORTAL_CACHE_TTL,
+          force: false,
+          onData: (data) => setSubmissions(Array.isArray(data) ? data : []),
         },
-      });
-      setSubmissions(data);
+      );
     } catch {
       // silent
     } finally {
       fetchingRef.current = false;
       if (!silent) setLoadingSubmissions(false);
     }
-  }, []);
+  }, [portalUser?.email]);
 
   useEffect(() => {
-    if (activeMenu === "history" && portalUser) {
+    if ((activeMenu === "history" || activeMenu === "overview") && portalUser) {
       fetchSubmissions();
       // Real-time refresh via socket + fallback 60s polling
       const sock = connectSocket("portal", portalUser.email);
-      const handler = () => fetchSubmissions(true);
+      const handler = () => {
+        invalidateCache(`${PORTAL_SUBMISSIONS_CACHE_KEY}-${portalUser?.email || ""}`);
+        invalidateCache(`${PORTAL_WASTE_RECEIVED_CACHE_KEY}:${activeSlfId || activeSlfName}`);
+        fetchSubmissions(true);
+      };
       sock.on("notification", handler);
       sock.on("data-refresh", handler);
       pollingRef.current = setInterval(() => {
@@ -1235,11 +1312,11 @@ export default function SLFPortal() {
     return () => {
       if (pollingRef.current) clearInterval(pollingRef.current);
     };
-  }, [activeMenu, portalUser, fetchSubmissions]);
+  }, [activeMenu, activeSlfId, activeSlfName, portalUser, fetchSubmissions]);
 
   // When coming back online while on history tab, refresh immediately
   useEffect(() => {
-    if (isOnline && activeMenu === "history" && portalUser) {
+    if (isOnline && (activeMenu === "history" || activeMenu === "overview") && portalUser) {
       fetchSubmissions(true);
     }
   }, [isOnline, activeMenu, portalUser, fetchSubmissions]);
@@ -1921,8 +1998,10 @@ export default function SLFPortal() {
 
     setBaselineSavingLoading(true);
     try {
-      const baselineValues = baselineForm.getFieldsValue();
-      const companyValues = companyForm.getFieldsValue();
+      const [baselineValues, companyValues] = await Promise.all([
+        baselineForm.validateFields(),
+        companyForm.validateFields(),
+      ]);
       const disposalValues = entryForm.getFieldsValue();
       const addressParts = [
         barangays.find((b) => b.code === companyValues.companyBarangay)?.name,
@@ -1936,29 +2015,36 @@ export default function SLFPortal() {
         companyValues.address ||
         addressParts.join(", ");
       // Compute legacy totals from entries for backward compat
+      const wasteTypeOf = (entry) => String(entry?.wasteType || "").trim().toLowerCase();
+      const isLegacyInertHazard = (entry) => wasteTypeOf(entry) === "inert/hazardous waste";
+      const isResidualEntry = (entry) => wasteTypeOf(entry).includes("residual");
+      const isHazardousEntry = (entry) => wasteTypeOf(entry).includes("hazard") && !isLegacyInertHazard(entry);
+      const isInertEntry = (entry) => wasteTypeOf(entry).includes("inert") || isLegacyInertHazard(entry);
+      const sumCellEntries = (entries, predicate) =>
+        entries.filter(predicate).reduce((sum, entry) => sum + (Number(entry.volume) || 0), 0);
       const activeCellResidualVolume =
-        activeCellEntries
-          .filter((e) => e.wasteType === "Residual")
-          .reduce((s, e) => s + (e.volume || 0), 0) ||
+        sumCellEntries(activeCellEntries, isResidualEntry) ||
         baselineValues.activeCellResidualVolume ||
         undefined;
       const activeCellInertVolume =
-        activeCellEntries
-          .filter((e) => e.wasteType === "Inert/Hazardous Waste")
-          .reduce((s, e) => s + (e.volume || 0), 0) ||
+        sumCellEntries(activeCellEntries, isInertEntry) ||
         baselineValues.activeCellInertVolume ||
         undefined;
+      const activeCellHazardousVolume =
+        sumCellEntries(activeCellEntries, isHazardousEntry) ||
+        baselineValues.activeCellHazardousVolume ||
+        undefined;
       const closedCellResidualVolume =
-        closedCellEntries
-          .filter((e) => e.wasteType === "Residual")
-          .reduce((s, e) => s + (e.volume || 0), 0) ||
+        sumCellEntries(closedCellEntries, isResidualEntry) ||
         baselineValues.closedCellResidualVolume ||
         undefined;
       const closedCellInertVolume =
-        closedCellEntries
-          .filter((e) => e.wasteType === "Inert/Hazardous Waste")
-          .reduce((s, e) => s + (e.volume || 0), 0) ||
+        sumCellEntries(closedCellEntries, isInertEntry) ||
         baselineValues.closedCellInertVolume ||
+        undefined;
+      const closedCellHazardousVolume =
+        sumCellEntries(closedCellEntries, isHazardousEntry) ||
+        baselineValues.closedCellHazardousVolume ||
         undefined;
 
       await api.patch(
@@ -1985,10 +2071,14 @@ export default function SLFPortal() {
           activeCellResidualUnit: baselineUnit,
           activeCellInertVolume,
           activeCellInertUnit: baselineUnit,
+          activeCellHazardousVolume,
+          activeCellHazardousUnit: baselineUnit,
           closedCellResidualVolume,
           closedCellResidualUnit: baselineUnit,
           closedCellInertVolume,
           closedCellInertUnit: baselineUnit,
+          closedCellHazardousVolume,
+          closedCellHazardousUnit: baselineUnit,
           activeCellEntries: activeCellEntries.map(({ key, ...rest }) => ({
             ...rest,
             unit: rest.unit || baselineUnit,
@@ -2014,6 +2104,9 @@ export default function SLFPortal() {
               ),
             }),
           ),
+          acceptsHazardousWaste: Boolean(
+            baselineValues.acceptsHazardousWaste ?? acceptsHazardousWaste,
+          ),
         },
       );
 
@@ -2029,6 +2122,15 @@ export default function SLFPortal() {
         showConfirmButton: false,
       });
     } catch (err) {
+      if (err?.errorFields) {
+        Swal.fire({
+          icon: "warning",
+          title: "Review Baseline Fields",
+          text: "Please complete the required baseline and company information before saving.",
+          confirmButtonColor: "#1a3353",
+        });
+        return;
+      }
       Swal.fire({
         icon: "error",
         title: "Save Failed",
@@ -2105,10 +2207,18 @@ export default function SLFPortal() {
     setWasteReceivedModalOpen(true);
     if (!activeSlfName) return;
     setWasteReceivedLoading(true);
+    const cacheKey = `${PORTAL_WASTE_RECEIVED_CACHE_KEY}:${activeSlfId || activeSlfName}`;
     try {
-      const { data } = await api.get(
-        `/data-slf/waste-received-summary/${encodeURIComponent(activeSlfName)}`,
-        { params: { slfId: activeSlfId } },
+      const data = await fetchWithCache(
+        cacheKey,
+        async () => {
+          const { data: response } = await api.get(
+            `/data-slf/waste-received-summary/${encodeURIComponent(activeSlfName)}`,
+            { params: { slfId: activeSlfId } },
+          );
+          return response || {};
+        },
+        { ttl: PORTAL_CACHE_TTL, staleTtl: PORTAL_CACHE_TTL * 6 },
       );
       setWasteReceivedData({
         lguR3: [],
@@ -2337,7 +2447,11 @@ export default function SLFPortal() {
       try {
         const wb = XLSX.read(e.target.result, { type: "array" });
         const ws = wb.Sheets[wb.SheetNames[0]];
-        const jsonData = XLSX.utils.sheet_to_json(ws, { defval: "" });
+        const jsonData = XLSX.utils
+          .sheet_to_json(ws, { defval: "" })
+          .filter((row) =>
+            Object.values(row || {}).some((value) => cleanUploadText(value) !== ""),
+          );
         if (jsonData.length === 0) {
           Swal.fire({
             icon: "warning",
@@ -2353,43 +2467,43 @@ export default function SLFPortal() {
         const normalized = jsonData.map((row, i) => {
           const normalized = { key: `upload-${i}-${Date.now()}` };
           for (const [key, value] of Object.entries(row)) {
-            const k = key.toLowerCase().trim();
+            const k = uploadHeaderKey(key);
             if (effectiveType === "truck") {
               if (k.includes("ticket") || k.includes("disposal"))
-                normalized.disposalTicketNo = String(value);
-              else if (k.includes("hauler")) normalized.hauler = String(value);
+                normalized.disposalTicketNo = cleanUploadText(value);
+              else if (k.includes("hauler")) normalized.hauler = cleanUploadText(value);
               else if (k.includes("plate"))
-                normalized.plateNumber = String(value);
+                normalized.plateNumber = cleanUploadText(value);
               else if (k.includes("capacity") && !k.includes("unit"))
-                normalized.truckCapacity = Number(value) || null;
+                normalized.truckCapacity = parseUploadNumber(value);
               else if (k.includes("volume") && !k.includes("unit"))
-                normalized.actualVolume = Number(value) || null;
+                normalized.actualVolume = parseUploadNumber(value);
               else if (k.includes("waste") && k.includes("type"))
-                normalized.wasteType = String(value);
+                normalized.wasteType = cleanUploadText(value);
               else if (k.includes("haz") || k.includes("code"))
-                normalized.hazWasteCode = String(value)
+                normalized.hazWasteCode = cleanUploadText(value)
                   .split(",")
                   .map((s) => s.trim())
                   .filter(Boolean);
             } else {
-              if (k.includes("hauler") || k.includes("name"))
-                normalized.haulerName = String(value);
-              else if (k.includes("truck") || k.includes("number"))
-                normalized.numberOfTrucks = Number(value) || null;
+              if (isNumberOfTrucksHeader(k))
+                normalized.numberOfTrucks = parseUploadNumber(value);
+              else if (isHaulerNameHeader(k))
+                normalized.haulerName = cleanUploadText(value);
               else if (k.includes("office") || k.includes("address"))
-                normalized.officeAddress = String(value);
+                normalized.officeAddress = cleanUploadText(value);
               else if (k.includes("plate"))
-                normalized.plateNumber = String(value);
+                normalized.plateNumber = cleanUploadText(value);
               else if (k.includes("vehicle") || k.includes("type"))
-                normalized.vehicleType = String(value);
+                normalized.vehicleType = cleanUploadText(value);
               else if (k.includes("capacity") && !k.includes("unit"))
-                normalized.capacity = Number(value) || null;
+                normalized.capacity = parseUploadNumber(value);
               else if (k.includes("capacity") && k.includes("unit"))
                 normalized.capacityUnit = normalizeUnit(
                   value || baselineUnit || "m³",
                 );
               else if (k.includes("client"))
-                normalized.privateSectorClients = String(value)
+                normalized.privateSectorClients = cleanUploadText(value)
                   .split(",")
                   .map((s) => s.trim())
                   .filter(Boolean);
@@ -2405,25 +2519,28 @@ export default function SLFPortal() {
         // Build editable columns
         if (effectiveType === "truck") {
           setUploadPreviewColumns([
-            { title: "#", width: 50, render: (_, __, i) => i + 1 },
+            { title: "#", width: 44, render: (_, __, i) => i + 1 },
             {
               title: "Ticket No.",
               dataIndex: "disposalTicketNo",
               key: "disposalTicketNo",
+              width: 130,
             },
-            { title: "Hauler", dataIndex: "hauler", key: "hauler" },
+            { title: "Hauler", dataIndex: "hauler", key: "hauler", width: 170 },
             {
               title: "Plate No.",
               dataIndex: "plateNumber",
               key: "plateNumber",
+              width: 120,
             },
             {
               title: "Capacity",
               dataIndex: "truckCapacity",
               key: "truckCapacity",
+              width: 110,
             },
-            { title: "Volume", dataIndex: "actualVolume", key: "actualVolume" },
-            { title: "Waste Type", dataIndex: "wasteType", key: "wasteType" },
+            { title: "Volume", dataIndex: "actualVolume", key: "actualVolume", width: 110 },
+            { title: "Waste Type", dataIndex: "wasteType", key: "wasteType", width: 150 },
             {
               title: "Validation",
               key: "validation",
@@ -2456,33 +2573,38 @@ export default function SLFPortal() {
           ]);
         } else {
           setUploadPreviewColumns([
-            { title: "#", width: 50, render: (_, __, i) => i + 1 },
+            { title: "#", width: 44, render: (_, __, i) => i + 1 },
             {
               title: "Hauler Name",
               dataIndex: "haulerName",
               key: "haulerName",
+              width: 180,
             },
             {
               title: "Trucks",
               dataIndex: "numberOfTrucks",
               key: "numberOfTrucks",
+              width: 90,
             },
             {
               title: "Office Address",
               dataIndex: "officeAddress",
               key: "officeAddress",
+              width: 240,
             },
             {
               title: "Plate No.",
               dataIndex: "plateNumber",
               key: "plateNumber",
+              width: 120,
             },
             {
               title: "Vehicle Type",
               dataIndex: "vehicleType",
               key: "vehicleType",
+              width: 140,
             },
-            { title: "Capacity", dataIndex: "capacity", key: "capacity" },
+            { title: "Capacity", dataIndex: "capacity", key: "capacity", width: 110 },
             {
               title: "Validation",
               key: "validation",
@@ -2562,18 +2684,18 @@ export default function SLFPortal() {
         disposalTicketNo: d.disposalTicketNo || "",
         hauler: d.hauler || "",
         plateNumber: d.plateNumber || "",
-        truckCapacity: d.truckCapacity,
+        truckCapacity: parseUploadNumber(d.truckCapacity),
         truckCapacityUnit: baselineUnit || "m³",
         vehicles: d.plateNumber
           ? [
               {
                 plateNumber: d.plateNumber,
-                capacity: d.truckCapacity,
+                capacity: parseUploadNumber(d.truckCapacity),
                 capacityUnit: baselineUnit || "m³",
               },
             ]
           : [],
-        actualVolume: d.actualVolume,
+        actualVolume: parseUploadNumber(d.actualVolume),
         actualVolumeUnit: baselineUnit || "m³",
         wasteType: d.wasteType || "Residual",
         hazWasteCode: d.hazWasteCode || [],
@@ -2583,14 +2705,14 @@ export default function SLFPortal() {
       const newHaulers = uploadPreviewData.map((d) => ({
         key: d.key,
         haulerName: d.haulerName || "",
-        numberOfTrucks: d.numberOfTrucks || null,
+        numberOfTrucks: parseUploadNumber(d.numberOfTrucks),
         officeAddress: d.officeAddress || "",
-        vehicles: d.plateNumber
+        vehicles: d.plateNumber || d.vehicleType || !isEmptyUploadValue(d.capacity)
           ? [
               {
                 plateNumber: d.plateNumber || "",
                 vehicleType: d.vehicleType || "",
-                capacity: d.capacity,
+                capacity: parseUploadNumber(d.capacity),
                 capacityUnit: d.capacityUnit || baselineUnit || "m³",
               },
             ]
@@ -2689,6 +2811,8 @@ export default function SLFPortal() {
         vehicles: (h.vehicles || []).map((v) => ({ ...v, capacityUnit: unit })),
       })),
     );
+    setActiveCellDraft((prev) => ({ ...prev, unit }));
+    setClosedCellDraft((prev) => ({ ...prev, unit }));
   };
 
   // ── Edit reverted entry ──
@@ -3724,6 +3848,11 @@ export default function SLFPortal() {
 
   const menuItems = [
     {
+      key: "overview",
+      icon: <DashboardOutlined />,
+      label: "Dashboard",
+    },
+    {
       key: "data-entry",
       icon: <FileTextOutlined />,
       label: (
@@ -3842,6 +3971,86 @@ export default function SLFPortal() {
   ];
 
   // ── Data Entry Content ──
+  const renderUnitMeasurementControl = () => (
+    <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "4px 8px", border: "1px solid #91caff", borderRadius: 8, background: "#e6f4ff", maxWidth: "100%" }}>
+      <DatabaseOutlined style={{ color: "#1677ff" }} />
+      {!isMobile && <Text strong style={{ fontSize: 12, color: "#003eb3", whiteSpace: "nowrap" }}>Unit of Measurement</Text>}
+      <Select size="small" value={baselineUnit || "m³"} onChange={handleBaselineUnitChange} disabled={baselineSaved} placeholder="Unit" style={{ width: isMobile ? 104 : 150 }}>
+        <Option value="m³">m³</Option>
+        <Option value="tons">tons</Option>
+      </Select>
+    </div>
+  );
+
+  const renderOverview = () => {
+    const ownSubmissions = Array.isArray(submissions) ? submissions : [];
+    const statusData = Object.entries(ownSubmissions.reduce((acc, item) => {
+      const key = item.status || "pending";
+      acc[key] = (acc[key] || 0) + 1;
+      return acc;
+    }, {})).map(([name, value]) => ({ name: name.replace("_", " "), value }));
+    const volumeTotals = ownSubmissions.reduce((acc, item) => {
+      (item.trucks || []).forEach((truck) => {
+        const unit = normalizeUnit(truck.actualVolumeUnit || item.baselineUnit || baselineUnit || "m³");
+        if (unit === "tons") acc.tons += Number(truck.actualVolume || 0);
+        else acc.m3 += Number(truck.actualVolume || 0);
+      });
+      return acc;
+    }, { m3: 0, tons: 0 });
+    const statusColors = ["#1677ff", "#52c41a", "#faad14", "#ff4d4f", "#722ed1", "#13c2c2"];
+    const cellData = [
+      { name: "Active Cells", value: activeCellEntries.length || Number(slfInfo?.activeCells || 0) || 0 },
+      { name: "Closed Cells", value: closedCellEntries.length || Number(slfInfo?.closedCells || 0) || 0 },
+    ].filter((item) => item.value > 0);
+
+    return (
+      <div style={{ maxWidth: 1680, margin: "0 auto" }}>
+        <Row gutter={[12, 12]} style={{ marginBottom: 12 }}>
+          <Col xs={24} md={6}><Card size="small" style={{ borderRadius: 8 }}><Statistic title="My Submissions" value={ownSubmissions.length} valueStyle={{ color: "#1677ff" }} /></Card></Col>
+          <Col xs={24} md={6}><Card size="small" style={{ borderRadius: 8 }}><Statistic title="Truck Entries" value={ownSubmissions.reduce((sum, item) => sum + (item.trucks?.length || 0), 0)} /></Card></Col>
+          <Col xs={24} md={6}><Card size="small" style={{ borderRadius: 8 }}><Statistic title="Accredited Haulers" value={haulers.length} /></Card></Col>
+          <Col xs={24} md={6}><Card size="small" style={{ borderRadius: 8 }}><Statistic title="My Recorded Volume" value={`${volumeTotals.m3 ? `${volumeTotals.m3.toLocaleString()} m³` : ""}${volumeTotals.m3 && volumeTotals.tons ? " / " : ""}${volumeTotals.tons ? `${volumeTotals.tons.toLocaleString()} tons` : ""}` || "0"} valueStyle={{ fontSize: 16, color: "#52c41a" }} /></Card></Col>
+        </Row>
+        <Row gutter={[12, 12]}>
+          <Col xs={24} lg={14}>
+            <Card className="slf-section" title={<Space><DashboardOutlined /> <Text strong>SLF Overview</Text></Space>} style={{ borderRadius: 8 }}>
+              <Row gutter={[10, 10]}>
+                {[["Facility", activeSlfName], ["Province", slfInfo?.province], ["Municipality", slfInfo?.municipality || slfInfo?.city], ["Classification", slfInfo?.category || slfInfo?.classification], ["Status", slfInfo?.operationalStatus || slfInfo?.status], ["Ownership", slfInfo?.ownership], ["ECC No.", slfInfo?.eccNo], ["Permit to Operate", slfInfo?.permitToOperate]].map(([label, value]) => (
+                  <Col xs={24} sm={12} md={8} key={label}>
+                    <div style={{ padding: 10, border: "1px solid #eef2f7", borderRadius: 8, minHeight: 66 }}>
+                      <Text type="secondary" style={{ fontSize: 11 }}>{label}</Text>
+                      <div style={{ fontSize: 13, fontWeight: 600, color: "#1a3353", overflowWrap: "anywhere" }}>{value || "Not encoded"}</div>
+                    </div>
+                  </Col>
+                ))}
+              </Row>
+            </Card>
+          </Col>
+          <Col xs={24} lg={10}>
+            <Card title={<Text strong style={{ fontSize: 14 }}>Submission Status</Text>} style={{ borderRadius: 8 }} bodyStyle={{ height: 270 }}>
+              {statusData.length ? <ResponsiveContainer width="100%" height="100%"><PieChart><Pie data={statusData} dataKey="value" nameKey="name" innerRadius={54} outerRadius={84} paddingAngle={3}>{statusData.map((_, index) => <RCell key={index} fill={statusColors[index % statusColors.length]} />)}</Pie><RTooltip /><Legend /></PieChart></ResponsiveContainer> : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No submissions yet" />}
+            </Card>
+          </Col>
+          <Col xs={24} lg={10}>
+            <Card title={<Text strong style={{ fontSize: 14 }}>Landfill Cells</Text>} style={{ borderRadius: 8 }} bodyStyle={{ height: 250 }}>
+              {cellData.length ? <ResponsiveContainer width="100%" height="100%"><PieChart><Pie data={cellData} dataKey="value" nameKey="name" innerRadius={48} outerRadius={78}>{cellData.map((_, index) => <RCell key={index} fill={index === 0 ? "#52c41a" : "#8c8c8c"} />)}</Pie><RTooltip /><Legend /></PieChart></ResponsiveContainer> : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No cell data encoded" />}
+            </Card>
+          </Col>
+          <Col xs={24} lg={14}>
+            <Card title={<Text strong style={{ fontSize: 14 }}>Recent Portal Submissions</Text>} style={{ borderRadius: 8 }}>
+              <Table size="small" rowKey={(row) => row._id} dataSource={ownSubmissions.slice(0, 6)} loading={loadingSubmissions} pagination={false} locale={{ emptyText: "No portal submissions yet" }} columns={[
+                { title: "ID", dataIndex: "idNo", width: 110, render: (value, row) => value || row.submissionId || "No ID" },
+                { title: "Disposal Date", dataIndex: "dateOfDisposal", width: 130, render: (value) => value ? dayjs(value).format("MM/DD/YYYY") : "Not encoded" },
+                { title: "Trucks", width: 80, align: "center", render: (_, row) => row.trucks?.length || 0 },
+                { title: "Status", dataIndex: "status", width: 120, render: (value) => <Tag color={value === "acknowledged" ? "green" : value === "rejected" ? "red" : "gold"}>{value || "pending"}</Tag> },
+              ]} />
+            </Card>
+          </Col>
+        </Row>
+      </div>
+    );
+  };
+
   const renderDataEntry = () => {
     if (submitted) {
       return (
@@ -4993,7 +5202,7 @@ export default function SLFPortal() {
                               height: 28,
                               borderRadius: 6,
                               background: "#1a3353",
-                              display: "flex",
+                              display: "none",
                               alignItems: "center",
                               justifyContent: "center",
                             }}
@@ -5160,6 +5369,7 @@ export default function SLFPortal() {
               <Tabs
                 activeKey={activeTab}
                 onChange={setActiveTab}
+                tabBarExtraContent={renderUnitMeasurementControl()}
                 items={[
                   {
                     key: "basic-info",
@@ -5360,7 +5570,7 @@ export default function SLFPortal() {
                               borderRadius: 6,
                               padding: "10px 14px",
                               marginBottom: 16,
-                              display: "flex",
+                              display: "none",
                               alignItems: isMobile ? "flex-start" : "center",
                               justifyContent: "space-between",
                               flexWrap: "wrap",
@@ -5438,7 +5648,9 @@ export default function SLFPortal() {
                               borderRadius: 10,
                               padding: "12px 16px",
                               marginBottom: 16,
-                              display: "flex",
+                              marginLeft: "auto",
+                              width: "min(100%, 420px)",
+                              display: "none",
                               alignItems: "center",
                               gap: 12,
                               flexWrap: "wrap",
@@ -5460,19 +5672,19 @@ export default function SLFPortal() {
                                 style={{ color: "#fff", fontSize: 15 }}
                               />
                             </div>
-                            <div style={{ flex: 1, minWidth: 120 }}>
+                            <div style={{ flex: 1, minWidth: 130 }}>
                               <Text
                                 strong
                                 style={{
-                                  fontSize: 13,
+                                  fontSize: 12,
                                   color: "#003eb3",
                                   display: "block",
                                 }}
                               >
                                 Unit of Measurement
                               </Text>
-                              <Text type="secondary" style={{ fontSize: 11 }}>
-                                Applies to all volume fields below
+                              <Text type="secondary" style={{ fontSize: 10 }}>
+                                Applies to all portal volume fields
                               </Text>
                             </div>
                             <Select
@@ -5480,7 +5692,7 @@ export default function SLFPortal() {
                               onChange={handleBaselineUnitChange}
                               disabled={baselineSaved}
                               placeholder="Select unit of measurement"
-                              style={{ width: 200 }}
+                              style={{ width: 170 }}
                             >
                               <Option value="m³">m³ (cubic meters)</Option>
                               <Option value="tons">tons</Option>
@@ -7185,6 +7397,7 @@ export default function SLFPortal() {
               </Space>
             </Card>
           )}
+          {activeMenu === "overview" && renderOverview()}
           {activeMenu === "data-entry" && renderDataEntry()}
           {activeMenu === "history" && renderHistory()}
           {activeMenu === "requests" && renderRequests()}

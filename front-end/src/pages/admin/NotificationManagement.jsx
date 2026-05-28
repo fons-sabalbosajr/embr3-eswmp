@@ -37,10 +37,13 @@ import Swal from "sweetalert2";
 import dayjs from "dayjs";
 import api from "../../api";
 import { getSocket } from "../../utils/socket";
+import { fetchWithCache } from "../../utils/pageCache";
 
 const { Text, Title, Paragraph } = Typography;
 const { Option } = Select;
 const { RangePicker } = DatePicker;
+const NOTIFICATION_CACHE_KEY = "notification-management-cache";
+const NOTIFICATION_CACHE_TTL = 45 * 1000;
 
 const wrapCellStyle = {
   whiteSpace: "normal",
@@ -82,8 +85,7 @@ export default function NotificationManagement({ isDark }) {
   const [globalUnread, setGlobalUnread] = useState(0);
   const [dateRange, setDateRange] = useState(null);
 
-  const fetchNotifications = useCallback(async (page = 1, pageSize = 30) => {
-    setLoading(true);
+  const fetchNotifications = useCallback(async (page = 1, pageSize = 30, { force = false, silent = false } = {}) => {
     try {
       const params = new URLSearchParams({ page, limit: pageSize });
       if (typeFilter !== "all") params.append("type", typeFilter);
@@ -91,24 +93,35 @@ export default function NotificationManagement({ isDark }) {
       if (searchText.trim()) params.append("search", searchText.trim());
       if (dateRange?.[0]) params.append("dateFrom", dateRange[0].startOf("day").toISOString());
       if (dateRange?.[1]) params.append("dateTo", dateRange[1].endOf("day").toISOString());
-      const { data } = await api.get(`/notifications/all/manage?${params}`);
-      setNotifications(data.notifications || []);
-      setGlobalUnread(data.unreadCount || 0);
-      setPagination((prev) => ({
-        ...prev,
-        current: data.page || page,
-        total: data.total || 0,
-      }));
+      await fetchWithCache(
+        `${NOTIFICATION_CACHE_KEY}-${params.toString()}`,
+        () => api.get(`/notifications/all/manage?${params}`).then(({ data }) => data),
+        {
+          ttl: NOTIFICATION_CACHE_TTL,
+          force,
+          onStart: () => !silent && setLoading(true),
+          onEnd: () => !silent && setLoading(false),
+          onData: (data = {}) => {
+            setNotifications(data.notifications || []);
+            setGlobalUnread(data.unreadCount || 0);
+            setPagination((prev) => ({
+              ...prev,
+              current: data.page || page,
+              total: data.total || 0,
+            }));
+            setLoading(false);
+          },
+        },
+      );
     } catch {
       /* silent */
-    } finally {
-      setLoading(false);
     }
   }, [typeFilter, recipientFilter, searchText, dateRange]);
 
   // Initial fetch on mount / filter changes
   useEffect(() => {
-    fetchNotifications();
+    const timer = setTimeout(() => fetchNotifications(), 250);
+    return () => clearTimeout(timer);
   }, [fetchNotifications]);
 
   // Real-time: listen on the existing admin socket connection
@@ -125,7 +138,7 @@ export default function NotificationManagement({ isDark }) {
     const socket = getSocket();
     if (!socket) return;
     const handleLive = () => {
-      fetchNotifications(currentPageRef.current, currentPageSizeRef.current);
+      fetchNotifications(currentPageRef.current, currentPageSizeRef.current, { force: true, silent: true });
     };
     socket.on("notification", handleLive);
     socket.on("data-refresh", handleLive);
@@ -139,7 +152,7 @@ export default function NotificationManagement({ isDark }) {
     try {
       await api.delete(`/notifications/${id}`);
       Swal.fire({ icon: "success", title: "Deleted", timer: 1000, showConfirmButton: false });
-      fetchNotifications(pagination.current, pagination.pageSize);
+      fetchNotifications(pagination.current, pagination.pageSize, { force: true });
     } catch {
       Swal.fire("Error", "Could not delete notification", "error");
     }
@@ -151,7 +164,7 @@ export default function NotificationManagement({ isDark }) {
       await api.post("/notifications/bulk-delete", { ids: selectedRows });
       Swal.fire({ icon: "success", title: `${selectedRows.length} Deleted`, timer: 1200, showConfirmButton: false });
       setSelectedRows([]);
-      fetchNotifications(pagination.current, pagination.pageSize);
+      fetchNotifications(pagination.current, pagination.pageSize, { force: true });
     } catch {
       Swal.fire("Error", "Could not delete notifications", "error");
     }
@@ -160,7 +173,7 @@ export default function NotificationManagement({ isDark }) {
   const handleMarkRead = async (id) => {
     try {
       await api.patch(`/notifications/${id}/read`);
-      fetchNotifications(pagination.current, pagination.pageSize);
+      fetchNotifications(pagination.current, pagination.pageSize, { force: true });
     } catch { /* silent */ }
   };
 
@@ -176,7 +189,7 @@ export default function NotificationManagement({ isDark }) {
       await api.patch("/notifications/bulk-read", { ids });
       Swal.fire({ icon: "success", title: `${ids.length} notification${ids.length === 1 ? "" : "s"} marked read`, timer: 1500, showConfirmButton: false });
       setSelectedRows([]);
-      fetchNotifications(pagination.current, pagination.pageSize);
+      fetchNotifications(pagination.current, pagination.pageSize, { force: true });
     } catch {
       Swal.fire("Error", "Could not mark notifications as read", "error");
     }
@@ -215,14 +228,17 @@ export default function NotificationManagement({ isDark }) {
           )}
         </Space>
       ),
-      minWidth: isCompact ? 180 : 220,
+      width: isCompact ? 130 : 160,
+      minWidth: isCompact ? 130 : 160,
+      onCell: () => ({ style: { ...wrapCellStyle, maxWidth: isCompact ? 130 : 160 } }),
     },
     {
       title: "Message",
       dataIndex: "message",
       key: "message",
-      minWidth: 150,
-      onCell: () => ({ style: wrapCellStyle }),
+      width: isCompact ? 180 : 240,
+      minWidth: isCompact ? 160 : 240,
+      onCell: () => ({ style: { ...wrapCellStyle, maxWidth: isCompact ? 180 : 240 } }),
       render: (v) => <Text type="secondary" style={{ fontSize: 12 }}>{v || "—"}</Text>,
     },
     {
@@ -352,7 +368,7 @@ export default function NotificationManagement({ isDark }) {
                 prefix={<SearchOutlined />}
                 value={searchText}
                 onChange={(e) => setSearchText(e.target.value)}
-                onPressEnter={() => fetchNotifications(1, pagination.pageSize)}
+                onPressEnter={() => fetchNotifications(1, pagination.pageSize, { force: true })}
                 style={{ width: 220 }}
                 allowClear
               />
@@ -367,7 +383,7 @@ export default function NotificationManagement({ isDark }) {
                 <Option value="admin">Admin</Option>
               </Select>
               <RangePicker value={dateRange} onChange={setDateRange} allowClear style={{ width: 260 }} />
-              <Button icon={<ReloadOutlined />} onClick={() => fetchNotifications(1, pagination.pageSize)}>
+              <Button icon={<ReloadOutlined />} onClick={() => fetchNotifications(1, pagination.pageSize, { force: true })}>
                 Search
               </Button>
             </Space>

@@ -130,6 +130,37 @@ router.get("/conversations", async (req, res) => {
   }
 });
 
+router.get("/folders/summary", async (req, res) => {
+  try {
+    const currentUserId = userId(req);
+    const base = { participants: currentUserId };
+    const [inboxCount, sentCount, draftsCount, deletedCount, inboxThreads] = await Promise.all([
+      MessageThread.countDocuments({ ...base, deletedFor: { $ne: currentUserId }, "messages.0": { $exists: true } }),
+      MessageThread.countDocuments({ ...base, "messages.sender": currentUserId }),
+      MessageThread.countDocuments({ ...base, "drafts.author": currentUserId }),
+      MessageThread.countDocuments({ ...base, deletedFor: currentUserId }),
+      MessageThread.find({ ...base, deletedFor: { $ne: currentUserId }, "messages.0": { $exists: true } })
+        .select("messages.sender messages.readBy")
+        .lean(),
+    ]);
+
+    const unread = inboxThreads.reduce((total, thread) => (
+      total + (thread.messages || []).filter((message) => (
+        idOf(message.sender) !== currentUserId && !(message.readBy || []).some((readerId) => idOf(readerId) === currentUserId)
+      )).length
+    ), 0);
+
+    res.json({
+      inbox: { count: inboxCount, unread },
+      sent: { count: sentCount },
+      drafts: { count: draftsCount },
+      deleted: { count: deletedCount },
+    });
+  } catch (error) {
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+});
+
 router.get("/conversations/:id", async (req, res) => {
   try {
     const currentUserId = userId(req);

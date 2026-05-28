@@ -63,6 +63,27 @@ export default function PortalSignup() {
   const goNext = async () => {
     try {
       await form.validateFields(STEP_FIELDS[current]);
+      if (current === 0) {
+        const email = String(form.getFieldValue("email") || "").trim().toLowerCase();
+        const username = email.split("@")[0];
+        const { data } = await api.get("/portal-auth/check-existing", {
+          params: { email, username },
+        });
+        if (data.exists) {
+          Swal.fire({
+            icon: "warning",
+            title: "Portal Account Already Exists",
+            html: "This email is already registered in the SLF Portal.<br/>Please log in or recover your account instead.",
+            confirmButtonText: "Go to Login",
+            showCancelButton: true,
+            cancelButtonText: "Stay Here",
+            confirmButtonColor: "#1a3353",
+          }).then((result) => {
+            if (result.isConfirmed) navigate("/slfportal/login");
+          });
+          return;
+        }
+      }
       setCurrent((c) => c + 1);
     } catch { /* validation errors shown inline */ }
   };

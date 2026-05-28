@@ -82,6 +82,10 @@ const appSettingsSchema = new mongoose.Schema(
     hideRecordsBeforeOrEqualYear: { type: Number, default: null },
     hiddenRecordYears: { type: [Number], default: [] },
 
+    // Baseline/submission volume analysis
+    excludePreBaselineDisposalFromCellFill: { type: Boolean, default: true },
+    preBaselineDisposalDetectorEnabled: { type: Boolean, default: true },
+
     // Dashboard Visibility & Maintenance (per-tab)
     dashboardTabs: {
       type: Map,
