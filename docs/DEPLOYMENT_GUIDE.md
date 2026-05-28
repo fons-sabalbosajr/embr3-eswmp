@@ -426,9 +426,15 @@ The ESWMP section within the shared config:
         proxy_set_header   X-Real-IP         $remote_addr;
         proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
         proxy_set_header   X-Forwarded-Proto $scheme;
-        client_max_body_size 10M;
+        client_max_body_size 200M;
+        proxy_request_buffering off;
+        proxy_connect_timeout 600s;
+        proxy_send_timeout 600s;
+        proxy_read_timeout 600s;
     }
 ```
+
+For SLF media/document uploads, keep the API proxy upload limit and timeouts at 200 MB. A lower `client_max_body_size` can make 40 MB+ uploads stall or fail before the Express API receives the file.
 
 After editing, test and reload:
 

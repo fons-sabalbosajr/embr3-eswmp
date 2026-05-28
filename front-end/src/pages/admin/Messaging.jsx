@@ -42,6 +42,8 @@ import { connectSocket, getSocket } from "../../utils/socket";
 
 const { Title, Text, Paragraph } = Typography;
 const { TextArea } = Input;
+const MAX_MESSAGE_UPLOAD_MB = 200;
+const MAX_MESSAGE_UPLOAD_BYTES = MAX_MESSAGE_UPLOAD_MB * 1024 * 1024;
 
 const folders = [
   { key: "inbox", label: "Inbox", icon: <InboxOutlined /> },
@@ -105,6 +107,7 @@ export default function Messaging({ isDark, currentUser }) {
   const [composeAttachments, setComposeAttachments] = useState([]);
   const [composeAppLinks, setComposeAppLinks] = useState([]);
   const [uploading, setUploading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState(0);
   const [composeForm] = Form.useForm();
   const [appLinkForm] = Form.useForm();
   const [replyLinkForm] = Form.useForm();
@@ -208,18 +211,28 @@ export default function Messaging({ isDark, currentUser }) {
   }, [currentUser?.email, currentUserId, fetchFolderSummary, fetchThreads, openThread, selectedThread?._id]);
 
   const uploadFile = async (file, target) => {
+    if (file.size > MAX_MESSAGE_UPLOAD_BYTES) {
+      antdMessage.error(`${file.name} is larger than ${MAX_MESSAGE_UPLOAD_MB} MB.`);
+      return Upload.LIST_IGNORE;
+    }
     try {
       setUploading(true);
+      setUploadProgress(0);
       const formData = new FormData();
       formData.append("file", file);
       const { data } = await api.post("/upload", formData, {
         headers: { "Content-Type": "multipart/form-data" },
+        onUploadProgress: (event) => {
+          if (!event.total) return;
+          setUploadProgress(Math.round((event.loaded * 100) / event.total));
+        },
       });
       const attachment = {
         name: data.name || file.name,
         url: data.url,
         fileId: data.fileId,
         mimeType: data.mimeType || file.type,
+        size: data.size || file.size,
         source: "local",
       };
       if (target === "reply") setReplyAttachments((prev) => [...prev, attachment]);
@@ -229,6 +242,7 @@ export default function Messaging({ isDark, currentUser }) {
       antdMessage.error(error.response?.data?.message || "Upload failed");
     } finally {
       setUploading(false);
+      setUploadProgress(0);
     }
     return false;
   };
@@ -669,8 +683,11 @@ export default function Messaging({ isDark, currentUser }) {
                     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, marginTop: 8, flexWrap: "wrap" }}>
                       <Space wrap>
                         <Upload beforeUpload={(file) => uploadFile(file, "reply")} showUploadList={false} disabled={uploading}>
-                          <Button icon={<PaperClipOutlined />} loading={uploading}>Upload File</Button>
+                          <Button icon={<PaperClipOutlined />} loading={uploading}>
+                            {uploading ? `Uploading ${uploadProgress || 0}%` : "Upload File"}
+                          </Button>
                         </Upload>
+                        <Text type="secondary" style={{ fontSize: 12 }}>Max 200 MB</Text>
                       </Space>
                       <Button icon={<SendOutlined />} type="primary" onClick={sendReply}>Send</Button>
                     </div>
@@ -721,8 +738,11 @@ export default function Messaging({ isDark, currentUser }) {
 
         <Space wrap>
           <Upload beforeUpload={(file) => uploadFile(file, "compose")} showUploadList={false} disabled={uploading}>
-            <Button icon={<PaperClipOutlined />} loading={uploading}>Upload Local File</Button>
+            <Button icon={<PaperClipOutlined />} loading={uploading}>
+              {uploading ? `Uploading ${uploadProgress || 0}%` : "Upload Local File"}
+            </Button>
           </Upload>
+          <Text type="secondary" style={{ fontSize: 12 }}>Max 200 MB</Text>
         </Space>
         {renderAttachmentTags(composeAttachments, "compose")}
 

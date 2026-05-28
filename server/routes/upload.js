@@ -8,6 +8,8 @@ const { authMiddleware } = require("../middleware/auth");
 const router = express.Router();
 const MAX_UPLOAD_MB = 200;
 const MAX_UPLOAD_BYTES = MAX_UPLOAD_MB * 1024 * 1024;
+const DIRECT_LOCAL_UPLOAD_MB = 25;
+const DIRECT_LOCAL_UPLOAD_BYTES = DIRECT_LOCAL_UPLOAD_MB * 1024 * 1024;
 
 router.get("/files/:fileName", (req, res) => {
   try {
@@ -41,8 +43,8 @@ const upload = multer({
 
 /**
  * POST /api/upload
- * Accepts a single file and uploads it to Google Drive.
- * Returns: { url, fileId, name, mimeType, size }
+ * Accepts a single file and stores it for later viewing/download.
+ * Returns: { url, fileId, name, mimeType, size, storage }
  */
 router.post("/", authMiddleware, uploadSingle(upload, "file", { maxSizeMb: MAX_UPLOAD_MB }), async (req, res) => {
   try {
@@ -53,20 +55,28 @@ router.post("/", authMiddleware, uploadSingle(upload, "file", { maxSizeMb: MAX_U
     const isImage = req.file.mimetype.startsWith("image/");
     let fileId = "";
     let viewUrl = "";
+    let storage = "drive";
 
-    try {
-      const driveResult = await uploadFileToDrive(
-        req.file.buffer,
-        req.file.mimetype,
-        req.file.originalname,
-        isImage
-      );
-      fileId = driveResult.fileId;
-      viewUrl = driveResult.viewUrl;
-    } catch (driveErr) {
-      console.warn(`Drive upload failed; saving attachment locally instead: ${driveErr.message}`);
+    if (req.file.size >= DIRECT_LOCAL_UPLOAD_BYTES) {
       const localResult = await saveLocalUpload(req.file);
       viewUrl = localResult.url;
+      storage = "local";
+    } else {
+      try {
+        const driveResult = await uploadFileToDrive(
+          req.file.buffer,
+          req.file.mimetype,
+          req.file.originalname,
+          isImage
+        );
+        fileId = driveResult.fileId;
+        viewUrl = driveResult.viewUrl;
+      } catch (driveErr) {
+        console.warn(`Drive upload failed; saving attachment locally instead: ${driveErr.message}`);
+        const localResult = await saveLocalUpload(req.file);
+        viewUrl = localResult.url;
+        storage = "local";
+      }
     }
 
     res.json({
@@ -75,6 +85,7 @@ router.post("/", authMiddleware, uploadSingle(upload, "file", { maxSizeMb: MAX_U
       name: req.file.originalname,
       mimeType: req.file.mimetype,
       size: req.file.size,
+      storage,
     });
   } catch (err) {
     const isConfigError =

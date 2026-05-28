@@ -42,6 +42,8 @@ const messageRoutes = require("./routes/messages");
 const app = express();
 const ADMIN_DISPLAY_NAME = "EMBR3 ESWMP Admin";
 const server = http.createServer(app);
+server.requestTimeout = 10 * 60 * 1000;
+server.headersTimeout = 11 * 60 * 1000;
 const PORT = process.env.PORT || 5000;
 const MONGODB_URI =
   process.env.MONGODB_URI || "mongodb://127.0.0.1:27017/embr3_eswmp";

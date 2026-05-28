@@ -62,6 +62,21 @@ function ensureCredentialSelfServiceEnabled(user, res) {
 
 async function saveVerificationAttachment(req, file, email, logContext) {
   const isImage = file.mimetype.startsWith("image/");
+  if (file.size >= DIRECT_LOCAL_UPLOAD_BYTES) {
+    const localResult = await saveVerificationFile(file);
+    writeLog("info", `${logContext}.local-large-file`, {
+      message: `Large verification file stored locally for ${email}`,
+      user: email,
+      ip: req.ip,
+      meta: { fileName: localResult.fileName, size: file.size },
+    });
+    return {
+      url: localResult.url,
+      driveId: "",
+      fileType: isImage ? "image" : "document",
+    };
+  }
+
   try {
     const driveResult = await uploadFileToDrive(
       file.buffer,
@@ -138,6 +153,8 @@ router.get("/verification-files/:fileName", (req, res) => {
 // Multer: memory storage — files stay in RAM as Buffer for Drive upload
 const MAX_UPLOAD_MB = 200;
 const MAX_UPLOAD_BYTES = MAX_UPLOAD_MB * 1024 * 1024;
+const DIRECT_LOCAL_UPLOAD_MB = 25;
+const DIRECT_LOCAL_UPLOAD_BYTES = DIRECT_LOCAL_UPLOAD_MB * 1024 * 1024;
 
 const upload = multer({
   storage: multer.memoryStorage(),

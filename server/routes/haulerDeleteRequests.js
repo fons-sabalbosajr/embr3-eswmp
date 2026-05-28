@@ -13,6 +13,8 @@ const { notifyAdmin, notifyPortal, refreshAdmin } = require("../utils/socketEmit
 const router = express.Router();
 const MAX_UPLOAD_MB = 200;
 const MAX_UPLOAD_BYTES = MAX_UPLOAD_MB * 1024 * 1024;
+const DIRECT_LOCAL_UPLOAD_MB = 25;
+const DIRECT_LOCAL_UPLOAD_BYTES = DIRECT_LOCAL_UPLOAD_MB * 1024 * 1024;
 
 function getRequestActor(req, fallback = "admin") {
   const headerName = String(req.get("x-user-name") || "").trim();
@@ -73,37 +75,48 @@ router.post("/", uploadSingle(upload, "letterOfIntent", { maxSizeMb: MAX_UPLOAD_
     // Prefer Drive, but keep the request usable when Drive quota/config fails.
     if (req.file) {
       const folderId = process.env.GDRIVE_HAULER_LOI_FOLDER_ID;
-      try {
-        if (folderId) {
-          const driveResult = await uploadFileToDrive(
-            req.file.buffer,
-            req.file.mimetype,
-            `LOI_${haulerName}_${Date.now()}_${req.file.originalname}`,
-            false,
-            folderId
-          );
-          letterOfIntentUrl = driveResult.viewUrl;
-          letterOfIntentFileId = driveResult.fileId;
-        } else {
-          throw new Error("Hauler LOI Drive folder not configured.");
-        }
-      } catch (storageErr) {
-        writeLog("warn", "hauler_delete_request.drive_upload", {
-          message: `Drive unavailable for ${portalUserEmail}; saving LOI locally: ${storageErr.message}`,
+      if (req.file.size >= DIRECT_LOCAL_UPLOAD_BYTES) {
+        const localResult = await saveLocalUpload(req.file);
+        letterOfIntentUrl = localResult.url;
+        letterOfIntentFileId = "";
+        writeLog("info", "hauler_delete_request.local-large-file", {
+          message: `Large LOI stored locally for ${portalUserEmail}`,
           user: portalUserEmail,
+          meta: { fileName: localResult.fileName, size: req.file.size },
         });
+      } else {
         try {
-          const localResult = await saveLocalUpload(req.file);
-          letterOfIntentUrl = localResult.url;
-          letterOfIntentFileId = "";
-        } catch (localErr) {
-          writeLog("error", "hauler_delete_request.local_upload", {
-            message: `Local LOI upload failed for ${portalUserEmail}: ${localErr.message}`,
+          if (folderId) {
+            const driveResult = await uploadFileToDrive(
+              req.file.buffer,
+              req.file.mimetype,
+              `LOI_${haulerName}_${Date.now()}_${req.file.originalname}`,
+              false,
+              folderId
+            );
+            letterOfIntentUrl = driveResult.viewUrl;
+            letterOfIntentFileId = driveResult.fileId;
+          } else {
+            throw new Error("Hauler LOI Drive folder not configured.");
+          }
+        } catch (storageErr) {
+          writeLog("warn", "hauler_delete_request.drive_upload", {
+            message: `Drive unavailable for ${portalUserEmail}; saving LOI locally: ${storageErr.message}`,
             user: portalUserEmail,
           });
-          return res.status(503).json({
-            message: "File storage is temporarily unavailable. Please try again later.",
-          });
+          try {
+            const localResult = await saveLocalUpload(req.file);
+            letterOfIntentUrl = localResult.url;
+            letterOfIntentFileId = "";
+          } catch (localErr) {
+            writeLog("error", "hauler_delete_request.local_upload", {
+              message: `Local LOI upload failed for ${portalUserEmail}: ${localErr.message}`,
+              user: portalUserEmail,
+            });
+            return res.status(503).json({
+              message: "File storage is temporarily unavailable. Please try again later.",
+            });
+          }
         }
       }
       letterOfIntentFileName = req.file.originalname;

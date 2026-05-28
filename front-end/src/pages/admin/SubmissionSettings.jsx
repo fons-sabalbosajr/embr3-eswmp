@@ -619,7 +619,7 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, ca
     }
   };
 
-  const getTxnHistoryKey = (record) => record?._id || record?.idNo || record?.submissionId || null;
+  const getTxnHistoryKey = (record) => record?.idNo || record?._id || record?.submissionId || null;
 
   const handleAdminRevert = async () => {
     if (!revertReason.trim()) {

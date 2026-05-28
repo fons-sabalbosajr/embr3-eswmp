@@ -306,6 +306,7 @@ router.put("/:id", async (req, res) => {
     entry.revertedAt = undefined;
 
     // Regenerate idNo based on current companyType and SLF province
+    const previousIdNo = entry.idNo;
     let province = "";
     if (entry.slfGenerator) {
       const facility = await SlfFacility.findById(entry.slfGenerator).select("province");
@@ -322,6 +323,10 @@ router.put("/:id", async (req, res) => {
       if (!isNaN(lastNum)) seq = lastNum + 1;
     }
     entry.idNo = `SLF-${typeCode}-${provCode}-${String(seq).padStart(4, "0")}`;
+    if (!Array.isArray(entry.previousIdNos)) entry.previousIdNos = [];
+    if (previousIdNo && previousIdNo !== entry.idNo && !entry.previousIdNos.includes(previousIdNo)) {
+      entry.previousIdNos.push(previousIdNo);
+    }
 
     await entry.save();
 
@@ -339,7 +344,7 @@ router.put("/:id", async (req, res) => {
           ? `Resubmitted updated entry ${entry.idNo} — "${resubmitComment}"`
           : `Resubmitted updated entry ${entry.idNo}`,
         performedBy: entry.submittedBy || "portal",
-        meta: { idNo: entry.idNo, comment: resubmitComment || undefined },
+        meta: { idNo: entry.idNo, previousIdNo, comment: resubmitComment || undefined },
       });
     } catch { /* silent */ }
 
