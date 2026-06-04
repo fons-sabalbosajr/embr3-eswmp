@@ -954,6 +954,7 @@ export default function AdminHome() {
             canViewBaseline={hasAccess("baselineData")}
             canEditBaseline={canEdit("baselineData")}
             canDeleteBaseline={canDelete("baselineData")}
+            canOverrideBaselineUnlock={isDeveloper}
             canViewCellPlacement={hasAccess("cellWastePlacement")}
             canEditCellPlacement={canEdit("cellWastePlacement")}
             canRepairIds={isDeveloper}

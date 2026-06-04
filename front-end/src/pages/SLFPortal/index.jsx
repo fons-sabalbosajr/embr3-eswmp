@@ -1924,6 +1924,8 @@ export default function SLFPortal() {
         ],
         reason: reason.trim(),
       });
+      setBaselineSaved(true);
+      setBaselineUpdatePending(true);
       Swal.fire({
         icon: "success",
         title: "Request Sent",
@@ -5636,7 +5638,7 @@ export default function SLFPortal() {
                               borderRadius: 6,
                               padding: "10px 14px",
                               marginBottom: 16,
-                              display: "none",
+                              display: "flex",
                               alignItems: isMobile ? "flex-start" : "center",
                               justifyContent: "space-between",
                               flexWrap: "wrap",

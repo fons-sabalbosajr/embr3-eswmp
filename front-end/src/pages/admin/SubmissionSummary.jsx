@@ -273,7 +273,16 @@ export default function SubmissionSummary({ isDark }) {
     return records.filter((record) => {
       const statusMatch = statusFilter === "all" || matchesFilter(record.status, statusFilter);
       if (!statusMatch) return false;
-      return rowMatchesSearch(record, search);
+      return rowMatchesSearch(record, search, [
+        "idNo",
+        "submissionId",
+        "lguCompanyName",
+        "submittedBy",
+        "companyType",
+        "slfName",
+        (item) => item.slfGenerator?.slfName,
+        (item) => (item.trucks || []).map((truck) => [truck.plateNumber, truck.hauler, truck.haulerName, truck.wasteType]),
+      ]);
     });
   }, [records, search, statusFilter]);
 

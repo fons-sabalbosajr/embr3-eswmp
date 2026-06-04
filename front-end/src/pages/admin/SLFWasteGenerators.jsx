@@ -28,6 +28,7 @@ export default function SLFWasteGenerators({
   canViewBaseline = true,
   canEditBaseline = true,
   canDeleteBaseline = true,
+  canOverrideBaselineUnlock = false,
   canViewCellPlacement = true,
   canEditCellPlacement = true,
   canRepairIds = false,
@@ -108,6 +109,7 @@ export default function SLFWasteGenerators({
           isDark={isDark}
           canEdit={canEditBaseline}
           canDelete={canDeleteBaseline}
+          canOverrideUnlock={canOverrideBaselineUnlock}
         />
       ),
       hidden: !canViewBaseline,
@@ -162,7 +164,7 @@ export default function SLFWasteGenerators({
         <Tabs
           defaultActiveKey={tabItems[0]?.key}
           items={tabItems}
-          destroyOnHidden
+          destroyOnHidden={false}
         />
       </Card>
     </div>

@@ -59,6 +59,7 @@ import {
   getSubmissionVolumeSummary,
   normalizeSubmissionRecord,
 } from "./shared/submissionRecords";
+import { rowMatchesSearch } from "./shared/tableFilters";
 
 const { Title, Text } = Typography;
 const { Option } = Select;
@@ -82,13 +83,29 @@ const wrapColumn = (column) => ({
   }),
   onHeaderCell: (...args) => ({
     style: WRAP_CELL_STYLE,
-    ...(typeof column.onHeaderCell === "function" ? column.onHeaderCell(...args) : {}),
+    ...(typeof column.onHeaderCell === "function"
+      ? column.onHeaderCell(...args)
+      : {}),
   }),
 });
 
-export default function SubmissionSettings({canEdit = true, canDelete = true, canRepairIds = false, isDark}) {
+export default function SubmissionSettings({
+  canEdit = true,
+  canDelete = true,
+  canRepairIds = false,
+  isDark,
+}) {
   const [data, setData] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [statusActionKey, setStatusActionKey] = useState("");
+  const [bulkAcknowledgeLoading, setBulkAcknowledgeLoading] = useState(false);
+  const [ackProgress, setAckProgress] = useState({
+    open: false,
+    title: "Acknowledging submissions",
+    description: "Preparing acknowledgement request...",
+    percent: 0,
+    count: 0,
+  });
   const [search, setSearch] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
   const [cacheVersion, setCacheVersion] = useState(0);
@@ -102,6 +119,7 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, ca
     total: 0,
   });
   const [viewRecord, setViewRecord] = useState(null);
+  const [groupedEntriesRecord, setGroupedEntriesRecord] = useState(null);
   const [editRecord, setEditRecord] = useState(null);
   const [editLoading, setEditLoading] = useState(false);
   const [selectedRowKeys, setSelectedRowKeys] = useState([]);
@@ -117,20 +135,17 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, ca
   const [revertLoading, setRevertLoading] = useState(false);
   const [repairingXX, setRepairingXX] = useState(false);
   const currentUser = secureStorage.getJSON("user") || {};
-  const currentActorName = [currentUser.firstName, currentUser.lastName].filter(Boolean).join(" ").trim() || currentUser.username || currentUser.email || "admin";
-  const page = pagination.current;
-  const pageSize = pagination.pageSize;
-  const searchTerm = debouncedSearch.trim();
+  const currentActorName =
+    [currentUser.firstName, currentUser.lastName]
+      .filter(Boolean)
+      .join(" ")
+      .trim() ||
+    currentUser.username ||
+    currentUser.email ||
+    "admin";
   const currentCacheKey = useMemo(
-    () => [
-      CACHE_KEY,
-      cacheVersion,
-      page,
-      pageSize,
-      statusFilter,
-      searchTerm.toLowerCase(),
-    ].join(":"),
-    [cacheVersion, page, pageSize, statusFilter, searchTerm],
+    () => [CACHE_KEY, cacheVersion, "full-list"].join(":"),
+    [cacheVersion],
   );
   const bumpSubmissionsCache = useCallback(() => {
     setCacheVersion((version) => version + 1);
@@ -165,61 +180,60 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, ca
   // Resolved address names for view details
   const [resolvedAddr, setResolvedAddr] = useState({});
 
-  const fetchData = useCallback(async ({ force = false, silent = false } = {}) => {
-    const requestKey = currentCacheKey;
-    if (fetchingRef.current === requestKey) {
-      if (force) pendingRefreshRef.current = true;
-      return;
-    }
-    latestRequestKeyRef.current = requestKey;
-    fetchingRef.current = requestKey;
-    try {
-      await fetchWithCache(requestKey, () => api.get("/data-slf", {
-        params: {
-          mode: "list",
-          page,
-          limit: pageSize,
-          status: statusFilter,
-          search: searchTerm || undefined,
-        },
-      }).then(({ data }) => ({
-        rows: (data?.data || []).map(normalizeSubmissionRecord),
-        total: Number(data?.total || 0),
-        page: Number(data?.page || page),
-        pageSize: Number(data?.limit || pageSize),
-      })), {
-        ttl: CACHE_TTL,
-        force,
-        onData:  (payload) => {
-          if (latestRequestKeyRef.current !== requestKey) return;
-          const rows = Array.isArray(payload) ? payload.map(normalizeSubmissionRecord) : (payload?.rows || []);
-          setData(rows);
-          setPagination((prev) => ({
-            ...prev,
-            current: payload?.page || prev.current,
-            pageSize: payload?.pageSize || prev.pageSize,
-            total: typeof payload?.total === "number" ? payload.total : rows.length,
-          }));
-          setLoading(false);
-        },
-        onError: ()     => {
-          if (!silent) Swal.fire("Error", "Could not load submissions", "error");
-        },
-        onStart: ()     => {
-          if (!silent) setLoading(true);
-        },
-        onEnd:   ()     => {
-          if (!silent) setLoading(false);
-        },
-      });
-    } finally {
-      if (fetchingRef.current === requestKey) fetchingRef.current = null;
-      if (pendingRefreshRef.current) {
-        pendingRefreshRef.current = false;
-        window.setTimeout(() => fetchData({ force: true, silent: true }), 0);
+  const fetchData = useCallback(
+    async ({ force = false, silent = false } = {}) => {
+      const requestKey = currentCacheKey;
+      if (fetchingRef.current === requestKey) {
+        if (force) pendingRefreshRef.current = true;
+        return;
       }
-    }
-  }, [currentCacheKey, page, pageSize, statusFilter, searchTerm]);
+      latestRequestKeyRef.current = requestKey;
+      fetchingRef.current = requestKey;
+      try {
+        await fetchWithCache(
+          requestKey,
+          () =>
+            api
+              .get("/data-slf", {
+                params: {
+                  mode: "list",
+                  includeTrucks: true,
+                },
+              })
+              .then(({ data }) =>
+                Array.isArray(data) ? data.map(normalizeSubmissionRecord) : [],
+              ),
+          {
+            ttl: CACHE_TTL,
+            force,
+            onData: (payload) => {
+              if (latestRequestKeyRef.current !== requestKey) return;
+              const rows = Array.isArray(payload) ? payload : [];
+              setData(rows);
+              setLoading(false);
+            },
+            onError: () => {
+              if (!silent)
+                Swal.fire("Error", "Could not load submissions", "error");
+            },
+            onStart: () => {
+              if (!silent) setLoading(true);
+            },
+            onEnd: () => {
+              if (!silent) setLoading(false);
+            },
+          },
+        );
+      } finally {
+        if (fetchingRef.current === requestKey) fetchingRef.current = null;
+        if (pendingRefreshRef.current) {
+          pendingRefreshRef.current = false;
+          window.setTimeout(() => fetchData({ force: true, silent: true }), 0);
+        }
+      }
+    },
+    [currentCacheKey],
+  );
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -232,7 +246,10 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, ca
 
   useEffect(() => {
     fetchData();
-    const interval = setInterval(() => fetchData({ force: true, silent: true }), 60000);
+    const interval = setInterval(
+      () => fetchData({ force: true, silent: true }),
+      60000,
+    );
     return () => clearInterval(interval);
   }, [fetchData]);
 
@@ -261,16 +278,303 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, ca
     }
   }, [viewRecord]);
 
-  const updateStatus = async (id, status) => {
+  const getPortalSubmissionGroupKey = useCallback((record) => {
+    const submittedBy = String(record?.submittedBy || "")
+      .trim()
+      .toLowerCase();
+    const company = String(record?.lguCompanyName || "")
+      .trim()
+      .toLowerCase();
+    const status = String(record?.status || "")
+      .trim()
+      .toLowerCase();
+    if (
+      !submittedBy ||
+      !company ||
+      !submittedBy.includes("@") ||
+      status === "reverted"
+    )
+      return null;
+    return `${submittedBy}::${company}::${status}`;
+  }, []);
+
+  const getGroupedStatus = useCallback((entries) => {
+    const statuses = [
+      ...new Set(entries.map((entry) => entry?.status).filter(Boolean)),
+    ];
+    if (statuses.length <= 1) return statuses[0] || "pending";
+    if (statuses.includes("pending")) return "pending";
+    if (statuses.includes("reverted")) return "reverted";
+    if (statuses.includes("rejected")) return "rejected";
+    if (statuses.includes("editApproved")) return "editApproved";
+    return statuses[0] || "pending";
+  }, []);
+
+  const buildGroupedRow = useCallback(
+    (groupKey, entries) => {
+      const primary = entries[0];
+      const submissionIds = [
+        ...new Set(entries.map((entry) => entry.submissionId).filter(Boolean)),
+      ];
+      return {
+        ...primary,
+        _id: `group:${groupKey}`,
+        primaryId: primary._id,
+        entryIds: entries.map((entry) => entry._id),
+        groupedEntries: entries,
+        isGroupedSubmission: true,
+        entryCount: entries.length,
+        groupedSubmissionCount: submissionIds.length,
+        submissionIds,
+        truckCount: entries.reduce(
+          (sum, entry) => sum + (entry.truckCount ?? entry.trucks?.length ?? 0),
+          0,
+        ),
+        trucks: entries.flatMap((entry) => entry.trucks || []),
+        status: getGroupedStatus(entries),
+        editRequested: entries.some((entry) => entry.editRequested),
+        revertRequested: entries.some((entry) => entry.revertRequested),
+        createdAt: primary.createdAt,
+        updatedAt: entries.reduce(
+          (latest, entry) => {
+            const current = new Date(
+              entry.updatedAt || entry.createdAt || 0,
+            ).getTime();
+            return current > latest ? current : latest;
+          },
+          new Date(primary.updatedAt || primary.createdAt || 0).getTime(),
+        ),
+      };
+    },
+    [getGroupedStatus],
+  );
+
+  const tableRows = useMemo(() => {
+    const groups = new Map();
+    data.forEach((entry) => {
+      const key = getPortalSubmissionGroupKey(entry);
+      if (!key) return;
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(entry);
+    });
+
+    const seen = new Set();
+    return data
+      .map((entry) => {
+        const key = getPortalSubmissionGroupKey(entry);
+        const groupedEntries = key ? groups.get(key) || [] : [];
+        if (key && groupedEntries.length > 1) {
+          if (seen.has(key)) return null;
+          seen.add(key);
+          return buildGroupedRow(key, groupedEntries);
+        }
+        return {
+          ...entry,
+          primaryId: entry._id,
+          entryIds: [entry._id],
+          isGroupedSubmission: false,
+          entryCount: 1,
+        };
+      })
+      .filter(Boolean);
+  }, [buildGroupedRow, data, getPortalSubmissionGroupKey]);
+
+  const filteredTableRows = useMemo(() => {
+    const needle = debouncedSearch.trim();
+    const statusNeedle = String(statusFilter || "all")
+      .trim()
+      .toLowerCase();
+    return tableRows.filter((row) => {
+      const matchesStatus =
+        statusNeedle === "all" ||
+        String(row.status || "")
+          .trim()
+          .toLowerCase() === statusNeedle;
+      if (!matchesStatus) return false;
+      if (!needle) return true;
+      return rowMatchesSearch(
+        {
+          ...row,
+          groupedIds: (row.groupedEntries || []).map(
+            (entry) => entry.idNo || entry.submissionId,
+          ),
+          groupedSubmitters: (row.groupedEntries || []).map(
+            (entry) => entry.submittedBy,
+          ),
+          groupedCompanies: (row.groupedEntries || []).map(
+            (entry) => entry.lguCompanyName,
+          ),
+          groupedSlfNames: (row.groupedEntries || []).map(
+            (entry) => entry.slfName || entry.slfGenerator?.slfName,
+          ),
+        },
+        needle,
+        [
+          "idNo",
+          "submissionId",
+          "lguCompanyName",
+          "companyType",
+          "submittedBy",
+          "slfName",
+          (record) => record.slfGenerator?.slfName,
+          "groupedIds",
+          "groupedSubmitters",
+          "groupedCompanies",
+          "groupedSlfNames",
+        ],
+      );
+    });
+  }, [debouncedSearch, statusFilter, tableRows]);
+
+  useEffect(() => {
+    setPagination((prev) => {
+      const total = filteredTableRows.length;
+      const maxPage = Math.max(1, Math.ceil(total / prev.pageSize));
+      return {
+        ...prev,
+        total,
+        current: prev.current > maxPage ? 1 : prev.current,
+      };
+    });
+  }, [filteredTableRows.length]);
+
+  const paginatedTableRows = useMemo(() => {
+    const startIndex = (pagination.current - 1) * pagination.pageSize;
+    return filteredTableRows.slice(
+      startIndex,
+      startIndex + pagination.pageSize,
+    );
+  }, [filteredTableRows, pagination.current, pagination.pageSize]);
+
+  const selectedEntryIds = useMemo(() => {
+    const ids = new Set();
+    selectedRowKeys.forEach((rowKey) => {
+      const row =
+        filteredTableRows.find((item) => item._id === rowKey) ||
+        tableRows.find((item) => item._id === rowKey);
+      (row?.entryIds || []).forEach((id) => ids.add(id));
+    });
+    return [...ids];
+  }, [filteredTableRows, selectedRowKeys, tableRows]);
+
+  const runAcknowledgeFlow = useCallback(
+    async ({ ids, rowKey, clearSelection = false }) => {
+      const pendingIds = ids.filter((id) => {
+        const entry = data.find((item) => item._id === id);
+        return entry?.status === "pending";
+      });
+      if (pendingIds.length === 0) {
+        Swal.fire("Info", "No pending entries selected.", "info");
+        return false;
+      }
+
+      const entryLabel = pendingIds.length === 1 ? "entry" : "entries";
+      setStatusActionKey(`${rowKey}:acknowledged`);
+      setAckProgress({
+        open: true,
+        title:
+          pendingIds.length > 1
+            ? "Acknowledging grouped submissions"
+            : "Acknowledging submission",
+        description: `Submitting acknowledgement for ${pendingIds.length} ${entryLabel}...`,
+        percent: 25,
+        count: pendingIds.length,
+      });
+
+      try {
+        await api.patch("/data-slf/bulk-status", {
+          ids: pendingIds,
+          status: "acknowledged",
+        });
+
+        setAckProgress((prev) => ({
+          ...prev,
+          description: "Refreshing submission list...",
+          percent: 75,
+        }));
+
+        bumpSubmissionsCache();
+        secureStorage.invalidateDashboard();
+        if (clearSelection) setSelectedRowKeys([]);
+        if (selectedRowKeys.includes(rowKey)) {
+          setSelectedRowKeys((prev) => prev.filter((key) => key !== rowKey));
+        }
+        await fetchData({ force: true, silent: true });
+
+        setAckProgress((prev) => ({
+          ...prev,
+          description: "Acknowledgement completed.",
+          percent: 100,
+        }));
+
+        window.setTimeout(() => {
+          setAckProgress({
+            open: false,
+            title: "Acknowledging submissions",
+            description: "Preparing acknowledgement request...",
+            percent: 0,
+            count: 0,
+          });
+        }, 350);
+
+        Swal.fire({
+          icon: "success",
+          title: `Submission acknowledged`,
+          text: `${pendingIds.length} ${entryLabel} acknowledged successfully.`,
+          timer: 1200,
+          showConfirmButton: false,
+        });
+        return true;
+      } catch {
+        setAckProgress({
+          open: false,
+          title: "Acknowledging submissions",
+          description: "Preparing acknowledgement request...",
+          percent: 0,
+          count: 0,
+        });
+        Swal.fire("Error", "Could not acknowledge submissions", "error");
+        return false;
+      } finally {
+        setStatusActionKey("");
+        if (clearSelection) setBulkAcknowledgeLoading(false);
+      }
+    },
+    [bumpSubmissionsCache, data, fetchData, selectedRowKeys],
+  );
+
+  const updateStatus = async (recordOrId, status) => {
+    const record =
+      typeof recordOrId === "object"
+        ? recordOrId
+        : tableRows.find(
+            (row) => row._id === recordOrId || row.primaryId === recordOrId,
+          ) || {
+            _id: recordOrId,
+            primaryId: recordOrId,
+            entryIds: [recordOrId],
+          };
+    const rowKey = record?._id || record?.primaryId || String(recordOrId || "");
+    const targetIds =
+      Array.isArray(record?.entryIds) && record.entryIds.length > 0
+        ? record.entryIds
+        : [record?.primaryId || record?._id || recordOrId].filter(Boolean);
+    if (targetIds.length === 0) return;
+    if (status === "acknowledged") {
+      await runAcknowledgeFlow({ ids: targetIds, rowKey });
+      return;
+    }
     try {
-      const { data: updated } = await api.patch(`/data-slf/${id}/status`, {
+      setStatusActionKey(`${rowKey}:${status}`);
+      await api.patch("/data-slf/bulk-status", {
+        ids: targetIds,
         status,
       });
-      setData((prev) =>
-        prev.map((d) => (d._id === id ? normalizeSubmissionRecord(updated) : d)),
-      );
       bumpSubmissionsCache();
       secureStorage.invalidateDashboard();
+      if (selectedRowKeys.includes(rowKey))
+        setSelectedRowKeys((prev) => prev.filter((key) => key !== rowKey));
+      await fetchData({ force: true, silent: true });
       Swal.fire({
         icon: "success",
         title: `Submission ${status}`,
@@ -279,6 +583,8 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, ca
       });
     } catch {
       Swal.fire("Error", "Could not update status", "error");
+    } finally {
+      setStatusActionKey("");
     }
   };
 
@@ -300,7 +606,7 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, ca
   };
 
   const handleBulkAcknowledge = async () => {
-    const pendingIds = selectedRowKeys.filter((id) => {
+    const pendingIds = selectedEntryIds.filter((id) => {
       const entry = data.find((d) => d._id === id);
       return entry?.status === "pending";
     });
@@ -317,35 +623,18 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, ca
       confirmButtonColor: "#52c41a",
     });
     if (!confirmed.isConfirmed) return;
-    try {
-      const { data: result } = await api.patch("/data-slf/bulk-status", {
-        ids: pendingIds,
-        status: "acknowledged",
-      });
-      setData((prev) =>
-        prev.map((d) => {
-          const updated = result.data.find((u) => u._id === d._id);
-          return updated || d;
-        }),
-      );
-      bumpSubmissionsCache();
-      secureStorage.invalidateDashboard();
-      setSelectedRowKeys([]);
-      Swal.fire({
-        icon: "success",
-        title: `${result.data.length} entries acknowledged`,
-        timer: 1500,
-        showConfirmButton: false,
-      });
-    } catch {
-      Swal.fire("Error", "Could not acknowledge entries", "error");
-    }
+    setBulkAcknowledgeLoading(true);
+    await runAcknowledgeFlow({
+      ids: pendingIds,
+      rowKey: "bulk-selection",
+      clearSelection: true,
+    });
   };
 
   const handleBulkDelete = async () => {
-    if (selectedRowKeys.length === 0) return;
+    if (selectedEntryIds.length === 0) return;
     const confirmed = await Swal.fire({
-      title: `Delete ${selectedRowKeys.length} selected entry(ies)?`,
+      title: `Delete ${selectedEntryIds.length} selected entry(ies)?`,
       text: "Selected entries will be moved to Deleted Submissions.",
       icon: "warning",
       showCancelButton: true,
@@ -355,27 +644,41 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, ca
     if (!confirmed.isConfirmed) return;
     try {
       const { data: result } = await api.post("/data-slf/bulk-delete", {
-        ids: selectedRowKeys,
+        ids: selectedEntryIds,
         performedBy: currentActorName,
       });
-      setData((prev) => prev.filter((entry) => !result.data.some((deleted) => deleted._id === entry._id)));
+      setData((prev) =>
+        prev.filter(
+          (entry) => !result.data.some((deleted) => deleted._id === entry._id),
+        ),
+      );
       bumpSubmissionsCache();
       secureStorage.invalidateDashboard();
       setSelectedRowKeys([]);
-      Swal.fire({ icon: "success", title: result.message || "Selected entries deleted", timer: 1500, showConfirmButton: false });
+      Swal.fire({
+        icon: "success",
+        title: result.message || "Selected entries deleted",
+        timer: 1500,
+        showConfirmButton: false,
+      });
     } catch (err) {
-      Swal.fire("Error", err.response?.data?.message || "Could not delete selected entries", "error");
+      Swal.fire(
+        "Error",
+        err.response?.data?.message || "Could not delete selected entries",
+        "error",
+      );
     }
   };
 
   const handleBulkRevert = async () => {
-    if (selectedRowKeys.length === 0) return;
+    if (selectedEntryIds.length === 0) return;
     const { value: reason, isConfirmed } = await Swal.fire({
-      title: `Revert ${selectedRowKeys.length} selected entry(ies)?`,
+      title: `Revert ${selectedEntryIds.length} selected entry(ies)?`,
       input: "textarea",
       inputLabel: "Reason for revert",
       inputPlaceholder: "Enter one reason that applies to all selected rows...",
-      inputValidator: (value) => (!value?.trim() ? "Please enter a reason" : undefined),
+      inputValidator: (value) =>
+        !value?.trim() ? "Please enter a reason" : undefined,
       showCancelButton: true,
       confirmButtonText: "Revert Selected",
       confirmButtonColor: "#fa541c",
@@ -383,17 +686,31 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, ca
     if (!isConfirmed) return;
     try {
       const { data: result } = await api.patch("/data-slf/bulk-revert", {
-        ids: selectedRowKeys,
+        ids: selectedEntryIds,
         reason: reason.trim(),
         performedBy: currentActorName,
       });
-      setData((prev) => prev.map((entry) => result.data.find((updated) => updated._id === entry._id) || entry));
+      setData((prev) =>
+        prev.map(
+          (entry) =>
+            result.data.find((updated) => updated._id === entry._id) || entry,
+        ),
+      );
       bumpSubmissionsCache();
       secureStorage.invalidateDashboard();
       setSelectedRowKeys([]);
-      Swal.fire({ icon: "success", title: result.message || "Selected entries reverted", timer: 1800, showConfirmButton: false });
+      Swal.fire({
+        icon: "success",
+        title: result.message || "Selected entries reverted",
+        timer: 1800,
+        showConfirmButton: false,
+      });
     } catch (err) {
-      Swal.fire("Error", err.response?.data?.message || "Could not revert selected entries", "error");
+      Swal.fire(
+        "Error",
+        err.response?.data?.message || "Could not revert selected entries",
+        "error",
+      );
     }
   };
 
@@ -485,12 +802,19 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, ca
   };
 
   const loadSubmissionDetail = async (record) => {
-    if (!record?._id) return record;
+    const detailId = record?.primaryId || record?._id;
+    if (!detailId || String(detailId).startsWith("group:")) return record;
     try {
-      const { data } = await api.get(`/data-slf/detail/${record._id}`);
+      const { data } = await api.get(`/data-slf/detail/${detailId}`);
       const detailed = normalizeSubmissionRecord(data);
-      setData((prev) => prev.map((item) => (item._id === detailed._id ? { ...item, ...detailed } : item)));
-      return detailed;
+      setData((prev) =>
+        prev.map((item) =>
+          item._id === detailed._id ? { ...item, ...detailed } : item,
+        ),
+      );
+      return record?.isGroupedSubmission
+        ? { ...record, ...detailed, _id: record._id, primaryId: detailId }
+        : detailed;
     } catch {
       return record;
     }
@@ -501,6 +825,59 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, ca
     const detailed = await loadSubmissionDetail(record);
     setViewRecord(detailed);
   };
+
+  const syncGroupedViewAfterStatusChange = useCallback(
+    (groupRecord, entryId) => {
+      if (!groupRecord?.isGroupedSubmission) return;
+      const nextEntries = (groupRecord.groupedEntries || []).filter(
+        (entry) => entry._id !== entryId,
+      );
+      const buildNextGroupRecord = () => {
+        if (nextEntries.length === 0) return null;
+        const nextPrimary = nextEntries[0];
+        return {
+          ...groupRecord,
+          ...nextPrimary,
+          groupedEntries: nextEntries,
+          entryIds: nextEntries.map((entry) => entry._id),
+          entryCount: nextEntries.length,
+          groupedSubmissionCount: [
+            ...new Set(
+              nextEntries.map((entry) => entry.submissionId).filter(Boolean),
+            ),
+          ].length,
+          truckCount: nextEntries.reduce(
+            (sum, entry) =>
+              sum + (entry.truckCount ?? entry.trucks?.length ?? 0),
+            0,
+          ),
+          trucks: nextEntries.flatMap((entry) => entry.trucks || []),
+          primaryId: nextPrimary._id,
+        };
+      };
+      if (nextEntries.length === 0) {
+        if (viewRecord?._id === groupRecord._id) setViewRecord(null);
+        if (groupedEntriesRecord?._id === groupRecord._id)
+          setGroupedEntriesRecord(null);
+        return;
+      }
+      const nextGroupRecord = buildNextGroupRecord();
+      if (viewRecord?._id === groupRecord._id) setViewRecord(nextGroupRecord);
+      if (groupedEntriesRecord?._id === groupRecord._id)
+        setGroupedEntriesRecord(nextGroupRecord);
+    },
+    [groupedEntriesRecord, viewRecord],
+  );
+
+  const handleGroupedEntryStatus = useCallback(
+    async (groupRecord, entry, status) => {
+      await updateStatus(entry, status);
+      if (status === "acknowledged" || status === "rejected") {
+        syncGroupedViewAfterStatusChange(groupRecord, entry._id);
+      }
+    },
+    [syncGroupedViewAfterStatusChange, updateStatus],
+  );
 
   const openEdit = async (record) => {
     record = await loadSubmissionDetail(record);
@@ -525,7 +902,8 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, ca
       companyProvince: record.companyProvince,
       companyMunicipality: record.companyMunicipality,
       companyBarangay: record.companyBarangay,
-      baselineUnit: record.baselineUnit || record.totalVolumeAcceptedUnit || "m³",
+      baselineUnit:
+        record.baselineUnit || record.totalVolumeAcceptedUnit || "m³",
       totalVolumeAccepted: record.totalVolumeAccepted,
       totalVolumeAcceptedUnit: record.totalVolumeAcceptedUnit || "m³",
       activeCellResidualVolume: record.activeCellResidualVolume,
@@ -566,11 +944,21 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, ca
         ...values,
         activeCellEntries: (values.activeCellEntries || []).map((entry) => ({
           ...entry,
-          unit: (entry.unit || values.baselineUnit || values.totalVolumeAcceptedUnit || "m³").replace("m3", "m³"),
+          unit: (
+            entry.unit ||
+            values.baselineUnit ||
+            values.totalVolumeAcceptedUnit ||
+            "m³"
+          ).replace("m3", "m³"),
         })),
         closedCellEntries: (values.closedCellEntries || []).map((entry) => ({
           ...entry,
-          unit: (entry.unit || values.baselineUnit || values.totalVolumeAcceptedUnit || "m³").replace("m3", "m³"),
+          unit: (
+            entry.unit ||
+            values.baselineUnit ||
+            values.totalVolumeAcceptedUnit ||
+            "m³"
+          ).replace("m3", "m³"),
         })),
         updatedBy: currentActorName,
         dateOfDisposal: values.dateOfDisposal?.toISOString(),
@@ -619,7 +1007,8 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, ca
     }
   };
 
-  const getTxnHistoryKey = (record) => record?.idNo || record?._id || record?.submissionId || null;
+  const getTxnHistoryKey = (record) =>
+    record?.idNo || record?._id || record?.submissionId || null;
 
   const handleAdminRevert = async () => {
     if (!revertReason.trim()) {
@@ -647,14 +1036,24 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, ca
     if (!confirm.isConfirmed) return;
     setRevertLoading(true);
     try {
-      await api.patch(`/data-slf/${revertModal.record._id}/admin-revert`, {
-        reason: revertReason,
-        performedBy: currentActorName,
-      });
+      if (revertModal.record?.isGroupedSubmission) {
+        await api.patch("/data-slf/bulk-revert", {
+          ids: revertModal.record.entryIds || [],
+          reason: revertReason,
+          performedBy: currentActorName,
+        });
+      } else {
+        await api.patch(`/data-slf/${revertModal.record._id}/admin-revert`, {
+          reason: revertReason,
+          performedBy: currentActorName,
+        });
+      }
       Swal.fire({
         icon: "success",
         title: "Reverted",
-        text: "Submission reverted and the portal user has been notified via email.",
+        text: revertModal.record?.isGroupedSubmission
+          ? "Grouped submissions reverted and the portal user has been notified via email."
+          : "Submission reverted and the portal user has been notified via email.",
         confirmButtonColor: ACCENT,
         timer: 2500,
       });
@@ -684,10 +1083,19 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, ca
     if (!result.isConfirmed) return;
     try {
       await api.patch(`/data-slf/${id}/approve-edit`);
-      Swal.fire({ icon: "success", title: "Edit Approved", timer: 1500, showConfirmButton: false });
+      Swal.fire({
+        icon: "success",
+        title: "Edit Approved",
+        timer: 1500,
+        showConfirmButton: false,
+      });
       fetchData({ force: true });
     } catch (err) {
-      Swal.fire("Error", err.response?.data?.message || "Failed to approve edit", "error");
+      Swal.fire(
+        "Error",
+        err.response?.data?.message || "Failed to approve edit",
+        "error",
+      );
     }
   };
 
@@ -703,14 +1111,21 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, ca
     if (reason === undefined) return; // cancelled
     try {
       await api.patch(`/data-slf/${id}/reject-edit`, { reason: reason || "" });
-      Swal.fire({ icon: "success", title: "Edit Rejected", timer: 1500, showConfirmButton: false });
+      Swal.fire({
+        icon: "success",
+        title: "Edit Rejected",
+        timer: 1500,
+        showConfirmButton: false,
+      });
       fetchData({ force: true });
     } catch (err) {
-      Swal.fire("Error", err.response?.data?.message || "Failed to reject edit", "error");
+      Swal.fire(
+        "Error",
+        err.response?.data?.message || "Failed to reject edit",
+        "error",
+      );
     }
   };
-
-  const tableRows = data;
 
   const statusColors = {
     pending: "orange",
@@ -719,6 +1134,18 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, ca
     reverted: "volcano",
     editApproved: "cyan",
   };
+
+  const openGroupedEntriesModal = useCallback((record) => {
+    setGroupedEntriesRecord(record);
+  }, []);
+
+  const openGroupedEntryDetail = useCallback(
+    (entry) => {
+      setGroupedEntriesRecord(null);
+      openView(entry);
+    },
+    [openView],
+  );
 
   const columns = [
     {
@@ -730,10 +1157,22 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, ca
       dataIndex: "idNo",
       key: "idNo",
       width: 120,
-      render: (text) => (
-        <Text strong style={{ fontSize: 12, ...WRAP_CELL_STYLE }}>
-          {text}
-        </Text>
+      render: (text, record) => (
+        <Space direction="vertical" size={0}>
+          <Text strong style={{ fontSize: 12, ...WRAP_CELL_STYLE }}>
+            {record.isGroupedSubmission
+              ? record.groupedSubmissionCount > 1
+                ? `Multiple (${record.groupedSubmissionCount})`
+                : record.submissionId || text
+              : text}
+          </Text>
+          {record.isGroupedSubmission && (
+            <Text type="secondary" style={{ fontSize: 11 }}>
+              {record.entryCount} grouped entr
+              {record.entryCount === 1 ? "y" : "ies"}
+            </Text>
+          )}
+        </Space>
       ),
     },
     {
@@ -797,8 +1236,15 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, ca
           <Tag color={statusColors[val] || "default"}>
             {val?.charAt(0).toUpperCase() + val?.slice(1)}
           </Tag>
+          {r.isGroupedSubmission && (
+            <Tag color="geekblue" style={{ fontSize: 10 }}>
+              Grouped Submission
+            </Tag>
+          )}
           {r.editRequested && val !== "editApproved" && val !== "reverted" && (
-            <Tag color="processing" style={{ fontSize: 10 }}>Edit Requested</Tag>
+            <Tag color="processing" style={{ fontSize: 10 }}>
+              Edit Requested
+            </Tag>
           )}
         </Space>
       ),
@@ -807,100 +1253,122 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, ca
       title: "Actions",
       key: "actions",
       width: 220,
-      render: (_, r) => (
-        <Space size={4} wrap={false}>
-          <Tooltip title="View Details">
-            <Button
-              size="small"
-              icon={<EyeOutlined />}
-              style={{ borderColor: ACCENT, color: ACCENT }}
-              onClick={() => openView(r)}
-            />
-          </Tooltip>
-          {getTxnHistoryKey(r) && (
-            <Tooltip title="Transaction History">
-              <Button
-                size="small"
-                icon={<HistoryOutlined />}
-                style={{ borderColor: "#722ed1", color: "#722ed1" }}
-                onClick={() => openTxnHistory(getTxnHistoryKey(r))}
-              />
-            </Tooltip>
-          )}
-          {r.status === "pending" && canEdit && (
-            <>
-              <Tooltip title="Edit">
+      render: (_, r) => {
+        return (
+          <Space size={4} wrap={false}>
+            {r.isGroupedSubmission ? (
+              <Tooltip title="View Group Entries">
                 <Button
                   size="small"
-                  icon={<EditOutlined />}
+                  icon={<EyeOutlined />}
                   style={{ borderColor: ACCENT, color: ACCENT }}
-                  onClick={() => openEdit(r)}
+                  onClick={() => openGroupedEntriesModal(r)}
                 />
               </Tooltip>
-              <Tooltip title="Acknowledge">
+            ) : (
+              <Tooltip title="View Details">
                 <Button
                   size="small"
-                  icon={<CheckOutlined />}
-                  style={{ borderColor: "#52c41a", color: "#52c41a" }}
-                  onClick={() => updateStatus(r._id, "acknowledged")}
+                  icon={<EyeOutlined />}
+                  style={{ borderColor: ACCENT, color: ACCENT }}
+                  onClick={() => openView(r)}
                 />
               </Tooltip>
-              <Tooltip title="Reject">
+            )}
+            {getTxnHistoryKey(r) && (
+              <Tooltip title="Transaction History">
                 <Button
                   size="small"
-                  danger
-                  icon={<CloseOutlined />}
-                  onClick={() => updateStatus(r._id, "rejected")}
+                  icon={<HistoryOutlined />}
+                  style={{ borderColor: "#722ed1", color: "#722ed1" }}
+                  onClick={() => openTxnHistory(getTxnHistoryKey(r))}
                 />
               </Tooltip>
-            </>
-          )}
-          {r.status !== "reverted" && r.status !== "pending" && canEdit && (
-            <Tooltip title="Revert Submission">
-              <Button
-                size="small"
-                icon={<UndoOutlined />}
-                style={{ borderColor: "#fa541c", color: "#fa541c" }}
-                onClick={() => {
-                  setRevertModal({ open: true, record: r });
-                  setRevertReason("");
-                }}
-              />
-            </Tooltip>
-          )}
-          {r.editRequested && r.status !== "editApproved" && r.status !== "reverted" && canEdit && (
-            <>
-              <Tooltip title="Approve Edit Request">
+            )}
+            {r.status === "pending" && canEdit && (
+              <>
+                {!r.isGroupedSubmission && (
+                  <Tooltip title="Edit">
+                    <Button
+                      size="small"
+                      icon={<EditOutlined />}
+                      style={{ borderColor: ACCENT, color: ACCENT }}
+                      onClick={() => openEdit(r)}
+                    />
+                  </Tooltip>
+                )}
+                <Tooltip title="Acknowledge">
+                  <Button
+                    size="small"
+                    icon={<CheckOutlined />}
+                    style={{ borderColor: "#52c41a", color: "#52c41a" }}
+                    loading={statusActionKey === `${r._id}:acknowledged`}
+                    onClick={() => updateStatus(r, "acknowledged")}
+                  />
+                </Tooltip>
+                <Tooltip title="Reject">
+                  <Button
+                    size="small"
+                    danger
+                    icon={<CloseOutlined />}
+                    loading={statusActionKey === `${r._id}:rejected`}
+                    onClick={() => updateStatus(r, "rejected")}
+                  />
+                </Tooltip>
+              </>
+            )}
+            {r.status !== "reverted" && r.status !== "pending" && canEdit && (
+              <Tooltip title="Revert Submission">
                 <Button
                   size="small"
-                  icon={<CheckOutlined />}
-                  style={{ borderColor: "#52c41a", color: "#52c41a" }}
-                  onClick={() => handleApproveEdit(r._id)}
+                  icon={<UndoOutlined />}
+                  style={{ borderColor: "#fa541c", color: "#fa541c" }}
+                  onClick={() => {
+                    setRevertModal({ open: true, record: r });
+                    setRevertReason("");
+                  }}
                 />
               </Tooltip>
-              <Tooltip title="Reject Edit Request">
-                <Button
-                  size="small"
-                  danger
-                  icon={<CloseOutlined />}
-                  onClick={() => handleRejectEdit(r._id)}
-                />
-              </Tooltip>
-            </>
-          )}
-          {canDelete && <Popconfirm
-            title="Delete this submission?"
-            description="This action cannot be undone."
-            onConfirm={() => handleDelete(r._id)}
-            okText="Delete"
-            okButtonProps={{ danger: true }}
-          >
-            <Tooltip title="Delete">
-              <Button size="small" danger icon={<DeleteOutlined />} />
-            </Tooltip>
-          </Popconfirm>}
-        </Space>
-      ),
+            )}
+            {r.editRequested &&
+              r.status !== "editApproved" &&
+              r.status !== "reverted" &&
+              canEdit && (
+                <>
+                  <Tooltip title="Approve Edit Request">
+                    <Button
+                      size="small"
+                      icon={<CheckOutlined />}
+                      style={{ borderColor: "#52c41a", color: "#52c41a" }}
+                      onClick={() => handleApproveEdit(r._id)}
+                    />
+                  </Tooltip>
+                  <Tooltip title="Reject Edit Request">
+                    <Button
+                      size="small"
+                      danger
+                      icon={<CloseOutlined />}
+                      onClick={() => handleRejectEdit(r._id)}
+                    />
+                  </Tooltip>
+                </>
+              )}
+            {canDelete && (
+              <Popconfirm
+                title="Delete this submission?"
+                description="This action cannot be undone."
+                onConfirm={() => handleDelete(r._id)}
+                okText="Delete"
+                okButtonProps={{ danger: true }}
+              >
+                <Tooltip title="Delete">
+                  <Button size="small" danger icon={<DeleteOutlined />} />
+                </Tooltip>
+              </Popconfirm>
+            )}
+          </Space>
+        );
+      },
     },
   ].map(wrapColumn);
 
@@ -911,7 +1379,7 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, ca
           <Button
             icon={<DownloadOutlined />}
             onClick={() => {
-              const rows = tableRows.map((d) => ({
+              const rows = filteredTableRows.map((d) => ({
                 "ID No.": d.idNo,
                 "LGU/Company": d.lguCompanyName,
                 "Company Type": d.companyType,
@@ -981,9 +1449,10 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, ca
                 type="primary"
                 icon={<CheckOutlined />}
                 style={{ background: "#52c41a", borderColor: "#52c41a" }}
+                loading={bulkAcknowledgeLoading}
                 onClick={handleBulkAcknowledge}
               >
-                Acknowledge Selected ({selectedRowKeys.length})
+                Acknowledge Selected ({selectedEntryIds.length})
               </Button>
               {canEdit && (
                 <Button
@@ -995,7 +1464,11 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, ca
                 </Button>
               )}
               {canDelete && (
-                <Button danger icon={<DeleteOutlined />} onClick={handleBulkDelete}>
+                <Button
+                  danger
+                  icon={<DeleteOutlined />}
+                  onClick={handleBulkDelete}
+                >
                   Delete Selected
                 </Button>
               )}
@@ -1004,14 +1477,14 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, ca
         </Space>
 
         <ResponsiveTable
-          dataSource={tableRows}
+          dataSource={paginatedTableRows}
           columns={columns}
           rowKey="_id"
           loading={loading}
           pagination={{
             current: pagination.current,
             pageSize: pagination.pageSize,
-            total: pagination.total,
+            total: filteredTableRows.length,
             showSizeChanger: true,
             pageSizeOptions: ["15", "25", "50", "100"],
             showTotal: (total, range) => `${range[0]}-${range[1]} of ${total}`,
@@ -1027,9 +1500,210 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, ca
           size="middle"
           scroll={{ x: 1250, y: 640 }}
           virtual
-          rowSelection={{ selectedRowKeys, onChange: setSelectedRowKeys, columnWidth: 42 }}
+          rowSelection={{
+            selectedRowKeys,
+            onChange: setSelectedRowKeys,
+            columnWidth: 42,
+          }}
         />
       </Card>
+
+      <Modal
+        open={ackProgress.open}
+        title={ackProgress.title}
+        closable={false}
+        maskClosable={false}
+        keyboard={false}
+        footer={null}
+        centered
+        width={420}
+      >
+        <Space direction="vertical" size={16} style={{ width: "100%" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+            <Spin size="large" />
+            <div>
+              <Text strong style={{ display: "block" }}>
+                Processing acknowledgement
+              </Text>
+              <Text type="secondary">
+                {ackProgress.count > 0
+                  ? `${ackProgress.count} submission entr${ackProgress.count === 1 ? "y" : "ies"}`
+                  : "Preparing request"}
+              </Text>
+            </div>
+          </div>
+          <Progress
+            percent={ackProgress.percent}
+            status="active"
+            strokeColor="#52c41a"
+          />
+          <Text type="secondary">{ackProgress.description}</Text>
+        </Space>
+      </Modal>
+
+      <Modal
+        title={
+          groupedEntriesRecord ? (
+            <Space>
+              <EyeOutlined style={{ color: ACCENT }} />
+              <span>Grouped Entries</span>
+              <Tag color="geekblue" style={{ margin: 0 }}>
+                {groupedEntriesRecord.groupedEntries?.length || 0} item(s)
+              </Tag>
+            </Space>
+          ) : (
+            "Grouped Entries"
+          )
+        }
+        open={!!groupedEntriesRecord}
+        onCancel={() => setGroupedEntriesRecord(null)}
+        footer={
+          <Button type="primary" onClick={() => setGroupedEntriesRecord(null)}>
+            Close
+          </Button>
+        }
+        width={960}
+        destroyOnHidden
+      >
+        {groupedEntriesRecord && (
+          <Space direction="vertical" size={10} style={{ width: "100%" }}>
+            <div
+              style={{
+                background: isDark ? "rgba(24,144,255,0.08)" : "#f0f5ff",
+                border: isDark
+                  ? "1px solid rgba(24,144,255,0.25)"
+                  : "1px solid #adc6ff",
+                borderRadius: 10,
+                padding: "14px 16px",
+              }}
+            >
+              <Text strong style={{ fontSize: 13, display: "block" }}>
+                {groupedEntriesRecord.lguCompanyName || "Grouped submissions"}
+              </Text>
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                Review each individual submission entry and use the available
+                actions below.
+              </Text>
+            </div>
+            {(groupedEntriesRecord.groupedEntries || []).map((entry, index) => (
+              <div
+                key={entry._id}
+                style={{
+                  display: "flex",
+                  justifyContent: "space-between",
+                  alignItems: "center",
+                  gap: 12,
+                  padding: "12px 14px",
+                  borderRadius: 10,
+                  background: isDark ? "rgba(255,255,255,0.03)" : "#fff",
+                  border: isDark
+                    ? "1px solid rgba(255,255,255,0.08)"
+                    : "1px solid #f0f0f0",
+                }}
+              >
+                <div style={{ minWidth: 0, flex: 1 }}>
+                  <Text strong style={{ fontSize: 13, display: "block" }}>
+                    {entry.idNo ||
+                      entry.submissionId ||
+                      `Submission ${index + 1}`}
+                  </Text>
+                  <Text
+                    type="secondary"
+                    style={{ fontSize: 11, display: "block" }}
+                  >
+                    {dayjs(entry.createdAt || entry.dateOfDisposal).format(
+                      "MM/DD/YYYY hh:mm A",
+                    )}
+                  </Text>
+                  <Text
+                    type="secondary"
+                    style={{ fontSize: 11, display: "block" }}
+                  >
+                    {entry.truckCount ?? entry.trucks?.length ?? 0} truck(s)
+                  </Text>
+                  <Tag
+                    color={statusColors[entry.status] || "default"}
+                    style={{ marginTop: 6, marginInlineEnd: 0 }}
+                  >
+                    {entry.status}
+                  </Tag>
+                </div>
+                <Space size={6} wrap>
+                  <Button
+                    size="small"
+                    icon={<EyeOutlined />}
+                    onClick={() => openGroupedEntryDetail(entry)}
+                  />
+                  {entry.status === "pending" && canEdit && (
+                    <Button
+                      size="small"
+                      icon={<EditOutlined />}
+                      style={{ borderColor: ACCENT, color: ACCENT }}
+                      onClick={() => {
+                        setGroupedEntriesRecord(null);
+                        openEdit(entry);
+                      }}
+                    />
+                  )}
+                  {entry.status === "pending" && (
+                    <>
+                      <Button
+                        size="small"
+                        type="primary"
+                        icon={<CheckOutlined />}
+                        style={{
+                          background: "#52c41a",
+                          borderColor: "#52c41a",
+                        }}
+                        loading={
+                          statusActionKey === `${entry._id}:acknowledged`
+                        }
+                        onClick={() =>
+                          handleGroupedEntryStatus(
+                            groupedEntriesRecord,
+                            entry,
+                            "acknowledged",
+                          )
+                        }
+                      />
+
+                      <Button
+                        size="small"
+                        danger
+                        icon={<CloseOutlined />}
+                        loading={statusActionKey === `${entry._id}:rejected`}
+                        onClick={() =>
+                          handleGroupedEntryStatus(
+                            groupedEntriesRecord,
+                            entry,
+                            "rejected",
+                          )
+                        }
+                      />
+                    </>
+                  )}
+                  {entry.status !== "reverted" &&
+                    entry.status !== "pending" &&
+                    canEdit && (
+                      <Button
+                        size="small"
+                        icon={<UndoOutlined />}
+                        style={{ borderColor: "#fa541c", color: "#fa541c" }}
+                        onClick={() => {
+                          setGroupedEntriesRecord(null);
+                          setRevertModal({ open: true, record: entry });
+                          setRevertReason("");
+                        }}
+                      >
+                        Revert
+                      </Button>
+                    )}
+                </Space>
+              </div>
+            ))}
+          </Space>
+        )}
+      </Modal>
 
       {/* ── View Modal ── */}
       <Modal
@@ -1061,42 +1735,49 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, ca
                 )}
             </div>
             <Space>
-              {viewRecord?.status === "pending" && (
-                <>
-                  <Button
-                    icon={<EditOutlined />}
-                    style={{ borderColor: ACCENT, color: ACCENT }}
-                    onClick={() => {
-                      setViewRecord(null);
-                      openEdit(viewRecord);
-                    }}
-                  >
-                    Edit
-                  </Button>
-                  <Button
-                    type="primary"
-                    icon={<CheckOutlined />}
-                    style={{ background: "#52c41a", borderColor: "#52c41a" }}
-                    onClick={() => {
-                      updateStatus(viewRecord._id, "acknowledged");
-                      setViewRecord(null);
-                    }}
-                  >
-                    Acknowledge
-                  </Button>
-                  <Button
-                    danger
-                    icon={<CloseOutlined />}
-                    onClick={() => {
-                      updateStatus(viewRecord._id, "rejected");
-                      setViewRecord(null);
-                    }}
-                  >
-                    Reject
-                  </Button>
-                </>
-              )}
-              <Button type="primary" onClick={() => setViewRecord(null)}>Close</Button>
+              {viewRecord?.status === "pending" &&
+                !viewRecord?.isGroupedSubmission && (
+                  <>
+                    <Button
+                      icon={<EditOutlined />}
+                      style={{ borderColor: ACCENT, color: ACCENT }}
+                      onClick={() => {
+                        setViewRecord(null);
+                        openEdit(viewRecord);
+                      }}
+                    >
+                      Edit
+                    </Button>
+                    <Button
+                      type="primary"
+                      icon={<CheckOutlined />}
+                      style={{ background: "#52c41a", borderColor: "#52c41a" }}
+                      loading={
+                        statusActionKey === `${viewRecord._id}:acknowledged`
+                      }
+                      onClick={() => {
+                        updateStatus(viewRecord, "acknowledged");
+                        setViewRecord(null);
+                      }}
+                    >
+                      Acknowledge
+                    </Button>
+                    <Button
+                      danger
+                      icon={<CloseOutlined />}
+                      loading={statusActionKey === `${viewRecord._id}:rejected`}
+                      onClick={() => {
+                        updateStatus(viewRecord, "rejected");
+                        setViewRecord(null);
+                      }}
+                    >
+                      Reject
+                    </Button>
+                  </>
+                )}
+              <Button type="primary" onClick={() => setViewRecord(null)}>
+                Close
+              </Button>
             </Space>
           </div>
         }
@@ -1144,7 +1825,9 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, ca
                             fontWeight: 700,
                           }}
                         >
-                          {r.idNo}
+                          {r.isGroupedSubmission
+                            ? `${r.entryCount} Grouped Submissions`
+                            : r.idNo}
                         </Text>
                       </div>
                       <Text
@@ -1189,10 +1872,14 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, ca
                     <Col xs={8}>
                       <div
                         style={{
-                          background: isDark ? "rgba(47,84,235,0.1)" : "#f0f5ff",
+                          background: isDark
+                            ? "rgba(47,84,235,0.1)"
+                            : "#f0f5ff",
                           borderRadius: 8,
                           padding: "12px 14px",
-                          border: isDark ? "1px solid rgba(47,84,235,0.3)" : "1px solid #d6e4ff",
+                          border: isDark
+                            ? "1px solid rgba(47,84,235,0.3)"
+                            : "1px solid #d6e4ff",
                           minHeight: 72,
                           display: "flex",
                           flexDirection: "column",
@@ -1204,7 +1891,9 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, ca
                             fontSize: 11,
                             textTransform: "uppercase",
                             letterSpacing: 0.5,
-                            color: isDark ? "rgba(255,255,255,0.65)" : "rgba(0,0,0,0.45)",
+                            color: isDark
+                              ? "rgba(255,255,255,0.65)"
+                              : "rgba(0,0,0,0.45)",
                           }}
                         >
                           Company Type
@@ -1222,10 +1911,14 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, ca
                     <Col xs={8}>
                       <div
                         style={{
-                          background: isDark ? "rgba(82,196,26,0.1)" : "#f6ffed",
+                          background: isDark
+                            ? "rgba(82,196,26,0.1)"
+                            : "#f6ffed",
                           borderRadius: 8,
                           padding: "12px 14px",
-                          border: isDark ? "1px solid rgba(82,196,26,0.3)" : "1px solid #d9f7be",
+                          border: isDark
+                            ? "1px solid rgba(82,196,26,0.3)"
+                            : "1px solid #d9f7be",
                           minHeight: 72,
                           display: "flex",
                           flexDirection: "column",
@@ -1237,7 +1930,9 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, ca
                             fontSize: 11,
                             textTransform: "uppercase",
                             letterSpacing: 0.5,
-                            color: isDark ? "rgba(255,255,255,0.65)" : "rgba(0,0,0,0.45)",
+                            color: isDark
+                              ? "rgba(255,255,255,0.65)"
+                              : "rgba(0,0,0,0.45)",
                           }}
                         >
                           Truck Entries
@@ -1245,7 +1940,10 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, ca
                         <div style={{ marginTop: 4 }}>
                           <Text
                             strong
-                            style={{ fontSize: 18, color: isDark ? "#73d13d" : "#52c41a" }}
+                            style={{
+                              fontSize: 18,
+                              color: isDark ? "#73d13d" : "#52c41a",
+                            }}
                           >
                             {r.trucks?.length || 0}
                           </Text>
@@ -1255,10 +1953,14 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, ca
                     <Col xs={8}>
                       <div
                         style={{
-                          background: isDark ? "rgba(250,173,20,0.1)" : "#fff7e6",
+                          background: isDark
+                            ? "rgba(250,173,20,0.1)"
+                            : "#fff7e6",
                           borderRadius: 8,
                           padding: "12px 14px",
-                          border: isDark ? "1px solid rgba(250,173,20,0.3)" : "1px solid #ffe7ba",
+                          border: isDark
+                            ? "1px solid rgba(250,173,20,0.3)"
+                            : "1px solid #ffe7ba",
                           minHeight: 72,
                           display: "flex",
                           flexDirection: "column",
@@ -1270,13 +1972,21 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, ca
                             fontSize: 11,
                             textTransform: "uppercase",
                             letterSpacing: 0.5,
-                            color: isDark ? "rgba(255,255,255,0.65)" : "rgba(0,0,0,0.45)",
+                            color: isDark
+                              ? "rgba(255,255,255,0.65)"
+                              : "rgba(0,0,0,0.45)",
                           }}
                         >
                           Total Volume
                         </Text>
                         <div style={{ marginTop: 4 }}>
-                          <Text strong style={{ fontSize: 14, color: isDark ? "#ffc53d" : "#fa8c16" }}>
+                          <Text
+                            strong
+                            style={{
+                              fontSize: 14,
+                              color: isDark ? "#ffc53d" : "#fa8c16",
+                            }}
+                          >
                             {totalVolumeSummary}
                           </Text>
                         </div>
@@ -1520,17 +2230,82 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, ca
                           const hasAC = (r.activeCellEntries || []).length > 0;
                           const hasCC = (r.closedCellEntries || []).length > 0;
                           const cellTableCols = [
-                            { title: "#", key: "i", width: 40, render: (_, __, i) => <Text type="secondary" style={{ fontSize: 11 }}>{i + 1}</Text> },
-                            { title: "Cell Name", dataIndex: "cellName", render: (v) => <Text style={{ fontSize: 11, whiteSpace: "normal", overflowWrap: "anywhere", wordBreak: "break-word" }}>{v || "—"}</Text> },
-                            { title: "Waste Type", dataIndex: "wasteType", width: 120, render: (v) => <Tag color={v === "Residual" ? "blue" : v === "Inert" ? "green" : /hazardous/i.test(v || "") ? "red" : "default"} bordered={false} style={{ fontSize: 10, whiteSpace: "normal" }}>{v || "—"}</Tag> },
-                            { title: "Volume", dataIndex: "volume", width: 140, render: (v, row) => <Text strong style={{ fontSize: 11 }}>{v != null ? `${Number(v).toLocaleString()} ${(row.unit || r.baselineUnit || "m³").replace("m3", "m³")}` : "—"}</Text> },
+                            {
+                              title: "#",
+                              key: "i",
+                              width: 40,
+                              render: (_, __, i) => (
+                                <Text type="secondary" style={{ fontSize: 11 }}>
+                                  {i + 1}
+                                </Text>
+                              ),
+                            },
+                            {
+                              title: "Cell Name",
+                              dataIndex: "cellName",
+                              render: (v) => (
+                                <Text
+                                  style={{
+                                    fontSize: 11,
+                                    whiteSpace: "normal",
+                                    overflowWrap: "anywhere",
+                                    wordBreak: "break-word",
+                                  }}
+                                >
+                                  {v || "—"}
+                                </Text>
+                              ),
+                            },
+                            {
+                              title: "Waste Type",
+                              dataIndex: "wasteType",
+                              width: 120,
+                              render: (v) => (
+                                <Tag
+                                  color={
+                                    v === "Residual"
+                                      ? "blue"
+                                      : v === "Inert"
+                                        ? "green"
+                                        : /hazardous/i.test(v || "")
+                                          ? "red"
+                                          : "default"
+                                  }
+                                  bordered={false}
+                                  style={{ fontSize: 10, whiteSpace: "normal" }}
+                                >
+                                  {v || "—"}
+                                </Tag>
+                              ),
+                            },
+                            {
+                              title: "Volume",
+                              dataIndex: "volume",
+                              width: 140,
+                              render: (v, row) => (
+                                <Text strong style={{ fontSize: 11 }}>
+                                  {v != null
+                                    ? `${Number(v).toLocaleString()} ${(row.unit || r.baselineUnit || "m³").replace("m3", "m³")}`
+                                    : "—"}
+                                </Text>
+                              ),
+                            },
                           ];
                           return (
                             <div>
                               {/* Total Volume */}
                               <Row gutter={16} style={{ marginBottom: 8 }}>
                                 <Col xs={12}>
-                                  <Text type="secondary" style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: 0.4, display: "block", marginBottom: 2 }}>
+                                  <Text
+                                    type="secondary"
+                                    style={{
+                                      fontSize: 11,
+                                      textTransform: "uppercase",
+                                      letterSpacing: 0.4,
+                                      display: "block",
+                                      marginBottom: 2,
+                                    }}
+                                  >
                                     Total Volume Accepted
                                   </Text>
                                   <Text strong style={{ fontSize: 13 }}>
@@ -1543,23 +2318,74 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, ca
 
                               {/* Active Cell Entries */}
                               <div style={{ marginBottom: 14 }}>
-                                <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 6 }}>
-                                  <div style={{ width: 3, height: 13, background: "#52c41a", borderRadius: 2 }} />
-                                  <Text strong style={{ fontSize: 12, color: "#52c41a" }}>Active Cell{hasAC ? ` Entries (${r.activeCellEntries.length})` : " — Legacy"}</Text>
+                                <div
+                                  style={{
+                                    display: "flex",
+                                    alignItems: "center",
+                                    gap: 6,
+                                    marginBottom: 6,
+                                  }}
+                                >
+                                  <div
+                                    style={{
+                                      width: 3,
+                                      height: 13,
+                                      background: "#52c41a",
+                                      borderRadius: 2,
+                                    }}
+                                  />
+                                  <Text
+                                    strong
+                                    style={{ fontSize: 12, color: "#52c41a" }}
+                                  >
+                                    Active Cell
+                                    {hasAC
+                                      ? ` Entries (${r.activeCellEntries.length})`
+                                      : " — Legacy"}
+                                  </Text>
                                 </div>
                                 {hasAC ? (
-                                  <Table dataSource={r.activeCellEntries} rowKey={(_, i) => i} size="small" pagination={false} columns={cellTableCols} style={{ fontSize: 11 }} />
+                                  <Table
+                                    dataSource={r.activeCellEntries}
+                                    rowKey={(_, i) => i}
+                                    size="small"
+                                    pagination={false}
+                                    columns={cellTableCols}
+                                    style={{ fontSize: 11 }}
+                                  />
                                 ) : (
                                   <Row gutter={8}>
                                     {[
-                                      ["Residual", r.activeCellResidualVolume, r.activeCellResidualUnit],
-                                      ["Inert", r.activeCellInertVolume, r.activeCellInertUnit],
-                                      ["Hazardous", r.activeCellHazardousVolume, r.activeCellHazardousUnit],
+                                      [
+                                        "Residual",
+                                        r.activeCellResidualVolume,
+                                        r.activeCellResidualUnit,
+                                      ],
+                                      [
+                                        "Inert",
+                                        r.activeCellInertVolume,
+                                        r.activeCellInertUnit,
+                                      ],
+                                      [
+                                        "Hazardous",
+                                        r.activeCellHazardousVolume,
+                                        r.activeCellHazardousUnit,
+                                      ],
                                     ].map(([label, val, unit]) => (
                                       <Col key={label} xs={12}>
-                                        <Text type="secondary" style={{ fontSize: 11, display: "block" }}>{label}</Text>
+                                        <Text
+                                          type="secondary"
+                                          style={{
+                                            fontSize: 11,
+                                            display: "block",
+                                          }}
+                                        >
+                                          {label}
+                                        </Text>
                                         <Text strong style={{ fontSize: 13 }}>
-                                          {val != null ? `${val.toLocaleString()} ${(unit || "m³").replace("m3", "m³")}` : "—"}
+                                          {val != null
+                                            ? `${val.toLocaleString()} ${(unit || "m³").replace("m3", "m³")}`
+                                            : "—"}
                                         </Text>
                                       </Col>
                                     ))}
@@ -1569,23 +2395,74 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, ca
 
                               {/* Closed Cell Entries */}
                               <div style={{ marginBottom: 14 }}>
-                                <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 6 }}>
-                                  <div style={{ width: 3, height: 13, background: "#fa8c16", borderRadius: 2 }} />
-                                  <Text strong style={{ fontSize: 12, color: "#fa8c16" }}>Closed Cell{hasCC ? ` Entries (${r.closedCellEntries.length})` : " — Legacy"}</Text>
+                                <div
+                                  style={{
+                                    display: "flex",
+                                    alignItems: "center",
+                                    gap: 6,
+                                    marginBottom: 6,
+                                  }}
+                                >
+                                  <div
+                                    style={{
+                                      width: 3,
+                                      height: 13,
+                                      background: "#fa8c16",
+                                      borderRadius: 2,
+                                    }}
+                                  />
+                                  <Text
+                                    strong
+                                    style={{ fontSize: 12, color: "#fa8c16" }}
+                                  >
+                                    Closed Cell
+                                    {hasCC
+                                      ? ` Entries (${r.closedCellEntries.length})`
+                                      : " — Legacy"}
+                                  </Text>
                                 </div>
                                 {hasCC ? (
-                                  <Table dataSource={r.closedCellEntries} rowKey={(_, i) => i} size="small" pagination={false} columns={cellTableCols} style={{ fontSize: 11 }} />
+                                  <Table
+                                    dataSource={r.closedCellEntries}
+                                    rowKey={(_, i) => i}
+                                    size="small"
+                                    pagination={false}
+                                    columns={cellTableCols}
+                                    style={{ fontSize: 11 }}
+                                  />
                                 ) : (
                                   <Row gutter={8}>
                                     {[
-                                      ["Residual", r.closedCellResidualVolume, r.closedCellResidualUnit],
-                                      ["Inert", r.closedCellInertVolume, r.closedCellInertUnit],
-                                      ["Hazardous", r.closedCellHazardousVolume, r.closedCellHazardousUnit],
+                                      [
+                                        "Residual",
+                                        r.closedCellResidualVolume,
+                                        r.closedCellResidualUnit,
+                                      ],
+                                      [
+                                        "Inert",
+                                        r.closedCellInertVolume,
+                                        r.closedCellInertUnit,
+                                      ],
+                                      [
+                                        "Hazardous",
+                                        r.closedCellHazardousVolume,
+                                        r.closedCellHazardousUnit,
+                                      ],
                                     ].map(([label, val, unit]) => (
                                       <Col key={label} xs={12}>
-                                        <Text type="secondary" style={{ fontSize: 11, display: "block" }}>{label}</Text>
+                                        <Text
+                                          type="secondary"
+                                          style={{
+                                            fontSize: 11,
+                                            display: "block",
+                                          }}
+                                        >
+                                          {label}
+                                        </Text>
                                         <Text strong style={{ fontSize: 13 }}>
-                                          {val != null ? `${val.toLocaleString()} ${(unit || "m³").replace("m3", "m³")}` : "—"}
+                                          {val != null
+                                            ? `${val.toLocaleString()} ${(unit || "m³").replace("m3", "m³")}`
+                                            : "—"}
                                         </Text>
                                       </Col>
                                     ))}
@@ -1597,10 +2474,26 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, ca
                               {r.accreditedHaulers?.length > 0 && (
                                 <>
                                   <Divider style={{ margin: "4px 0 12px" }} />
-                                  <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
-                                    <TeamOutlined style={{ color: "#52c41a", fontSize: 14 }} />
-                                    <Text strong style={{ fontSize: 13, color: isDark ? "#e8e8e8" : "#262626" }}>
-                                      Accredited Haulers ({r.accreditedHaulers.length})
+                                  <div
+                                    style={{
+                                      display: "flex",
+                                      alignItems: "center",
+                                      gap: 8,
+                                      marginBottom: 10,
+                                    }}
+                                  >
+                                    <TeamOutlined
+                                      style={{ color: "#52c41a", fontSize: 14 }}
+                                    />
+                                    <Text
+                                      strong
+                                      style={{
+                                        fontSize: 13,
+                                        color: isDark ? "#e8e8e8" : "#262626",
+                                      }}
+                                    >
+                                      Accredited Haulers (
+                                      {r.accreditedHaulers.length})
                                     </Text>
                                   </div>
                                   <Table
@@ -1615,8 +2508,18 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, ca
                                         const vehicles =
                                           h.vehicles?.length > 0
                                             ? h.vehicles
-                                            : h.plateNumber || h.vehicleType || h.capacity != null
-                                              ? [{ plateNumber: h.plateNumber, vehicleType: h.vehicleType, capacity: h.capacity, capacityUnit: h.capacityUnit }]
+                                            : h.plateNumber ||
+                                                h.vehicleType ||
+                                                h.capacity != null
+                                              ? [
+                                                  {
+                                                    plateNumber: h.plateNumber,
+                                                    vehicleType: h.vehicleType,
+                                                    capacity: h.capacity,
+                                                    capacityUnit:
+                                                      h.capacityUnit,
+                                                  },
+                                                ]
                                               : [];
                                         return vehicles.length > 0 ? (
                                           <Table
@@ -1627,30 +2530,80 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, ca
                                             style={{ fontSize: 11 }}
                                             className="hauler-wrap-table"
                                             columns={[
-                                              { title: "#", key: "idx", width: 40, render: (_, __, vi) => vi + 1 },
-                                              { title: "Plate Number", dataIndex: "plateNumber", key: "plate", render: (v) => v || "—" },
-                                              { title: "Vehicle Type", dataIndex: "vehicleType", key: "type", render: (v) => v || "—" },
-                                              { title: "Capacity", key: "cap", render: (_, v) => v.capacity != null ? `${v.capacity} ${(v.capacityUnit || "m³").replace("m3", "m³")}` : "—" },
+                                              {
+                                                title: "#",
+                                                key: "idx",
+                                                width: 40,
+                                                render: (_, __, vi) => vi + 1,
+                                              },
+                                              {
+                                                title: "Plate Number",
+                                                dataIndex: "plateNumber",
+                                                key: "plate",
+                                                render: (v) => v || "—",
+                                              },
+                                              {
+                                                title: "Vehicle Type",
+                                                dataIndex: "vehicleType",
+                                                key: "type",
+                                                render: (v) => v || "—",
+                                              },
+                                              {
+                                                title: "Capacity",
+                                                key: "cap",
+                                                render: (_, v) =>
+                                                  v.capacity != null
+                                                    ? `${v.capacity} ${(v.capacityUnit || "m³").replace("m3", "m³")}`
+                                                    : "—",
+                                              },
                                             ]}
                                           />
                                         ) : (
-                                          <Text type="secondary">No vehicle details</Text>
+                                          <Text type="secondary">
+                                            No vehicle details
+                                          </Text>
                                         );
                                       },
                                       rowExpandable: () => true,
                                     }}
                                     columns={[
-                                      { title: "Hauler Name", dataIndex: "haulerName", key: "haulerName", render: (v) => <Text strong>{v}</Text> },
-                                      { title: "No. of Trucks", dataIndex: "numberOfTrucks", key: "numberOfTrucks", width: 110, render: (v) => v ?? "—" },
-                                      { title: "Office Address", dataIndex: "officeAddress", key: "officeAddress", render: (v) => v || "—" },
+                                      {
+                                        title: "Hauler Name",
+                                        dataIndex: "haulerName",
+                                        key: "haulerName",
+                                        render: (v) => <Text strong>{v}</Text>,
+                                      },
+                                      {
+                                        title: "No. of Trucks",
+                                        dataIndex: "numberOfTrucks",
+                                        key: "numberOfTrucks",
+                                        width: 110,
+                                        render: (v) => v ?? "—",
+                                      },
+                                      {
+                                        title: "Office Address",
+                                        dataIndex: "officeAddress",
+                                        key: "officeAddress",
+                                        render: (v) => v || "—",
+                                      },
                                       {
                                         title: "Private Sector Clients",
                                         dataIndex: "privateSectorClients",
                                         key: "privateSectorClients",
                                         render: (v) => {
-                                          const arr = Array.isArray(v) ? v : v ? [v] : [];
+                                          const arr = Array.isArray(v)
+                                            ? v
+                                            : v
+                                              ? [v]
+                                              : [];
                                           if (arr.length === 0) return "—";
-                                          return arr.map(c => typeof c === "string" ? c : c.clientName || "—").join(", ");
+                                          return arr
+                                            .map((c) =>
+                                              typeof c === "string"
+                                                ? c
+                                                : c.clientName || "—",
+                                            )
+                                            .join(", ");
                                         },
                                       },
                                     ]}
@@ -2094,7 +3047,13 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, ca
       >
         <Form form={editForm} layout="vertical" size="small">
           <Collapse
-            defaultActiveKey={["disposal", "company", "operations", "baseline", "trucks"]}
+            defaultActiveKey={[
+              "disposal",
+              "company",
+              "operations",
+              "baseline",
+              "trucks",
+            ]}
             bordered={false}
             size="small"
             items={[
@@ -2115,10 +3074,14 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, ca
                       <Col xs={24} style={{ marginBottom: 12 }}>
                         <div
                           style={{
-                            background: isDark ? "rgba(47,84,235,0.1)" : "#f0f5ff",
+                            background: isDark
+                              ? "rgba(47,84,235,0.1)"
+                              : "#f0f5ff",
                             borderRadius: 6,
                             padding: "8px 14px",
-                            border: isDark ? "1px solid rgba(47,84,235,0.3)" : "1px solid #d6e4ff",
+                            border: isDark
+                              ? "1px solid rgba(47,84,235,0.3)"
+                              : "1px solid #d6e4ff",
                           }}
                         >
                           <Text
@@ -2150,7 +3113,10 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, ca
                         }
                         rules={[{ required: true }]}
                       >
-                        <DatePicker format="MM/DD/YYYY" style={{ width: "100%" }} />
+                        <DatePicker
+                          format="MM/DD/YYYY"
+                          style={{ width: "100%" }}
+                        />
                       </Form.Item>
                     </Col>
                     <Col xs={24} sm={12}>
@@ -2352,7 +3318,11 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, ca
                 children: (
                   <Row gutter={12}>
                     <Col xs={12} sm={6}>
-                      <Form.Item name="baselineUnit" label="Baseline Unit" initialValue="m³">
+                      <Form.Item
+                        name="baselineUnit"
+                        label="Baseline Unit"
+                        initialValue="m³"
+                      >
                         <Select placeholder="Select baseline unit">
                           <Option value="m³">m³</Option>
                           <Option value="tons">Tons</Option>
@@ -2368,7 +3338,11 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, ca
                       </Form.Item>
                     </Col>
                     <Col xs={6} sm={6}>
-                      <Form.Item name="totalVolumeAcceptedUnit" label="Unit" initialValue="m³">
+                      <Form.Item
+                        name="totalVolumeAcceptedUnit"
+                        label="Unit"
+                        initialValue="m³"
+                      >
                         <Select placeholder="Select unit">
                           <Option value="m³">m³</Option>
                           <Option value="tons">Tons</Option>
@@ -2384,7 +3358,11 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, ca
                       </Form.Item>
                     </Col>
                     <Col xs={6} sm={6}>
-                      <Form.Item name="activeCellResidualUnit" label="Unit" initialValue="m³">
+                      <Form.Item
+                        name="activeCellResidualUnit"
+                        label="Unit"
+                        initialValue="m³"
+                      >
                         <Select placeholder="Select unit">
                           <Option value="m³">m³</Option>
                           <Option value="tons">Tons</Option>
@@ -2400,7 +3378,11 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, ca
                       </Form.Item>
                     </Col>
                     <Col xs={6} sm={6}>
-                      <Form.Item name="activeCellInertUnit" label="Unit" initialValue="m³">
+                      <Form.Item
+                        name="activeCellInertUnit"
+                        label="Unit"
+                        initialValue="m³"
+                      >
                         <Select placeholder="Select unit">
                           <Option value="m³">m³</Option>
                           <Option value="tons">Tons</Option>
@@ -2416,7 +3398,11 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, ca
                       </Form.Item>
                     </Col>
                     <Col xs={6} sm={6}>
-                      <Form.Item name="closedCellResidualUnit" label="Unit" initialValue="m³">
+                      <Form.Item
+                        name="closedCellResidualUnit"
+                        label="Unit"
+                        initialValue="m³"
+                      >
                         <Select placeholder="Select unit">
                           <Option value="m³">m³</Option>
                           <Option value="tons">Tons</Option>
@@ -2432,7 +3418,11 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, ca
                       </Form.Item>
                     </Col>
                     <Col xs={6} sm={6}>
-                      <Form.Item name="closedCellInertUnit" label="Unit" initialValue="m³">
+                      <Form.Item
+                        name="closedCellInertUnit"
+                        label="Unit"
+                        initialValue="m³"
+                      >
                         <Select placeholder="Select unit">
                           <Option value="m³">m³</Option>
                           <Option value="tons">Tons</Option>
@@ -2440,34 +3430,67 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, ca
                       </Form.Item>
                     </Col>
                     <Col xs={24} md={12}>
-                      <Card size="small" title="Active Cell Entries" style={{ borderRadius: 8, marginBottom: 8 }}>
+                      <Card
+                        size="small"
+                        title="Active Cell Entries"
+                        style={{ borderRadius: 8, marginBottom: 8 }}
+                      >
                         <Form.List name="activeCellEntries">
                           {(fields, { add, remove }) => (
                             <>
                               {fields.map(({ key, name, ...rest }) => (
                                 <Row gutter={8} key={key} align="middle">
                                   <Col xs={24} sm={8}>
-                                    <Form.Item {...rest} name={[name, "cellName"]} label="Cell Name">
+                                    <Form.Item
+                                      {...rest}
+                                      name={[name, "cellName"]}
+                                      label="Cell Name"
+                                    >
                                       <Input placeholder="Cell 1" />
                                     </Form.Item>
                                   </Col>
                                   <Col xs={24} sm={8}>
-                                    <Form.Item {...rest} name={[name, "wasteType"]} label="Waste Type">
-                                      <Select placeholder="Select type" allowClear>
-                                        <Option value="Residual">Residual</Option>
+                                    <Form.Item
+                                      {...rest}
+                                      name={[name, "wasteType"]}
+                                      label="Waste Type"
+                                    >
+                                      <Select
+                                        placeholder="Select type"
+                                        allowClear
+                                      >
+                                        <Option value="Residual">
+                                          Residual
+                                        </Option>
                                         <Option value="Inert">Inert</Option>
-                                        <Option value="Hazardous Waste">Hazardous Waste</Option>
-                                        <Option value="Treated Hazardous Waste">Treated Hazardous Waste</Option>
+                                        <Option value="Hazardous Waste">
+                                          Hazardous Waste
+                                        </Option>
+                                        <Option value="Treated Hazardous Waste">
+                                          Treated Hazardous Waste
+                                        </Option>
                                       </Select>
                                     </Form.Item>
                                   </Col>
                                   <Col xs={12} sm={4}>
-                                    <Form.Item {...rest} name={[name, "volume"]} label="Volume">
-                                      <InputNumber min={0} style={{ width: "100%" }} />
+                                    <Form.Item
+                                      {...rest}
+                                      name={[name, "volume"]}
+                                      label="Volume"
+                                    >
+                                      <InputNumber
+                                        min={0}
+                                        style={{ width: "100%" }}
+                                      />
                                     </Form.Item>
                                   </Col>
                                   <Col xs={8} sm={4}>
-                                    <Form.Item {...rest} name={[name, "unit"]} label="Unit" initialValue="m³">
+                                    <Form.Item
+                                      {...rest}
+                                      name={[name, "unit"]}
+                                      label="Unit"
+                                      initialValue="m³"
+                                    >
                                       <Select>
                                         <Option value="m³">m³</Option>
                                         <Option value="tons">tons</Option>
@@ -2475,11 +3498,22 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, ca
                                     </Form.Item>
                                   </Col>
                                   <Col xs={4} sm={2} style={{ paddingTop: 22 }}>
-                                    <Button type="text" danger icon={<DeleteOutlined />} onClick={() => remove(name)} />
+                                    <Button
+                                      type="text"
+                                      danger
+                                      icon={<DeleteOutlined />}
+                                      onClick={() => remove(name)}
+                                    />
                                   </Col>
                                 </Row>
                               ))}
-                              <Button type="dashed" block onClick={() => add({ wasteType: "Residual", unit: "m³" })}>
+                              <Button
+                                type="dashed"
+                                block
+                                onClick={() =>
+                                  add({ wasteType: "Residual", unit: "m³" })
+                                }
+                              >
                                 Add Active Cell Entry
                               </Button>
                             </>
@@ -2488,34 +3522,67 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, ca
                       </Card>
                     </Col>
                     <Col xs={24} md={12}>
-                      <Card size="small" title="Closed Cell Entries" style={{ borderRadius: 8, marginBottom: 8 }}>
+                      <Card
+                        size="small"
+                        title="Closed Cell Entries"
+                        style={{ borderRadius: 8, marginBottom: 8 }}
+                      >
                         <Form.List name="closedCellEntries">
                           {(fields, { add, remove }) => (
                             <>
                               {fields.map(({ key, name, ...rest }) => (
                                 <Row gutter={8} key={key} align="middle">
                                   <Col xs={24} sm={8}>
-                                    <Form.Item {...rest} name={[name, "cellName"]} label="Cell Name">
+                                    <Form.Item
+                                      {...rest}
+                                      name={[name, "cellName"]}
+                                      label="Cell Name"
+                                    >
                                       <Input placeholder="Cell 1" />
                                     </Form.Item>
                                   </Col>
                                   <Col xs={24} sm={8}>
-                                    <Form.Item {...rest} name={[name, "wasteType"]} label="Waste Type">
-                                      <Select placeholder="Select type" allowClear>
-                                        <Option value="Residual">Residual</Option>
+                                    <Form.Item
+                                      {...rest}
+                                      name={[name, "wasteType"]}
+                                      label="Waste Type"
+                                    >
+                                      <Select
+                                        placeholder="Select type"
+                                        allowClear
+                                      >
+                                        <Option value="Residual">
+                                          Residual
+                                        </Option>
                                         <Option value="Inert">Inert</Option>
-                                        <Option value="Hazardous Waste">Hazardous Waste</Option>
-                                        <Option value="Treated Hazardous Waste">Treated Hazardous Waste</Option>
+                                        <Option value="Hazardous Waste">
+                                          Hazardous Waste
+                                        </Option>
+                                        <Option value="Treated Hazardous Waste">
+                                          Treated Hazardous Waste
+                                        </Option>
                                       </Select>
                                     </Form.Item>
                                   </Col>
                                   <Col xs={12} sm={4}>
-                                    <Form.Item {...rest} name={[name, "volume"]} label="Volume">
-                                      <InputNumber min={0} style={{ width: "100%" }} />
+                                    <Form.Item
+                                      {...rest}
+                                      name={[name, "volume"]}
+                                      label="Volume"
+                                    >
+                                      <InputNumber
+                                        min={0}
+                                        style={{ width: "100%" }}
+                                      />
                                     </Form.Item>
                                   </Col>
                                   <Col xs={8} sm={4}>
-                                    <Form.Item {...rest} name={[name, "unit"]} label="Unit" initialValue="m³">
+                                    <Form.Item
+                                      {...rest}
+                                      name={[name, "unit"]}
+                                      label="Unit"
+                                      initialValue="m³"
+                                    >
                                       <Select>
                                         <Option value="m³">m³</Option>
                                         <Option value="tons">tons</Option>
@@ -2523,11 +3590,22 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, ca
                                     </Form.Item>
                                   </Col>
                                   <Col xs={4} sm={2} style={{ paddingTop: 22 }}>
-                                    <Button type="text" danger icon={<DeleteOutlined />} onClick={() => remove(name)} />
+                                    <Button
+                                      type="text"
+                                      danger
+                                      icon={<DeleteOutlined />}
+                                      onClick={() => remove(name)}
+                                    />
                                   </Col>
                                 </Row>
                               ))}
-                              <Button type="dashed" block onClick={() => add({ wasteType: "Residual", unit: "m³" })}>
+                              <Button
+                                type="dashed"
+                                block
+                                onClick={() =>
+                                  add({ wasteType: "Residual", unit: "m³" })
+                                }
+                              >
                                 Add Closed Cell Entry
                               </Button>
                             </>
@@ -2892,7 +3970,13 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, ca
         open={txnHistoryModal.open}
         onCancel={() => setTxnHistoryModal({ open: false, submissionId: null })}
         footer={
-          <Button type="primary" block onClick={() => setTxnHistoryModal({ open: false, submissionId: null })}>
+          <Button
+            type="primary"
+            block
+            onClick={() =>
+              setTxnHistoryModal({ open: false, submissionId: null })
+            }
+          >
             Close
           </Button>
         }
@@ -2902,21 +3986,62 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, ca
         destroyOnHidden
       >
         {/* Gradient header */}
-        <div style={{ background: `linear-gradient(135deg, #2e6dd1 0%, #531dab 100%)`, padding: "18px 24px", borderRadius: "8px 8px 0 0" }}>
+        <div
+          style={{
+            background: `linear-gradient(135deg, #2e6dd1 0%, #531dab 100%)`,
+            padding: "18px 24px",
+            borderRadius: "8px 8px 0 0",
+          }}
+        >
           <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-            <div style={{ width: 36, height: 36, borderRadius: 8, background: "rgba(255,255,255,0.15)", display: "flex", alignItems: "center", justifyContent: "center" }}>
+            <div
+              style={{
+                width: 36,
+                height: 36,
+                borderRadius: 8,
+                background: "rgba(255,255,255,0.15)",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+              }}
+            >
               <HistoryOutlined style={{ color: "#fff", fontSize: 18 }} />
             </div>
             <div>
-              <Text style={{ color: "#fff", fontSize: 16, fontWeight: 700, display: "block" }}>Transaction History</Text>
-              <Text style={{ color: "rgba(255,255,255,0.65)", fontSize: 12 }}>{txnHistoryModal.submissionId}</Text>
+              <Text
+                style={{
+                  color: "#fff",
+                  fontSize: 16,
+                  fontWeight: 700,
+                  display: "block",
+                }}
+              >
+                Transaction History
+              </Text>
+              <Text style={{ color: "rgba(255,255,255,0.65)", fontSize: 12 }}>
+                {txnHistoryModal.submissionId}
+              </Text>
             </div>
             {txnHistoryData.length > 0 && (
               <div style={{ marginLeft: "auto", textAlign: "right" }}>
-                <Text style={{ color: "rgba(255,255,255,0.55)", fontSize: 11, display: "block" }}>{txnHistoryData.length} event{txnHistoryData.length !== 1 ? "s" : ""}</Text>
+                <Text
+                  style={{
+                    color: "rgba(255,255,255,0.55)",
+                    fontSize: 11,
+                    display: "block",
+                  }}
+                >
+                  {txnHistoryData.length} event
+                  {txnHistoryData.length !== 1 ? "s" : ""}
+                </Text>
                 {txnHistoryData[0]?.createdAt && (
-                  <Text style={{ color: "rgba(255,255,255,0.4)", fontSize: 11 }}>
-                    {dayjs(txnHistoryData[txnHistoryData.length - 1]?.createdAt).format("MMM D")} → {dayjs(txnHistoryData[0]?.createdAt).format("MM/DD/YYYY")}
+                  <Text
+                    style={{ color: "rgba(255,255,255,0.4)", fontSize: 11 }}
+                  >
+                    {dayjs(
+                      txnHistoryData[txnHistoryData.length - 1]?.createdAt,
+                    ).format("MMM D")}{" "}
+                    → {dayjs(txnHistoryData[0]?.createdAt).format("MM/DD/YYYY")}
                   </Text>
                 )}
               </div>
@@ -2926,115 +4051,282 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, ca
 
         <div style={{ padding: "16px 20px" }}>
           {txnHistoryLoading ? (
-            <div style={{ textAlign: "center", padding: 40 }}><Spin /></div>
+            <div style={{ textAlign: "center", padding: 40 }}>
+              <Spin />
+            </div>
           ) : txnHistoryData.length === 0 ? (
             <Empty description="No transactions found" />
-          ) : (() => {
-            const getTxnMeta = (type) => {
-              const map = {
-                submission:            { color: "#1677ff", bg: "#f0f5ff", label: "Submission" },
-                resubmission:          { color: "#13c2c2", bg: "#e6fffb", label: "Resubmission" },
-                email_ack_sent:        { color: "#52c41a", bg: "#f6ffed", label: "Email Sent" },
-                email_ack_failed:      { color: "#ff4d4f", bg: "#fff1f0", label: "Email Failed" },
-                status_change:         { color: "#fa8c16", bg: "#fff7e6", label: "Status Change" },
-                revert_approved:       { color: "#fa541c", bg: "#fff2e8", label: "Reverted" },
-                baseline_update_request:{ color: "#faad14", bg: "#fffbe6", label: "Baseline Request" },
-                baseline_update_approved:{ color: "#52c41a", bg: "#f6ffed", label: "Baseline Approved" },
-                baseline_update:       { color: "#722ed1", bg: "#f9f0ff", label: "Baseline Update" },
-                baseline_delete:       { color: "#ff4d4f", bg: "#fff1f0", label: "Baseline Cleared" },
-                admin_edit:            { color: "#2f54eb", bg: "#f0f5ff", label: "Admin Edit" },
-                submission_edit_request:{ color: "#faad14", bg: "#fffbe6", label: "Edit Request" },
-                submission_edit_approved:{ color: "#52c41a", bg: "#f6ffed", label: "Edit Approved" },
-                submission_edit_rejected:{ color: "#ff4d4f", bg: "#fff1f0", label: "Edit Rejected" },
-                hauler_delete_request: { color: "#fa8c16", bg: "#fff7e6", label: "Hauler Delete Req." },
-                hauler_delete_approved:{ color: "#52c41a", bg: "#f6ffed", label: "Hauler Deleted" },
-                hauler_delete_rejected:{ color: "#ff4d4f", bg: "#fff1f0", label: "Hauler Delete Rej." },
-                deleted:               { color: "#ff4d4f", bg: "#fff1f0", label: "Deleted" },
+          ) : (
+            (() => {
+              const getTxnMeta = (type) => {
+                const map = {
+                  submission: {
+                    color: "#1677ff",
+                    bg: "#f0f5ff",
+                    label: "Submission",
+                  },
+                  resubmission: {
+                    color: "#13c2c2",
+                    bg: "#e6fffb",
+                    label: "Resubmission",
+                  },
+                  email_ack_sent: {
+                    color: "#52c41a",
+                    bg: "#f6ffed",
+                    label: "Email Sent",
+                  },
+                  email_ack_failed: {
+                    color: "#ff4d4f",
+                    bg: "#fff1f0",
+                    label: "Email Failed",
+                  },
+                  status_change: {
+                    color: "#fa8c16",
+                    bg: "#fff7e6",
+                    label: "Status Change",
+                  },
+                  revert_approved: {
+                    color: "#fa541c",
+                    bg: "#fff2e8",
+                    label: "Reverted",
+                  },
+                  baseline_update_request: {
+                    color: "#faad14",
+                    bg: "#fffbe6",
+                    label: "Baseline Request",
+                  },
+                  baseline_update_approved: {
+                    color: "#52c41a",
+                    bg: "#f6ffed",
+                    label: "Baseline Approved",
+                  },
+                  baseline_update: {
+                    color: "#722ed1",
+                    bg: "#f9f0ff",
+                    label: "Baseline Update",
+                  },
+                  baseline_delete: {
+                    color: "#ff4d4f",
+                    bg: "#fff1f0",
+                    label: "Baseline Cleared",
+                  },
+                  admin_edit: {
+                    color: "#2f54eb",
+                    bg: "#f0f5ff",
+                    label: "Admin Edit",
+                  },
+                  submission_edit_request: {
+                    color: "#faad14",
+                    bg: "#fffbe6",
+                    label: "Edit Request",
+                  },
+                  submission_edit_approved: {
+                    color: "#52c41a",
+                    bg: "#f6ffed",
+                    label: "Edit Approved",
+                  },
+                  submission_edit_rejected: {
+                    color: "#ff4d4f",
+                    bg: "#fff1f0",
+                    label: "Edit Rejected",
+                  },
+                  hauler_delete_request: {
+                    color: "#fa8c16",
+                    bg: "#fff7e6",
+                    label: "Hauler Delete Req.",
+                  },
+                  hauler_delete_approved: {
+                    color: "#52c41a",
+                    bg: "#f6ffed",
+                    label: "Hauler Deleted",
+                  },
+                  hauler_delete_rejected: {
+                    color: "#ff4d4f",
+                    bg: "#fff1f0",
+                    label: "Hauler Delete Rej.",
+                  },
+                  deleted: {
+                    color: "#ff4d4f",
+                    bg: "#fff1f0",
+                    label: "Deleted",
+                  },
+                };
+                return (
+                  map[type] || { color: "#8c8c8c", bg: "#f5f5f5", label: type }
+                );
               };
-              return map[type] || { color: "#8c8c8c", bg: "#f5f5f5", label: type };
-            };
-            return (
-              <Table
-                dataSource={[...txnHistoryData].reverse()}
-                rowKey={(t) => t._id}
-                size="small"
-                pagination={{ pageSize: 15, size: "small", showSizeChanger: true, showTotal: (t) => `${t} event(s)` }}
-                scroll={{ y: 480 }}
-                columns={[
-                  {
-                    title: "#",
-                    key: "idx",
-                    width: 40,
-                    render: (_, __, i) => (
-                      <div style={{ width: 24, height: 24, borderRadius: "50%", background: isDark ? "#262626" : "#f5f5f5", display: "flex", alignItems: "center", justifyContent: "center" }}>
-                        <Text type="secondary" style={{ fontSize: 11, lineHeight: 1 }}>{txnHistoryData.length - i}</Text>
-                      </div>
-                    ),
-                  },
-                  {
-                    title: "Event",
-                    dataIndex: "type",
-                    key: "type",
-                    width: 170,
-                    render: (v) => {
-                      const meta = getTxnMeta(v);
-                      return (
-                        <div style={{ background: meta.bg, border: `1px solid ${meta.color}22`, borderRadius: 6, padding: "3px 8px", display: "inline-block" }}>
-                          <Text style={{ fontSize: 11, color: meta.color, fontWeight: 600 }}>{meta.label}</Text>
-                        </div>
-                      );
-                    },
-                  },
-                  {
-                    title: "Details",
-                    key: "details",
-                    width: 360,
-                    onCell: () => ({ style: { maxWidth: 360, ...WRAP_CELL_STYLE } }),
-                    render: (_, t) => (
-                      <div style={WRAP_CELL_STYLE}>
-                        <Text style={{ fontSize: 12, display: "block", ...WRAP_CELL_STYLE }}>{t.description}</Text>
-                        {(t.meta?.comment || t.meta?.reason) && (
-                          <Text type="secondary" style={{ fontSize: 11, fontStyle: "italic", display: "block", marginTop: 2, ...WRAP_CELL_STYLE }}>
-                            &ldquo;{t.meta.comment || t.meta.reason}&rdquo;
+              return (
+                <Table
+                  dataSource={[...txnHistoryData].reverse()}
+                  rowKey={(t) => t._id}
+                  size="small"
+                  pagination={{
+                    pageSize: 15,
+                    size: "small",
+                    showSizeChanger: true,
+                    showTotal: (t) => `${t} event(s)`,
+                  }}
+                  scroll={{ y: 480 }}
+                  columns={[
+                    {
+                      title: "#",
+                      key: "idx",
+                      width: 40,
+                      render: (_, __, i) => (
+                        <div
+                          style={{
+                            width: 24,
+                            height: 24,
+                            borderRadius: "50%",
+                            background: isDark ? "#262626" : "#f5f5f5",
+                            display: "flex",
+                            alignItems: "center",
+                            justifyContent: "center",
+                          }}
+                        >
+                          <Text
+                            type="secondary"
+                            style={{ fontSize: 11, lineHeight: 1 }}
+                          >
+                            {txnHistoryData.length - i}
                           </Text>
-                        )}
-                      </div>
-                    ),
-                  },
-                  {
-                    title: "By",
-                    dataIndex: "performedBy",
-                    key: "by",
-                    width: 170,
-                    onCell: () => ({ style: { maxWidth: 170, ...WRAP_CELL_STYLE } }),
-                    render: (v) => {
-                      const displayName = v === "admin" ? "EMBR3 ESWMP Admin" : (v || "system");
-                      return (
-                      <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                        <div style={{ width: 22, height: 22, borderRadius: "50%", background: isDark ? "rgba(47,84,235,0.15)" : "#f0f5ff", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 10, color: ACCENT, fontWeight: 600, flexShrink: 0 }}>
-                          {displayName.charAt(0).toUpperCase()}
                         </div>
-                        <Text type="secondary" style={{ fontSize: 12, ...WRAP_CELL_STYLE }}>{displayName}</Text>
-                      </div>
-                    );
+                      ),
                     },
-                  },
-                  {
-                    title: "Date / Time",
-                    dataIndex: "createdAt",
-                    key: "date",
-                    width: 130,
-                    render: (v) => (
-                      <div>
-                        <Text style={{ fontSize: 12, display: "block" }}>{dayjs(v).format("MM/DD/YYYY")}</Text>
-                        <Text type="secondary" style={{ fontSize: 11 }}>{dayjs(v).format("h:mm A")}</Text>
-                      </div>
-                    ),
-                  },
-                ]}
-              />
-            );
-          })()}
+                    {
+                      title: "Event",
+                      dataIndex: "type",
+                      key: "type",
+                      width: 170,
+                      render: (v) => {
+                        const meta = getTxnMeta(v);
+                        return (
+                          <div
+                            style={{
+                              background: meta.bg,
+                              border: `1px solid ${meta.color}22`,
+                              borderRadius: 6,
+                              padding: "3px 8px",
+                              display: "inline-block",
+                            }}
+                          >
+                            <Text
+                              style={{
+                                fontSize: 11,
+                                color: meta.color,
+                                fontWeight: 600,
+                              }}
+                            >
+                              {meta.label}
+                            </Text>
+                          </div>
+                        );
+                      },
+                    },
+                    {
+                      title: "Details",
+                      key: "details",
+                      width: 360,
+                      onCell: () => ({
+                        style: { maxWidth: 360, ...WRAP_CELL_STYLE },
+                      }),
+                      render: (_, t) => (
+                        <div style={WRAP_CELL_STYLE}>
+                          <Text
+                            style={{
+                              fontSize: 12,
+                              display: "block",
+                              ...WRAP_CELL_STYLE,
+                            }}
+                          >
+                            {t.description}
+                          </Text>
+                          {(t.meta?.comment || t.meta?.reason) && (
+                            <Text
+                              type="secondary"
+                              style={{
+                                fontSize: 11,
+                                fontStyle: "italic",
+                                display: "block",
+                                marginTop: 2,
+                                ...WRAP_CELL_STYLE,
+                              }}
+                            >
+                              &ldquo;{t.meta.comment || t.meta.reason}&rdquo;
+                            </Text>
+                          )}
+                        </div>
+                      ),
+                    },
+                    {
+                      title: "By",
+                      dataIndex: "performedBy",
+                      key: "by",
+                      width: 170,
+                      onCell: () => ({
+                        style: { maxWidth: 170, ...WRAP_CELL_STYLE },
+                      }),
+                      render: (v) => {
+                        const displayName =
+                          v === "admin" ? "EMBR3 ESWMP Admin" : v || "system";
+                        return (
+                          <div
+                            style={{
+                              display: "flex",
+                              alignItems: "center",
+                              gap: 6,
+                            }}
+                          >
+                            <div
+                              style={{
+                                width: 22,
+                                height: 22,
+                                borderRadius: "50%",
+                                background: isDark
+                                  ? "rgba(47,84,235,0.15)"
+                                  : "#f0f5ff",
+                                display: "flex",
+                                alignItems: "center",
+                                justifyContent: "center",
+                                fontSize: 10,
+                                color: ACCENT,
+                                fontWeight: 600,
+                                flexShrink: 0,
+                              }}
+                            >
+                              {displayName.charAt(0).toUpperCase()}
+                            </div>
+                            <Text
+                              type="secondary"
+                              style={{ fontSize: 12, ...WRAP_CELL_STYLE }}
+                            >
+                              {displayName}
+                            </Text>
+                          </div>
+                        );
+                      },
+                    },
+                    {
+                      title: "Date / Time",
+                      dataIndex: "createdAt",
+                      key: "date",
+                      width: 130,
+                      render: (v) => (
+                        <div>
+                          <Text style={{ fontSize: 12, display: "block" }}>
+                            {dayjs(v).format("MM/DD/YYYY")}
+                          </Text>
+                          <Text type="secondary" style={{ fontSize: 11 }}>
+                            {dayjs(v).format("h:mm A")}
+                          </Text>
+                        </div>
+                      ),
+                    },
+                  ]}
+                />
+              );
+            })()
+          )}
         </div>
       </Modal>
 
@@ -3079,7 +4371,9 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, ca
             <div
               style={{
                 background: isDark ? "rgba(250,173,20,0.1)" : "#fff7e6",
-                border: isDark ? "1px solid rgba(250,173,20,0.3)" : "1px solid #ffe7ba",
+                border: isDark
+                  ? "1px solid rgba(250,173,20,0.3)"
+                  : "1px solid #ffe7ba",
                 borderRadius: 8,
                 padding: "10px 14px",
                 marginBottom: 16,
@@ -3089,7 +4383,12 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, ca
                 <ExclamationCircleOutlined
                   style={{ color: "#fa8c16", marginTop: 2 }}
                 />
-                <Text style={{ fontSize: 12, color: isDark ? "#d4a94b" : "#8c6d1f" }}>
+                <Text
+                  style={{
+                    fontSize: 12,
+                    color: isDark ? "#d4a94b" : "#8c6d1f",
+                  }}
+                >
                   This will revert the submission back to the portal user. They
                   will be notified via email and can update and resubmit the
                   entry.
@@ -3121,7 +4420,9 @@ export default function SubmissionSettings({canEdit = true, canDelete = true, ca
                       ID No.
                     </Text>
                     <Text strong style={{ fontSize: 13 }}>
-                      {revertModal.record.idNo || "—"}
+                      {revertModal.record.isGroupedSubmission
+                        ? `${revertModal.record.entryCount || 0} grouped entries`
+                        : revertModal.record.idNo || "—"}
                     </Text>
                   </div>
                 </Col>

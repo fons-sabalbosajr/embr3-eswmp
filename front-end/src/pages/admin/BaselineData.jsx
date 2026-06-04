@@ -1,4 +1,4 @@
-import { useCallback, useState, useEffect } from "react";
+import { useCallback, useState, useEffect, useMemo } from "react";
 import {
   Table,
   Tag,
@@ -30,6 +30,7 @@ import {
   PlusOutlined,
   DeleteOutlined,
   LockOutlined,
+  UnlockOutlined,
   ReloadOutlined,
   AppstoreOutlined,
   TeamOutlined,
@@ -39,6 +40,7 @@ import api from "../../api";
 import dayjs from "dayjs";
 import { fetchWithCache, invalidateCache } from "../../utils/pageCache";
 import { getSocket } from "../../utils/socket";
+import { buildFilters, rowMatchesSearch, searchableSelectProps } from "./shared/tableFilters";
 
 const { Text } = Typography;
 const UNIT_OPTIONS = ["m³", "tons"];
@@ -275,9 +277,12 @@ export default function BaselineData({
   isDark,
   canEdit = false,
   canDelete = false,
+  canOverrideUnlock = false,
 }) {
   const [baselines, setBaselines] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [search, setSearch] = useState("");
+  const [lockFilter, setLockFilter] = useState("all");
   const [detailOpen, setDetailOpen] = useState(false);
   const [selectedRecord, setSelectedRecord] = useState(null);
   const [editOpen, setEditOpen] = useState(false);
@@ -326,6 +331,29 @@ export default function BaselineData({
     val != null
       ? `${Number(val).toLocaleString()} ${normalizeUnit(unit)}`
       : "—";
+
+  const getLockState = useCallback((record) => {
+    if (record?.baselineUpdateApproved) return "unlocked";
+    if (record?.baselineUpdateRequested) return "requested";
+    return "locked";
+  }, []);
+
+  const filteredBaselines = useMemo(() => {
+    return baselines.filter((record) => {
+      const matchesLock = lockFilter === "all" || getLockState(record) === lockFilter;
+      if (!matchesLock) return false;
+      return rowMatchesSearch(record, search, [
+        "slfName",
+        "lguCompanyName",
+        "submittedBy",
+        "companyType",
+        (item) => getLockState(item),
+      ]);
+    });
+  }, [baselines, getLockState, lockFilter, search]);
+
+  const slfFilters = useMemo(() => buildFilters(baselines, "slfName"), [baselines]);
+  const submitterFilters = useMemo(() => buildFilters(baselines, "submittedBy"), [baselines]);
 
   const openEdit = (record) => {
     const baselineUnit = getBaselineUnit(record);
@@ -462,13 +490,15 @@ export default function BaselineData({
     }
   };
 
-  const handleApproveBaselineUpdate = async (slfName) => {
+  const handleApproveBaselineUpdate = async (slfName, { isOverride = false } = {}) => {
     const result = await Swal.fire({
-      title: "Approve Baseline Update?",
-      text: `This will unlock baseline data for "${slfName}" so the portal user can make changes.`,
+      title: isOverride ? "Unlock Baseline?" : "Approve Baseline Update?",
+      text: isOverride
+        ? `This will unlock baseline data for "${slfName}" even without a portal request.`
+        : `This will unlock baseline data for "${slfName}" so the portal user can make changes.`,
       icon: "question",
       showCancelButton: true,
-      confirmButtonText: "Approve",
+      confirmButtonText: isOverride ? "Unlock" : "Approve",
       confirmButtonColor: "#52c41a",
     });
     if (!result.isConfirmed) return;
@@ -637,6 +667,9 @@ export default function BaselineData({
       title: "SLF Name",
       dataIndex: "slfName",
       key: "slfName",
+      filters: slfFilters,
+      filterSearch: true,
+      onFilter: (value, record) => String(record.slfName || "") === String(value || ""),
       render: (v, r) => (
         <div>
           <Text strong style={{ fontSize: 13 }}>
@@ -653,12 +686,14 @@ export default function BaselineData({
       dataIndex: "lastUpdated",
       key: "lastUpdated",
       width: 120,
+      sorter: (a, b) => new Date(a.lastUpdated || 0) - new Date(b.lastUpdated || 0),
       render: (v) => (v ? dayjs(v).format("MM/DD/YYYY") : "—"),
     },
     {
       title: "Total Volume",
       key: "volume",
       width: 130,
+      sorter: (a, b) => Number(a.totalVolumeAccepted || 0) - Number(b.totalVolumeAccepted || 0),
       render: (_, r) => (
         <Text strong>
           {fmtVol(r.totalVolumeAccepted, r.totalVolumeAcceptedUnit)}
@@ -699,6 +734,12 @@ export default function BaselineData({
       title: "Status",
       key: "status",
       width: 160,
+      filters: [
+        { text: "Locked", value: "locked" },
+        { text: "Update Requested", value: "requested" },
+        { text: "Edit Unlocked", value: "unlocked" },
+      ],
+      onFilter: (value, record) => getLockState(record) === value,
       render: (_, r) => (
         <Space size={4} wrap>
           {r.baselineUpdateRequested && (
@@ -758,6 +799,19 @@ export default function BaselineData({
                 />
               </Tooltip>
             </>
+          )}
+          {canOverrideUnlock && !r.baselineUpdateRequested && !r.baselineUpdateApproved && (
+            <Tooltip title="Unlock Baseline">
+              <Button
+                size="small"
+                type="text"
+                icon={<UnlockOutlined />}
+                style={{ color: GREEN }}
+                onClick={() =>
+                  handleApproveBaselineUpdate(r.slfName, { isOverride: true })
+                }
+              />
+            </Tooltip>
           )}
           {r.baselineUpdateApproved && (
             <Tooltip title="Re-lock Baseline">
@@ -1003,6 +1057,8 @@ export default function BaselineData({
           justifyContent: "space-between",
           alignItems: "center",
           marginBottom: 16,
+          gap: 12,
+          flexWrap: "wrap",
         }}
       >
         <Space align="center">
@@ -1010,26 +1066,47 @@ export default function BaselineData({
           <Text strong style={{ fontSize: 15 }}>
             Company Baseline Data
           </Text>
-          <Badge count={baselines.length} style={{ backgroundColor: PURPLE }} />
+          <Badge count={filteredBaselines.length} style={{ backgroundColor: PURPLE }} />
         </Space>
-        <Button
-          type="text"
-          size="small"
-          icon={<ReloadOutlined spin={loading} />}
-          onClick={() => fetchBaselines({ force: true })}
-        >
-          Refresh
-        </Button>
+        <Space wrap>
+          <Input
+            allowClear
+            placeholder="Search SLF, submitter, or status"
+            value={search}
+            onChange={(event) => setSearch(event.target.value)}
+            style={{ width: 280 }}
+          />
+          <Select
+            value={lockFilter}
+            onChange={setLockFilter}
+            style={{ width: 170 }}
+            {...searchableSelectProps}
+            options={[
+              { label: "All States", value: "all" },
+              { label: "Locked", value: "locked" },
+              { label: "Update Requested", value: "requested" },
+              { label: "Edit Unlocked", value: "unlocked" },
+            ]}
+          />
+          <Button
+            type="text"
+            size="small"
+            icon={<ReloadOutlined spin={loading} />}
+            onClick={() => fetchBaselines({ force: true })}
+          >
+            Refresh
+          </Button>
+        </Space>
       </div>
 
-      {baselines.length === 0 && !loading ? (
+      {filteredBaselines.length === 0 && !loading ? (
         <Empty
           description="No baseline data available yet."
           image={Empty.PRESENTED_IMAGE_SIMPLE}
         />
       ) : (
         <Table
-          dataSource={baselines}
+          dataSource={filteredBaselines}
           rowKey="_id"
           columns={tableColumns}
           size="small"
