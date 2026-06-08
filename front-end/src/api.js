@@ -1,5 +1,6 @@
 import axios from "axios";
 import secureStorage from "./utils/secureStorage";
+import { getAdminDisplayName } from "./utils/adminIdentity";
 
 const api = axios.create({
   baseURL: "/eswm-pipeline/api",
@@ -32,7 +33,7 @@ api.interceptors.request.use((config) => {
     }
   }
   const adminUser = secureStorage.getJSON("user") || {};
-  const adminName = [adminUser.firstName, adminUser.lastName].filter(Boolean).join(" ").trim();
+  const adminName = getAdminDisplayName(adminUser);
   if (adminName || adminUser.email || adminUser.username) {
     config.headers["X-User-Name"] = adminName || adminUser.username || adminUser.email;
     config.headers["X-User-Email"] = adminUser.email || "";

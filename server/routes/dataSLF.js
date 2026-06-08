@@ -181,6 +181,119 @@ function hasBaselineData(entry) {
   );
 }
 
+function normalizeUnit(unit) {
+  return String(unit || "m³").replace("m3", "m³");
+}
+
+function sanitizeClient(client) {
+  if (typeof client === "string") {
+    return {
+      clientName: client.trim(),
+      clientType: "Private",
+      region: "",
+      regionName: "",
+      province: "",
+      provinceName: "",
+      municipality: "",
+      municipalityName: "",
+    };
+  }
+  if (!client || typeof client !== "object") return null;
+  return {
+    clientName: String(client.clientName || "").trim(),
+    clientType: String(client.clientType || "Private").trim() || "Private",
+    region: String(client.region || "").trim(),
+    regionName: String(client.regionName || "").trim(),
+    province: String(client.province || "").trim(),
+    provinceName: String(client.provinceName || "").trim(),
+    municipality: String(client.municipality || "").trim(),
+    municipalityName: String(client.municipalityName || "").trim(),
+  };
+}
+
+function sanitizeVehicle(vehicle, fallbackUnit = "m³") {
+  if (!vehicle || typeof vehicle !== "object") return null;
+  return {
+    plateNumber: String(vehicle.plateNumber || vehicle.plateNo || vehicle.plate || "").trim(),
+    vehicleType: String(vehicle.vehicleType || vehicle.type || "").trim(),
+    capacity:
+      vehicle.capacity == null || Number.isNaN(Number(vehicle.capacity))
+        ? null
+        : Number(vehicle.capacity),
+    capacityUnit: normalizeUnit(vehicle.capacityUnit || vehicle.truckCapacityUnit || fallbackUnit),
+    selectedClients: Array.isArray(vehicle.selectedClients)
+      ? vehicle.selectedClients.map(sanitizeClient).filter(Boolean)
+      : [],
+  };
+}
+
+function sanitizeAccreditedHaulers(haulers = [], fallbackUnit = "m³") {
+  if (!Array.isArray(haulers)) return [];
+  return haulers.map((hauler) => {
+    const vehicles = Array.isArray(hauler?.vehicles)
+      ? hauler.vehicles.map((vehicle) => sanitizeVehicle(vehicle, fallbackUnit)).filter(Boolean)
+      : [];
+    const primaryVehicle = vehicles[0] || sanitizeVehicle(hauler, fallbackUnit) || {};
+    return {
+      haulerName: String(hauler?.haulerName || hauler?.name || "").trim(),
+      numberOfTrucks: Math.max(Number(hauler?.numberOfTrucks || 0), vehicles.length) || null,
+      officeAddress: String(hauler?.officeAddress || "").trim(),
+      plateNumber: primaryVehicle.plateNumber || "",
+      vehicleType: primaryVehicle.vehicleType || "",
+      capacity: primaryVehicle.capacity ?? null,
+      capacityUnit: normalizeUnit(primaryVehicle.capacityUnit || fallbackUnit),
+      vehicles,
+      privateSectorClients: Array.isArray(hauler?.privateSectorClients)
+        ? hauler.privateSectorClients.map(sanitizeClient).filter(Boolean)
+        : [],
+    };
+  });
+}
+
+async function findMatchingBaselineOnlyIds({ slfName, slfGenerator, lguCompanyName }) {
+  const namesToMatch = [...new Set([slfName, lguCompanyName].filter(Boolean))];
+  const baseFilter = {
+    $or: [{ trucks: { $exists: false } }, { trucks: { $size: 0 } }],
+  };
+  const directOr = [];
+
+  if (slfGenerator && mongoose.Types.ObjectId.isValid(String(slfGenerator))) {
+    directOr.push({ slfGenerator });
+  }
+  namesToMatch.forEach((name) => {
+    directOr.push({ slfName: name });
+    directOr.push({ lguCompanyName: name });
+  });
+
+  let candidates = [];
+  if (directOr.length > 0) {
+    candidates = await DataSLF.find({ $and: [baseFilter, { $or: directOr }] })
+      .select("_id slfGenerator slfName lguCompanyName")
+      .lean();
+  }
+
+  let matches = candidates.filter((item) => {
+    if (slfGenerator && String(item.slfGenerator || "") === String(slfGenerator)) {
+      return true;
+    }
+    return namesToMatch.some((name) => matchesBaselineName(item, name));
+  });
+
+  if (matches.length === 0 && namesToMatch.length > 0) {
+    const fallbackCandidates = await DataSLF.find(baseFilter)
+      .select("_id slfGenerator slfName lguCompanyName")
+      .lean();
+    matches = fallbackCandidates.filter((item) => {
+      if (slfGenerator && String(item.slfGenerator || "") === String(slfGenerator)) {
+        return true;
+      }
+      return namesToMatch.some((name) => matchesBaselineName(item, name));
+    });
+  }
+
+  return [...new Set(matches.map((item) => String(item._id)).filter(Boolean))];
+}
+
 async function ensurePortalAccountCanSubmit(email) {
   const normalizedEmail = String(email || "").trim().toLowerCase();
   if (!normalizedEmail) return null;
@@ -2131,19 +2244,37 @@ router.patch("/portal-save-baseline/:slfName", async (req, res) => {
     if (!slfName) return res.status(400).json({ message: "slfName is required" });
     await ensurePortalAccountCanSubmit(submittedBy);
 
-    // Broad filter — match any DataSLF entry for this SLF regardless of existing baseline data
-    const filter = {
-      $or: [{ slfName }, { lguCompanyName: slfName }],
-    };
-    const baselineOnlyFilter = {
-      $and: [
-        filter,
-        { $or: [{ trucks: { $exists: false } }, { trucks: { $size: 0 } }] },
-      ],
-    };
+    let genId = slfGenerator || null;
+    let facilityLgu = lguCompanyName || slfName;
+    let facilityType = companyType || "LGU";
+
+    if (!genId) {
+      const exactSlfName = new RegExp(`^${escapeRegExp(slfName)}$`, "i");
+      const exactCompanyName = lguCompanyName
+        ? new RegExp(`^${escapeRegExp(lguCompanyName)}$`, "i")
+        : null;
+      const facility = await SlfFacility.findOne({
+        $or: [
+          { lgu: exactSlfName },
+          ...(exactCompanyName ? [{ lgu: exactCompanyName }] : []),
+        ],
+      }).sort({ dataYear: -1 });
+      if (facility) {
+        genId = facility._id;
+        facilityLgu = lguCompanyName || facility.lgu || slfName;
+        facilityType = companyType || ((facility.ownership || "").toLowerCase().includes("private") ? "Private" : "LGU");
+      }
+    }
+
+    const baselineOnlyIds = await findMatchingBaselineOnlyIds({
+      slfName,
+      slfGenerator: genId,
+      lguCompanyName,
+    });
 
     const updateFields = {
       slfName,
+      ...(genId ? { slfGenerator: genId } : {}),
       baselineUpdateApproved: false,
       baselineUpdateRequested: false,
       baselineUpdateApprovedAt: null,
@@ -2166,35 +2297,21 @@ router.patch("/portal-save-baseline/:slfName", async (req, res) => {
       closedCellInertVolume, closedCellInertUnit,
       closedCellHazardousVolume, closedCellHazardousUnit,
       activeCellEntries, closedCellEntries,
-      accreditedHaulers,
+      accreditedHaulers: accreditedHaulers
+        ? sanitizeAccreditedHaulers(accreditedHaulers, baselineUnit || totalVolumeAcceptedUnit || "m³")
+        : accreditedHaulers,
       acceptsHazardousWaste,
     };
     for (const [k, v] of Object.entries(fieldMap)) {
       if (v !== undefined) updateFields[k] = v;
     }
 
-    const updateResult = await DataSLF.updateMany(baselineOnlyFilter, { $set: updateFields });
+    const updateResult = baselineOnlyIds.length > 0
+      ? await DataSLF.updateMany({ _id: { $in: baselineOnlyIds } }, { $set: updateFields })
+      : { matchedCount: 0 };
 
     // If no existing records exist for this SLF, create a baseline-only record
     if (updateResult.matchedCount === 0) {
-      // Resolve slfGenerator from SlfFacility if ID not provided
-      let genId = slfGenerator || null;
-      let facilityLgu = lguCompanyName || slfName;
-      let facilityType = companyType || "LGU";
-
-      if (!genId) {
-        const facility = await SlfFacility.findOne({
-          $or: [
-            { lgu: { $regex: new RegExp(slfName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i") } },
-          ],
-        }).sort({ dataYear: -1 });
-        if (facility) {
-          genId = facility._id;
-          facilityLgu = lguCompanyName || facility.lgu || slfName;
-          facilityType = companyType || ((facility.ownership || "").toLowerCase().includes("private") ? "Private" : "LGU");
-        }
-      }
-
       const provCode = getProvinceCode("");
       const typeCode = facilityType === "Private" ? "PVT" : "LGU";
       const pattern = new RegExp(`^SLF-${typeCode}-${provCode}-`);
@@ -2225,7 +2342,20 @@ router.patch("/portal-save-baseline/:slfName", async (req, res) => {
       await newDoc.save();
     }
 
-    const latest = await DataSLF.findOne(baselineOnlyFilter).setOptions({ includeHiddenYears: true }).sort({ createdAt: -1 });
+    const latest = baselineOnlyIds.length > 0
+      ? await DataSLF.findOne({ _id: { $in: baselineOnlyIds } })
+          .setOptions({ includeHiddenYears: true })
+          .sort({ updatedAt: -1, createdAt: -1 })
+      : await DataSLF.findOne({
+          $and: [
+            { $or: [{ trucks: { $exists: false } }, { trucks: { $size: 0 } }] },
+            ...(genId && mongoose.Types.ObjectId.isValid(String(genId))
+              ? [{ slfGenerator: genId }]
+              : [{ slfName }]),
+          ],
+        })
+          .setOptions({ includeHiddenYears: true })
+          .sort({ updatedAt: -1, createdAt: -1 });
 
     // Log transaction
     await Transaction.create({

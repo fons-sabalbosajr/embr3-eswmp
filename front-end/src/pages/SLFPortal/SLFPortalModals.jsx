@@ -169,6 +169,20 @@ export default function SLFPortalModals({
   );
   const messageUnreadCount = portalNotificationCounts.messages || 0;
   const supportUnreadCount = portalNotificationCounts.support || 0;
+  const uploadClientOptions = Array.from(
+    new Map(
+      (haulers || [])
+        .flatMap((hauler) => hauler.privateSectorClients || [])
+        .map((client, index) => {
+          const name = typeof client === "string" ? client : client?.clientName;
+          const trimmedName = String(name || "").trim();
+          return trimmedName
+            ? [trimmedName.toLowerCase(), { label: trimmedName, value: trimmedName, key: trimmedName || index }]
+            : null;
+        })
+        .filter(Boolean),
+    ).values(),
+  );
 
   const requestCredentialCode = async () => {
     setCredentialLoading(true);
@@ -317,7 +331,6 @@ export default function SLFPortalModals({
         width={1100}
       >
         <Collapse
-          defaultActiveKey={["basic", "vehicle", "clients"]}
           bordered={false}
           expandIconPlacement="end"
           style={{ background: "transparent" }}
@@ -1625,7 +1638,6 @@ export default function SLFPortalModals({
                   </Row>
 
                   <Collapse
-                    defaultActiveKey={["company", "transport"]}
                     bordered={false}
                     size="small"
                     style={{ background: "transparent" }}
@@ -2310,13 +2322,6 @@ export default function SLFPortalModals({
           </div>
         )}
         <Collapse
-          defaultActiveKey={[
-            "company",
-            "baseline",
-            "disposal",
-            "haulers",
-            "transport",
-          ]}
           bordered={false}
           expandIconPlacement="end"
           style={{ background: "transparent" }}
@@ -3207,7 +3212,7 @@ export default function SLFPortalModals({
         }
         okButtonProps={{ className: "slf-primary-btn" }}
         cancelText="Cancel"
-        width={600}
+        width={1000}
         destroyOnHidden
       >
         {uploadGuideType === "hauler" ? (
@@ -3222,6 +3227,8 @@ export default function SLFPortalModals({
             <Table
               size="small"
               pagination={false}
+              tableLayout="fixed"
+              style={{ width: "100%" }}
               dataSource={[
                 {
                   col: "Hauler Name",
@@ -3253,19 +3260,54 @@ export default function SLFPortalModals({
                   desc: "Vehicle capacity in m³ or tons",
                   required: false,
                 },
+                {
+                  col: "Clients",
+                  desc: "Comma-separated list of private sector clients served by this hauler (e.g. Acme Corp, XYZ Inc)",
+                  required: false,
+                },
               ]}
               columns={[
                 {
                   title: "Column Header",
                   dataIndex: "col",
-                  width: 180,
-                  render: (v) => <Text code>{v}</Text>,
+                  width: 150,
+                  render: (v) => (
+                    <Text
+                      code
+                      style={{
+                        whiteSpace: "normal",
+                        overflowWrap: "anywhere",
+                        wordBreak: "break-word",
+                      }}
+                    >
+                      {v}
+                    </Text>
+                  ),
+                  onCell: () => ({
+                    style: {
+                      whiteSpace: "normal",
+                      overflowWrap: "anywhere",
+                      wordBreak: "break-word",
+                      verticalAlign: "top",
+                    },
+                  }),
                 },
-                { title: "Description", dataIndex: "desc" },
+                {
+                  title: "Description",
+                  dataIndex: "desc",
+                  onCell: () => ({
+                    style: {
+                      whiteSpace: "normal",
+                      overflowWrap: "anywhere",
+                      wordBreak: "break-word",
+                      verticalAlign: "top",
+                    },
+                  }),
+                },
                 {
                   title: "Required",
                   dataIndex: "required",
-                  width: 80,
+                  width: 88,
                   align: "center",
                   render: (v) =>
                     v ? <Tag color="red">Yes</Tag> : <Tag>No</Tag>,
@@ -3286,8 +3328,9 @@ export default function SLFPortalModals({
                 <InfoCircleOutlined
                   style={{ color: "#faad14", marginRight: 6 }}
                 />
-                Each row represents one vehicle entry under a hauler. Rows
-                sharing the same Hauler Name will be grouped.
+                Each row represents one vehicle entry under a hauler. Rows sharing the same
+                Hauler Name will be grouped. For the <Text code>Clients</Text> column,
+                separate multiple client names with commas.
               </Text>
             </div>
           </div>
@@ -3445,12 +3488,49 @@ export default function SLFPortalModals({
                     }
                     style={{ width: "100%" }}
                   />
+                ) : col.dataIndex === "privateSectorClients" ? (
+                  <Select
+                    mode="tags"
+                    size="small"
+                    value={Array.isArray(text) ? text : []}
+                    onChange={(value) =>
+                      updateUploadCell(record.key, col.dataIndex, value)
+                    }
+                    options={Array.from(
+                      new Map(
+                        [
+                          ...uploadClientOptions,
+                          ...((Array.isArray(text) ? text : [])
+                            .map((clientName) => {
+                              const trimmedName = String(clientName || "").trim();
+                              return trimmedName
+                                ? [trimmedName.toLowerCase(), { label: trimmedName, value: trimmedName }]
+                                : null;
+                            })
+                            .filter(Boolean)),
+                        ],
+                      ).values(),
+                    )}
+                    placeholder="Select encoded clients"
+                    style={{ width: "100%" }}
+                    allowClear
+                    showSearch
+                    optionFilterProp="label"
+                    tokenSeparators={[","]}
+                    notFoundContent="Type and press Enter to add a new client"
+                    maxTagCount="responsive"
+                  />
                 ) : (
                   <Input
                     size="small"
                     value={Array.isArray(text) ? text.join(", ") : text ?? ""}
                     onChange={(e) =>
                       updateUploadCell(record.key, col.dataIndex, e.target.value)
+                    }
+                    placeholder={
+                      col.dataIndex === "privateSectorClients"
+                        ? "Comma-separated clients (optional)"
+                        : undefined
                     }
                     style={{
                       border: "none",

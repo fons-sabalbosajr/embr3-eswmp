@@ -31,6 +31,7 @@ import dayjs from "dayjs";
 import api from "../../api";
 import { fetchWithCache, invalidateCache } from "../../utils/pageCache";
 import { getSocket } from "../../utils/socket";
+import { rowMatchesSearch } from "./shared/tableFilters";
 
 const { Text, Title } = Typography;
 const CACHE_KEY = "cell-waste-placement-cache";
@@ -199,7 +200,22 @@ export default function CellWastePlacement({ canEdit = true }) {
     return records.filter((record) => (record.trucks || []).some((truck) => Number(truck.actualVolume || 0) > 0));
   }, [records]);
 
-  const selected = submissions.find((record) => record._id === selectedId) || submissions[0] || null;
+  const filteredSubmissions = useMemo(() => {
+    if (!search.trim()) return submissions;
+    return submissions.filter((record) =>
+      rowMatchesSearch(record, search, [
+        "idNo",
+        "submissionId",
+        "lguCompanyName",
+        "companyType",
+        "submittedBy",
+        (item) => getFacilityName(item),
+        (item) => (item.createdAt ? dayjs(item.createdAt).format("MM/DD/YYYY") : ""),
+      ]),
+    );
+  }, [search, submissions]);
+
+  const selected = filteredSubmissions.find((record) => record._id === selectedId) || filteredSubmissions[0] || null;
   const facility = selected?.slfGenerator || {};
   const baselineMap = useMemo(() => {
     const map = new Map();
@@ -390,7 +406,7 @@ export default function CellWastePlacement({ canEdit = true }) {
             <List
               size="small"
               loading={loading}
-              dataSource={submissions}
+                dataSource={filteredSubmissions}
               locale={{ emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No submissions with truck volume" /> }}
               style={{ maxHeight: 640, overflow: "auto" }}
               renderItem={(record) => (

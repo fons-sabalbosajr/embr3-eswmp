@@ -87,6 +87,7 @@ import Swal from "sweetalert2";
 import api from "../../api";
 import { exportToExcel } from "../../utils/exportExcel";
 import secureStorage from "../../utils/secureStorage";
+import { getAdminDisplayName } from "../../utils/adminIdentity";
 import { fetchWithCache, invalidateCache } from "../../utils/pageCache";
 import { useDataRef } from "../../utils/dataRef";
 import dayjs from "dayjs";
@@ -244,7 +245,7 @@ const isCompletedCellStatus = (status) =>
 const getUploadHeaders = () => {
   const token = secureStorage.get("token");
   const user = secureStorage.getJSON("user") || {};
-  const userName = [user.firstName, user.lastName].filter(Boolean).join(" ").trim();
+  const userName = getAdminDisplayName(user);
   return {
     ...(token ? { Authorization: `Bearer ${token}` } : {}),
     ...(userName || user.username || user.email

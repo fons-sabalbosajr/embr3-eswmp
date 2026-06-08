@@ -115,6 +115,7 @@ const NotificationManagement = lazy(() => import("./admin/NotificationManagement
 const PortalUsers = lazy(() => import("./admin/PortalUsers"));
 const Messaging = lazy(() => import("./admin/Messaging"));
 import api from "../api";
+import { getAdminDisplayName } from "../utils/adminIdentity";
 import secureStorage from "../utils/secureStorage";
 import { DataRefProvider } from "../utils/dataRef";
 import embLogo from "../assets/emblogo.svg";
@@ -1563,7 +1564,7 @@ export default function AdminHome() {
               />
               <div style={{ marginTop: 12 }}>
                 <Title level={4} style={{ margin: 0 }}>
-                  {user.firstName} {user.lastName}
+                  {getAdminDisplayName(user) || "Admin"}
                 </Title>
                 <Tag
                   color={

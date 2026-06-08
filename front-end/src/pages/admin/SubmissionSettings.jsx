@@ -49,6 +49,7 @@ import { exportToExcel } from "../../utils/exportExcel";
 import Swal from "sweetalert2";
 import api from "../../api";
 import secureStorage from "../../utils/secureStorage";
+import { getAdminDisplayName } from "../../utils/adminIdentity";
 import { fetchWithCache, invalidateCache } from "../../utils/pageCache";
 import { getSocket } from "../../utils/socket";
 import dayjs from "dayjs";
@@ -136,10 +137,7 @@ export default function SubmissionSettings({
   const [repairingXX, setRepairingXX] = useState(false);
   const currentUser = secureStorage.getJSON("user") || {};
   const currentActorName =
-    [currentUser.firstName, currentUser.lastName]
-      .filter(Boolean)
-      .join(" ")
-      .trim() ||
+    getAdminDisplayName(currentUser) ||
     currentUser.username ||
     currentUser.email ||
     "admin";

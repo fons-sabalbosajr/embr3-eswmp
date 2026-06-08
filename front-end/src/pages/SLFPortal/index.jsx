@@ -194,6 +194,21 @@ const normalizeClientRecord = (client, index = 0) => {
   return { key: client?.key ?? client?._id ?? index, ...(client || {}) };
 };
 
+const cleanClientForSubmit = (client, index = 0) => {
+  const normalized = normalizeClientRecord(client, index);
+  const { key, ...rest } = normalized;
+  return {
+    clientName: rest.clientName || "",
+    clientType: rest.clientType || "Private",
+    region: rest.region || "",
+    regionName: rest.regionName || "",
+    province: rest.province || "",
+    provinceName: rest.provinceName || "",
+    municipality: rest.municipality || "",
+    municipalityName: rest.municipalityName || "",
+  };
+};
+
 const normalizeHaulerRecord = (hauler = {}, index = 0, fallbackUnit = "m³") => {
   let vehicles = Array.isArray(hauler.vehicles)
     ? hauler.vehicles.map((vehicle) =>
@@ -261,10 +276,30 @@ const mergeHaulersByName = (haulers = [], fallbackUnit = "m³") => {
         .toLowerCase();
       if (!clientMap.has(clientKey)) clientMap.set(clientKey, client);
     });
+    const primaryVehicle = vehicleMap.values().next().value || {};
     merged.set(nameKey, {
       ...existing,
       ...normalized,
       key: existing.key,
+      haulerName: normalized.haulerName || existing.haulerName || "",
+      officeAddress: normalized.officeAddress || existing.officeAddress || "",
+      plateNumber:
+        normalized.plateNumber ||
+        existing.plateNumber ||
+        primaryVehicle.plateNumber ||
+        "",
+      vehicleType:
+        normalized.vehicleType ||
+        existing.vehicleType ||
+        primaryVehicle.vehicleType ||
+        "",
+      capacity:
+        normalized.capacity ?? existing.capacity ?? primaryVehicle.capacity ?? null,
+      capacityUnit:
+        normalized.capacityUnit ||
+        existing.capacityUnit ||
+        primaryVehicle.capacityUnit ||
+        fallbackUnit,
       vehicles: Array.from(vehicleMap.values()),
       privateSectorClients: Array.from(clientMap.values()),
       numberOfTrucks: Math.max(
@@ -275,6 +310,54 @@ const mergeHaulersByName = (haulers = [], fallbackUnit = "m³") => {
     });
   });
   return Array.from(merged.values());
+};
+
+const cleanVehicleForSubmit = (vehicle = {}, fallbackUnit = "m³") => {
+  const normalized = normalizeVehicleRecord(vehicle, fallbackUnit);
+  return {
+    plateNumber: normalized.plateNumber || "",
+    vehicleType: normalized.vehicleType || "",
+    capacity:
+      normalized.capacity == null || Number.isNaN(Number(normalized.capacity))
+        ? null
+        : Number(normalized.capacity),
+    capacityUnit: normalizeUnit(normalized.capacityUnit || fallbackUnit),
+    selectedClients: (normalized.selectedClients || []).map(
+      cleanClientForSubmit,
+    ),
+  };
+};
+
+const cleanHaulerForSubmit = (hauler = {}, index = 0, fallbackUnit = "m³") => {
+  const normalized = normalizeHaulerRecord(hauler, index, fallbackUnit);
+  const cleanedVehicles = (normalized.vehicles || [])
+    .map((vehicle) => cleanVehicleForSubmit(vehicle, fallbackUnit))
+    .filter(
+      (vehicle) =>
+        vehicle.plateNumber ||
+        vehicle.vehicleType ||
+        vehicle.capacity != null ||
+        (vehicle.selectedClients || []).length > 0,
+    );
+  const cleanedClients = (normalized.privateSectorClients || []).map(
+    cleanClientForSubmit,
+  );
+  const primaryVehicle = cleanedVehicles[0] || {};
+
+  return {
+    haulerName: normalized.haulerName || "",
+    numberOfTrucks: Math.max(
+      Number(normalized.numberOfTrucks || 0),
+      cleanedVehicles.length,
+    ) || null,
+    officeAddress: normalized.officeAddress || "",
+    plateNumber: primaryVehicle.plateNumber || "",
+    vehicleType: primaryVehicle.vehicleType || "",
+    capacity: primaryVehicle.capacity ?? null,
+    capacityUnit: normalizeUnit(primaryVehicle.capacityUnit || fallbackUnit),
+    vehicles: cleanedVehicles,
+    privateSectorClients: cleanedClients,
+  };
 };
 
 const convertVolume = (value, fromUnit = "m³", toUnit = fromUnit) => {
@@ -341,6 +424,17 @@ const isNumberOfTrucksHeader = (header) => {
     compact === "totaltrucks" ||
     compact === "numbertrucks" ||
     (key.includes("truck") && (key.includes("number") || key.includes("no.") || key.includes("no ") || key.includes("count") || key.includes("total")))
+  );
+};
+
+const isClientsHeader = (header) => {
+  const compact = compactUploadHeaderKey(header);
+  const key = uploadHeaderKey(header);
+  return (
+    compact === "clients" ||
+    compact === "privatesectorclients" ||
+    compact === "client" ||
+    (key.includes("client") && !key.includes("hauler"))
   );
 };
 
@@ -2372,8 +2466,15 @@ export default function SLFPortal() {
     [fetchPortalNotifications],
   );
 
+  const shouldLoadPortalActivityData =
+    notificationPanelOpen ||
+    supportDrawerOpen ||
+    messageDrawerOpen ||
+    activeMenu === "history" ||
+    activeMenu === "requests";
+
   useEffect(() => {
-    if (!portalUser?.email) return;
+    if (!portalUser?.email || !shouldLoadPortalActivityData) return;
     const sock = connectSocket("portal", portalUser.email);
     const refreshMessages = (payload) => {
       if (
@@ -2388,14 +2489,33 @@ export default function SLFPortal() {
       }
       fetchPortalNotifications();
     };
-    fetchPortalNotifications();
+    if (
+      notificationPanelOpen ||
+      activeMenu === "history" ||
+      activeMenu === "requests"
+    ) {
+      fetchPortalNotifications();
+    }
+    if ((supportDrawerOpen || messageDrawerOpen) && supportTickets.length === 0) {
+      fetchSupportTickets();
+    }
     sock.on("notification", refreshMessages);
     sock.on("data-refresh", refreshMessages);
     return () => {
       sock.off("notification", refreshMessages);
       sock.off("data-refresh", refreshMessages);
     };
-  }, [portalUser?.email, fetchSupportTickets, fetchPortalNotifications]);
+  }, [
+    portalUser?.email,
+    shouldLoadPortalActivityData,
+    notificationPanelOpen,
+    supportDrawerOpen,
+    messageDrawerOpen,
+    activeMenu,
+    supportTickets.length,
+    fetchSupportTickets,
+    fetchPortalNotifications,
+  ]);
 
   const handleSubmitTicket = async (values) => {
     setSupportSubmitting(true);
@@ -2510,7 +2630,7 @@ export default function SLFPortal() {
                 normalized.capacityUnit = normalizeUnit(
                   value || baselineUnit || "m³",
                 );
-              else if (k.includes("client"))
+              else if (isClientsHeader(k))
                 normalized.privateSectorClients = cleanUploadText(value)
                   .split(",")
                   .map((s) => s.trim())
@@ -2613,6 +2733,16 @@ export default function SLFPortal() {
               width: 140,
             },
             { title: "Capacity", dataIndex: "capacity", key: "capacity", width: 110 },
+            {
+              title: "Clients (optional)",
+              dataIndex: "privateSectorClients",
+              key: "privateSectorClients",
+              width: 200,
+              render: (val) =>
+                Array.isArray(val) && val.length > 0
+                  ? val.join(", ")
+                  : <Text type="secondary" style={{ fontSize: 11 }}>—</Text>,
+            },
             {
               title: "Validation",
               key: "validation",
@@ -2748,19 +2878,18 @@ export default function SLFPortal() {
     setUploadPreviewData((prev) =>
       prev.map((row) => {
         if (row.key !== key) return row;
-        const updated = { ...row, [field]: value };
+        // Re-split clients string back to array so downstream merge works correctly
+        const coercedValue =
+          field === "privateSectorClients" && typeof value === "string"
+            ? value.split(",").map((s) => s.trim()).filter(Boolean)
+            : value;
+        const updated = { ...row, [field]: coercedValue };
         return {
           ...updated,
           _errors: getUploadRowErrors(updated, uploadType || "truck"),
         };
       }),
     );
-  };
-
-  const cleanClientForSubmit = (client) => {
-    if (!client || typeof client !== "object") return client;
-    const { key, ...rest } = client;
-    return rest;
   };
 
   const cleanTruckForSubmit = ({ key, vehicles, selectedClients, ...rest }) => {
@@ -2962,23 +3091,10 @@ export default function SLFPortal() {
           ...rest,
           unit: rest.unit || baselineUnit,
         })),
-        accreditedHaulers: mergeHaulersByName(haulers, baselineUnit).map(
-          ({ key, vehicles, privateSectorClients, ...rest }) => ({
-            ...rest,
-            numberOfTrucks: rest.numberOfTrucks || vehicles?.length || 0,
-            vehicles: (vehicles || []).map(
-              ({ key: vehicleKey, ...vehicle }) => ({
-                ...vehicle,
-                capacityUnit: normalizeUnit(
-                  vehicle.capacityUnit || baselineUnit,
-                ),
-              }),
-            ),
-            privateSectorClients: (privateSectorClients || []).map(
-              ({ key: clientKey, ...client }) => client,
-            ),
-          }),
-        ),
+          accreditedHaulers: mergeHaulersByName(haulers, baselineUnit).map(
+            (hauler, index) =>
+              cleanHaulerForSubmit(hauler, index, baselineUnit || "m³"),
+          ),
         acceptsHazardousWaste,
         trucks: trucks.map(cleanTruckForSubmit),
       };
@@ -3089,6 +3205,37 @@ export default function SLFPortal() {
       setActiveTab("disposal");
       return;
     }
+
+    // ── Unit-conflict check ──
+    const currentUnit = normalizeUnit(baselineUnit || "m³");
+    const conflictingTrucks = trucks.filter((truck) => {
+      const truckUnit = normalizeUnit(truck.actualVolumeUnit || baselineUnit || "m³");
+      return truckUnit !== currentUnit;
+    });
+    if (conflictingTrucks.length > 0) {
+      const unitSet = [...new Set(conflictingTrucks.map((t) => normalizeUnit(t.actualVolumeUnit || baselineUnit || "m³")))];
+      const { isConfirmed } = await Swal.fire({
+        icon: "warning",
+        title: "Unit of Measurement Mismatch",
+        html: `<p style='font-size:13px;text-align:left'>
+          <b>${conflictingTrucks.length}</b> transport entr${conflictingTrucks.length === 1 ? "y has" : "ies have"} a volume unit
+          (<b>${unitSet.join(", ")}</b>) that differs from the current baseline unit
+          (<b>${currentUnit}</b>).<br/><br/>
+          This may cause incorrect volume calculations on the admin side.
+          Please verify the units are correct before proceeding.
+        </p>`,
+        showCancelButton: true,
+        confirmButtonText: "Submit Anyway",
+        cancelButtonText: "Go Back & Fix",
+        confirmButtonColor: "#faad14",
+        cancelButtonColor: "#1a3353",
+      });
+      if (!isConfirmed) {
+        setActiveTab("disposal");
+        return;
+      }
+    }
+
     setReviewModalOpen(true);
   };
 
@@ -5845,7 +5992,6 @@ export default function SLFPortal() {
                           </div>
 
                           <Collapse
-                            defaultActiveKey={["active", "closed", "haulers"]}
                             bordered={false}
                             style={{
                               background: "transparent",

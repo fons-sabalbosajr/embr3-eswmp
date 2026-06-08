@@ -43,6 +43,7 @@ import Swal from "sweetalert2";
 import api from "../../api";
 import { exportToExcel } from "../../utils/exportExcel";
 import secureStorage from "../../utils/secureStorage";
+import { getAdminDisplayName } from "../../utils/adminIdentity";
 import { rowMatchesSearch } from "./shared/tableFilters";
 
 const { Title, Text } = Typography;
@@ -300,7 +301,7 @@ export default function AccountSettings({ isDark }) {
       render: (_, r) => (
         <Space>
           <UserOutlined />
-          <Text strong>{r.firstName} {r.lastName}</Text>
+          <Text strong>{getAdminDisplayName(r) || "User"}</Text>
         </Space>
       ),
     },
@@ -408,7 +409,7 @@ export default function AccountSettings({ isDark }) {
             icon={<DownloadOutlined />}
             onClick={() => {
               const rows = filtered.map((u) => ({
-                Name: `${u.firstName} ${u.lastName}`,
+                Name: getAdminDisplayName(u) || "User",
                 Email: u.email,
                 Position: u.position || "",
                 Designation: u.designation || "",
@@ -434,7 +435,7 @@ export default function AccountSettings({ isDark }) {
 
       {/* ── Edit User Modal ── */}
       <Modal
-        title={<Space><EditOutlined /> <span>Edit User — {editModal?.firstName} {editModal?.lastName}</span></Space>}
+        title={<Space><EditOutlined /> <span>Edit User — {getAdminDisplayName(editModal) || "User"}</span></Space>}
         open={!!editModal}
         onCancel={() => setEditModal(null)}
         onOk={saveProfile}
@@ -446,7 +447,7 @@ export default function AccountSettings({ isDark }) {
             <div style={{ textAlign: "center", marginBottom: 16 }}>
               <Avatar size={64} style={{ backgroundColor: "#1a3353" }} icon={<UserOutlined />} />
               <div style={{ marginTop: 8 }}>
-                <Text strong style={{ fontSize: 16 }}>{editModal.firstName} {editModal.lastName}</Text>
+                <Text strong style={{ fontSize: 16 }}>{getAdminDisplayName(editModal) || "User"}</Text>
               </div>
               <Text type="secondary">{editModal.email}</Text>
             </div>
@@ -483,7 +484,7 @@ export default function AccountSettings({ isDark }) {
         title={
           <Space>
             <SafetyCertificateOutlined style={{ color: "#722ed1" }} />
-            <span>Manage Access — {accessModal?.firstName} {accessModal?.lastName}</span>
+            <span>Manage Access — {getAdminDisplayName(accessModal) || "User"}</span>
           </Space>
         }
         open={!!accessModal}
@@ -498,7 +499,7 @@ export default function AccountSettings({ isDark }) {
             <div style={{ textAlign: "center", marginBottom: 16, padding: "12px 0", background: isDark ? "linear-gradient(135deg, #1f1f1f 0%, #2a2a2a 100%)" : "linear-gradient(135deg, #f6f8fc 0%, #eef2f7 100%)", borderRadius: 8 }}>
               <Avatar size={48} style={{ backgroundColor: accessModal.role === "admin" ? "#faad14" : "#1a3353" }} icon={<UserOutlined />} />
               <div style={{ marginTop: 8 }}>
-                <Text strong>{accessModal.firstName} {accessModal.lastName}</Text>
+                <Text strong>{getAdminDisplayName(accessModal) || "User"}</Text>
                 <br />
                 <Text type="secondary" style={{ fontSize: 12 }}>{accessModal.email}</Text>
                 <br />
