@@ -57,6 +57,18 @@ su - embr3_eswm
 
 # Pull latest code
 cd /home/embr3_eswm/apps/embr3-eswmp
+
+# Check for local changes first (important before git pull)
+git status --short
+
+# If ONLY front-end/package-lock.json is locally modified and you want to discard
+# the VPS copy in favor of the version from GitHub:
+git restore front-end/package-lock.json
+
+# If there are other local edits you need to keep temporarily:
+# git stash push -u -m "vps-before-update"
+
+# Pull latest code
 git pull origin main
 
 # Update server deps (only if package.json changed)
@@ -78,6 +90,16 @@ curl -sS --ipv4 --max-time 5 -w '\nHTTP %{http_code}\n' http://127.0.0.1:5006/ap
 curl -sS --max-time 10 -w '\nHTTP %{http_code}\n' https://embr3-onlinesystems.cloud/eswm-pipeline/api/health
 pm2 logs embr3-eswmp-api --lines 20
 ```
+
+> If `git pull` fails with `Your local changes to the following files would be overwritten by merge:` and the file is only `front-end/package-lock.json`, the fastest safe fix is:
+
+```bash
+cd /home/embr3_eswm/apps/embr3-eswmp
+git restore front-end/package-lock.json
+git pull origin main
+```
+
+> Use `git stash push -u` only when you intentionally want to keep uncommitted VPS edits and re-apply them after the update.
 
 > If your shell prompt still starts with `root@...` when you run PM2, you are managing the root PM2 instance (`/root/.pm2`). The intended deployment user is `embr3_eswm`, so run `su - embr3_eswm` before `pm2 restart`, `pm2 save`, and `pm2 logs` unless the live process was intentionally created under root.
 
@@ -572,28 +594,74 @@ pm2 set pm2-logrotate:retain 7
 ### Deploying Updates
 
 ```bash
+# 0. SSH in as root, then switch to the app user so nvm/node/pm2 are correct
+ssh root@72.61.125.232
+su - embr3_eswm
+
+# 1. Go to the app root
 cd /home/embr3_eswm/apps/embr3-eswmp
 
-# Pull latest code
+# 2. Inspect the worktree first
+git status --short
+
+# 3A. If ONLY package-lock is dirty and you do NOT need the VPS copy:
+git restore front-end/package-lock.json
+
+# 3B. If you DO need to keep local VPS edits temporarily instead:
+# git stash push -u -m "vps-before-update"
+
+# 4. Pull latest code
 git pull origin main
 
-# Update server dependencies (if package.json changed)
+# 5. Update server dependencies
 cd server
 npm install --production
 
-# Rebuild front-end (if front-end code changed)
+# 6. Rebuild front-end
 cd ../front-end
 npm install
 npm run build
 
-# Copy new build to nginx directory (dist/ subdirectory required)
+# 7. Copy new build to nginx directory (dist/ subdirectory required)
 sudo mkdir -p /var/www/eswm-pipeline/dist
 sudo cp -a dist/. /var/www/eswm-pipeline/dist/
 sudo chown -R www-data:www-data /var/www/eswm-pipeline/
 
-# Restart the server (actual PM2 process name: embr3-eswmp-api, port: 5006)
+# 8. Restart the API (actual PM2 process name: embr3-eswmp-api, port: 5006)
 pm2 restart embr3-eswmp-api --update-env && pm2 save
+
+# 9. Verify the deployment
+curl -sS --ipv4 --max-time 5 -w '\nHTTP %{http_code}\n' http://127.0.0.1:5006/api/health
+curl -sS --max-time 10 -w '\nHTTP %{http_code}\n' https://embr3-onlinesystems.cloud/eswm-pipeline/api/health
+pm2 logs embr3-eswmp-api --lines 20
 ```
+
+#### Resolving the exact `package-lock.json` pull error
+
+If you see this on the VPS:
+
+```bash
+error: Your local changes to the following files would be overwritten by merge:
+  front-end/package-lock.json
+Please commit your changes or stash them before you merge.
+```
+
+run:
+
+```bash
+su - embr3_eswm
+cd /home/embr3_eswm/apps/embr3-eswmp
+git status --short
+git restore front-end/package-lock.json
+git pull origin main
+cd server && npm install --production && cd ../front-end && npm install && npm run build && cd ..
+sudo cp -a /home/embr3_eswm/apps/embr3-eswmp/front-end/dist/. /var/www/eswm-pipeline/dist/
+sudo chown -R www-data:www-data /var/www/eswm-pipeline/
+pm2 restart embr3-eswmp-api --update-env && pm2 save
+curl -sS --ipv4 --max-time 5 -w '\nHTTP %{http_code}\n' http://127.0.0.1:5006/api/health
+```
+
+Use `git stash push -u -m "vps-before-update"` instead of `git restore ...` only if those local VPS changes are intentional and must be preserved.
 
 ### Quick Redeploy (Copy Pre-built from Local)
 
