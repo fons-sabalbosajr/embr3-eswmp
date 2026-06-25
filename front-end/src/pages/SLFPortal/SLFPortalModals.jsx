@@ -19,14 +19,80 @@ import api from "../../api";
 import secureStorage from "../../utils/secureStorage";
 
 const { Text } = Typography;
-const { Option } = Select;
 const { TextArea } = Input;
 const normalizeUnitLabel = (unit) => String(unit || "m³").replace("m3", "m³");
+
+const SUPPORT_TAB_KEYS = ["faq", "new-ticket", "my-tickets"];
+const SUPPORT_CATEGORY_OPTIONS = [
+  { label: "Technical Issue", value: "Technical Issue" },
+  { label: "Data Correction", value: "Data Correction" },
+  { label: "Account Issue", value: "Account Issue" },
+  { label: "Requirements / Compliance", value: "Requirements / Compliance" },
+  { label: "Submission Concern", value: "Submission Concern" },
+  { label: "Feature Request", value: "Feature Request" },
+  { label: "Other", value: "Other" },
+];
+const SUPPORT_PRIORITY_OPTIONS = [
+  { label: "Low", value: "Low" },
+  { label: "Medium", value: "Medium" },
+  { label: "High", value: "High" },
+  { label: "Urgent", value: "Urgent" },
+];
+const SUPPORT_FAQ_ITEMS = [
+  {
+    key: "1",
+    label: "How do I submit disposal data?",
+    icon: <FileTextOutlined style={{ color: "#1677ff" }} />,
+    content: "Navigate to Data Entry, complete all required tabs, add at least one transport entry, then submit the record for review.",
+  },
+  {
+    key: "2",
+    label: "How do I update baseline data?",
+    icon: <DatabaseOutlined style={{ color: "#389e0d" }} />,
+    content: "Baseline data is locked after your first submission. Use Request Update from the Baseline tab and wait for admin approval.",
+  },
+  {
+    key: "3",
+    label: "How do I edit a submitted entry?",
+    icon: <AuditOutlined style={{ color: "#d48806" }} />,
+    content: "Open History, choose the submitted record, and send a Request Edit. The admin team will approve or reject the change request.",
+  },
+  {
+    key: "4",
+    label: "What file formats are supported for upload?",
+    icon: <UploadOutlined style={{ color: "#722ed1" }} />,
+    content: "The portal accepts Excel (.xlsx, .xls) and CSV files for bulk hauler and waste generator uploads.",
+  },
+  {
+    key: "5",
+    label: "Who do I contact for technical issues?",
+    icon: <MailOutlined style={{ color: "#cf1322" }} />,
+    content: "Open a support ticket from this panel for portal issues, account problems, or submission concerns. You can also email emb_region3@emb.gov.ph.",
+  },
+];
+
+const getSupportStatusColor = (status) =>
+  status === "open"
+    ? "blue"
+    : status === "in_progress"
+      ? "orange"
+      : status === "resolved"
+        ? "green"
+        : "default";
+
+const getSupportPriorityColor = (priority) =>
+  priority === "Urgent"
+    ? "red"
+    : priority === "High"
+      ? "orange"
+      : priority === "Medium"
+        ? "gold"
+        : "default";
 
 // All SLF Portal modals — receives all state/handlers via props
 export default function SLFPortalModals({
   // Form instances
-  entryForm, baselineForm, companyForm,
+  entryForm, baselineForm, companyForm, supportForm,
   // State
   haulerModalOpen, setHaulerModalOpen,
   haulerDraft, setHaulerDraft,
@@ -234,6 +300,9 @@ export default function SLFPortalModals({
   );
   const messageUnreadCount = portalNotificationCounts.messages || 0;
   const supportUnreadCount = portalNotificationCounts.support || 0;
+  const resolvedSupportTab = SUPPORT_TAB_KEYS.includes(supportTab)
+    ? supportTab
+    : "new-ticket";
   const uploadClientOptions = Array.from(
     new Map(
       (haulers || [])
@@ -3077,125 +3146,160 @@ export default function SLFPortalModals({
 
       {/* ── Support Popup ── */}
       <Modal
-        title={<Space><QuestionCircleOutlined /> Support &amp; FAQ</Space>}
+        title={
+          <div className="slf-support-modal-title">
+            <div className="slf-support-modal-heading">
+              <span className="slf-support-modal-icon"><QuestionCircleOutlined /></span>
+              <div>
+                <div className="slf-support-modal-title-text">Support &amp; FAQ</div>
+                <Text type="secondary" className="slf-support-modal-subtitle">
+                  Ask for help, review common answers, and track every ticket in one place.
+                </Text>
+              </div>
+            </div>
+          </div>
+        }
         open={supportDrawerOpen}
         onCancel={() => setSupportDrawerOpen(false)}
         footer={null}
         centered
-        width={isMobile ? "96%" : 660}
+        width={isMobile ? "96%" : 760}
         styles={{ body: { padding: 0 } }}
       >
-        <Tabs
-          activeKey={supportTab}
+        <div className="slf-support-shell">
+          <div className="slf-support-hero">
+            <div>
+              <Text className="slf-support-hero-kicker">EMB Region III Portal Help Desk</Text>
+              <div className="slf-support-hero-title">Fast answers for filing, updates, and account issues</div>
+              <Text className="slf-support-hero-copy">
+                Use the FAQ for common workflow questions or open a ticket for anything that needs direct support.
+              </Text>
+            </div>
+            <div className="slf-support-hero-stats">
+              <div className="slf-support-stat-card">
+                <span className="slf-support-stat-icon slf-support-stat-icon-blue"><QuestionCircleOutlined /></span>
+                <div>
+                  <div className="slf-support-stat-value">{SUPPORT_FAQ_ITEMS.length}</div>
+                  <div className="slf-support-stat-label">Quick answers</div>
+                </div>
+              </div>
+              <div className="slf-support-stat-card">
+                <span className="slf-support-stat-icon slf-support-stat-icon-red"><MessageOutlined /></span>
+                <div>
+                  <div className="slf-support-stat-value">{supportUnreadCount}</div>
+                  <div className="slf-support-stat-label">Unread updates</div>
+                </div>
+              </div>
+            </div>
+          </div>
+          <Tabs
+          activeKey={resolvedSupportTab}
           onChange={setSupportTab}
-          style={{ padding: "0 16px" }}
+          className="slf-support-tabs"
           items={[
             {
               key: "faq",
               label: (
-                <span>
-                  <QuestionCircleOutlined /> FAQ
+                <span className="slf-support-tab-label">
+                  <span className="slf-support-tab-icon slf-support-tab-icon-blue"><QuestionCircleOutlined /></span>
+                  FAQ
                   {(portalNotificationCounts.total || 0) > 0 && (
                     <Badge dot style={{ marginLeft: 6 }} />
                   )}
                 </span>
               ),
               children: (
-                <Collapse
-                  activeKey={faqActiveKey}
-                  onChange={setFaqActiveKey}
-                  bordered={false}
-                  items={[
-                    {
-                      key: "1",
-                      label: "How do I submit disposal data?",
-                      children: (
-                        <Text>
-                          Navigate to Data Entry, fill in all required tabs
-                          (Basic Info, Baseline, Waste Generator Info), add at
-                          least one transport entry, then click Submit.
-                        </Text>
+                <div className="slf-support-pane">
+                  <div className="slf-support-section-header">
+                    <div>
+                      <div className="slf-support-section-title">Frequently Asked Questions</div>
+                      <Text type="secondary">Answers to the issues portal users hit most often.</Text>
+                    </div>
+                    <Tag color="blue">Self-service</Tag>
+                  </div>
+                  <Collapse
+                    activeKey={faqActiveKey}
+                    onChange={setFaqActiveKey}
+                    ghost
+                    className="slf-support-faq"
+                    items={SUPPORT_FAQ_ITEMS.map((item) => ({
+                      key: item.key,
+                      label: (
+                        <span className="slf-support-faq-label">
+                          <span className="slf-support-faq-icon">{item.icon}</span>
+                          <span>{item.label}</span>
+                        </span>
                       ),
-                    },
-                    {
-                      key: "2",
-                      label: "How do I update baseline data?",
-                      children: (
-                        <Text>
-                          Baseline data is locked after your first submission.
-                          Click &ldquo;Request Update&rdquo; in the Baseline
-                          tab. An admin will review and approve your request.
-                        </Text>
-                      ),
-                    },
-                    {
-                      key: "3",
-                      label: "How do I edit a submitted entry?",
-                      children: (
-                        <Text>
-                          Go to History, find the entry, and click
-                          &ldquo;Request Edit&rdquo;. The admin will review and
-                          either approve or reject your request.
-                        </Text>
-                      ),
-                    },
-                    {
-                      key: "4",
-                      label: "What file formats are supported for upload?",
-                      children: (
-                        <Text>
-                          You can upload Excel (.xlsx, .xls) or CSV files for
-                          bulk hauler and waste generator entries.
-                        </Text>
-                      ),
-                    },
-                    {
-                      key: "5",
-                      label: "Who do I contact for technical issues?",
-                      children: (
-                        <Text>
-                          Submit a support ticket using the &ldquo;New
-                          Ticket&rdquo; tab, or email emb_region3@emb.gov.ph
-                          directly.
-                        </Text>
-                      ),
-                    },
-                  ]}
-                />
+                      children: <Text className="slf-support-faq-copy">{item.content}</Text>,
+                    }))}
+                  />
+                </div>
               ),
             },
             {
               key: "new-ticket",
               label: (
-                <span>
-                  <SendOutlined /> New Ticket
+                <span className="slf-support-tab-label">
+                  <span className="slf-support-tab-icon slf-support-tab-icon-green"><SendOutlined /></span>
+                  New Ticket
                 </span>
               ),
               children: (
-                <Form
+                <div className="slf-support-pane">
+                  <div className="slf-support-grid">
+                    <div className="slf-support-callout">
+                      <div className="slf-support-callout-badge">Help Request</div>
+                      <div className="slf-support-callout-title">Send a clear ticket so the admin team can act quickly</div>
+                      <div className="slf-support-callout-list">
+                        <div><span className="slf-support-mini-icon slf-support-mini-icon-blue"><InfoCircleOutlined /></span> Pick the closest category.</div>
+                        <div><span className="slf-support-mini-icon slf-support-mini-icon-orange"><AuditOutlined /></span> State what record, page, or action failed.</div>
+                        <div><span className="slf-support-mini-icon slf-support-mini-icon-red"><WifiOutlined /></span> Include errors, affected dates, and timing if relevant.</div>
+                      </div>
+                    </div>
+                    <Form
+                  form={supportForm}
                   layout="vertical"
+                  requiredMark={false}
                   onFinish={handleSubmitTicket}
-                  style={{ padding: "8px 0" }}
+                  className="slf-support-form"
+                  initialValues={{ category: "Technical Issue", priority: "Medium" }}
                 >
+                  <div className="slf-support-form-header">
+                    <div className="slf-support-section-title">Create Support Ticket</div>
+                    <Text type="secondary">Your ticket will appear immediately in My Tickets after submission.</Text>
+                  </div>
+                  <Row gutter={12}>
+                    <Col xs={24} md={14}>
                   <Form.Item
                     name="category"
                     label="Category"
                     rules={[{ required: true, message: "Select a category" }]}
                   >
-                    <Select placeholder="Select category">
-                      <Option value="Technical Issue">Technical Issue</Option>
-                      <Option value="Data Correction">Data Correction</Option>
-                      <Option value="Account Issue">Account Issue</Option>
-                      <Option value="Feature Request">Feature Request</Option>
-                      <Option value="Other">Other</Option>
-                    </Select>
+                    <Select
+                      placeholder="Select category"
+                      options={SUPPORT_CATEGORY_OPTIONS}
+                    />
                   </Form.Item>
+                    </Col>
+                    <Col xs={24} md={10}>
+                  <Form.Item
+                    name="priority"
+                    label="Priority"
+                    rules={[{ required: true, message: "Select a priority" }]}
+                  >
+                    <Select
+                      placeholder="Select priority"
+                      options={SUPPORT_PRIORITY_OPTIONS}
+                    />
+                  </Form.Item>
+                    </Col>
+                  </Row>
                   <Form.Item
                     name="subject"
                     label="Subject"
                     rules={[{ required: true, message: "Enter a subject" }]}
                   >
-                    <Input placeholder="Brief description of your concern" />
+                    <Input placeholder="Brief summary of the issue or request" />
                   </Form.Item>
                   <Form.Item
                     name="message"
@@ -3205,8 +3309,8 @@ export default function SLFPortalModals({
                     ]}
                   >
                     <Input.TextArea
-                      rows={4}
-                      placeholder="Detailed description..."
+                      rows={5}
+                      placeholder="Describe what happened, what you expected, and any record, date, or screen involved."
                     />
                   </Form.Item>
                   <Form.Item>
@@ -3220,21 +3324,31 @@ export default function SLFPortalModals({
                       Submit Ticket
                     </Button>
                   </Form.Item>
-                </Form>
+                    </Form>
+                  </div>
+                </div>
               ),
             },
             {
               key: "my-tickets",
               label: (
-                <span>
-                  <FileTextOutlined /> My Tickets
+                <span className="slf-support-tab-label">
+                  <span className="slf-support-tab-icon slf-support-tab-icon-orange"><FileTextOutlined /></span>
+                  My Tickets
                   {supportUnreadCount > 0 && (
                     <Badge count={supportUnreadCount} size="small" style={{ marginLeft: 6 }} />
                   )}
                 </span>
               ),
               children: (
-                <div style={{ padding: "8px 0" }}>
+                <div className="slf-support-pane">
+                  <div className="slf-support-section-header">
+                    <div>
+                      <div className="slf-support-section-title">My Tickets</div>
+                      <Text type="secondary">Review status changes, open threads, and admin replies.</Text>
+                    </div>
+                    <Tag color="geekblue">{portalSupportTickets.length} total</Tag>
+                  </div>
                   {supportLoading ? (
                     <div style={{ textAlign: "center", padding: 40 }}>
                       <Spin />
@@ -3246,32 +3360,22 @@ export default function SLFPortalModals({
                       dataSource={portalSupportTickets}
                       renderItem={(ticket) => (
                         <List.Item
-                          style={{ cursor: "pointer", padding: "12px 0" }}
+                          className="slf-support-ticket-item"
                           onClick={() => setSupportDetailModal(ticket)}
                         >
                           <List.Item.Meta
+                            avatar={
+                              <Avatar
+                                className="slf-support-ticket-avatar"
+                                icon={<MessageOutlined />}
+                              />
+                            }
                             title={
-                              <div
-                                style={{
-                                  display: "flex",
-                                  justifyContent: "space-between",
-                                  alignItems: "center",
-                                }}
-                              >
-                                <Text strong style={{ fontSize: 13 }}>
+                              <div className="slf-support-ticket-title-row">
+                                <Text strong className="slf-support-ticket-title">
                                   {ticket.subject}
                                 </Text>
-                                <Tag
-                                  color={
-                                    ticket.status === "open"
-                                      ? "blue"
-                                      : ticket.status === "in_progress"
-                                        ? "orange"
-                                        : ticket.status === "resolved"
-                                          ? "green"
-                                          : "default"
-                                  }
-                                >
+                                <Tag color={getSupportStatusColor(ticket.status)}>
                                   {ticket.status
                                     ?.replace("_", " ")
                                     .toUpperCase()}
@@ -3279,14 +3383,11 @@ export default function SLFPortalModals({
                               </div>
                             }
                             description={
-                              <div>
-                                <Text type="secondary" style={{ fontSize: 11 }}>
-                                  {ticket.ticketNo} &middot; {ticket.category}{" "}
-                                  &middot;{" "}
-                                  {dayjs(ticket.createdAt).format(
-                                    "MMM D, YYYY h:mm A",
-                                  )}
+                              <div className="slf-support-ticket-meta">
+                                <Text type="secondary" className="slf-support-ticket-meta-text">
+                                  {ticket.ticketNo} • {ticket.category} • {dayjs(ticket.createdAt).format("MMM D, YYYY h:mm A")}
                                 </Text>
+                                <Tag color={getSupportPriorityColor(ticket.priority)}>{ticket.priority}</Tag>
                               </div>
                             }
                           />
@@ -3298,44 +3399,68 @@ export default function SLFPortalModals({
               ),
             },
           ]}
-        />
+          />
+        </div>
       </Modal>
 
       {/* ── Support Ticket Detail Modal ── */}
       <Modal
-        title={
-          supportDetailModal
-            ? `${supportDetailModal.source === "admin_message" ? "Message" : supportDetailModal.ticketNo} — ${supportDetailModal.subject}`
-            : "Thread Detail"
-        }
+        title={supportDetailModal ? (
+          <div className="slf-support-detail-title-wrap">
+            <span className="slf-support-detail-title-icon"><MessageOutlined /></span>
+            <div>
+              <div className="slf-support-detail-title-main">
+                {supportDetailModal.source === "admin_message" ? "Message" : supportDetailModal.ticketNo}
+              </div>
+              <Text type="secondary">{supportDetailModal.subject}</Text>
+            </div>
+          </div>
+        ) : "Thread Detail"}
         open={!!supportDetailModal}
         onCancel={() => {
           setSupportDetailModal(null);
           setSupportReplyText("");
         }}
         footer={null}
-        width={600}
+        width={680}
       >
         {supportDetailModal && (
-          <>
+          <div className="slf-support-detail-shell">
+            <div className="slf-support-detail-summary">
+              <div className="slf-support-detail-summary-item">
+                <span className="slf-support-mini-icon slf-support-mini-icon-blue"><InfoCircleOutlined /></span>
+                <div>
+                  <div className="slf-support-detail-label">Status</div>
+                  <Tag color={getSupportStatusColor(supportDetailModal.status)}>
+                    {supportDetailModal.status?.replace("_", " ").toUpperCase()}
+                  </Tag>
+                </div>
+              </div>
+              <div className="slf-support-detail-summary-item">
+                <span className="slf-support-mini-icon slf-support-mini-icon-orange"><AuditOutlined /></span>
+                <div>
+                  <div className="slf-support-detail-label">Priority</div>
+                  <Tag color={getSupportPriorityColor(supportDetailModal.priority)}>
+                    {supportDetailModal.priority}
+                  </Tag>
+                </div>
+              </div>
+              <div className="slf-support-detail-summary-item">
+                <span className="slf-support-mini-icon slf-support-mini-icon-green"><FileTextOutlined /></span>
+                <div>
+                  <div className="slf-support-detail-label">Category</div>
+                  <Text strong>{supportDetailModal.category}</Text>
+                </div>
+              </div>
+            </div>
             <Descriptions
               size="small"
               column={1}
               bordered
-              style={{ marginBottom: 16 }}
+              className="slf-support-detail-descriptions"
             >
               <Descriptions.Item label="Status">
-                <Tag
-                  color={
-                    supportDetailModal.status === "open"
-                      ? "blue"
-                      : supportDetailModal.status === "in_progress"
-                        ? "orange"
-                        : supportDetailModal.status === "resolved"
-                          ? "green"
-                          : "default"
-                  }
-                >
+                <Tag color={getSupportStatusColor(supportDetailModal.status)}>
                   {supportDetailModal.status?.replace("_", " ").toUpperCase()}
                 </Tag>
               </Descriptions.Item>
@@ -3343,17 +3468,7 @@ export default function SLFPortalModals({
                 {supportDetailModal.category}
               </Descriptions.Item>
               <Descriptions.Item label="Priority">
-                <Tag
-                  color={
-                    supportDetailModal.priority === "Urgent"
-                      ? "red"
-                      : supportDetailModal.priority === "High"
-                        ? "orange"
-                        : supportDetailModal.priority === "Medium"
-                          ? "gold"
-                          : "default"
-                  }
-                >
+                <Tag color={getSupportPriorityColor(supportDetailModal.priority)}>
                   {supportDetailModal.priority}
                 </Tag>
               </Descriptions.Item>
@@ -3364,12 +3479,7 @@ export default function SLFPortalModals({
               </Descriptions.Item>
             </Descriptions>
             <div
-              style={{
-                background: "#f5f5f5",
-                padding: "12px 16px",
-                borderRadius: 6,
-                marginBottom: 16,
-              }}
+              className="slf-support-detail-message"
             >
               <Text>{supportDetailModal.message}</Text>
             </div>
@@ -3379,21 +3489,9 @@ export default function SLFPortalModals({
                 {supportDetailModal.replies.map((r, i) => (
                   <div
                     key={i}
-                    style={{
-                      background: r.isAdmin ? "#e6f4ff" : "#f6ffed",
-                      padding: "10px 14px",
-                      borderRadius: 6,
-                      marginBottom: 8,
-                      borderLeft: `3px solid ${r.isAdmin ? "#1677ff" : "#52c41a"}`,
-                    }}
+                    className={`slf-support-reply-bubble ${r.isAdmin ? "slf-support-reply-admin" : "slf-support-reply-user"}`}
                   >
-                    <div
-                      style={{
-                        display: "flex",
-                        justifyContent: "space-between",
-                        marginBottom: 4,
-                      }}
-                    >
+                    <div className="slf-support-reply-meta">
                       <Text strong style={{ fontSize: 12 }}>
                         {r.isAdmin ? "Admin" : "You"}
                       </Text>
@@ -3408,7 +3506,7 @@ export default function SLFPortalModals({
             )}
             {supportDetailModal.status !== "closed" &&
               supportDetailModal.status !== "resolved" && (
-                <div style={{ marginTop: 12 }}>
+                <div className="slf-support-reply-box">
                   <Input.TextArea
                     rows={3}
                     placeholder="Type your reply..."
@@ -3427,7 +3525,7 @@ export default function SLFPortalModals({
                   </Button>
                 </div>
               )}
-          </>
+          </div>
         )}
       </Modal>
 

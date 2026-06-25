@@ -647,10 +647,11 @@ export default function SLFPortal() {
   // Global baseline unit of measurement
   const [baselineUnit, setBaselineUnit] = useState("m³");
   const [acceptsHazardousWaste, setAcceptsHazardousWaste] = useState(false);
+  const [supportForm] = Form.useForm();
   // Support ticket states
   const [supportDrawerOpen, setSupportDrawerOpen] = useState(false);
   const [messageDrawerOpen, setMessageDrawerOpen] = useState(false);
-  const [supportTab, setSupportTab] = useState("new");
+  const [supportTab, setSupportTab] = useState("new-ticket");
   const [supportTickets, setSupportTickets] = useState([]);
   const [supportLoading, setSupportLoading] = useState(false);
   const [supportSubmitting, setSupportSubmitting] = useState(false);
@@ -2983,6 +2984,7 @@ export default function SLFPortal() {
         text: "Your concern has been submitted. Our team will review and respond.",
         confirmButtonColor: "#1a3353",
       });
+      supportForm.resetFields();
       fetchSupportTickets();
       setSupportTab("my-tickets");
     } catch (err) {
@@ -8752,6 +8754,7 @@ export default function SLFPortal() {
           setSupportDrawerOpen={setSupportDrawerOpen}
           messageDrawerOpen={messageDrawerOpen}
           setMessageDrawerOpen={setMessageDrawerOpen}
+          supportForm={supportForm}
           supportTab={supportTab}
           setSupportTab={setSupportTab}
           supportTickets={supportTickets}

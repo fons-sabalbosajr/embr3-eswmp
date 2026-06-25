@@ -1,6 +1,15 @@
 import { useEffect, useState } from "react";
 import { Form, Input, Button, Card, Typography, Divider, Alert, Space, Tag, Collapse, Modal } from "antd";
-import { UserOutlined, LockOutlined, SafetyCertificateOutlined } from "@ant-design/icons";
+import {
+  UserOutlined,
+  LockOutlined,
+  SafetyCertificateOutlined,
+  NotificationOutlined,
+  CalendarOutlined,
+  InfoCircleOutlined,
+  CheckCircleOutlined,
+  ExclamationCircleOutlined,
+} from "@ant-design/icons";
 import { Link, useNavigate } from "react-router-dom";
 import { useErrorCard } from "../utils/ErrorHandler";
 import api from "../api";
@@ -10,6 +19,33 @@ import bgEmb from "../assets/bgemb.webp";
 import "./Auth.css";
 
 const { Title, Text } = Typography;
+
+const announcementTypeMeta = {
+  info: {
+    icon: <InfoCircleOutlined />,
+    iconClassName: "auth-announcement-type-icon-info",
+    tagColor: "blue",
+    label: "Information",
+  },
+  success: {
+    icon: <CheckCircleOutlined />,
+    iconClassName: "auth-announcement-type-icon-success",
+    tagColor: "green",
+    label: "Update",
+  },
+  warning: {
+    icon: <ExclamationCircleOutlined />,
+    iconClassName: "auth-announcement-type-icon-warning",
+    tagColor: "orange",
+    label: "Important",
+  },
+  error: {
+    icon: <ExclamationCircleOutlined />,
+    iconClassName: "auth-announcement-type-icon-error",
+    tagColor: "red",
+    label: "Urgent",
+  },
+};
 
 export default function PortalLogin() {
   const [loading, setLoading] = useState(false);
@@ -21,6 +57,9 @@ export default function PortalLogin() {
   const [credentialForm] = Form.useForm();
   const navigate = useNavigate();
   const { showError, card: errorCard } = useErrorCard();
+  const announcementType = announcement?.portalAnnouncementType || "info";
+  const announcementMeta =
+    announcementTypeMeta[announcementType] || announcementTypeMeta.info;
 
   useEffect(() => {
     api
@@ -170,24 +209,53 @@ export default function PortalLogin() {
               items={[{
                 key: "announcement",
                 label: (
-                  <Space size={8} wrap>
-                    <span>{announcement.portalAnnouncementTitle || "SLF Portal Announcement"}</span>
-                    <Tag color="blue">Announcement</Tag>
-                  </Space>
-                ),
-                children: (
-                  <Alert
-                    type={announcement.portalAnnouncementType || "info"}
-                    showIcon
-                    message={null}
-                    description={
-                      <div>
-                        <div style={{ whiteSpace: "pre-wrap" }}>
-                          {announcement.portalAnnouncementMessage}
+                  <div className="auth-announcement-header">
+                    <div className="auth-announcement-heading">
+                      <span className="auth-announcement-bell">
+                        <NotificationOutlined />
+                      </span>
+                      <div className="auth-announcement-heading-copy">
+                        <div className="auth-announcement-title-row">
+                          <span className="auth-announcement-title-text">
+                            {announcement.portalAnnouncementTitle || "SLF Portal Announcement"}
+                          </span>
+                          <Tag color={announcementMeta.tagColor} className="auth-announcement-tag">
+                            {announcementMeta.label}
+                          </Tag>
+                        </div>
+                        <div className="auth-announcement-subline">
+                          <span className={`auth-announcement-type-icon ${announcementMeta.iconClassName}`}>
+                            {announcementMeta.icon}
+                          </span>
+                          <span>Posted advisory</span>
+                          <span className="auth-announcement-subline-sep">•</span>
+                          <CalendarOutlined />
+                          <span>
+                            {announcement.portalAnnouncementStartAt
+                              ? new Date(announcement.portalAnnouncementStartAt).toLocaleDateString()
+                              : "Active now"}
+                          </span>
                         </div>
                       </div>
-                    }
-                  />
+                    </div>
+                  </div>
+                ),
+                children: (
+                  <div className="auth-announcement-body">
+                    <div className="auth-announcement-body-meta">
+                      <span className={`auth-announcement-type-icon ${announcementMeta.iconClassName}`}>
+                        {announcementMeta.icon}
+                      </span>
+                      <Text className="auth-announcement-body-label">
+                        {announcementMeta.label} notice for portal users
+                      </Text>
+                    </div>
+                    <div className="auth-announcement-scroll">
+                      <div className="auth-announcement-message">
+                        {announcement.portalAnnouncementMessage}
+                      </div>
+                    </div>
+                  </div>
                 ),
               }]}
             />
