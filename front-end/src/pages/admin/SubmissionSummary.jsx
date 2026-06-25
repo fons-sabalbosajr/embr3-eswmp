@@ -934,7 +934,7 @@ export default function SubmissionSummary({ isDark }) {
         open={!!submissionDetail}
         onCancel={() => setSubmissionDetail(null)}
         footer={<Button onClick={() => setSubmissionDetail(null)}>Close</Button>}
-        width={1300}
+        width={1400}
         destroyOnHidden
       >
         {submissionDetail && (

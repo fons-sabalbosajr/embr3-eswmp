@@ -1197,13 +1197,18 @@ export default function SLFPortal() {
     return Array.from({ length: count }, (_, index) => {
       const status = normalizeCellStatus(slfInfo?.cellStatuses?.[index]);
       const isOpen = isActiveCellStatus(status);
+      const capacity = Number(slfInfo?.cellCapacities?.[index] || 0);
+      const fill = Number(slfInfo?.cellFillValues?.[index] || 0);
+      const isFull = capacity > 0 && fill >= capacity;
       // Admin per-cell submission toggle (undefined => allowed when active).
       const submissionAllowed =
         slfInfo?.cellSubmissionAllowed?.[index] !== false;
       const cellValue = `Cell ${index + 1}`;
       const userAllowed =
         allowedCells.length === 0 || allowedCells.includes(cellValue);
-      return isOpen && submissionAllowed && userAllowed
+      // Once a cell is 100% filled, it is no longer available for portal waste
+      // placement even if it is still marked Active/Open in the infra status.
+      return isOpen && submissionAllowed && userAllowed && !isFull
         ? {
             label: `Cell ${index + 1}${slfInfo?.cellTypes?.[index] ? ` - ${slfInfo.cellTypes[index]}` : ""}`,
             value: cellValue,
@@ -1240,6 +1245,12 @@ export default function SLFPortal() {
   const [cellOrganizerData, setCellOrganizerData] = useState([]);
   const [cellOrganizerSaving, setCellOrganizerSaving] = useState(false);
   const [cellOrganizerPrompted, setCellOrganizerPrompted] = useState(false);
+  // expanded card keys  (array of sub._id strings)
+  const [cellOrganizerExpanded, setCellOrganizerExpanded] = useState([]);
+  // checked row keys  ("subId|truckIndex|vehicleIndex" or "subId|truckIndex|t")
+  const [cellOrganizerSelected, setCellOrganizerSelected] = useState([]);
+  // cell value to bulk-apply to all checked rows
+  const [cellOrganizerBulkCell, setCellOrganizerBulkCell] = useState(undefined);
 
   // A vehicle/truck is "unplaced" when it carries waste volume but has no cell.
   const submissionHasUnplaced = useCallback((sub) => {
@@ -1277,6 +1288,9 @@ export default function SLFPortal() {
       })),
     }));
     setCellOrganizerData(working);
+    setCellOrganizerExpanded([]);
+    setCellOrganizerSelected([]);
+    setCellOrganizerBulkCell(undefined);
     setCellOrganizerOpen(true);
   };
 
@@ -1305,6 +1319,23 @@ export default function SLFPortal() {
         return { ...sub, trucks };
       }),
     );
+  };
+
+  // Apply the bulk cell to all currently checked rows.
+  const applyBulkCellToSelected = () => {
+    if (!cellOrganizerBulkCell || cellOrganizerSelected.length === 0) return;
+    cellOrganizerSelected.forEach((rowKey) => {
+      // rowKey format: "subId|truckIndex|vehicleIndex" or "subId|truckIndex|t"
+      const parts = rowKey.split("|");
+      if (parts.length < 3) return;
+      const subId = parts[0];
+      const truckIndex = Number(parts[1]);
+      const vPart = parts[2];
+      const vehicleIndex = vPart === "t" ? null : Number(vPart);
+      updateOrganizerCell(subId, truckIndex, vehicleIndex, cellOrganizerBulkCell);
+    });
+    setCellOrganizerSelected([]);
+    setCellOrganizerBulkCell(undefined);
   };
 
   const saveCellOrganizer = async () => {
@@ -8129,133 +8160,533 @@ export default function SLFPortal() {
             <Space>
               <ContainerOutlined style={{ color: "#722ed1" }} />
               <span>Organize Cell Placement</span>
+              {cellOrganizerData.length > 0 && (
+                <Tag color="purple">{cellOrganizerData.length} submission(s)</Tag>
+              )}
             </Space>
           }
           open={cellOrganizerOpen}
           onCancel={() => setCellOrganizerOpen(false)}
-          width={920}
+          width={960}
           okText="Save Placement"
           okButtonProps={{ icon: <SaveOutlined />, loading: cellOrganizerSaving }}
           onOk={saveCellOrganizer}
           destroyOnHidden
+          styles={{ body: { maxHeight: "72vh", overflowY: "auto", padding: "12px 16px" } }}
         >
           {cellOrganizerData.length === 0 ? (
             <Empty description="All your submissions are already organized into cells." />
           ) : (
-            <Space direction="vertical" size={12} style={{ width: "100%" }}>
+            <Space direction="vertical" size={10} style={{ width: "100%" }}>
               <Alert
                 type="info"
                 showIcon
-                message="Place each truck/vehicle's waste into an open disposal cell"
-                description="Only active open cells configured by EMB Region III are shown. Hazardous loads can only go to hazardous cells."
+                message="Expand a submission card, check the rows you want to assign, then use the bulk-assign bar or the individual cell selector."
                 style={{ borderRadius: 8 }}
               />
-              {cellOrganizerData.map((sub) => {
-                const rows = [];
-                sub.trucks.forEach((truck, truckIndex) => {
-                  if ((truck.vehicles || []).length > 0) {
-                    truck.vehicles.forEach((veh, vehicleIndex) => {
-                      rows.push({
-                        rowKey: `${truckIndex}-${vehicleIndex}`,
-                        truckIndex,
-                        vehicleIndex,
-                        plate: veh.plateNumber || truck.disposalTicketNo || "-",
-                        wasteType: veh.wasteType || truck.wasteType || "Residual",
-                        volume: veh.actualVolume != null ? veh.actualVolume : truck.actualVolume,
-                        volumeUnit: veh.actualVolumeUnit || truck.actualVolumeUnit || baselineUnit || "m³",
-                        cellName: veh.cellName,
-                      });
-                    });
-                  } else {
-                    rows.push({
-                      rowKey: `${truckIndex}-t`,
-                      truckIndex,
-                      vehicleIndex: null,
-                      plate: truck.plateNumber || truck.disposalTicketNo || "-",
-                      wasteType: truck.wasteType || "Residual",
-                      volume: truck.actualVolume,
-                      volumeUnit: truck.actualVolumeUnit || baselineUnit || "m³",
-                      cellName: truck.cellName,
-                    });
-                  }
+
+              {/* ── Cell Status Summary ── */}
+              {(() => {
+                const count = Number(
+                  slfInfo?.numberOfCell || slfInfo?.cellStatuses?.length || 0,
+                );
+                if (!count) return null;
+
+                const STATUS_COLOR = {
+                  "Active Cell": "#52c41a",
+                  "Operational": "#52c41a",
+                  "Active": "#52c41a",
+                  "Used/Completed": "#8c8c8c",
+                  "Closed": "#8c8c8c",
+                  "Under Construction": "#faad14",
+                  "Reserved Area": "#1677ff",
+                  "Reserved Cell": "#1677ff",
+                  "Not Existed": "#d9d9d9",
+                };
+                const STATUS_BG = {
+                  "Active Cell": "#f6ffed",
+                  "Operational": "#f6ffed",
+                  "Active": "#f6ffed",
+                  "Used/Completed": "#f5f5f5",
+                  "Closed": "#f5f5f5",
+                  "Under Construction": "#fffbe6",
+                  "Reserved Area": "#e6f4ff",
+                  "Reserved Cell": "#e6f4ff",
+                  "Not Existed": "#fafafa",
+                };
+
+                const cells = Array.from({ length: count }, (_, idx) => {
+                  const rawStatus = normalizeCellStatus(slfInfo?.cellStatuses?.[idx]);
+                  const type = slfInfo?.cellTypes?.[idx] || "Residual";
+                  const submissionAllowed = slfInfo?.cellSubmissionAllowed?.[idx] !== false;
+                  const isOpen = isActiveCellStatus(rawStatus);
+                  const capacity = Number(slfInfo?.cellCapacities?.[idx] || 0);
+                  const fill = Number(slfInfo?.cellFillValues?.[idx] || 0);
+                  const capUnit = (slfInfo?.cellCapacityUnits?.[idx] || slfInfo?.wasteReceivedUnit || "m³").replace("m3", "m³");
+                  const pct = capacity > 0 && fill != null
+                    ? Math.min(100, Math.round((fill / capacity) * 100))
+                    : null;
+                  const isFull = capacity > 0 && fill >= capacity;
+                  return { idx, label: `Cell ${idx + 1}`, status: rawStatus, type, submissionAllowed, isOpen, isFull, capacity, fill, capUnit, pct };
                 });
+
+                const pieCounts = cells.reduce((acc, c) => {
+                  const key = c.isFull
+                    ? "Full / Disabled"
+                    : isActiveCellStatus(c.status) && c.submissionAllowed
+                    ? "Open for Disposal"
+                    : isActiveCellStatus(c.status) && !c.submissionAllowed
+                    ? "Active (locked)"
+                    : c.status || "Other";
+                  acc[key] = (acc[key] || 0) + 1;
+                  return acc;
+                }, {});
+                const PIE_COLORS = {
+                  "Open for Disposal": "#52c41a",
+                  "Full / Disabled": "#ff4d4f",
+                  "Active (locked)": "#faad14",
+                  "Used/Completed": "#8c8c8c",
+                  "Closed": "#bfbfbf",
+                  "Under Construction": "#fa8c16",
+                  "Reserved Area": "#1677ff",
+                  "Reserved Cell": "#597ef7",
+                  "Not Existed": "#d9d9d9",
+                };
+                const pieData = Object.entries(pieCounts).map(([name, value]) => ({ name, value }));
+
                 return (
                   <Card
-                    key={sub._id}
                     size="small"
-                    style={{ borderRadius: 10 }}
+                    style={{
+                      borderRadius: 16,
+                      border: "1px solid #e7d8ff",
+                      background:
+                        "linear-gradient(135deg, rgba(114,46,209,0.08) 0%, rgba(255,255,255,0.98) 48%, rgba(24,144,255,0.05) 100%)",
+                      boxShadow: "0 10px 30px rgba(114,46,209,0.08)",
+                      overflow: "hidden",
+                    }}
+                    styles={{ body: { padding: "14px 16px 16px" } }}
                     title={
-                      <Space wrap>
+                      <div
+                        style={{
+                          display: "flex",
+                          justifyContent: "space-between",
+                          alignItems: "center",
+                          gap: 12,
+                          flexWrap: "wrap",
+                        }}
+                      >
+                        <Space>
+                          <div
+                            style={{
+                              width: 34,
+                              height: 34,
+                              borderRadius: 10,
+                              background: "linear-gradient(135deg, #722ed1 0%, #9254de 100%)",
+                              display: "flex",
+                              alignItems: "center",
+                              justifyContent: "center",
+                              boxShadow: "0 6px 16px rgba(114,46,209,0.24)",
+                            }}
+                          >
+                            <ContainerOutlined style={{ color: "#fff", fontSize: 16 }} />
+                          </div>
+                          <div>
+                            <Text strong style={{ fontSize: 14, display: "block" }}>
+                              Cell Infra Overview
+                            </Text>
+                            <Text type="secondary" style={{ fontSize: 11 }}>
+                              Open cells only remain selectable while capacity is still available.
+                            </Text>
+                          </div>
+                        </Space>
+                        <Space size={6} wrap>
+                          <Tag color="green">{activeCellOptions.length} open</Tag>
+                          {cells.filter((c) => c.isFull).length > 0 && (
+                            <Tag color="red">{cells.filter((c) => c.isFull).length} full / disabled</Tag>
+                          )}
+                        </Space>
+                      </div>
+                    }
+                  >
+                    <Row gutter={[10, 10]} align="middle">
+                      {/* Pie chart */}
+                      <Col xs={24} sm={8} style={{ textAlign: "center" }}>
+                        <ResponsiveContainer width="100%" height={130}>
+                          <PieChart>
+                            <Pie
+                              data={pieData}
+                              cx="50%"
+                              cy="50%"
+                              innerRadius={36}
+                              outerRadius={56}
+                              paddingAngle={2}
+                              dataKey="value"
+                            >
+                              {pieData.map((entry) => (
+                                <RCell
+                                  key={entry.name}
+                                  fill={PIE_COLORS[entry.name] || "#d9d9d9"}
+                                />
+                              ))}
+                            </Pie>
+                            <RTooltip
+                              formatter={(val, name) => [`${val} cell(s)`, name]}
+                              contentStyle={{ fontSize: 11 }}
+                            />
+                          </PieChart>
+                        </ResponsiveContainer>
+                        <div style={{ marginTop: -8 }}>
+                          {pieData.map((entry) => (
+                            <Space key={entry.name} size={4} style={{ marginRight: 10 }}>
+                              <span
+                                style={{
+                                  display: "inline-block",
+                                  width: 8,
+                                  height: 8,
+                                  borderRadius: "50%",
+                                  background: PIE_COLORS[entry.name] || "#d9d9d9",
+                                }}
+                              />
+                              <Text style={{ fontSize: 10 }}>{entry.name} ({entry.value})</Text>
+                            </Space>
+                          ))}
+                        </div>
+                      </Col>
+
+                      {/* Per-cell cards */}
+                      <Col xs={24} sm={16}>
+                        <div
+                          style={{
+                            display: "grid",
+                            gridTemplateColumns: "repeat(auto-fill, minmax(145px, 1fr))",
+                            gap: 10,
+                          }}
+                        >
+                          {cells.map((c) => {
+                            const color = c.isFull
+                              ? "#ff4d4f"
+                              : c.isOpen && c.submissionAllowed
+                              ? "#52c41a"
+                              : c.isOpen
+                              ? "#faad14"
+                              : STATUS_COLOR[c.status] || "#8c8c8c";
+                            const bg = c.isFull
+                              ? "linear-gradient(135deg, #fff1f0 0%, #fff 100%)"
+                              : c.isOpen && c.submissionAllowed
+                              ? "#f6ffed"
+                              : c.isOpen
+                              ? "#fffbe6"
+                              : STATUS_BG[c.status] || "#f5f5f5";
+                            const statusLabel = c.isFull
+                              ? "Full / Disabled"
+                              : c.isOpen && c.submissionAllowed
+                              ? "Open"
+                              : c.isOpen
+                              ? "Active (locked)"
+                              : c.status;
+                            return (
+                              <div
+                                key={c.idx}
+                                style={{
+                                  borderRadius: 14,
+                                  border: `1.5px solid ${color}33`,
+                                  background: bg,
+                                  padding: "10px 11px",
+                                  borderLeft: `5px solid ${color}`,
+                                  position: "relative",
+                                  boxShadow: c.isFull
+                                    ? "0 6px 18px rgba(255,77,79,0.10)"
+                                    : "0 6px 18px rgba(0,0,0,0.04)",
+                                }}
+                              >
+                                <div
+                                  style={{
+                                    display: "flex",
+                                    justifyContent: "space-between",
+                                    alignItems: "flex-start",
+                                    gap: 6,
+                                    marginBottom: 2,
+                                  }}
+                                >
+                                  <Text strong style={{ fontSize: 12, display: "block", color }}>
+                                    {c.label}
+                                  </Text>
+                                  <Tag
+                                    color={c.isFull ? "red" : c.isOpen && c.submissionAllowed ? "green" : c.isOpen ? "gold" : "default"}
+                                    style={{ margin: 0, fontSize: 9, lineHeight: "16px", paddingInline: 6 }}
+                                  >
+                                    {c.isFull ? "FULL" : c.isOpen && c.submissionAllowed ? "OPEN" : c.isOpen ? "LOCKED" : "OFF"}
+                                  </Tag>
+                                </div>
+                                <Text style={{ fontSize: 10, display: "block", color: "#595959", marginBottom: 1 }}>
+                                  {statusLabel}
+                                </Text>
+                                <Text style={{ fontSize: 10, display: "block", color: "#8c8c8c" }}>
+                                  {c.type}
+                                </Text>
+                                {/* {c.capacity > 0 && (
+                                  <Text style={{ fontSize: 9, display: "block", color: "#8c8c8c", marginTop: 4 }}>
+                                    {Number(c.fill || 0).toLocaleString()} / {Number(c.capacity).toLocaleString()} {c.capUnit}
+                                  </Text>
+                                )} */}
+                                {c.pct != null && (
+                                  <div
+                                    style={{
+                                      marginTop: 6,
+                                      height: 6,
+                                      borderRadius: 4,
+                                      background: "#e0e0e0",
+                                      overflow: "hidden",
+                                    }}
+                                  >
+                                    <div
+                                      style={{
+                                        height: "100%",
+                                        borderRadius: 4,
+                                        width: `${c.pct}%`,
+                                        background: c.pct >= 90 ? "#ff4d4f" : c.pct >= 75 ? "#faad14" : "#52c41a",
+                                      }}
+                                    />
+                                  </div>
+                                )}
+                                {c.pct != null && (
+                                  <Text style={{ fontSize: 9, color: c.isFull ? "#cf1322" : "#8c8c8c", fontWeight: c.isFull ? 700 : 400 }}>
+                                    {c.isFull ? "No longer available" : `${c.pct}% filled`}
+                                  </Text>
+                                )}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </Col>
+                    </Row>
+                  </Card>
+                );
+              })()}
+
+              {/* ── Bulk-assign bar ── */}
+              {cellOrganizerSelected.length > 0 && (
+                <div
+                  style={{
+                    background: "linear-gradient(90deg, #391085 0%, #531dab 100%)",
+                    borderRadius: 8,
+                    padding: "10px 14px",
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 10,
+                    flexWrap: "wrap",
+                  }}
+                >
+                  <Tag color="white" style={{ color: "#531dab", fontWeight: 700, fontSize: 12 }}>
+                    {cellOrganizerSelected.length} row(s) selected
+                  </Tag>
+                  <Select
+                    placeholder="Select cell to apply to all"
+                    value={cellOrganizerBulkCell}
+                    onChange={setCellOrganizerBulkCell}
+                    allowClear
+                    style={{ flex: 1, minWidth: 200 }}
+                    options={activeCellOptions.map((o) => ({ label: o.label, value: o.value }))}
+                    size="small"
+                  />
+                  <Button
+                    size="small"
+                    type="primary"
+                    disabled={!cellOrganizerBulkCell}
+                    onClick={applyBulkCellToSelected}
+                    style={{ background: "#9254de", borderColor: "#9254de" }}
+                    icon={<ContainerOutlined />}
+                  >
+                    Apply to Selected
+                  </Button>
+                  <Button
+                    size="small"
+                    type="text"
+                    onClick={() => {
+                      setCellOrganizerSelected([]);
+                      setCellOrganizerBulkCell(undefined);
+                    }}
+                    style={{ color: "rgba(255,255,255,0.75)" }}
+                  >
+                    Clear
+                  </Button>
+                </div>
+              )}
+
+              {/* ── Collapsible submission cards ── */}
+              <Collapse
+                accordion={false}
+                activeKey={cellOrganizerExpanded}
+                onChange={setCellOrganizerExpanded}
+                bordered={false}
+                style={{ background: "transparent" }}
+                items={cellOrganizerData.map((sub) => {
+                  // Build flat row list for this submission
+                  const rows = [];
+                  sub.trucks.forEach((truck, truckIndex) => {
+                    if ((truck.vehicles || []).length > 0) {
+                      truck.vehicles.forEach((veh, vehicleIndex) => {
+                        const rowKey = `${sub._id}|${truckIndex}|${vehicleIndex}`;
+                        rows.push({
+                          rowKey,
+                          truckIndex,
+                          vehicleIndex,
+                          plate: veh.plateNumber || truck.disposalTicketNo || "-",
+                          wasteType: veh.wasteType || truck.wasteType || "Residual",
+                          volume: veh.actualVolume != null ? veh.actualVolume : truck.actualVolume,
+                          volumeUnit: veh.actualVolumeUnit || truck.actualVolumeUnit || baselineUnit || "m³",
+                          cellName: veh.cellName,
+                        });
+                      });
+                    } else {
+                      const rowKey = `${sub._id}|${truckIndex}|t`;
+                      rows.push({
+                        rowKey,
+                        truckIndex,
+                        vehicleIndex: null,
+                        plate: truck.plateNumber || truck.disposalTicketNo || "-",
+                        wasteType: truck.wasteType || "Residual",
+                        volume: truck.actualVolume,
+                        volumeUnit: truck.actualVolumeUnit || baselineUnit || "m³",
+                        cellName: truck.cellName,
+                      });
+                    }
+                  });
+
+                  const placedCount = rows.filter((r) => r.cellName).length;
+                  const allPlaced = placedCount === rows.length;
+                  const subSelectedCount = rows.filter((r) =>
+                    cellOrganizerSelected.includes(r.rowKey),
+                  ).length;
+                  const allSubSelected = subSelectedCount === rows.length;
+
+                  return {
+                    key: sub._id,
+                    label: (
+                      <div
+                        style={{
+                          display: "flex",
+                          alignItems: "center",
+                          gap: 8,
+                          flexWrap: "wrap",
+                          width: "100%",
+                        }}
+                      >
+                        {/* select-all checkbox for this submission */}
+                        <Checkbox
+                          checked={allSubSelected && rows.length > 0}
+                          indeterminate={subSelectedCount > 0 && !allSubSelected}
+                          onClick={(e) => e.stopPropagation()}
+                          onChange={(e) => {
+                            const keys = rows.map((r) => r.rowKey);
+                            if (e.target.checked) {
+                              setCellOrganizerSelected((prev) => [
+                                ...prev.filter((k) => !keys.includes(k)),
+                                ...keys,
+                              ]);
+                            } else {
+                              setCellOrganizerSelected((prev) =>
+                                prev.filter((k) => !keys.includes(k)),
+                              );
+                            }
+                          }}
+                        />
                         <Text strong style={{ fontSize: 13 }}>
                           {sub.idNo || sub.submissionId || "Submission"}
                         </Text>
                         <Tag color="blue">{sub.lguCompanyName || "—"}</Tag>
-                        <Text type="secondary" style={{ fontSize: 11 }}>
-                          {sub.dateOfDisposal
-                            ? dayjs(sub.dateOfDisposal).format("MM/DD/YYYY")
-                            : ""}
-                        </Text>
-                      </Space>
-                    }
-                  >
-                    <Table
-                      size="small"
-                      rowKey="rowKey"
-                      pagination={false}
-                      dataSource={rows}
-                      columns={[
-                        { title: "Truck / Plate", dataIndex: "plate", width: 140 },
-                        {
-                          title: "Waste Type",
-                          dataIndex: "wasteType",
-                          width: 150,
-                          render: (v) => (
-                            <Tag color={/haz|inert/i.test(v) ? "volcano" : "green"}>{v}</Tag>
+                        {sub.dateOfDisposal && (
+                          <Text type="secondary" style={{ fontSize: 11 }}>
+                            {dayjs(sub.dateOfDisposal).format("MM/DD/YYYY")}
+                          </Text>
+                        )}
+                        <Tag
+                          color={allPlaced ? "success" : "warning"}
+                          style={{ marginLeft: "auto" }}
+                        >
+                          {placedCount}/{rows.length} placed
+                        </Tag>
+                      </div>
+                    ),
+                    style: {
+                      borderRadius: 10,
+                      marginBottom: 6,
+                      border: "1px solid #efdbff",
+                      background: "#fdf9ff",
+                    },
+                    styles: { header: { padding: "10px 14px" }, body: { padding: "0 14px 12px" } },
+                    children: (
+                      <Table
+                        size="small"
+                        rowKey="rowKey"
+                        pagination={false}
+                        dataSource={rows}
+                        rowSelection={{
+                          selectedRowKeys: cellOrganizerSelected.filter((k) =>
+                            rows.some((r) => r.rowKey === k),
                           ),
-                        },
-                        {
-                          title: "Volume",
-                          width: 110,
-                          render: (_, r) =>
-                            `${Number(r.volume || 0).toLocaleString()} ${String(r.volumeUnit).replace("m3", "m³")}`,
-                        },
-                        {
-                          title: "Disposal Cell",
-                          render: (_, r) => {
-                            const isHaz = /haz|inert/i.test(r.wasteType);
-                            const opts = activeCellOptions.filter((o) =>
-                              isHaz
-                                ? String(o.cellType || "").toLowerCase().includes("haz")
-                                : !String(o.cellType || "").toLowerCase().includes("haz"),
+                          onChange: (selectedKeys) => {
+                            const otherSubs = cellOrganizerSelected.filter(
+                              (k) => !rows.some((r) => r.rowKey === k),
                             );
-                            const cellOpts = opts.length ? opts : activeCellOptions;
-                            return (
-                              <Select
-                                style={{ width: "100%" }}
-                                placeholder="Select open cell"
-                                value={r.cellName || undefined}
-                                allowClear
-                                options={cellOpts.map((o) => ({
-                                  label: o.label,
-                                  value: o.value,
-                                }))}
-                                onChange={(val) =>
-                                  updateOrganizerCell(
-                                    sub._id,
-                                    r.truckIndex,
-                                    r.vehicleIndex,
-                                    val,
-                                  )
-                                }
-                              />
-                            );
+                            setCellOrganizerSelected([...otherSubs, ...selectedKeys]);
                           },
-                        },
-                      ]}
-                    />
-                  </Card>
-                );
-              })}
+                          columnWidth: 36,
+                        }}
+                        columns={[
+                          { title: "Truck / Plate", dataIndex: "plate", width: 130, render: (v) => <Text style={{ fontSize: 12 }}>{v}</Text> },
+                          {
+                            title: "Waste Type",
+                            dataIndex: "wasteType",
+                            width: 150,
+                            render: (v) => (
+                              <Tag color={/haz|inert/i.test(v) ? "volcano" : "green"} style={{ fontSize: 11 }}>
+                                {v}
+                              </Tag>
+                            ),
+                          },
+                          {
+                            title: "Volume",
+                            width: 100,
+                            render: (_, r) => (
+                              <Text style={{ fontSize: 12 }}>
+                                {Number(r.volume || 0).toLocaleString()}{" "}
+                                {String(r.volumeUnit).replace("m3", "m³")}
+                              </Text>
+                            ),
+                          },
+                          {
+                            title: "Disposal Cell",
+                            render: (_, r) => {
+                              const isHaz = /haz|inert/i.test(r.wasteType);
+                              const opts = activeCellOptions.filter((o) =>
+                                isHaz
+                                  ? String(o.cellType || "").toLowerCase().includes("haz")
+                                  : !String(o.cellType || "").toLowerCase().includes("haz"),
+                              );
+                              const cellOpts = opts.length ? opts : activeCellOptions;
+                              return (
+                                <Select
+                                  size="small"
+                                  style={{ width: "100%" }}
+                                  placeholder="Select open cell"
+                                  value={r.cellName || undefined}
+                                  allowClear
+                                  options={cellOpts.map((o) => ({ label: o.label, value: o.value }))}
+                                  onChange={(val) =>
+                                    updateOrganizerCell(sub._id, r.truckIndex, r.vehicleIndex, val)
+                                  }
+                                />
+                              );
+                            },
+                          },
+                        ]}
+                      />
+                    ),
+                  };
+                })}
+              />
             </Space>
           )}
         </Modal>

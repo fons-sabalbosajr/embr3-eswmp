@@ -1621,7 +1621,7 @@ export default function SLFPortalModals({
         open={!!historyDetailModal}
         onCancel={() => setHistoryDetailModal(null)}
         footer={null}
-        width={900}
+        width={1100}
         destroyOnHidden
         styles={{ body: { padding: 0 } }}
         closeIcon={
@@ -2211,122 +2211,65 @@ export default function SLFPortalModals({
                                   {d.accreditedHaulers.length})
                                 </Text>
                               ),
-                              children: (
-                                <div
-                                  style={{
-                                    display: "flex",
-                                    flexDirection: "column",
-                                    gap: 10,
-                                  }}
-                                >
-                                  {d.accreditedHaulers.map((h, i) => {
-                                    const clients = Array.isArray(
-                                      h.privateSectorClients,
-                                    )
-                                      ? h.privateSectorClients
-                                      : h.privateSectorClients
-                                        ? [h.privateSectorClients]
+                              children: (() => {
+                                // Helper: normalise a client entry to a plain string.
+                                const clientLabel = (c) => {
+                                  if (!c) return "";
+                                  if (typeof c === "string") return c.trim();
+                                  return (
+                                    c.clientName ||
+                                    c.name ||
+                                    c.company ||
+                                    JSON.stringify(c)
+                                  ).trim();
+                                };
+                                // Flatten each hauler into a flat row for the
+                                // main table, carrying its vehicles for expansion.
+                                const haulerRows = d.accreditedHaulers.map((h, i) => {
+                                  const rawClients = Array.isArray(h.privateSectorClients)
+                                    ? h.privateSectorClients
+                                    : h.privateSectorClients
+                                      ? [h.privateSectorClients]
+                                      : [];
+                                  const clientStr =
+                                    rawClients.length > 0
+                                      ? rawClients.map(clientLabel).filter(Boolean).join(", ")
+                                      : "—";
+                                  const vehicles =
+                                    h.vehicles?.length > 0
+                                      ? h.vehicles
+                                      : h.plateNumber || h.vehicleType || h.capacity != null
+                                        ? [{
+                                            plateNumber: h.plateNumber,
+                                            vehicleType: h.vehicleType,
+                                            capacity: h.capacity,
+                                            capacityUnit: h.capacityUnit,
+                                          }]
                                         : [];
-                                    const vehicles =
-                                      h.vehicles?.length > 0
-                                        ? h.vehicles
-                                        : h.plateNumber ||
-                                            h.vehicleType ||
-                                            h.capacity != null
-                                          ? [
-                                              {
-                                                plateNumber: h.plateNumber,
-                                                vehicleType: h.vehicleType,
-                                                capacity: h.capacity,
-                                                capacityUnit: h.capacityUnit,
-                                              },
-                                            ]
-                                          : [];
-                                    return (
-                                      <div
-                                        key={i}
-                                        style={{
-                                          background: "#fff",
-                                          borderRadius: 6,
-                                          padding: "14px 16px",
-                                          border: "1px solid #e8e8e8",
-                                        }}
-                                      >
-                                        <div
-                                          style={{
-                                            display: "flex",
-                                            alignItems: "center",
-                                            gap: 8,
-                                            marginBottom: 10,
-                                          }}
-                                        >
-                                          <div
-                                            style={{
-                                              width: 24,
-                                              height: 24,
-                                              borderRadius: "50%",
-                                              background: "#1a3353",
-                                              color: "#fff",
-                                              display: "flex",
-                                              alignItems: "center",
-                                              justifyContent: "center",
-                                              fontSize: 11,
-                                              fontWeight: 700,
-                                            }}
-                                          >
-                                            {i + 1}
-                                          </div>
-                                          <Text strong style={{ fontSize: 13 }}>
-                                            {h.haulerName || "Unnamed Hauler"}
-                                          </Text>
-                                        </div>
-                                        <Row gutter={16}>
-                                          {fieldRow(
-                                            "No. of Trucks",
-                                            h.numberOfTrucks ?? "—",
-                                          )}
-                                          {fieldRow(
-                                            "Office Address",
-                                            h.officeAddress || "—",
-                                            { span: 2 },
-                                          )}
-                                          {fieldRow(
-                                            "Private Sector/LGU Clients",
-                                            clients.length > 0
-                                              ? clients.join(", ")
-                                              : "—",
-                                            { span: 2 },
-                                          )}
-                                        </Row>
-                                        {vehicles.length > 0 && (
+                                  return { ...h, _idx: i, clientStr, vehicles };
+                                });
+                                return (
+                                  <Table
+                                    size="small"
+                                    rowKey="_idx"
+                                    pagination={false}
+                                    dataSource={haulerRows}
+                                    scroll={{ x: 640 }}
+                                    expandable={{
+                                      expandedRowRender: (row) =>
+                                        row.vehicles.length > 0 ? (
                                           <Table
-                                            dataSource={vehicles}
-                                            rowKey={(_, vi) => vi}
                                             size="small"
+                                            rowKey={(_, vi) => vi}
                                             pagination={false}
-                                            style={{ marginTop: 8 }}
+                                            dataSource={row.vehicles}
+                                            style={{ margin: "4px 0" }}
                                             columns={[
-                                              {
-                                                title: "#",
-                                                key: "idx",
-                                                width: 40,
-                                                render: (_, __, vi) => vi + 1,
-                                              },
-                                              {
-                                                title: "Plate Number",
-                                                dataIndex: "plateNumber",
-                                                key: "plate",
-                                                render: (v) => v || "—",
-                                              },
-                                              {
-                                                title: "Vehicle Type",
-                                                dataIndex: "vehicleType",
-                                                key: "type",
-                                                render: (v) => v || "—",
-                                              },
+                                              { title: "#", width: 40, render: (_, __, vi) => vi + 1 },
+                                              { title: "Plate Number", dataIndex: "plateNumber", render: (v) => v || "—" },
+                                              { title: "Vehicle Type", dataIndex: "vehicleType", render: (v) => v || "—" },
                                               {
                                                 title: "Capacity",
-                                                key: "cap",
                                                 render: (_, v) =>
                                                   v.capacity != null
                                                     ? `${v.capacity} ${(v.capacityUnit || "m³").replace("m3", "m³")}`
@@ -2334,12 +2277,44 @@ export default function SLFPortalModals({
                                               },
                                             ]}
                                           />
-                                        )}
-                                      </div>
-                                    );
-                                  })}
-                                </div>
-                              ),
+                                        ) : null,
+                                      rowExpandable: (row) => row.vehicles.length > 0,
+                                    }}
+                                    columns={[
+                                      {
+                                        title: "#",
+                                        dataIndex: "_idx",
+                                        width: 44,
+                                        render: (v) => v + 1,
+                                      },
+                                      {
+                                        title: "Hauler Name",
+                                        dataIndex: "haulerName",
+                                        render: (v) => <Text strong style={{ fontSize: 12 }}>{v || "Unnamed"}</Text>,
+                                      },
+                                      {
+                                        title: "No. of Trucks",
+                                        dataIndex: "numberOfTrucks",
+                                        width: 100,
+                                        align: "center",
+                                        render: (v) => v ?? "—",
+                                      },
+                                      {
+                                        title: "Office Address",
+                                        dataIndex: "officeAddress",
+                                        render: (v) => <Text style={{ fontSize: 12 }}>{v || "—"}</Text>,
+                                      },
+                                      {
+                                        title: "Clients",
+                                        dataIndex: "clientStr",
+                                        render: (v) => (
+                                          <Text style={{ fontSize: 12, whiteSpace: "normal", wordBreak: "break-word" }}>{v}</Text>
+                                        ),
+                                      },
+                                    ]}
+                                  />
+                                );
+                              })(),
                             },
                           ]
                         : []),
