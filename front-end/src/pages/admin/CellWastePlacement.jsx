@@ -116,10 +116,10 @@ export default function CellWastePlacement({ canEdit = true }) {
   const page = pagination.current;
   const pageSize = pagination.pageSize;
   const searchTerm = debouncedSearch.trim();
-  const currentCacheKey = useMemo(
-    () => [CACHE_KEY, page, pageSize, searchTerm.toLowerCase()].join(":"),
-    [page, pageSize, searchTerm],
-  );
+  // Single stable cache key — we load the full submission set once and do all
+  // searching + pagination on the client so the search covers every submission
+  // (not just the current page) and cell-fill totals aggregate across all records.
+  const currentCacheKey = CACHE_KEY;
 
   const fetchRecords = useCallback(async ({ force = false, silent = false } = {}) => {
     await fetchWithCache(
@@ -129,9 +129,6 @@ export default function CellWastePlacement({ canEdit = true }) {
           api.get("/data-slf", {
             params: {
               mode: "list",
-              page,
-              limit: pageSize,
-              search: searchTerm || undefined,
               includeTrucks: true,
               withTruckVolume: true,
             },
@@ -139,11 +136,11 @@ export default function CellWastePlacement({ canEdit = true }) {
           api.get("/data-slf/baselines"),
           api.get("/settings/app"),
         ]);
+        const rawRecords = Array.isArray(recordsRes.data)
+          ? recordsRes.data
+          : recordsRes.data?.data || [];
         return {
-          records: recordsRes.data?.data || [],
-          total: Number(recordsRes.data?.total || 0),
-          page: Number(recordsRes.data?.page || page),
-          pageSize: Number(recordsRes.data?.limit || pageSize),
+          records: rawRecords,
           baselines: baselinesRes.data || [],
           settings: settingsRes.data || {},
         };
@@ -156,12 +153,6 @@ export default function CellWastePlacement({ canEdit = true }) {
         onData: (payload = {}) => {
           const next = Array.isArray(payload) ? payload : Array.isArray(payload.records) ? payload.records : [];
           setRecords(next);
-          setPagination((prev) => ({
-            ...prev,
-            current: payload.page || prev.current,
-            pageSize: payload.pageSize || prev.pageSize,
-            total: typeof payload.total === "number" ? payload.total : next.length,
-          }));
           setBaselines(Array.isArray(payload.baselines) ? payload.baselines : []);
           setSettings(payload.settings || {});
           setSelectedId((current) => next.some((row) => row._id === current) ? current : next[0]?._id || null);
@@ -169,7 +160,7 @@ export default function CellWastePlacement({ canEdit = true }) {
         },
       },
     );
-  }, [currentCacheKey, page, pageSize, searchTerm]);
+  }, [currentCacheKey]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -201,9 +192,9 @@ export default function CellWastePlacement({ canEdit = true }) {
   }, [records]);
 
   const filteredSubmissions = useMemo(() => {
-    if (!search.trim()) return submissions;
+    if (!searchTerm) return submissions;
     return submissions.filter((record) =>
-      rowMatchesSearch(record, search, [
+      rowMatchesSearch(record, searchTerm, [
         "idNo",
         "submissionId",
         "lguCompanyName",
@@ -213,7 +204,26 @@ export default function CellWastePlacement({ canEdit = true }) {
         (item) => (item.createdAt ? dayjs(item.createdAt).format("MM/DD/YYYY") : ""),
       ]),
     );
-  }, [search, submissions]);
+  }, [searchTerm, submissions]);
+
+  // Client-side pagination over the fully-filtered set so the list reflects
+  // every matching submission, then keep pagination total in sync.
+  useEffect(() => {
+    setPagination((prev) => {
+      const total = filteredSubmissions.length;
+      const maxPage = Math.max(1, Math.ceil(total / prev.pageSize));
+      return {
+        ...prev,
+        total,
+        current: prev.current > maxPage ? 1 : prev.current,
+      };
+    });
+  }, [filteredSubmissions.length]);
+
+  const pagedSubmissions = useMemo(() => {
+    const start = (page - 1) * pageSize;
+    return filteredSubmissions.slice(start, start + pageSize);
+  }, [filteredSubmissions, page, pageSize]);
 
   const selected = filteredSubmissions.find((record) => record._id === selectedId) || filteredSubmissions[0] || null;
   const facility = selected?.slfGenerator || {};
@@ -270,6 +280,25 @@ export default function CellWastePlacement({ canEdit = true }) {
     records.forEach((record) => {
       if (getFacilityName(record) !== getFacilityName(selected) || !shouldCountRecord(record)) return;
       (record.trucks || []).forEach((truck, truckIndex) => {
+        // Prefer per-vehicle cell placements (new model); fall back to the
+        // truck-level cell for legacy submissions.
+        const vehiclePlacements = (truck.vehicles || []).filter(
+          (v) => v.cellIndex != null && Number(v.actualVolume || 0) > 0,
+        );
+        if (vehiclePlacements.length > 0) {
+          vehiclePlacements.forEach((veh, vehIndex) => {
+            const row = rows[Number(veh.cellIndex)];
+            if (!row) return;
+            const volume = convertVolume(
+              veh.actualVolume,
+              veh.actualVolumeUnit || truck.actualVolumeUnit || record.baselineUnit || row.unit,
+              row.unit,
+            );
+            row.used += volume;
+            row.submissions.push({ record, truck, truckIndex, vehicle: veh, vehIndex, volume });
+          });
+          return;
+        }
         if (truck.cellIndex == null) return;
         const row = rows[Number(truck.cellIndex)];
         if (!row) return;
@@ -406,7 +435,7 @@ export default function CellWastePlacement({ canEdit = true }) {
             <List
               size="small"
               loading={loading}
-                dataSource={filteredSubmissions}
+                dataSource={pagedSubmissions}
               locale={{ emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No submissions with truck volume" /> }}
               style={{ maxHeight: 640, overflow: "auto" }}
               renderItem={(record) => (

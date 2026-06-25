@@ -10,6 +10,7 @@ const Transaction = require("../models/Transaction");
 const Notification = require("../models/Notification");
 const UserPortal = require("../models/UserPortal");
 const { notifyAdmin, notifyPortal, refreshAdmin } = require("../utils/socketEmit");
+const { authMiddleware, developerOnly } = require("../middleware/auth");
 
 // Province code mapping (mirrors DataSLF model)
 const PROVINCE_CODES = {
@@ -320,13 +321,21 @@ router.post("/", async (req, res) => {
     const items = Array.isArray(entries) ? entries : [req.body];
     const submissionId = `SUB-${Date.now()}-${crypto.randomBytes(3).toString("hex")}`;
 
+    // Cache SLFGenerator lookups so repeated slfNames in a batch don't re-query.
+    const genCache = new Map();
     const saved = [];
     for (const item of items) {
       // Resolve slfGenerator from slfName if not set
       let genId = item.slfGenerator || null;
       if (!genId && item.slfName) {
-        const gen = await SLFGenerator.findOne({ slfName: item.slfName });
-        if (gen) genId = gen._id;
+        const cacheKey = String(item.slfName).trim().toLowerCase();
+        if (genCache.has(cacheKey)) {
+          genId = genCache.get(cacheKey);
+        } else {
+          const gen = await SLFGenerator.findOne({ slfName: item.slfName }).select("_id").lean();
+          genId = gen?._id || null;
+          genCache.set(cacheKey, genId);
+        }
       }
       const doc = new DataSLF({
         ...item,
@@ -334,52 +343,57 @@ router.post("/", async (req, res) => {
         submissionId,
         submittedBy: submittedBy || item.submittedBy || "",
       });
+      // idNo generation must stay sequential to avoid duplicate sequence numbers.
       await doc.save();
       saved.push(doc);
     }
 
-    // Log submission transaction for each unique company
-    const companies = [...new Set(saved.map((s) => s.lguCompanyName))];
-    for (const company of companies) {
-      const companyEntries = saved.filter((s) => s.lguCompanyName === company);
-      try {
-        await Transaction.create({
-          submissionId,
-          dataEntry: companyEntries[0]._id,
-          companyName: company,
-          companyType: companyEntries[0].companyType,
-          submittedBy: submittedBy || "",
-          type: "submission",
-          description: `${companyEntries.length} entr${companyEntries.length === 1 ? "y" : "ies"} submitted by ${submittedBy || "unknown"}`,
-          performedBy: submittedBy || "portal",
-          meta: { entryCount: companyEntries.length, ids: companyEntries.map((e) => e.idNo) },
-        });
-      } catch { /* silent */ }
-    }
-
+    // Respond immediately — audit logging, notifications and socket refresh are
+    // non-critical and run after the response so the user isn't blocked on them.
     res.status(201).json({ message: "Data submitted successfully", data: saved });
 
-    // Notify admins of new submission
-    try {
-      await Notification.create({
-        recipient: "admin",
-        type: "new_submission",
-        title: "New Submission",
-        message: `${submittedBy || "A portal user"} submitted ${saved.length} entr${saved.length === 1 ? "y" : "ies"} (${saved[0]?.lguCompanyName || "Unknown"})`,
-        submissionId,
-        dataEntry: saved[0]?._id,
-        meta: { entryCount: saved.length, companyName: saved[0]?.lguCompanyName, submittedBy },
-      });
-    } catch { /* silent */ }
-    notifyAdmin(req, { type: "new_submission", title: "New Submission", message: `${submittedBy || "A portal user"} submitted ${saved.length} entries` });
-    refreshAdmin(req, "submissions");
+    (async () => {
+      try {
+        // One transaction per unique company, written in a single round trip.
+        const companies = [...new Set(saved.map((s) => s.lguCompanyName))];
+        const txnDocs = companies.map((company) => {
+          const companyEntries = saved.filter((s) => s.lguCompanyName === company);
+          return {
+            submissionId,
+            dataEntry: companyEntries[0]._id,
+            companyName: company,
+            companyType: companyEntries[0].companyType,
+            submittedBy: submittedBy || "",
+            type: "submission",
+            description: `${companyEntries.length} entr${companyEntries.length === 1 ? "y" : "ies"} submitted by ${submittedBy || "unknown"}`,
+            performedBy: submittedBy || "portal",
+            meta: { entryCount: companyEntries.length, ids: companyEntries.map((e) => e.idNo) },
+          };
+        });
+        if (txnDocs.length) await Transaction.insertMany(txnDocs, { ordered: false });
+      } catch { /* silent */ }
 
-    writeLog("info", "submission.create", {
-      message: `New submission: ${saved.length} entries by ${submittedBy || "unknown"}`,
-      user: submittedBy || "",
-      ip: req.ip,
-      meta: { submissionId: saved[0]?.submissionId, count: saved.length },
-    });
+      try {
+        await Notification.create({
+          recipient: "admin",
+          type: "new_submission",
+          title: "New Submission",
+          message: `${submittedBy || "A portal user"} submitted ${saved.length} entr${saved.length === 1 ? "y" : "ies"} (${saved[0]?.lguCompanyName || "Unknown"})`,
+          submissionId,
+          dataEntry: saved[0]?._id,
+          meta: { entryCount: saved.length, companyName: saved[0]?.lguCompanyName, submittedBy },
+        });
+      } catch { /* silent */ }
+      notifyAdmin(req, { type: "new_submission", title: "New Submission", message: `${submittedBy || "A portal user"} submitted ${saved.length} entries` });
+      refreshAdmin(req, "submissions");
+
+      writeLog("info", "submission.create", {
+        message: `New submission: ${saved.length} entries by ${submittedBy || "unknown"}`,
+        user: submittedBy || "",
+        ip: req.ip,
+        meta: { submissionId: saved[0]?.submissionId, count: saved.length },
+      });
+    })();
   } catch (error) {
     if (error.statusCode) return res.status(error.statusCode).json({ message: error.message });
     res.status(500).json({ message: "Server error", error: error.message });
@@ -493,29 +507,53 @@ router.put("/:id", async (req, res) => {
   }
 });
 
-// Get latest baseline info for an SLF (by assigned name) — portal
+// Get latest baseline info for an SLF (by assigned name or facility id) — portal
 router.get("/baseline/:slfName", async (req, res) => {
   try {
     const slfName = req.params.slfName;
+    // Optional: SlfFacility _id passed by the portal so lookup works even when
+    // the facility was renamed and the stored slfName no longer matches.
+    const slfId = req.query.slfId;
+    const slfObjectId =
+      slfId && mongoose.Types.ObjectId.isValid(String(slfId))
+        ? new mongoose.Types.ObjectId(String(slfId))
+        : null;
+
+    const nameOrFilters = [
+      ...(slfObjectId ? [{ slfGenerator: slfObjectId }] : []),
+      { slfName },
+      { lguCompanyName: slfName },
+    ];
 
     let candidates = await DataSLF.find({
-      $and: [
-        { $or: [{ slfName }, { lguCompanyName: slfName }] },
-        baselineDataMatch,
-      ],
+      $and: [{ $or: nameOrFilters }, baselineDataMatch],
     })
       .setOptions({ includeHiddenYears: true })
       .sort({ createdAt: -1 })
       .lean();
+
+    // Prefer records that match by facility id (most reliable link after a rename).
     let matchedCandidates = candidates;
-    let latest = chooseBaselineRecord(candidates);
+    if (
+      slfObjectId &&
+      candidates.some((c) => String(c.slfGenerator || "") === String(slfObjectId))
+    ) {
+      matchedCandidates = candidates.filter(
+        (c) => String(c.slfGenerator || "") === String(slfObjectId),
+      );
+    }
+    let latest = chooseBaselineRecord(matchedCandidates);
 
     if (!latest) {
       candidates = await DataSLF.find(baselineDataMatch)
         .setOptions({ includeHiddenYears: true })
         .sort({ createdAt: -1 })
         .lean();
-      matchedCandidates = candidates.filter((item) => matchesBaselineName(item, slfName));
+      matchedCandidates = candidates.filter((item) => {
+        if (slfObjectId && String(item.slfGenerator || "") === String(slfObjectId))
+          return true;
+        return matchesBaselineName(item, slfName);
+      });
       latest = chooseBaselineRecord(matchedCandidates);
     }
 
@@ -1349,9 +1387,42 @@ router.patch("/:id/cell-assignments", async (req, res) => {
         ? undefined
         : Number(assignment.cellIndex);
       if (cellIndex !== undefined && (!Number.isInteger(cellIndex) || cellIndex < 0)) return;
-      entry.trucks[truckIndex].cellIndex = cellIndex;
-      entry.trucks[truckIndex].cellName = cellIndex === undefined ? "" : (assignment.cellName || `Cell ${cellIndex + 1}`);
-      entry.trucks[truckIndex].cellType = assignment.cellType || "";
+      const cellName = cellIndex === undefined ? "" : (assignment.cellName || `Cell ${cellIndex + 1}`);
+      const cellType = assignment.cellType || "";
+      // Per-vehicle assignment when a vehicleIndex is supplied (new model).
+      const vehicleIndex =
+        assignment.vehicleIndex === null || assignment.vehicleIndex === undefined
+          ? null
+          : Number(assignment.vehicleIndex);
+      const truck = entry.trucks[truckIndex];
+      if (
+        Number.isInteger(vehicleIndex) &&
+        Array.isArray(truck.vehicles) &&
+        vehicleIndex >= 0 &&
+        vehicleIndex < truck.vehicles.length
+      ) {
+        truck.vehicles[vehicleIndex].cellIndex = cellIndex;
+        truck.vehicles[vehicleIndex].cellName = cellName;
+        truck.vehicles[vehicleIndex].cellType = cellType;
+        // Keep the truck-level cell in sync with the first vehicle for legacy views.
+        if (vehicleIndex === 0) {
+          truck.cellIndex = cellIndex;
+          truck.cellName = cellName;
+          truck.cellType = cellType;
+        }
+        return;
+      }
+      truck.cellIndex = cellIndex;
+      truck.cellName = cellName;
+      truck.cellType = cellType;
+      // Mirror to all vehicles so per-vehicle cell-fill stays consistent.
+      if (Array.isArray(truck.vehicles)) {
+        truck.vehicles.forEach((veh) => {
+          veh.cellIndex = cellIndex;
+          veh.cellName = cellName;
+          veh.cellType = cellType;
+        });
+      }
     });
     entry.markModified("trucks");
     await entry.save();
@@ -1376,6 +1447,87 @@ router.patch("/:id/cell-assignments", async (req, res) => {
     });
     refreshAdmin(req, "submissions");
     res.json({ message: "Cell assignments updated", data: entry });
+  } catch (error) {
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+});
+
+// Portal: the submitter organizes their own past submission waste into open
+// cells. Validates ownership via submittedBy and applies per-vehicle (or
+// truck-level) cell placements.
+router.patch("/:id/portal-cell-assignments", async (req, res) => {
+  try {
+    const { submittedBy, assignments } = req.body || {};
+    const entry = await DataSLF.findOne({ _id: req.params.id, deletedAt: null });
+    if (!entry) return res.status(404).json({ message: "Entry not found" });
+    if (
+      !submittedBy ||
+      String(entry.submittedBy || "").trim().toLowerCase() !==
+        String(submittedBy).trim().toLowerCase()
+    ) {
+      return res.status(403).json({ message: "You can only organize your own submissions." });
+    }
+    const list = Array.isArray(assignments) ? assignments : [];
+    list.forEach((assignment) => {
+      const truckIndex = Number(assignment.truckIndex);
+      if (!Number.isInteger(truckIndex) || truckIndex < 0 || truckIndex >= entry.trucks.length) return;
+      const truck = entry.trucks[truckIndex];
+      const cellIndex =
+        assignment.cellIndex === null || assignment.cellIndex === undefined || assignment.cellIndex === ""
+          ? undefined
+          : Number(assignment.cellIndex);
+      if (cellIndex !== undefined && (!Number.isInteger(cellIndex) || cellIndex < 0)) return;
+      const cellName = cellIndex === undefined ? "" : (assignment.cellName || `Cell ${cellIndex + 1}`);
+      const cellType = assignment.cellType || "";
+      const vehicleIndex =
+        assignment.vehicleIndex === null || assignment.vehicleIndex === undefined
+          ? null
+          : Number(assignment.vehicleIndex);
+      if (
+        Number.isInteger(vehicleIndex) &&
+        Array.isArray(truck.vehicles) &&
+        vehicleIndex >= 0 &&
+        vehicleIndex < truck.vehicles.length
+      ) {
+        truck.vehicles[vehicleIndex].cellIndex = cellIndex;
+        truck.vehicles[vehicleIndex].cellName = cellName;
+        truck.vehicles[vehicleIndex].cellType = cellType;
+        if (vehicleIndex === 0) {
+          truck.cellIndex = cellIndex;
+          truck.cellName = cellName;
+          truck.cellType = cellType;
+        }
+        return;
+      }
+      truck.cellIndex = cellIndex;
+      truck.cellName = cellName;
+      truck.cellType = cellType;
+      if (Array.isArray(truck.vehicles)) {
+        truck.vehicles.forEach((veh) => {
+          veh.cellIndex = cellIndex;
+          veh.cellName = cellName;
+          veh.cellType = cellType;
+        });
+      }
+    });
+    entry.markModified("trucks");
+    await entry.save();
+
+    try {
+      await Transaction.create({
+        submissionId: entry.submissionId || entry.idNo,
+        dataEntry: entry._id,
+        companyName: entry.lguCompanyName,
+        companyType: entry.companyType,
+        submittedBy: entry.submittedBy || "",
+        type: "cell_assignment",
+        description: `Portal user organized waste placement for ${entry.idNo || entry.lguCompanyName}`,
+        performedBy: submittedBy,
+        meta: { idNo: entry.idNo, portal: true },
+      });
+    } catch { /* silent */ }
+    refreshAdmin(req, "submissions");
+    res.json({ message: "Cell placement saved", data: entry });
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });
   }
@@ -1868,6 +2020,184 @@ router.post("/repair-xx-ids", async (req, res) => {
       message: `Repaired ${updated} of ${xxDocs.length} XX records.`,
       updated,
       skipped: xxDocs.length - updated - errors.length,
+      errors,
+    });
+  } catch (error) {
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+});
+
+// Repair existing ID No. TYPE segment mismatches (PVT vs LGU).
+// Developer-only. Uses the SLF facility OWNERSHIP together with province and the
+// SLF name as a strict identity condition so records are only re-typed when the
+// correct facility is confidently matched.
+router.post("/repair-type-ids", authMiddleware, developerOnly, async (req, res) => {
+  try {
+    const typeCodeForCompanyType = (companyType) => {
+      const value = String(companyType || "").trim().toLowerCase();
+      if (value === "private" || value === "pvt") return "PVT";
+      if (value === "lgu") return "LGU";
+      return null;
+    };
+    // Derive the PVT/LGU type from a facility's ownership classification.
+    const typeCodeForOwnership = (ownership) => {
+      const o = String(ownership || "").toLowerCase();
+      if (!o) return null;
+      if (/private|pvt|corporat|company/.test(o)) return "PVT";
+      if (/lgu|government|gov't|govt|public|municipal|city|provincial|barangay/.test(o))
+        return "LGU";
+      return null;
+    };
+
+    // Load all facilities once and index by normalized SLF name (latest year wins).
+    const facilities = await SlfFacility.find({ deletedAt: null })
+      .select("lgu province ownership dataYear")
+      .lean();
+    const facilityById = new Map();
+    const facilityByName = new Map();
+    facilities.forEach((f) => {
+      facilityById.set(String(f._id), f);
+      getNameVariants(f.lgu).forEach((variant) => {
+        const key = normalizeSlfName(variant);
+        if (!key) return;
+        const prev = facilityByName.get(key);
+        if (!prev || (f.dataYear || 0) > (prev.dataYear || 0))
+          facilityByName.set(key, f);
+      });
+    });
+
+    // Strictly resolve the facility for a submission using slfGenerator, then a
+    // name match validated against the submission's province.
+    const resolveFacility = (doc) => {
+      if (doc.slfGenerator && facilityById.has(String(doc.slfGenerator)))
+        return facilityById.get(String(doc.slfGenerator));
+      const nameKeys = getNameVariants(doc.slfName).map(normalizeSlfName).filter(Boolean);
+      for (const key of nameKeys) {
+        const f = facilityByName.get(key);
+        if (!f) continue;
+        // Province must agree when both are known (strict condition).
+        const docProv = doc.companyProvince
+          ? getProvinceCode(doc.companyProvince)
+          : null;
+        const facProv = f.province ? getProvinceCode(f.province) : null;
+        if (docProv && facProv && docProv !== facProv) continue;
+        return f;
+      }
+      return null;
+    };
+
+    const docs = await DataSLF.find({ idNo: /^SLF-(PVT|LGU)-/ })
+      .setOptions({ includeHiddenYears: true })
+      .lean();
+
+    let updated = 0;
+    let skipped = 0;
+    const errors = [];
+    const sequenceCache = new Map();
+    const assignedIds = new Set();
+
+    const getNextIdNo = async (typeCode, provCode) => {
+      const key = `${typeCode}-${provCode}`;
+      let seq = sequenceCache.get(key);
+      if (seq == null) {
+        const pattern = new RegExp(`^SLF-${typeCode}-${provCode}-(\\d{4,})`);
+        const existing = await DataSLF.find({ idNo: pattern })
+          .setOptions({ includeHiddenYears: true })
+          .select("idNo")
+          .lean();
+        seq = existing.reduce((max, item) => {
+          const match = String(item.idNo || "").match(pattern);
+          const n = match ? Number(match[1]) : 0;
+          return n > max ? n : max;
+        }, 0);
+      }
+      let candidate;
+      do {
+        seq += 1;
+        candidate = `SLF-${typeCode}-${provCode}-${String(seq).padStart(4, "0")}`;
+      } while (
+        assignedIds.has(candidate) ||
+        (await DataSLF.exists({ idNo: candidate }).setOptions({ includeHiddenYears: true }))
+      );
+      sequenceCache.set(key, seq);
+      assignedIds.add(candidate);
+      return candidate;
+    };
+
+    for (const doc of docs) {
+      try {
+        const parts = String(doc.idNo).split("-");
+        if (parts.length < 4 || parts[0] !== "SLF") continue;
+        const currentType = parts[1];
+        const provCode = parts[2];
+
+        // Strict identity: require a confidently-matched facility (slfGenerator
+        // or name+province) so we never re-type the wrong SLF's records.
+        const facility = resolveFacility(doc);
+        if (!facility) {
+          skipped++;
+          continue;
+        }
+
+        // The submission's companyType drives the type; fall back to the
+        // facility ownership when companyType is missing/ambiguous.
+        const desiredType =
+          typeCodeForCompanyType(doc.companyType) ||
+          typeCodeForOwnership(facility.ownership);
+        if (!desiredType || desiredType === currentType) {
+          if (!desiredType) skipped++;
+          continue;
+        }
+
+        const oldIdNo = doc.idNo;
+        const finalIdNo = await getNextIdNo(desiredType, provCode);
+        await DataSLF.updateOne(
+          { _id: doc._id },
+          {
+            $set: { idNo: finalIdNo },
+            $addToSet: { previousIdNos: oldIdNo },
+          },
+        );
+        await Transaction.updateMany(
+          {
+            $or: [
+              { dataEntry: doc._id },
+              { "meta.idNo": oldIdNo },
+              { "meta.ids": oldIdNo },
+            ],
+          },
+          {
+            $set: { "meta.idNo": finalIdNo },
+            $addToSet: { "meta.previousIdNos": oldIdNo },
+          },
+        );
+        await Transaction.create({
+          submissionId: doc.submissionId || doc._id.toString(),
+          dataEntry: doc._id,
+          companyName: doc.lguCompanyName,
+          companyType: doc.companyType,
+          submittedBy: doc.submittedBy,
+          type: "admin_edit",
+          description: `Fixed ID No. type from ${oldIdNo} to ${finalIdNo} (${currentType}→${desiredType}; ownership: ${facility.ownership || "n/a"})`,
+          performedBy: getRequestActor(req),
+          meta: { idNo: finalIdNo, previousIdNo: oldIdNo, repairType: true, ownership: facility.ownership || "" },
+        });
+        updated++;
+      } catch (err) {
+        errors.push({ id: doc._id, error: err.message });
+      }
+    }
+
+    writeLog("warn", "id.repair-type", {
+      message: `Repaired ${updated} ID No. type mismatches (PVT/LGU)`,
+      user: getRequestActor(req),
+      meta: { total: docs.length, updated, skipped, errors: errors.length },
+    });
+
+    res.json({
+      message: `Repaired ${updated} PVT/LGU ID No. mismatch(es).${skipped ? ` ${skipped} skipped (SLF could not be strictly identified by ownership/province/name).` : ""}`,
+      updated,
+      skipped,
       errors,
     });
   } catch (error) {

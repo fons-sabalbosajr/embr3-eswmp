@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import {
   Layout,
   Form,
@@ -35,6 +35,7 @@ import {
   Progress,
   Checkbox,
   Alert,
+  Tour,
 } from "antd";
 import {
   CheckCircleOutlined,
@@ -120,6 +121,7 @@ const PORTAL_SETTINGS_CACHE_KEY = "portal-settings-cache";
 const PORTAL_SUBMISSIONS_CACHE_KEY = "portal-submissions-cache";
 const PORTAL_WASTE_RECEIVED_CACHE_KEY = "portal-waste-received-cache";
 const PORTAL_CACHE_TTL = 2 * 60 * 1000;
+const PORTAL_UPDATE_TOUR_SEEN_PREFIX = "slf-portal-update-tour-seen-";
 
 const normalizeUnit = (unit) => String(unit || "m³").replace("m3", "m³");
 const hasBaselinePayload = (data = {}) =>
@@ -593,6 +595,8 @@ export default function SLFPortal() {
   const [activeCellModalOpen, setActiveCellModalOpen] = useState(false);
   const [activeCellDraft, setActiveCellDraft] = useState({
     cellName: "",
+    cellType: "",
+    cellIndex: null,
     wasteType: "Residual",
     volume: null,
   });
@@ -602,6 +606,8 @@ export default function SLFPortal() {
   const [closedCellModalOpen, setClosedCellModalOpen] = useState(false);
   const [closedCellDraft, setClosedCellDraft] = useState({
     cellName: "",
+    cellType: "",
+    cellIndex: null,
     wasteType: "Residual",
     volume: null,
   });
@@ -656,6 +662,14 @@ export default function SLFPortal() {
   const [portalSettings, setPortalSettings] = useState(null);
   const [portalAnnouncement, setPortalAnnouncement] = useState(null);
   const [announcementDismissed, setAnnouncementDismissed] = useState(false);
+  const [updateTourOpen, setUpdateTourOpen] = useState(false);
+  const [updateTourCurrent, setUpdateTourCurrent] = useState(0);
+  const announcementBannerRef = useRef(null);
+  const slfSelectorRef = useRef(null);
+  const dataEntryTabsRef = useRef(null);
+  const baselinePanelRef = useRef(null);
+  const baselineStatusRef = useRef(null);
+  const baselineActionRef = useRef(null);
   // Excel/CSV upload states
   const [uploadModalOpen, setUploadModalOpen] = useState(false);
   const [uploadType, setUploadType] = useState("truck"); // "truck" or "hauler"
@@ -698,6 +712,77 @@ export default function SLFPortal() {
     missingBaselineInfo ||
     missingDisposalInfo ||
     missingHazardousCodeTrucks.length > 0;
+  const portalAnnouncementVersion =
+    portalAnnouncement?.updatedAt ||
+    portalAnnouncement?._id ||
+    portalAnnouncement?.portalAnnouncementTitle ||
+    "";
+  const portalUpdateTourSeenKey = portalAnnouncementVersion
+    ? `${PORTAL_UPDATE_TOUR_SEEN_PREFIX}${portalAnnouncementVersion}`
+    : "";
+  const isPortalUpdateAnnouncement = /\b(update|updates|what'?s new|guided tour|tour)\b/i.test(
+    `${portalAnnouncement?.portalAnnouncementTitle || ""}\n${portalAnnouncement?.portalAnnouncementMessage || ""}`,
+  );
+  const hasMultipleAssignedSlf =
+    Array.isArray(portalUser?.assignedSlfName) &&
+    portalUser.assignedSlfName.length > 1;
+  const openPortalUpdateTour = useCallback(() => {
+    setAnnouncementDismissed(false);
+    setActiveMenu("data-entry");
+    setUpdateTourCurrent(0);
+    setUpdateTourOpen(true);
+  }, []);
+  const updateTourSteps = useMemo(() => {
+    const steps = [
+      {
+        key: "announcement",
+        title: "Today's portal updates",
+        description:
+          "This banner is where the latest SLF portal changes are announced. Use it to review rollout notes and update guidance.",
+        target: () => announcementBannerRef.current,
+        placement: "bottom",
+      },
+    ];
+
+    if (hasMultipleAssignedSlf) {
+      steps.push({
+        key: "slf-selector",
+        title: "Switch your assigned SLF",
+        description:
+          "If your account handles more than one facility, switch here before reviewing baseline or disposal records.",
+        target: () => slfSelectorRef.current,
+        placement: "bottom",
+      });
+    }
+
+    steps.push(
+      {
+        key: "baseline-tab",
+        title: "Baseline tab",
+        description:
+          "Baseline records now stay tied to the assigned SLF more reliably, including after facility rename updates.",
+        target: () => dataEntryTabsRef.current,
+        placement: "top",
+      },
+      {
+        key: "baseline-actions",
+        title: baselineSaved ? "Baseline change workflow" : "Save your baseline",
+        description: baselineSaved
+          ? baselineUpdatePending
+            ? "Your request is pending admin review. Use Refresh here to check when editing becomes available again."
+            : "After the first save locks the baseline, use Request Update here whenever admin approval is needed."
+          : "When editing is available, save the updated baseline here so it remains linked to the correct assigned facility.",
+        target: () =>
+          baselineActionRef.current ||
+          baselineStatusRef.current ||
+          baselinePanelRef.current ||
+          dataEntryTabsRef.current,
+        placement: "top",
+      },
+    );
+
+    return steps;
+  }, [baselineSaved, baselineUpdatePending, hasMultipleAssignedSlf]);
   const RequiredDot = ({ show }) =>
     show ? (
       <Badge dot offset={[2, -2]} style={{ backgroundColor: "#ff4d4f" }} />
@@ -999,6 +1084,15 @@ export default function SLFPortal() {
     const key = `portal-announcement-seen-${portalAnnouncement.updatedAt || portalAnnouncement._id || portalAnnouncement.portalAnnouncementTitle}`;
     if (sessionStorage.getItem(key) === "1") return;
     sessionStorage.setItem(key, "1");
+    if (isPortalUpdateAnnouncement) {
+      if (
+        portalUpdateTourSeenKey &&
+        localStorage.getItem(portalUpdateTourSeenKey) !== "1"
+      ) {
+        openPortalUpdateTour();
+      }
+      return;
+    }
     Modal.info({
       title:
         portalAnnouncement.portalAnnouncementTitle || "SLF Portal Announcement",
@@ -1010,7 +1104,25 @@ export default function SLFPortal() {
       okText: "Got it",
       width: 560,
     });
-  }, [portalAnnouncement, portalUser]);
+  }, [
+    isPortalUpdateAnnouncement,
+    openPortalUpdateTour,
+    portalAnnouncement,
+    portalUpdateTourSeenKey,
+    portalUser,
+  ]);
+
+  useEffect(() => {
+    if (!updateTourOpen) return;
+    const stepKey = updateTourSteps[updateTourCurrent]?.key;
+    if (!stepKey) return;
+    if (stepKey !== "announcement") {
+      setActiveMenu("data-entry");
+    }
+    if (stepKey === "baseline-tab" || stepKey === "baseline-actions") {
+      setActiveTab("baseline");
+    }
+  }, [updateTourCurrent, updateTourOpen, updateTourSteps]);
 
   // Load portal user from storage, then refresh from server for latest status/isVerified
   useEffect(() => {
@@ -1076,17 +1188,223 @@ export default function SLFPortal() {
     const count = Number(
       slfInfo?.numberOfCell || slfInfo?.cellStatuses?.length || 0,
     );
+    // Per-user cell access restriction (admin Manage Access). Empty => no restriction.
+    const allowedCells = Array.isArray(portalUser?.portalAccess?.allowedCells)
+      ? portalUser.portalAccess.allowedCells
+          .map((c) => String(c || "").trim())
+          .filter(Boolean)
+      : [];
     return Array.from({ length: count }, (_, index) => {
       const status = normalizeCellStatus(slfInfo?.cellStatuses?.[index]);
       const isOpen = isActiveCellStatus(status);
-      return isOpen
+      // Admin per-cell submission toggle (undefined => allowed when active).
+      const submissionAllowed =
+        slfInfo?.cellSubmissionAllowed?.[index] !== false;
+      const cellValue = `Cell ${index + 1}`;
+      const userAllowed =
+        allowedCells.length === 0 || allowedCells.includes(cellValue);
+      return isOpen && submissionAllowed && userAllowed
         ? {
             label: `Cell ${index + 1}${slfInfo?.cellTypes?.[index] ? ` - ${slfInfo.cellTypes[index]}` : ""}`,
-            value: `Cell ${index + 1}`,
+            value: cellValue,
+            cellType: slfInfo?.cellTypes?.[index] || "Residual",
+            cellIndex: index,
           }
         : null;
     }).filter(Boolean);
   })();
+
+  // All cells from the facility's cell infrastructure (regardless of the
+  // disposal-submission restriction) — used to anchor baseline Cell Entry names
+  // to real cells in the cell infra so they stay consistent with the admin side.
+  const baselineCellOptions = (() => {
+    const count = Number(
+      slfInfo?.numberOfCell || slfInfo?.cellStatuses?.length || 0,
+    );
+    return Array.from({ length: count }, (_, index) => {
+      const status = normalizeCellStatus(slfInfo?.cellStatuses?.[index]);
+      const type = slfInfo?.cellTypes?.[index] || "Residual";
+      return {
+        label: `Cell ${index + 1} - ${type}${status ? ` (${status})` : ""}`,
+        value: `Cell ${index + 1}`,
+        cellType: type,
+        cellIndex: index,
+        status,
+      };
+    });
+  })();
+
+  // ── Cell Placement organizer (item #8): let users place PAST submissions'
+  // waste into open cells so their disposals are organized per cell. ──
+  const [cellOrganizerOpen, setCellOrganizerOpen] = useState(false);
+  const [cellOrganizerData, setCellOrganizerData] = useState([]);
+  const [cellOrganizerSaving, setCellOrganizerSaving] = useState(false);
+  const [cellOrganizerPrompted, setCellOrganizerPrompted] = useState(false);
+
+  // A vehicle/truck is "unplaced" when it carries waste volume but has no cell.
+  const submissionHasUnplaced = useCallback((sub) => {
+    return (sub?.trucks || []).some((truck) => {
+      const vehs = (truck.vehicles || []).filter(
+        (v) => Number(v.actualVolume || 0) > 0,
+      );
+      if (vehs.length) return vehs.some((v) => !v.cellName);
+      return Number(truck.actualVolume || 0) > 0 && !truck.cellName;
+    });
+  }, []);
+
+  const unplacedSubmissions = useMemo(() => {
+    if (activeCellOptions.length === 0) return [];
+    return (submissions || []).filter(
+      (sub) =>
+        sub.status !== "reverted" &&
+        sub.status !== "rejected" &&
+        submissionHasUnplaced(sub),
+    );
+  }, [submissions, activeCellOptions.length, submissionHasUnplaced]);
+
+  const openCellOrganizer = () => {
+    // Build an editable working copy of unplaced submissions.
+    const working = unplacedSubmissions.map((sub) => ({
+      _id: sub._id,
+      idNo: sub.idNo,
+      submissionId: sub.submissionId,
+      dateOfDisposal: sub.dateOfDisposal,
+      lguCompanyName: sub.lguCompanyName,
+      status: sub.status,
+      trucks: (sub.trucks || []).map((truck) => ({
+        ...truck,
+        vehicles: (truck.vehicles || []).map((v) => ({ ...v })),
+      })),
+    }));
+    setCellOrganizerData(working);
+    setCellOrganizerOpen(true);
+  };
+
+  const updateOrganizerCell = (subId, truckIndex, vehicleIndex, cellValue) => {
+    const opt = activeCellOptions.find((o) => o.value === cellValue);
+    const patch = {
+      cellName: cellValue || "",
+      cellType: opt?.cellType || "",
+      cellIndex:
+        opt && typeof opt.cellIndex === "number" ? opt.cellIndex : null,
+    };
+    setCellOrganizerData((prev) =>
+      prev.map((sub) => {
+        if (sub._id !== subId) return sub;
+        const trucks = sub.trucks.map((truck, ti) => {
+          if (ti !== truckIndex) return truck;
+          if (Number.isInteger(vehicleIndex)) {
+            const vehicles = (truck.vehicles || []).map((v, vi) =>
+              vi === vehicleIndex ? { ...v, ...patch } : v,
+            );
+            return { ...truck, vehicles, ...(vehicleIndex === 0 ? patch : {}) };
+          }
+          const vehicles = (truck.vehicles || []).map((v) => ({ ...v, ...patch }));
+          return { ...truck, ...patch, vehicles };
+        });
+        return { ...sub, trucks };
+      }),
+    );
+  };
+
+  const saveCellOrganizer = async () => {
+    setCellOrganizerSaving(true);
+    try {
+      for (const sub of cellOrganizerData) {
+        const assignments = [];
+        sub.trucks.forEach((truck, truckIndex) => {
+          if ((truck.vehicles || []).length > 0) {
+            truck.vehicles.forEach((veh, vehicleIndex) => {
+              assignments.push({
+                truckIndex,
+                vehicleIndex,
+                cellIndex: veh.cellIndex,
+                cellName: veh.cellName,
+                cellType: veh.cellType,
+              });
+            });
+          } else {
+            assignments.push({
+              truckIndex,
+              cellIndex: truck.cellIndex,
+              cellName: truck.cellName,
+              cellType: truck.cellType,
+            });
+          }
+        });
+        await api.patch(`/data-slf/${sub._id}/portal-cell-assignments`, {
+          submittedBy: portalUser?.email,
+          assignments,
+        });
+      }
+      Swal.fire({
+        icon: "success",
+        title: "Waste Placement Saved",
+        text: "Your past submissions have been organized into the selected cells.",
+        confirmButtonColor: "#1a3353",
+      });
+      setCellOrganizerOpen(false);
+      fetchSubmissions(true);
+    } catch (err) {
+      showError({
+        type: "error",
+        title: "Could Not Save",
+        message:
+          err.response?.data?.message ||
+          "Something went wrong while saving cell placements. Please try again.",
+      });
+    } finally {
+      setCellOrganizerSaving(false);
+    }
+  };
+
+  // Prompt the user (once) to organize any past submissions that still have
+  // waste not yet placed into an open cell.
+  useEffect(() => {
+    if (cellOrganizerPrompted) return;
+    if (!portalUser?.email) return;
+    if (unplacedSubmissions.length === 0) return;
+    setCellOrganizerPrompted(true);
+    Swal.fire({
+      icon: "info",
+      title: "Organize Your Cell Placements",
+      html: `You have <b>${unplacedSubmissions.length}</b> past submission(s) with waste that hasn't been placed into a disposal cell yet. Organize them now so your records stay accurate.`,
+      showCancelButton: true,
+      confirmButtonText: "Organize Now",
+      cancelButtonText: "Later",
+      confirmButtonColor: "#722ed1",
+    }).then((result) => {
+      if (result.isConfirmed) openCellOrganizer();
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [unplacedSubmissions.length, portalUser?.email, cellOrganizerPrompted]);
+
+
+  useEffect(() => {
+    if (!portalUser?.locationSharingEnabled) return;
+    if (!("geolocation" in navigator)) return;
+    let cancelled = false;
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        if (cancelled) return;
+        const { latitude, longitude, accuracy } = pos.coords;
+        api
+          .patch("/portal-auth/location", {
+            enabled: true,
+            lat: latitude,
+            lng: longitude,
+            accuracy,
+            label: `${latitude.toFixed(4)}, ${longitude.toFixed(4)}`,
+          })
+          .catch(() => {});
+      },
+      () => {},
+      { enableHighAccuracy: false, timeout: 8000, maximumAge: 300000 },
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [portalUser?.locationSharingEnabled, portalUser?.email]);
 
   useEffect(() => {
     if (!activeSlfId) return;
@@ -1128,9 +1446,10 @@ export default function SLFPortal() {
     const ac = new AbortController();
     withRetry(
       () =>
-        api.get(`/data-slf/baseline/${encodeURIComponent(activeSlfName)}`, {
-          signal: ac.signal,
-        }),
+        api.get(
+          `/data-slf/baseline/${encodeURIComponent(activeSlfName)}?slfId=${encodeURIComponent(activeSlfId || "")}`,
+          { signal: ac.signal },
+        ),
       { retries: 3, signal: ac.signal },
     )
       .then(({ data }) => {
@@ -1331,7 +1650,7 @@ export default function SLFPortal() {
         payload?.type === "baseline_locked"
       ) {
         api
-          .get(`/data-slf/baseline/${encodeURIComponent(activeSlfName)}`)
+          .get(`/data-slf/baseline/${encodeURIComponent(activeSlfName)}?slfId=${encodeURIComponent(activeSlfId || "")}`)
           .then(({ data }) => {
             if (hasBaselinePayload(data)) {
               if (data.baselineUpdateApproved) {
@@ -1492,24 +1811,47 @@ export default function SLFPortal() {
       errs.disposalTicketNo = "Required";
     if (isRequired("hauler", true) && !truckDraft.hauler?.trim())
       errs.hauler = "Required";
+    const vehicles = (truckDraft.vehicles || []).filter(
+      (v) => v.plateNumber?.trim() || v.actualVolume != null,
+    );
     if (
       isRequired("plateNumber", true) &&
       !(truckDraft.vehicles || []).some((v) => v.plateNumber?.trim())
     )
       errs.plateNumber = "At least one vehicle plate number is required";
-    if (
-      isRequired("actualVolume", true) &&
-      !truckDraft.actualVolume &&
-      truckDraft.actualVolume !== 0
-    )
-      errs.actualVolume = "Required";
-    if (isRequired("wasteType", true) && !truckDraft.wasteType)
-      errs.wasteType = "Required";
-    if (
-      isTreatedHazardousWaste(truckDraft.wasteType) &&
-      !hasHazardousWasteCode(truckDraft.hazWasteCode)
-    ) {
-      errs.hazWasteCode = "Required for Treated Hazardous Waste";
+    // Per-vehicle waste placement validation.
+    const vehicleErrors = [];
+    (truckDraft.vehicles || []).forEach((v, idx) => {
+      const hasPlate = v.plateNumber?.trim();
+      // Only validate vehicles that the user actually started filling in.
+      if (!hasPlate && v.actualVolume == null && !v.wasteType && !v.cellName)
+        return;
+      const vehErr = {};
+      if (isRequired("wasteType", true) && !v.wasteType)
+        vehErr.wasteType = "Select waste type";
+      if (
+        isRequired("actualVolume", true) &&
+        !v.actualVolume &&
+        v.actualVolume !== 0
+      )
+        vehErr.actualVolume = "Enter the waste volume";
+      if (activeCellOptions.length > 0 && !v.cellName?.trim())
+        vehErr.cellName = "Assign a disposal cell";
+      if (
+        isTreatedHazardousWaste(v.wasteType) &&
+        !hasHazardousWasteCode(v.hazWasteCode)
+      )
+        vehErr.hazWasteCode = "Hazardous code required";
+      if (Object.keys(vehErr).length) vehicleErrors[idx] = vehErr;
+    });
+    if (vehicleErrors.length) {
+      errs.vehicles = vehicleErrors;
+      errs.plateNumber =
+        errs.plateNumber ||
+        "Complete the waste volume, type and disposal cell for each vehicle.";
+    }
+    if (vehicles.length === 0 && isRequired("actualVolume", true)) {
+      errs.plateNumber = "Add at least one vehicle with its waste volume.";
     }
     // Validate additional transport fields from Portal Field Settings
     extraTransportFields.forEach((f) => {
@@ -1736,6 +2078,39 @@ export default function SLFPortal() {
   const openTruckModal = (record) => {
     if (record) {
       setEditingTruckKey(record.key);
+      // Migrate older entry-level waste fields into the first vehicle so the
+      // per-vehicle editor shows existing data when editing legacy entries.
+      const migrateVehicle = (v, i, isFirst) => ({
+        ...EMPTY_VEHICLE,
+        ...v,
+        key: Date.now() + i,
+        actualVolume:
+          v.actualVolume != null
+            ? v.actualVolume
+            : isFirst
+              ? record.actualVolume ?? null
+              : null,
+        actualVolumeUnit:
+          v.actualVolumeUnit ||
+          (isFirst ? record.actualVolumeUnit : null) ||
+          baselineUnit ||
+          "m³",
+        wasteType: v.wasteType || (isFirst ? record.wasteType : undefined),
+        hazWasteCode:
+          (v.hazWasteCode && v.hazWasteCode.length
+            ? v.hazWasteCode
+            : isFirst
+              ? record.hazWasteCode
+              : []) || [],
+        cellName: v.cellName || (isFirst ? record.cellName : "") || "",
+        cellType: v.cellType || (isFirst ? record.cellType : "") || "",
+        cellIndex:
+          typeof v.cellIndex === "number"
+            ? v.cellIndex
+            : isFirst && typeof record.cellIndex === "number"
+              ? record.cellIndex
+              : null,
+      });
       const draft = {
         disposalTicketNo: record.disposalTicketNo || "",
         hauler: record.hauler || "",
@@ -1744,16 +2119,19 @@ export default function SLFPortal() {
         truckCapacityUnit: record.truckCapacityUnit || baselineUnit || "m³",
         vehicles:
           record.vehicles?.length > 0
-            ? record.vehicles.map((v, i) => ({ ...v, key: Date.now() + i }))
+            ? record.vehicles.map((v, i) => migrateVehicle(v, i, i === 0))
             : record.plateNumber
               ? [
-                  {
-                    key: Date.now(),
-                    plateNumber: record.plateNumber,
-                    capacity: record.truckCapacity,
-                    capacityUnit:
-                      record.truckCapacityUnit || baselineUnit || "m³",
-                  },
+                  migrateVehicle(
+                    {
+                      plateNumber: record.plateNumber,
+                      capacity: record.truckCapacity,
+                      capacityUnit:
+                        record.truckCapacityUnit || baselineUnit || "m³",
+                    },
+                    0,
+                    true,
+                  ),
                 ]
               : [
                   {
@@ -1766,6 +2144,10 @@ export default function SLFPortal() {
         actualVolumeUnit: record.actualVolumeUnit || baselineUnit || "m³",
         wasteType: record.wasteType,
         hazWasteCode: record.hazWasteCode,
+        cellName: record.cellName || "",
+        cellType: record.cellType || "",
+        cellIndex:
+          typeof record.cellIndex === "number" ? record.cellIndex : null,
       };
       // Populate additional transport fields from record
       extraTransportFields.forEach((f) => {
@@ -1914,11 +2296,39 @@ export default function SLFPortal() {
       ({ key, ...rest }) => rest,
     );
     const first = vehicles[0] || {};
+    // Derive entry-level totals from the per-vehicle waste placements so that
+    // downstream summaries (which read truck-level fields) stay correct.
+    const filledVehicles = vehicles.filter(
+      (v) => v.plateNumber || v.actualVolume != null,
+    );
+    const totalVolume = filledVehicles.reduce(
+      (sum, v) => sum + Number(v.actualVolume || 0),
+      0,
+    );
+    const anyHaz = filledVehicles.some((v) =>
+      String(v.wasteType || "").toLowerCase().includes("hazard"),
+    );
+    const representativeWasteType =
+      filledVehicles.find((v) => v.wasteType)?.wasteType ||
+      truckDraft.wasteType ||
+      undefined;
+    const unionHazCodes = [
+      ...new Set(filledVehicles.flatMap((v) => v.hazWasteCode || [])),
+    ];
     const savedDraft = {
       ...truckDraft,
       plateNumber: first.plateNumber || truckDraft.plateNumber || "",
       truckCapacity: first.capacity ?? truckDraft.truckCapacity,
       truckCapacityUnit: first.capacityUnit || truckDraft.truckCapacityUnit,
+      // Entry-level rollups derived from vehicles
+      actualVolume: filledVehicles.length ? totalVolume : truckDraft.actualVolume,
+      actualVolumeUnit: first.actualVolumeUnit || baselineUnit || "m³",
+      wasteType: anyHaz ? "Treated Hazardous Waste" : representativeWasteType,
+      hazWasteCode: unionHazCodes,
+      cellName: first.cellName || "",
+      cellType: first.cellType || "",
+      cellIndex:
+        typeof first.cellIndex === "number" ? first.cellIndex : null,
       vehicles,
     };
     if (editingTruckKey) {
@@ -2042,7 +2452,7 @@ export default function SLFPortal() {
     setBaselineRefreshLoading(true);
     try {
       const { data } = await api.get(
-        `/data-slf/baseline/${encodeURIComponent(activeSlfName)}`,
+        `/data-slf/baseline/${encodeURIComponent(activeSlfName)}?slfId=${encodeURIComponent(activeSlfId || "")}`,
       );
       if (hasBaselinePayload(data)) {
         if (data.baselineUpdateApproved) {
@@ -2081,6 +2491,14 @@ export default function SLFPortal() {
 
   // ── Save Portal Baseline Update (after admin approval) ──
   const handleSaveBaselinePortal = async () => {
+    if (portalUser?.portalAccess?.canEditBaseline === false) {
+      Swal.fire(
+        "Baseline Editing Disabled",
+        "Your account is not permitted to edit baseline data. Please contact EMB Region III.",
+        "warning",
+      );
+      return;
+    }
     const confirm = await Swal.fire({
       title: "Save Baseline Update?",
       html: "<p style='font-size:13px'>This will save your updated baseline data and re-lock the baseline for future edits. You will need to submit another update request if further changes are needed.</p>",
@@ -2781,14 +3199,32 @@ export default function SLFPortal() {
           title: "Parse Error",
           text: "Could not parse the uploaded file. Please check the format.",
         });
+      } finally {
+        Swal.close();
       }
     };
-    reader.readAsArrayBuffer(file);
+    // Show a non-blocking loader and defer parsing a tick so large files don't
+    // freeze the UI before the spinner can paint.
+    Swal.fire({
+      title: "Reading file...",
+      text: "Parsing your spreadsheet, please wait.",
+      allowOutsideClick: false,
+      didOpen: () => Swal.showLoading(),
+    });
+    setTimeout(() => reader.readAsArrayBuffer(file), 50);
     return false; // prevent auto upload
   };
 
   // ── Open upload guide modal first, then trigger file picker on proceed ──
   const openUploadGuide = (type) => {
+    if (portalUser?.portalAccess?.canUploadExcel === false) {
+      Swal.fire(
+        "Excel Upload Disabled",
+        "Your account is not permitted to upload Excel/CSV files. Please contact EMB Region III.",
+        "warning",
+      );
+      return;
+    }
     setUploadGuideType(type);
     setUploadGuideOpen(true);
   };
@@ -3240,6 +3676,15 @@ export default function SLFPortal() {
   };
 
   const handleConfirmSubmit = async () => {
+    if (portalUser?.portalAccess?.canSubmitDisposal === false) {
+      showError({
+        type: "error",
+        title: "Disposal Submissions Disabled",
+        message:
+          "Your account is not permitted to submit disposal entries. Please contact EMB Region III.",
+      });
+      return;
+    }
     if (!navigator.onLine) {
       showError({
         type: "offline",
@@ -3421,6 +3866,19 @@ export default function SLFPortal() {
           : "—",
     },
     {
+      title: "Cell(s)",
+      key: "cells",
+      render: (_, t) => {
+        const vehs = t.vehicles || [];
+        const cells = vehs.map((v) => v.cellName).filter(Boolean);
+        if (cells.length) {
+          const unique = [...new Set(cells)];
+          return unique.join(", ");
+        }
+        return t.cellName || "—";
+      },
+    },
+    {
       title: "Waste Type",
       dataIndex: "wasteType",
       key: "wasteType",
@@ -3430,7 +3888,7 @@ export default function SLFPortal() {
       title: "Haz. Code",
       dataIndex: "hazWasteCode",
       key: "hazWasteCode",
-      render: (v) => v || "—",
+      render: (v) => (Array.isArray(v) ? v.join(", ") : v) || "—",
     },
     {
       title: "Actions",
@@ -4037,6 +4495,22 @@ export default function SLFPortal() {
       ),
     },
     {
+      key: "cell-placement",
+      icon: <ContainerOutlined />,
+      label: (
+        <span>
+          Organize Cells
+          {unplacedSubmissions.length > 0 && (
+            <Badge
+              count={unplacedSubmissions.length}
+              size="small"
+              style={{ marginLeft: 8, backgroundColor: "#722ed1" }}
+            />
+          )}
+        </span>
+      ),
+    },
+    {
       key: "requests",
       icon: <AuditOutlined />,
       label: (
@@ -4085,6 +4559,11 @@ export default function SLFPortal() {
         mode="inline"
         selectedKeys={[activeMenu]}
         onClick={({ key }) => {
+          if (key === "cell-placement") {
+            openCellOrganizer();
+            if (isMobile) setMobileDrawer(false);
+            return;
+          }
           setActiveMenu(key);
           if (key === "history") markPortalNotificationsRead("history");
           if (key === "requests") markPortalNotificationsRead("requests");
@@ -4301,7 +4780,8 @@ export default function SLFPortal() {
         {/* SLF selector for users with multiple assigned SLFs */}
         {Array.isArray(portalUser?.assignedSlfName) &&
           portalUser.assignedSlfName.length > 1 && (
-            <Card
+            <div ref={slfSelectorRef}>
+              <Card
               size="small"
               style={{
                 marginBottom: 12,
@@ -4345,7 +4825,8 @@ export default function SLFPortal() {
                   }))}
                 />
               </div>
-            </Card>
+              </Card>
+            </div>
           )}
         <Row gutter={[16, 16]} align="top">
           <Col xs={24} xl={19}>
@@ -5581,7 +6062,8 @@ export default function SLFPortal() {
 
             {/* Disposal Data Form */}
             <Card className="slf-section" style={{ marginTop: 20 }}>
-              <Tabs
+              <div ref={dataEntryTabsRef}>
+                <Tabs
                 activeKey={activeTab}
                 onChange={setActiveTab}
                 tabBarExtraContent={renderUnitMeasurementControl()}
@@ -5774,9 +6256,10 @@ export default function SLFPortal() {
                       </span>
                     ),
                     children: (
-                      <>
+                      <div ref={baselinePanelRef}>
                         {baselineSaved && (
                           <div
+                            ref={baselineStatusRef}
                             style={{
                               background: baselineUpdatePending
                                 ? "#e6f7ff"
@@ -5813,39 +6296,41 @@ export default function SLFPortal() {
                                   : "Baseline data is locked after your first submission. To request changes, click the button."}
                               </Text>
                             </div>
-                            <Space wrap>
-                              {!baselineUpdatePending && (
+                            <div ref={baselineActionRef}>
+                              <Space wrap>
+                                {!baselineUpdatePending && (
+                                  <Button
+                                    type="primary"
+                                    size="small"
+                                    icon={<SendOutlined />}
+                                    loading={baselineUpdateLoading}
+                                    onClick={handleBaselineUpdateRequest}
+                                    style={{
+                                      background: "#fa8c16",
+                                      borderColor: "#fa8c16",
+                                    }}
+                                  >
+                                    Request Update
+                                  </Button>
+                                )}
+                                {baselineUpdatePending && (
+                                  <Tag
+                                    color="processing"
+                                    icon={<ClockCircleOutlined />}
+                                  >
+                                    Awaiting Approval
+                                  </Tag>
+                                )}
                                 <Button
-                                  type="primary"
                                   size="small"
-                                  icon={<SendOutlined />}
-                                  loading={baselineUpdateLoading}
-                                  onClick={handleBaselineUpdateRequest}
-                                  style={{
-                                    background: "#fa8c16",
-                                    borderColor: "#fa8c16",
-                                  }}
+                                  icon={<ReloadOutlined />}
+                                  loading={baselineRefreshLoading}
+                                  onClick={refreshBaselineStatus}
                                 >
-                                  Request Update
+                                  Refresh
                                 </Button>
-                              )}
-                              {baselineUpdatePending && (
-                                <Tag
-                                  color="processing"
-                                  icon={<ClockCircleOutlined />}
-                                >
-                                  Awaiting Approval
-                                </Tag>
-                              )}
-                              <Button
-                                size="small"
-                                icon={<ReloadOutlined />}
-                                loading={baselineRefreshLoading}
-                                onClick={refreshBaselineStatus}
-                              >
-                                Refresh
-                              </Button>
-                            </Space>
+                              </Space>
+                            </div>
                           </div>
                         )}
                         <Form
@@ -6431,6 +6916,7 @@ export default function SLFPortal() {
                           {/* ── Save Baseline Update Button (visible when admin approved editing) ── */}
                           {!baselineSaved && (
                             <div
+                              ref={baselineActionRef}
                               style={{
                                 marginTop: 24,
                                 paddingTop: 16,
@@ -6457,7 +6943,7 @@ export default function SLFPortal() {
                             </div>
                           )}
                         </Form>
-                      </>
+                      </div>
                     ),
                   },
                   {
@@ -7059,7 +7545,8 @@ export default function SLFPortal() {
                     ),
                   },
                 ]}
-              />
+                />
+              </div>
             </Card>
           </Col>
           <Col xs={24} xl={5}>
@@ -7494,7 +7981,8 @@ export default function SLFPortal() {
             </div>
           )}
           {portalAnnouncement && !announcementDismissed && (
-            <Collapse
+            <div ref={announcementBannerRef}>
+              <Collapse
               size="small"
               style={{
                 marginBottom: 12,
@@ -7512,20 +8000,30 @@ export default function SLFPortal() {
                       <Tag color="blue">Announcement</Tag>
                     </Space>
                   ),
-                  extra:
-                    portalAnnouncement.portalAnnouncementDismissible !==
-                    false ? (
-                      <Button
-                        size="small"
-                        type="text"
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          setAnnouncementDismissed(true);
-                        }}
-                      >
-                        Dismiss
-                      </Button>
-                    ) : null,
+                  extra: (
+                    <Space size={4} onClick={(event) => event.stopPropagation()}>
+                      {isPortalUpdateAnnouncement && (
+                        <Button
+                          size="small"
+                          type="text"
+                          onClick={() => openPortalUpdateTour()}
+                        >
+                          What's New Tour
+                        </Button>
+                      )}
+                      {portalAnnouncement.portalAnnouncementDismissible !== false ? (
+                        <Button
+                          size="small"
+                          type="text"
+                          onClick={() => {
+                            setAnnouncementDismissed(true);
+                          }}
+                        >
+                          Dismiss
+                        </Button>
+                      ) : null}
+                    </Space>
+                  ),
                   children: (
                     <Alert
                       type={portalAnnouncement.portalAnnouncementType || "info"}
@@ -7546,7 +8044,8 @@ export default function SLFPortal() {
                   ),
                 },
               ]}
-            />
+              />
+            </div>
           )}
           {(portalNotificationCounts.messages > 0 ||
             portalNotificationCounts.support > 0) && (
@@ -7624,6 +8123,142 @@ export default function SLFPortal() {
             rights reserved.
           </Text>
         </div>
+
+        <Modal
+          title={
+            <Space>
+              <ContainerOutlined style={{ color: "#722ed1" }} />
+              <span>Organize Cell Placement</span>
+            </Space>
+          }
+          open={cellOrganizerOpen}
+          onCancel={() => setCellOrganizerOpen(false)}
+          width={920}
+          okText="Save Placement"
+          okButtonProps={{ icon: <SaveOutlined />, loading: cellOrganizerSaving }}
+          onOk={saveCellOrganizer}
+          destroyOnHidden
+        >
+          {cellOrganizerData.length === 0 ? (
+            <Empty description="All your submissions are already organized into cells." />
+          ) : (
+            <Space direction="vertical" size={12} style={{ width: "100%" }}>
+              <Alert
+                type="info"
+                showIcon
+                message="Place each truck/vehicle's waste into an open disposal cell"
+                description="Only active open cells configured by EMB Region III are shown. Hazardous loads can only go to hazardous cells."
+                style={{ borderRadius: 8 }}
+              />
+              {cellOrganizerData.map((sub) => {
+                const rows = [];
+                sub.trucks.forEach((truck, truckIndex) => {
+                  if ((truck.vehicles || []).length > 0) {
+                    truck.vehicles.forEach((veh, vehicleIndex) => {
+                      rows.push({
+                        rowKey: `${truckIndex}-${vehicleIndex}`,
+                        truckIndex,
+                        vehicleIndex,
+                        plate: veh.plateNumber || truck.disposalTicketNo || "-",
+                        wasteType: veh.wasteType || truck.wasteType || "Residual",
+                        volume: veh.actualVolume != null ? veh.actualVolume : truck.actualVolume,
+                        volumeUnit: veh.actualVolumeUnit || truck.actualVolumeUnit || baselineUnit || "m³",
+                        cellName: veh.cellName,
+                      });
+                    });
+                  } else {
+                    rows.push({
+                      rowKey: `${truckIndex}-t`,
+                      truckIndex,
+                      vehicleIndex: null,
+                      plate: truck.plateNumber || truck.disposalTicketNo || "-",
+                      wasteType: truck.wasteType || "Residual",
+                      volume: truck.actualVolume,
+                      volumeUnit: truck.actualVolumeUnit || baselineUnit || "m³",
+                      cellName: truck.cellName,
+                    });
+                  }
+                });
+                return (
+                  <Card
+                    key={sub._id}
+                    size="small"
+                    style={{ borderRadius: 10 }}
+                    title={
+                      <Space wrap>
+                        <Text strong style={{ fontSize: 13 }}>
+                          {sub.idNo || sub.submissionId || "Submission"}
+                        </Text>
+                        <Tag color="blue">{sub.lguCompanyName || "—"}</Tag>
+                        <Text type="secondary" style={{ fontSize: 11 }}>
+                          {sub.dateOfDisposal
+                            ? dayjs(sub.dateOfDisposal).format("MM/DD/YYYY")
+                            : ""}
+                        </Text>
+                      </Space>
+                    }
+                  >
+                    <Table
+                      size="small"
+                      rowKey="rowKey"
+                      pagination={false}
+                      dataSource={rows}
+                      columns={[
+                        { title: "Truck / Plate", dataIndex: "plate", width: 140 },
+                        {
+                          title: "Waste Type",
+                          dataIndex: "wasteType",
+                          width: 150,
+                          render: (v) => (
+                            <Tag color={/haz|inert/i.test(v) ? "volcano" : "green"}>{v}</Tag>
+                          ),
+                        },
+                        {
+                          title: "Volume",
+                          width: 110,
+                          render: (_, r) =>
+                            `${Number(r.volume || 0).toLocaleString()} ${String(r.volumeUnit).replace("m3", "m³")}`,
+                        },
+                        {
+                          title: "Disposal Cell",
+                          render: (_, r) => {
+                            const isHaz = /haz|inert/i.test(r.wasteType);
+                            const opts = activeCellOptions.filter((o) =>
+                              isHaz
+                                ? String(o.cellType || "").toLowerCase().includes("haz")
+                                : !String(o.cellType || "").toLowerCase().includes("haz"),
+                            );
+                            const cellOpts = opts.length ? opts : activeCellOptions;
+                            return (
+                              <Select
+                                style={{ width: "100%" }}
+                                placeholder="Select open cell"
+                                value={r.cellName || undefined}
+                                allowClear
+                                options={cellOpts.map((o) => ({
+                                  label: o.label,
+                                  value: o.value,
+                                }))}
+                                onChange={(val) =>
+                                  updateOrganizerCell(
+                                    sub._id,
+                                    r.truckIndex,
+                                    r.vehicleIndex,
+                                    val,
+                                  )
+                                }
+                              />
+                            );
+                          },
+                        },
+                      ]}
+                    />
+                  </Card>
+                );
+              })}
+            </Space>
+          )}
+        </Modal>
 
         <SLFPortalModals
           entryForm={entryForm}
@@ -7757,6 +8392,7 @@ export default function SLFPortal() {
           wasteReceivedLoading={wasteReceivedLoading}
           activeCellEntries={activeCellEntries}
           activeCellOptions={activeCellOptions}
+          baselineCellOptions={baselineCellOptions}
           closedCellEntries={closedCellEntries}
           haulers={haulers}
           trucks={trucks}
@@ -7809,6 +8445,18 @@ export default function SLFPortal() {
           setResubmitComment={setResubmitComment}
           editingRevertedId={editingRevertedId}
           setEditingRevertedId={setEditingRevertedId}
+        />
+        <Tour
+          open={updateTourOpen}
+          current={updateTourCurrent}
+          onChange={setUpdateTourCurrent}
+          onClose={() => {
+            setUpdateTourOpen(false);
+            if (portalUpdateTourSeenKey) {
+              localStorage.setItem(portalUpdateTourSeenKey, "1");
+            }
+          }}
+          steps={updateTourSteps}
         />
       </Layout>
     </Layout>

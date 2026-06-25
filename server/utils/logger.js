@@ -14,6 +14,7 @@ async function writeLog(level, action, opts = {}) {
       message: opts.message || "",
       user: opts.user || opts.req?.logUser || "",
       ip: opts.ip || opts.req?.ip || "",
+      geo: opts.geo || opts.req?.logGeo || undefined,
       meta: opts.meta,
     });
   } catch {

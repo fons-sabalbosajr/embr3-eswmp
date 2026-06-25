@@ -376,6 +376,7 @@ router.post("/login", async (req, res) => {
       user: loginId,
       ip: req.ip,
     });
+    UserPortal.updateOne({ _id: user._id }, { lastActiveAt: new Date() }).catch(() => {});
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });
   }
@@ -397,13 +398,77 @@ router.get("/me", async (req, res) => {
       return res.status(403).json({ message: user.maintenanceReason || "Portal account under maintenance" });
     }
 
+    // Touch presence (throttled to once/minute) so admins can see online status.
+    const now = Date.now();
+    if (!user.lastActiveAt || now - new Date(user.lastActiveAt).getTime() > 60000) {
+      UserPortal.updateOne({ _id: user._id }, { lastActiveAt: new Date() }).catch(() => {});
+    }
+
     res.json(user);
   } catch (error) {
     res.status(401).json({ message: "Invalid token" });
   }
 });
 
-// Get submission history for the logged-in portal user
+// Update the logged-in portal user's location-sharing preference and/or
+// record their current browser location for activity tracing.
+router.patch("/location", async (req, res) => {
+  try {
+    const token = req.headers.authorization?.split(" ")[1];
+    if (!token) return res.status(401).json({ message: "No token provided" });
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    const user = await UserPortal.findById(decoded.id).select("-password");
+    if (!user) return res.status(404).json({ message: "User not found" });
+
+    const { enabled, lat, lng, accuracy, label } = req.body || {};
+    if (typeof enabled === "boolean") {
+      user.locationSharingEnabled = enabled;
+    }
+
+    let recordedGeo = null;
+    if (
+      user.locationSharingEnabled &&
+      typeof lat === "number" &&
+      typeof lng === "number"
+    ) {
+      const locationLabel =
+        label ||
+        (Number.isFinite(lat) && Number.isFinite(lng)
+          ? `${lat.toFixed(4)}, ${lng.toFixed(4)}`
+          : "");
+      user.lastKnownLocation = {
+        lat,
+        lng,
+        accuracy: typeof accuracy === "number" ? accuracy : undefined,
+        label: locationLabel,
+        updatedAt: new Date(),
+      };
+      recordedGeo = {
+        lat,
+        lng,
+        accuracy: typeof accuracy === "number" ? accuracy : undefined,
+        label: locationLabel,
+        source: "browser",
+      };
+    }
+    await user.save();
+
+    writeLog("info", "portal.location-update", {
+      message: `${user.email} ${user.locationSharingEnabled ? "shared location" : "disabled location sharing"}`,
+      user: user.email,
+      ip: req.ip,
+      geo: recordedGeo || undefined,
+    });
+
+    res.json({
+      message: "Location preference updated",
+      locationSharingEnabled: user.locationSharingEnabled,
+      lastKnownLocation: user.lastKnownLocation,
+    });
+  } catch (error) {
+    res.status(401).json({ message: "Invalid token" });
+  }
+});
 router.get("/my-submissions", async (req, res) => {
   try {
     const token = req.headers.authorization?.split(" ")[1];

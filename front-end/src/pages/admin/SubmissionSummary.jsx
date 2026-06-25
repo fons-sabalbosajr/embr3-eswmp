@@ -15,7 +15,20 @@ import {
   Tag,
   Typography,
 } from "antd";
-import { CalendarOutlined, EyeOutlined, ReloadOutlined, SearchOutlined } from "@ant-design/icons";
+import {
+  CalendarOutlined,
+  EyeOutlined,
+  ReloadOutlined,
+  SearchOutlined,
+  BankOutlined,
+  InboxOutlined,
+  CarOutlined,
+  DatabaseOutlined,
+  ExperimentOutlined,
+  WarningOutlined,
+  CheckCircleOutlined,
+  ClockCircleOutlined,
+} from "@ant-design/icons";
 import dayjs from "dayjs";
 import FullCalendar from "@fullcalendar/react";
 import dayGridPlugin from "@fullcalendar/daygrid";
@@ -200,6 +213,129 @@ function buildCellStatusRows(summary, throughDate, settings = {}) {
   });
 }
 
+// Inject keyframes/animations once for the redesigned summary tiles.
+const SUMMARY_TILE_STYLE_ID = "submission-summary-tile-styles";
+function ensureSummaryTileStyles() {
+  if (typeof document === "undefined") return;
+  if (document.getElementById(SUMMARY_TILE_STYLE_ID)) return;
+  const style = document.createElement("style");
+  style.id = SUMMARY_TILE_STYLE_ID;
+  style.innerHTML = `
+    @keyframes summaryTileIn {
+      from { opacity: 0; transform: translateY(10px) scale(0.98); }
+      to { opacity: 1; transform: translateY(0) scale(1); }
+    }
+    @keyframes summaryIconPulse {
+      0%, 100% { transform: scale(1); }
+      50% { transform: scale(1.12); }
+    }
+    .summary-tile {
+      border-radius: 12px;
+      overflow: hidden;
+      position: relative;
+      animation: summaryTileIn 0.45s cubic-bezier(0.22, 1, 0.36, 1) both;
+      transition: transform 0.25s ease, box-shadow 0.25s ease;
+      will-change: transform;
+    }
+    .summary-tile:hover {
+      transform: translateY(-4px);
+      box-shadow: 0 10px 24px rgba(0,0,0,0.12);
+    }
+    .summary-tile:hover .summary-tile-icon {
+      animation: summaryIconPulse 0.9s ease-in-out infinite;
+    }
+    .summary-tile-icon {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 44px;
+      height: 44px;
+      border-radius: 12px;
+      font-size: 20px;
+      flex-shrink: 0;
+      transition: transform 0.25s ease;
+    }
+    .summary-tile-accent {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 4px;
+    }
+  `;
+  document.head.appendChild(style);
+}
+
+// Smoothly animates an integer value from 0 → target on mount/update.
+function CountUp({ value = 0, duration = 900, style }) {
+  const [display, setDisplay] = useState(0);
+  const target = Number(value) || 0;
+  useEffect(() => {
+    let raf;
+    const start = performance.now();
+    const from = 0;
+    const animate = (now) => {
+      const progress = Math.min((now - start) / duration, 1);
+      const eased = 1 - Math.pow(1 - progress, 3);
+      setDisplay(Math.round(from + (target - from) * eased));
+      if (progress < 1) raf = requestAnimationFrame(animate);
+    };
+    raf = requestAnimationFrame(animate);
+    return () => cancelAnimationFrame(raf);
+  }, [target, duration]);
+  return <span style={style}>{display.toLocaleString()}</span>;
+}
+
+function SummaryTile({ icon, color, label, children, subtitle, isDark, delay = 0 }) {
+  return (
+    <Card
+      size="small"
+      className="summary-tile"
+      style={{
+        borderRadius: 12,
+        animationDelay: `${delay}ms`,
+        background: isDark ? "#1f1f1f" : "#fff",
+      }}
+      styles={{ body: { padding: "14px 16px" } }}
+    >
+      <div className="summary-tile-accent" style={{ background: color }} />
+      <Space align="start" size={12} style={{ width: "100%" }}>
+        <span
+          className="summary-tile-icon"
+          style={{ background: `${color}1f`, color }}
+        >
+          {icon}
+        </span>
+        <div style={{ minWidth: 0 }}>
+          <Text
+            type="secondary"
+            style={{ fontSize: 12, display: "block", lineHeight: 1.2 }}
+          >
+            {label}
+          </Text>
+          <div
+            style={{
+              fontSize: 24,
+              fontWeight: 700,
+              color,
+              lineHeight: 1.25,
+              marginTop: 2,
+              wordBreak: "break-word",
+            }}
+          >
+            {children}
+          </div>
+          {subtitle && (
+            <Text type="secondary" style={{ fontSize: 11 }}>
+              {subtitle}
+            </Text>
+          )}
+        </div>
+      </Space>
+    </Card>
+  );
+}
+
 export default function SubmissionSummary({ isDark }) {
   const [records, setRecords] = useState([]);
   const [facilities, setFacilities] = useState([]);
@@ -211,6 +347,10 @@ export default function SubmissionSummary({ isDark }) {
   const [calendarRecord, setCalendarRecord] = useState(null);
   const [calendarDate, setCalendarDate] = useState(dayjs());
   const [submissionDetail, setSubmissionDetail] = useState(null);
+
+  useEffect(() => {
+    ensureSummaryTileStyles();
+  }, []);
 
   const fetchRecords = useCallback(async ({ force = false, silent = false } = {}) => {
     await fetchWithCache(
@@ -296,6 +436,31 @@ export default function SubmissionSummary({ isDark }) {
     return map;
   }, [facilities]);
 
+  // Index facilities by id so a submission's SLF name always reflects the
+  // CURRENT facility name (fixes stale names after an SLF/LGU rename).
+  const facilityById = useMemo(() => {
+    const map = new Map();
+    facilities.forEach((facility) => {
+      if (facility?._id) map.set(String(facility._id), facility);
+    });
+    return map;
+  }, [facilities]);
+
+  const resolveCurrentSlfName = useCallback(
+    (record) => {
+      const genId =
+        record?.slfGenerator && typeof record.slfGenerator === "object"
+          ? record.slfGenerator._id
+          : record?.slfGenerator;
+      const facility = genId ? facilityById.get(String(genId)) : null;
+      if (facility?.lgu) {
+        return `${facility.lgu}${facility.ownership ? " (" + facility.ownership + ")" : ""}`;
+      }
+      return getRecordSlfName(record);
+    },
+    [facilityById],
+  );
+
   const baselineMap = useMemo(() => {
     const map = new Map();
     baselines.forEach((baseline) => {
@@ -308,7 +473,7 @@ export default function SubmissionSummary({ isDark }) {
   const summaryRows = useMemo(() => {
     const map = new Map();
     filteredRecords.forEach((record) => {
-      const slfName = getRecordSlfName(record);
+      const slfName = resolveCurrentSlfName(record);
       if (!map.has(slfName)) map.set(slfName, emptySummary(slfName));
       const summary = map.get(slfName);
       summary.submissions += 1;
@@ -338,7 +503,7 @@ export default function SubmissionSummary({ isDark }) {
         submitterCount: row.submitters.size,
       };
     }).sort((a, b) => a.slfName.localeCompare(b.slfName));
-  }, [filteredRecords, facilityMap, baselineMap]);
+  }, [filteredRecords, facilityMap, baselineMap, resolveCurrentSlfName]);
 
   const selectedDayRecords = useMemo(() => {
     if (!calendarRecord) return [];
@@ -403,12 +568,24 @@ export default function SubmissionSummary({ isDark }) {
     extendedProps: item,
   })), [dayMap]);
 
-  const totals = useMemo(() => summaryRows.reduce((acc, row) => ({
-    submissions: acc.submissions + row.submissions,
-    trucks: acc.trucks + row.trucks,
-    m3: acc.m3 + row.totalM3,
-    tons: acc.tons + row.totalTons,
-  }), { submissions: 0, trucks: 0, m3: 0, tons: 0 }), [summaryRows]);
+  const totals = useMemo(() => summaryRows.reduce((acc, row) => {
+    acc.submissions += row.submissions;
+    acc.trucks += row.trucks;
+    acc.m3 += row.totalM3;
+    acc.tons += row.totalTons;
+    acc.residualM3 += row.residualM3;
+    acc.residualTons += row.residualTons;
+    acc.hazardousM3 += row.hazardousM3;
+    acc.hazardousTons += row.hazardousTons;
+    Object.entries(row.statuses || {}).forEach(([status, count]) => {
+      acc.statuses[status] = (acc.statuses[status] || 0) + count;
+    });
+    return acc;
+  }, {
+    submissions: 0, trucks: 0, m3: 0, tons: 0,
+    residualM3: 0, residualTons: 0, hazardousM3: 0, hazardousTons: 0,
+    statuses: {},
+  }), [summaryRows]);
 
   const columns = [
     {
@@ -474,25 +651,111 @@ export default function SubmissionSummary({ isDark }) {
   return (
     <div>
       <Row gutter={[12, 12]} style={{ marginBottom: 16 }}>
-        <Col xs={12} md={6}>
-          <Card size="small" style={{ borderRadius: 8 }}>
-            <Statistic title="SLFs" value={summaryRows.length} valueStyle={{ color: ACCENT }} />
-          </Card>
+        <Col xs={12} sm={12} md={8} lg={6}>
+          <SummaryTile
+            icon={<BankOutlined />}
+            color="#2f54eb"
+            label="Reporting SLFs"
+            subtitle="Active landfill facilities"
+            isDark={isDark}
+            delay={0}
+          >
+            <CountUp value={summaryRows.length} />
+          </SummaryTile>
         </Col>
-        <Col xs={12} md={6}>
-          <Card size="small" style={{ borderRadius: 8 }}>
-            <Statistic title="Submissions" value={totals.submissions} />
-          </Card>
+        <Col xs={12} sm={12} md={8} lg={6}>
+          <SummaryTile
+            icon={<InboxOutlined />}
+            color="#13c2c2"
+            label="Submissions"
+            subtitle={`${totals.statuses.pending || 0} pending review`}
+            isDark={isDark}
+            delay={60}
+          >
+            <CountUp value={totals.submissions} />
+          </SummaryTile>
         </Col>
-        <Col xs={12} md={6}>
-          <Card size="small" style={{ borderRadius: 8 }}>
-            <Statistic title="Truck Entries" value={totals.trucks} />
-          </Card>
+        <Col xs={12} sm={12} md={8} lg={6}>
+          <SummaryTile
+            icon={<CarOutlined />}
+            color="#fa8c16"
+            label="Truck Entries"
+            subtitle="Total disposal trips"
+            isDark={isDark}
+            delay={120}
+          >
+            <CountUp value={totals.trucks} />
+          </SummaryTile>
         </Col>
-        <Col xs={12} md={6}>
-          <Card size="small" style={{ borderRadius: 8 }}>
-            <Statistic title="Waste Volume" value={formatVolume(totals.m3, totals.tons)} valueStyle={{ fontSize: 18 }} />
-          </Card>
+        <Col xs={12} sm={12} md={8} lg={6}>
+          <SummaryTile
+            icon={<DatabaseOutlined />}
+            color="#722ed1"
+            label="Total Waste Volume"
+            subtitle={
+              totals.tons > 0 && totals.m3 > 0
+                ? `${totals.tons.toLocaleString()} tons combined`
+                : "All accepted waste"
+            }
+            isDark={isDark}
+            delay={180}
+          >
+            <span style={{ fontSize: 19, fontWeight: 700 }}>
+              {formatVolume(totals.m3, totals.tons)}
+            </span>
+          </SummaryTile>
+        </Col>
+        <Col xs={12} sm={12} md={8} lg={6}>
+          <SummaryTile
+            icon={<ExperimentOutlined />}
+            color="#52c41a"
+            label="Residual Waste"
+            subtitle="Non-hazardous volume"
+            isDark={isDark}
+            delay={240}
+          >
+            <span style={{ fontSize: 17, fontWeight: 700 }}>
+              {formatVolume(totals.residualM3, totals.residualTons)}
+            </span>
+          </SummaryTile>
+        </Col>
+        <Col xs={12} sm={12} md={8} lg={6}>
+          <SummaryTile
+            icon={<WarningOutlined />}
+            color="#cf1322"
+            label="Hazardous Waste"
+            subtitle="Treated hazardous volume"
+            isDark={isDark}
+            delay={300}
+          >
+            <span style={{ fontSize: 17, fontWeight: 700 }}>
+              {formatVolume(totals.hazardousM3, totals.hazardousTons)}
+            </span>
+          </SummaryTile>
+        </Col>
+        <Col xs={12} sm={12} md={8} lg={6}>
+          <SummaryTile
+            icon={<CheckCircleOutlined />}
+            color="#389e0d"
+            label="Acknowledged"
+            subtitle="Reviewed & accepted"
+            isDark={isDark}
+            delay={360}
+          >
+            <CountUp value={totals.statuses.acknowledged || 0} />
+          </SummaryTile>
+        </Col>
+        <Col xs={12} sm={12} md={8} lg={6}>
+          <SummaryTile
+            icon={<ClockCircleOutlined />}
+            color="#d48806"
+            label="Pending"
+            subtitle="Awaiting admin action"
+            isDark={isDark}
+            delay={420}
+          >
+            <CountUp value={totals.statuses.pending || 0} />
+          </SummaryTile>
         </Col>
       </Row>
 
@@ -671,7 +934,7 @@ export default function SubmissionSummary({ isDark }) {
         open={!!submissionDetail}
         onCancel={() => setSubmissionDetail(null)}
         footer={<Button onClick={() => setSubmissionDetail(null)}>Close</Button>}
-        width={900}
+        width={1300}
         destroyOnHidden
       >
         {submissionDetail && (
@@ -696,21 +959,47 @@ export default function SubmissionSummary({ isDark }) {
             <Table
               size="small"
               pagination={true}
+              className="portal-user-wrap-table"
               dataSource={submissionDetail.trucks || []}
               rowKey={(_, index) => index}
+              scroll={{ x: "max-content" }}
               locale={{ emptyText: "No truck entries recorded" }}
               columns={[
-                { title: "Truck", width: 80, render: (_, __, index) => index + 1 },
+                { title: "Truck", width: 60, render: (_, __, index) => index + 1 },
                 { title: "Ticket", dataIndex: "disposalTicketNo", render: (value) => value || "Not encoded" },
                 { title: "Plate No.", dataIndex: "plateNumber", render: (value, truck) => value || truck.plateNo || "Not encoded" },
                 { title: "Hauler", dataIndex: "hauler", render: (value, truck) => value || truck.haulerName || "Not encoded" },
                 { title: "Waste Type", dataIndex: "wasteType", render: (value) => value || "Residual" },
                 {
+                  title: "Cell(s)",
+                  render: (_, truck) => {
+                    const cells = (truck.vehicles || [])
+                      .map((v) => v.cellName)
+                      .filter(Boolean);
+                    return cells.length
+                      ? [...new Set(cells)].join(", ")
+                      : truck.cellName || "—";
+                  },
+                },
+                {
                   title: "Actual Volume",
                   align: "right",
                   render: (_, truck) => `${Number(truck.actualVolume || 0).toLocaleString(undefined, { maximumFractionDigits: 2 })} ${normalizeUnit(truck.actualVolumeUnit || submissionDetail.baselineUnit || "m³")}`,
                 },
-              ]}
+              ].map((col) => ({
+                ...col,
+                onHeaderCell: () => ({
+                  style: { whiteSpace: "normal", wordBreak: "break-word", fontSize: 11 },
+                }),
+                onCell: () => ({
+                  style: {
+                    whiteSpace: "normal",
+                    overflowWrap: "anywhere",
+                    wordBreak: "break-word",
+                    fontSize: 11,
+                  },
+                }),
+              }))}
             />
           </Space>
         )}

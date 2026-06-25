@@ -527,7 +527,7 @@ export default function AccountSettings({ isDark }) {
             </div>
 
             <Collapse
-              defaultActiveKey={PERMISSION_GROUPS.map(g => g.group)}
+              defaultActiveKey={[]}
               bordered={false}
               size="small"
               items={PERMISSION_GROUPS.map(g => {

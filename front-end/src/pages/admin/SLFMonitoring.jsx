@@ -8,6 +8,7 @@ import {
 import {
   Card,
   List,
+  Segmented,
   Table,
   Button,
   Modal,
@@ -56,12 +57,16 @@ import {
   TeamOutlined,
   CalendarOutlined,
   BarChartOutlined,
+  InboxOutlined,
+  CarOutlined,
   FilterOutlined,
   ClearOutlined,
   SafetyCertificateOutlined,
   BankOutlined,
   MinusCircleOutlined,
   LinkOutlined,
+  AppstoreOutlined,
+  UnorderedListOutlined,
   DatabaseOutlined,
   ExperimentOutlined,
   AlertOutlined,
@@ -70,6 +75,7 @@ import {
   UndoOutlined,
   BellOutlined,
   HistoryOutlined,
+  InfoCircleOutlined,
   MailOutlined,
   SendOutlined,
   WarningOutlined,
@@ -89,6 +95,7 @@ import { exportToExcel } from "../../utils/exportExcel";
 import secureStorage from "../../utils/secureStorage";
 import { getAdminDisplayName } from "../../utils/adminIdentity";
 import { fetchWithCache, invalidateCache } from "../../utils/pageCache";
+import { getSocket } from "../../utils/socket";
 import { useDataRef } from "../../utils/dataRef";
 import dayjs from "dayjs";
 import { buildFilters, matchesFilter, rowMatchesSearch } from "./shared/tableFilters";
@@ -98,6 +105,8 @@ import {
   Cell as RCell,
   BarChart,
   Bar,
+  LineChart,
+  Line,
   XAxis,
   YAxis,
   CartesianGrid,
@@ -323,6 +332,269 @@ const getWasteKind = (wasteType) => {
 const isHazardousCellType = (cellType) =>
   /haz|inert/i.test(String(cellType || ""));
 
+// Extract a Google Drive file id from any of its URL shapes.
+const extractDriveId = (url) => {
+  const s = String(url || "");
+  let m = s.match(/\/file\/d\/([^/?#]+)/);
+  if (m) return m[1];
+  m = s.match(/[?&]id=([^&#]+)/);
+  if (m) return m[1];
+  m = s.match(/\/d\/([^/?#]+)/);
+  if (m) return m[1];
+  return "";
+};
+
+const isDriveUrl = (url) =>
+  /drive\.google\.com|googleusercontent\.com|docs\.google\.com/.test(
+    String(url || ""),
+  );
+
+// Resolve a stored media URL into something directly usable by <img>/<a>.
+// Google Drive "webViewLink" values are viewer pages and cannot be used as an
+// image source — convert them to a direct thumbnail/view URL instead.
+const resolveMediaUrl = (url, { thumbnail = false } = {}) => {
+  const s = String(url || "");
+  if (!s) return "";
+  if (isDriveUrl(s)) {
+    const id = extractDriveId(s);
+    if (id) {
+      return thumbnail
+        ? `https://drive.google.com/thumbnail?id=${id}&sz=w1200`
+        : `https://drive.google.com/uc?export=view&id=${id}`;
+    }
+  }
+  return s;
+};
+
+const normalizeStoredFileUrl = (value) => {
+  if (!value) return "";
+  if (Array.isArray(value))
+    return value[0]?.response?.url || value[0]?.url || value[0] || "";
+  if (typeof value === "object") return value.response?.url || value.url || "";
+  return value;
+};
+
+// ── Consolidated SLF Dashboard (shown inside the SLF Data Table view modal) ──
+function SlfDashboardTab({ dashboard, isDark }) {
+  const [page, setPage] = useState(1);
+  if (!dashboard || dashboard.totalSubmissions === 0) {
+    return (
+      <Empty
+        description="No portal submissions for this SLF yet"
+        style={{ padding: 40 }}
+      />
+    );
+  }
+  const {
+    unit,
+    totalSubmissions,
+    totalTrucks,
+    totalVolume,
+    residual,
+    hazardous,
+    generatorCount,
+    companyTypeData,
+    cellData,
+    monthly,
+    topGenerators,
+    statusData,
+    tableRows,
+  } = dashboard;
+
+  const fmt = (n) => Number(n || 0).toLocaleString(undefined, { maximumFractionDigits: 1 });
+  const tiles = [
+    { label: "Submissions", value: totalSubmissions, color: "#2f54eb", icon: <InboxOutlined /> },
+    { label: "Truck Trips", value: totalTrucks, color: "#fa8c16", icon: <CarOutlined /> },
+    { label: `Total Volume (${unit})`, value: fmt(totalVolume), color: "#722ed1", icon: <DatabaseOutlined /> },
+    { label: "Generators", value: generatorCount, color: "#13c2c2", icon: <TeamOutlined /> },
+    { label: `Residual (${unit})`, value: fmt(residual), color: "#52c41a", icon: <BarChartOutlined /> },
+    { label: `Hazardous (${unit})`, value: fmt(hazardous), color: "#cf1322", icon: <WarningOutlined /> },
+  ];
+
+  const wasteComposition = [
+    { name: "Residual", value: Math.round(residual) },
+    { name: "Hazardous", value: Math.round(hazardous) },
+  ].filter((d) => d.value > 0);
+
+  const cardStyle = { borderRadius: 10, height: "100%" };
+  const axisTick = { fontSize: 11, fill: isDark ? "#aaa" : "#555" };
+
+  return (
+    <div>
+      <Row gutter={[10, 10]} style={{ marginBottom: 12 }}>
+        {tiles.map((t) => (
+          <Col xs={12} sm={8} md={8} lg={4} key={t.label}>
+            <Card size="small" style={{ borderRadius: 10, borderLeft: `4px solid ${t.color}` }} styles={{ body: { padding: "10px 12px" } }}>
+              <Space align="center" size={8}>
+                <span style={{ width: 32, height: 32, borderRadius: 8, background: `${t.color}1f`, color: t.color, display: "inline-flex", alignItems: "center", justifyContent: "center", fontSize: 15 }}>
+                  {t.icon}
+                </span>
+                <div>
+                  <div style={{ fontSize: 18, fontWeight: 700, color: t.color, lineHeight: 1.1 }}>{t.value}</div>
+                  <Text type="secondary" style={{ fontSize: 10 }}>{t.label}</Text>
+                </div>
+              </Space>
+            </Card>
+          </Col>
+        ))}
+      </Row>
+
+      <Row gutter={[10, 10]} style={{ marginBottom: 12 }}>
+        <Col xs={24} md={8}>
+          <Card size="small" title={<Text style={{ fontSize: 12 }}><PieChartOutlined /> Waste Composition ({unit})</Text>} style={cardStyle}>
+            {wasteComposition.length ? (
+              <ResponsiveContainer width="100%" height={200}>
+                <PieChart>
+                  <Pie data={wasteComposition} cx="50%" cy="50%" innerRadius={45} outerRadius={75} paddingAngle={3} dataKey="value" label={({ name, value }) => `${name}: ${value.toLocaleString()}`} labelLine={false}>
+                    {wasteComposition.map((d, i) => (
+                      <RCell key={d.name} fill={d.name === "Hazardous" ? "#cf1322" : "#52c41a"} />
+                    ))}
+                  </Pie>
+                  <RTooltip />
+                </PieChart>
+              </ResponsiveContainer>
+            ) : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No volume" />}
+          </Card>
+        </Col>
+        <Col xs={24} md={8}>
+          <Card size="small" title={<Text style={{ fontSize: 12 }}><PieChartOutlined /> Submissions by Source</Text>} style={cardStyle}>
+            {companyTypeData.length ? (
+              <ResponsiveContainer width="100%" height={200}>
+                <PieChart>
+                  <Pie data={companyTypeData} cx="50%" cy="50%" outerRadius={75} dataKey="value" label={({ name, value }) => `${name}: ${value}`} labelLine={false}>
+                    {companyTypeData.map((d, i) => (
+                      <RCell key={d.name} fill={CHART_COLORS[i % CHART_COLORS.length]} />
+                    ))}
+                  </Pie>
+                  <RTooltip />
+                </PieChart>
+              </ResponsiveContainer>
+            ) : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No data" />}
+          </Card>
+        </Col>
+        <Col xs={24} md={8}>
+          <Card size="small" title={<Text style={{ fontSize: 12 }}><BarChartOutlined /> Top Generators ({unit})</Text>} style={cardStyle}>
+            {topGenerators.length ? (
+              <ResponsiveContainer width="100%" height={200}>
+                <BarChart data={topGenerators} layout="vertical" margin={{ left: 8, right: 12 }}>
+                  <CartesianGrid strokeDasharray="3 3" horizontal={false} />
+                  <XAxis type="number" tick={axisTick} />
+                  <YAxis type="category" dataKey="name" width={90} tick={{ fontSize: 10, fill: isDark ? "#aaa" : "#555" }} />
+                  <RTooltip />
+                  <Bar dataKey="value" radius={[0, 4, 4, 0]}>
+                    {topGenerators.map((d, i) => (
+                      <RCell key={d.name} fill={CHART_COLORS[i % CHART_COLORS.length]} />
+                    ))}
+                  </Bar>
+                </BarChart>
+              </ResponsiveContainer>
+            ) : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No data" />}
+          </Card>
+        </Col>
+      </Row>
+
+      <Row gutter={[10, 10]} style={{ marginBottom: 12 }}>
+        <Col xs={24} md={14}>
+          <Card size="small" title={<Text style={{ fontSize: 12 }}><BarChartOutlined /> Monthly Disposal Trend ({unit})</Text>} style={cardStyle}>
+            {monthly.length ? (
+              <ResponsiveContainer width="100%" height={230}>
+                <LineChart data={monthly} margin={{ left: 4, right: 12, top: 8 }}>
+                  <CartesianGrid strokeDasharray="3 3" />
+                  <XAxis dataKey="month" tick={axisTick} />
+                  <YAxis tick={axisTick} />
+                  <RTooltip />
+                  <Line type="monotone" dataKey="volume" stroke="#2f54eb" strokeWidth={2} dot={{ r: 3 }} />
+                </LineChart>
+              </ResponsiveContainer>
+            ) : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No trend data" />}
+          </Card>
+        </Col>
+        <Col xs={24} md={10}>
+          <Card size="small" title={<Text style={{ fontSize: 12 }}><PieChartOutlined /> Submission Status</Text>} style={cardStyle}>
+            {statusData.length ? (
+              <ResponsiveContainer width="100%" height={230}>
+                <PieChart>
+                  <Pie data={statusData} cx="50%" cy="50%" innerRadius={40} outerRadius={75} paddingAngle={2} dataKey="value" label={({ name, value }) => `${name}: ${value}`} labelLine={false}>
+                    {statusData.map((d, i) => (
+                      <RCell key={d.name} fill={CHART_COLORS[i % CHART_COLORS.length]} />
+                    ))}
+                  </Pie>
+                  <RTooltip />
+                  <Legend wrapperStyle={{ fontSize: 11 }} />
+                </PieChart>
+              </ResponsiveContainer>
+            ) : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No data" />}
+          </Card>
+        </Col>
+      </Row>
+
+      <Card size="small" title={<Text style={{ fontSize: 12 }}><BarChartOutlined /> Cell Utilization ({unit})</Text>} style={{ borderRadius: 10, marginBottom: 12 }}>
+        {cellData.length ? (
+          <Row gutter={[10, 10]}>
+            <Col xs={24} md={14}>
+              <ResponsiveContainer width="100%" height={240}>
+                <BarChart data={cellData} margin={{ left: 4, right: 12, top: 8 }}>
+                  <CartesianGrid strokeDasharray="3 3" />
+                  <XAxis dataKey="name" tick={axisTick} />
+                  <YAxis tick={axisTick} />
+                  <RTooltip />
+                  <Legend wrapperStyle={{ fontSize: 11 }} />
+                  <Bar dataKey="capacity" name="Capacity" fill="#d6e4ff" radius={[4, 4, 0, 0]} />
+                  <Bar dataKey="used" name="Used" fill="#2f54eb" radius={[4, 4, 0, 0]} />
+                </BarChart>
+              </ResponsiveContainer>
+            </Col>
+            <Col xs={24} md={10}>
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                {cellData.map((c) => (
+                  <div key={c.name}>
+                    <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11 }}>
+                      <Text strong style={{ fontSize: 11 }}>
+                        {c.name}{" "}
+                        <Tag color={isHazardousCellType(c.type) ? "volcano" : "blue"} style={{ fontSize: 9, marginLeft: 2 }}>
+                          {c.type}
+                        </Tag>
+                      </Text>
+                      <Text type="secondary" style={{ fontSize: 10 }}>
+                        {fmt(c.used)} / {c.capacity ? fmt(c.capacity) : "—"} {unit}
+                      </Text>
+                    </div>
+                    <Progress
+                      percent={c.pct == null ? 0 : Math.round(c.pct)}
+                      size="small"
+                      status={c.pct >= 90 ? "exception" : c.pct >= 75 ? "active" : "normal"}
+                      strokeColor={c.pct >= 90 ? "#ff4d4f" : c.pct >= 75 ? "#faad14" : "#52c41a"}
+                    />
+                  </div>
+                ))}
+              </div>
+            </Col>
+          </Row>
+        ) : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No cell infrastructure configured" />}
+      </Card>
+
+      <Card size="small" title={<Text style={{ fontSize: 12 }}><InboxOutlined /> Submissions</Text>} style={{ borderRadius: 10 }}>
+        <ResponsiveTable
+          size="small"
+          dataSource={tableRows}
+          rowKey="_id"
+          pagination={{ current: page, pageSize: 8, onChange: setPage, size: "small", showSizeChanger: false }}
+          scroll={{ x: 720 }}
+          columns={[
+            { title: "ID No.", dataIndex: "idNo", key: "idNo", width: 140, render: (v) => <Text style={{ fontSize: 11 }}>{v || "—"}</Text> },
+            { title: "Date", dataIndex: "dateOfDisposal", key: "date", width: 110, render: (v) => <Text style={{ fontSize: 11 }}>{v ? dayjs(v).format("MM/DD/YYYY") : "—"}</Text> },
+            { title: "Generator", dataIndex: "lguCompanyName", key: "gen", render: (v, r) => <span style={{ fontSize: 11 }}>{v || "—"} <Tag color={r.companyType === "Private" ? "green" : "blue"} style={{ fontSize: 9 }}>{r.companyType || "—"}</Tag></span> },
+            { title: "Trucks", dataIndex: "truckCount", key: "trucks", width: 70, align: "center", render: (v) => <Text style={{ fontSize: 11 }}>{v}</Text> },
+            { title: `Volume (${unit})`, dataIndex: "volume", key: "vol", width: 110, align: "right", render: (v) => <Text style={{ fontSize: 11 }}>{fmt(v)}</Text> },
+            { title: "Status", dataIndex: "status", key: "status", width: 110, render: (v) => <Tag style={{ fontSize: 10 }} color={{ pending: "gold", acknowledged: "green", rejected: "red", reverted: "volcano" }[v] || "default"}>{String(v || "pending").replace("_", " ")}</Tag> },
+          ]}
+        />
+      </Card>
+    </div>
+  );
+}
+
+
 const formatVolume = (value, unit = "tons") => {
   const number = Number(value || 0);
   return `${number.toLocaleString(undefined, { maximumFractionDigits: number >= 100 ? 0 : 2 })} ${normalizeUnit(unit)}`;
@@ -428,6 +700,40 @@ const getSubmissionSlfId = (submission) => {
 };
 
 const getDataEntryId = (entry) => (entry?._id ? String(entry._id) : "");
+
+// Pre-index submissions by SLF id + normalized name so each facility can fetch
+// only its candidate submissions in O(1) instead of scanning every submission
+// (avoids the O(facilities × submissions) bottleneck on the SLF Data Table).
+const buildSubmissionFacilityIndex = (submissions = []) => {
+  const byKey = new Map();
+  (submissions || []).forEach((sub) => {
+    const keys = new Set();
+    const id = getSubmissionSlfId(sub);
+    if (id) keys.add(`id:${id}`);
+    getSubmissionSlfNames(sub).forEach((name) => {
+      const k = normalizeSlfKey(name);
+      if (k) keys.add(`name:${k}`);
+    });
+    keys.forEach((key) => {
+      if (!byKey.has(key)) byKey.set(key, []);
+      byKey.get(key).push(sub);
+    });
+  });
+  return byKey;
+};
+
+const getFacilityCandidateSubmissions = (record, byKey) => {
+  if (!byKey) return [];
+  const result = new Set();
+  getRecordIds(record).forEach((id) => {
+    (byKey.get(`id:${id}`) || []).forEach((s) => result.add(s));
+  });
+  expandSlfNames(getFacilitySlfNames(record)).forEach((name) => {
+    const k = normalizeSlfKey(name);
+    if (k) (byKey.get(`name:${k}`) || []).forEach((s) => result.add(s));
+  });
+  return [...result];
+};
 
 const isSameDataEntry = (left, right) => {
   const leftId = getDataEntryId(left);
@@ -1296,23 +1602,41 @@ function PortalGenerators({
       });
   }, []);
 
-  useEffect(() => {
+  const fetchGeneratorStats = useCallback(() => {
     api
       .get("/data-slf/generator-summary")
       .then(({ data }) => setPortalStats(data))
       .catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    fetchGeneratorStats();
     api
       .get("/portal-users")
       .then(({ data }) => setPortalUsers(Array.isArray(data) ? data : []))
       .catch(() => setPortalUsers([]));
     fetchSubmissions();
-  }, [fetchSubmissions]);
+  }, [fetchSubmissions, fetchGeneratorStats]);
 
-  // Refresh quietly in the background so the table does not keep entering a loading state.
+  // Refresh quietly in the background so the table does not keep entering a
+  // loading state. Live socket events drive immediate updates; the timer is a
+  // gentle fallback so the Waste Generators view reflects newly submitted data.
   useEffect(() => {
-    const interval = setInterval(() => fetchSubmissions(false), 30000);
-    return () => clearInterval(interval);
-  }, [fetchSubmissions]);
+    const refresh = () => {
+      fetchSubmissions(false);
+      fetchGeneratorStats();
+    };
+    const interval = setInterval(refresh, 60000);
+    const socket = getSocket();
+    const handler = ({ target } = {}) => {
+      if (!target || target === "submissions") refresh();
+    };
+    if (socket) socket.on("data-refresh", handler);
+    return () => {
+      clearInterval(interval);
+      if (socket) socket.off("data-refresh", handler);
+    };
+  }, [fetchSubmissions, fetchGeneratorStats]);
 
   const openTxnHistory = async (submissionId) => {
     setTxnHistoryModal({ open: true, submissionId });
@@ -3357,6 +3681,7 @@ export default function SLFMonitoring({
   const [loadingGen, setLoadingGen] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
   const [detailModal, setDetailModal] = useState(null);
+  const [galleryViewMode, setGalleryViewMode] = useState("tiled");
   const [detailYearRecords, setDetailYearRecords] = useState([]);
   const [detailYear, setDetailYear] = useState(null);
   const [baselineData, setBaselineData] = useState(null);
@@ -3414,12 +3739,13 @@ export default function SLFMonitoring({
         const normalizedSubmissions = normalizeSlfSubmissions(submissions);
         setSlfSubmissions(normalizedSubmissions);
         const baselineMap = buildBaselineMap(baselines || []);
+        const submissionIndex = buildSubmissionFacilityIndex(normalizedSubmissions);
         return {
           records: (facilities || []).map((record) =>
             enrichFacilityWithBaseline(
               record,
               findBaselineForFacility(record, baselineMap),
-              normalizedSubmissions,
+              getFacilityCandidateSubmissions(record, submissionIndex),
             ),
           ),
           submissions: normalizedSubmissions,
@@ -3455,6 +3781,23 @@ export default function SLFMonitoring({
   useEffect(() => {
     fetchRecords();
     fetchGenerators();
+  }, [fetchRecords, fetchGenerators]);
+
+  // Keep the SLF Monitoring Dashboard + Waste Generators tabs in sync with newly
+  // submitted portal data. Driven by live socket events (no aggressive polling),
+  // so it stays fresh without adding load to the SLF Data Table page.
+  useEffect(() => {
+    const socket = getSocket();
+    if (!socket) return undefined;
+    const handler = ({ target } = {}) => {
+      if (!target || target === "submissions" || target === "baselines") {
+        invalidateCache(CACHE_KEY);
+        fetchRecords(true);
+        fetchGenerators();
+      }
+    };
+    socket.on("data-refresh", handler);
+    return () => socket.off("data-refresh", handler);
   }, [fetchRecords, fetchGenerators]);
 
   // Fetch baseline data when detail modal opens for a facility.
@@ -3531,6 +3874,154 @@ export default function SLFMonitoring({
     detailYear,
     slfSubmissions,
   ]);
+
+  // Consolidated dashboard data for the "SLF Dashboard" tab in the view modal.
+  const detailDashboard = useMemo(() => {
+    const facility = detailViewRecord;
+    if (!facility || !detailModal) return null;
+    const subs = slfSubmissions.filter(
+      (sub) =>
+        ACTIVE_VOLUME_STATUSES.has(sub.status || "pending") &&
+        submissionMatchesFacility(detailModal, sub),
+    );
+    const unit = normalizeUnit(
+      facility.wasteReceivedUnit ||
+        facility.volumeCapacityUnit ||
+        facility.baselineUnit ||
+        "m³",
+    );
+    let totalTrucks = 0;
+    let totalVolume = 0;
+    let residual = 0;
+    let hazardous = 0;
+    const generators = new Map();
+    const monthMap = new Map();
+    const companyTypeCounts = { LGU: 0, Private: 0 };
+    const statusCounts = {};
+    const cellCount = Number(
+      facility.numberOfCell || facility.cellCapacities?.length || 0,
+    );
+    const cellUsed = Array(cellCount).fill(0);
+    const tableRows = [];
+
+    subs.forEach((sub) => {
+      const status = sub.status || "pending";
+      statusCounts[status] = (statusCounts[status] || 0) + 1;
+      const ct = sub.companyType === "Private" ? "Private" : "LGU";
+      companyTypeCounts[ct] = (companyTypeCounts[ct] || 0) + 1;
+      const gName = sub.lguCompanyName || "Unknown";
+      const month = sub.dateOfDisposal
+        ? dayjs(sub.dateOfDisposal).format("YYYY-MM")
+        : sub.createdAt
+          ? dayjs(sub.createdAt).format("YYYY-MM")
+          : "Unknown";
+      let subVolume = 0;
+      (sub.trucks || []).forEach((truck) => {
+        totalTrucks += 1;
+        const placements = (truck.vehicles || []).filter(
+          (v) => Number(v.actualVolume || 0) > 0,
+        );
+        const items = placements.length
+          ? placements.map((v) => ({
+              vol: v.actualVolume,
+              vunit: v.actualVolumeUnit || truck.actualVolumeUnit,
+              wt: v.wasteType || truck.wasteType,
+              cellIndex: v.cellIndex,
+            }))
+          : [
+              {
+                vol: truck.actualVolume,
+                vunit: truck.actualVolumeUnit,
+                wt: truck.wasteType,
+                cellIndex: truck.cellIndex,
+              },
+            ];
+        items.forEach(({ vol, vunit, wt, cellIndex }) => {
+          const v = convertVolume(vol, vunit || unit, unit);
+          if (!v) return;
+          totalVolume += v;
+          subVolume += v;
+          if (getWasteKind(wt) === "hazardous") hazardous += v;
+          else residual += v;
+          generators.set(gName, (generators.get(gName) || 0) + v);
+          monthMap.set(month, (monthMap.get(month) || 0) + v);
+          const idx = Number(cellIndex);
+          if (Number.isInteger(idx) && idx >= 0 && idx < cellCount)
+            cellUsed[idx] += v;
+        });
+      });
+      tableRows.push({
+        _id: sub._id,
+        idNo: sub.idNo,
+        dateOfDisposal: sub.dateOfDisposal,
+        lguCompanyName: sub.lguCompanyName,
+        companyType: sub.companyType,
+        truckCount: (sub.trucks || []).length,
+        volume: Math.round(subVolume),
+        status,
+      });
+    });
+
+    const cellData = Array.from({ length: cellCount }, (_, i) => {
+      const capacity = convertVolume(
+        facility.cellCapacities?.[i] || 0,
+        facility.cellCapacityUnits?.[i] || unit,
+        unit,
+      );
+      const base = convertVolume(
+        facility.cellFillValues?.[i] || 0,
+        facility.cellFillUnits?.[i] || unit,
+        unit,
+      );
+      const used = Math.round(base + cellUsed[i]);
+      return {
+        name: `Cell ${i + 1}`,
+        capacity: Math.round(capacity),
+        used,
+        type: facility.cellTypes?.[i] || "Residual",
+        status: facility.cellStatuses?.[i] || "Active Cell",
+        pct: capacity > 0 ? Math.min(100, (used / capacity) * 100) : null,
+      };
+    });
+
+    const monthly = Array.from(monthMap.entries())
+      .filter(([m]) => m !== "Unknown")
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([m, v]) => ({ month: dayjs(`${m}-01`).format("MMM YY"), volume: Math.round(v) }));
+
+    const topGenerators = Array.from(generators.entries())
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 6)
+      .map(([name, v]) => ({
+        name: name.length > 18 ? `${name.slice(0, 17)}…` : name,
+        value: Math.round(v),
+      }));
+
+    const companyTypeData = Object.entries(companyTypeCounts)
+      .filter(([, v]) => v > 0)
+      .map(([name, value]) => ({ name, value }));
+
+    const statusData = Object.entries(statusCounts).map(([name, value]) => ({
+      name: name.replace("_", " "),
+      value,
+    }));
+
+    return {
+      unit,
+      totalSubmissions: subs.length,
+      totalTrucks,
+      totalVolume: Math.round(totalVolume),
+      residual: Math.round(residual),
+      hazardous: Math.round(hazardous),
+      generatorCount: generators.size,
+      companyTypeData,
+      statusData,
+      cellData,
+      monthly,
+      topGenerators,
+      tableRows,
+    };
+  }, [detailViewRecord, detailModal, slfSubmissions]);
 
   const openDailySubmissionsModal = (cellRow) => {
     if (!detailViewRecord) return;
@@ -3629,6 +4120,9 @@ export default function SLFMonitoring({
       cellTypes:
         record.cellTypes ||
         Array.from({ length: record.numberOfCell || 0 }, () => "Residual"),
+      cellSubmissionAllowed:
+        record.cellSubmissionAllowed ||
+        Array.from({ length: record.numberOfCell || 0 }, () => true),
       cellNotes:
         record.cellNotes ||
         Array.from({ length: record.numberOfCell || 0 }, () => ""),
@@ -3852,17 +4346,32 @@ export default function SLFMonitoring({
     setCellAssignmentModal({ submissions, selectedId: submissions[0]?._id || null });
   };
 
-  const updateCellAssignmentLocal = (submissionId, truckIndex, cellIndex) => {
+  const updateCellAssignmentLocal = (submissionId, truckIndex, cellIndex, vehicleIndex = null) => {
     const cell = getActiveCellOptions().find((item) => item.index === cellIndex);
+    const cellPatch = {
+      cellIndex,
+      cellName: cell?.name || "",
+      cellType: cell?.type || "",
+    };
     setCellAssignmentModal((prev) => ({
       ...prev,
       submissions: (prev?.submissions || []).map((submission) => {
         if (submission._id !== submissionId) return submission;
-        const trucks = (submission.trucks || []).map((truck, index) =>
-          index === truckIndex
-            ? { ...truck, cellIndex, cellName: cell?.name || "", cellType: cell?.type || "" }
-            : truck,
-        );
+        const trucks = (submission.trucks || []).map((truck, index) => {
+          if (index !== truckIndex) return truck;
+          if (Number.isInteger(vehicleIndex) && Array.isArray(truck.vehicles)) {
+            const vehicles = truck.vehicles.map((veh, vIdx) =>
+              vIdx === vehicleIndex ? { ...veh, ...cellPatch } : veh,
+            );
+            // keep truck-level synced with first vehicle
+            const synced = vehicleIndex === 0 ? cellPatch : {};
+            return { ...truck, ...synced, vehicles };
+          }
+          const vehicles = Array.isArray(truck.vehicles)
+            ? truck.vehicles.map((veh) => ({ ...veh, ...cellPatch }))
+            : truck.vehicles;
+          return { ...truck, ...cellPatch, vehicles };
+        });
         return { ...submission, trucks };
       }),
     }));
@@ -3875,12 +4384,27 @@ export default function SLFMonitoring({
     if (!submission) return;
     setCellAssignmentSaving(true);
     try {
-      const assignments = (submission.trucks || []).map((truck, truckIndex) => ({
-        truckIndex,
-        cellIndex: truck.cellIndex,
-        cellName: truck.cellName,
-        cellType: truck.cellType,
-      }));
+      const assignments = [];
+      (submission.trucks || []).forEach((truck, truckIndex) => {
+        if (Array.isArray(truck.vehicles) && truck.vehicles.length > 0) {
+          truck.vehicles.forEach((veh, vehicleIndex) => {
+            assignments.push({
+              truckIndex,
+              vehicleIndex,
+              cellIndex: veh.cellIndex,
+              cellName: veh.cellName,
+              cellType: veh.cellType,
+            });
+          });
+        } else {
+          assignments.push({
+            truckIndex,
+            cellIndex: truck.cellIndex,
+            cellName: truck.cellName,
+            cellType: truck.cellType,
+          });
+        }
+      });
       const { data } = await api.patch(`/data-slf/${submission._id}/cell-assignments`, { assignments });
       const updated = data.data || submission;
       setSlfSubmissions((prev) => prev.map((item) => item._id === updated._id ? updated : item));
@@ -3998,6 +4522,7 @@ export default function SLFMonitoring({
         cellCapacities: fieldValue("cellCapacities", []),
         cellCapacityUnits: fieldValue("cellCapacityUnits", []),
         cellTypes: fieldValue("cellTypes", []),
+        cellSubmissionAllowed: fieldValue("cellSubmissionAllowed", []),
         cellNotes: fieldValue("cellNotes", []),
         cellFillValues: fieldValue("cellFillValues", []),
         cellFillUnits: fieldValue("cellFillUnits", []),
@@ -6899,6 +7424,8 @@ export default function SLFMonitoring({
                                 form.getFieldValue("cellStatuses") || [];
                               const curTy =
                                 form.getFieldValue("cellTypes") || [];
+                              const curSubAllowed =
+                                form.getFieldValue("cellSubmissionAllowed") || [];
                               const curNotes =
                                 form.getFieldValue("cellNotes") || [];
                               const curFill =
@@ -6921,6 +7448,10 @@ export default function SLFMonitoring({
                                 { length: val || 0 },
                                 (_, i) => curTy[i] || "Residual",
                               );
+                              const nextSubAllowed = Array.from(
+                                { length: val || 0 },
+                                (_, i) => (curSubAllowed[i] === undefined ? true : curSubAllowed[i]),
+                              );
                               const nextNotes = Array.from(
                                 { length: val || 0 },
                                 (_, i) => curNotes[i] || "",
@@ -6938,6 +7469,7 @@ export default function SLFMonitoring({
                                 cellCapacityUnits: nextUnits,
                                 cellStatuses: nextSt,
                                 cellTypes: nextTy,
+                                cellSubmissionAllowed: nextSubAllowed,
                                 cellNotes: nextNotes,
                                 cellFillValues: nextFill,
                                 cellFillUnits: nextFillUnits,
@@ -6966,6 +7498,7 @@ export default function SLFMonitoring({
                         "cellCapacities",
                         "cellStatuses",
                         "cellTypes",
+                        "cellSubmissionAllowed",
                         "cellNotes",
                         "cellFillValues",
                         "cellCapacityUnits",
@@ -7155,6 +7688,26 @@ export default function SLFMonitoring({
                                         />
                                       </Form.Item>
                                       <Form.Item
+                                        name={["cellSubmissionAllowed", i]}
+                                        label={
+                                          <Tooltip title="When ON, SLF/portal users can select this cell when disposing their volume-waste submissions in the Add Transport Entry form. Only Active/Open cells appear in the portal.">
+                                            <span>
+                                              Allow Portal Submissions{" "}
+                                              <InfoCircleOutlined style={{ color: "#13c2c2" }} />
+                                            </span>
+                                          </Tooltip>
+                                        }
+                                        valuePropName="checked"
+                                        initialValue={true}
+                                        style={{ marginBottom: 0, marginTop: 8 }}
+                                      >
+                                        <Switch
+                                          checkedChildren="Open"
+                                          unCheckedChildren="Off"
+                                          disabled={!isActiveCellStatus(cellStatus)}
+                                        />
+                                      </Form.Item>
+                                      <Form.Item
                                         label="Waste in Cell"
                                         style={{
                                           marginBottom: 0,
@@ -7222,6 +7775,7 @@ export default function SLFMonitoring({
                         "cellCapacityUnits",
                         "cellStatuses",
                         "cellTypes",
+                        "cellSubmissionAllowed",
                         "cellNotes",
                         "cellFillValues",
                         "cellFillUnits",
@@ -9011,13 +9565,13 @@ export default function SLFMonitoring({
         open={!!detailModal}
         onCancel={() => setDetailModal(null)}
         footer={<Button onClick={() => setDetailModal(null)}>Close</Button>}
-        width={1100}
+        width={1240}
       >
         {detailModal && (
           <>
             {detailViewRecord ? (
               <Tabs
-                defaultActiveKey="1"
+                defaultActiveKey="slf-dashboard"
                 tabPosition="left"
                 style={{ minHeight: 400 }}
                 tabBarStyle={{
@@ -9027,6 +9581,17 @@ export default function SLFMonitoring({
                   padding: "8px 0",
                 }}
                 items={[
+                  {
+                    key: "slf-dashboard",
+                    label: (
+                      <span style={{ color: "#722ed1" }}>
+                        <BarChartOutlined /> SLF Dashboard
+                      </span>
+                    ),
+                    children: (
+                      <SlfDashboardTab dashboard={detailDashboard} isDark={isDark} />
+                    ),
+                  },
                   {
                     key: "1",
                     label: (
@@ -11109,11 +11674,35 @@ export default function SLFMonitoring({
                           <Space size={[6, 6]} wrap>
                             {(
                               detailViewRecord.preventiveMeasureFiles || []
-                            ).map((url, i) => (
-                              <Tag key={i} color="orange">
-                                {url.split("/").pop() || `File ${i + 1}`}
-                              </Tag>
-                            ))}
+                            ).map((entry, i) => {
+                              const url = normalizeStoredFileUrl(entry);
+                              const name =
+                                decodeURIComponent(
+                                  String(url || "").split("/").pop() || "",
+                                ).split("?")[0] || `File ${i + 1}`;
+                              return url ? (
+                                <a
+                                  key={i}
+                                  href={
+                                    isDriveUrl(url) ? url : resolveMediaUrl(url)
+                                  }
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                >
+                                  <Tag
+                                    color="orange"
+                                    icon={<LinkOutlined />}
+                                    style={{ cursor: "pointer" }}
+                                  >
+                                    {name}
+                                  </Tag>
+                                </a>
+                              ) : (
+                                <Tag key={i} color="orange">
+                                  {name}
+                                </Tag>
+                              );
+                            })}
                           </Space>
                         ) : (
                           <Empty
@@ -11151,10 +11740,27 @@ export default function SLFMonitoring({
                               {
                                 title: "Attachments",
                                 dataIndex: "attachments",
-                                width: 130,
+                                width: 160,
                                 render: (v) =>
                                   (v || []).length ? (
-                                    <Tag color="purple">{v.length} file(s)</Tag>
+                                    <Space size={[4, 4]} wrap>
+                                      {(v || []).map((att, ai) => {
+                                        const url = normalizeStoredFileUrl(att);
+                                        if (!url) return null;
+                                        return (
+                                          <a
+                                            key={ai}
+                                            href={isDriveUrl(url) ? url : resolveMediaUrl(url)}
+                                            target="_blank"
+                                            rel="noopener noreferrer"
+                                          >
+                                            <Tag color="purple" icon={<LinkOutlined />} style={{ cursor: "pointer" }}>
+                                              File {ai + 1}
+                                            </Tag>
+                                          </a>
+                                        );
+                                      })}
+                                    </Space>
                                   ) : (
                                     "—"
                                   ),
@@ -11200,58 +11806,130 @@ export default function SLFMonitoring({
                         map[key].push(item);
                         return map;
                       }, {});
+                      const fileName = (item) =>
+                        item.caption ||
+                        decodeURIComponent(
+                          String(item.url || "").split("/").pop() || "Photo",
+                        ).split("?")[0];
                       return (
-                        <Image.PreviewGroup>
-                          <Space
-                            direction="vertical"
-                            size={14}
-                            style={{ width: "100%" }}
+                        <>
+                          <div
+                            style={{
+                              display: "flex",
+                              justifyContent: "space-between",
+                              alignItems: "center",
+                              marginBottom: 12,
+                              flexWrap: "wrap",
+                              gap: 8,
+                            }}
                           >
-                            {Object.entries(groups).map(([group, items]) => (
-                              <div key={group}>
-                                <Divider
-                                  plain
-                                  orientation="left"
-                                  style={{ marginTop: 0 }}
-                                >
-                                  {group}
-                                </Divider>
-                                <Row gutter={[8, 8]}>
-                                  {items.map((item, i) => (
-                                    <Col
-                                      key={`${item.url}-${i}`}
-                                      xs={12}
-                                      sm={8}
-                                      md={6}
-                                    >
-                                      <Image
-                                        src={item.url}
-                                        style={{
-                                          width: "100%",
-                                          borderRadius: 6,
-                                          objectFit: "cover",
-                                          height: 110,
-                                        }}
-                                      />
-                                      {item.caption && (
-                                        <Text
-                                          type="secondary"
-                                          style={{
-                                            display: "block",
-                                            fontSize: 11,
-                                            marginTop: 4,
-                                          }}
+                            <Text type="secondary" style={{ fontSize: 12 }}>
+                              {photos.length} media file(s) — click any item to open in a new tab.
+                            </Text>
+                            <Segmented
+                              size="small"
+                              value={galleryViewMode}
+                              onChange={setGalleryViewMode}
+                              options={[
+                                { label: "Tiled", value: "tiled", icon: <AppstoreOutlined /> },
+                                { label: "List", value: "list", icon: <UnorderedListOutlined /> },
+                              ]}
+                            />
+                          </div>
+                          <Image.PreviewGroup>
+                            <Space
+                              direction="vertical"
+                              size={14}
+                              style={{ width: "100%" }}
+                            >
+                              {Object.entries(groups).map(([group, items]) =>
+                                galleryViewMode === "list" ? (
+                                  <div key={group}>
+                                    <Divider plain orientation="left" style={{ marginTop: 0 }}>
+                                      {group}
+                                    </Divider>
+                                    <List
+                                      size="small"
+                                      dataSource={items}
+                                      renderItem={(item) => (
+                                        <List.Item
+                                          actions={[
+                                            <a
+                                              key="open"
+                                              href={resolveMediaUrl(item.url)}
+                                              target="_blank"
+                                              rel="noopener noreferrer"
+                                            >
+                                              <LinkOutlined /> Open in new tab
+                                            </a>,
+                                          ]}
                                         >
-                                          {item.caption}
-                                        </Text>
+                                          <List.Item.Meta
+                                            avatar={
+                                              <Image
+                                                src={resolveMediaUrl(item.url, { thumbnail: true })}
+                                                preview={{ src: resolveMediaUrl(item.url) }}
+                                                width={64}
+                                                height={48}
+                                                style={{ objectFit: "cover", borderRadius: 4 }}
+                                                fallback="data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='64' height='48'%3E%3Crect width='100%25' height='100%25' fill='%23f0f0f0'/%3E%3C/svg%3E"
+                                              />
+                                            }
+                                            title={<Text style={{ fontSize: 12 }}>{fileName(item)}</Text>}
+                                            description={
+                                              <Text type="secondary" style={{ fontSize: 11 }}>
+                                                {item.folder || "General"} · {item.component || "SLF Component"}
+                                              </Text>
+                                            }
+                                          />
+                                        </List.Item>
                                       )}
-                                    </Col>
-                                  ))}
-                                </Row>
-                              </div>
-                            ))}
-                          </Space>
-                        </Image.PreviewGroup>
+                                    />
+                                  </div>
+                                ) : (
+                                  <div key={group}>
+                                    <Divider plain orientation="left" style={{ marginTop: 0 }}>
+                                      {group}
+                                    </Divider>
+                                    <Row gutter={[8, 8]}>
+                                      {items.map((item, i) => (
+                                        <Col key={`${item.url}-${i}`} xs={12} sm={8} md={6}>
+                                          <Image
+                                            src={resolveMediaUrl(item.url, { thumbnail: true })}
+                                            preview={{ src: resolveMediaUrl(item.url) }}
+                                            fallback="data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='200' height='110'%3E%3Crect width='100%25' height='100%25' fill='%23f0f0f0'/%3E%3Ctext x='50%25' y='50%25' dominant-baseline='middle' text-anchor='middle' fill='%23999' font-size='12' font-family='sans-serif'%3EImage unavailable%3C/text%3E%3C/svg%3E"
+                                            style={{
+                                              width: "100%",
+                                              borderRadius: 6,
+                                              objectFit: "cover",
+                                              height: 110,
+                                            }}
+                                          />
+                                          <a
+                                            href={resolveMediaUrl(item.url)}
+                                            target="_blank"
+                                            rel="noopener noreferrer"
+                                            style={{ fontSize: 11, display: "inline-block", marginTop: 4 }}
+                                          >
+                                            <LinkOutlined /> Open
+                                          </a>
+                                          {item.caption && (
+                                            <Text
+                                              type="secondary"
+                                              style={{ display: "block", fontSize: 11 }}
+                                            >
+                                              {item.caption}
+                                            </Text>
+                                          )}
+                                        </Col>
+                                      ))}
+                                    </Row>
+                                  </div>
+                                ),
+                              )}
+                            </Space>
+                          </Image.PreviewGroup>
+                        </>
                       );
                     })(),
                   },
@@ -11304,23 +11982,24 @@ export default function SLFMonitoring({
                             {
                               title: "File",
                               dataIndex: "url",
-                              width: 100,
-                              render: (v) => {
-                                const fileUrl = Array.isArray(v)
-                                  ? v[0]?.response?.url || v[0]?.url
-                                  : v;
-                                return fileUrl ? (
+                              width: 110,
+                              render: (v, doc) => {
+                                const raw = normalizeStoredFileUrl(v) || normalizeStoredFileUrl(doc?.fileUrl);
+                                if (!raw) return "—";
+                                const openUrl = isDriveUrl(raw)
+                                  ? raw
+                                  : resolveMediaUrl(raw);
+                                return (
                                   <Button
                                     size="small"
                                     type="link"
                                     icon={<FilePdfOutlined />}
-                                    href={fileUrl}
+                                    href={openUrl}
                                     target="_blank"
+                                    rel="noopener noreferrer"
                                   >
                                     Open
                                   </Button>
-                                ) : (
-                                  "—"
                                 );
                               },
                             },
@@ -12362,6 +13041,7 @@ export default function SLFMonitoring({
                   <List
                     size="small"
                     bordered
+                    style={{ maxHeight: 420, overflowY: "auto" }}
                     dataSource={cellAssignmentModal.submissions || []}
                     locale={{ emptyText: "No portal submissions found for this SLF" }}
                     renderItem={(submission) => (
@@ -12386,52 +13066,101 @@ export default function SLFMonitoring({
                 <Col xs={24} md={15}>
                   {!selected ? (
                     <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="Select a submission" />
-                  ) : (
+                  ) : (() => {
+                    // Flatten trucks → per-vehicle rows so each vehicle's waste
+                    // can be placed in its own active cell (matches portal model).
+                    const placementRows = [];
+                    (selected.trucks || []).forEach((truck, truckIndex) => {
+                      if (Array.isArray(truck.vehicles) && truck.vehicles.length > 0) {
+                        truck.vehicles.forEach((veh, vehicleIndex) => {
+                          placementRows.push({
+                            rowKey: `${truckIndex}-${vehicleIndex}`,
+                            truckIndex,
+                            vehicleIndex,
+                            plate: veh.plateNumber || truck.disposalTicketNo || "-",
+                            wasteType: veh.wasteType || truck.wasteType || "Residual",
+                            volume: veh.actualVolume != null ? veh.actualVolume : truck.actualVolume,
+                            volumeUnit: veh.actualVolumeUnit || truck.actualVolumeUnit || "tons",
+                            cellSource: veh,
+                          });
+                        });
+                      } else {
+                        placementRows.push({
+                          rowKey: `${truckIndex}-t`,
+                          truckIndex,
+                          vehicleIndex: null,
+                          plate: truck.plateNumber || truck.disposalTicketNo || "-",
+                          wasteType: truck.wasteType || "Residual",
+                          volume: truck.actualVolume,
+                          volumeUnit: truck.actualVolumeUnit || "tons",
+                          cellSource: truck,
+                        });
+                      }
+                    });
+                    return (
                     <Table
                       className="portal-user-wrap-table"
                       size="small"
-                      rowKey={(truck, index) =>
-                        truck._id ||
-                        truck.key ||
-                        `${truck.disposalTicketNo || truck.plateNumber || "truck"}-${index}`
-                      }
+                      rowKey="rowKey"
                       pagination={false}
-                      dataSource={selected.trucks || []}
+                      dataSource={placementRows}
                       locale={{
                         emptyText: "No truck records found in this portal submission",
                       }}
                       columns={[
-                        { title: "Truck / Plate", width: 150, render: (_, truck) => <Text>{truck.plateNumber || truck.disposalTicketNo || "-"}</Text> },
-                        { title: "Waste Type", width: 150, render: (_, truck) => <Tag>{truck.wasteType || "Residual"}</Tag> },
+                        { title: "Truck / Plate", width: 150, render: (_, row) => <Text>{row.plate}</Text> },
+                        {
+                          title: "Waste Type",
+                          width: 140,
+                          render: (_, row) => (
+                            <Tag color={/haz|inert/i.test(row.wasteType) ? "volcano" : "green"}>
+                              {row.wasteType}
+                            </Tag>
+                          ),
+                        },
                         {
                           title: "Volume",
-                          width: 120,
-                          render: (_, truck) => `${Number(truck.actualVolume || 0).toLocaleString()} ${normalizeUnit(truck.actualVolumeUnit || "tons")}`,
+                          width: 110,
+                          render: (_, row) => `${Number(row.volume || 0).toLocaleString()} ${normalizeUnit(row.volumeUnit)}`,
                         },
                         {
                           title: "Active Cell",
-                          render: (_, truck, truckIndex) => (
-                            <Select
-                              style={{ width: "100%" }}
-                              placeholder="Select active cell"
-                              value={(() => {
-                                const index = getTruckCellIndex(truck);
-                                return activeCells.some(
-                                  (cell) => cell.index === index,
-                                )
-                                  ? index
-                                  : undefined;
-                              })()}
-                              options={activeCells.map((cell) => ({ label: cell.label, value: cell.index }))}
-                              onChange={(value) => updateCellAssignmentLocal(selected._id, truckIndex, value)}
-                              allowClear
-                              disabled={activeCells.length === 0}
-                            />
-                          ),
+                          render: (_, row) => {
+                            const compatible = activeCells.filter((cell) =>
+                              /haz|inert/i.test(row.wasteType)
+                                ? isHazardousCellType(cell.type)
+                                : !isHazardousCellType(cell.type),
+                            );
+                            const cellList = compatible.length ? compatible : activeCells;
+                            return (
+                              <Select
+                                style={{ width: "100%" }}
+                                placeholder="Select active cell"
+                                value={(() => {
+                                  const index = getTruckCellIndex(row.cellSource);
+                                  return cellList.some((cell) => cell.index === index)
+                                    ? index
+                                    : undefined;
+                                })()}
+                                options={cellList.map((cell) => ({ label: cell.label, value: cell.index }))}
+                                onChange={(value) =>
+                                  updateCellAssignmentLocal(
+                                    selected._id,
+                                    row.truckIndex,
+                                    value,
+                                    row.vehicleIndex,
+                                  )
+                                }
+                                allowClear
+                                disabled={activeCells.length === 0}
+                              />
+                            );
+                          },
                         },
                       ]}
                     />
-                  )}
+                    );
+                  })()}
                 </Col>
               </Row>
             </Space>

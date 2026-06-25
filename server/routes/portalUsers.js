@@ -489,6 +489,55 @@ router.patch("/:id/security", async (req, res) => {
   }
 });
 
+// Admin: manage per-user portal access (feature toggles + allowed disposal cells)
+router.patch("/:id/access", async (req, res) => {
+  try {
+    const { canSubmitDisposal, canEditBaseline, canUploadExcel, allowedCells } =
+      req.body || {};
+    const user = await UserPortal.findById(req.params.id);
+    if (!user) return res.status(404).json({ message: "User not found" });
+
+    const current = user.portalAccess || {};
+    const next = {
+      canSubmitDisposal:
+        typeof canSubmitDisposal === "boolean"
+          ? canSubmitDisposal
+          : current.canSubmitDisposal !== false,
+      canEditBaseline:
+        typeof canEditBaseline === "boolean"
+          ? canEditBaseline
+          : current.canEditBaseline !== false,
+      canUploadExcel:
+        typeof canUploadExcel === "boolean"
+          ? canUploadExcel
+          : current.canUploadExcel !== false,
+      allowedCells: Array.isArray(allowedCells)
+        ? allowedCells
+            .map((c) => String(c || "").trim())
+            .filter(Boolean)
+        : Array.isArray(current.allowedCells)
+          ? current.allowedCells
+          : [],
+      updatedAt: new Date(),
+      updatedBy: req.user?.email || req.user?.id || "admin",
+    };
+    user.portalAccess = next;
+    user.markModified("portalAccess");
+    await user.save();
+
+    const safeUser = user.toObject();
+    delete safeUser.password;
+    res.json({ message: "Portal access updated", data: safeUser });
+    writeLog("info", "portal.access-update", {
+      message: `Portal user access updated: ${user.email}`,
+      user: req.user.id,
+      ip: req.ip,
+    });
+  } catch (error) {
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+});
+
 // Admin reset portal user password
 router.patch("/:id/reset-password", async (req, res) => {
   try {

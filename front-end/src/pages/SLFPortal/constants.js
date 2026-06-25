@@ -11,6 +11,9 @@ export const EMPTY_TRUCK = {
   actualVolumeUnit: "m³",
   wasteType: undefined,
   hazWasteCode: [],
+  cellName: "",
+  cellType: "",
+  cellIndex: null,
 };
 
 export const KNOWN_TRANSPORT_KEYS = new Set([
@@ -28,6 +31,14 @@ export const EMPTY_VEHICLE = {
   vehicleType: "",
   capacity: null,
   capacityUnit: "m³",
+  // Per-vehicle waste placement: each vehicle's waste goes to a specific open cell.
+  actualVolume: null,
+  actualVolumeUnit: "m³",
+  wasteType: undefined,
+  hazWasteCode: [],
+  cellName: "",
+  cellType: "",
+  cellIndex: null,
 };
 
 export const EMPTY_HAULER = {

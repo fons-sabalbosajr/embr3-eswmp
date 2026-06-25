@@ -5,6 +5,7 @@ import {
   DatabaseOutlined,
   DeleteOutlined,
   PieChartOutlined,
+  CustomerServiceOutlined,
 } from "@ant-design/icons";
 import SubmissionSettings from "./SubmissionSettings";
 import SubmissionSummary from "./SubmissionSummary";
@@ -12,6 +13,7 @@ import Reports from "./Reports";
 import BaselineData from "./BaselineData";
 import HaulerRequests from "./HaulerRequests";
 import CellWastePlacement from "./CellWastePlacement";
+import SupportTickets from "./SupportTickets";
 import { useState, useEffect } from "react";
 import api from "../../api";
 
@@ -53,6 +55,19 @@ export default function SLFWasteGenerators({
     return () => clearInterval(interval);
   }, []);
 
+  const [openTickets, setOpenTickets] = useState(0);
+
+  useEffect(() => {
+    const loadTickets = () =>
+      api
+        .get("/support-tickets", { params: { status: "open", limit: 1 } })
+        .then(({ data }) => setOpenTickets(data.total || 0))
+        .catch(() => {});
+    loadTickets();
+    const interval = setInterval(loadTickets, 30000);
+    return () => clearInterval(interval);
+  }, []);
+
   const tabItems = [
     {
       key: "summary",
@@ -79,6 +94,23 @@ export default function SLFWasteGenerators({
           canRepairIds={canRepairIds}
         />
       ),
+      hidden: !canViewSubmissions,
+    },
+    {
+      key: "support-tickets",
+      label: (
+        <span>
+          <CustomerServiceOutlined /> Support Tickets
+          {openTickets > 0 && (
+            <Badge
+              count={openTickets}
+              size="small"
+              style={{ marginLeft: 6, backgroundColor: "#ff4d4f" }}
+            />
+          )}
+        </span>
+      ),
+      children: <SupportTickets canEdit={canEdit} />,
       hidden: !canViewSubmissions,
     },
     {

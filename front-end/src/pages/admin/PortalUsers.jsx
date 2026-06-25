@@ -17,9 +17,12 @@ import {
 } from "@ant-design/icons";
 import Swal from "sweetalert2";
 import dayjs from "dayjs";
+import relativeTime from "dayjs/plugin/relativeTime";
 import api from "../../api";
 import ResponsiveTable from "./shared/ResponsiveTable";
 import { matchesFilter, rowMatchesSearch } from "./shared/tableFilters";
+
+dayjs.extend(relativeTime);
 
 const { Text, Title } = Typography;
 const { Option } = Select;
@@ -61,6 +64,13 @@ const getPortalEmailTemplates = (user = {}) => ({
 
 const appBase = (import.meta.env.BASE_URL || "/eswm-pipeline/").replace(/\/+$/, "");
 const appApiBase = `${appBase}/api`;
+
+// A portal user is considered "online" if their last activity ping was within
+// this window (presence is touched on portal login and /me activity).
+const ONLINE_WINDOW_MS = 5 * 60 * 1000;
+const isUserOnline = (user) =>
+  !!user?.lastActiveAt &&
+  Date.now() - new Date(user.lastActiveAt).getTime() <= ONLINE_WINDOW_MS;
 
 function normalizeVerificationFileUrl(url) {
   if (!url) return "";
@@ -128,6 +138,9 @@ export default function PortalUsers({ isDark, canEdit = true, canDelete = true, 
 
   useEffect(() => {
     fetchData();
+    // Refresh periodically so online/offline presence stays current.
+    const interval = setInterval(() => fetchData({ silent: true }), 60000);
+    return () => clearInterval(interval);
   }, []);
 
   // Deduplicated SLF options: one entry per unique lgu+ownership label,
@@ -146,8 +159,8 @@ export default function PortalUsers({ isDark, canEdit = true, canDelete = true, 
       .map(([label, g]) => ({ label, value: g._id }));
   }, [generators]);
 
-  const fetchData = async () => {
-    setLoading(true);
+  const fetchData = async ({ silent = false } = {}) => {
+    if (!silent) setLoading(true);
     try {
       const [usersRes, genRes] = await Promise.all([
         api.get("/portal-users"),
@@ -158,7 +171,7 @@ export default function PortalUsers({ isDark, canEdit = true, canDelete = true, 
     } catch {
       // silent
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
     }
   };
 
@@ -681,7 +694,40 @@ export default function PortalUsers({ isDark, canEdit = true, canDelete = true, 
           ? names.map((n, i) => <Tag key={i} color="blue" style={{ marginBottom: 2 }}>{n}</Tag>)
           : <Text type="secondary">Not assigned</Text>;
       },
-      width: 180,
+      width: 140,
+    },
+    {
+      title: "Presence",
+      key: "presence",
+      width: 150,
+      filters: [
+        { text: "Online", value: "online" },
+        { text: "Offline", value: "offline" },
+      ],
+      onFilter: (value, record) =>
+        value === "online" ? isUserOnline(record) : !isUserOnline(record),
+      render: (_, record) => {
+        const online = isUserOnline(record);
+        return (
+          <Space direction="vertical" size={0}>
+            <Tag
+              color={online ? "green" : "default"}
+              style={{ borderRadius: 10, fontSize: 11 }}
+            >
+              <Badge
+                status={online ? "success" : "default"}
+                style={{ marginRight: 4 }}
+              />
+              {online ? "Online" : "Offline"}
+            </Tag>
+            <Text type="secondary" style={{ fontSize: 11 }}>
+              {record.lastActiveAt
+                ? `Active ${dayjs(record.lastActiveAt).fromNow()}`
+                : "No activity yet"}
+            </Text>
+          </Space>
+        );
+      },
     },
     {
       title: "Status & Files",
@@ -788,6 +834,36 @@ export default function PortalUsers({ isDark, canEdit = true, canDelete = true, 
 
   const pendingCount = users.filter((u) => u.status === "pending").length;
 
+  const userSummary = useMemo(() => {
+    const acc = {
+      total: users.length,
+      approved: 0,
+      pending: 0,
+      rejected: 0,
+      online: 0,
+      held: 0,
+      sharingLocation: 0,
+    };
+    users.forEach((u) => {
+      if (u.status === "approved") acc.approved += 1;
+      else if (u.status === "pending") acc.pending += 1;
+      else if (u.status === "rejected") acc.rejected += 1;
+      if (isUserOnline(u)) acc.online += 1;
+      if (u.verificationRequired) acc.held += 1;
+      if (u.locationSharingEnabled) acc.sharingLocation += 1;
+    });
+    return acc;
+  }, [users]);
+
+  const summaryTiles = [
+    { key: "total", label: "Total Users", value: userSummary.total, color: "#1a3353", icon: <UserOutlined /> },
+    { key: "online", label: "Online Now", value: userSummary.online, color: "#52c41a", icon: <Badge status="success" /> },
+    { key: "approved", label: "Approved", value: userSummary.approved, color: "#2f54eb", icon: <CheckCircleOutlined /> },
+    { key: "pending", label: "Pending", value: userSummary.pending, color: "#faad14", icon: <ClockCircleOutlined /> },
+    { key: "held", label: "On Hold", value: userSummary.held, color: "#fa541c", icon: <LockOutlined /> },
+    { key: "sharing", label: "Sharing Location", value: userSummary.sharingLocation, color: "#13c2c2", icon: <EnvironmentOutlined /> },
+  ];
+
   return (
     <div>
       <div
@@ -812,6 +888,42 @@ export default function PortalUsers({ isDark, canEdit = true, canDelete = true, 
           Refresh
         </Button>
       </div>
+
+      <Row gutter={[12, 12]} style={{ marginBottom: 16 }}>
+        {summaryTiles.map((tile) => (
+          <Col xs={12} sm={8} md={4} key={tile.key}>
+            <Card
+              size="small"
+              style={{ borderRadius: 10, borderLeft: `4px solid ${tile.color}` }}
+              styles={{ body: { padding: "10px 14px" } }}
+            >
+              <Space align="center" size={10}>
+                <span
+                  style={{
+                    width: 38,
+                    height: 38,
+                    borderRadius: 10,
+                    background: `${tile.color}1f`,
+                    color: tile.color,
+                    display: "inline-flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    fontSize: 18,
+                  }}
+                >
+                  {tile.icon}
+                </span>
+                <div>
+                  <div style={{ fontSize: 22, fontWeight: 700, color: tile.color, lineHeight: 1.1 }}>
+                    {tile.value}
+                  </div>
+                  <Text type="secondary" style={{ fontSize: 11 }}>{tile.label}</Text>
+                </div>
+              </Space>
+            </Card>
+          </Col>
+        ))}
+      </Row>
 
       <Card size="small" style={{ marginBottom: 16, borderRadius: 8 }}>
         <Row gutter={[12, 12]} align="middle">

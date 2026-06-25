@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import {
   Card,
   Typography,
@@ -45,6 +45,9 @@ import {
   EyeOutlined,
   EyeInvisibleOutlined,
   ApartmentOutlined,
+  ContainerOutlined,
+  CheckCircleOutlined,
+  CloseCircleOutlined,
   SearchOutlined,
   FundProjectionScreenOutlined,
   BankOutlined,
@@ -53,6 +56,7 @@ import {
   SwapOutlined,
   BarChartOutlined,
   EnvironmentOutlined,
+  AimOutlined,
   HistoryOutlined,
   SendOutlined,
   PlusOutlined,
@@ -100,10 +104,17 @@ export default function DeveloperSettings({onSettingsSaved, isDark, initialActiv
   const [portalSecurityModal, setPortalSecurityModal] = useState({ open: false, record: null });
   const [portalPasswordModal, setPortalPasswordModal] = useState({ open: false, record: null });
   const [portalWarningModal, setPortalWarningModal] = useState({ open: false, record: null });
+  const [portalAccessModal, setPortalAccessModal] = useState({ open: false, record: null });
+  const [portalAccessCellOptions, setPortalAccessCellOptions] = useState([]);
+  const [portalAccessCellLoading, setPortalAccessCellLoading] = useState(false);
   const [portalSecuritySaving, setPortalSecuritySaving] = useState(false);
   const [portalSecurityForm] = Form.useForm();
   const [portalPasswordForm] = Form.useForm();
   const [portalWarningForm] = Form.useForm();
+  const [portalAccessForm] = Form.useForm();
+  const [submissionRecordModal, setSubmissionRecordModal] = useState({ open: false, user: null });
+  const [submissionRecords, setSubmissionRecords] = useState([]);
+  const [submissionRecordsLoading, setSubmissionRecordsLoading] = useState(false);
 
   // Dashboard display settings
   const DASHBOARD_TABS = [
@@ -130,6 +141,23 @@ export default function DeveloperSettings({onSettingsSaved, isDark, initialActiv
       return { label: String(year), value: year };
     }
   );
+
+  useEffect(() => {
+    if (typeof document !== "undefined" && !document.getElementById("portal-action-icon-styles")) {
+      const style = document.createElement("style");
+      style.id = "portal-action-icon-styles";
+      style.innerHTML = `
+        .portal-action-icons .ant-btn { transition: transform 0.18s ease, background 0.18s ease; }
+        .portal-action-icons .ant-btn:hover { transform: translateY(-2px) scale(1.12); }
+        @keyframes portalActionPulse {
+          0%, 100% { transform: scale(1); }
+          50% { transform: scale(1.18); }
+        }
+        .portal-action-icons .portal-action-active { animation: portalActionPulse 1.6s ease-in-out infinite; }
+      `;
+      document.head.appendChild(style);
+    }
+  }, []);
 
   useEffect(() => {
     fetchSettings();
@@ -362,6 +390,164 @@ export default function DeveloperSettings({onSettingsSaved, isDark, initialActiv
     }
   };
 
+  // ── Manage Access (per-user feature toggles + allowed disposal cells) ──
+  const loadPortalAccessCellOptions = async (record) => {
+    const ids = Array.isArray(record?.assignedSlf) ? record.assignedSlf : [];
+    const names = Array.isArray(record?.assignedSlfName) ? record.assignedSlfName : [];
+    if (!ids.length) {
+      setPortalAccessCellOptions([]);
+      return;
+    }
+    setPortalAccessCellLoading(true);
+    try {
+      const results = await Promise.all(
+        ids.map((id, idx) => {
+          const sid = typeof id === "object" ? id?._id || id?.$oid || id : id;
+          const nameParam = names[idx] ? `?slfName=${encodeURIComponent(names[idx])}` : "";
+          return api
+            .get(`/slf-facilities/portal/${sid}${nameParam}`)
+            .then(({ data }) => ({ data, name: names[idx] || data?.lgu || "SLF" }))
+            .catch(() => null);
+        }),
+      );
+      const options = [];
+      const seen = new Set();
+      results.filter(Boolean).forEach(({ data, name }) => {
+        const count = Number(data?.numberOfCell || data?.cellStatuses?.length || 0);
+        for (let i = 0; i < count; i++) {
+          const status = String(data?.cellStatuses?.[i] || "");
+          const isOpen = ["Active Cell", "Operational", "Active"].includes(status);
+          const submissionAllowed = data?.cellSubmissionAllowed?.[i] !== false;
+          if (!isOpen || !submissionAllowed) continue;
+          const value = `Cell ${i + 1}`;
+          if (seen.has(value)) return;
+          seen.add(value);
+          const type = data?.cellTypes?.[i] ? ` - ${data.cellTypes[i]}` : "";
+          options.push({ label: `${value}${type} (${name})`, value });
+        }
+      });
+      setPortalAccessCellOptions(options);
+    } finally {
+      setPortalAccessCellLoading(false);
+    }
+  };
+
+  const openPortalAccessModal = (record) => {
+    const access = record.portalAccess || {};
+    setPortalAccessModal({ open: true, record });
+    portalAccessForm.setFieldsValue({
+      canSubmitDisposal: access.canSubmitDisposal !== false,
+      canEditBaseline: access.canEditBaseline !== false,
+      canUploadExcel: access.canUploadExcel !== false,
+      allowedCells: Array.isArray(access.allowedCells) ? access.allowedCells : [],
+    });
+    setPortalAccessCellOptions([]);
+    loadPortalAccessCellOptions(record);
+  };
+
+  const savePortalAccess = async () => {
+    setPortalSecuritySaving(true);
+    try {
+      const values = await portalAccessForm.validateFields();
+      const { data } = await api.patch(
+        `/portal-users/${portalAccessModal.record._id}/access`,
+        values,
+      );
+      setPortalSecurityUsers((prev) => prev.map((u) => (u._id === data.data._id ? data.data : u)));
+      setPortalAccessModal({ open: false, record: null });
+      Swal.fire({ icon: "success", title: "Access updated", timer: 1100, showConfirmButton: false });
+    } catch (err) {
+      if (err?.errorFields) return;
+      Swal.fire("Error", err.response?.data?.message || "Could not update access", "error");
+    } finally {
+      setPortalSecuritySaving(false);
+    }
+  };
+
+  // ── View Submission Record (CRUD of a portal user's raw submissions) ──
+  const fetchSubmissionRecords = useCallback(async (user) => {
+    if (!user?._id) return;
+    setSubmissionRecordsLoading(true);
+    try {
+      const { data } = await api.get(`/portal-users/${user._id}/submission-history`);
+      setSubmissionRecords(Array.isArray(data?.submissions) ? data.submissions : []);
+    } catch {
+      Swal.fire("Error", "Could not load submission records", "error");
+    } finally {
+      setSubmissionRecordsLoading(false);
+    }
+  }, []);
+
+  const openSubmissionRecordModal = (user) => {
+    setSubmissionRecordModal({ open: true, user });
+    setSubmissionRecords([]);
+    fetchSubmissionRecords(user);
+  };
+
+  const handleSubmissionRecordEdit = async (record) => {
+    const { value: formValues } = await Swal.fire({
+      title: `Edit ${record.idNo || "Submission"}`,
+      html:
+        `<input id="swal-company" class="swal2-input" placeholder="Company / LGU name" value="${(record.lguCompanyName || "").replace(/"/g, "&quot;")}">` +
+        `<select id="swal-type" class="swal2-input">` +
+        `<option value="LGU" ${record.companyType === "LGU" ? "selected" : ""}>LGU</option>` +
+        `<option value="Private" ${record.companyType === "Private" ? "selected" : ""}>Private</option>` +
+        `</select>`,
+      focusConfirm: false,
+      showCancelButton: true,
+      confirmButtonText: "Save Changes",
+      confirmButtonColor: "#2f54eb",
+      preConfirm: () => ({
+        lguCompanyName: document.getElementById("swal-company").value.trim(),
+        companyType: document.getElementById("swal-type").value,
+      }),
+    });
+    if (!formValues) return;
+    try {
+      const { data } = await api.patch(`/data-slf/${record._id}/admin-edit`, {
+        ...formValues,
+        updatedBy: "Developer Settings",
+      });
+      setSubmissionRecords((prev) =>
+        prev.map((r) => (r._id === record._id ? { ...r, ...data } : r)),
+      );
+      Swal.fire({ icon: "success", title: "Submission updated", timer: 1100, showConfirmButton: false });
+    } catch (err) {
+      Swal.fire("Error", err.response?.data?.message || "Could not update submission", "error");
+    }
+  };
+
+  const handleSubmissionRecordStatus = async (record, status) => {
+    try {
+      await api.patch(`/data-slf/${record._id}/status`, { status });
+      setSubmissionRecords((prev) =>
+        prev.map((r) => (r._id === record._id ? { ...r, status } : r)),
+      );
+      Swal.fire({ icon: "success", title: `Marked ${status}`, timer: 900, showConfirmButton: false });
+    } catch (err) {
+      Swal.fire("Error", err.response?.data?.message || "Could not update status", "error");
+    }
+  };
+
+  const handleSubmissionRecordDelete = async (record) => {
+    const confirm = await Swal.fire({
+      title: `Delete ${record.idNo || "submission"}?`,
+      text: "This moves the submission to Deleted Submissions (soft delete).",
+      icon: "warning",
+      showCancelButton: true,
+      confirmButtonText: "Delete",
+      confirmButtonColor: "#ff4d4f",
+    });
+    if (!confirm.isConfirmed) return;
+    try {
+      await api.delete(`/data-slf/${record._id}`);
+      setSubmissionRecords((prev) => prev.filter((r) => r._id !== record._id));
+      Swal.fire({ icon: "success", title: "Deleted", timer: 800, showConfirmButton: false });
+    } catch (err) {
+      Swal.fire("Error", err.response?.data?.message || "Could not delete submission", "error");
+    }
+  };
+
   const filteredPortalSecurityUsers = portalSecurityUsers.filter((user) => {
     const q = portalSecuritySearch.trim().toLowerCase();
     if (!q) return true;
@@ -538,17 +724,26 @@ export default function DeveloperSettings({onSettingsSaved, isDark, initialActiv
       <style>
         {`
           .developer-settings-tabs .ant-tabs-tab {
-            font-size: 12px;
-            padding: 8px 10px;
+            font-size: 11px;
+            padding: 5px 8px;
+            margin: 1px 0 !important;
+            line-height: 1.25;
+          }
+          .developer-settings-tabs .ant-tabs-tab + .ant-tabs-tab {
+            margin-top: 2px !important;
           }
           .developer-settings-tabs .ant-tabs-tab .anticon {
-            font-size: 13px;
+            font-size: 12px;
+            margin-right: 6px;
+          }
+          .developer-settings-tabs .ant-tabs-tab-btn {
+            font-weight: 500;
           }
         `}
       </style>
       <Tabs
         defaultActiveKey={initialActiveKey}
-        size="large"
+        size="small"
         tabPosition="left"
         className="developer-settings-tabs"
         style={{
@@ -560,8 +755,8 @@ export default function DeveloperSettings({onSettingsSaved, isDark, initialActiv
           padding: 12,
         }}
         tabBarStyle={{
-          width: 240,
-          fontSize: 12,
+          width: 210,
+          fontSize: 11,
           paddingRight: 8,
           borderRight: isDark ? "1px solid #303030" : "1px solid #f0f0f0",
         }}
@@ -1143,31 +1338,56 @@ export default function DeveloperSettings({onSettingsSaved, isDark, initialActiv
                       width: 230,
                       fixed: "right",
                       render: (_, user) => (
-                        <Space size={4} wrap>
+                        <Space size={4} wrap className="portal-action-icons">
+                          <Tooltip title="View submission records (CRUD)">
+                            <Button
+                              size="small"
+                              type="text"
+                              icon={<ContainerOutlined />}
+                              style={{ color: "#13c2c2" }}
+                              onClick={() => openSubmissionRecordModal(user)}
+                            />
+                          </Tooltip>
+                          <Tooltip title="Manage access (disposal cells & portal features)">
+                            <Button
+                              size="small"
+                              type="text"
+                              icon={<ApartmentOutlined />}
+                              style={{ color: "#722ed1" }}
+                              onClick={() => openPortalAccessModal(user)}
+                            />
+                          </Tooltip>
                           <Tooltip title="Edit security settings">
-                            <Button size="small" type="text" icon={<EditOutlined />} onClick={() => openPortalSecurityModal(user)} />
+                            <Button size="small" type="text" icon={<EditOutlined />} style={{ color: "#2f54eb" }} onClick={() => openPortalSecurityModal(user)} />
                           </Tooltip>
                           <Tooltip title="Reset password">
-                            <Button size="small" type="text" icon={<LockOutlined />} onClick={() => {
+                            <Button size="small" type="text" icon={<LockOutlined />} style={{ color: "#fa8c16" }} onClick={() => {
                               setPortalPasswordModal({ open: true, record: user });
                               portalPasswordForm.resetFields();
                             }} />
                           </Tooltip>
                           <Tooltip title="Send warning email">
-                            <Button size="small" type="text" icon={<MailOutlined />} onClick={() => {
-                              setPortalWarningModal({ open: true, record: user });
-                              portalWarningForm.setFieldsValue({
-                                subject: "Portal Account Security Notice",
-                                message: `Hello ${user.firstName || "Portal User"},\n\nPlease review your SLF portal account activity and comply with the required portal account security measures.\n\nThank you.`,
-                              });
-                            }} />
+                            <Button
+                              size="small"
+                              type="text"
+                              icon={<MailOutlined />}
+                              style={{ color: user.securityWarningCount > 0 ? "#d4380d" : "#8c8c8c" }}
+                              onClick={() => {
+                                setPortalWarningModal({ open: true, record: user });
+                                portalWarningForm.setFieldsValue({
+                                  subject: "Portal Account Security Notice",
+                                  message: `Hello ${user.firstName || "Portal User"},\n\nPlease review your SLF portal account activity and comply with the required portal account security measures.\n\nThank you.`,
+                                });
+                              }}
+                            />
                           </Tooltip>
                           <Tooltip title={user.blocked ? "Unblock account" : "Block account"}>
                             <Button
                               size="small"
                               type="text"
-                              danger={!user.blocked}
                               icon={user.blocked ? <UnlockOutlined /> : <LockOutlined />}
+                              className={user.blocked ? "portal-action-active" : ""}
+                              style={{ color: user.blocked ? "#cf1322" : "#8c8c8c" }}
                               onClick={() => togglePortalSecurityFlag(user, {
                                 blocked: !user.blocked,
                                 blockedReason: !user.blocked ? "Blocked by admin security settings" : "",
@@ -1179,6 +1399,8 @@ export default function DeveloperSettings({onSettingsSaved, isDark, initialActiv
                               size="small"
                               type="text"
                               icon={<ToolOutlined />}
+                              className={user.maintenanceMode ? "portal-action-active" : ""}
+                              style={{ color: user.maintenanceMode ? "#1677ff" : "#8c8c8c" }}
                               onClick={() => togglePortalSecurityFlag(user, {
                                 maintenanceMode: !user.maintenanceMode,
                                 maintenanceReason: !user.maintenanceMode ? "Account under maintenance by admin" : "",
@@ -1283,7 +1505,7 @@ export default function DeveloperSettings({onSettingsSaved, isDark, initialActiv
                     size="small"
                     loading={logsLoading}
                     pagination={{ pageSize: 30, size: "small" }}
-                    scroll={{ x: 700 }}
+                    scroll={{ x: 950 }}
                     style={{ fontSize: 11 }}
                     className="compact-logs-table"
                     columns={[
@@ -1334,8 +1556,34 @@ export default function DeveloperSettings({onSettingsSaved, isDark, initialActiv
                         title: "IP",
                         dataIndex: "ip",
                         key: "ip",
-                        width: 190,
+                        width: 150,
                         render: (v) => <Text style={{ fontSize: 10 }}>{v || "—"}</Text>,
+                      },
+                      {
+                        title: "Location",
+                        key: "location",
+                        width: 200,
+                        render: (_, log) => {
+                          const geo = log.geo || {};
+                          const label = geo.label || "—";
+                          const isPrivate = geo.source === "private";
+                          const isBrowser = geo.source === "browser";
+                          const color = isBrowser ? "green" : isPrivate ? "default" : "blue";
+                          const icon = isBrowser ? <AimOutlined /> : <EnvironmentOutlined />;
+                          return (
+                            <Tooltip
+                              title={
+                                geo.lat != null && geo.lng != null
+                                  ? `${Number(geo.lat).toFixed(4)}, ${Number(geo.lng).toFixed(4)}${isBrowser ? " (shared by user)" : ""}`
+                                  : label
+                              }
+                            >
+                              <Tag color={color} icon={icon} style={{ fontSize: 10, maxWidth: 190, overflow: "hidden", textOverflow: "ellipsis" }}>
+                                {label}
+                              </Tag>
+                            </Tooltip>
+                          );
+                        },
                       },
                     ]}
                   />
@@ -1644,6 +1892,189 @@ export default function DeveloperSettings({onSettingsSaved, isDark, initialActiv
             <TextArea rows={2} placeholder="Reason shown to the portal user during account maintenance" />
           </Form.Item>
         </Form>
+      </Modal>
+      <Modal
+        title={
+          <Space>
+            <ApartmentOutlined style={{ color: "#722ed1" }} />
+            <span>
+              Manage Access
+              {portalAccessModal.record ? ` — ${`${portalAccessModal.record.firstName || ""} ${portalAccessModal.record.lastName || ""}`.trim() || portalAccessModal.record.email}` : ""}
+            </span>
+          </Space>
+        }
+        open={portalAccessModal.open}
+        onCancel={() => setPortalAccessModal({ open: false, record: null })}
+        onOk={savePortalAccess}
+        confirmLoading={portalSecuritySaving}
+        okText="Save Access"
+        okButtonProps={{ icon: <SaveOutlined /> }}
+        width={640}
+        destroyOnHidden
+      >
+        <Alert
+          type="info"
+          showIcon
+          style={{ marginBottom: 16, borderRadius: 8 }}
+          message="Control what this portal user can do"
+          description="Disable a feature to remove it from the SLF portal for this user. Restrict disposal cells to limit which open cells they can submit volume waste into. Leave cells empty to allow all admin-opened cells."
+        />
+        <Form form={portalAccessForm} layout="vertical">
+          <Row gutter={[16, 0]}>
+            <Col xs={24} md={8}>
+              <Form.Item name="canSubmitDisposal" label="Submit Disposal Entries" valuePropName="checked">
+                <Switch checkedChildren="Allowed" unCheckedChildren="Blocked" />
+              </Form.Item>
+            </Col>
+            <Col xs={24} md={8}>
+              <Form.Item name="canEditBaseline" label="Edit Baseline Data" valuePropName="checked">
+                <Switch checkedChildren="Allowed" unCheckedChildren="Blocked" />
+              </Form.Item>
+            </Col>
+            <Col xs={24} md={8}>
+              <Form.Item name="canUploadExcel" label="Upload Excel Files" valuePropName="checked">
+                <Switch checkedChildren="Allowed" unCheckedChildren="Blocked" />
+              </Form.Item>
+            </Col>
+          </Row>
+          <Form.Item
+            name="allowedCells"
+            label={
+              <Space size={4}>
+                <ContainerOutlined style={{ color: "#722ed1" }} />
+                <span>Allowed Disposal Cells</span>
+              </Space>
+            }
+            tooltip="Only open cells configured on the SLF Data Table (Cell Infrastructure) appear here. Empty = all open cells allowed."
+          >
+            <Select
+              mode="tags"
+              allowClear
+              loading={portalAccessCellLoading}
+              placeholder={
+                portalAccessCellLoading
+                  ? "Loading open cells..."
+                  : portalAccessCellOptions.length
+                    ? "Select open cells (empty = all allowed)"
+                    : "No open cells configured — leave empty to allow all"
+              }
+              options={portalAccessCellOptions}
+              tokenSeparators={[","]}
+            />
+          </Form.Item>
+        </Form>
+      </Modal>
+      <Modal
+        title={
+          <Space>
+            <ContainerOutlined style={{ color: "#13c2c2" }} />
+            <span>
+              Submission Records
+              {submissionRecordModal.user
+                ? ` — ${`${submissionRecordModal.user.firstName || ""} ${submissionRecordModal.user.lastName || ""}`.trim() || submissionRecordModal.user.email}`
+                : ""}
+            </span>
+          </Space>
+        }
+        open={submissionRecordModal.open}
+        onCancel={() => setSubmissionRecordModal({ open: false, user: null })}
+        footer={
+          <Button onClick={() => setSubmissionRecordModal({ open: false, user: null })}>
+            Close
+          </Button>
+        }
+        width={960}
+        destroyOnHidden
+      >
+        <Alert
+          type="info"
+          showIcon
+          style={{ marginBottom: 12, borderRadius: 8 }}
+          message="Raw disposal submissions for this portal user"
+          description="View, edit, change status, or delete the submissions raised by this account. Changes apply immediately to the live records."
+        />
+        <ResponsiveTable
+          dataSource={submissionRecords}
+          rowKey="_id"
+          loading={submissionRecordsLoading}
+          pagination={{ pageSize: 8, size: "small" }}
+          scroll={{ x: 820 }}
+          columns={[
+            {
+              title: "ID No.",
+              dataIndex: "idNo",
+              key: "idNo",
+              width: 150,
+              render: (v, r) => (
+                <Space direction="vertical" size={0}>
+                  <Text strong style={{ fontSize: 12 }}>{v || "—"}</Text>
+                  <Text type="secondary" style={{ fontSize: 11 }}>
+                    {r.dateOfDisposal ? dayjs(r.dateOfDisposal).format("MM/DD/YYYY") : "No date"}
+                  </Text>
+                </Space>
+              ),
+            },
+            {
+              title: "Company",
+              dataIndex: "lguCompanyName",
+              key: "company",
+              render: (v, r) => (
+                <Space direction="vertical" size={0}>
+                  <Text style={{ fontSize: 12 }}>{v || "—"}</Text>
+                  <Tag color={r.companyType === "Private" ? "green" : "blue"} style={{ fontSize: 10 }}>
+                    {r.companyType || "—"}
+                  </Tag>
+                </Space>
+              ),
+            },
+            {
+              title: "Trucks",
+              key: "trucks",
+              width: 70,
+              align: "center",
+              render: (_, r) => (Array.isArray(r.trucks) ? r.trucks.length : r.truckCount || 0),
+            },
+            {
+              title: "Status",
+              dataIndex: "status",
+              key: "status",
+              width: 120,
+              render: (v) => {
+                const colors = {
+                  pending: "gold",
+                  acknowledged: "green",
+                  rejected: "red",
+                  reverted: "volcano",
+                  revert_requested: "orange",
+                };
+                return <Tag color={colors[v] || "default"}>{String(v || "pending").replace("_", " ")}</Tag>;
+              },
+            },
+            {
+              title: "Actions",
+              key: "actions",
+              width: 180,
+              fixed: "right",
+              render: (_, r) => (
+                <Space size={4} wrap>
+                  <Tooltip title="Edit company / type">
+                    <Button size="small" type="text" icon={<EditOutlined />} style={{ color: "#2f54eb" }} onClick={() => handleSubmissionRecordEdit(r)} />
+                  </Tooltip>
+                  <Tooltip title="Acknowledge">
+                    <Button size="small" type="text" icon={<CheckCircleOutlined />} style={{ color: "#52c41a" }} onClick={() => handleSubmissionRecordStatus(r, "acknowledged")} />
+                  </Tooltip>
+                  <Tooltip title="Reject">
+                    <Button size="small" type="text" icon={<CloseCircleOutlined />} style={{ color: "#fa8c16" }} onClick={() => handleSubmissionRecordStatus(r, "rejected")} />
+                  </Tooltip>
+                  <Tooltip title="Delete submission">
+                    <Button size="small" type="text" danger icon={<DeleteOutlined />} onClick={() => handleSubmissionRecordDelete(r)} />
+                  </Tooltip>
+                </Space>
+              ),
+            },
+          ]}
+          locale={{ emptyText: <Empty description="No submissions for this user" /> }}
+        />
       </Modal>
       <Modal
         title="Reset Portal Password"

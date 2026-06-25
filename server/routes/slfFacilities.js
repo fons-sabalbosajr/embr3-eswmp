@@ -211,7 +211,7 @@ router.get("/portal/:id", async (req, res) => {
   try {
     const selectFields =
       "province lgu barangay category ownership statusOfSLF remainingLifeSpan " +
-      "volumeCapacity volumeCapacityUnit receivingVolumeCapacity receivingVolumeCapacityUnit numberOfCell cellCapacities cellCapacityUnits cellStatuses cellTypes cellNotes cellFillValues cellFillUnits estimatedVolumeWaste estimatedVolumeWasteUnit actualResidualWasteReceived wasteReceivedUnit " +
+      "volumeCapacity volumeCapacityUnit receivingVolumeCapacity receivingVolumeCapacityUnit numberOfCell cellCapacities cellCapacityUnits cellStatuses cellTypes cellSubmissionAllowed cellNotes cellFillValues cellFillUnits estimatedVolumeWaste estimatedVolumeWasteUnit actualResidualWasteReceived wasteReceivedUnit " +
       "noOfLeachatePond numberOfGasVents mrfEstablished yearStartedOperation " +
       "eccNo dischargePermit dischargePermitValidity dischargePermitStatus dischargePermits permitToOperate permitToOperateValidity permitToOperateStatus permitToOperatePermits focalPerson " +
       "receivingFacilities hasWastewaterTreatmentFacility wastewaterTreatmentFacilityType wastewaterTreatmentFacilityRemarks leachatePondDetails gasVentDetails trashSlideMeasures firePrevMeasures galleryPhotos galleryItems slfDocuments preventiveMeasureFiles scrpDetails";
@@ -381,6 +381,14 @@ router.put("/:id", async (req, res) => {
     const record = await SlfFacility.findOne({ _id: req.params.id, deletedAt: null });
     if (!record) return res.status(404).json({ message: "Record not found" });
 
+    // Capture the SLF display name before the update so a rename can be
+    // propagated to portal users and their submission/baseline records.
+    const buildDisplayName = (lgu, ownership) =>
+      `${lgu || ""}${ownership ? " (" + ownership + ")" : ""}`.trim();
+    const prevLgu = record.lgu;
+    const prevOwnership = record.ownership;
+    const prevDisplayName = buildDisplayName(prevLgu, prevOwnership);
+
     ["leachatePondDetails", "gasVentDetails", "trashSlideMeasures", "firePrevMeasures", "scrpDetails"].forEach((key) => {
       if (!Array.isArray(update[key])) return;
       const existingRows = Array.isArray(record[key]) ? record[key] : [];
@@ -396,8 +404,116 @@ router.put("/:id", async (req, res) => {
 
     record.set(update);
     await record.save();
+
+    // Propagate an SLF/LGU rename so submissions, baseline records and portal
+    // user assignments stay linked (prevents "lost" baseline data on rename).
+    const newDisplayName = buildDisplayName(record.lgu, record.ownership);
+    const nameChanged =
+      (prevLgu || "") !== (record.lgu || "") ||
+      (prevOwnership || "") !== (record.ownership || "");
+    if (nameChanged && newDisplayName) {
+      try {
+        // 1) Submissions & baseline records linked by facility id (safe link).
+        await DataSLF.updateMany(
+          { slfGenerator: record._id },
+          { $set: { slfName: newDisplayName } },
+        );
+        // 2) Legacy records without a facility id — update by exact name match first,
+        //    then do a fuzzy in-memory pass to catch records saved with a different
+        //    name format (e.g., an acronym vs the full long name after a rename).
+        if (prevDisplayName && prevDisplayName !== newDisplayName) {
+          await DataSLF.updateMany(
+            {
+              $or: [
+                { slfGenerator: null },
+                { slfGenerator: { $exists: false } },
+              ],
+              slfName: prevDisplayName,
+            },
+            { $set: { slfName: newDisplayName, slfGenerator: record._id } },
+          );
+        }
+        // 2b) Broader fuzzy pass — load all no-generator baseline-only records and
+        //     match by normalized name so renamed facilities with different name
+        //     formats (e.g., short acronym vs full name) are also re-linked.
+        {
+          const legacyDocs = await DataSLF.find({
+            $or: [{ slfGenerator: null }, { slfGenerator: { $exists: false } }],
+          }).select("_id slfName lguCompanyName").lean();
+
+          function _normalizeName(val) {
+            return String(val || "")
+              .replace(/\s*\(.*?\)\s*/g, " ")
+              .replace(/\blocal\s+governm\s*ent\s+unit\b/gi, " ")
+              .replace(/\blgu\b/gi, " ")
+              .replace(/\bmunicipality\s+of\b/gi, " ")
+              .replace(/\bcity\s+of\b/gi, " ")
+              .replace(/^province\s+of\s+/i, "")
+              .replace(/[\u2012-\u2015-]+/g, " ")
+              .replace(/[,.;:/]+/g, " ")
+              .replace(/\s+/g, " ")
+              .trim()
+              .toLowerCase();
+          }
+
+          const nameVariants = [prevLgu, prevDisplayName, record.lgu, newDisplayName]
+            .flatMap((n) => {
+              const raw = String(n || "").trim();
+              if (!raw) return [];
+              const noParens = raw.replace(/\s*\(.*?\)\s*/g, " ").trim();
+              return [raw, noParens];
+            })
+            .map(_normalizeName)
+            .filter(Boolean);
+
+          const idsToLink = legacyDocs
+            .filter((doc) => {
+              const docNorm = _normalizeName(doc.slfName || doc.lguCompanyName || "");
+              return docNorm && nameVariants.includes(docNorm);
+            })
+            .map((doc) => doc._id);
+
+          if (idsToLink.length > 0) {
+            await DataSLF.updateMany(
+              { _id: { $in: idsToLink } },
+              { $set: { slfName: newDisplayName, slfGenerator: record._id } },
+            );
+          }
+        }
+        // 3) Portal users assigned to this facility — update the parallel
+        //    assignedSlfName entry at the same index as the facility id.
+        const portalUsers = await UserPortal.find({ assignedSlf: record._id }).select(
+          "assignedSlf assignedSlfName",
+        );
+        for (const pu of portalUsers) {
+          const ids = (pu.assignedSlf || []).map((x) => String(x));
+          const idx = ids.indexOf(String(record._id));
+          if (idx === -1) continue;
+          const names = Array.isArray(pu.assignedSlfName)
+            ? [...pu.assignedSlfName]
+            : [];
+          names[idx] = newDisplayName;
+          pu.assignedSlfName = names;
+          pu.markModified("assignedSlfName");
+          await pu.save();
+        }
+      } catch (propErr) {
+        writeLog("warn", "slfFacility.rename-propagate", {
+          message: `Rename propagation issue for ${record._id}: ${propErr.message}`,
+          ip: req.ip,
+        });
+      }
+      // Tell connected admin views (Summary, SLF Monitoring) to refresh so the
+      // renamed SLF appears immediately everywhere.
+      refreshAdmin(req, "submissions");
+      refreshAdmin(req, "baselines");
+    }
+
     res.json(record);
-    writeLog("info", "slfFacility.update", { message: `Updated SLF: ${record.lgu}`, ip: req.ip });
+    writeLog("info", "slfFacility.update", {
+      message: `Updated SLF: ${record.lgu}${nameChanged ? ` (renamed from "${prevDisplayName}")` : ""}`,
+      ip: req.ip,
+    });
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });
   }

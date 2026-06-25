@@ -22,6 +22,14 @@ const vehicleSchema = new mongoose.Schema(
     capacity: { type: Number },
     capacityUnit: { type: String, enum: ["tons", "m³", "m3"], default: "m³" },
     selectedClients: [clientSchema],
+    // Per-vehicle waste placement (volume goes to a specific open cell)
+    actualVolume: { type: Number },
+    actualVolumeUnit: { type: String, enum: ["tons", "m³", "m3"], default: "m³" },
+    wasteType: { type: String, trim: true },
+    hazWasteCode: [{ type: String, trim: true }],
+    cellIndex: { type: Number },
+    cellName: { type: String, trim: true },
+    cellType: { type: String, trim: true },
   },
   { _id: false }
 );
@@ -102,12 +110,16 @@ const dataSLFSchema = new mongoose.Schema(
     acceptsHazardousWaste: { type: Boolean, default: false },
     activeCellEntries: [{
       cellName: { type: String, trim: true },
+      cellType: { type: String, trim: true },
+      cellIndex: { type: Number },
       wasteType: { type: String, trim: true },
       volume: { type: Number },
       unit: { type: String, enum: ["m³", "tons", "m3"], default: "m³" },
     }],
     closedCellEntries: [{
       cellName: { type: String, trim: true },
+      cellType: { type: String, trim: true },
+      cellIndex: { type: Number },
       wasteType: { type: String, trim: true },
       volume: { type: Number },
       unit: { type: String, enum: ["m³", "tons", "m3"], default: "m³" },
@@ -190,8 +202,53 @@ function getProvinceCode(province) {
   return PROVINCE_CODES[key] || raw.substring(0, 2).toUpperCase();
 }
 
+// Map companyType → ID No. TYPE segment. The TYPE segment must always reflect
+// the entry's companyType so LGU and Private (PVT) submissions never get confused.
+function typeCodeForCompanyType(companyType) {
+  const value = String(companyType || "").trim().toLowerCase();
+  if (value === "private" || value === "pvt") return "PVT";
+  if (value === "lgu") return "LGU";
+  return "OTH";
+}
+
+// Compute the next available sequence number for a given SLF-TYPE-PROV- prefix.
+async function nextIdNoSequence(typeCode, provCode) {
+  const DataSLF = mongoose.model("DataSLF");
+  const pattern = new RegExp(`^SLF-${typeCode}-${provCode}-`);
+  const lastDoc = await DataSLF.findOne({ idNo: pattern })
+    .setOptions({ includeHiddenYears: true })
+    .sort({ idNo: -1 });
+  let seq = 1;
+  if (lastDoc && lastDoc.idNo) {
+    const parts = lastDoc.idNo.split("-");
+    const lastNum = parseInt(parts[3], 10);
+    if (!isNaN(lastNum)) seq = lastNum + 1;
+  }
+  return seq;
+}
+
 // Auto-generate the ID No based on province of the SLF
 dataSLFSchema.pre("save", async function () {
+  // Regenerate the TYPE segment when companyType changes on an existing entry,
+  // so an LGU→Private (or vice-versa) edit never leaves a mismatched ID No.
+  if (!this.isNew && this.idNo && this.isModified("companyType")) {
+    const parts = String(this.idNo).split("-");
+    if (parts.length >= 4 && parts[0] === "SLF") {
+      const currentType = parts[1];
+      const desiredType = typeCodeForCompanyType(this.companyType);
+      if (desiredType !== "OTH" && desiredType !== currentType) {
+        const provCode = parts[2] || "XX";
+        const seq = await nextIdNoSequence(desiredType, provCode);
+        const newIdNo = `SLF-${desiredType}-${provCode}-${String(seq).padStart(4, "0")}`;
+        if (newIdNo !== this.idNo) {
+          if (!Array.isArray(this.previousIdNos)) this.previousIdNos = [];
+          this.previousIdNos.push(this.idNo);
+          this.idNo = newIdNo;
+        }
+      }
+    }
+  }
+
   if (this.isNew && !this.idNo) {
     const DataSLF = mongoose.model("DataSLF");
     const SlfFacility = mongoose.model("SlfFacility");
@@ -248,16 +305,7 @@ dataSLFSchema.pre("save", async function () {
         : "OTH";
 
     // Count existing docs with same province code and type to get next sequence
-    const pattern = new RegExp(`^SLF-${typeCode}-${provCode}-`);
-    const lastDoc = await DataSLF.findOne({ idNo: pattern })
-      .setOptions({ includeHiddenYears: true })
-      .sort({ idNo: -1 });
-    let seq = 1;
-    if (lastDoc && lastDoc.idNo) {
-      const parts = lastDoc.idNo.split("-");
-      const lastNum = parseInt(parts[3], 10);
-      if (!isNaN(lastNum)) seq = lastNum + 1;
-    }
+    const seq = await nextIdNoSequence(typeCode, provCode);
     this.idNo = `SLF-${typeCode}-${provCode}-${String(seq).padStart(4, "0")}`;
   }
 });

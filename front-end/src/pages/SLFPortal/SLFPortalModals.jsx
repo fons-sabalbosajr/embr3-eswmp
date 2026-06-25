@@ -101,6 +101,7 @@ export default function SLFPortalModals({
   wasteReceivedLoading,
   activeCellEntries,
   activeCellOptions = [],
+  baselineCellOptions = [],
   closedCellEntries,
   haulers,
   trucks,
@@ -154,6 +155,70 @@ export default function SLFPortalModals({
   const [credentialForm] = Form.useForm();
   const [credentialCodeRequested, setCredentialCodeRequested] = useState(false);
   const [credentialLoading, setCredentialLoading] = useState(false);
+  const [locationSharing, setLocationSharing] = useState(
+    !!portalUser?.locationSharingEnabled,
+  );
+  const [locationBusy, setLocationBusy] = useState(false);
+  const [locationLabel, setLocationLabel] = useState(
+    portalUser?.lastKnownLocation?.label || "",
+  );
+
+  // Toggle browser location sharing for activity tracing.
+  const handleLocationSharingToggle = async (enabled) => {
+    setLocationBusy(true);
+    try {
+      if (!enabled) {
+        await api.patch("/portal-auth/location", { enabled: false });
+        setLocationSharing(false);
+        setLocationLabel("");
+        return;
+      }
+      if (!("geolocation" in navigator)) {
+        await api.patch("/portal-auth/location", { enabled: true });
+        setLocationSharing(true);
+        return;
+      }
+      // Request the current position, then persist it.
+      await new Promise((resolve) => {
+        navigator.geolocation.getCurrentPosition(
+          async (pos) => {
+            const { latitude, longitude, accuracy } = pos.coords;
+            const label = `${latitude.toFixed(4)}, ${longitude.toFixed(4)}`;
+            try {
+              await api.patch("/portal-auth/location", {
+                enabled: true,
+                lat: latitude,
+                lng: longitude,
+                accuracy,
+                label,
+              });
+              setLocationSharing(true);
+              setLocationLabel(label);
+            } catch {
+              /* ignore */
+            }
+            resolve();
+          },
+          async () => {
+            // Permission denied / unavailable — still record the preference.
+            try {
+              await api.patch("/portal-auth/location", { enabled: true });
+              setLocationSharing(true);
+            } catch {
+              /* ignore */
+            }
+            resolve();
+          },
+          { enableHighAccuracy: true, timeout: 8000, maximumAge: 60000 },
+        );
+      });
+    } catch {
+      /* ignore */
+    } finally {
+      setLocationBusy(false);
+    }
+  };
+
   const haulerFieldErr = (name) =>
     haulerErrors[name]
       ? { validateStatus: "error", help: haulerErrors[name] }
@@ -800,7 +865,7 @@ export default function SLFPortalModals({
         }}
         cancelButtonProps={{ icon: <CloseCircleOutlined /> }}
         destroyOnHidden
-        width={880}
+        width={1040}
         styles={{
           body: { paddingTop: 16, maxHeight: "72vh", overflowY: "auto" },
         }}
@@ -912,7 +977,7 @@ export default function SLFPortalModals({
             strong
             style={{ color: "#fff", fontSize: 13, letterSpacing: 0.3 }}
           >
-            Vehicle & Capacity
+            Vehicle, Waste &amp; Cell Placement
           </Text>
         </div>
         <div
@@ -943,6 +1008,23 @@ export default function SLFPortalModals({
                 vehicle?.plateNumber &&
                 list.findIndex((item) => item.plateNumber === vehicle.plateNumber) === index,
               );
+            // Per-vehicle cell options filtered by this vehicle's waste type so
+            // hazardous loads only go to hazardous cells and vice-versa.
+            const vehIsHaz = String(veh.wasteType || "")
+              .toLowerCase()
+              .includes("hazard");
+            const vehCellOptions = veh.wasteType
+              ? activeCellOptions.filter((o) =>
+                  vehIsHaz
+                    ? String(o.cellType || "").toLowerCase().includes("haz")
+                    : !String(o.cellType || "").toLowerCase().includes("haz"),
+                )
+              : activeCellOptions;
+            const patchVehicle = (patch) => {
+              const updated = [...(truckDraft.vehicles || [])];
+              updated[vi] = { ...updated[vi], ...patch };
+              updateTruckDraft("vehicles", updated);
+            };
             return (
               <div
                 key={veh.key || vi}
@@ -1070,6 +1152,159 @@ export default function SLFPortalModals({
                       </Select>
                     </Form.Item>
                   </Col>
+                  <Col xs={24} sm={12}>
+                    <Form.Item
+                      label={fl("wasteType", "Waste Type")}
+                      style={{ marginBottom: 4 }}
+                    >
+                      <Select
+                        placeholder="Select waste classification"
+                        value={veh.wasteType}
+                        onChange={(val) => {
+                          // Clear an incompatible cell when waste type changes.
+                          const stillCompatible =
+                            !veh.cellType ||
+                            (String(val || "").toLowerCase().includes("hazard")
+                              ? String(veh.cellType).toLowerCase().includes("haz")
+                              : !String(veh.cellType).toLowerCase().includes("haz"));
+                          patchVehicle({
+                            wasteType: val,
+                            ...(stillCompatible
+                              ? {}
+                              : { cellName: "", cellType: "", cellIndex: null }),
+                            ...(String(val || "").toLowerCase().includes("hazard")
+                              ? {}
+                              : { hazWasteCode: [] }),
+                          });
+                        }}
+                      >
+                        {opts("wasteType", [
+                          "Residual",
+                          "Treated Hazardous Waste",
+                        ]).map((o) => (
+                          <Option key={o} value={o}>
+                            {o}
+                          </Option>
+                        ))}
+                      </Select>
+                    </Form.Item>
+                  </Col>
+                  <Col xs={14} sm={8}>
+                    <Form.Item
+                      label={
+                        <Text style={{ fontSize: 12 }}>
+                          <DatabaseOutlined style={{ marginRight: 4, color: "#722ed1" }} />
+                          {fl("actualVolume", "Waste Volume")}
+                        </Text>
+                      }
+                      style={{ marginBottom: 4 }}
+                    >
+                      <InputNumber
+                        placeholder="Volume to this cell"
+                        style={{ width: "100%" }}
+                        min={0}
+                        step={0.01}
+                        value={veh.actualVolume}
+                        onChange={(val) => patchVehicle({ actualVolume: val })}
+                      />
+                    </Form.Item>
+                  </Col>
+                  <Col xs={10} sm={4}>
+                    <Form.Item label="Unit" style={{ marginBottom: 4 }}>
+                      <Select
+                        value={veh.actualVolumeUnit || baselineUnit || "m³"}
+                        onChange={(val) => patchVehicle({ actualVolumeUnit: val })}
+                      >
+                        <Option value="tons">tons</Option>
+                        <Option value="m³">m³</Option>
+                      </Select>
+                    </Form.Item>
+                  </Col>
+                  <Col xs={24} sm={12}>
+                    <Form.Item
+                      label={
+                        <Space size={4}>
+                          <ContainerOutlined style={{ color: "#722ed1" }} />
+                          {fl("disposalCell", "Disposal Cell")}
+                        </Space>
+                      }
+                      tooltip="Active/open cell (set by the admin) where THIS vehicle's waste will be placed."
+                      style={{ marginBottom: 4 }}
+                    >
+                      <Select
+                        showSearch
+                        allowClear
+                        placeholder={
+                          !veh.wasteType
+                            ? "Select waste type first"
+                            : vehCellOptions.length
+                              ? "Select active open cell"
+                              : "No matching open cells"
+                        }
+                        disabled={!veh.wasteType}
+                        value={veh.cellName || undefined}
+                        onChange={(val) => {
+                          const opt = vehCellOptions.find((o) => o.value === val);
+                          patchVehicle({
+                            cellName: val || "",
+                            cellType: opt?.cellType || "",
+                            cellIndex:
+                              opt && typeof opt.cellIndex === "number"
+                                ? opt.cellIndex
+                                : null,
+                          });
+                        }}
+                        filterOption={(input, option) =>
+                          (option?.children ?? "")
+                            .toLowerCase()
+                            .includes(input.toLowerCase())
+                        }
+                        notFoundContent={
+                          <Text type="secondary" style={{ fontSize: 12 }}>
+                            No matching open cells. Contact EMB Region III.
+                          </Text>
+                        }
+                      >
+                        {vehCellOptions.map((o) => (
+                          <Option key={o.value} value={o.value}>
+                            {o.label}
+                          </Option>
+                        ))}
+                      </Select>
+                      {veh.cellType && (
+                        <Tag
+                          color={vehIsHaz ? "volcano" : "geekblue"}
+                          style={{ marginTop: 6, fontSize: 11 }}
+                        >
+                          {veh.cellType} Cell
+                        </Tag>
+                      )}
+                    </Form.Item>
+                  </Col>
+                  {vehIsHaz && (
+                    <Col xs={24}>
+                      <Form.Item
+                        label="Hazardous Waste Code (DENR EMB)"
+                        tooltip="Required for Treated Hazardous Waste"
+                        style={{ marginBottom: 4 }}
+                      >
+                        <Select
+                          mode="multiple"
+                          placeholder="Select DENR EMB hazardous waste code(s)"
+                          value={veh.hazWasteCode || []}
+                          onChange={(val) => patchVehicle({ hazWasteCode: val })}
+                          showSearch
+                          allowClear
+                        >
+                          {hazWasteCodes.map((code) => (
+                            <Option key={code} value={code}>
+                              {code}
+                            </Option>
+                          ))}
+                        </Select>
+                      </Form.Item>
+                    </Col>
+                  )}
                   {(() => {
                     const haulerClients = matchingHaulers
                       .flatMap((hauler) => hauler.privateSectorClients || [])
@@ -1186,7 +1421,7 @@ export default function SLFPortalModals({
             strong
             style={{ color: "#fff", fontSize: 13, letterSpacing: 0.3 }}
           >
-            Waste Details
+            Waste Placement Summary
           </Text>
         </div>
         <div
@@ -1195,96 +1430,96 @@ export default function SLFPortalModals({
             border: "1px solid #d3adf7",
             borderTop: "none",
             borderRadius: "0 0 8px 8px",
-            padding: "16px 16px 4px",
+            padding: "14px 16px",
             marginBottom: extraTransportFields.length > 0 ? 14 : 0,
           }}
         >
-          <Row gutter={[12, 0]}>
-            <Col xs={12} sm={8}>
-              <Form.Item
-                label={fl("actualVolume", "Actual Waste Volume")}
-                required={isRequired("actualVolume", true)}
-                {...fieldErr("actualVolume")}
-              >
-                <InputNumber
-                  placeholder="Volume"
-                  style={{ width: "100%" }}
-                  min={0}
-                  step={0.01}
-                  value={truckDraft.actualVolume}
-                  onChange={(v) => updateTruckDraft("actualVolume", v)}
-                />
-              </Form.Item>
-            </Col>
-            <Col xs={12} sm={4}>
-              <Form.Item label="Unit">
-                <Select
-                  value={truckDraft.actualVolumeUnit || baselineUnit || "m³"}
-                  placeholder="Select unit"
-                  onChange={(v) => updateTruckDraft("actualVolumeUnit", v)}
-                >
-                  <Option value="tons">tons</Option>
-                  <Option value="m³">m³</Option>
-                </Select>
-              </Form.Item>
-            </Col>
-            <Col xs={24} sm={12}>
-              <Form.Item
-                label={fl("wasteType", "Waste Type")}
-                required={isRequired("wasteType", true)}
-                {...fieldErr("wasteType")}
-              >
-                <Select
-                  placeholder="Select waste classification"
-                  value={truckDraft.wasteType}
-                  onChange={(v) => updateTruckDraft("wasteType", v)}
-                >
-                  {opts("wasteType", [
-                    "Residual",
-                    "Treated Hazardous Waste",
-                  ]).map((o) => (
-                    <Option key={o} value={o}>
-                      {o}
-                    </Option>
-                  ))}
-                </Select>
-              </Form.Item>
-            </Col>
-          </Row>
-          <Row gutter={[12, 0]}>
-            <Col xs={24} sm={14}>
-              <Form.Item
-                label="Hazardous Waste Code (DENR EMB)"
-                tooltip="Applicable only for Treated Hazardous Waste"
-                required={String(truckDraft.wasteType || "").trim().toLowerCase() === "treated hazardous waste"}
-                {...fieldErr("hazWasteCode")}
-              >
-                <Select
-                  mode="multiple"
-                  placeholder="Select DENR EMB hazardous waste code(s)"
-                  value={truckDraft.hazWasteCode}
-                  onChange={(v) => updateTruckDraft("hazWasteCode", v)}
-                  disabled={
-                    !truckDraft.wasteType?.toLowerCase().includes("hazardous")
-                  }
-                  showSearch
-                  allowClear
-                >
-                  {hazWasteCodes.map((code) => (
-                    <Option key={code} value={code}>
-                      {code}
-                    </Option>
-                  ))}
-                </Select>
-                {!truckDraft.wasteType?.toLowerCase().includes("hazardous") && (
-                  <Text type="secondary" style={{ fontSize: 11 }}>
-                    Select &quot;Treated Hazardous Waste&quot; as Waste Type to
-                    enable this field.
+          {(() => {
+            const vehicles = (truckDraft.vehicles || []).filter(
+              (v) => v.plateNumber || v.actualVolume,
+            );
+            if (!vehicles.length) {
+              return (
+                <Text type="secondary" style={{ fontSize: 12 }}>
+                  Add a vehicle above and set its waste volume, type, and disposal
+                  cell. Totals will appear here.
+                </Text>
+              );
+            }
+            const totalsByUnit = vehicles.reduce((acc, v) => {
+              const unit = (v.actualVolumeUnit || baselineUnit || "m³").replace(
+                "m3",
+                "m³",
+              );
+              const amount = Number(v.actualVolume || 0);
+              if (amount) acc[unit] = (acc[unit] || 0) + amount;
+              return acc;
+            }, {});
+            const totalLabel =
+              Object.entries(totalsByUnit)
+                .map(([unit, amount]) => `${amount.toLocaleString()} ${unit}`)
+                .join(" + ") || "—";
+            return (
+              <>
+                <Space style={{ marginBottom: 10 }} wrap>
+                  <Text type="secondary" style={{ fontSize: 12 }}>
+                    Total Waste Volume
                   </Text>
-                )}
-              </Form.Item>
-            </Col>
-          </Row>
+                  <Tag color="purple" style={{ fontSize: 13, padding: "2px 10px" }}>
+                    {totalLabel}
+                  </Tag>
+                </Space>
+                <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                  {vehicles.map((v, i) => (
+                    <div
+                      key={v.key || i}
+                      style={{
+                        display: "flex",
+                        flexWrap: "wrap",
+                        alignItems: "center",
+                        gap: 8,
+                        background: "#fff",
+                        borderRadius: 6,
+                        padding: "6px 10px",
+                        border: "1px solid #efdbff",
+                      }}
+                    >
+                      <Tag color="orange" style={{ margin: 0 }}>
+                        {v.plateNumber || `Vehicle ${i + 1}`}
+                      </Tag>
+                      <Text style={{ fontSize: 12 }}>
+                        {v.actualVolume != null
+                          ? `${Number(v.actualVolume).toLocaleString()} ${(v.actualVolumeUnit || baselineUnit || "m³").replace("m3", "m³")}`
+                          : "No volume"}
+                      </Text>
+                      {v.wasteType && (
+                        <Tag
+                          color={
+                            String(v.wasteType).toLowerCase().includes("hazard")
+                              ? "volcano"
+                              : "green"
+                          }
+                          style={{ margin: 0, fontSize: 11 }}
+                        >
+                          {v.wasteType}
+                        </Tag>
+                      )}
+                      <ContainerOutlined style={{ color: "#722ed1" }} />
+                      <Text style={{ fontSize: 12 }}>
+                        {v.cellName ? (
+                          v.cellName
+                        ) : (
+                          <Text type="danger" style={{ fontSize: 12 }}>
+                            No cell assigned
+                          </Text>
+                        )}
+                      </Text>
+                    </div>
+                  ))}
+                </div>
+              </>
+            );
+          })()}
         </div>
 
         {/* ── Section 5: Additional Fields (if any) ── */}
@@ -2706,6 +2941,37 @@ export default function SLFPortalModals({
           </Descriptions.Item>
         </Descriptions>
         <Divider orientation="left" plain>
+          Activity Location
+        </Divider>
+        <Card
+          size="small"
+          style={{ borderRadius: 8, background: "#f6ffed", borderColor: "#b7eb8f" }}
+        >
+          <Space align="start" style={{ width: "100%", justifyContent: "space-between" }}>
+            <Space align="start">
+              <EnvironmentOutlined style={{ color: "#52c41a", fontSize: 18, marginTop: 2 }} />
+              <div>
+                <Text strong style={{ fontSize: 13 }}>Share my location</Text>
+                <div>
+                  <Text type="secondary" style={{ fontSize: 12 }}>
+                    Allow EMB Region III to trace your portal activity location.
+                    {locationSharing && locationLabel
+                      ? ` Last shared: ${locationLabel}.`
+                      : ""}
+                  </Text>
+                </div>
+              </div>
+            </Space>
+            <Checkbox
+              checked={locationSharing}
+              disabled={locationBusy}
+              onChange={(e) => handleLocationSharingToggle(e.target.checked)}
+            >
+              {locationBusy ? "Saving..." : locationSharing ? "On" : "Off"}
+            </Checkbox>
+          </Space>
+        </Card>
+        <Divider orientation="left" plain>
           Account Credentials
         </Divider>
         <Alert
@@ -3579,13 +3845,41 @@ export default function SLFPortalModals({
           <Form.Item label="Cell Name" required>
             <Select
               showSearch
-              placeholder="Select active cell"
+              placeholder="Select a cell from the cell infrastructure"
               value={activeCellDraft.cellName || undefined}
-              onChange={(value) =>
-                setActiveCellDraft((d) => ({ ...d, cellName: value }))
-              }
-              options={activeCellOptions}
-              notFoundContent="No active cells available"
+              onChange={(value) => {
+                const opt = (baselineCellOptions.length
+                  ? baselineCellOptions
+                  : activeCellOptions
+                ).find((o) => o.value === value);
+                setActiveCellDraft((d) => ({
+                  ...d,
+                  cellName: value,
+                  cellType: opt?.cellType ?? d.cellType,
+                  cellIndex:
+                    opt && typeof opt.cellIndex === "number"
+                      ? opt.cellIndex
+                      : d.cellIndex ?? null,
+                }));
+              }}
+              options={(() => {
+                const base = baselineCellOptions.length
+                  ? baselineCellOptions
+                  : activeCellOptions;
+                // Keep the current cell selectable even if it is no longer
+                // part of the configured cell infrastructure.
+                if (
+                  activeCellDraft.cellName &&
+                  !base.some((o) => o.value === activeCellDraft.cellName)
+                ) {
+                  return [
+                    { label: `${activeCellDraft.cellName} (not in cell infra)`, value: activeCellDraft.cellName },
+                    ...base,
+                  ];
+                }
+                return base;
+              })()}
+              notFoundContent="No cells configured in the cell infrastructure"
             />
           </Form.Item>
           <Form.Item label="Waste Type" required>
@@ -3645,12 +3939,36 @@ export default function SLFPortalModals({
       >
         <Form layout="vertical" requiredMark={false}>
           <Form.Item label="Cell Name" required>
-            <Input
-              placeholder="e.g. Cell 3"
-              value={closedCellDraft.cellName}
-              onChange={(e) =>
-                setClosedCellDraft((d) => ({ ...d, cellName: e.target.value }))
-              }
+            <Select
+              showSearch
+              placeholder="Select a cell from the cell infrastructure"
+              value={closedCellDraft.cellName || undefined}
+              onChange={(value) => {
+                const opt = baselineCellOptions.find((o) => o.value === value);
+                setClosedCellDraft((d) => ({
+                  ...d,
+                  cellName: value,
+                  cellType: opt?.cellType ?? d.cellType,
+                  cellIndex:
+                    opt && typeof opt.cellIndex === "number"
+                      ? opt.cellIndex
+                      : d.cellIndex ?? null,
+                }));
+              }}
+              options={(() => {
+                const base = baselineCellOptions;
+                if (
+                  closedCellDraft.cellName &&
+                  !base.some((o) => o.value === closedCellDraft.cellName)
+                ) {
+                  return [
+                    { label: `${closedCellDraft.cellName} (not in cell infra)`, value: closedCellDraft.cellName },
+                    ...base,
+                  ];
+                }
+                return base;
+              })()}
+              notFoundContent="No cells configured in the cell infrastructure"
             />
           </Form.Item>
           <Form.Item label="Waste Type" required>

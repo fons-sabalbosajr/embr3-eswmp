@@ -11,6 +11,17 @@ const appLogSchema = new mongoose.Schema(
     message: { type: String, trim: true },
     user: { type: String, trim: true },
     ip: { type: String, trim: true },
+    // Best-effort activity location (browser geolocation if shared, else IP-derived)
+    geo: {
+      lat: { type: Number },
+      lng: { type: Number },
+      accuracy: { type: Number },
+      city: { type: String, trim: true },
+      region: { type: String, trim: true },
+      country: { type: String, trim: true },
+      label: { type: String, trim: true },
+      source: { type: String, trim: true }, // "browser" | "ip" | "private"
+    },
     meta: { type: mongoose.Schema.Types.Mixed },
   },
   { timestamps: true }

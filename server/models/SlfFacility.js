@@ -81,6 +81,9 @@ const slfFacilitySchema = new mongoose.Schema(
     cellCapacityUnits: [{ type: String, enum: ["m³", "tons", "m3"], default: "m³" }],
     cellStatuses: [{ type: String, enum: ["Active Cell", "Used/Completed", "Under Construction", "Reserved Area", "Not Existed", "Operational", "Closed", "Reserved Cell"], default: "Active Cell" }],
     cellTypes: [{ type: String, trim: true, default: "Residual" }], // per-cell: "Residual" or "Treated Haz Waste"
+    // per-cell: whether portal/SLF users may dispose volume-waste submissions into this cell.
+    // Empty/undefined => fall back to active cell status. Explicit false => disallow.
+    cellSubmissionAllowed: [{ type: Boolean }],
     cellNotes: [{ type: String, trim: true }], // per-cell notes (used for Under Construction / Reserved Cell status)
     cellFillValues: [{ type: Number }],
     cellFillUnits: [{ type: String, enum: ["m³", "tons", "m3"], default: "m³" }],

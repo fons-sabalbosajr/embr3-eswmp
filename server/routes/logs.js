@@ -1,6 +1,7 @@
 const express = require("express");
 const AppLog = require("../models/AppLog");
 const { writeLog } = require("../utils/logger");
+const { resolveIpLocation } = require("../utils/ipLocation");
 
 const router = express.Router();
 
@@ -42,16 +43,35 @@ router.get("/", async (req, res) => {
         { action: regex },
         { message: regex },
         { user: regex },
+        { ip: regex },
+        { "geo.label": regex },
+        { "geo.country": regex },
+        { "geo.city": regex },
       ];
     }
     const [logs, total] = await Promise.all([
       AppLog.find(filter)
         .sort({ createdAt: -1 })
         .skip(Number(skip))
-        .limit(Number(limit)),
+        .limit(Number(limit))
+        .lean(),
       AppLog.countDocuments(filter),
     ]);
-    res.json({ logs, total });
+
+    // Enrich each log with a display location: prefer browser-shared geo,
+    // else resolve from IP (cached, best-effort, never blocks failures).
+    const ipCache = new Map();
+    const enriched = await Promise.all(
+      logs.map(async (log) => {
+        if (log.geo && log.geo.label) return log;
+        const ip = log.ip || "";
+        if (!ip) return { ...log, geo: { ...(log.geo || {}), label: "Unknown" } };
+        if (!ipCache.has(ip)) ipCache.set(ip, await resolveIpLocation(ip));
+        const resolved = ipCache.get(ip);
+        return { ...log, geo: { ...(log.geo || {}), ...resolved } };
+      }),
+    );
+    res.json({ logs: enriched, total });
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });
   }

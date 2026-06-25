@@ -135,6 +135,7 @@ export default function SubmissionSettings({
   const [revertReason, setRevertReason] = useState("");
   const [revertLoading, setRevertLoading] = useState(false);
   const [repairingXX, setRepairingXX] = useState(false);
+  const [repairingType, setRepairingType] = useState(false);
   const currentUser = secureStorage.getJSON("user") || {};
   const currentActorName =
     getAdminDisplayName(currentUser) ||
@@ -168,6 +169,27 @@ export default function SubmissionSettings({
       Swal.fire("Error", "Could not repair XX IDs.", "error");
     } finally {
       setRepairingXX(false);
+    }
+  };
+
+  const handleRepairTypeIds = async () => {
+    setRepairingType(true);
+    try {
+      const { data } = await api.post("/data-slf/repair-type-ids");
+      Swal.fire({
+        icon: "success",
+        title: "PVT/LGU IDs Repaired",
+        html: `<div style="text-align:left;font-size:13px">
+          <p>${data.message}</p>
+          ${data.errors?.length ? `<p style="color:#ff4d4f">${data.errors.length} error(s) encountered.</p>` : ""}
+        </div>`,
+        confirmButtonColor: "#2f54eb",
+      });
+      fetchData({ force: true, silent: true });
+    } catch {
+      Swal.fire("Error", "Could not repair PVT/LGU IDs.", "error");
+    } finally {
+      setRepairingType(false);
     }
   };
   // Address cascading dropdowns for admin edit
@@ -436,14 +458,6 @@ export default function SubmissionSettings({
     });
   }, [filteredTableRows.length]);
 
-  const paginatedTableRows = useMemo(() => {
-    const startIndex = (pagination.current - 1) * pagination.pageSize;
-    return filteredTableRows.slice(
-      startIndex,
-      startIndex + pagination.pageSize,
-    );
-  }, [filteredTableRows, pagination.current, pagination.pageSize]);
-
   const selectedEntryIds = useMemo(() => {
     const ids = new Set();
     selectedRowKeys.forEach((rowKey) => {
@@ -480,7 +494,7 @@ export default function SubmissionSettings({
       });
 
       try {
-        await api.patch("/data-slf/bulk-status", {
+        const { data: ackResult } = await api.patch("/data-slf/bulk-status", {
           ids: pendingIds,
           status: "acknowledged",
         });
@@ -491,13 +505,23 @@ export default function SubmissionSettings({
           percent: 75,
         }));
 
+        // Merge the updated entries into local state instead of re-fetching the
+        // entire dataset — avoids the action-button bottleneck on large lists.
+        const updatedEntries = Array.isArray(ackResult?.data)
+          ? ackResult.data.map(normalizeSubmissionRecord)
+          : [];
+        if (updatedEntries.length > 0) {
+          const updatedById = new Map(updatedEntries.map((e) => [e._id, e]));
+          setData((prev) =>
+            prev.map((entry) => updatedById.get(entry._id) || entry),
+          );
+        }
         bumpSubmissionsCache();
         secureStorage.invalidateDashboard();
         if (clearSelection) setSelectedRowKeys([]);
         if (selectedRowKeys.includes(rowKey)) {
           setSelectedRowKeys((prev) => prev.filter((key) => key !== rowKey));
         }
-        await fetchData({ force: true, silent: true });
 
         setAckProgress((prev) => ({
           ...prev,
@@ -564,15 +588,23 @@ export default function SubmissionSettings({
     }
     try {
       setStatusActionKey(`${rowKey}:${status}`);
-      await api.patch("/data-slf/bulk-status", {
+      const { data: statusResult } = await api.patch("/data-slf/bulk-status", {
         ids: targetIds,
         status,
       });
+      const updatedEntries = Array.isArray(statusResult?.data)
+        ? statusResult.data.map(normalizeSubmissionRecord)
+        : [];
+      if (updatedEntries.length > 0) {
+        const updatedById = new Map(updatedEntries.map((e) => [e._id, e]));
+        setData((prev) =>
+          prev.map((entry) => updatedById.get(entry._id) || entry),
+        );
+      }
       bumpSubmissionsCache();
       secureStorage.invalidateDashboard();
       if (selectedRowKeys.includes(rowKey))
         setSelectedRowKeys((prev) => prev.filter((key) => key !== rowKey));
-      await fetchData({ force: true, silent: true });
       Swal.fire({
         icon: "success",
         title: `Submission ${status}`,
@@ -1057,7 +1089,7 @@ export default function SubmissionSettings({
       });
       setRevertModal({ open: false, record: null });
       setRevertReason("");
-      fetchData({ force: true });
+      fetchData({ force: true, silent: true });
     } catch (err) {
       Swal.fire(
         "Error",
@@ -1087,7 +1119,7 @@ export default function SubmissionSettings({
         timer: 1500,
         showConfirmButton: false,
       });
-      fetchData({ force: true });
+      fetchData({ force: true, silent: true });
     } catch (err) {
       Swal.fire(
         "Error",
@@ -1115,7 +1147,7 @@ export default function SubmissionSettings({
         timer: 1500,
         showConfirmButton: false,
       });
-      fetchData({ force: true });
+      fetchData({ force: true, silent: true });
     } catch (err) {
       Swal.fire(
         "Error",
@@ -1434,6 +1466,20 @@ export default function SubmissionSettings({
               </Button>
             </Popconfirm>
           )}
+          {canRepairIds && (
+            <Popconfirm
+              title="Fix PVT/LGU ID Mismatches (Developer)"
+              description="Realigns each ID No.'s LGU/PVT segment using the SLF ownership, province, and name as a strict match. Records whose SLF cannot be confidently identified are skipped."
+              onConfirm={handleRepairTypeIds}
+              okText="Yes, Fix Now"
+              cancelText="Cancel"
+              okButtonProps={{ loading: repairingType }}
+            >
+              <Button icon={<IdcardOutlined />} loading={repairingType}>
+                Fix PVT/LGU IDs
+              </Button>
+            </Popconfirm>
+          )}
           <Button
             icon={<ReloadOutlined />}
             onClick={() => fetchData({ force: true })}
@@ -1475,7 +1521,7 @@ export default function SubmissionSettings({
         </Space>
 
         <ResponsiveTable
-          dataSource={paginatedTableRows}
+          dataSource={filteredTableRows}
           columns={columns}
           rowKey="_id"
           loading={loading}
@@ -1583,122 +1629,117 @@ export default function SubmissionSettings({
                 actions below.
               </Text>
             </div>
-            {(groupedEntriesRecord.groupedEntries || []).map((entry, index) => (
-              <div
-                key={entry._id}
-                style={{
-                  display: "flex",
-                  justifyContent: "space-between",
-                  alignItems: "center",
-                  gap: 12,
-                  padding: "12px 14px",
-                  borderRadius: 10,
-                  background: isDark ? "rgba(255,255,255,0.03)" : "#fff",
-                  border: isDark
-                    ? "1px solid rgba(255,255,255,0.08)"
-                    : "1px solid #f0f0f0",
-                }}
-              >
-                <div style={{ minWidth: 0, flex: 1 }}>
-                  <Text strong style={{ fontSize: 13, display: "block" }}>
-                    {entry.idNo ||
-                      entry.submissionId ||
-                      `Submission ${index + 1}`}
-                  </Text>
-                  <Text
-                    type="secondary"
-                    style={{ fontSize: 11, display: "block" }}
-                  >
-                    {dayjs(entry.createdAt || entry.dateOfDisposal).format(
-                      "MM/DD/YYYY hh:mm A",
-                    )}
-                  </Text>
-                  <Text
-                    type="secondary"
-                    style={{ fontSize: 11, display: "block" }}
-                  >
-                    {entry.truckCount ?? entry.trucks?.length ?? 0} truck(s)
-                  </Text>
-                  <Tag
-                    color={statusColors[entry.status] || "default"}
-                    style={{ marginTop: 6, marginInlineEnd: 0 }}
-                  >
-                    {entry.status}
-                  </Tag>
-                </div>
-                <Space size={6} wrap>
-                  <Button
-                    size="small"
-                    icon={<EyeOutlined />}
-                    onClick={() => openGroupedEntryDetail(entry)}
-                  />
-                  {entry.status === "pending" && canEdit && (
-                    <Button
-                      size="small"
-                      icon={<EditOutlined />}
-                      style={{ borderColor: ACCENT, color: ACCENT }}
-                      onClick={() => {
-                        setGroupedEntriesRecord(null);
-                        openEdit(entry);
-                      }}
-                    />
-                  )}
-                  {entry.status === "pending" && (
-                    <>
-                      <Button
-                        size="small"
-                        type="primary"
-                        icon={<CheckOutlined />}
-                        style={{
-                          background: "#52c41a",
-                          borderColor: "#52c41a",
-                        }}
-                        loading={
-                          statusActionKey === `${entry._id}:acknowledged`
-                        }
-                        onClick={() =>
-                          handleGroupedEntryStatus(
-                            groupedEntriesRecord,
-                            entry,
-                            "acknowledged",
-                          )
-                        }
-                      />
-
-                      <Button
-                        size="small"
-                        danger
-                        icon={<CloseOutlined />}
-                        loading={statusActionKey === `${entry._id}:rejected`}
-                        onClick={() =>
-                          handleGroupedEntryStatus(
-                            groupedEntriesRecord,
-                            entry,
-                            "rejected",
-                          )
-                        }
-                      />
-                    </>
-                  )}
-                  {entry.status !== "reverted" &&
-                    entry.status !== "pending" &&
-                    canEdit && (
-                      <Button
-                        size="small"
-                        icon={<UndoOutlined />}
-                        style={{ borderColor: "#fa541c", color: "#fa541c" }}
-                        onClick={() => {
-                          setGroupedEntriesRecord(null);
-                          setRevertModal({ open: true, record: entry });
-                          setRevertReason("");
-                        }}
-                      >
-                        Revert
-                      </Button>
-                    )}
-                </Space>
-              </div>
-            ))}
+            <Table
+              className="portal-user-wrap-table"
+              size="small"
+              rowKey="_id"
+              dataSource={groupedEntriesRecord.groupedEntries || []}
+              pagination={
+                (groupedEntriesRecord.groupedEntries || []).length > 10
+                  ? { pageSize: 10, size: "small" }
+                  : false
+              }
+              scroll={{ y: 360 }}
+              columns={[
+                {
+                  title: "ID No.",
+                  key: "idNo",
+                  render: (_, entry, index) => (
+                    <Space direction="vertical" size={0}>
+                      <Text strong style={{ fontSize: 12 }}>
+                        {entry.idNo || entry.submissionId || `Submission ${index + 1}`}
+                      </Text>
+                      <Text type="secondary" style={{ fontSize: 10 }}>
+                        {dayjs(entry.createdAt || entry.dateOfDisposal).format("MM/DD/YYYY hh:mm A")}
+                      </Text>
+                    </Space>
+                  ),
+                },
+                {
+                  title: "Trucks",
+                  key: "trucks",
+                  width: 64,
+                  align: "center",
+                  render: (_, entry) => (
+                    <Text style={{ fontSize: 12 }}>
+                      {entry.truckCount ?? entry.trucks?.length ?? 0}
+                    </Text>
+                  ),
+                },
+                {
+                  title: "Status",
+                  key: "status",
+                  width: 110,
+                  render: (_, entry) => (
+                    <Tag color={statusColors[entry.status] || "default"} style={{ margin: 0 }}>
+                      {entry.status}
+                    </Tag>
+                  ),
+                },
+                {
+                  title: "Actions",
+                  key: "actions",
+                  width: 150,
+                  render: (_, entry) => (
+                    <Space size={4} wrap>
+                      <Tooltip title="View">
+                        <Button size="small" icon={<EyeOutlined />} onClick={() => openGroupedEntryDetail(entry)} />
+                      </Tooltip>
+                      {entry.status === "pending" && canEdit && (
+                        <Tooltip title="Edit">
+                          <Button
+                            size="small"
+                            icon={<EditOutlined />}
+                            style={{ borderColor: ACCENT, color: ACCENT }}
+                            onClick={() => {
+                              setGroupedEntriesRecord(null);
+                              openEdit(entry);
+                            }}
+                          />
+                        </Tooltip>
+                      )}
+                      {entry.status === "pending" && (
+                        <>
+                          <Tooltip title="Acknowledge">
+                            <Button
+                              size="small"
+                              type="primary"
+                              icon={<CheckOutlined />}
+                              style={{ background: "#52c41a", borderColor: "#52c41a" }}
+                              loading={statusActionKey === `${entry._id}:acknowledged`}
+                              onClick={() => handleGroupedEntryStatus(groupedEntriesRecord, entry, "acknowledged")}
+                            />
+                          </Tooltip>
+                          <Tooltip title="Reject">
+                            <Button
+                              size="small"
+                              danger
+                              icon={<CloseOutlined />}
+                              loading={statusActionKey === `${entry._id}:rejected`}
+                              onClick={() => handleGroupedEntryStatus(groupedEntriesRecord, entry, "rejected")}
+                            />
+                          </Tooltip>
+                        </>
+                      )}
+                      {entry.status !== "reverted" && entry.status !== "pending" && canEdit && (
+                        <Tooltip title="Revert">
+                          <Button
+                            size="small"
+                            icon={<UndoOutlined />}
+                            style={{ borderColor: "#fa541c", color: "#fa541c" }}
+                            onClick={() => {
+                              setGroupedEntriesRecord(null);
+                              setRevertModal({ open: true, record: entry });
+                              setRevertReason("");
+                            }}
+                          />
+                        </Tooltip>
+                      )}
+                    </Space>
+                  ),
+                },
+              ]}
+            />
           </Space>
         )}
       </Modal>

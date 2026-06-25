@@ -78,6 +78,29 @@ const userPortalSchema = new mongoose.Schema(
     allowCredentialSelfService: { type: Boolean, default: false },
     securityWarningCount: { type: Number, default: 0 },
     lastSecurityWarningAt: { type: Date, default: null },
+    // Activity-location tracing (opt-in browser geolocation)
+    locationSharingEnabled: { type: Boolean, default: false },
+    lastKnownLocation: {
+      lat: { type: Number },
+      lng: { type: Number },
+      accuracy: { type: Number },
+      label: { type: String, trim: true },
+      updatedAt: { type: Date },
+    },
+    // Presence tracking — updated on portal activity to derive online/offline.
+    lastActiveAt: { type: Date, default: null },
+    // Admin-managed portal access control (per-user feature & cell access)
+    portalAccess: {
+      canSubmitDisposal: { type: Boolean, default: true },
+      canEditBaseline: { type: Boolean, default: true },
+      canUploadExcel: { type: Boolean, default: true },
+      // Restrict which disposal cells this user may dispose into.
+      // Empty array => no restriction (all admin-allowed open cells available).
+      // Stored as cell value labels, e.g. "Cell 1".
+      allowedCells: [{ type: String, trim: true }],
+      updatedAt: { type: Date, default: null },
+      updatedBy: { type: String, trim: true, default: "" },
+    },
     // Password reset
     resetToken: { type: String, default: null },
     resetTokenExpiry: { type: Date, default: null },
