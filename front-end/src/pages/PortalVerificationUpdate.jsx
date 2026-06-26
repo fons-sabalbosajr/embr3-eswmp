@@ -303,7 +303,7 @@ export default function PortalVerificationUpdate() {
       </div>
 
       <div className="auth-page-footer">
-        &copy; 2026 EMBR3 &mdash; Environmental Management Bureau Region III
+        &copy; 2026 EMBR3 &mdash; Ecological Solid Waste Management Section
       </div>
     </div>
   );

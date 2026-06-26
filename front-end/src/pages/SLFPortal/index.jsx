@@ -721,6 +721,11 @@ export default function SLFPortal() {
   const portalUpdateTourSeenKey = portalAnnouncementVersion
     ? `${PORTAL_UPDATE_TOUR_SEEN_PREFIX}${portalAnnouncementVersion}`
     : "";
+  const portalMaintenanceActive = !!portalSettings?.portalMaintenanceMode;
+  const portalMaintenanceMessage =
+    portalSettings?.portalMaintenanceMessage ||
+    portalSettings?.portalMaintenanceReason ||
+    "The portal is currently under maintenance. Please try again later.";
   const isPortalUpdateAnnouncement = /\b(update|updates|what'?s new|guided tour|tour)\b/i.test(
     `${portalAnnouncement?.portalAnnouncementTitle || ""}\n${portalAnnouncement?.portalAnnouncementMessage || ""}`,
   );
@@ -4214,6 +4219,38 @@ export default function SLFPortal() {
       >
         <Spin size="large" />
       </div>
+    );
+  }
+
+  if (portalMaintenanceActive) {
+    return (
+      <Layout style={{ minHeight: "100vh", background: "linear-gradient(180deg, #f5f7fa 0%, #e6edf7 100%)" }}>
+        {errorCard}
+        <Content
+          style={{
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            padding: 24,
+          }}
+        >
+          <Card style={{ width: "100%", maxWidth: 680, borderRadius: 16, boxShadow: "0 18px 45px rgba(26, 51, 83, 0.12)" }}>
+            <Result
+              status="warning"
+              title="Portal maintenance in progress"
+              subTitle={portalMaintenanceMessage}
+              extra={[
+                <Button key="login" type="primary" onClick={() => navigate("/slfportal/login", { replace: true })}>
+                  Back to Login
+                </Button>,
+                <Button key="logout" onClick={handleLogout}>
+                  Sign Out
+                </Button>,
+              ]}
+            />
+          </Card>
+        </Content>
+      </Layout>
     );
   }
 

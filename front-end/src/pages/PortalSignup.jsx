@@ -365,7 +365,7 @@ export default function PortalSignup() {
         </div>
       </div>
 
-      <div className="auth-page-footer">&copy; 2026 EMBR3 &mdash; Environmental Management Bureau Region III</div>
+      <div className="auth-page-footer">&copy; 2026 EMBR3 &mdash; Ecological Solid Waste Management Section</div>
     </div>
   );
 }
