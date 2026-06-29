@@ -47,7 +47,41 @@ server.headersTimeout = 11 * 60 * 1000;
 const PORT = process.env.PORT || 5000;
 const MONGODB_URI =
   process.env.MONGODB_URI || "mongodb://127.0.0.1:27017/embr3_eswmp";
+const MONGODB_DNS_SERVERS = (process.env.MONGODB_DNS_SERVERS || "8.8.8.8,1.1.1.1")
+  .split(",")
+  .map((value) => value.trim())
+  .filter(Boolean);
 const CLIENT_URL = process.env.CLIENT_URL || "http://localhost:5173/eswm-pipeline";
+
+function getMongoSrvHost(uri) {
+  if (!uri.startsWith("mongodb+srv://")) return "";
+  const authority = uri.slice("mongodb+srv://".length).split("/")[0] || "";
+  const host = authority.includes("@") ? authority.split("@").pop() : authority;
+  return (host || "").split("?")[0];
+}
+
+async function configureMongoDns(uri) {
+  const srvHost = getMongoSrvHost(uri);
+  if (!srvHost) return;
+
+  try {
+    await dns.promises.resolveSrv(`_mongodb._tcp.${srvHost}`);
+  } catch (error) {
+    if (!["ECONNREFUSED", "ETIMEOUT", "ENOTFOUND", "ESERVFAIL"].includes(error.code)) {
+      throw error;
+    }
+
+    if (!MONGODB_DNS_SERVERS.length) {
+      throw error;
+    }
+
+    dns.setServers(MONGODB_DNS_SERVERS);
+    console.warn(
+      `MongoDB SRV lookup failed via default DNS (${error.code}). Retrying with fallback DNS servers: ${MONGODB_DNS_SERVERS.join(", ")}`,
+    );
+    await dns.promises.resolveSrv(`_mongodb._tcp.${srvHost}`);
+  }
+}
 
 // Middleware — build allowed CORS origins dynamically
 function getAllowedOrigins() {
@@ -133,8 +167,10 @@ app.use((req, _res, next) => {
 });
 
 // Connect to MongoDB
-mongoose
-  .connect(MONGODB_URI)
+async function connectToMongo() {
+  await configureMongoDns(MONGODB_URI);
+
+  return mongoose.connect(MONGODB_URI)
   .then(async () => {
     console.log("MongoDB connected successfully");
     // Auto-backfill transaction history for existing submissions
@@ -215,6 +251,9 @@ mongoose
     }
   })
   .catch((err) => console.error("MongoDB connection error:", err));
+}
+
+connectToMongo();
 
 // Routes
 app.get("/api/health", (req, res) => {

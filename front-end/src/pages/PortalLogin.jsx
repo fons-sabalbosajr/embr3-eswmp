@@ -49,6 +49,7 @@ const announcementTypeMeta = {
 
 export default function PortalLogin() {
   const [loading, setLoading] = useState(false);
+  const [portalSettings, setPortalSettings] = useState(null);
   const [announcement, setAnnouncement] = useState(null);
   const [credentialModalOpen, setCredentialModalOpen] = useState(false);
   const [credentialCodeRequested, setCredentialCodeRequested] = useState(false);
@@ -60,11 +61,17 @@ export default function PortalLogin() {
   const announcementType = announcement?.portalAnnouncementType || "info";
   const announcementMeta =
     announcementTypeMeta[announcementType] || announcementTypeMeta.info;
+  const portalMaintenanceActive = !!portalSettings?.portalMaintenanceMode;
+  const portalMaintenanceMessage =
+    portalSettings?.portalMaintenanceMessage ||
+    portalSettings?.portalMaintenanceReason ||
+    "The portal is currently under maintenance. Please try again later.";
 
   useEffect(() => {
     api
       .get("/settings/app")
       .then(({ data }) => {
+        setPortalSettings(data);
         const now = Date.now();
         const startsAt = data.portalAnnouncementStartAt
           ? new Date(data.portalAnnouncementStartAt).getTime()
@@ -200,6 +207,15 @@ export default function PortalLogin() {
         </div>
 
         <div className="auth-card-wrapper auth-card-wrapper-login">
+          {portalMaintenanceActive && (
+            <Alert
+              type="warning"
+              showIcon
+              style={{ marginBottom: 14, textAlign: "left" }}
+              message="Portal maintenance in progress"
+              description={portalMaintenanceMessage}
+            />
+          )}
           {announcement && (
             <Collapse
               className="auth-announcement-collapse"
@@ -270,13 +286,13 @@ export default function PortalLogin() {
 
             <Form name="portal-login" size="large" onFinish={onFinish} layout="vertical" requiredMark={false} className="auth-form">
               <Form.Item name="email" label="Email" rules={[{ required: true, message: "Please enter your email" }]}>
-                <Input prefix={<UserOutlined style={{ color: "#1a3353" }} />} placeholder="you@example.com" />
+                <Input prefix={<UserOutlined style={{ color: "#1a3353" }} />} placeholder="you@example.com" disabled={portalMaintenanceActive} />
               </Form.Item>
               <Form.Item name="password" label="Password" rules={[{ required: true, message: "Please enter your password" }]}>
-                <Input.Password prefix={<LockOutlined style={{ color: "#1a3353" }} />} placeholder="Password" />
+                <Input.Password prefix={<LockOutlined style={{ color: "#1a3353" }} />} placeholder="Password" disabled={portalMaintenanceActive} />
               </Form.Item>
               <Form.Item style={{ marginBottom: 16, marginTop: 8 }}>
-                <Button className="auth-btn-primary" type="primary" htmlType="submit" loading={loading} block>Sign In</Button>
+                <Button className="auth-btn-primary" type="primary" htmlType="submit" loading={loading} block disabled={portalMaintenanceActive}>Sign In</Button>
               </Form.Item>
               <div style={{ display: "flex", justifyContent: "space-between", gap: 12, marginTop: -8, marginBottom: 8, flexWrap: "wrap" }}>
                 {/* <Button
@@ -293,7 +309,11 @@ export default function PortalLogin() {
                 >
                   Update credentials
                 </Button> */}
-                <Link to="/slfportal/forgot-password" className="auth-forgot-link">Forgot password?</Link>
+                {portalMaintenanceActive ? (
+                  <Text type="secondary">Password recovery is unavailable during maintenance.</Text>
+                ) : (
+                  <Link to="/slfportal/forgot-password" className="auth-forgot-link">Forgot password?</Link>
+                )}
               </div>
             </Form>
 
@@ -301,15 +321,21 @@ export default function PortalLogin() {
               <Text type="secondary" style={{ fontSize: 13 }}>Don&apos;t have an account?</Text>
             </Divider>
             <div style={{ textAlign: "center" }}>
-              <Link to="/slfportal/signup">
-                <Button className="auth-btn-secondary" type="default" block>Register for Portal</Button>
-              </Link>
+              {portalMaintenanceActive ? (
+                <Button className="auth-btn-secondary" type="default" block disabled>
+                  Registration unavailable during maintenance
+                </Button>
+              ) : (
+                <Link to="/slfportal/signup">
+                  <Button className="auth-btn-secondary" type="default" block>Register for Portal</Button>
+                </Link>
+              )}
             </div>
           </Card>
         </div>
       </div>
 
-      <div className="auth-page-footer">&copy; 2026 EMBR3 &mdash; Environmental Management Bureau Region III</div>
+      <div className="auth-page-footer">&copy; 2026 EMBR3 &mdash; Ecological Solid Waste Management Section</div>
       <Modal
         title={
           <Space>

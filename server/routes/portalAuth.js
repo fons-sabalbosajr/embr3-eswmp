@@ -2,6 +2,7 @@ const express = require("express");
 const jwt = require("jsonwebtoken");
 const crypto = require("crypto");
 const multer = require("multer");
+const AppSettings = require("../models/AppSettings");
 const UserPortal = require("../models/UserPortal");
 const { writeLog } = require("../utils/logger");
 const { uploadFileToDrive } = require("../utils/googleDrive");
@@ -57,6 +58,35 @@ function ensureCredentialSelfServiceEnabled(user, res) {
     res.status(403).json({ message: "Portal credential updates are currently disabled." });
     return false;
   }
+  return true;
+}
+
+async function getPortalMaintenanceState() {
+  const settings = await AppSettings.findOne().select(
+    "portalMaintenanceMode portalMaintenanceReason portalMaintenanceMessage"
+  );
+
+  if (!settings?.portalMaintenanceMode) {
+    return { active: false, message: "" };
+  }
+
+  return {
+    active: true,
+    message:
+      settings.portalMaintenanceMessage ||
+      settings.portalMaintenanceReason ||
+      "The portal is currently under maintenance. Please try again later.",
+  };
+}
+
+async function enforcePortalMaintenance(res) {
+  const maintenance = await getPortalMaintenanceState();
+  if (!maintenance.active) return false;
+
+  res.status(503).json({
+    message: maintenance.message,
+    portalMaintenanceMode: true,
+  });
   return true;
 }
 
@@ -197,6 +227,8 @@ router.get("/check-existing", async (req, res) => {
 
 router.post("/signup", uploadSingle(upload, "verificationFile", { maxSizeMb: MAX_UPLOAD_MB }), async (req, res) => {
   try {
+    if (await enforcePortalMaintenance(res)) return;
+
     const {
       firstName,
       lastName,
@@ -303,6 +335,8 @@ router.post("/signup", uploadSingle(upload, "verificationFile", { maxSizeMb: MAX
 // Portal Login — only approved accounts
 router.post("/login", async (req, res) => {
   try {
+    if (await enforcePortalMaintenance(res)) return;
+
     const { email, password } = req.body;
     const loginId = String(email || "").trim().toLowerCase();
 
@@ -385,6 +419,8 @@ router.post("/login", async (req, res) => {
 // Get current portal user
 router.get("/me", async (req, res) => {
   try {
+    if (await enforcePortalMaintenance(res)) return;
+
     const token = req.headers.authorization?.split(" ")[1];
     if (!token) return res.status(401).json({ message: "No token provided" });
 
@@ -496,6 +532,8 @@ router.get("/my-submissions", async (req, res) => {
 // Forgot Password — send 6-digit reset code
 router.post("/forgot-password", async (req, res) => {
   try {
+    if (await enforcePortalMaintenance(res)) return;
+
     const { email } = req.body;
     if (!email) return res.status(400).json({ message: "Email is required" });
 
@@ -553,6 +591,8 @@ router.post("/verify-reset-code", async (req, res) => {
 // Reset Password — verify code & update password
 router.post("/reset-password", async (req, res) => {
   try {
+    if (await enforcePortalMaintenance(res)) return;
+
     const { email, code, password } = req.body;
     if (!email || !code || !password) {
       return res.status(400).json({ message: "Email, code and new password are required" });
@@ -593,6 +633,8 @@ router.post("/reset-password", async (req, res) => {
 // Request verification code before changing logged-in portal credentials
 router.post("/credentials/request-code", async (req, res) => {
   try {
+    if (await enforcePortalMaintenance(res)) return;
+
     const user = await getCredentialUpdateUser(req, res);
     if (!user) return;
     if (!ensureCredentialSelfServiceEnabled(user, res)) return;
@@ -646,6 +688,8 @@ router.post("/credentials/request-code", async (req, res) => {
 // Verify code and update logged-in portal credentials
 router.post("/credentials/update", async (req, res) => {
   try {
+    if (await enforcePortalMaintenance(res)) return;
+
     const user = await getCredentialUpdateUser(req, res);
     if (!user) return;
     if (!ensureCredentialSelfServiceEnabled(user, res)) return;
