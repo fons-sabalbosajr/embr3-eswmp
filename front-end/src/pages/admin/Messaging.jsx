@@ -91,7 +91,7 @@ function lastPreview(thread) {
   return "No messages yet";
 }
 
-export default function Messaging({ isDark, currentUser }) {
+export default function Messaging({ isDark, currentUser, driveDisabled = false }) {
   const [folder, setFolder] = useState("inbox");
   const [threads, setThreads] = useState([]);
   const [folderSummary, setFolderSummary] = useState({});
@@ -682,7 +682,7 @@ export default function Messaging({ isDark, currentUser }) {
                     <TextArea rows={3} value={replyBody} onChange={(event) => setReplyBody(event.target.value)} placeholder="Write a message" style={{ borderRadius: 8 }} />
                     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, marginTop: 8, flexWrap: "wrap" }}>
                       <Space wrap>
-                        <Upload beforeUpload={(file) => uploadFile(file, "reply")} showUploadList={false} disabled={uploading}>
+                        <Upload beforeUpload={(file) => uploadFile(file, "reply")} showUploadList={false} disabled={uploading || driveDisabled}>
                           <Button icon={<PaperClipOutlined />} loading={uploading}>
                             {uploading ? `Uploading ${uploadProgress || 0}%` : "Upload File"}
                           </Button>
@@ -737,7 +737,7 @@ export default function Messaging({ isDark, currentUser }) {
         </Form>
 
         <Space wrap>
-          <Upload beforeUpload={(file) => uploadFile(file, "compose")} showUploadList={false} disabled={uploading}>
+          <Upload beforeUpload={(file) => uploadFile(file, "compose")} showUploadList={false} disabled={uploading || driveDisabled}>
             <Button icon={<PaperClipOutlined />} loading={uploading}>
               {uploading ? `Uploading ${uploadProgress || 0}%` : "Upload Local File"}
             </Button>

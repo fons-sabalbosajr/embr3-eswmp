@@ -67,6 +67,29 @@ const appSettingsSchema = new mongoose.Schema(
     emailNotificationsEnabled: { type: Boolean, default: true },
     emailFrom: { type: String, default: "" },
 
+    // SMTP / Email transport configuration (stored in DB so admin can configure via UI)
+    smtpConfigured: { type: Boolean, default: false },
+    smtpProvider: {
+      type: String,
+      enum: ["smtp", "gmail-apppw", "gmail-oauth2", "none"],
+      default: "none",
+    },
+    smtpHost:   { type: String, default: "" },
+    smtpPort:   { type: Number, default: 587 },
+    smtpUser:   { type: String, default: "" },
+    smtpPass:   { type: String, default: "" }, // stored encrypted-at-rest by MongoDB; masked in API
+    smtpSecure: { type: Boolean, default: false },
+    smtpFrom:   { type: String, default: "" },
+    emailMaintenanceMode: { type: Boolean, default: false },
+    emailMaintenanceMessage: { type: String, default: "Email notifications are temporarily disabled for maintenance." },
+
+    // Google Drive maintenance (blocks all Drive-based file uploads)
+    driveMaintenanceMode: { type: Boolean, default: false },
+    driveMaintenanceMessage: {
+      type: String,
+      default: "Google Drive is temporarily unavailable. File uploads are disabled. Please try again later.",
+    },
+
     // Security
     sessionTimeout: { type: Number, default: 7 },        // days
     maxLoginAttempts: { type: Number, default: 5 },

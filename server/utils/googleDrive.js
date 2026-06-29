@@ -188,4 +188,61 @@ async function uploadFileToDrive(fileBuffer, mimeType, originalName, isImage, ov
   throw lastError;
 }
 
-module.exports = { uploadFileToDrive };
+async function verifyDriveAccess() {
+  const folderTargets = [
+    { key: "images", id: process.env.GDRIVE_IMAGE_FOLDER_ID },
+    { key: "documents", id: process.env.GDRIVE_DOCS_FOLDER_ID },
+    { key: "haulerLoi", id: process.env.GDRIVE_HAULER_LOI_FOLDER_ID },
+  ];
+  const missing = folderTargets.filter((item) => !hasValue(item.id)).map((item) => item.key);
+  if (missing.length > 0) {
+    throw new Error(`Google Drive folder IDs not configured for: ${missing.join(", ")}.`);
+  }
+
+  const clients = getDriveClients();
+  const attempts = [];
+  let lastError;
+
+  for (let index = 0; index < clients.length; index += 1) {
+    const client = clients[index];
+    try {
+      const folders = [];
+      for (const target of folderTargets) {
+        const response = await client.drive.files.get({
+          fileId: target.id,
+          fields: "id,name,mimeType,capabilities(canAddChildren)",
+          supportsAllDrives: true,
+        });
+        folders.push({
+          key: target.key,
+          id: response.data.id,
+          name: response.data.name,
+          mimeType: response.data.mimeType,
+          writable: response.data.capabilities?.canAddChildren !== false,
+        });
+      }
+      return {
+        ok: true,
+        client: client.name,
+        folders,
+      };
+    } catch (error) {
+      lastError = error;
+      attempts.push(`${client.name}: ${error.message || error}`);
+      const hasFallback = index < clients.length - 1;
+      if (!hasFallback || !isRetryableAuthError(error)) {
+        if (attempts.length > 1) {
+          error.message = `Google Drive verification failed after ${attempts.length} attempts. ${attempts.join(" | ")}`;
+        }
+        throw error;
+      }
+    }
+  }
+
+  if (lastError && attempts.length > 1) {
+    lastError.message = `Google Drive verification failed after ${attempts.length} attempts. ${attempts.join(" | ")}`;
+  }
+  throw lastError;
+}
+
+module.exports = { uploadFileToDrive, verifyDriveAccess };

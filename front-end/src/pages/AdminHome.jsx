@@ -343,6 +343,7 @@ export default function AdminHome() {
   const [developerSettingsInitialTab, setDeveloperSettingsInitialTab] = useState("general");
   const [currentTime, setCurrentTime] = useState(dayjs());
   const [profileModalOpen, setProfileModalOpen] = useState(false);
+  const [driveMaintenanceMode, setDriveMaintenanceMode] = useState(false);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [notifOpen, setNotifOpen] = useState(false);
   const [notifications, setNotifications] = useState([]);
@@ -432,6 +433,7 @@ export default function AdminHome() {
         if (data.headerColorDark) setHeaderColorDark(data.headerColorDark);
         if (data.sidebarStyle) setSidebarStyle(data.sidebarStyle);
         syncPortalAnnouncementFlag(data);
+        setDriveMaintenanceMode(!!data.driveMaintenanceMode);
       })
       .catch(() => {});
   }, [navigate, syncCurrentUser]);
@@ -933,7 +935,7 @@ export default function AdminHome() {
           />
         ) : denied;
       case "messaging":
-        return hasAccess("messaging") ? <Messaging isDark={isDark} currentUser={user} /> : denied;
+        return hasAccess("messaging") ? <Messaging isDark={isDark} currentUser={user} driveDisabled={driveMaintenanceMode} /> : denied;
       case "settings-fields":
         return hasAccess("portalFields") ? <FieldSettings isDark={isDark} canEdit={canEdit("portalFields")} canDelete={canDelete("portalFields")} /> : denied;
       case "settings-data-refs":
@@ -941,7 +943,7 @@ export default function AdminHome() {
       case "settings-org-chart":
         return hasAccess("orgChart") ? <OrgChartSettings isDark={isDark} canEdit={canEdit("orgChart")} canDelete={canDelete("orgChart")} /> : denied;
       case "slf-monitoring":
-        return hasAccess("slfMonitoring") ? <SLFMonitoring isDark={isDark} canEdit={canEdit("slfMonitoring")} canDelete={canDelete("slfMonitoring")} /> : denied;
+        return hasAccess("slfMonitoring") ? <SLFMonitoring isDark={isDark} canEdit={canEdit("slfMonitoring")} canDelete={canDelete("slfMonitoring")} driveDisabled={driveMaintenanceMode} /> : denied;
       case "slf-waste-generators":
         return hasAccess("submissions") || hasAccess("reports") || hasAccess("baselineData") || hasAccess("cellWastePlacement") ? (
           <SLFWasteGenerators
@@ -1184,7 +1186,7 @@ export default function AdminHome() {
                   }}
                 >
                   Portal Announcements
-                </Tag>
+                </Tag>  
               </Tooltip>
               <Switch
                 checked={!isDark}
@@ -1393,6 +1395,17 @@ export default function AdminHome() {
             className="admin-content"
             style={{ background: isDark ? "#1f1f1f" : "#f0f2f5" }}
           >
+            {driveMaintenanceMode && (
+              <Alert
+                type="error"
+                banner
+                showIcon
+                icon={<AlertOutlined />}
+                message="Google Drive is currently in maintenance mode."
+                description="All file uploads (documents, images, LOI attachments) are disabled until Drive access is restored. Data entry and Excel imports are unaffected. Go to Developer Settings → Portal & Email to disable maintenance mode once Drive is available again."
+                style={{ marginBottom: 0, borderRadius: 0 }}
+              />
+            )}
             <Suspense fallback={<div style={{ display: "flex", justifyContent: "center", alignItems: "center", padding: 80 }}><Spin size="large" /></div>}>
             {renderContent()}
             </Suspense>
@@ -1408,7 +1421,30 @@ export default function AdminHome() {
       </Layout>
 
       <Modal
-        title={<Space><BellOutlined />Portal Announcement</Space>}
+        title={
+          <Space size={12}>
+            <Avatar
+              shape="square"
+              size={40}
+              icon={<BellOutlined />}
+              style={{
+                background: currentPortalAnnouncement?.portalAnnouncementEnabled
+                  ? "linear-gradient(135deg, #1a3353 0%, #2f54eb 100%)"
+                  : "linear-gradient(135deg, #8c8c8c 0%, #bfbfbf 100%)",
+                color: "#fff",
+                borderRadius: 12,
+              }}
+            />
+            <div>
+              <div style={{ fontWeight: 700, fontSize: 18, lineHeight: 1.2 }}>
+                SLF Portal Announcement
+              </div>
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                Review the currently published header announcement and its visibility.
+              </Text>
+            </div>
+          </Space>
+        }
         open={portalAnnouncementModalOpen}
         onCancel={() => setPortalAnnouncementModalOpen(false)}
         footer={
@@ -1425,33 +1461,72 @@ export default function AdminHome() {
             <Button type="primary" onClick={() => setPortalAnnouncementModalOpen(false)}>Close</Button>
           </Space>
         }
-        width={620}
+        width={760}
+        styles={{
+          body: {
+            maxHeight: "68vh",
+            overflowY: "auto",
+            paddingRight: 8,
+          },
+        }}
       >
         {currentPortalAnnouncement?.portalAnnouncementEnabled ? (
-          <Space direction="vertical" size={12} style={{ width: "100%" }}>
-            <Alert
-              type={currentPortalAnnouncement.portalAnnouncementType || "info"}
-              showIcon
-              message={currentPortalAnnouncement.portalAnnouncementTitle || "SLF Portal Announcement"}
-              description={<div style={{ whiteSpace: "pre-wrap" }}>{currentPortalAnnouncement.portalAnnouncementMessage || "No announcement message set."}</div>}
-            />
-            <Descriptions column={1} size="small">
-              <Descriptions.Item label="Login Page">
-                {currentPortalAnnouncement.portalAnnouncementShowOnLogin !== false ? "Shown" : "Hidden"}
-              </Descriptions.Item>
-              <Descriptions.Item label="SLF Portal">
-                {currentPortalAnnouncement.portalAnnouncementShowInPortal !== false ? "Shown" : "Hidden"}
-              </Descriptions.Item>
-              <Descriptions.Item label="Valid From">
-                {currentPortalAnnouncement.portalAnnouncementStartAt ? dayjs(currentPortalAnnouncement.portalAnnouncementStartAt).format("MMM D, YYYY h:mm A") : "Always"}
-              </Descriptions.Item>
-              <Descriptions.Item label="Valid Until">
-                {currentPortalAnnouncement.portalAnnouncementEndAt ? dayjs(currentPortalAnnouncement.portalAnnouncementEndAt).format("MMM D, YYYY h:mm A") : "No end date"}
-              </Descriptions.Item>
-            </Descriptions>
+          <Space direction="vertical" size={16} style={{ width: "100%" }}>
+            <Card
+              bordered={false}
+              style={{
+                borderRadius: 18,
+                background:
+                  currentPortalAnnouncement.portalAnnouncementType === "warning"
+                    ? "linear-gradient(135deg, #fff7e6 0%, #fff1b8 100%)"
+                    : currentPortalAnnouncement.portalAnnouncementType === "error"
+                      ? "linear-gradient(135deg, #fff1f0 0%, #ffccc7 100%)"
+                      : currentPortalAnnouncement.portalAnnouncementType === "success"
+                        ? "linear-gradient(135deg, #f6ffed 0%, #d9f7be 100%)"
+                        : "linear-gradient(135deg, #f0f5ff 0%, #d6e4ff 100%)",
+                boxShadow: "0 14px 34px rgba(0,0,0,0.08)",
+              }}
+            >
+              <Space direction="vertical" size={10} style={{ width: "100%" }}>
+                <Space wrap>
+                  <Tag color={currentPortalAnnouncement.portalAnnouncementType || "blue"} style={{ borderRadius: 999, paddingInline: 10 }}>
+                    {(currentPortalAnnouncement.portalAnnouncementType || "info").toUpperCase()}
+                  </Tag>
+                  <Tag color="green" style={{ borderRadius: 999, paddingInline: 10 }}>
+                    PUBLISHED
+                  </Tag>
+                </Space>
+                <div style={{ fontSize: 24, fontWeight: 800, color: "#1a3353", lineHeight: 1.15 }}>
+                  {currentPortalAnnouncement.portalAnnouncementTitle || "SLF Portal Announcement"}
+                </div>
+                <Text style={{ whiteSpace: "pre-wrap", fontSize: 14, lineHeight: 1.75, color: "#243b53" }}>
+                  {currentPortalAnnouncement.portalAnnouncementMessage || "No announcement message set."}
+                </Text>
+              </Space>
+            </Card>
           </Space>
         ) : (
-          <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No published portal announcement" />
+          <Card
+            bordered={false}
+            style={{
+              borderRadius: 18,
+              background: "linear-gradient(135deg, #fafafa 0%, #f5f5f5 100%)",
+              textAlign: "center",
+            }}
+          >
+            <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No published portal announcement" />
+            <Button
+              type="primary"
+              style={{ marginTop: 8 }}
+              onClick={() => {
+                setPortalAnnouncementModalOpen(false);
+                setDeveloperSettingsInitialTab("announcements");
+                setActiveMenu("dev-settings");
+              }}
+            >
+              Create Announcement
+            </Button>
+          </Card>
         )}
       </Modal>
 

@@ -4,6 +4,7 @@ const { uploadFileToDrive } = require("../utils/googleDrive");
 const { saveLocalUpload, resolveLocalUpload } = require("../utils/localUploadStorage");
 const { uploadSingle } = require("../utils/uploadErrorHandler");
 const { authMiddleware } = require("../middleware/auth");
+const { requireDriveActive } = require("../utils/driveMaintenanceGuard");
 
 const router = express.Router();
 const MAX_UPLOAD_MB = 200;
@@ -46,7 +47,7 @@ const upload = multer({
  * Accepts a single file and stores it for later viewing/download.
  * Returns: { url, fileId, name, mimeType, size, storage }
  */
-router.post("/", authMiddleware, uploadSingle(upload, "file", { maxSizeMb: MAX_UPLOAD_MB }), async (req, res) => {
+router.post("/", authMiddleware, requireDriveActive, uploadSingle(upload, "file", { maxSizeMb: MAX_UPLOAD_MB }), async (req, res) => {
   try {
     if (!req.file) {
       return res.status(400).json({ message: "No file provided." });

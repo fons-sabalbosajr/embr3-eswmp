@@ -149,6 +149,21 @@ const dataSLFSchema = new mongoose.Schema(
     companyBarangay: { type: String, trim: true },
 
     trucks: [truckSchema],
+
+    // Denormalized metric fields — computed from trucks/dateOfDisposal on save.
+    // Aggregations may fall back to computing from trucks when these are missing
+    // on older records. See computeSlfMetrics() + scripts/backfillDataSLFMetrics.js
+    truckCount: { type: Number, default: 0 },
+    totalVolumeM3: { type: Number, default: 0 },
+    totalVolumeTons: { type: Number, default: 0 },
+    residualVolumeM3: { type: Number, default: 0 },
+    residualVolumeTons: { type: Number, default: 0 },
+    hazardousVolumeM3: { type: Number, default: 0 },
+    hazardousVolumeTons: { type: Number, default: 0 },
+    submissionYear: { type: Number },
+    submissionMonth: { type: Number },
+    submissionDateKey: { type: String, trim: true },
+
     status: {
       type: String,
       enum: ["pending", "acknowledged", "rejected", "revert_requested", "reverted"],
@@ -170,6 +185,49 @@ const dataSLFSchema = new mongoose.Schema(
   },
   { timestamps: true }
 );
+
+// m³ ↔ tons conversion (mirrors the frontend TON_PER_M3 = 0.2 assumption).
+const TON_PER_M3 = 0.2;
+const normalizeVolumeUnit = (unit) => String(unit || "m³").replace("m3", "m³").trim().toLowerCase();
+
+// Compute denormalized metric fields from a trucks array + disposal date.
+// Hazardous = wasteType contains "hazard"; everything else counts as residual.
+// Missing volume → 0; missing unit → m³; invalid date → year/month/key left null.
+function computeSlfMetrics(doc = {}) {
+  const trucks = Array.isArray(doc.trucks) ? doc.trucks : [];
+  const metrics = {
+    truckCount: trucks.length,
+    totalVolumeM3: 0,
+    totalVolumeTons: 0,
+    residualVolumeM3: 0,
+    residualVolumeTons: 0,
+    hazardousVolumeM3: 0,
+    hazardousVolumeTons: 0,
+  };
+  for (const truck of trucks) {
+    const amount = Number(truck?.actualVolume || 0);
+    if (!amount || Number.isNaN(amount)) continue;
+    const unit = normalizeVolumeUnit(truck?.actualVolumeUnit || doc.baselineUnit || "m³");
+    const isTons = unit === "tons";
+    const isHazardous = /hazard/i.test(String(truck?.wasteType || ""));
+    if (isTons) {
+      metrics.totalVolumeTons += amount;
+      if (isHazardous) metrics.hazardousVolumeTons += amount;
+      else metrics.residualVolumeTons += amount;
+    } else {
+      metrics.totalVolumeM3 += amount;
+      if (isHazardous) metrics.hazardousVolumeM3 += amount;
+      else metrics.residualVolumeM3 += amount;
+    }
+  }
+  const disposal = doc.dateOfDisposal ? new Date(doc.dateOfDisposal) : null;
+  if (disposal && !Number.isNaN(disposal.getTime())) {
+    metrics.submissionYear = disposal.getUTCFullYear();
+    metrics.submissionMonth = disposal.getUTCMonth() + 1;
+    metrics.submissionDateKey = disposal.toISOString().slice(0, 10);
+  }
+  return metrics;
+}
 
 // Province name → abbreviation mapping for ID generation
 const PROVINCE_CODES = {
@@ -318,8 +376,25 @@ dataSLFSchema.index({ deletedAt: 1, lguCompanyName: 1 });
 dataSLFSchema.index({ submissionId: 1 });
 dataSLFSchema.index({ submittedBy: 1, createdAt: -1 });
 
+// Indexes for summary aggregations + grouped/paginated list queries
+dataSLFSchema.index({ deletedAt: 1, slfGenerator: 1, createdAt: -1 });
+dataSLFSchema.index({ deletedAt: 1, slfName: 1, createdAt: -1 });
+dataSLFSchema.index({ deletedAt: 1, dateOfDisposal: -1 });
+dataSLFSchema.index({ deletedAt: 1, companyType: 1, status: 1 });
+dataSLFSchema.index({ deletedAt: 1, submittedBy: 1, status: 1, createdAt: -1 });
+dataSLFSchema.index({ deletedAt: 1, submissionYear: 1, submissionMonth: 1 });
+
+// Keep denormalized metrics in sync whenever trucks/dateOfDisposal change.
+dataSLFSchema.pre("save", function () {
+  if (this.isNew || this.isModified("trucks") || this.isModified("dateOfDisposal") || this.isModified("baselineUnit")) {
+    const metrics = computeSlfMetrics(this);
+    Object.assign(this, metrics);
+  }
+});
+
 dataSLFSchema.plugin(dateFieldYearVisibilityPlugin("dateOfDisposal"));
 
 const DataSLFModel = mongoose.model("DataSLF", dataSLFSchema, "data-slf");
 DataSLFModel.PSGC_PROVINCE_CODES = PSGC_PROVINCE_CODES;
+DataSLFModel.computeSlfMetrics = computeSlfMetrics;
 module.exports = DataSLFModel;

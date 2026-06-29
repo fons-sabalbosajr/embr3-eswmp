@@ -98,18 +98,27 @@ export default function SubmissionSettings({
 }) {
   const [data, setData] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [statusActionKey, setStatusActionKey] = useState("");
+  // Set of in-flight action keys so multiple rows can submit simultaneously
+  const [actionKeys, setActionKeys] = useState(() => new Set());
+  const addActionKey = useCallback(
+    (k) => setActionKeys((prev) => new Set(prev).add(k)),
+    [],
+  );
+  const removeActionKey = useCallback(
+    (k) =>
+      setActionKeys((prev) => {
+        const next = new Set(prev);
+        next.delete(k);
+        return next;
+      }),
+    [],
+  );
+  const isActing = useCallback((k) => actionKeys.has(k), [actionKeys]);
+  // rowKey -> { done, total } for per-row acknowledge progress bar
+  const [rowProgress, setRowProgress] = useState({});
   const [bulkAcknowledgeLoading, setBulkAcknowledgeLoading] = useState(false);
-  const [ackProgress, setAckProgress] = useState({
-    open: false,
-    title: "Acknowledging submissions",
-    description: "Preparing acknowledgement request...",
-    percent: 0,
-    count: 0,
-  });
   const [search, setSearch] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
-  const [cacheVersion, setCacheVersion] = useState(0);
   const fetchingRef = useRef(null);
   const pendingRefreshRef = useRef(false);
   const latestRequestKeyRef = useRef("");
@@ -143,13 +152,17 @@ export default function SubmissionSettings({
     currentUser.email ||
     "admin";
   const currentCacheKey = useMemo(
-    () => [CACHE_KEY, cacheVersion, "full-list"].join(":"),
-    [cacheVersion],
+    () => [CACHE_KEY, statusFilter, debouncedSearch].join(":"),
+    [statusFilter, debouncedSearch],
   );
   const bumpSubmissionsCache = useCallback(() => {
-    setCacheVersion((version) => version + 1);
+    // Clear cached lists so the next manual/interval refresh re-fetches fresh data,
+    // but do NOT change the cache key/version — that would trigger an immediate,
+    // blocking full re-fetch and a slow spinner even though local state is already
+    // merged. The in-place merge keeps the table correct without a network round-trip.
     secureStorage.remove(CACHE_KEY);
-  }, []);
+    invalidateCache(currentCacheKey);
+  }, [currentCacheKey]);
 
   const handleRepairXX = async () => {
     setRepairingXX(true);
@@ -217,12 +230,19 @@ export default function SubmissionSettings({
               .get("/data-slf", {
                 params: {
                   mode: "list",
-                  includeTrucks: true,
+                  ...(statusFilter && statusFilter !== "all" ? { status: statusFilter } : {}),
+                  ...(debouncedSearch.trim() ? { search: debouncedSearch.trim() } : {}),
                 },
               })
-              .then(({ data }) =>
-                Array.isArray(data) ? data.map(normalizeSubmissionRecord) : [],
-              ),
+              .then(({ data: resp }) => {
+                // API returns { data, total, page, limit } when paginated, or an array otherwise
+                const rows = Array.isArray(resp)
+                  ? resp
+                  : Array.isArray(resp?.data)
+                    ? resp.data
+                    : [];
+                return rows.map(normalizeSubmissionRecord);
+              }),
           {
             ttl: CACHE_TTL,
             force,
@@ -252,7 +272,7 @@ export default function SubmissionSettings({
         }
       }
     },
-    [currentCacheKey],
+    [currentCacheKey, statusFilter, debouncedSearch],
   );
 
   useEffect(() => {
@@ -400,19 +420,14 @@ export default function SubmissionSettings({
   }, [buildGroupedRow, data, getPortalSubmissionGroupKey]);
 
   const filteredTableRows = useMemo(() => {
+    // Status and search are now handled server-side;
+    // only secondary client-side fields (e.g. grouped-batch matching) need filtering here.
     const needle = debouncedSearch.trim();
-    const statusNeedle = String(statusFilter || "all")
-      .trim()
-      .toLowerCase();
-    return tableRows.filter((row) => {
-      const matchesStatus =
-        statusNeedle === "all" ||
-        String(row.status || "")
-          .trim()
-          .toLowerCase() === statusNeedle;
-      if (!matchesStatus) return false;
-      if (!needle) return true;
-      return rowMatchesSearch(
+    if (!needle) return tableRows;
+    // Server already filtered by the plain fields. Do an additional pass only
+    // for grouped-batch metadata that the server cannot see.
+    return tableRows.filter((row) =>
+      rowMatchesSearch(
         {
           ...row,
           groupedIds: (row.groupedEntries || []).map(
@@ -442,9 +457,9 @@ export default function SubmissionSettings({
           "groupedCompanies",
           "groupedSlfNames",
         ],
-      );
-    });
-  }, [debouncedSearch, statusFilter, tableRows]);
+      ),
+    );
+  }, [debouncedSearch, tableRows]);
 
   useEffect(() => {
     setPagination((prev) => {
@@ -481,37 +496,39 @@ export default function SubmissionSettings({
       }
 
       const entryLabel = pendingIds.length === 1 ? "entry" : "entries";
-      setStatusActionKey(`${rowKey}:acknowledged`);
-      setAckProgress({
-        open: true,
-        title:
-          pendingIds.length > 1
-            ? "Acknowledging grouped submissions"
-            : "Acknowledging submission",
-        description: `Submitting acknowledgement for ${pendingIds.length} ${entryLabel}...`,
-        percent: 25,
-        count: pendingIds.length,
-      });
+      const ackKey = `${rowKey}:acknowledged`;
+      // Per-row tracking — does NOT block other rows from acknowledging in parallel
+      addActionKey(ackKey);
+      setRowProgress((prev) => ({
+        ...prev,
+        [rowKey]: { done: 0, total: pendingIds.length },
+      }));
 
       try {
-        const { data: ackResult } = await api.patch("/data-slf/bulk-status", {
-          ids: pendingIds,
-          status: "acknowledged",
-        });
+        // Process in batches so the progress bar reflects how many of the
+        // grouped submissions have completed. Single entries finish in one tick;
+        // multiple entries advance one at a time so the percentage is visible.
+        const BATCH = pendingIds.length > 1 ? 1 : 5;
+        const allUpdated = [];
+        for (let i = 0; i < pendingIds.length; i += BATCH) {
+          const chunk = pendingIds.slice(i, i + BATCH);
+          const { data: ackResult } = await api.patch("/data-slf/bulk-status", {
+            ids: chunk,
+            status: "acknowledged",
+          });
+          if (Array.isArray(ackResult?.data)) {
+            allUpdated.push(...ackResult.data.map(normalizeSubmissionRecord));
+          }
+          const done = Math.min(i + BATCH, pendingIds.length);
+          setRowProgress((prev) => ({
+            ...prev,
+            [rowKey]: { done, total: pendingIds.length },
+          }));
+        }
 
-        setAckProgress((prev) => ({
-          ...prev,
-          description: "Refreshing submission list...",
-          percent: 75,
-        }));
-
-        // Merge the updated entries into local state instead of re-fetching the
-        // entire dataset — avoids the action-button bottleneck on large lists.
-        const updatedEntries = Array.isArray(ackResult?.data)
-          ? ackResult.data.map(normalizeSubmissionRecord)
-          : [];
-        if (updatedEntries.length > 0) {
-          const updatedById = new Map(updatedEntries.map((e) => [e._id, e]));
+        // Merge updated entries into local state instead of re-fetching everything
+        if (allUpdated.length > 0) {
+          const updatedById = new Map(allUpdated.map((e) => [e._id, e]));
           setData((prev) =>
             prev.map((entry) => updatedById.get(entry._id) || entry),
           );
@@ -522,47 +539,28 @@ export default function SubmissionSettings({
         if (selectedRowKeys.includes(rowKey)) {
           setSelectedRowKeys((prev) => prev.filter((key) => key !== rowKey));
         }
-
-        setAckProgress((prev) => ({
-          ...prev,
-          description: "Acknowledgement completed.",
-          percent: 100,
-        }));
-
-        window.setTimeout(() => {
-          setAckProgress({
-            open: false,
-            title: "Acknowledging submissions",
-            description: "Preparing acknowledgement request...",
-            percent: 0,
-            count: 0,
-          });
-        }, 350);
-
         Swal.fire({
           icon: "success",
-          title: `Submission acknowledged`,
+          title: "Submission acknowledged",
           text: `${pendingIds.length} ${entryLabel} acknowledged successfully.`,
-          timer: 1200,
+          timer: 1000,
           showConfirmButton: false,
         });
         return true;
       } catch {
-        setAckProgress({
-          open: false,
-          title: "Acknowledging submissions",
-          description: "Preparing acknowledgement request...",
-          percent: 0,
-          count: 0,
-        });
         Swal.fire("Error", "Could not acknowledge submissions", "error");
         return false;
       } finally {
-        setStatusActionKey("");
+        removeActionKey(ackKey);
+        setRowProgress((prev) => {
+          const next = { ...prev };
+          delete next[rowKey];
+          return next;
+        });
         if (clearSelection) setBulkAcknowledgeLoading(false);
       }
     },
-    [bumpSubmissionsCache, data, fetchData, selectedRowKeys],
+    [addActionKey, removeActionKey, bumpSubmissionsCache, data, selectedRowKeys],
   );
 
   const updateStatus = async (recordOrId, status) => {
@@ -587,7 +585,8 @@ export default function SubmissionSettings({
       return;
     }
     try {
-      setStatusActionKey(`${rowKey}:${status}`);
+      const actKey = `${rowKey}:${status}`;
+      addActionKey(actKey);
       const { data: statusResult } = await api.patch("/data-slf/bulk-status", {
         ids: targetIds,
         status,
@@ -614,7 +613,7 @@ export default function SubmissionSettings({
     } catch {
       Swal.fire("Error", "Could not update status", "error");
     } finally {
-      setStatusActionKey("");
+      removeActionKey(`${rowKey}:${status}`);
     }
   };
 
@@ -1280,6 +1279,43 @@ export default function SubmissionSettings({
       ),
     },
     {
+      title: "Progress",
+      key: "ackProgress",
+      width: 150,
+      render: (_, r) => {
+        const prog = rowProgress[r._id];
+        const acking = isActing(`${r._id}:acknowledged`);
+        const rejecting = isActing(`${r._id}:rejected`);
+        if (acking && prog) {
+          const pct = prog.total
+            ? Math.round((prog.done / prog.total) * 100)
+            : 0;
+          return (
+            <div style={{ minWidth: 120 }}>
+              <Progress
+                percent={pct}
+                size="small"
+                status="active"
+                strokeColor="#52c41a"
+              />
+              <Text type="secondary" style={{ fontSize: 10 }}>
+                {prog.done}/{prog.total} submission{prog.total === 1 ? "" : "s"}
+              </Text>
+            </div>
+          );
+        }
+        if (acking) return <Tag color="processing">Submitting…</Tag>;
+        if (rejecting) return <Tag color="warning">Rejecting…</Tag>;
+        if (r.status === "pending")
+          return <Tag color="default">Ready</Tag>;
+        if (r.status === "acknowledged")
+          return <Tag color="success">Acknowledged</Tag>;
+        if (r.status === "rejected")
+          return <Tag color="error">Rejected</Tag>;
+        return <Tag>{r.status}</Tag>;
+      },
+    },
+    {
       title: "Actions",
       key: "actions",
       width: 220,
@@ -1327,12 +1363,12 @@ export default function SubmissionSettings({
                     />
                   </Tooltip>
                 )}
-                <Tooltip title="Acknowledge">
+                <Tooltip title={r.isGroupedSubmission ? "Acknowledge all entries" : "Acknowledge"}>
                   <Button
                     size="small"
                     icon={<CheckOutlined />}
                     style={{ borderColor: "#52c41a", color: "#52c41a" }}
-                    loading={statusActionKey === `${r._id}:acknowledged`}
+                    loading={isActing(`${r._id}:acknowledged`)}
                     onClick={() => updateStatus(r, "acknowledged")}
                   />
                 </Tooltip>
@@ -1341,7 +1377,7 @@ export default function SubmissionSettings({
                     size="small"
                     danger
                     icon={<CloseOutlined />}
-                    loading={statusActionKey === `${r._id}:rejected`}
+                    loading={isActing(`${r._id}:rejected`)}
                     onClick={() => updateStatus(r, "rejected")}
                   />
                 </Tooltip>
@@ -1553,39 +1589,6 @@ export default function SubmissionSettings({
       </Card>
 
       <Modal
-        open={ackProgress.open}
-        title={ackProgress.title}
-        closable={false}
-        maskClosable={false}
-        keyboard={false}
-        footer={null}
-        centered
-        width={420}
-      >
-        <Space direction="vertical" size={16} style={{ width: "100%" }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-            <Spin size="large" />
-            <div>
-              <Text strong style={{ display: "block" }}>
-                Processing acknowledgement
-              </Text>
-              <Text type="secondary">
-                {ackProgress.count > 0
-                  ? `${ackProgress.count} submission entr${ackProgress.count === 1 ? "y" : "ies"}`
-                  : "Preparing request"}
-              </Text>
-            </div>
-          </div>
-          <Progress
-            percent={ackProgress.percent}
-            status="active"
-            strokeColor="#52c41a"
-          />
-          <Text type="secondary">{ackProgress.description}</Text>
-        </Space>
-      </Modal>
-
-      <Modal
         title={
           groupedEntriesRecord ? (
             <Space>
@@ -1706,7 +1709,7 @@ export default function SubmissionSettings({
                               type="primary"
                               icon={<CheckOutlined />}
                               style={{ background: "#52c41a", borderColor: "#52c41a" }}
-                              loading={statusActionKey === `${entry._id}:acknowledged`}
+                              loading={isActing(`${entry._id}:acknowledged`)}
                               onClick={() => handleGroupedEntryStatus(groupedEntriesRecord, entry, "acknowledged")}
                             />
                           </Tooltip>
@@ -1715,7 +1718,7 @@ export default function SubmissionSettings({
                               size="small"
                               danger
                               icon={<CloseOutlined />}
-                              loading={statusActionKey === `${entry._id}:rejected`}
+                              loading={isActing(`${entry._id}:rejected`)}
                               onClick={() => handleGroupedEntryStatus(groupedEntriesRecord, entry, "rejected")}
                             />
                           </Tooltip>
@@ -1792,7 +1795,7 @@ export default function SubmissionSettings({
                       icon={<CheckOutlined />}
                       style={{ background: "#52c41a", borderColor: "#52c41a" }}
                       loading={
-                        statusActionKey === `${viewRecord._id}:acknowledged`
+                        isActing(`${viewRecord._id}:acknowledged`)
                       }
                       onClick={() => {
                         updateStatus(viewRecord, "acknowledged");
@@ -1804,7 +1807,7 @@ export default function SubmissionSettings({
                     <Button
                       danger
                       icon={<CloseOutlined />}
-                      loading={statusActionKey === `${viewRecord._id}:rejected`}
+                      loading={isActing(`${viewRecord._id}:rejected`)}
                       onClick={() => {
                         updateStatus(viewRecord, "rejected");
                         setViewRecord(null);
@@ -3013,6 +3016,33 @@ export default function SubmissionSettings({
                                     ) : (
                                       "—"
                                     ),
+                                },
+                                {
+                                  title: "Cell Placed",
+                                  key: "cell",
+                                  width: 110,
+                                  render: (_, t) => {
+                                    // Collect unique cell names from per-vehicle entries first,
+                                    // then fall back to the truck-level cellName.
+                                    const vehicleCells = (t.vehicles || [])
+                                      .map((v) => v.cellName)
+                                      .filter(Boolean);
+                                    const cells = vehicleCells.length
+                                      ? [...new Set(vehicleCells)]
+                                      : t.cellName
+                                        ? [t.cellName]
+                                        : [];
+                                    if (!cells.length) return <Text type="secondary">—</Text>;
+                                    return (
+                                      <Space size={2} wrap>
+                                        {cells.map((name) => (
+                                          <Tag key={name} color="cyan" bordered={false} style={{ fontSize: 11, margin: 0 }}>
+                                            {name}
+                                          </Tag>
+                                        ))}
+                                      </Space>
+                                    );
+                                  },
                                 },
                                 {
                                   title: "HW Code",

@@ -123,3496 +123,61 @@ import {
 } from "./shared/submissionRecords";
 
 const { Title, Text } = Typography;
-const ACCENT = "#2f54eb";
-const CHART_COLORS = [
-  "#2f54eb",
-  "#52c41a",
-  "#faad14",
-  "#ff4d4f",
-  "#13c2c2",
-  "#722ed1",
-  "#eb2f96",
-];
-
-const managementStatusSummary = (items = []) => {
-  const counts = items.reduce((acc, item) => {
-    const status = item.status || item.condition || item.remarks || "Recorded";
-    acc[status] = (acc[status] || 0) + 1;
-    return acc;
-  }, {});
-  return Object.entries(counts)
-    .map(([status, count]) => `${status}: ${count}`)
-    .join("\n");
-};
-const UNIT_OPTIONS = [
-  { label: "m³", value: "m³" },
-  { label: "tons", value: "tons" },
-];
-const CELL_STATUS_OPTIONS = [
-  { label: "Active Cell", value: "Active Cell" },
-  { label: "Used/Completed", value: "Used/Completed" },
-  { label: "Under Construction", value: "Under Construction" },
-  { label: "Reserved Area", value: "Reserved Area" },
-  { label: "Not Existed", value: "Not Existed" },
-];
-const CELL_STATUS_COLORS = {
-  "Active Cell": {
-    border: "#52c41a",
-    bg: "#f6ffed",
-    dark: "rgba(82,196,26,0.08)",
-    tag: "success",
-  },
-  "Used/Completed": {
-    border: "#8c8c8c",
-    bg: "#f5f5f5",
-    dark: "rgba(140,140,140,0.08)",
-    tag: "default",
-  },
-  "Under Construction": {
-    border: "#fa8c16",
-    bg: "#fff7e6",
-    dark: "rgba(250,140,22,0.08)",
-    tag: "warning",
-  },
-  "Reserved Area": {
-    border: "#722ed1",
-    bg: "#f9f0ff",
-    dark: "rgba(114,46,209,0.08)",
-    tag: "purple",
-  },
-  "Not Existed": {
-    border: "#bfbfbf",
-    bg: "#fafafa",
-    dark: "rgba(191,191,191,0.08)",
-    tag: "default",
-  },
-};
-const PERMIT_STATUS_OPTIONS = [
-  { label: "New", value: "New" },
-  { label: "Renewal", value: "Renewal" },
-];
-const DP_TYPE_OPTIONS = [
-  { label: "Domestic", value: "Domestic" },
-  { label: "Industrial", value: "Industrial" },
-];
-const WWTF_TYPE_OPTIONS = [
-  "Primary Treatment",
-  "Preliminary Treatment",
-  "Biological",
-  "Chemical",
-  "Physical-Chemical Treatment",
-  "Tertiary Treatment",
-  "Disinfection",
-  "Constructed Wetland",
-  "Leachate Recirculation",
-  "Other",
-].map((value) => ({ label: value, value }));
-const asStringArray = (value) => {
-  if (Array.isArray(value)) return value.filter(Boolean);
-  return value ? [value] : [];
-};
-const formatStringArray = (value) => asStringArray(value).join(", ");
-const RECEIVING_FACILITY_TYPE_OPTIONS = [
-  "Material Recovery Facility (MRF)",
-  "Sorting Facility",
-  "Transfer Station",
-  "RCA",
-].map((value) => ({ label: value, value }));
-const GALLERY_COMPONENT_OPTIONS = [
-  "Entrance / Weighbridge",
-  "Active Cell",
-  "Completed Cell",
-  "Leachate Pond",
-  "Gas Management",
-  "Drainage",
-  "Access Road",
-  "Office / Support Facility",
-  "Other",
-].map((value) => ({ label: value, value }));
-const normalizeUnit = (unit) => (unit || "m³").replace("m3", "m³");
-const TON_PER_M3 = 0.2;
-const ACTIVE_VOLUME_STATUSES = new Set([
-  "pending",
-  "acknowledged",
-  "revert_requested",
-]);
-
-const normalizeCellStatus = (status) => {
-  const value = String(status || "").trim();
-  if (/^operational$/i.test(value)) return "Active Cell";
-  if (/^closed$/i.test(value)) return "Used/Completed";
-  if (/^reserved cell$/i.test(value)) return "Reserved Area";
-  return value || "Active Cell";
-};
-
-const isActiveCellStatus = (status) =>
-  ["Active Cell", "Operational", "Active"].includes(String(status || ""));
-
-const isCompletedCellStatus = (status) =>
-  ["Used/Completed", "Closed"].includes(String(status || ""));
-
-const getUploadHeaders = () => {
-  const token = secureStorage.get("token");
-  const user = secureStorage.getJSON("user") || {};
-  const userName = getAdminDisplayName(user);
-  return {
-    ...(token ? { Authorization: `Bearer ${token}` } : {}),
-    ...(userName || user.username || user.email
-      ? { "X-User-Name": userName || user.username || user.email }
-      : {}),
-    ...(user.email ? { "X-User-Email": user.email } : {}),
-  };
-};
-
-const MAX_SLF_UPLOAD_MB = 200;
-const MAX_SLF_UPLOAD_BYTES = MAX_SLF_UPLOAD_MB * 1024 * 1024;
-
-const formatFileSize = (bytes) => {
-  const size = Number(bytes || 0);
-  if (!size) return "";
-  if (size >= 1024 * 1024) return `${(size / (1024 * 1024)).toFixed(size >= 10 * 1024 * 1024 ? 1 : 2)} MB`;
-  if (size >= 1024) return `${(size / 1024).toFixed(1)} KB`;
-  return `${size} B`;
-};
-
-const getUploadFileSize = (file) =>
-  file?.size || file?.originFileObj?.size || file?.response?.size || 0;
-
-const validateSlfUpload = (file) => {
-  if (file?.size > MAX_SLF_UPLOAD_BYTES) {
-    message.error(`${file.name} is larger than ${MAX_SLF_UPLOAD_MB} MB.`);
-    return Upload.LIST_IGNORE;
-  }
-  return true;
-};
-
-const renderSlfUploadItem = (originNode, file) => {
-  const sizeText = formatFileSize(getUploadFileSize(file));
-  const percent =
-    file?.status === "uploading" && Number.isFinite(file?.percent)
-      ? ` - ${Math.round(file.percent)}%`
-      : "";
-  if (!sizeText && !percent) return originNode;
-  return (
-    <div className="slf-upload-list-item">
-      {originNode}
-      <Text
-        type="secondary"
-        style={{ display: "block", fontSize: 11, lineHeight: 1.3, marginTop: 2 }}
-      >
-        {sizeText}
-        {percent}
-      </Text>
-    </div>
-  );
-};
-
-const slfUploadProps = {
-  beforeUpload: validateSlfUpload,
-  itemRender: renderSlfUploadItem,
-  progress: { showInfo: true },
-};
-
-const convertVolume = (value, fromUnit = "tons", toUnit = fromUnit) => {
-  const number = Number(value || 0);
-  const from = normalizeUnit(fromUnit);
-  const to = normalizeUnit(toUnit || from);
-  if (!number || from === to) return number;
-  if (from === "tons" && to === "m³") return number / TON_PER_M3;
-  if (from === "m³" && to === "tons") return number * TON_PER_M3;
-  return number;
-};
-
-const getWasteKind = (wasteType) => {
-  const value = String(wasteType || "").toLowerCase();
-  if (value.includes("haz") || value.includes("inert")) return "hazardous";
-  return "residual";
-};
-
-const isHazardousCellType = (cellType) =>
-  /haz|inert/i.test(String(cellType || ""));
-
-// Extract a Google Drive file id from any of its URL shapes.
-const extractDriveId = (url) => {
-  const s = String(url || "");
-  let m = s.match(/\/file\/d\/([^/?#]+)/);
-  if (m) return m[1];
-  m = s.match(/[?&]id=([^&#]+)/);
-  if (m) return m[1];
-  m = s.match(/\/d\/([^/?#]+)/);
-  if (m) return m[1];
-  return "";
-};
-
-const isDriveUrl = (url) =>
-  /drive\.google\.com|googleusercontent\.com|docs\.google\.com/.test(
-    String(url || ""),
-  );
-
-// Resolve a stored media URL into something directly usable by <img>/<a>.
-// Google Drive "webViewLink" values are viewer pages and cannot be used as an
-// image source — convert them to a direct thumbnail/view URL instead.
-const resolveMediaUrl = (url, { thumbnail = false } = {}) => {
-  const s = String(url || "");
-  if (!s) return "";
-  if (isDriveUrl(s)) {
-    const id = extractDriveId(s);
-    if (id) {
-      return thumbnail
-        ? `https://drive.google.com/thumbnail?id=${id}&sz=w1200`
-        : `https://drive.google.com/uc?export=view&id=${id}`;
-    }
-  }
-  return s;
-};
-
-const normalizeStoredFileUrl = (value) => {
-  if (!value) return "";
-  if (Array.isArray(value))
-    return value[0]?.response?.url || value[0]?.url || value[0] || "";
-  if (typeof value === "object") return value.response?.url || value.url || "";
-  return value;
-};
-
-// ── Consolidated SLF Dashboard (shown inside the SLF Data Table view modal) ──
-function SlfDashboardTab({ dashboard, isDark }) {
-  const [page, setPage] = useState(1);
-  if (!dashboard || dashboard.totalSubmissions === 0) {
-    return (
-      <Empty
-        description="No portal submissions for this SLF yet"
-        style={{ padding: 40 }}
-      />
-    );
-  }
-  const {
-    unit,
-    totalSubmissions,
-    totalTrucks,
-    totalVolume,
-    residual,
-    hazardous,
-    generatorCount,
-    companyTypeData,
-    cellData,
-    monthly,
-    topGenerators,
-    statusData,
-    tableRows,
-  } = dashboard;
-
-  const fmt = (n) => Number(n || 0).toLocaleString(undefined, { maximumFractionDigits: 1 });
-  const tiles = [
-    { label: "Submissions", value: totalSubmissions, color: "#2f54eb", icon: <InboxOutlined /> },
-    { label: "Truck Trips", value: totalTrucks, color: "#fa8c16", icon: <CarOutlined /> },
-    { label: `Total Volume (${unit})`, value: fmt(totalVolume), color: "#722ed1", icon: <DatabaseOutlined /> },
-    { label: "Generators", value: generatorCount, color: "#13c2c2", icon: <TeamOutlined /> },
-    { label: `Residual (${unit})`, value: fmt(residual), color: "#52c41a", icon: <BarChartOutlined /> },
-    { label: `Hazardous (${unit})`, value: fmt(hazardous), color: "#cf1322", icon: <WarningOutlined /> },
-  ];
-
-  const wasteComposition = [
-    { name: "Residual", value: Math.round(residual) },
-    { name: "Hazardous", value: Math.round(hazardous) },
-  ].filter((d) => d.value > 0);
-
-  const cardStyle = { borderRadius: 10, height: "100%" };
-  const axisTick = { fontSize: 11, fill: isDark ? "#aaa" : "#555" };
-
-  return (
-    <div>
-      <Row gutter={[10, 10]} style={{ marginBottom: 12 }}>
-        {tiles.map((t) => (
-          <Col xs={12} sm={8} md={8} lg={4} key={t.label}>
-            <Card size="small" style={{ borderRadius: 10, borderLeft: `4px solid ${t.color}` }} styles={{ body: { padding: "10px 12px" } }}>
-              <Space align="center" size={8}>
-                <span style={{ width: 32, height: 32, borderRadius: 8, background: `${t.color}1f`, color: t.color, display: "inline-flex", alignItems: "center", justifyContent: "center", fontSize: 15 }}>
-                  {t.icon}
-                </span>
-                <div>
-                  <div style={{ fontSize: 18, fontWeight: 700, color: t.color, lineHeight: 1.1 }}>{t.value}</div>
-                  <Text type="secondary" style={{ fontSize: 10 }}>{t.label}</Text>
-                </div>
-              </Space>
-            </Card>
-          </Col>
-        ))}
-      </Row>
-
-      <Row gutter={[10, 10]} style={{ marginBottom: 12 }}>
-        <Col xs={24} md={8}>
-          <Card size="small" title={<Text style={{ fontSize: 12 }}><PieChartOutlined /> Waste Composition ({unit})</Text>} style={cardStyle}>
-            {wasteComposition.length ? (
-              <ResponsiveContainer width="100%" height={200}>
-                <PieChart>
-                  <Pie data={wasteComposition} cx="50%" cy="50%" innerRadius={45} outerRadius={75} paddingAngle={3} dataKey="value" label={({ name, value }) => `${name}: ${value.toLocaleString()}`} labelLine={false}>
-                    {wasteComposition.map((d, i) => (
-                      <RCell key={d.name} fill={d.name === "Hazardous" ? "#cf1322" : "#52c41a"} />
-                    ))}
-                  </Pie>
-                  <RTooltip />
-                </PieChart>
-              </ResponsiveContainer>
-            ) : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No volume" />}
-          </Card>
-        </Col>
-        <Col xs={24} md={8}>
-          <Card size="small" title={<Text style={{ fontSize: 12 }}><PieChartOutlined /> Submissions by Source</Text>} style={cardStyle}>
-            {companyTypeData.length ? (
-              <ResponsiveContainer width="100%" height={200}>
-                <PieChart>
-                  <Pie data={companyTypeData} cx="50%" cy="50%" outerRadius={75} dataKey="value" label={({ name, value }) => `${name}: ${value}`} labelLine={false}>
-                    {companyTypeData.map((d, i) => (
-                      <RCell key={d.name} fill={CHART_COLORS[i % CHART_COLORS.length]} />
-                    ))}
-                  </Pie>
-                  <RTooltip />
-                </PieChart>
-              </ResponsiveContainer>
-            ) : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No data" />}
-          </Card>
-        </Col>
-        <Col xs={24} md={8}>
-          <Card size="small" title={<Text style={{ fontSize: 12 }}><BarChartOutlined /> Top Generators ({unit})</Text>} style={cardStyle}>
-            {topGenerators.length ? (
-              <ResponsiveContainer width="100%" height={200}>
-                <BarChart data={topGenerators} layout="vertical" margin={{ left: 8, right: 12 }}>
-                  <CartesianGrid strokeDasharray="3 3" horizontal={false} />
-                  <XAxis type="number" tick={axisTick} />
-                  <YAxis type="category" dataKey="name" width={90} tick={{ fontSize: 10, fill: isDark ? "#aaa" : "#555" }} />
-                  <RTooltip />
-                  <Bar dataKey="value" radius={[0, 4, 4, 0]}>
-                    {topGenerators.map((d, i) => (
-                      <RCell key={d.name} fill={CHART_COLORS[i % CHART_COLORS.length]} />
-                    ))}
-                  </Bar>
-                </BarChart>
-              </ResponsiveContainer>
-            ) : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No data" />}
-          </Card>
-        </Col>
-      </Row>
-
-      <Row gutter={[10, 10]} style={{ marginBottom: 12 }}>
-        <Col xs={24} md={14}>
-          <Card size="small" title={<Text style={{ fontSize: 12 }}><BarChartOutlined /> Monthly Disposal Trend ({unit})</Text>} style={cardStyle}>
-            {monthly.length ? (
-              <ResponsiveContainer width="100%" height={230}>
-                <LineChart data={monthly} margin={{ left: 4, right: 12, top: 8 }}>
-                  <CartesianGrid strokeDasharray="3 3" />
-                  <XAxis dataKey="month" tick={axisTick} />
-                  <YAxis tick={axisTick} />
-                  <RTooltip />
-                  <Line type="monotone" dataKey="volume" stroke="#2f54eb" strokeWidth={2} dot={{ r: 3 }} />
-                </LineChart>
-              </ResponsiveContainer>
-            ) : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No trend data" />}
-          </Card>
-        </Col>
-        <Col xs={24} md={10}>
-          <Card size="small" title={<Text style={{ fontSize: 12 }}><PieChartOutlined /> Submission Status</Text>} style={cardStyle}>
-            {statusData.length ? (
-              <ResponsiveContainer width="100%" height={230}>
-                <PieChart>
-                  <Pie data={statusData} cx="50%" cy="50%" innerRadius={40} outerRadius={75} paddingAngle={2} dataKey="value" label={({ name, value }) => `${name}: ${value}`} labelLine={false}>
-                    {statusData.map((d, i) => (
-                      <RCell key={d.name} fill={CHART_COLORS[i % CHART_COLORS.length]} />
-                    ))}
-                  </Pie>
-                  <RTooltip />
-                  <Legend wrapperStyle={{ fontSize: 11 }} />
-                </PieChart>
-              </ResponsiveContainer>
-            ) : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No data" />}
-          </Card>
-        </Col>
-      </Row>
-
-      <Card size="small" title={<Text style={{ fontSize: 12 }}><BarChartOutlined /> Cell Utilization ({unit})</Text>} style={{ borderRadius: 10, marginBottom: 12 }}>
-        {cellData.length ? (
-          <Row gutter={[10, 10]}>
-            <Col xs={24} md={14}>
-              <ResponsiveContainer width="100%" height={240}>
-                <BarChart data={cellData} margin={{ left: 4, right: 12, top: 8 }}>
-                  <CartesianGrid strokeDasharray="3 3" />
-                  <XAxis dataKey="name" tick={axisTick} />
-                  <YAxis tick={axisTick} />
-                  <RTooltip />
-                  <Legend wrapperStyle={{ fontSize: 11 }} />
-                  <Bar dataKey="capacity" name="Capacity" fill="#d6e4ff" radius={[4, 4, 0, 0]} />
-                  <Bar dataKey="used" name="Used" fill="#2f54eb" radius={[4, 4, 0, 0]} />
-                </BarChart>
-              </ResponsiveContainer>
-            </Col>
-            <Col xs={24} md={10}>
-              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                {cellData.map((c) => (
-                  <div key={c.name}>
-                    <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11 }}>
-                      <Text strong style={{ fontSize: 11 }}>
-                        {c.name}{" "}
-                        <Tag color={isHazardousCellType(c.type) ? "volcano" : "blue"} style={{ fontSize: 9, marginLeft: 2 }}>
-                          {c.type}
-                        </Tag>
-                      </Text>
-                      <Text type="secondary" style={{ fontSize: 10 }}>
-                        {fmt(c.used)} / {c.capacity ? fmt(c.capacity) : "—"} {unit}
-                      </Text>
-                    </div>
-                    <Progress
-                      percent={c.pct == null ? 0 : Math.round(c.pct)}
-                      size="small"
-                      status={c.pct >= 90 ? "exception" : c.pct >= 75 ? "active" : "normal"}
-                      strokeColor={c.pct >= 90 ? "#ff4d4f" : c.pct >= 75 ? "#faad14" : "#52c41a"}
-                    />
-                  </div>
-                ))}
-              </div>
-            </Col>
-          </Row>
-        ) : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No cell infrastructure configured" />}
-      </Card>
-
-      <Card size="small" title={<Text style={{ fontSize: 12 }}><InboxOutlined /> Submissions</Text>} style={{ borderRadius: 10 }}>
-        <ResponsiveTable
-          size="small"
-          dataSource={tableRows}
-          rowKey="_id"
-          pagination={{ current: page, pageSize: 8, onChange: setPage, size: "small", showSizeChanger: false }}
-          scroll={{ x: 720 }}
-          columns={[
-            { title: "ID No.", dataIndex: "idNo", key: "idNo", width: 140, render: (v) => <Text style={{ fontSize: 11 }}>{v || "—"}</Text> },
-            { title: "Date", dataIndex: "dateOfDisposal", key: "date", width: 110, render: (v) => <Text style={{ fontSize: 11 }}>{v ? dayjs(v).format("MM/DD/YYYY") : "—"}</Text> },
-            { title: "Generator", dataIndex: "lguCompanyName", key: "gen", render: (v, r) => <span style={{ fontSize: 11 }}>{v || "—"} <Tag color={r.companyType === "Private" ? "green" : "blue"} style={{ fontSize: 9 }}>{r.companyType || "—"}</Tag></span> },
-            { title: "Trucks", dataIndex: "truckCount", key: "trucks", width: 70, align: "center", render: (v) => <Text style={{ fontSize: 11 }}>{v}</Text> },
-            { title: `Volume (${unit})`, dataIndex: "volume", key: "vol", width: 110, align: "right", render: (v) => <Text style={{ fontSize: 11 }}>{fmt(v)}</Text> },
-            { title: "Status", dataIndex: "status", key: "status", width: 110, render: (v) => <Tag style={{ fontSize: 10 }} color={{ pending: "gold", acknowledged: "green", rejected: "red", reverted: "volcano" }[v] || "default"}>{String(v || "pending").replace("_", " ")}</Tag> },
-          ]}
-        />
-      </Card>
-    </div>
-  );
-}
-
-
-const formatVolume = (value, unit = "tons") => {
-  const number = Number(value || 0);
-  return `${number.toLocaleString(undefined, { maximumFractionDigits: number >= 100 ? 0 : 2 })} ${normalizeUnit(unit)}`;
-};
-
-const CACHE_KEY = "slf-facility-cache-v6";
-const CACHE_TTL = 5 * 60 * 1000;
-
-const R3_PROVINCES = [
-  "Bataan",
-  "Bulacan",
-  "Nueva Ecija",
-  "Pampanga",
-  "Tarlac",
-  "Zambales",
-  "Aurora",
-];
-
-const formatCompact = (value, digits = 1) => {
-  const number = Number(value || 0);
-  if (Math.abs(number) >= 1000000)
-    return `${(number / 1000000).toFixed(digits)}M`;
-  if (Math.abs(number) >= 1000) return `${(number / 1000).toFixed(digits)}k`;
-  return number.toLocaleString();
-};
-
-const sumBy = (items, getter) =>
-  items.reduce((sum, item) => sum + Number(getter(item) || 0), 0);
-
-const getNameVariants = (value) => {
-  const raw = String(value || "").trim();
-  if (!raw) return [];
-  const noParens = raw.replace(/\s*\(.*?\)\s*/g, " ").trim();
-  const withoutPrefix = noParens
-    .replace(/^province\s+of\s+/i, "")
-    .replace(
-      /^(local\s+governm\s*ent\s+unit|lgu|municipality\s+of|city\s+of)\s*[-:\u2012-\u2015]?\s*/i,
-      "",
-    )
-    .trim();
-  const firstCommaPart = withoutPrefix.split(",")[0]?.trim();
-  return [
-    ...new Set([raw, noParens, withoutPrefix, firstCommaPart].filter(Boolean)),
-  ];
-};
-
-const normalizeSlfKey = (value) =>
-  String(value || "")
-    .replace(/\s*\(.*?\)\s*/g, " ")
-    .replace(/\blocal\s+governm\s*ent\s+unit\b/gi, " ")
-    .replace(/\blgu\b/gi, " ")
-    .replace(/\bmunicipality\s+of\b/gi, " ")
-    .replace(/\bcity\s+of\b/gi, " ")
-    .replace(/^province\s+of\s+/i, "")
-    .replace(/[\u2012-\u2015-]+/g, " ")
-    .replace(/[,.;:/]+/g, " ")
-    .replace(/\s+/g, " ")
-    .trim()
-    .toLowerCase();
-
-const expandSlfNames = (names = []) => [
-  ...new Set(names.flatMap((name) => getNameVariants(name)).filter(Boolean)),
-];
-
-const getFacilitySlfNames = (record) =>
-  [
-    ...(record?.slfGenerator && typeof record.slfGenerator === "object"
-      ? [record.slfGenerator.slfName]
-      : []),
-    record?.slfName,
-    record?.lgu,
-    record?.lgu && record?.province
-      ? `${record.lgu}, ${record.province}`
-      : null,
-    record?.province,
-  ].filter(Boolean);
-
-const getBaselineSlfNames = (baseline) =>
-  expandSlfNames([baseline?.slfName, baseline?.lguCompanyName]);
-
-const getSubmissionSlfNames = (submission) =>
-  expandSlfNames([
-    submission?.slfName,
-    submission?.slfGenerator && typeof submission.slfGenerator === "object"
-      ? submission.slfGenerator.slfName
-      : null,
-  ]);
-
-const getRecordIds = (record) =>
-  [
-    record?._id,
-    record?.slfGenerator && typeof record.slfGenerator === "object"
-      ? record.slfGenerator._id
-      : record?.slfGenerator,
-  ]
-    .filter(Boolean)
-    .map(String);
-
-const getSubmissionSlfId = (submission) => {
-  const value = submission?.slfGenerator;
-  if (!value) return "";
-  return String(typeof value === "object" ? value._id : value);
-};
-
-const getDataEntryId = (entry) => (entry?._id ? String(entry._id) : "");
-
-// Pre-index submissions by SLF id + normalized name so each facility can fetch
-// only its candidate submissions in O(1) instead of scanning every submission
-// (avoids the O(facilities × submissions) bottleneck on the SLF Data Table).
-const buildSubmissionFacilityIndex = (submissions = []) => {
-  const byKey = new Map();
-  (submissions || []).forEach((sub) => {
-    const keys = new Set();
-    const id = getSubmissionSlfId(sub);
-    if (id) keys.add(`id:${id}`);
-    getSubmissionSlfNames(sub).forEach((name) => {
-      const k = normalizeSlfKey(name);
-      if (k) keys.add(`name:${k}`);
-    });
-    keys.forEach((key) => {
-      if (!byKey.has(key)) byKey.set(key, []);
-      byKey.get(key).push(sub);
-    });
-  });
-  return byKey;
-};
-
-const getFacilityCandidateSubmissions = (record, byKey) => {
-  if (!byKey) return [];
-  const result = new Set();
-  getRecordIds(record).forEach((id) => {
-    (byKey.get(`id:${id}`) || []).forEach((s) => result.add(s));
-  });
-  expandSlfNames(getFacilitySlfNames(record)).forEach((name) => {
-    const k = normalizeSlfKey(name);
-    if (k) (byKey.get(`name:${k}`) || []).forEach((s) => result.add(s));
-  });
-  return [...result];
-};
-
-const isSameDataEntry = (left, right) => {
-  const leftId = getDataEntryId(left);
-  const rightId = getDataEntryId(right);
-  return !!leftId && !!rightId && leftId === rightId;
-};
-
-const hasTruckVolume = (submission) =>
-  (submission?.trucks || []).some(
-    (truck) => Number(truck?.actualVolume || 0) > 0,
-  );
-
-const getPortalVolumeUnit = (baseline, submissions = [], record) =>
-  normalizeUnit(
-    submissions
-      .flatMap((submission) => submission.trucks || [])
-      .find(
-        (truck) =>
-          Number(truck?.actualVolume || 0) > 0 && truck.actualVolumeUnit,
-      )?.actualVolumeUnit ||
-      (baseline?.activeCellEntries || []).find(
-        (entry) => Number(entry?.volume || 0) > 0 && entry.unit,
-      )?.unit ||
-      baseline?.baselineUnit ||
-      baseline?.activeCellResidualUnit ||
-      baseline?.totalVolumeAcceptedUnit ||
-      record?.wasteReceivedUnit ||
-      record?.cellFillUnits?.find(Boolean) ||
-      record?.cellCapacityUnits?.find(Boolean) ||
-      record?.volumeCapacityUnit ||
-      "m³",
-  );
-
-const parseCellIndex = (cellName) => {
-  const match = String(cellName || "").match(/(?:cell\s*)?(\d+)/i);
-  return match ? Number(match[1]) - 1 : null;
-};
-
-const getTruckCellIndex = (truck) => {
-  if (Number.isInteger(truck?.cellIndex)) return truck.cellIndex;
-  const numericIndex = Number(truck?.cellIndex);
-  if (Number.isInteger(numericIndex) && numericIndex >= 0) return numericIndex;
-  return parseCellIndex(
-    truck?.cellName ||
-      truck?.activeCell ||
-      truck?.cellPlacement ||
-      truck?.submissionCellPlacement,
-  );
-};
-
-const buildBaselineMap = (baselines = []) => {
-  const map = new Map();
-  baselines.forEach((baseline) => {
-    getBaselineSlfNames(baseline).forEach((name) => {
-      const key = normalizeSlfKey(name);
-      if (key && !map.has(key)) map.set(key, baseline);
-    });
-  });
-  return map;
-};
-
-const findBaselineForFacility = (record, baselineMap) => {
-  for (const name of expandSlfNames(getFacilitySlfNames(record))) {
-    const baseline = baselineMap.get(normalizeSlfKey(name));
-    if (baseline) return baseline;
-  }
-  return null;
-};
-
-const submissionMatchesFacility = (record, submission) => {
-  const submissionId = getSubmissionSlfId(submission);
-  if (submissionId && getRecordIds(record).includes(submissionId)) return true;
-
-  const recordKeys = expandSlfNames(getFacilitySlfNames(record)).map((name) =>
-    normalizeSlfKey(name),
-  );
-  const submissionKeys = getSubmissionSlfNames(submission).map((name) =>
-    normalizeSlfKey(name),
-  );
-  return submissionKeys.some((key) => key && recordKeys.includes(key));
-};
-
-const findBestCellIndex = (rows, wasteType, preferredIndex = null) => {
-  if (
-    preferredIndex != null &&
-    rows[preferredIndex] &&
-    isActiveCellStatus(rows[preferredIndex].status)
-  )
-    return preferredIndex;
-  const kind = getWasteKind(wasteType);
-  const activeMatch = rows.findIndex(
-    (row) =>
-      isActiveCellStatus(row.status) &&
-      (kind === "hazardous" ? row.isHazardous : !row.isHazardous),
-  );
-  if (activeMatch >= 0) return activeMatch;
-  const operational = rows.findIndex((row) => isActiveCellStatus(row.status));
-  return operational >= 0 ? operational : 0;
-};
-
-const addVolumeToCell = (row, volume, source, wasteType, unit) => {
-  const converted = convertVolume(volume, unit, row.unit);
-  if (converted <= 0) return;
-  row[source] += converted;
-  row.total += converted;
-  const kind = getWasteKind(wasteType);
-  row.byWasteType[kind] = (row.byWasteType[kind] || 0) + converted;
-};
-
-const buildFacilityCellUsage = (record, baseline, submissions = []) => {
-  const cellCount = Math.max(
-    Number(record?.numberOfCell || 0),
-    Array.isArray(record?.cellCapacities) ? record.cellCapacities.length : 0,
-    Array.isArray(baseline?.activeCellEntries)
-      ? baseline.activeCellEntries.length
-      : 0,
-    1,
-  );
-  const matchingSubmissions = submissions.filter(
-    (submission) =>
-      ACTIVE_VOLUME_STATUSES.has(submission.status || "pending") &&
-      submissionMatchesFacility(record, submission) &&
-      !isSameDataEntry(submission, baseline) &&
-      hasTruckVolume(submission),
-  );
-  const targetUnit = getPortalVolumeUnit(baseline, matchingSubmissions, record);
-
-  const rows = Array.from({ length: cellCount }, (_, index) => {
-    const status = normalizeCellStatus(record?.cellStatuses?.[index]);
-    const type = record?.cellTypes?.[index] || "Residual";
-    return {
-      key: `cell-${index + 1}`,
-      index,
-      cellName: `Cell ${index + 1}`,
-      status,
-      type,
-      isHazardous: isHazardousCellType(type),
-      capacity: Number(record?.cellCapacities?.[index] || 0),
-      capacityUnit: normalizeUnit(
-        record?.cellCapacityUnits?.[index] ||
-          record?.volumeCapacityUnit ||
-          "m³",
-      ),
-      unit: targetUnit,
-      baseline: 0,
-      submissions: 0,
-      total: 0,
-      byWasteType: {},
-    };
-  });
-
-  const activeEntries = Array.isArray(baseline?.activeCellEntries)
-    ? baseline.activeCellEntries
-    : [];
-  activeEntries.forEach((entry, orderIndex) => {
-    const parsedIndex = parseCellIndex(entry.cellName);
-    const targetIndex = findBestCellIndex(
-      rows,
-      entry.wasteType,
-      parsedIndex != null && parsedIndex >= 0 ? parsedIndex : orderIndex,
-    );
-    const row = rows[targetIndex] || rows[0];
-    if (entry.cellName) row.cellName = entry.cellName;
-    addVolumeToCell(
-      row,
-      Number(entry.volume || 0),
-      "baseline",
-      entry.wasteType,
-      entry.unit || baseline?.baselineUnit || targetUnit,
-    );
-  });
-
-  if (activeEntries.length === 0 && baseline) {
-    [
-      {
-        volume: baseline.activeCellResidualVolume,
-        unit: baseline.activeCellResidualUnit,
-        wasteType: "Residual",
-      },
-      {
-        volume: baseline.activeCellInertVolume,
-        unit: baseline.activeCellInertUnit,
-        wasteType: "Treated Hazardous Waste",
-      },
-      {
-        volume: baseline.activeCellHazardousVolume,
-        unit: baseline.activeCellHazardousUnit,
-        wasteType: "Hazardous Waste",
-      },
-    ].forEach((entry) => {
-      const targetIndex = findBestCellIndex(rows, entry.wasteType);
-      addVolumeToCell(
-        rows[targetIndex] || rows[0],
-        Number(entry.volume || 0),
-        "baseline",
-        entry.wasteType,
-        entry.unit || targetUnit,
-      );
-    });
-  }
-
-  matchingSubmissions.forEach((submission) => {
-    (submission.trucks || []).forEach((truck) => {
-      const explicitIndex = getTruckCellIndex(truck);
-      const targetIndex = findBestCellIndex(rows, truck.wasteType, explicitIndex);
-      addVolumeToCell(
-        rows[targetIndex] || rows[0],
-        Number(truck.actualVolume || 0),
-        "submissions",
-        truck.wasteType,
-        truck.actualVolumeUnit || "tons",
-      );
-    });
-  });
-
-  const totalBaseline = rows.reduce((sum, row) => sum + row.baseline, 0);
-  const totalSubmissions = rows.reduce((sum, row) => sum + row.submissions, 0);
-  const total = rows.reduce((sum, row) => sum + row.total, 0);
-  return {
-    rows,
-    totalBaseline,
-    totalSubmissions,
-    total,
-    unit: targetUnit,
-    submissionCount: matchingSubmissions.length,
-  };
-};
-
-const enrichFacilityWithBaseline = (record, baseline, submissions = []) => {
-  if (!record) return record;
-  const cellCount = Number(record.numberOfCell || 0);
-  const usage = buildFacilityCellUsage(record, baseline, submissions);
-  if (usage.total <= 0) return record;
-
-  const currentFillValues = Array.isArray(record.cellFillValues)
-    ? record.cellFillValues
-    : [];
-  const currentFillUnits = Array.isArray(record.cellFillUnits)
-    ? record.cellFillUnits
-    : [];
-  const hasStoredFillValues = currentFillValues.some(
-    (value) => value !== null && value !== undefined && value !== "",
-  );
-  const storedTargetUnit = normalizeUnit(record.wasteReceivedUnit || usage.unit);
-  const storedFillTotal = currentFillValues.reduce(
-    (sum, value, index) =>
-      sum +
-      convertVolume(
-        value,
-        currentFillUnits[index] || storedTargetUnit,
-        storedTargetUnit,
-      ),
-    0,
-  );
-  const nextFillValues = Array.from(
-    { length: Math.max(cellCount, usage.rows.length) },
-    (_, index) =>
-      currentFillValues[index] !== null && currentFillValues[index] !== undefined && currentFillValues[index] !== ""
-        ? currentFillValues[index]
-        : usage.rows[index]?.total > 0
-          ? usage.rows[index].total
-          : currentFillValues[index],
-  );
-  const nextFillUnits = nextFillValues.map(
-    (_, index) =>
-      currentFillUnits[index] || usage.rows[index]?.unit || usage.unit,
-  );
-
-  return {
-    ...record,
-    actualResidualWasteReceived: hasStoredFillValues
-      ? Number(storedFillTotal.toFixed(3))
-      : usage.total,
-    wasteReceivedUnit: hasStoredFillValues ? storedTargetUnit : usage.unit,
-    cellFillValues: nextFillValues,
-    cellFillUnits: nextFillUnits,
-    _baselineWasteReceived: usage.totalBaseline,
-    _baselineWasteReceivedUnit: usage.unit,
-    _submissionWasteReceived: usage.totalSubmissions,
-    _submissionWasteReceivedUnit: usage.unit,
-    _cellUsageRows: usage.rows,
-    _cellUsageSubmissionCount: usage.submissionCount,
-    _baselineActiveCellEntries: baseline?.activeCellEntries || [],
-  };
-};
-
-function groupMetric(items, groupGetter, valueGetter) {
-  const map = new Map();
-  items.forEach((item) => {
-    const name = groupGetter(item) || "Unspecified";
-    map.set(name, (map.get(name) || 0) + Number(valueGetter(item) || 0));
-  });
-  return [...map.entries()]
-    .map(([name, value]) => ({ name, value }))
-    .filter((item) => item.value > 0)
-    .sort((a, b) => b.value - a.value);
-}
-
-function topMetric(items, valueGetter, label = "value") {
-  return items
-    .map((item) => ({
-      name: item.lgu || item.facilityName || item.province || "Unspecified SLF",
-      province: item.province || "-",
-      status: item.statusOfSLF || "-",
-      ownership: item.ownership || "-",
-      value: Number(valueGetter(item) || 0),
-      label,
-    }))
-    .filter((item) => item.value > 0)
-    .sort((a, b) => b.value - a.value);
-}
-
-function DashboardMetricCard({
-  active,
-  color,
-  icon,
-  title,
-  value,
-  suffix,
-  formatter,
-  summary,
-  breakdowns = [],
-  onClick,
-}) {
-  return (
-    <Card
-      size="small"
-      hoverable
-      onClick={onClick}
-      style={{
-        borderRadius: 8,
-        border: active ? `1px solid ${color}` : "1px solid #f0f0f0",
-        borderTop: `3px solid ${color}`,
-        height: "100%",
-        minHeight: 118,
-        cursor: "pointer",
-        boxShadow: active ? `0 0 0 1px ${color}33` : "0 1px 3px rgba(15, 23, 42, 0.06)",
-      }}
-      bodyStyle={{ padding: "10px 12px", height: "100%" }}
-    >
-      <div
-        style={{
-          display: "flex",
-          flexDirection: "column",
-          gap: 10,
-          height: "100%",
-        }}
-      >
-        <Statistic
-          title={<span style={{ fontSize: 11 }}>{title}</span>}
-          value={value}
-          suffix={suffix}
-          valueStyle={{ fontSize: 18, lineHeight: 1.1 }}
-          prefix={icon}
-          formatter={formatter}
-        />
-        <div style={{ marginTop: "auto", minHeight: 34 }}>
-          <Text strong style={{ display: "block", fontSize: 11, color }}>
-            {summary}
-          </Text>
-          {breakdowns.slice(0, 2).map((item) => (
-            <Text
-              key={item}
-              type="secondary"
-              style={{ display: "block", fontSize: 10, lineHeight: 1.25 }}
-            >
-              {item}
-            </Text>
-          ))}
-        </div>
-      </div>
-    </Card>
-  );
-}
-
-function InsightStat({ title, value, suffix, color }) {
-  return (
-    <Card
-      size="small"
-      style={{
-        borderRadius: 8,
-        border: `1px solid ${color}33`,
-        background: `${color}0d`,
-        height: "100%",
-      }}
-    >
-      <Statistic
-        title={title}
-        value={value}
-        suffix={suffix}
-        valueStyle={{ color, fontSize: 22 }}
-        formatter={(v) => Number(v || 0).toLocaleString()}
-      />
-    </Card>
-  );
-}
-
-function networkDays(startDate, endDate) {
-  if (!startDate || !endDate) return null;
-  const s = dayjs(startDate).startOf("day");
-  const e = dayjs(endDate).startOf("day");
-  if (!s.isValid() || !e.isValid()) return null;
-  let count = 0,
-    cur = s;
-  const dir = e.isAfter(s) ? 1 : -1;
-  while (dir > 0 ? !cur.isAfter(e) : !cur.isBefore(e)) {
-    const dow = cur.day();
-    if (dow !== 0 && dow !== 6) count++;
-    cur = cur.add(dir, "day");
-  }
-  return Math.max(1, count > 1 ? count - 1 : count);
-}
-
-function computeFields(rec) {
-  return {
-    totalDaysReportPrepared: networkDays(
-      rec.dateOfMonitoring,
-      rec.dateReportPrepared,
-    ),
-    totalDaysReviewedStaff: networkDays(
-      rec.dateReportPrepared,
-      rec.dateReportReviewedStaff,
-    ),
-    totalDaysReviewedFocal: networkDays(
-      rec.dateReportReviewedStaff || rec.dateReportPrepared,
-      rec.dateReportReviewedFocal,
-    ),
-    totalDaysApproved: networkDays(
-      rec.dateReportReviewedFocal,
-      rec.dateReportApproved,
-    ),
-  };
-}
-
-function getStatusTag(v) {
-  if (!v) return <Tag color="default">—</Tag>;
-  if (/operational/i.test(v) && !/non/i.test(v))
-    return (
-      <Tag color="green" bordered={false}>
-        <CheckCircleOutlined /> Operational
-      </Tag>
-    );
-  if (/non/i.test(v))
-    return (
-      <Tag color="red" bordered={false}>
-        <CloseCircleOutlined /> Non-Operational
-      </Tag>
-    );
-  return <Tag bordered={false}>{v}</Tag>;
-}
-
-// -- SLF Waste Baseline Info Sub-Tab --
-function WasteBaselineInfo() {
-  const [baselines, setBaselines] = useState([]);
-  const [loading, setLoading] = useState(false);
-  const [expandedGen, setExpandedGen] = useState(null);
-
-  useEffect(() => {
-    setLoading(true);
-    api
-      .get("/data-slf/baselines")
-      .then(({ data }) => setBaselines(data))
-      .catch(() => {})
-      .finally(() => setLoading(false));
-  }, []);
-
-  const columns = [
-    {
-      title: "SLF Name",
-      dataIndex: "slfName",
-      key: "slfName",
-      render: (t) => <Text strong>{t}</Text>,
-    },
-    {
-      title: "Status",
-      dataIndex: "isActive",
-      key: "isActive",
-      width: 100,
-      render: (v) =>
-        v ? <Tag color="green">Active</Tag> : <Tag color="red">Inactive</Tag>,
-    },
-    {
-      title: "Total Volume Accepted",
-      key: "totalVolumeAccepted",
-      render: (_, r) =>
-        r.totalVolumeAccepted != null
-          ? `${r.totalVolumeAccepted.toLocaleString()} ${normalizeUnit(r.totalVolumeAcceptedUnit || r.baselineUnit)}`
-          : "—",
-    },
-    {
-      title: "Active Cell (Residual)",
-      key: "activeCellResidual",
-      render: (_, r) =>
-        r.activeCellResidualVolume != null
-          ? `${r.activeCellResidualVolume.toLocaleString()} ${normalizeUnit(r.activeCellResidualUnit || r.baselineUnit)}`
-          : "—",
-    },
-    {
-      title: "Active Cell (Inert)",
-      key: "activeCellInert",
-      render: (_, r) =>
-        r.activeCellInertVolume != null
-          ? `${r.activeCellInertVolume.toLocaleString()} ${normalizeUnit(r.activeCellInertUnit || r.baselineUnit)}`
-          : "—",
-    },
-    {
-      title: "Closed Cell (Residual)",
-      key: "closedCellResidual",
-      render: (_, r) =>
-        r.closedCellResidualVolume != null
-          ? `${r.closedCellResidualVolume.toLocaleString()} ${normalizeUnit(r.closedCellResidualUnit || r.baselineUnit)}`
-          : "—",
-    },
-    {
-      title: "Closed Cell (Inert)",
-      key: "closedCellInert",
-      render: (_, r) =>
-        r.closedCellInertVolume != null
-          ? `${r.closedCellInertVolume.toLocaleString()} ${normalizeUnit(r.closedCellInertUnit || r.baselineUnit)}`
-          : "—",
-    },
-    {
-      title: "Haulers",
-      key: "haulers",
-      width: 80,
-      render: (_, r) => r.accreditedHaulers?.length || 0,
-    },
-    {
-      title: "Submitted By",
-      dataIndex: "submittedBy",
-      key: "submittedBy",
-      ellipsis: true,
-      render: (v) => v || "—",
-    },
-    {
-      title: "Last Updated",
-      dataIndex: "lastUpdated",
-      key: "lastUpdated",
-      width: 140,
-      render: (v) => (v ? dayjs(v).format("MM/DD/YYYY") : "—"),
-    },
-  ];
-
-  const buildBaselineCellRows = (record, cellType) => {
-    const entries =
-      cellType === "active"
-        ? record.activeCellEntries || []
-        : record.closedCellEntries || [];
-    const fallbackRows =
-      cellType === "active"
-        ? [
-            {
-              cellName: "Active Cell - Residual",
-              wasteType: "Residual",
-              volume: record.activeCellResidualVolume,
-              unit: record.activeCellResidualUnit || record.baselineUnit,
-            },
-            {
-              cellName: "Active Cell - Inert",
-              wasteType: "Inert",
-              volume: record.activeCellInertVolume,
-              unit: record.activeCellInertUnit || record.baselineUnit,
-            },
-            {
-              cellName: "Active Cell - Hazardous",
-              wasteType: "Hazardous Waste",
-              volume: record.activeCellHazardousVolume,
-              unit: record.activeCellHazardousUnit || record.baselineUnit,
-            },
-          ]
-        : [
-            {
-              cellName: "Closed Cell - Residual",
-              wasteType: "Residual",
-              volume: record.closedCellResidualVolume,
-              unit: record.closedCellResidualUnit || record.baselineUnit,
-            },
-            {
-              cellName: "Closed Cell - Inert",
-              wasteType: "Inert",
-              volume: record.closedCellInertVolume,
-              unit: record.closedCellInertUnit || record.baselineUnit,
-            },
-            {
-              cellName: "Closed Cell - Hazardous",
-              wasteType: "Hazardous Waste",
-              volume: record.closedCellHazardousVolume,
-              unit: record.closedCellHazardousUnit || record.baselineUnit,
-            },
-          ];
-
-    const source =
-      entries.length > 0
-        ? entries.map((entry, index) => ({
-            key: `${cellType}-${index}`,
-            cellNo: (parseCellIndex(entry.cellName) ?? index) + 1,
-            cellName: entry.cellName || `Cell ${index + 1}`,
-            wasteType: entry.wasteType || "Residual",
-            volume: Number(entry.volume || 0),
-            unit: record.baselineUnit || "m³",
-          }))
-        : fallbackRows.map((entry, index) => ({
-            key: `${cellType}-fallback-${index}`,
-            cellNo: index + 1,
-            cellName: entry.cellName,
-            wasteType: entry.wasteType,
-            volume: Number(entry.volume || 0),
-            unit: entry.unit || record.baselineUnit || "m³",
-          }));
-
-    return source
-      .filter((entry) => entry.volume > 0)
-      .sort(
-        (a, b) => a.cellNo - b.cellNo || a.cellName.localeCompare(b.cellName),
-      );
-  };
-
-  const baselineCellColumns = [
-    {
-      title: "Cell No.",
-      dataIndex: "cellNo",
-      width: 90,
-      render: (value) => <Tag color="blue">{value}</Tag>,
-    },
-    {
-      title: "Cell Name",
-      dataIndex: "cellName",
-      render: (value) => <Text strong>{value}</Text>,
-    },
-    {
-      title: "Waste Type",
-      dataIndex: "wasteType",
-      render: (value) => (
-        <Tag color={getWasteKind(value) === "hazardous" ? "red" : "green"}>
-          {value}
-        </Tag>
-      ),
-    },
-    {
-      title: "Baseline Volume",
-      key: "volume",
-      align: "right",
-      render: (_, row) => (
-        <Text strong>{formatVolume(row.volume, row.unit)}</Text>
-      ),
-    },
-  ];
-
-  return (
-    <>
-      <div
-        style={{
-          display: "flex",
-          justifyContent: "space-between",
-          marginBottom: 12,
-        }}
-      >
-        <Text type="secondary">
-          Baseline waste volume information submitted by SLF portal users.
-        </Text>
-        <Button
-          size="small"
-          icon={<ReloadOutlined />}
-          onClick={() => {
-            setLoading(true);
-            api
-              .get("/data-slf/baselines")
-              .then(({ data }) => setBaselines(data))
-              .catch(() => {})
-              .finally(() => setLoading(false));
-          }}
-        >
-          Refresh
-        </Button>
-      </div>
-      <Table
-        dataSource={baselines}
-        columns={columns}
-        rowKey="_id"
-        loading={loading}
-        size="small"
-        pagination={{ pageSize: 10 }}
-        scroll={{ x: 1200 }}
-        expandable={{
-          expandedRowKeys: expandedGen ? [expandedGen] : [],
-          onExpand: (expanded, record) =>
-            setExpandedGen(expanded ? record._id : null),
-          expandedRowRender: (record) => {
-            const activeRows = buildBaselineCellRows(record, "active");
-            const closedRows = buildBaselineCellRows(record, "closed");
-            return (
-              <Card
-                size="small"
-                style={{ borderRadius: 8 }}
-                bodyStyle={{ padding: 8 }}
-              >
-                <Collapse
-                  size="small"
-                  defaultActiveKey={["active"]}
-                  items={[
-                    {
-                      key: "active",
-                      label: (
-                        <Space>
-                          <ContainerOutlined /> Active Cell Volumes{" "}
-                          <Tag color="green">{activeRows.length}</Tag>
-                        </Space>
-                      ),
-                      children:
-                        activeRows.length > 0 ? (
-                          <Table
-                            dataSource={activeRows}
-                            columns={baselineCellColumns}
-                            rowKey="key"
-                            size="small"
-                            pagination={false}
-                          />
-                        ) : (
-                          <Empty
-                            image={Empty.PRESENTED_IMAGE_SIMPLE}
-                            description="No active cell baseline volumes"
-                          />
-                        ),
-                    },
-                    {
-                      key: "closed",
-                      label: (
-                        <Space>
-                          <DatabaseOutlined /> Closed Cell Volumes{" "}
-                          <Tag>{closedRows.length}</Tag>
-                        </Space>
-                      ),
-                      children:
-                        closedRows.length > 0 ? (
-                          <Table
-                            dataSource={closedRows}
-                            columns={baselineCellColumns}
-                            rowKey="key"
-                            size="small"
-                            pagination={false}
-                          />
-                        ) : (
-                          <Empty
-                            image={Empty.PRESENTED_IMAGE_SIMPLE}
-                            description="No closed cell baseline volumes"
-                          />
-                        ),
-                    },
-                    {
-                      key: "haulers",
-                      label: (
-                        <Space>
-                          <TeamOutlined /> Accredited Haulers{" "}
-                          <Tag color="blue">
-                            {record.accreditedHaulers?.length || 0}
-                          </Tag>
-                        </Space>
-                      ),
-                      children:
-                        record.accreditedHaulers?.length > 0 ? (
-                          <Table
-                            dataSource={record.accreditedHaulers}
-                            rowKey={(_, i) => i}
-                            size="small"
-                            pagination={false}
-                            columns={[
-                              {
-                                title: "Hauler Name",
-                                dataIndex: "haulerName",
-                                key: "haulerName",
-                              },
-                              {
-                                title: "Number of Trucks",
-                                dataIndex: "numberOfTrucks",
-                                key: "numberOfTrucks",
-                                render: (v) => v ?? "—",
-                              },
-                              {
-                                title: "Private Sector Clients",
-                                dataIndex: "privateSectorClients",
-                                key: "privateSectorClients",
-                                render: (v) => v || "—",
-                              },
-                            ]}
-                          />
-                        ) : (
-                          <Empty
-                            image={Empty.PRESENTED_IMAGE_SIMPLE}
-                            description="No accredited haulers"
-                          />
-                        ),
-                    },
-                  ]}
-                />
-              </Card>
-            );
-          },
-          rowExpandable: () => true,
-        }}
-      />
-    </>
-  );
-}
-
-// -- Portal Generators Sub-Tab --
-function PortalGenerators({
-  generators,
-  loadingGen,
-  fetchGenerators,
-  slfRecords,
-  canEdit = true,
-  canDelete = true,
-  isDark,
-}) {
-  const [modalOpen, setModalOpen] = useState(false);
-  const [editing, setEditing] = useState(null);
-  const [portalStats, setPortalStats] = useState([]);
-  const [portalUsers, setPortalUsers] = useState([]);
-  const [submissions, setSubmissions] = useState([]);
-  const [loadingSub, setLoadingSub] = useState(false);
-  const [form] = Form.useForm();
-  const [txnHistoryModal, setTxnHistoryModal] = useState({
-    open: false,
-    submissionId: null,
-  });
-  const [txnHistoryData, setTxnHistoryData] = useState([]);
-  const [txnHistoryLoading, setTxnHistoryLoading] = useState(false);
-  const [emailModal, setEmailModal] = useState({ open: false, record: null });
-  const [emailSubject, setEmailSubject] = useState("");
-  const [emailMessage, setEmailMessage] = useState("");
-  const [emailSending, setEmailSending] = useState(false);
-  const [revertModal, setRevertModal] = useState({ open: false, record: null });
-  const [revertReason, setRevertReason] = useState("");
-  const [revertLoading, setRevertLoading] = useState(false);
-  const [revertFollowUp, setRevertFollowUp] = useState({
-    enabled: false,
-    subject: "",
-    message: "",
-    temporaryDeleteAfterDays: 3,
-  });
-  const [submissionSearch, setSubmissionSearch] = useState("");
-  const [submissionStatusFilter, setSubmissionStatusFilter] = useState(null);
-  const [expandedRowKeys, setExpandedRowKeys] = useState([]);
-  const unitOptions = [
-    { label: "Tons", value: "tons" },
-    {
-      label: (
-        <span>
-          m<sup>3</sup>
-        </span>
-      ),
-      value: "m³",
-    },
-  ];
-
-  const fetchSubmissions = useCallback((showLoading = true) => {
-    if (showLoading) setLoadingSub(true);
-    api
-      .get("/data-slf")
-      .then(({ data }) =>
-        setSubmissions((data || []).map(normalizeSubmissionRecord)),
-      )
-      .catch(() => {})
-      .finally(() => {
-        if (showLoading) setLoadingSub(false);
-      });
-  }, []);
-
-  const fetchGeneratorStats = useCallback(() => {
-    api
-      .get("/data-slf/generator-summary")
-      .then(({ data }) => setPortalStats(data))
-      .catch(() => {});
-  }, []);
-
-  useEffect(() => {
-    fetchGeneratorStats();
-    api
-      .get("/portal-users")
-      .then(({ data }) => setPortalUsers(Array.isArray(data) ? data : []))
-      .catch(() => setPortalUsers([]));
-    fetchSubmissions();
-  }, [fetchSubmissions, fetchGeneratorStats]);
-
-  // Refresh quietly in the background so the table does not keep entering a
-  // loading state. Live socket events drive immediate updates; the timer is a
-  // gentle fallback so the Waste Generators view reflects newly submitted data.
-  useEffect(() => {
-    const refresh = () => {
-      fetchSubmissions(false);
-      fetchGeneratorStats();
-    };
-    const interval = setInterval(refresh, 60000);
-    const socket = getSocket();
-    const handler = ({ target } = {}) => {
-      if (!target || target === "submissions") refresh();
-    };
-    if (socket) socket.on("data-refresh", handler);
-    return () => {
-      clearInterval(interval);
-      if (socket) socket.off("data-refresh", handler);
-    };
-  }, [fetchSubmissions, fetchGeneratorStats]);
-
-  const openTxnHistory = async (submissionId) => {
-    setTxnHistoryModal({ open: true, submissionId });
-    setTxnHistoryLoading(true);
-    try {
-      const { data } = await api.get(`/transactions/thread/${submissionId}`);
-      setTxnHistoryData(data);
-    } catch {
-      setTxnHistoryData([]);
-    } finally {
-      setTxnHistoryLoading(false);
-    }
-  };
-
-  const openEmailModal = (record) => {
-    setEmailModal({ open: true, record });
-    setEmailSubject("");
-    setEmailMessage("");
-  };
-
-  const isAgedSubmission = (record) => dayjs().diff(dayjs(record?.createdAt), "day") >= 1;
-
-  const getRevertFollowUpTemplate = (record) => ({
-    enabled: isAgedSubmission(record),
-    subject: "Follow-Up Required: Reverted SLF Submission {{idNo}}",
-    message: [
-      "Dear Portal User,",
-      "",
-      "This is a follow-up regarding your reverted SLF submission {{idNo}} for {{companyName}}.",
-      "",
-      "Reason for revert: {{reason}}",
-      "",
-      "Please log in to the SLF portal, update the reverted data, and submit the corrected entry on or before {{deadline}}. If no corrected submission is received by the deadline, the data will be temporarily moved to Deleted Submissions for admin review.",
-      "",
-      "Thank you.",
-    ].join("\n"),
-    temporaryDeleteAfterDays: 3,
-  });
-
-  const openRevertModal = (record) => {
-    setRevertModal({ open: true, record });
-    setRevertReason("");
-    setRevertFollowUp(getRevertFollowUpTemplate(record));
-  };
-
-  const handleSendEmail = async () => {
-    if (!emailSubject.trim() || !emailMessage.trim()) {
-      Swal.fire(
-        "Warning",
-        "Please fill in both subject and message.",
-        "warning",
-      );
-      return;
-    }
-    setEmailSending(true);
-    try {
-      await api.post(`/data-slf/${emailModal.record._id}/send-email`, {
-        subject: emailSubject,
-        message: emailMessage,
-      });
-      Swal.fire({
-        icon: "success",
-        title: "Email Sent",
-        text: `Email sent to ${emailModal.record.submittedBy}`,
-        confirmButtonColor: ACCENT,
-        timer: 2500,
-      });
-      setEmailModal({ open: false, record: null });
-    } catch (err) {
-      Swal.fire(
-        "Error",
-        err.response?.data?.message || "Failed to send email",
-        "error",
-      );
-    } finally {
-      setEmailSending(false);
-    }
-  };
-
-  const handleAdminRevert = async () => {
-    if (!revertReason.trim()) {
-      Swal.fire("Warning", "Please provide a reason for reverting.", "warning");
-      return;
-    }
-    const confirm = await Swal.fire({
-      icon: "warning",
-      title: "Are you sure you want to revert this submission?",
-      html: `<div style="text-align:left;font-size:13px;line-height:1.7;">
-        <p>Reverting this submission will:</p>
-        <ul style="margin:8px 0;padding-left:20px;">
-          <li>Change the status to <strong>Reverted</strong></li>
-          <li>Notify the portal user (<strong>${revertModal.record?.submittedBy || "N/A"}</strong>) via email</li>
-          <li>Allow the portal user to edit and resubmit the entry</li>
-          <li>Record this action in the transaction history</li>
-        </ul>
-        <p style="margin-top:8px;"><strong>Reason:</strong> ${revertReason}</p>
-      </div>`,
-      showCancelButton: true,
-      confirmButtonText: "Yes, Revert",
-      confirmButtonColor: "#fa541c",
-      cancelButtonText: "Cancel",
-    });
-    if (!confirm.isConfirmed) return;
-    setRevertLoading(true);
-    try {
-      await api.patch(`/data-slf/${revertModal.record._id}/admin-revert`, {
-        reason: revertReason,
-        performedBy: "admin",
-        sendFollowUp: revertFollowUp.enabled,
-        followUpSubject: revertFollowUp.subject,
-        followUpMessage: revertFollowUp.message,
-        temporaryDeleteAfterDays: revertFollowUp.temporaryDeleteAfterDays,
-      });
-      Swal.fire({
-        icon: "success",
-        title: "Reverted",
-        text: "Submission reverted and the portal user has been notified via email.",
-        confirmButtonColor: ACCENT,
-        timer: 2500,
-      });
-      setRevertModal({ open: false, record: null });
-      setRevertReason("");
-      setRevertFollowUp({ enabled: false, subject: "", message: "", temporaryDeleteAfterDays: 3 });
-      fetchSubmissions();
-    } catch (err) {
-      Swal.fire(
-        "Error",
-        err.response?.data?.message || "Failed to revert",
-        "error",
-      );
-    } finally {
-      setRevertLoading(false);
-    }
-  };
-
-  const statsMap = useMemo(() => {
-    const m = {};
-    portalStats.forEach((s) => (m[s._id] = s));
-    return m;
-  }, [portalStats]);
-
-  const overallStats = useMemo(() => {
-    return portalStats.reduce(
-      (acc, s) => ({
-        totalEntries: acc.totalEntries + s.totalEntries,
-        pendingCount: acc.pendingCount + s.pendingCount,
-        acknowledgedCount: acc.acknowledgedCount + s.acknowledgedCount,
-        totalVolume: acc.totalVolume + s.totalVolume,
-        totalTrucks: acc.totalTrucks + s.totalTrucks,
-      }),
-      {
-        totalEntries: 0,
-        pendingCount: 0,
-        acknowledgedCount: 0,
-        totalVolume: 0,
-        totalTrucks: 0,
-      },
-    );
-  }, [portalStats]);
-
-  const portalGeneratorCount = useMemo(
-    () =>
-      portalUsers.length
-        ? portalUsers.filter((user) => user.status === "approved").length
-        : generators.length,
-    [generators.length, portalUsers],
-  );
-
-  const activePortalGeneratorCount = useMemo(
-    () =>
-      portalUsers.length
-        ? portalUsers.filter(
-            (user) =>
-              user.status === "approved" &&
-              !user.blocked &&
-              !user.maintenanceMode,
-          ).length
-        : generators.filter((g) => g.isActive).length,
-    [generators, portalUsers],
-  );
-
-  const filteredSubmissions = useMemo(() => {
-    return submissions.filter((s) => {
-      const matchStatus =
-        !submissionStatusFilter || s.status === submissionStatusFilter;
-      const matchSearch = rowMatchesSearch(s, submissionSearch);
-      return matchStatus && matchSearch;
-    });
-  }, [submissions, submissionSearch, submissionStatusFilter]);
-
-  const submissionWasteStats = useMemo(() => {
-    let residual = 0,
-      haz = 0,
-      other = 0;
-    submissions.forEach((s) => {
-      (s.trucks || []).forEach((t) => {
-        const wt = (t.wasteType || "").toLowerCase();
-        if (wt.includes("haz") || wt.includes("inert"))
-          haz += t.actualVolume || 0;
-        else if (wt.includes("residual")) residual += t.actualVolume || 0;
-        else other += t.actualVolume || 0;
-      });
-    });
-    return { residual, haz, other };
-  }, [submissions]);
-
-  const portalCellSummaries = useMemo(() => {
-    return generators
-      .map((generator) => {
-        const generatorId = String(generator._id || "");
-        const facility = slfRecords.find((record) => {
-          const ids = getRecordIds(record);
-          const names = expandSlfNames(getFacilitySlfNames(record)).map(
-            (name) => normalizeSlfKey(name),
-          );
-          return (
-            ids.includes(generatorId) ||
-            names.includes(normalizeSlfKey(generator.slfName))
-          );
-        });
-        const generatorSubmissions = submissions.filter((submission) => {
-          const submissionId = getSubmissionSlfId(submission);
-          if (submissionId && submissionId === generatorId) return true;
-          return getSubmissionSlfNames(submission).some(
-            (name) =>
-              normalizeSlfKey(name) === normalizeSlfKey(generator.slfName),
-          );
-        });
-        const usage = facility?._cellUsageRows?.length
-          ? {
-              rows: facility._cellUsageRows,
-              totalBaseline: Number(facility._baselineWasteReceived || 0),
-              totalSubmissions: Number(facility._submissionWasteReceived || 0),
-              total: Number(facility.actualResidualWasteReceived || 0),
-              unit: facility.wasteReceivedUnit || "tons",
-            }
-          : buildFacilityCellUsage(
-              { ...generator, lgu: generator.slfName, numberOfCell: 1 },
-              null,
-              generatorSubmissions,
-            );
-
-        return {
-          key: generatorId || generator.slfName,
-          slfName: generator.slfName,
-          facility,
-          rows: usage.rows.filter(
-            (row) => row.status !== "Closed" || row.total > 0,
-          ),
-          totalBaseline: usage.totalBaseline,
-          totalSubmissions: usage.totalSubmissions,
-          total: usage.total,
-          unit: usage.unit,
-          submissionCount: generatorSubmissions.length,
-        };
-      })
-      .filter(
-        (item) =>
-          item.submissionCount > 0 ||
-          item.total > 0 ||
-          item.facility?._cellUsageRows?.length > 0,
-      );
-  }, [generators, slfRecords, submissions]);
-
-  const portalCellColumns = [
-    {
-      title: "Cell",
-      dataIndex: "cellName",
-      width: 130,
-      render: (value, row) => (
-        <Text strong>{value || `Cell ${row.index + 1}`}</Text>
-      ),
-    },
-    {
-      title: "Type",
-      dataIndex: "type",
-      width: 120,
-      render: (value) => (
-        <Tag color={isHazardousCellType(value) ? "red" : "blue"}>
-          {isHazardousCellType(value) ? "Haz" : "Residual"}
-        </Tag>
-      ),
-    },
-    {
-      title: "Status",
-      dataIndex: "status",
-      width: 130,
-      render: (value) => (
-        <Tag
-          color={
-            value === "Operational"
-              ? "green"
-              : value === "Closed"
-                ? "default"
-                : "gold"
-          }
-        >
-          {value || "Operational"}
-        </Tag>
-      ),
-    },
-    {
-      title: "Baseline",
-      key: "baseline",
-      align: "right",
-      render: (_, row) => formatVolume(row.baseline, row.unit),
-    },
-    {
-      title: "Submissions",
-      key: "submissions",
-      align: "right",
-      render: (_, row) => (
-        <Text strong style={{ color: "#2f54eb" }}>
-          {formatVolume(row.submissions, row.unit)}
-        </Text>
-      ),
-    },
-    {
-      title: "Total Fill",
-      key: "total",
-      align: "right",
-      render: (_, row) => (
-        <Text strong>{formatVolume(row.total, row.unit)}</Text>
-      ),
-    },
-    {
-      title: "Capacity",
-      key: "capacity",
-      align: "right",
-      render: (_, row) =>
-        row.capacity > 0 ? formatVolume(row.capacity, row.capacityUnit) : "—",
-    },
-  ];
-
-  const revertRequestCount = useMemo(
-    () => submissions.filter((s) => s.revertRequested).length,
-    [submissions],
-  );
-
-  const openAdd = () => {
-    setEditing(null);
-    form.resetFields();
-    form.setFieldsValue({
-      existingBaselineUnit: "tons",
-      totalVolumeSinceOperationUnit: "tons",
-      totalVolumeActiveCellsUnit: "tons",
-      totalVolumeClosedCellsUnit: "tons",
-      isActive: true,
-      accreditedHaulers: [],
-    });
-    setModalOpen(true);
-  };
-  const openEdit = (r) => {
-    setEditing(r);
-    form.setFieldsValue({ ...r, accreditedHaulers: r.accreditedHaulers || [] });
-    setModalOpen(true);
-  };
-
-  const handleSave = async () => {
-    try {
-      const values = await form.validateFields();
-      if (editing) {
-        await api.put(`/slf-generators/${editing._id}`, values);
-        Swal.fire("Updated", "Generator updated", "success");
-      } else {
-        await api.post("/slf-generators", values);
-        Swal.fire("Created", "Generator added", "success");
-      }
-      setModalOpen(false);
-      fetchGenerators();
-    } catch (err) {
-      if (err.response)
-        Swal.fire(
-          "Error",
-          err.response.data?.message || "Save failed",
-          "error",
-        );
-    }
-  };
-
-  const handleDelete = async (id) => {
-    try {
-      await api.delete(`/slf-generators/${id}`);
-      Swal.fire("Deleted", "Generator removed", "success");
-      fetchGenerators();
-    } catch {
-      Swal.fire("Error", "Delete failed", "error");
-    }
-  };
-
-  const linkedFacilities = useMemo(() => {
-    const map = {};
-    slfRecords.forEach((r) => {
-      if (r.slfGenerator) {
-        const gid =
-          typeof r.slfGenerator === "object"
-            ? r.slfGenerator._id
-            : r.slfGenerator;
-        map[gid] = (map[gid] || 0) + 1;
-      }
-    });
-    return map;
-  }, [slfRecords]);
-
-  const genColumns = [
-    {
-      title: "SLF Name",
-      dataIndex: "slfName",
-      sorter: (a, b) => (a.slfName || "").localeCompare(b.slfName || ""),
-      render: (t, r) => (
-        <div>
-          <Text strong style={{ fontSize: 12 }}>
-            {t}
-          </Text>
-          {!r.isActive && (
-            <Tag color="red" style={{ marginLeft: 6, fontSize: 9 }}>
-              Inactive
-            </Tag>
-          )}
-        </div>
-      ),
-    },
-    {
-      title: "Linked Facility",
-      width: 120,
-      render: (_, r) => {
-        const cnt = linkedFacilities[r._id] || 0;
-        const fac = slfRecords.find((sr) => {
-          const gid =
-            typeof sr.slfGenerator === "object"
-              ? sr.slfGenerator?._id
-              : sr.slfGenerator;
-          return gid === r._id;
-        });
-        return cnt > 0 ? (
-          <div>
-            <Tag
-              color="geekblue"
-              icon={<BankOutlined />}
-              style={{ fontSize: 10 }}
-            >
-              {cnt} record{cnt > 1 ? "s" : ""}
-            </Tag>
-            {fac && (
-              <div style={{ fontSize: 10, color: "#8c8c8c", marginTop: 2 }}>
-                {fac.lgu || "—"}, {fac.province || ""}
-              </div>
-            )}
-          </div>
-        ) : (
-          <Text type="secondary" style={{ fontSize: 11 }}>
-            —
-          </Text>
-        );
-      },
-    },
-    {
-      title: "Baseline Volume",
-      width: 130,
-      render: (_, r) => {
-        const v = r.existingBaselineVolume ?? 0;
-        return v > 0 ? (
-          <Text style={{ fontSize: 12 }}>
-            {v.toLocaleString()}{" "}
-            <Text type="secondary" style={{ fontSize: 10 }}>
-              {(r.existingBaselineUnit || "tons").replace("m3", "m³")}
-            </Text>
-          </Text>
-        ) : (
-          <Text type="secondary" style={{ fontSize: 11 }}>
-            —
-          </Text>
-        );
-      },
-    },
-    {
-      title: "Total Since Operation",
-      width: 140,
-      render: (_, r) => {
-        const v = r.totalVolumeSinceOperation ?? 0;
-        return v > 0 ? (
-          <Text style={{ fontSize: 12 }}>
-            {v.toLocaleString()}{" "}
-            <Text type="secondary" style={{ fontSize: 10 }}>
-              {(r.totalVolumeSinceOperationUnit || "tons").replace("m3", "m³")}
-            </Text>
-          </Text>
-        ) : (
-          <Text type="secondary" style={{ fontSize: 11 }}>
-            —
-          </Text>
-        );
-      },
-    },
-    {
-      title: "Accredited Haulers",
-      width: 110,
-      align: "center",
-      render: (_, r) => {
-        const cnt = r.accreditedHaulers?.length || 0;
-        return cnt > 0 ? (
-          <Tag color="blue">
-            {cnt} hauler{cnt > 1 ? "s" : ""}
-          </Tag>
-        ) : (
-          <Text type="secondary" style={{ fontSize: 11 }}>
-            —
-          </Text>
-        );
-      },
-    },
-    {
-      title: "Submissions",
-      width: 100,
-      align: "center",
-      render: (_, r) => {
-        const st = statsMap[r._id];
-        if (!st)
-          return (
-            <Text type="secondary" style={{ fontSize: 11 }}>
-              -
-            </Text>
-          );
-        return (
-          <div style={{ lineHeight: 1.3 }}>
-            <Tag color="blue" style={{ margin: 0, fontSize: 11 }}>
-              {st.totalEntries}
-            </Tag>
-            {st.pendingCount > 0 && (
-              <Tag
-                color="orange"
-                style={{ margin: "2px 0 0", fontSize: 10, display: "block" }}
-              >
-                Pending: {st.pendingCount} pending
-              </Tag>
-            )}
-          </div>
-        );
-      },
-    },
-    {
-      title: "Status",
-      width: 80,
-      align: "center",
-      dataIndex: "isActive",
-      render: (v) =>
-        v ? (
-          <Tag color="success">Active</Tag>
-        ) : (
-          <Tag color="error">Inactive</Tag>
-        ),
-    },
-    {
-      title: "Actions",
-      width: 100,
-      render: (_, r) => (
-        <Space size={4}>
-          {canEdit && (
-            <Tooltip title="Edit Generator">
-              <Button
-                type="text"
-                size="small"
-                icon={<EditOutlined style={{ color: ACCENT }} />}
-                onClick={() => openEdit(r)}
-              />
-            </Tooltip>
-          )}
-          {canDelete && (
-            <Popconfirm
-              title="Delete this generator?"
-              onConfirm={() => handleDelete(r._id)}
-              okButtonProps={{ danger: true }}
-            >
-              <Tooltip title="Delete">
-                <Button
-                  type="text"
-                  size="small"
-                  danger
-                  icon={<DeleteOutlined />}
-                />
-              </Tooltip>
-            </Popconfirm>
-          )}
-        </Space>
-      ),
-    },
-  ];
-
-  const STATUS_OPTS = [
-    { label: "All", value: null },
-    { label: "Pending", value: "pending", color: "orange" },
-    { label: "Acknowledged", value: "acknowledged", color: "green" },
-    { label: "Rejected", value: "rejected", color: "red" },
-    { label: "Reverted", value: "reverted", color: "volcano" },
-  ];
-
-  const getSubmissionSlfLabel = (record) =>
-    record.slfGenerator?.slfName ||
-    record.slfGenerator?.lgu ||
-    record.slfName ||
-    "Unassigned SLF";
-
-  const submittedDataSummary = useMemo(() => {
-    const statusCounts = submissions.reduce((acc, submission) => {
-      const status = submission.status || "pending";
-      acc[status] = (acc[status] || 0) + 1;
-      return acc;
-    }, {});
-    const companySet = new Set();
-    const haulerSet = new Set();
-    const volumeByUnit = {};
-    const generatorMap = new Map();
-    let totalTrucks = 0;
-    let latestSubmission = null;
-
-    submissions.forEach((submission) => {
-      if (submission.lguCompanyName) {
-        companySet.add(submission.lguCompanyName.trim().toLowerCase());
-      }
-      const slfName = getSubmissionSlfLabel(submission);
-      const current = generatorMap.get(slfName) || {
-        name: slfName,
-        submissions: 0,
-        trucks: 0,
-        volume: 0,
-      };
-      current.submissions += 1;
-      if (
-        !latestSubmission ||
-        dayjs(submission.createdAt).isAfter(dayjs(latestSubmission.createdAt))
-      ) {
-        latestSubmission = submission;
-      }
-
-      (submission.trucks || []).forEach((truck) => {
-        totalTrucks += 1;
-        current.trucks += 1;
-        if (truck.hauler) {
-          haulerSet.add(truck.hauler.trim().toLowerCase());
-        }
-        const volume = Number(truck.actualVolume || 0);
-        if (volume > 0) {
-          const unit = normalizeUnit(truck.actualVolumeUnit || "tons");
-          volumeByUnit[unit] = (volumeByUnit[unit] || 0) + volume;
-          current.volume += volume;
-        }
-      });
-
-      generatorMap.set(slfName, current);
-    });
-
-    const volumeText = Object.entries(volumeByUnit)
-      .sort((a, b) => b[1] - a[1])
-      .map(([unit, value]) => `${value.toLocaleString()} ${unit}`)
-      .join(" / ");
-
-    return {
-      statusCounts,
-      uniqueCompanies: companySet.size,
-      uniqueHaulers: haulerSet.size,
-      totalTrucks,
-      averageTrucks: submissions.length
-        ? (totalTrucks / submissions.length).toFixed(1)
-        : "0",
-      volumeText: volumeText || "No volume yet",
-      latestSubmission,
-      topGenerators: [...generatorMap.values()]
-        .sort((a, b) => b.submissions - a.submissions || b.volume - a.volume)
-        .slice(0, 5),
-    };
-  }, [submissions]);
-
-  const subColumns = [
-    {
-      title: "ID No.",
-      dataIndex: "idNo",
-      width: 160,
-      render: (t) => (
-        <Text strong style={{ fontSize: 11, fontFamily: "monospace" }}>
-          {t}
-        </Text>
-      ),
-    },
-    {
-      title: "SLF / Generator",
-      key: "slfName",
-      width: 150,
-      render: (_, r) => {
-        const label = getSubmissionSlfLabel(r);
-        return label !== "Unassigned SLF" ? (
-          <Tag
-            icon={<BankOutlined />}
-            color="geekblue"
-            style={{ fontSize: 10 }}
-          >
-            {label}
-          </Tag>
-        ) : (
-          <Text type="secondary" style={{ fontSize: 11 }}>
-            —
-          </Text>
-        );
-      },
-      filters: generators.map((g) => ({ text: g.slfName, value: g._id })),
-      onFilter: (val, r) => matchesFilter(r.slfGenerator?._id || r.slfGenerator, val),
-    },
-    {
-      title: "Company",
-      dataIndex: "lguCompanyName",
-      ellipsis: true,
-      render: (v, r) => (
-        <div style={{ lineHeight: 1.3 }}>
-          <Text style={{ fontSize: 12 }}>{v || "—"}</Text>
-          {r.companyType && (
-            <div>
-              <Tag
-                style={{ fontSize: 9, marginTop: 2 }}
-                color={r.companyType === "LGU" ? "blue" : "purple"}
-              >
-                {r.companyType}
-              </Tag>
-            </div>
-          )}
-        </div>
-      ),
-    },
-    {
-      title: "Date",
-      dataIndex: "dateOfDisposal",
-      width: 100,
-      render: (v) =>
-        v ? (
-          <Text style={{ fontSize: 11 }}>{dayjs(v).format("MM/DD/YYYY")}</Text>
-        ) : (
-          "—"
-        ),
-      sorter: (a, b) =>
-        new Date(a.dateOfDisposal || 0) - new Date(b.dateOfDisposal || 0),
-    },
-    {
-      title: "Trucks",
-      width: 65,
-      align: "center",
-      render: (_, r) => {
-        const cnt = r.trucks?.length || 0;
-        return cnt > 0 ? (
-          <Tag color="cyan">{cnt}</Tag>
-        ) : (
-          <Text type="secondary">0</Text>
-        );
-      },
-    },
-    {
-      title: "Volume",
-      width: 110,
-      render: (_, r) => {
-        const summary = getSubmissionVolumeSummary(r);
-        return summary ? (
-          <Text strong style={{ fontSize: 12, color: "#2f54eb" }}>
-            {summary}
-          </Text>
-        ) : (
-          "—"
-        );
-      },
-      sorter: (a, b) => {
-        const va = (a.trucks || []).reduce(
-          (s, t) => s + (t.actualVolume || 0),
-          0,
-        );
-        const vb = (b.trucks || []).reduce(
-          (s, t) => s + (t.actualVolume || 0),
-          0,
-        );
-        return va - vb;
-      },
-    },
-    {
-      title: "Waste Types",
-      width: 140,
-      render: (_, r) => {
-        const trucks = r.trucks || [];
-        const residual = trucks.filter(
-          (t) =>
-            !(t.wasteType || "").toLowerCase().includes("haz") &&
-            !(t.wasteType || "").toLowerCase().includes("inert"),
-        );
-        const haz = trucks.filter(
-          (t) =>
-            (t.wasteType || "").toLowerCase().includes("haz") ||
-            (t.wasteType || "").toLowerCase().includes("inert"),
-        );
-        if (!trucks.length)
-          return (
-            <Text type="secondary" style={{ fontSize: 11 }}>
-              —
-            </Text>
-          );
-        return (
-          <Space size={4} wrap>
-            {residual.length > 0 && (
-              <Tag color="green" style={{ fontSize: 10 }}>
-                <CheckCircleOutlined /> {residual.length} Residual
-              </Tag>
-            )}
-            {haz.length > 0 && (
-              <Tag color="red" style={{ fontSize: 10 }}>
-                <WarningOutlined /> {haz.length} Haz/Inert
-              </Tag>
-            )}
-          </Space>
-        );
-      },
-    },
-    {
-      title: "Status",
-      dataIndex: "status",
-      width: 110,
-      render: (v, r) => {
-        const color =
-          v === "acknowledged"
-            ? "green"
-            : v === "rejected"
-              ? "red"
-              : v === "reverted"
-                ? "volcano"
-                : v === "revert_requested"
-                  ? "gold"
-                  : "orange";
-        return (
-          <div>
-            <Tag color={color} style={{ fontSize: 10 }}>
-              {v}
-            </Tag>
-            {r.revertRequested && (
-              <Tag
-                color="gold"
-                style={{ fontSize: 9, marginTop: 2, display: "block" }}
-              >
-                Revert Req.
-              </Tag>
-            )}
-          </div>
-        );
-      },
-      filters: [
-        { text: "Pending", value: "pending" },
-        { text: "Acknowledged", value: "acknowledged" },
-        { text: "Rejected", value: "rejected" },
-        { text: "Reverted", value: "reverted" },
-      ],
-      onFilter: (val, r) => matchesFilter(r.status, val),
-    },
-    {
-      title: "Submitted",
-      dataIndex: "createdAt",
-      width: 110,
-      render: (v) =>
-        v ? (
-          <Text type="secondary" style={{ fontSize: 11 }}>
-            {dayjs(v).format("MM/DD/YYYY")}
-          </Text>
-        ) : (
-          "—"
-        ),
-      sorter: (a, b) => new Date(a.createdAt || 0) - new Date(b.createdAt || 0),
-      defaultSortOrder: "descend",
-    },
-    {
-      title: "Actions",
-      key: "actions",
-      width: 160,
-      render: (_, r) => (
-        <Space size={2}>
-          {r.submissionId && (
-            <Tooltip title="Transaction History">
-              <Button
-                type="text"
-                size="small"
-                icon={<HistoryOutlined style={{ color: "#722ed1" }} />}
-                onClick={() => openTxnHistory(r.submissionId)}
-              />
-            </Tooltip>
-          )}
-          {r.submittedBy && (
-            <Tooltip title="Send Email">
-              <Button
-                type="text"
-                size="small"
-                icon={<MailOutlined style={{ color: "#1677ff" }} />}
-                onClick={() => openEmailModal(r)}
-              />
-            </Tooltip>
-          )}
-          {r.status !== "reverted" && (
-            <Tooltip title="Revert Submission">
-              <Button
-                type="text"
-                size="small"
-                icon={<UndoOutlined style={{ color: "#fa541c" }} />}
-                onClick={() => openRevertModal(r)}
-              />
-            </Tooltip>
-          )}
-          {r.revertRequested && (
-            <Tooltip
-              title={`Revert requested: ${r.revertReason || "No reason"}`}
-            >
-              <Popconfirm
-                title="Approve Revert?"
-                description="This will set the submission back to Pending for the portal user to edit."
-                onConfirm={async () => {
-                  try {
-                    await api.patch(`/data-slf/${r._id}/approve-revert`);
-                    fetchSubmissions();
-                    Swal.fire({
-                      icon: "success",
-                      title: "Reverted",
-                      text: "Submission reverted to Pending.",
-                      confirmButtonColor: ACCENT,
-                      timer: 2000,
-                    });
-                  } catch (err) {
-                    Swal.fire({
-                      icon: "error",
-                      title: "Error",
-                      text: err.response?.data?.message || "Failed to revert",
-                    });
-                  }
-                }}
-                okText="Approve Revert"
-                okButtonProps={{
-                  style: { background: "#fa8c16", borderColor: "#fa8c16" },
-                }}
-              >
-                <Button
-                  type="text"
-                  size="small"
-                  icon={
-                    <Badge dot>
-                      <UndoOutlined style={{ color: "#fa8c16" }} />
-                    </Badge>
-                  }
-                />
-              </Popconfirm>
-            </Tooltip>
-          )}
-        </Space>
-      ),
-    },
-  ];
-
-  const VolumeRow = ({ label, nameVal, nameUnit }) => (
-    <Row gutter={8}>
-      <Col xs={16}>
-        <Form.Item label={label} name={nameVal}>
-          <InputNumber min={0} style={{ width: "100%" }} />
-        </Form.Item>
-      </Col>
-      <Col xs={8}>
-        <Form.Item label="Unit" name={nameUnit}>
-          <Select options={unitOptions} />
-        </Form.Item>
-      </Col>
-    </Row>
-  );
-
-  return (
-    <>
-      {/* -- Summary Stats -------------------------------------------- */}
-      <Row gutter={[10, 10]} style={{ marginBottom: 16 }}>
-        <Col xs={12} sm={8} md={4}>
-          <Card
-            size="small"
-            style={{ borderRadius: 10, borderLeft: `3px solid ${ACCENT}` }}
-            bodyStyle={{ padding: "10px 14px" }}
-          >
-            <Statistic
-              title={<span style={{ fontSize: 11 }}>Total Generators</span>}
-              value={portalGeneratorCount}
-              valueStyle={{ fontSize: 20 }}
-              prefix={
-                <DatabaseOutlined style={{ color: ACCENT, fontSize: 13 }} />
-              }
-            />
-            <Text type="secondary" style={{ fontSize: 10 }}>
-              {activePortalGeneratorCount} active portal accounts
-            </Text>
-          </Card>
-        </Col>
-        <Col xs={12} sm={8} md={4}>
-          <Card
-            size="small"
-            style={{ borderRadius: 10, borderLeft: "3px solid #1677ff" }}
-            bodyStyle={{ padding: "10px 14px" }}
-          >
-            <Statistic
-              title={<span style={{ fontSize: 11 }}>Total Submissions</span>}
-              value={overallStats.totalEntries}
-              valueStyle={{ fontSize: 20 }}
-              prefix={
-                <FileTextOutlined style={{ color: "#1677ff", fontSize: 13 }} />
-              }
-            />
-            <Text type="secondary" style={{ fontSize: 10 }}>
-              {submissions.length} entries loaded
-            </Text>
-          </Card>
-        </Col>
-        <Col xs={12} sm={8} md={4}>
-          <Card
-            size="small"
-            style={{ borderRadius: 10, borderLeft: "3px solid #faad14" }}
-            bodyStyle={{ padding: "10px 14px" }}
-          >
-            <Statistic
-              title={<span style={{ fontSize: 11 }}>Pending Reviews</span>}
-              value={overallStats.pendingCount}
-              valueStyle={{ fontSize: 20, color: "#faad14" }}
-              prefix={
-                <AlertOutlined style={{ color: "#faad14", fontSize: 13 }} />
-              }
-            />
-            <Text type="secondary" style={{ fontSize: 10 }}>
-              Awaiting acknowledgement
-            </Text>
-          </Card>
-        </Col>
-        <Col xs={12} sm={8} md={4}>
-          <Card
-            size="small"
-            style={{ borderRadius: 10, borderLeft: "3px solid #52c41a" }}
-            bodyStyle={{ padding: "10px 14px" }}
-          >
-            <Statistic
-              title={<span style={{ fontSize: 11 }}>Acknowledged</span>}
-              value={overallStats.acknowledgedCount}
-              valueStyle={{ fontSize: 20, color: "#52c41a" }}
-              prefix={
-                <CheckCircleOutlined
-                  style={{ color: "#52c41a", fontSize: 13 }}
-                />
-              }
-            />
-            <Text type="secondary" style={{ fontSize: 10 }}>
-              Confirmed submissions
-            </Text>
-          </Card>
-        </Col>
-        <Col xs={12} sm={8} md={4}>
-          <Card
-            size="small"
-            style={{ borderRadius: 10, borderLeft: "3px solid #fa8c16" }}
-            bodyStyle={{ padding: "10px 14px" }}
-          >
-            <Statistic
-              title={<span style={{ fontSize: 11 }}>Revert Requests</span>}
-              value={revertRequestCount}
-              valueStyle={{
-                fontSize: 20,
-                color: revertRequestCount > 0 ? "#fa8c16" : undefined,
-              }}
-              prefix={
-                <UndoOutlined style={{ color: "#fa8c16", fontSize: 13 }} />
-              }
-            />
-            <Text type="secondary" style={{ fontSize: 10 }}>
-              Pending revert approval
-            </Text>
-          </Card>
-        </Col>
-        <Col xs={12} sm={8} md={4}>
-          <Card
-            size="small"
-            style={{ borderRadius: 10, borderLeft: "3px solid #722ed1" }}
-            bodyStyle={{ padding: "10px 14px" }}
-          >
-            <Statistic
-              title={<span style={{ fontSize: 11 }}>Total Volume</span>}
-              value={overallStats.totalVolume}
-              valueStyle={{ fontSize: 20, color: "#722ed1" }}
-              prefix={
-                <DatabaseOutlined style={{ color: "#722ed1", fontSize: 13 }} />
-              }
-              formatter={(v) => Number(v).toLocaleString()}
-            />
-            <Text type="secondary" style={{ fontSize: 10 }}>
-              <Tag color="green" style={{ fontSize: 9 }}>
-                R: {submissionWasteStats.residual.toLocaleString()}
-              </Tag>
-              <Tag color="red" style={{ fontSize: 9 }}>
-                H: {submissionWasteStats.haz.toLocaleString()}
-              </Tag>
-            </Text>
-          </Card>
-        </Col>
-      </Row>
-
-      <Card
-        size="small"
-        style={{ borderRadius: 10, marginBottom: 18 }}
-        bodyStyle={{ padding: 18 }}
-        title={
-          <Space wrap>
-            <BarChartOutlined style={{ color: ACCENT }} />
-            <Text strong>Submission Summary</Text>
-            <Tag bordered={false} color="blue">
-              Based on submitted portal data
-            </Tag>
-          </Space>
-        }
-      >
-        <Row gutter={[18, 18]} align="stretch">
-          <Col xs={24} md={8}>
-            <div
-              style={{
-                border: "1px solid #f0f0f0",
-                borderRadius: 8,
-                height: "100%",
-                padding: 14,
-              }}
-            >
-            <Space direction="vertical" size={10} style={{ width: "100%" }}>
-              <Statistic
-                title="Encoded Waste Volume"
-                value={submittedDataSummary.volumeText}
-                valueStyle={{ fontSize: 18, color: "#722ed1" }}
-                prefix={<DatabaseOutlined />}
-              />
-              <Space size={[6, 6]} wrap>
-                <Tag color="green">
-                  Residual: {submissionWasteStats.residual.toLocaleString()}
-                </Tag>
-                <Tag color="red">
-                  Haz/Inert: {submissionWasteStats.haz.toLocaleString()}
-                </Tag>
-                {submissionWasteStats.other > 0 && (
-                  <Tag color="default">
-                    Other: {submissionWasteStats.other.toLocaleString()}
-                  </Tag>
-                )}
-              </Space>
-            </Space>
-            </div>
-          </Col>
-          <Col xs={24} md={8}>
-            <div
-              style={{
-                border: "1px solid #f0f0f0",
-                borderRadius: 8,
-                height: "100%",
-                padding: 14,
-              }}
-            >
-            <Row gutter={[10, 10]}>
-              {[
-                {
-                  label: "Companies",
-                  value: submittedDataSummary.uniqueCompanies,
-                  icon: <TeamOutlined />,
-                  color: "#1677ff",
-                },
-                {
-                  label: "Haulers",
-                  value: submittedDataSummary.uniqueHaulers,
-                  icon: <ContainerOutlined />,
-                  color: "#13c2c2",
-                },
-                {
-                  label: "Truck Trips",
-                  value: submittedDataSummary.totalTrucks,
-                  icon: <TableOutlined />,
-                  color: "#fa8c16",
-                },
-                {
-                  label: "Avg Trips",
-                  value: submittedDataSummary.averageTrucks,
-                  icon: <BarChartOutlined />,
-                  color: "#52c41a",
-                },
-              ].map((item) => (
-                <Col xs={12} key={item.label}>
-                  <div
-                    style={{
-                      border: "1px solid #f0f0f0",
-                      borderRadius: 8,
-                      padding: "10px 12px",
-                      height: "100%",
-                    }}
-                  >
-                    <Space size={6}>
-                      <span style={{ color: item.color }}>{item.icon}</span>
-                      <Text type="secondary" style={{ fontSize: 11 }}>
-                        {item.label}
-                      </Text>
-                    </Space>
-                    <div
-                      style={{
-                        fontSize: 18,
-                        fontWeight: 700,
-                        color: item.color,
-                        lineHeight: 1.2,
-                      }}
-                    >
-                      {item.value}
-                    </div>
-                  </div>
-                </Col>
-              ))}
-            </Row>
-            </div>
-          </Col>
-          <Col xs={24} md={8}>
-            <div
-              style={{
-                border: "1px solid #f0f0f0",
-                borderRadius: 8,
-                height: "100%",
-                padding: 14,
-              }}
-            >
-            <Space direction="vertical" size={10} style={{ width: "100%" }}>
-              <Text strong>Submission Status</Text>
-              {STATUS_OPTS.filter((opt) => opt.value).map((opt) => {
-                const count = submittedDataSummary.statusCounts[opt.value] || 0;
-                const percent = submissions.length
-                  ? Math.round((count / submissions.length) * 100)
-                  : 0;
-                return (
-                  <div key={opt.value}>
-                    <div
-                      style={{
-                        display: "flex",
-                        justifyContent: "space-between",
-                        marginBottom: 3,
-                      }}
-                    >
-                      <Text style={{ fontSize: 12 }}>{opt.label}</Text>
-                      <Text type="secondary" style={{ fontSize: 12 }}>
-                        {count}
-                      </Text>
-                    </div>
-                    <Progress
-                      percent={percent}
-                      size="small"
-                      showInfo={false}
-                      strokeColor={
-                        opt.color === "green"
-                          ? "#52c41a"
-                          : opt.color === "red"
-                            ? "#ff4d4f"
-                            : opt.color === "volcano"
-                              ? "#fa541c"
-                              : "#faad14"
-                      }
-                    />
-                  </div>
-                );
-              })}
-            </Space>
-            </div>
-          </Col>
-        </Row>
-        <Divider style={{ margin: "18px 0" }} />
-        <Row gutter={[18, 18]}>
-          <Col xs={24} lg={14}>
-            <Text strong>Top SLFs by Submitted Entries</Text>
-            <Space
-              direction="vertical"
-              size={8}
-              style={{ width: "100%", marginTop: 8 }}
-            >
-              {submittedDataSummary.topGenerators.length ? (
-                submittedDataSummary.topGenerators.map((item, index) => (
-                  <div key={item.name}>
-                    <div
-                      style={{
-                        display: "flex",
-                        justifyContent: "space-between",
-                        gap: 10,
-                      }}
-                    >
-                      <Text style={{ fontSize: 12 }}>
-                        {index + 1}. {item.name}
-                      </Text>
-                      <Text strong style={{ fontSize: 12, color: ACCENT }}>
-                        {item.submissions} submissions
-                      </Text>
-                    </div>
-                    <Progress
-                      percent={Math.round(
-                        (item.submissions /
-                          Math.max(
-                            submittedDataSummary.topGenerators[0]
-                              ?.submissions || 1,
-                            1,
-                          )) *
-                          100,
-                      )}
-                      showInfo={false}
-                      size="small"
-                      strokeColor={ACCENT}
-                    />
-                  </div>
-                ))
-              ) : (
-                <Empty
-                  image={Empty.PRESENTED_IMAGE_SIMPLE}
-                  description="No submitted entries yet"
-                />
-              )}
-            </Space>
-          </Col>
-          <Col xs={24} lg={10}>
-            <Alert
-              type="info"
-              showIcon
-              message="Latest Submitted Record"
-              description={
-                submittedDataSummary.latestSubmission
-                  ? `${submittedDataSummary.latestSubmission.idNo || "No ID"} - ${submittedDataSummary.latestSubmission.lguCompanyName || "Unnamed company"} submitted ${dayjs(submittedDataSummary.latestSubmission.createdAt).format("MM/DD/YYYY hh:mm A")}`
-                  : "No portal submissions loaded yet."
-              }
-              style={{ borderRadius: 8 }}
-            />
-          </Col>
-        </Row>
-      </Card>
-
-      {/* -- Portal Submissions ------------------------------------------ */}
-      <Card
-        size="small"
-        style={{ borderRadius: 10 }}
-        bodyStyle={{ padding: 0 }}
-        title={
-          <Space wrap>
-            <FileTextOutlined style={{ color: ACCENT }} />
-            <Text strong>Portal Submitted Data</Text>
-            <Tag bordered={false} color="blue">
-              {filteredSubmissions.length} / {submissions.length}
-            </Tag>
-            {revertRequestCount > 0 && (
-              <Badge
-                count={revertRequestCount}
-                style={{ backgroundColor: "#fa8c16" }}
-                title="Revert requests pending"
-              />
-            )}
-          </Space>
-        }
-        extra={
-          <Tooltip title="Refresh submissions">
-            <Button
-              size="small"
-              icon={<ReloadOutlined />}
-              onClick={() => fetchSubmissions(true)}
-              loading={loadingSub}
-            />
-          </Tooltip>
-        }
-      >
-        {/* Toolbar: search + status chips */}
-        <div
-          style={{
-            padding: "10px 14px",
-            borderBottom: "1px solid #f0f0f0",
-            display: "flex",
-            alignItems: "center",
-            gap: 10,
-            flexWrap: "wrap",
-          }}
-        >
-          <Input
-            placeholder="Search by ID, company, SLF, email..."
-            prefix={<SearchOutlined style={{ color: "#8c8c8c" }} />}
-            value={submissionSearch}
-            onChange={(e) => setSubmissionSearch(e.target.value)}
-            allowClear
-            size="small"
-            style={{ width: 260 }}
-          />
-          <Space size={4} wrap>
-            {STATUS_OPTS.map((opt) => (
-              <Button
-                key={String(opt.value)}
-                size="small"
-                type={
-                  submissionStatusFilter === opt.value ? "primary" : "default"
-                }
-                onClick={() => setSubmissionStatusFilter(opt.value)}
-                style={
-                  submissionStatusFilter === opt.value
-                    ? { background: ACCENT, borderColor: ACCENT }
-                    : {}
-                }
-              >
-                {opt.label}
-                {opt.value && (
-                  <Tag
-                    bordered={false}
-                    color={
-                      submissionStatusFilter === opt.value
-                        ? undefined
-                        : opt.color
-                    }
-                    style={{ marginLeft: 4, fontSize: 10, padding: "0 4px" }}
-                  >
-                    {submissions.filter((s) => s.status === opt.value).length}
-                  </Tag>
-                )}
-              </Button>
-            ))}
-          </Space>
-        </div>
-        <ResponsiveTable
-          dataSource={filteredSubmissions}
-          rowKey="_id"
-          loading={loadingSub}
-          size="small"
-          pagination={{
-            pageSize: 20,
-            showSizeChanger: true,
-            showTotal: (t) => `${t} entries`,
-            pageSizeOptions: ["10", "20", "50"],
-          }}
-          expandedRowKeys={expandedRowKeys}
-          onExpandedRowsChange={setExpandedRowKeys}
-          expandable={{
-            expandedRowRender: (r) => {
-              const trucks = r.trucks || [];
-              if (!trucks.length)
-                return (
-                  <Empty
-                    description="No truck entries"
-                    image={Empty.PRESENTED_IMAGE_SIMPLE}
-                  />
-                );
-              return (
-                <div style={{ padding: "8px 16px" }}>
-                  <Table
-                    dataSource={trucks}
-                    rowKey={(_, i) => i}
-                    size="small"
-                    pagination={false}
-                    columns={[
-                      {
-                        title: "Ticket No.",
-                        dataIndex: "disposalTicketNo",
-                        width: 130,
-                        render: (v) => (
-                          <Text
-                            style={{ fontSize: 11, fontFamily: "monospace" }}
-                          >
-                            {v || "—"}
-                          </Text>
-                        ),
-                      },
-                      {
-                        title: "Hauler",
-                        dataIndex: "hauler",
-                        ellipsis: true,
-                        render: (v) => v || "—",
-                      },
-                      {
-                        title: "Plate No.",
-                        width: 110,
-                        render: (_, t) => getTruckPlateText(t),
-                      },
-                      {
-                        title: "Truck Cap.",
-                        width: 100,
-                        render: (_, t) => getTruckCapacityText(t),
-                      },
-                      {
-                        title: "Actual Volume",
-                        width: 110,
-                        render: (_, t) =>
-                          t.actualVolume != null ? (
-                            <Text strong style={{ color: "#2f54eb" }}>
-                              {t.actualVolume}{" "}
-                              {(t.actualVolumeUnit || "tons").replace(
-                                "m3",
-                                "m³",
-                              )}
-                            </Text>
-                          ) : (
-                            "—"
-                          ),
-                      },
-                      {
-                        title: "Waste Type",
-                        dataIndex: "wasteType",
-                        width: 130,
-                        render: (v) =>
-                          v ? (
-                            <Tag
-                              color={
-                                (v || "").toLowerCase().includes("haz") ||
-                                (v || "").toLowerCase().includes("inert")
-                                  ? "red"
-                                  : "green"
-                              }
-                              style={{ fontSize: 10 }}
-                            >
-                              {v}
-                            </Tag>
-                          ) : (
-                            "—"
-                          ),
-                      },
-                    ]}
-                  />
-                </div>
-              );
-            },
-            rowExpandable: (r) => (r.trucks || []).length > 0,
-          }}
-          columns={subColumns}
-        />
-      </Card>
-
-      <Modal
-        title={editing ? "Edit Generator" : "Add Generator"}
-        open={modalOpen}
-        onCancel={() => setModalOpen(false)}
-        onOk={handleSave}
-        width={720}
-        okText="Save"
-        okButtonProps={{ style: { background: ACCENT, borderColor: ACCENT } }}
-        destroyOnHidden
-      >
-        <Form form={form} layout="vertical" size="small">
-          <Form.Item
-            label="SLF Name"
-            name="slfName"
-            rules={[{ required: true }]}
-          >
-            <Input placeholder="SLF name" />
-          </Form.Item>
-          <Form.Item label="Active" name="isActive" valuePropName="checked">
-            <Switch />
-          </Form.Item>
-          <Divider orientation="left" plain>
-            Volume / Baseline Info
-          </Divider>
-          <VolumeRow
-            label="Existing Baseline Volume"
-            nameVal="existingBaselineVolume"
-            nameUnit="existingBaselineUnit"
-          />
-          <VolumeRow
-            label="Total Volume Since Operation"
-            nameVal="totalVolumeSinceOperation"
-            nameUnit="totalVolumeSinceOperationUnit"
-          />
-          <VolumeRow
-            label="Active Cells Volume"
-            nameVal="totalVolumeActiveCells"
-            nameUnit="totalVolumeActiveCellsUnit"
-          />
-          <VolumeRow
-            label="Closed Cells Volume"
-            nameVal="totalVolumeClosedCells"
-            nameUnit="totalVolumeClosedCellsUnit"
-          />
-          <Divider orientation="left" plain>
-            Accredited Haulers
-          </Divider>
-          <Form.List name="accreditedHaulers">
-            {(fields, { add, remove }) => (
-              <>
-                {fields.map(({ key, name, ...rest }) => (
-                  <Card
-                    key={key}
-                    size="small"
-                    style={{ marginBottom: 8 }}
-                    extra={
-                      <MinusCircleOutlined
-                        style={{ color: "red" }}
-                        onClick={() => remove(name)}
-                      />
-                    }
-                  >
-                    <Row gutter={12}>
-                      <Col span={10}>
-                        <Form.Item
-                          {...rest}
-                          name={[name, "haulerName"]}
-                          label="Name"
-                          rules={[{ required: true }]}
-                        >
-                          <Input />
-                        </Form.Item>
-                      </Col>
-                      <Col span={6}>
-                        <Form.Item
-                          {...rest}
-                          name={[name, "numberOfTrucks"]}
-                          label="Trucks"
-                        >
-                          <InputNumber min={0} style={{ width: "100%" }} />
-                        </Form.Item>
-                      </Col>
-                      <Col span={8}>
-                        <Form.Item
-                          {...rest}
-                          name={[name, "privateSectorClients"]}
-                          label="Clients"
-                        >
-                          <Input />
-                        </Form.Item>
-                      </Col>
-                    </Row>
-                  </Card>
-                ))}
-                <Button
-                  type="dashed"
-                  onClick={() => add()}
-                  block
-                  icon={<PlusOutlined />}
-                >
-                  Add Hauler
-                </Button>
-              </>
-            )}
-          </Form.List>
-        </Form>
-      </Modal>
-
-      {/* Transaction History Modal */}
-      <Modal
-        title={
-          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-            <div
-              style={{
-                width: 32,
-                height: 32,
-                borderRadius: 8,
-                background: isDark ? "rgba(47,84,235,0.1)" : "#f0f5ff",
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-              }}
-            >
-              <HistoryOutlined style={{ color: "#722ed1", fontSize: 16 }} />
-            </div>
-            <div>
-              <div style={{ fontSize: 15, fontWeight: 600 }}>
-                Transaction History
-              </div>
-              <Text type="secondary" style={{ fontSize: 11 }}>
-                {txnHistoryModal.submissionId}
-              </Text>
-            </div>
-          </div>
-        }
-        open={txnHistoryModal.open}
-        onCancel={() => setTxnHistoryModal({ open: false, submissionId: null })}
-        footer={
-          <Button
-            block
-            onClick={() =>
-              setTxnHistoryModal({ open: false, submissionId: null })
-            }
-          >
-            Close
-          </Button>
-        }
-        width={1200}
-        zIndex={1100}
-      >
-        {txnHistoryLoading ? (
-          <div style={{ textAlign: "center", padding: 40 }}>
-            <Spin />
-          </div>
-        ) : txnHistoryData.length === 0 ? (
-          <Empty description="No transactions found" />
-        ) : (
-          <Table
-            dataSource={txnHistoryData}
-            rowKey={(t) => t._id}
-            size="small"
-            pagination={{
-              pageSize: 10,
-              size: "small",
-              showSizeChanger: true,
-              pageSizeOptions: ["10", "20", "50"],
-            }}
-            scroll={{ y: 400 }}
-            columns={[
-              {
-                title: "#",
-                key: "idx",
-                width: 45,
-                render: (_, __, i) => <Text type="secondary">{i + 1}</Text>,
-              },
-              {
-                title: "Type",
-                dataIndex: "type",
-                key: "type",
-                width: 120,
-                render: (v) => (
-                  <Tag
-                    bordered={false}
-                    color={
-                      v === "submission"
-                        ? "blue"
-                        : v === "email_ack_sent"
-                          ? "green"
-                          : v === "email_ack_failed"
-                            ? "red"
-                            : v === "status_change"
-                              ? "orange"
-                              : v === "revert_approved"
-                                ? "volcano"
-                                : v === "resubmission"
-                                  ? "cyan"
-                                  : "default"
-                    }
-                    style={{ margin: 0, fontSize: 11 }}
-                  >
-                    {v === "submission"
-                      ? "Submission"
-                      : v === "email_ack_sent"
-                        ? "Email Sent"
-                        : v === "email_ack_failed"
-                          ? "Email Failed"
-                          : v === "status_change"
-                            ? "Status Change"
-                            : v === "revert_approved"
-                              ? "Revert Approved"
-                              : v === "resubmission"
-                                ? "Resubmission"
-                                : v === "deleted"
-                                  ? "Deleted"
-                                  : v}
-                  </Tag>
-                ),
-              },
-              {
-                title: "Description",
-                dataIndex: "description",
-                key: "desc",
-                ellipsis: false,
-                render: (v) => <Text style={{ fontSize: 11 }}>{v}</Text>,
-              },
-              {
-                title: "Message",
-                key: "msg",
-                width: 250,
-                ellipsis: false,
-                render: (_, t) => {
-                  const msg = t.meta?.comment || t.meta?.reason || "";
-                  return msg ? (
-                    <Text
-                      style={{
-                        fontSize: 12,
-                        color: t.meta?.comment
-                          ? isDark
-                            ? "#7eb8da"
-                            : "#1a3353"
-                          : "#fa541c",
-                        fontStyle: "italic",
-                        whiteSpace: "pre-wrap",
-                        wordBreak: "break-word",
-                      }}
-                    >
-                      {msg}
-                    </Text>
-                  ) : (
-                    <Text type="secondary" style={{ fontSize: 12 }}>
-                      —
-                    </Text>
-                  );
-                },
-              },
-              {
-                title: "Performed By",
-                dataIndex: "performedBy",
-                key: "by",
-                width: 200,
-                render: (v) => (
-                  <Text type="secondary" style={{ fontSize: 12 }}>
-                    {v || "system"}
-                  </Text>
-                ),
-              },
-              {
-                title: "Date / Time",
-                dataIndex: "createdAt",
-                key: "date",
-                width: 150,
-                render: (v) => (
-                  <Text type="secondary" style={{ fontSize: 12 }}>
-                    {dayjs(v).format("MM/DD/YYYY hh:mm A")}
-                  </Text>
-                ),
-              },
-            ]}
-          />
-        )}
-      </Modal>
-
-      {/* Send Email Modal */}
-      <Modal
-        title={
-          <Space>
-            <MailOutlined /> Send Email to Portal User
-          </Space>
-        }
-        open={emailModal.open}
-        onCancel={() => setEmailModal({ open: false, record: null })}
-        onOk={handleSendEmail}
-        confirmLoading={emailSending}
-        okText={
-          <>
-            <SendOutlined /> Send Email
-          </>
-        }
-        okButtonProps={{ style: { background: ACCENT, borderColor: ACCENT } }}
-        width={560}
-      >
-        {emailModal.record && (
-          <div>
-            <Descriptions column={1} size="small" style={{ marginBottom: 16 }}>
-              <Descriptions.Item label="To">
-                {emailModal.record.submittedBy}
-              </Descriptions.Item>
-              <Descriptions.Item label="Company">
-                {emailModal.record.lguCompanyName || "—"}
-              </Descriptions.Item>
-              <Descriptions.Item label="Submission">
-                {emailModal.record.submissionId || emailModal.record.idNo}
-              </Descriptions.Item>
-            </Descriptions>
-            <Form layout="vertical" size="small">
-              <Form.Item label="Subject" required>
-                <Input
-                  placeholder="e.g. Missing requirements for your submission"
-                  value={emailSubject}
-                  onChange={(e) => setEmailSubject(e.target.value)}
-                />
-              </Form.Item>
-              <Form.Item label="Message" required>
-                <Input.TextArea
-                  rows={5}
-                  placeholder="Type your message to the portal user..."
-                  value={emailMessage}
-                  onChange={(e) => setEmailMessage(e.target.value)}
-                />
-              </Form.Item>
-            </Form>
-          </div>
-        )}
-      </Modal>
-
-      {/* Admin Revert Modal */}
-      <Modal
-        title={
-          <Space>
-            <UndoOutlined style={{ color: "#fa541c" }} /> Revert Submission
-          </Space>
-        }
-        open={revertModal.open}
-        onCancel={() => {
-          setRevertModal({ open: false, record: null });
-          setRevertFollowUp({ enabled: false, subject: "", message: "", temporaryDeleteAfterDays: 3 });
-        }}
-        onOk={handleAdminRevert}
-        confirmLoading={revertLoading}
-        okText="Revert Submission"
-        okButtonProps={{
-          style: { background: "#fa541c", borderColor: "#fa541c" },
-        }}
-        width={680}
-      >
-        {revertModal.record && (
-          <div>
-            <Descriptions column={1} size="small" style={{ marginBottom: 16 }}>
-              <Descriptions.Item label="ID No.">
-                {revertModal.record.idNo || "—"}
-              </Descriptions.Item>
-              <Descriptions.Item label="Company">
-                {revertModal.record.lguCompanyName || "—"}
-              </Descriptions.Item>
-              <Descriptions.Item label="Submitted By">
-                {revertModal.record.submittedBy || "—"}
-              </Descriptions.Item>
-              <Descriptions.Item label="Current Status">
-                <Tag
-                  color={
-                    revertModal.record.status === "acknowledged"
-                      ? "green"
-                      : "orange"
-                  }
-                >
-                  {revertModal.record.status}
-                </Tag>
-              </Descriptions.Item>
-            </Descriptions>
-            <Text
-              type="secondary"
-              style={{ fontSize: 12, display: "block", marginBottom: 8 }}
-            >
-              This will revert the submission back to the portal user. The
-              portal user will see this entry on their Submission History and
-              can update and resubmit it.
-            </Text>
-            <Form layout="vertical" size="small">
-              <Form.Item label="Reason for Revert" required>
-                <Input.TextArea
-                  rows={3}
-                  placeholder="e.g. Incorrect data entries, missing truck information..."
-                  value={revertReason}
-                  onChange={(e) => setRevertReason(e.target.value)}
-                />
-              </Form.Item>
-              {isAgedSubmission(revertModal.record) && (
-                <Card size="small" style={{ borderRadius: 8, background: "#fff7e6", borderColor: "#ffd591" }}>
-                  <Space direction="vertical" size={10} style={{ width: "100%" }}>
-                    <Alert
-                      type="warning"
-                      showIcon
-                      message="This submission is at least 1 day old. A follow-up email template can be sent with a temporary deletion deadline."
-                    />
-                    <Form.Item label="Send follow-up email" style={{ marginBottom: 0 }}>
-                      <Switch
-                        checked={revertFollowUp.enabled}
-                        onChange={(enabled) => setRevertFollowUp((prev) => ({ ...prev, enabled }))}
-                      />
-                    </Form.Item>
-                    {revertFollowUp.enabled && (
-                      <>
-                        <Form.Item label="Follow-Up Subject" required>
-                          <Input
-                            value={revertFollowUp.subject}
-                            onChange={(e) => setRevertFollowUp((prev) => ({ ...prev, subject: e.target.value }))}
-                          />
-                        </Form.Item>
-                        <Form.Item label="Follow-Up Message" required>
-                          <Input.TextArea
-                            rows={7}
-                            value={revertFollowUp.message}
-                            onChange={(e) => setRevertFollowUp((prev) => ({ ...prev, message: e.target.value }))}
-                          />
-                        </Form.Item>
-                        <Form.Item label="Temporarily delete after (days)" style={{ maxWidth: 220 }}>
-                          <InputNumber
-                            min={1}
-                            precision={0}
-                            value={revertFollowUp.temporaryDeleteAfterDays}
-                            onChange={(value) => setRevertFollowUp((prev) => ({ ...prev, temporaryDeleteAfterDays: value || 1 }))}
-                            style={{ width: "100%" }}
-                          />
-                        </Form.Item>
-                        <Text type="secondary" style={{ fontSize: 12 }}>
-                          Available tokens: {"{{idNo}}"}, {"{{companyName}}"}, {"{{reason}}"}, {"{{deadline}}"}
-                        </Text>
-                      </>
-                    )}
-                  </Space>
-                </Card>
-              )}
-            </Form>
-          </div>
-        )}
-      </Modal>
-    </>
-  );
-}
-
-// -- Main Component --
+// ACCENT: see slf-monitoring/helpers.js
+// CHART_COLORS: see slf-monitoring/helpers.js
+
+// Extracted to reduce file size below Babel 500KB limit
+import SlfDashboardTab, {
+  sumBy,
+  groupMetric,
+  topMetric,
+  computeFields,
+  formatCompact,
+  DashboardMetricCard,
+  InsightStat,
+  getStatusTag,
+  buildSubmissionFacilityIndex,
+  getFacilityCandidateSubmissions,
+  expandSlfNames,
+  getFacilitySlfNames,
+  getBaselineSlfNames,
+  getSubmissionSlfNames,
+  getRecordIds,
+  getSubmissionSlfId,
+  getDataEntryId,
+  submissionMatchesFacility,
+  parseCellIndex,
+  getTruckCellIndex,
+  hasTruckVolume,
+  findBestCellIndex,
+  CACHE_KEY,
+  CACHE_TTL,
+  buildBaselineMap,
+  findBaselineForFacility,
+  enrichFacilityWithBaseline,
+  R3_PROVINCES,
+} from './slf-monitoring/SlfDashboardTab';
+import WasteBaselineInfo from './slf-monitoring/WasteBaselineInfo';
+import PortalGenerators from './slf-monitoring/PortalGenerators';
+import {
+  ACCENT, CHART_COLORS,
+  managementStatusSummary, asStringArray, formatStringArray,
+  normalizeUnit, normalizeCellStatus, isActiveCellStatus, isCompletedCellStatus,
+  ACTIVE_VOLUME_STATUSES,
+  TON_PER_M3,
+  UNIT_OPTIONS, CELL_STATUS_OPTIONS, CELL_STATUS_COLORS,
+  PERMIT_STATUS_OPTIONS, DP_TYPE_OPTIONS, WWTF_TYPE_OPTIONS,
+  RECEIVING_FACILITY_TYPE_OPTIONS, GALLERY_COMPONENT_OPTIONS,
+  getUploadHeaders, formatFileSize, getUploadFileSize, validateSlfUpload, renderSlfUploadItem,
+  slfUploadProps,
+  convertVolume, getWasteKind, isHazardousCellType,
+  extractDriveId, isDriveUrl, resolveMediaUrl, normalizeStoredFileUrl,
+} from './slf-monitoring/helpers.jsx';
 export default function SLFMonitoring({
   canEdit = true,
   canDelete = true,
   isDark,
+  driveDisabled = false,
 }) {
   const { getValues } = useDataRef();
   const provinceOptions = getValues("province").map((p) => ({
@@ -3677,7 +242,7 @@ export default function SLFMonitoring({
 
   const [records, setRecords] = useState([]);
   const [generators, setGenerators] = useState([]);
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(true); // start true so spinner shows on first mount
   const [loadingGen, setLoadingGen] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
   const [detailModal, setDetailModal] = useState(null);
@@ -3724,31 +289,50 @@ export default function SLFMonitoring({
     (items || []).map(normalizeSubmissionRecord);
 
   const fetchRecords = useCallback(async (skipCache = false) => {
+    // ── Phase 1: Load facilities + baselines first → render table immediately ──
+    // Submissions (needed for cell-fill %) are fetched in the background below.
+    let facilitiesCache = null;
+    let baselineMapCache = null;
+    const FAST_CACHE_KEY = `${CACHE_KEY}-fast`;
     await fetchWithCache(
-      CACHE_KEY,
+      FAST_CACHE_KEY,
       async () => {
         const [
           { data: facilities },
           { data: baselines },
-          { data: submissions },
+          summaryRes,
         ] = await Promise.all([
           api.get("/slf-facilities"),
           api.get("/data-slf/baselines"),
-          api.get("/data-slf"),
+          api.get("/data-slf/summary-by-slf").catch(() => ({ data: [] })),
         ]);
-        const normalizedSubmissions = normalizeSlfSubmissions(submissions);
-        setSlfSubmissions(normalizedSubmissions);
-        const baselineMap = buildBaselineMap(baselines || []);
-        const submissionIndex = buildSubmissionFacilityIndex(normalizedSubmissions);
+        facilitiesCache = facilities || [];
+        baselineMapCache = buildBaselineMap(baselines || []);
+        // Per-SLF waste totals from a fast server aggregation seed the summary
+        // tiles immediately, so they no longer wait for the heavy submissions
+        // list (phase 2 still refines exact cell-fill %).
+        const wasteByName = new Map();
+        (Array.isArray(summaryRes.data) ? summaryRes.data : []).forEach((row) => {
+          const total = Number(row.totalM3 || 0) + Number(row.totalTons || 0);
+          if (row.slfName && total > 0) {
+            wasteByName.set(String(row.slfName).trim().toLowerCase(), total);
+          }
+        });
         return {
-          records: (facilities || []).map((record) =>
-            enrichFacilityWithBaseline(
+          records: facilitiesCache.map((record) => {
+            const enriched = enrichFacilityWithBaseline(
               record,
-              findBaselineForFacility(record, baselineMap),
-              getFacilityCandidateSubmissions(record, submissionIndex),
-            ),
-          ),
-          submissions: normalizedSubmissions,
+              findBaselineForFacility(record, baselineMapCache),
+              [], // no submissions yet — cell-fill loads in phase 2
+            );
+            if (!(enriched.actualResidualWasteReceived > 0)) {
+              const seed =
+                wasteByName.get(String(record.lgu || "").trim().toLowerCase()) ||
+                wasteByName.get(String(record.slfName || "").trim().toLowerCase());
+              if (seed > 0) enriched.actualResidualWasteReceived = seed;
+            }
+            return enriched;
+          }),
         };
       },
       {
@@ -3756,14 +340,66 @@ export default function SLFMonitoring({
         force: skipCache,
         onData: (data) => {
           const rows = Array.isArray(data) ? data : data?.records || [];
-          setSlfSubmissions(Array.isArray(data) ? [] : data?.submissions || []);
           setRecords(rows.map((r) => ({ ...r, ...computeFields(r) })));
         },
-        onError: () => Swal.fire("Error", "Failed to load records", "error"),
+        onError: () => Swal.fire("Error", "Failed to load SLF facilities", "error"),
         onStart: () => setLoading(true),
         onEnd: () => setLoading(false),
       },
     );
+
+    // ── Phase 2 (background): submissions only → re-enrich for cell-fill % ──
+    try {
+      const FULL_CACHE_KEY = `${CACHE_KEY}-full`;
+      await fetchWithCache(
+        FULL_CACHE_KEY,
+        async () => {
+          // Only the heavy submissions list is fetched here; facilities and
+          // baselines are reused from Phase 1 to avoid duplicate requests.
+          // cellUsage=true returns a lean projection (no company/id/address) —
+          // ~80% smaller payload + far less memory. Full per-facility data is
+          // loaded on demand when a detail modal opens.
+          const calls = [
+            api.get("/data-slf", { params: { mode: "list", cellUsage: true } }),
+          ];
+          if (!facilitiesCache) calls.push(api.get("/slf-facilities"));
+          if (!baselineMapCache) calls.push(api.get("/data-slf/baselines"));
+          const res = await Promise.all(calls);
+          const submissions = res[0].data;
+          let idx = 1;
+          if (!facilitiesCache) facilitiesCache = res[idx++]?.data || [];
+          if (!baselineMapCache) baselineMapCache = buildBaselineMap(res[idx]?.data || []);
+          const normalizedSubmissions = normalizeSlfSubmissions(
+            Array.isArray(submissions) ? submissions : submissions?.data || []
+          );
+          const submissionIndex = buildSubmissionFacilityIndex(normalizedSubmissions);
+          return {
+            records: facilitiesCache.map((record) =>
+              enrichFacilityWithBaseline(
+                record,
+                findBaselineForFacility(record, baselineMapCache),
+                getFacilityCandidateSubmissions(record, submissionIndex),
+              ),
+            ),
+            // Keep the lean set in memory for table-level cell math; the detail
+            // modal fetches the richer per-facility data when opened.
+            submissions: normalizedSubmissions,
+          };
+        },
+        {
+          ttl: CACHE_TTL,
+          force: skipCache,
+          onData: (data) => {
+            const rows = Array.isArray(data) ? data : data?.records || [];
+            setSlfSubmissions(Array.isArray(data) ? [] : data?.submissions || []);
+            // Silently replace records with fully-enriched version (no spinner)
+            setRecords(rows.map((r) => ({ ...r, ...computeFields(r) })));
+          },
+        },
+      );
+    } catch {
+      // Phase 2 failure is non-fatal — table already shows from Phase 1
+    }
   }, []);
 
   const fetchGenerators = useCallback(async () => {
@@ -3791,7 +427,8 @@ export default function SLFMonitoring({
     if (!socket) return undefined;
     const handler = ({ target } = {}) => {
       if (!target || target === "submissions" || target === "baselines") {
-        invalidateCache(CACHE_KEY);
+        invalidateCache(`${CACHE_KEY}-fast`);
+        invalidateCache(`${CACHE_KEY}-full`);
         fetchRecords(true);
         fetchGenerators();
       }
@@ -3820,6 +457,27 @@ export default function SLFMonitoring({
       })
       .catch(() => setBaselineData(null))
       .finally(() => setLoadingBaseline(false));
+
+    // Lazy-load FULL submissions for just this facility so the detail modal shows
+    // rich data (company, ID, trucks) without keeping every submission in memory.
+    const slfName = detailModal.slfName || detailModal.lgu || "";
+    if (slfName) {
+      api
+        .get("/data-slf", {
+          params: { mode: "list", includeTrucks: true, search: slfName },
+        })
+        .then(({ data }) => {
+          const rows = Array.isArray(data) ? data : data?.data || [];
+          const full = rows.map(normalizeSubmissionRecord);
+          // Merge: full per-facility records replace lean ones by _id
+          setSlfSubmissions((prev) => {
+            const byId = new Map(prev.map((s) => [s._id, s]));
+            full.forEach((s) => byId.set(s._id, s));
+            return [...byId.values()];
+          });
+        })
+        .catch(() => {});
+    }
   }, [detailModal]);
 
   // Fetch cross-year history when viewing a facility record
@@ -4613,7 +1271,7 @@ export default function SLFMonitoring({
         });
         setEditing(updatedRecord);
         setDetailModal((prev) => (prev?._id === data._id ? updatedRecord : prev));
-        invalidateCache(CACHE_KEY);
+        invalidateCache(`${CACHE_KEY}-fast`); invalidateCache(`${CACHE_KEY}-full`);
         secureStorage.invalidateDashboard();
         Swal.fire(
           "Saved",
@@ -4627,7 +1285,7 @@ export default function SLFMonitoring({
         setRecords((prev) => [...prev, createdRecord]);
         setEditYearRecords((prev) => [...prev, createdRecord]);
         setEditing(createdRecord);
-        invalidateCache(CACHE_KEY);
+        invalidateCache(`${CACHE_KEY}-fast`); invalidateCache(`${CACHE_KEY}-full`);
         secureStorage.invalidateDashboard();
         Swal.fire(
           "Saved",
@@ -4840,7 +1498,7 @@ export default function SLFMonitoring({
     try {
       await api.delete(`/slf-facilities/${record._id}`);
       setRecords((prev) => prev.filter((r) => r._id !== record._id));
-      invalidateCache(CACHE_KEY);
+      invalidateCache(`${CACHE_KEY}-fast`); invalidateCache(`${CACHE_KEY}-full`);
       secureStorage.invalidateDashboard();
       Swal.fire({
         icon: "success",
@@ -4939,108 +1597,94 @@ export default function SLFMonitoring({
     setFilterMonth(null);
     setQuickFilter(null);
   };
+  // Summary tiles — single memoized pass over `filtered` (was ~25 separate
+  // filter/reduce loops on every render → main tile-summary bottleneck).
+  const tileStats = useMemo(() => {
+    let opCount = 0, nonOpCount = 0, totalCapacity = 0, totalLGUs = 0,
+      totalCells = 0, totalLeachate = 0, totalGasVents = 0, totalWaste = 0,
+      privateSectorCount = 0, cellsWithData = 0, lgusWithData = 0,
+      capacityWithData = 0, wasteWithData = 0, leachateWithData = 0,
+      gasVentsWithData = 0, privateClientsTotal = 0, receivingCapacityTotal = 0,
+      region3LguServed = 0, hasTons = false, hasM3 = false;
+    const cellStatusSummary = {};
+    const leachateStatusSummary = {};
+    const gasStatusSummary = {};
 
-  // Summary tiles
-  const totalRecords = filtered.length;
-  const opCount = filtered.filter(
-    (r) => /operational/i.test(r.statusOfSLF) && !/non/i.test(r.statusOfSLF),
-  ).length;
-  const nonOpCount = filtered.filter((r) => /non/i.test(r.statusOfSLF)).length;
-  const totalCapacity = filtered.reduce(
-    (s, r) => s + (r.volumeCapacity || 0),
-    0,
-  );
-  const totalLGUs = filtered.reduce((s, r) => s + (r.noOfLGUServed || 0), 0);
-  const totalCells = filtered.reduce((s, r) => s + (r.numberOfCell || 0), 0);
-  const totalLeachate = filtered.reduce(
-    (s, r) => s + (r.noOfLeachatePond || 0),
-    0,
-  );
-  const totalGasVents = filtered.reduce(
-    (s, r) => s + (r.numberOfGasVents || 0),
-    0,
-  );
-  const totalWaste = filtered.reduce(
-    (s, r) => s + (r.actualResidualWasteReceived || 0),
-    0,
-  );
-  const wasteUnitLabel =
-    filtered.some((r) => normalizeUnit(r.wasteReceivedUnit) === "tons") &&
-    !filtered.some((r) => normalizeUnit(r.wasteReceivedUnit) === "m³")
-      ? "tons"
-      : "m³";
-  const privateSectorCount = filtered.filter((r) =>
-    /private/i.test(r.ownership),
-  ).length;
+    for (const r of filtered) {
+      const status = r.statusOfSLF || "";
+      if (/operational/i.test(status) && !/non/i.test(status)) opCount++;
+      if (/non/i.test(status)) nonOpCount++;
+      totalCapacity += r.volumeCapacity || 0;
+      totalLGUs += r.noOfLGUServed || 0;
+      totalCells += r.numberOfCell || 0;
+      totalLeachate += r.noOfLeachatePond || 0;
+      totalGasVents += r.numberOfGasVents || 0;
+      totalWaste += r.actualResidualWasteReceived || 0;
+      const isPrivate = /private/i.test(r.ownership);
+      if (isPrivate) { privateSectorCount++; }
+      if (r.numberOfCell > 0) cellsWithData++;
+      if (r.noOfLGUServed > 0) lgusWithData++;
+      if (r.volumeCapacity > 0) capacityWithData++;
+      if (r.actualResidualWasteReceived > 0) wasteWithData++;
+      if (r.noOfLeachatePond > 0) leachateWithData++;
+      if (r.numberOfGasVents > 0) gasVentsWithData++;
+      privateClientsTotal += (r.privateCompaniesServed || []).length;
+      receivingCapacityTotal += r.receivingVolumeCapacity || 0;
+      if (R3_PROVINCES.includes(r.province)) region3LguServed += r.noOfLGUServed || 0;
+      const u = normalizeUnit(r.wasteReceivedUnit);
+      if (u === "tons") hasTons = true;
+      if (u === "m³") hasM3 = true;
 
-  // Denominators — counts of records that have a value for each metric
-  const cellsWithData = filtered.filter((r) => r.numberOfCell > 0).length;
-  const lgusWithData = filtered.filter((r) => r.noOfLGUServed > 0).length;
-  const capacityWithData = filtered.filter((r) => r.volumeCapacity > 0).length;
-  const wasteWithData = filtered.filter(
-    (r) => r.actualResidualWasteReceived > 0,
-  ).length;
-  const leachateWithData = filtered.filter(
-    (r) => r.noOfLeachatePond > 0,
-  ).length;
-  const gasVentsWithData = filtered.filter(
-    (r) => r.numberOfGasVents > 0,
-  ).length;
-  const privateWithData = filtered.filter((r) =>
-    /private/i.test(r.ownership),
-  ).length;
-  const privateClientsTotal = sumBy(
-    filtered,
-    (r) => (r.privateCompaniesServed || []).length,
-  );
-  const receivingCapacityTotal = sumBy(
-    filtered,
-    (r) => r.receivingVolumeCapacity || 0,
-  );
-  const region3LguServed = sumBy(
-    filtered.filter((r) => R3_PROVINCES.includes(r.province)),
-    (r) => r.noOfLGUServed || 0,
-  );
-  const outsideRegionLguServed = Math.max(0, totalLGUs - region3LguServed);
-  const capacityUsePercent =
-    totalCapacity > 0 ? Math.min(100, (totalWaste / totalCapacity) * 100) : 0;
-  const cellStatusSummary = filtered.reduce((acc, record) => {
-    const cellCount = Number(record.numberOfCell || 0);
-    const statuses = record.cellStatuses || [];
-    if (statuses.length > 0) {
-      statuses.slice(0, cellCount || statuses.length).forEach((status) => {
-        const key = status || "Unspecified";
-        acc[key] = (acc[key] || 0) + 1;
-      });
-    } else if (cellCount > 0) {
-      acc.Recorded = (acc.Recorded || 0) + cellCount;
+      const cellCount = Number(r.numberOfCell || 0);
+      const statuses = r.cellStatuses || [];
+      if (statuses.length > 0) {
+        statuses.slice(0, cellCount || statuses.length).forEach((s) => {
+          const k = s || "Unspecified";
+          cellStatusSummary[k] = (cellStatusSummary[k] || 0) + 1;
+        });
+      } else if (cellCount > 0) {
+        cellStatusSummary.Recorded = (cellStatusSummary.Recorded || 0) + cellCount;
+      }
+      const ponds = r.leachatePondDetails || [];
+      if (ponds.length > 0) {
+        ponds.forEach((p) => {
+          const k = p.status || "Active";
+          leachateStatusSummary[k] = (leachateStatusSummary[k] || 0) + 1;
+        });
+      } else if (Number(r.noOfLeachatePond || 0) > 0) {
+        leachateStatusSummary.Recorded = (leachateStatusSummary.Recorded || 0) + Number(r.noOfLeachatePond);
+      }
+      const vents = r.gasVentDetails || [];
+      if (vents.length > 0) {
+        vents.forEach((v) => {
+          const k = v.status || "Active";
+          gasStatusSummary[k] = (gasStatusSummary[k] || 0) + 1;
+        });
+      } else if (Number(r.numberOfGasVents || 0) > 0) {
+        gasStatusSummary.Recorded = (gasStatusSummary.Recorded || 0) + Number(r.numberOfGasVents);
+      }
     }
-    return acc;
-  }, {});
-  const leachateStatusSummary = filtered.reduce((acc, record) => {
-    const ponds = record.leachatePondDetails || [];
-    if (ponds.length > 0) {
-      ponds.forEach((pond) => {
-        const key = pond.status || "Active";
-        acc[key] = (acc[key] || 0) + 1;
-      });
-    } else if (Number(record.noOfLeachatePond || 0) > 0) {
-      acc.Recorded = (acc.Recorded || 0) + Number(record.noOfLeachatePond || 0);
-    }
-    return acc;
-  }, {});
-  const gasStatusSummary = filtered.reduce((acc, record) => {
-    const vents = record.gasVentDetails || [];
-    if (vents.length > 0) {
-      vents.forEach((vent) => {
-        const key = vent.status || "Active";
-        acc[key] = (acc[key] || 0) + 1;
-      });
-    } else if (Number(record.numberOfGasVents || 0) > 0) {
-      acc.Recorded = (acc.Recorded || 0) + Number(record.numberOfGasVents || 0);
-    }
-    return acc;
-  }, {});
+    return {
+      totalRecords: filtered.length,
+      opCount, nonOpCount, totalCapacity, totalLGUs, totalCells, totalLeachate,
+      totalGasVents, totalWaste, privateSectorCount, cellsWithData, lgusWithData,
+      capacityWithData, wasteWithData, leachateWithData, gasVentsWithData,
+      privateWithData: privateSectorCount, privateClientsTotal,
+      receivingCapacityTotal, region3LguServed,
+      outsideRegionLguServed: Math.max(0, totalLGUs - region3LguServed),
+      capacityUsePercent: totalCapacity > 0 ? Math.min(100, (totalWaste / totalCapacity) * 100) : 0,
+      wasteUnitLabel: hasTons && !hasM3 ? "tons" : "m³",
+      cellStatusSummary, leachateStatusSummary, gasStatusSummary,
+    };
+  }, [filtered]);
+  const {
+    totalRecords, opCount, nonOpCount, totalCapacity, totalLGUs, totalCells,
+    totalLeachate, totalGasVents, totalWaste, wasteUnitLabel, privateSectorCount,
+    cellsWithData, lgusWithData, capacityWithData, wasteWithData, leachateWithData,
+    gasVentsWithData, privateWithData, privateClientsTotal, receivingCapacityTotal,
+    region3LguServed, outsideRegionLguServed, capacityUsePercent,
+    cellStatusSummary, leachateStatusSummary, gasStatusSummary,
+  } = tileStats;
 
   const insightConfig = useMemo(() => {
     const ownershipBreakdown = groupMetric(
@@ -5514,8 +2158,7 @@ export default function SLFMonitoring({
             >
               <Tag
                 color="blue"
-                bordered={false}
-                style={{
+                variant="filled" style={{
                   marginInlineEnd: 0,
                   maxWidth: "100%",
                   whiteSpace: "normal",
@@ -5654,8 +2297,7 @@ export default function SLFMonitoring({
       render: (v) =>
         v ? (
           <div style={{ whiteSpace: "normal", wordBreak: "break-word", lineHeight: 1.25 }}>
-            <Tag
-              bordered={false}
+            <Tag variant="filled"
               color="cyan"
               style={{ whiteSpace: "normal", wordBreak: "break-word", lineHeight: 1.3 }}
             >
@@ -5772,200 +2414,200 @@ export default function SLFMonitoring({
     exportToExcel(rows, "SLF_Facilities_Data");
   };
 
-  const renderSlfSummaryTiles = () => (
-    <>
-      {/* Summary tiles */}
-      {loading ? (
-        <Row gutter={[8, 8]} style={{ marginBottom: 12 }}>
-          {Array.from({ length: 8 }).map((_, i) => (
-            <Col xs={12} sm={6} md={6} lg={3} key={i}>
-              <Card
-                size="small"
-                style={{ borderRadius: 8, height: "100%", padding: 0 }}
-                bodyStyle={{ padding: "8px 12px" }}
-              >
-                <Skeleton
-                  active
-                  paragraph={{ rows: 1 }}
-                  title={{ width: "60%" }}
-                />
-              </Card>
-            </Col>
-          ))}
-        </Row>
-      ) : (
-        <Row gutter={[8, 8]} style={{ marginBottom: 12 }}>
-          <Col xs={12} sm={6} md={6} lg={3}>
-            <DashboardMetricCard
-              active={quickFilter === "operational"}
-              color={ACCENT}
-              icon={<BankOutlined style={{ color: ACCENT, fontSize: 14 }} />}
-              title="Total SLF"
-              value={totalRecords}
-              summary={`${opCount} operational`}
-              breakdowns={[
-                `${nonOpCount} non-operational`,
-                `${totalRecords - opCount - nonOpCount} other status`,
-              ]}
-              onClick={() =>
-                setQuickFilter(
-                  quickFilter === "operational" ? null : "operational",
-                )
-              }
-            />
-          </Col>
-          <Col xs={12} sm={6} md={6} lg={3}>
-            <DashboardMetricCard
-              active={quickFilter === "withCells"}
-              color="#13c2c2"
-              icon={
-                <ExperimentOutlined
-                  style={{ color: "#13c2c2", fontSize: 14 }}
-                />
-              }
-              title="Cell Infrastructure"
-              value={totalCells}
-              summary={`${cellsWithData}/${totalRecords} SLFs`}
-              breakdowns={Object.entries(cellStatusSummary)
-                .slice(0, 2)
-                .map(([status, count]) => `${count} ${status}`)}
-              onClick={() => {
-                setQuickFilter(
-                  quickFilter === "withCells" ? null : "withCells",
-                );
-                setSlfInsightModal("cells");
-              }}
-            />
-          </Col>
-          <Col xs={12} sm={6} md={6} lg={3}>
-            <DashboardMetricCard
-              active={quickFilter === "withLGUs"}
-              color="#fa8c16"
-              icon={<TeamOutlined style={{ color: "#fa8c16", fontSize: 14 }} />}
-              title="LGUs Served"
-              value={totalLGUs}
-              summary={`${lgusWithData}/${totalRecords} reporting`}
-              breakdowns={[
-                `${region3LguServed} Region 3`,
-                `${outsideRegionLguServed} outside/other`,
-              ]}
-              onClick={() => {
-                setQuickFilter(quickFilter === "withLGUs" ? null : "withLGUs");
-                setSlfInsightModal("lgu");
-              }}
-            />
-          </Col>
-          <Col xs={12} sm={6} md={6} lg={3}>
-            <DashboardMetricCard
-              active={quickFilter === "private"}
-              color="#722ed1"
-              icon={<BankOutlined style={{ color: "#722ed1", fontSize: 14 }} />}
-              title="Private Sector Served"
-              value={privateClientsTotal || privateSectorCount}
-              summary={`${privateSectorCount} private SLFs`}
-              breakdowns={[
-                `${privateClientsTotal} client records`,
-                `${privateWithData}/${totalRecords} reporting`,
-              ]}
-              onClick={() => {
-                setQuickFilter(quickFilter === "private" ? null : "private");
-                setSlfInsightModal("private");
-              }}
-            />
-          </Col>
-          <Col xs={12} sm={6} md={6} lg={3}>
-            <DashboardMetricCard
-              active={quickFilter === "withCapacity"}
-              color="#eb2f96"
-              icon={
-                <DatabaseOutlined style={{ color: "#eb2f96", fontSize: 14 }} />
-              }
-              title="SLF Total Capacities"
-              value={totalCapacity}
-              formatter={(v) => formatCompact(v)}
-              summary={`${capacityWithData}/${totalRecords} with data`}
-              breakdowns={[
-                `${formatCompact(receivingCapacityTotal)} receiving`,
-                `${capacityUsePercent.toFixed(1)}% used`,
-              ]}
-              onClick={() => {
-                setQuickFilter(
-                  quickFilter === "withCapacity" ? null : "withCapacity",
-                );
-                setSlfInsightModal("capacity");
-              }}
-            />
-          </Col>
-          <Col xs={12} sm={6} md={6} lg={3}>
-            <DashboardMetricCard
-              active={quickFilter === "withWaste"}
-              color="#ff4d4f"
-              icon={
-                <BarChartOutlined style={{ color: "#ff4d4f", fontSize: 14 }} />
-              }
-              title="Waste Received"
-              value={totalWaste}
-              suffix={wasteUnitLabel}
-              formatter={(v) => formatCompact(v)}
-              summary={`${wasteWithData}/${totalRecords} reporting`}
-              breakdowns={[
-                `${formatCompact(wasteWithData ? totalWaste / wasteWithData : 0)} avg`,
-                `${capacityUsePercent.toFixed(1)}% capacity`,
-              ]}
-              onClick={() => {
-                setQuickFilter(
-                  quickFilter === "withWaste" ? null : "withWaste",
-                );
-                setSlfInsightModal("waste");
-              }}
-            />
-          </Col>
-          <Col xs={12} sm={6} md={6} lg={3}>
-            <DashboardMetricCard
-              active={quickFilter === "withLeachate"}
-              color="#1890ff"
-              icon={
-                <AlertOutlined style={{ color: "#1890ff", fontSize: 14 }} />
-              }
-              title="Leachate Management"
-              value={totalLeachate}
-              summary={`${leachateWithData}/${totalRecords} SLFs`}
-              breakdowns={Object.entries(leachateStatusSummary)
-                .slice(0, 2)
-                .map(([status, count]) => `${count} ${status}`)}
-              onClick={() => {
-                setQuickFilter(
-                  quickFilter === "withLeachate" ? null : "withLeachate",
-                );
-                setSlfInsightModal("leachate");
-              }}
-            />
-          </Col>
-          <Col xs={12} sm={6} md={6} lg={3}>
-            <DashboardMetricCard
-              active={quickFilter === "withGas"}
-              color="#52c41a"
-              icon={
-                <ExperimentOutlined
-                  style={{ color: "#52c41a", fontSize: 14 }}
-                />
-              }
-              title="Gas Management"
-              value={totalGasVents}
-              summary={`${gasVentsWithData}/${totalRecords} SLFs`}
-              breakdowns={Object.entries(gasStatusSummary)
-                .slice(0, 2)
-                .map(([status, count]) => `${count} ${status}`)}
-              onClick={() => {
-                setQuickFilter(quickFilter === "withGas" ? null : "withGas");
-                setSlfInsightModal("gas");
-              }}
-            />
-          </Col>
-        </Row>
-      )}
-    </>
-  );
+  // const renderSlfSummaryTiles = () => (
+  //   <>
+  //     {/* Summary tiles */}
+  //     {loading ? (
+  //       <Row gutter={[8, 8]} style={{ marginBottom: 12 }}>
+  //         {Array.from({ length: 8 }).map((_, i) => (
+  //           <Col xs={12} sm={6} md={6} lg={3} key={i}>
+  //             <Card
+  //               size="small"
+  //               style={{ borderRadius: 8, height: "100%", padding: 0 }}
+  //               bodyStyle={{ padding: "8px 12px" }}
+  //             >
+  //               <Skeleton
+  //                 active
+  //                 paragraph={{ rows: 1 }}
+  //                 title={{ width: "60%" }}
+  //               />
+  //             </Card>
+  //           </Col>
+  //         ))}
+  //       </Row>
+  //     ) : (
+  //       <Row gutter={[8, 8]} style={{ marginBottom: 12 }}>
+  //         <Col xs={12} sm={6} md={6} lg={3}>
+  //           <DashboardMetricCard
+  //             active={quickFilter === "operational"}
+  //             color={ACCENT}
+  //             icon={<BankOutlined style={{ color: ACCENT, fontSize: 14 }} />}
+  //             title="Total SLF"
+  //             value={totalRecords}
+  //             summary={`${opCount} operational`}
+  //             breakdowns={[
+  //               `${nonOpCount} non-operational`,
+  //               `${totalRecords - opCount - nonOpCount} other status`,
+  //             ]}
+  //             onClick={() =>
+  //               setQuickFilter(
+  //                 quickFilter === "operational" ? null : "operational",
+  //               )
+  //             }
+  //           />
+  //         </Col>
+  //         <Col xs={12} sm={6} md={6} lg={3}>
+  //           <DashboardMetricCard
+  //             active={quickFilter === "withCells"}
+  //             color="#13c2c2"
+  //             icon={
+  //               <ExperimentOutlined
+  //                 style={{ color: "#13c2c2", fontSize: 14 }}
+  //               />
+  //             }
+  //             title="Cell Infrastructure"
+  //             value={totalCells}
+  //             summary={`${cellsWithData}/${totalRecords} SLFs`}
+  //             breakdowns={Object.entries(cellStatusSummary)
+  //               .slice(0, 2)
+  //               .map(([status, count]) => `${count} ${status}`)}
+  //             onClick={() => {
+  //               setQuickFilter(
+  //                 quickFilter === "withCells" ? null : "withCells",
+  //               );
+  //               setSlfInsightModal("cells");
+  //             }}
+  //           />
+  //         </Col>
+  //         <Col xs={12} sm={6} md={6} lg={3}>
+  //           <DashboardMetricCard
+  //             active={quickFilter === "withLGUs"}
+  //             color="#fa8c16"
+  //             icon={<TeamOutlined style={{ color: "#fa8c16", fontSize: 14 }} />}
+  //             title="LGUs Served"
+  //             value={totalLGUs}
+  //             summary={`${lgusWithData}/${totalRecords} reporting`}
+  //             breakdowns={[
+  //               `${region3LguServed} Region 3`,
+  //               `${outsideRegionLguServed} outside/other`,
+  //             ]}
+  //             onClick={() => {
+  //               setQuickFilter(quickFilter === "withLGUs" ? null : "withLGUs");
+  //               setSlfInsightModal("lgu");
+  //             }}
+  //           />
+  //         </Col>
+  //         <Col xs={12} sm={6} md={6} lg={3}>
+  //           <DashboardMetricCard
+  //             active={quickFilter === "private"}
+  //             color="#722ed1"
+  //             icon={<BankOutlined style={{ color: "#722ed1", fontSize: 14 }} />}
+  //             title="Private Sector Served"
+  //             value={privateClientsTotal || privateSectorCount}
+  //             summary={`${privateSectorCount} private SLFs`}
+  //             breakdowns={[
+  //               `${privateClientsTotal} client records`,
+  //               `${privateWithData}/${totalRecords} reporting`,
+  //             ]}
+  //             onClick={() => {
+  //               setQuickFilter(quickFilter === "private" ? null : "private");
+  //               setSlfInsightModal("private");
+  //             }}
+  //           />
+  //         </Col>
+  //         <Col xs={12} sm={6} md={6} lg={3}>
+  //           <DashboardMetricCard
+  //             active={quickFilter === "withCapacity"}
+  //             color="#eb2f96"
+  //             icon={
+  //               <DatabaseOutlined style={{ color: "#eb2f96", fontSize: 14 }} />
+  //             }
+  //             title="SLF Total Capacities"
+  //             value={totalCapacity}
+  //             formatter={(v) => formatCompact(v)}
+  //             summary={`${capacityWithData}/${totalRecords} with data`}
+  //             breakdowns={[
+  //               `${formatCompact(receivingCapacityTotal)} receiving`,
+  //               `${capacityUsePercent.toFixed(1)}% used`,
+  //             ]}
+  //             onClick={() => {
+  //               setQuickFilter(
+  //                 quickFilter === "withCapacity" ? null : "withCapacity",
+  //               );
+  //               setSlfInsightModal("capacity");
+  //             }}
+  //           />
+  //         </Col>
+  //         <Col xs={12} sm={6} md={6} lg={3}>
+  //           <DashboardMetricCard
+  //             active={quickFilter === "withWaste"}
+  //             color="#ff4d4f"
+  //             icon={
+  //               <BarChartOutlined style={{ color: "#ff4d4f", fontSize: 14 }} />
+  //             }
+  //             title="Waste Received"
+  //             value={totalWaste}
+  //             suffix={wasteUnitLabel}
+  //             formatter={(v) => formatCompact(v)}
+  //             summary={`${wasteWithData}/${totalRecords} reporting`}
+  //             breakdowns={[
+  //               `${formatCompact(wasteWithData ? totalWaste / wasteWithData : 0)} avg`,
+  //               `${capacityUsePercent.toFixed(1)}% capacity`,
+  //             ]}
+  //             onClick={() => {
+  //               setQuickFilter(
+  //                 quickFilter === "withWaste" ? null : "withWaste",
+  //               );
+  //               setSlfInsightModal("waste");
+  //             }}
+  //           />
+  //         </Col>
+  //         <Col xs={12} sm={6} md={6} lg={3}>
+  //           <DashboardMetricCard
+  //             active={quickFilter === "withLeachate"}
+  //             color="#1890ff"
+  //             icon={
+  //               <AlertOutlined style={{ color: "#1890ff", fontSize: 14 }} />
+  //             }
+  //             title="Leachate Management"
+  //             value={totalLeachate}
+  //             summary={`${leachateWithData}/${totalRecords} SLFs`}
+  //             breakdowns={Object.entries(leachateStatusSummary)
+  //               .slice(0, 2)
+  //               .map(([status, count]) => `${count} ${status}`)}
+  //             onClick={() => {
+  //               setQuickFilter(
+  //                 quickFilter === "withLeachate" ? null : "withLeachate",
+  //               );
+  //               setSlfInsightModal("leachate");
+  //             }}
+  //           />
+  //         </Col>
+  //         <Col xs={12} sm={6} md={6} lg={3}>
+  //           <DashboardMetricCard
+  //             active={quickFilter === "withGas"}
+  //             color="#52c41a"
+  //             icon={
+  //               <ExperimentOutlined
+  //                 style={{ color: "#52c41a", fontSize: 14 }}
+  //               />
+  //             }
+  //             title="Gas Management"
+  //             value={totalGasVents}
+  //             summary={`${gasVentsWithData}/${totalRecords} SLFs`}
+  //             breakdowns={Object.entries(gasStatusSummary)
+  //               .slice(0, 2)
+  //               .map(([status, count]) => `${count} ${status}`)}
+  //             onClick={() => {
+  //               setQuickFilter(quickFilter === "withGas" ? null : "withGas");
+  //               setSlfInsightModal("gas");
+  //             }}
+  //           />
+  //         </Col>
+  //       </Row>
+  //     )}
+  //   </>
+  // );
   return (
     <div style={{ padding: 0 }}>
       <div
@@ -5988,7 +2630,7 @@ export default function SLFMonitoring({
           </Text>
         </div>
         <Space wrap>
-          <Tag bordered={false} color={hasFilters ? "blue" : "default"}>
+          <Tag variant="filled" color={hasFilters ? "blue" : "default"}>
             {filtered.length} / {records.length} records
           </Tag>
           {hasFilters && (
@@ -6017,7 +2659,7 @@ export default function SLFMonitoring({
             ),
             children: (
               <>
-                {renderSlfSummaryTiles()}
+                {/* {renderSlfSummaryTiles()} */}
 
                 {/* Header with Search + Export */}
                 <div
@@ -6153,8 +2795,7 @@ export default function SLFMonitoring({
                       </Space>
                     </Col>
                     <Col>
-                      <Tag
-                        bordered={false}
+                      <Tag variant="filled"
                         color={hasFilters ? "blue" : "default"}
                       >
                         {filtered.length} / {records.length} records
@@ -6170,7 +2811,7 @@ export default function SLFMonitoring({
                     dataSource={filtered}
                     columns={columns}
                     rowKey="_id"
-                    loading={loading}
+                    loading={loading && records.length === 0}
                     size="small"
                     pagination={{
                       pageSize: 50,
@@ -6288,7 +2929,7 @@ export default function SLFMonitoring({
           loading: saving,
           style: { background: ACCENT, borderColor: ACCENT },
         }}
-        maskClosable={!saving}
+        mask={{ closable: !saving }}
         keyboard={!saving}
         destroyOnHidden
       >
@@ -7534,8 +4175,7 @@ export default function SLFMonitoring({
                                   <Col span={8} key={i}>
                                     <Collapse
                                       size="small"
-                                      bordered={false}
-                                      defaultActiveKey={[]}
+                                      variant="filled" defaultActiveKey={[]}
                                       destroyOnHidden
                                       expandIconPosition="end"
                                       style={{
@@ -8748,7 +5388,8 @@ export default function SLFMonitoring({
                       >
                         <Upload
                           {...slfUploadProps}
-                          action="/eswm-pipeline/api/upload"
+                          action={driveDisabled ? undefined : "/eswm-pipeline/api/upload"}
+                          disabled={driveDisabled}
                           headers={getUploadHeaders()}
                           multiple
                           accept=".pdf,.doc,.docx,.xls,.xlsx,image/*"
@@ -8770,7 +5411,8 @@ export default function SLFMonitoring({
                       >
                         <Upload
                           {...slfUploadProps}
-                          action="/eswm-pipeline/api/upload"
+                          action={driveDisabled ? undefined : "/eswm-pipeline/api/upload"}
+                          disabled={driveDisabled}
                           headers={getUploadHeaders()}
                           multiple
                           accept=".pdf,.doc,.docx,.xls,.xlsx,image/*"
@@ -8805,7 +5447,8 @@ export default function SLFMonitoring({
                     >
                       <Upload
                         {...slfUploadProps}
-                        action="/eswm-pipeline/api/upload"
+                        action={driveDisabled ? undefined : "/eswm-pipeline/api/upload"}
+                          disabled={driveDisabled}
                         headers={getUploadHeaders()}
                         multiple
                         accept=".pdf,.doc,.docx,.xls,.xlsx,image/*"
@@ -8892,7 +5535,8 @@ export default function SLFMonitoring({
                                   >
                                     <Upload
                                       {...slfUploadProps}
-                                      action="/eswm-pipeline/api/upload"
+                                      action={driveDisabled ? undefined : "/eswm-pipeline/api/upload"}
+                          disabled={driveDisabled}
                                       headers={getUploadHeaders()}
                                       multiple
                                       accept=".pdf,.doc,.docx,.xls,.xlsx,image/*"
@@ -9021,7 +5665,8 @@ export default function SLFMonitoring({
                                       listType="picture-card"
                                       maxCount={1}
                                       accept="image/*"
-                                      action="/eswm-pipeline/api/upload"
+                                      action={driveDisabled ? undefined : "/eswm-pipeline/api/upload"}
+                          disabled={driveDisabled}
                                       headers={getUploadHeaders()}
                                     >
                                       <div>
@@ -9068,7 +5713,8 @@ export default function SLFMonitoring({
                         listType="picture-card"
                         accept="image/*"
                         multiple
-                        action="/eswm-pipeline/api/upload"
+                        action={driveDisabled ? undefined : "/eswm-pipeline/api/upload"}
+                          disabled={driveDisabled}
                         headers={getUploadHeaders()}
                       >
                         <div>
@@ -9184,7 +5830,8 @@ export default function SLFMonitoring({
                                       {...slfUploadProps}
                                       maxCount={1}
                                       accept=".pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx"
-                                      action="/eswm-pipeline/api/upload"
+                                      action={driveDisabled ? undefined : "/eswm-pipeline/api/upload"}
+                          disabled={driveDisabled}
                                       headers={getUploadHeaders()}
                                     >
                                       <Button icon={<FilePdfOutlined />}>
@@ -9573,6 +6220,7 @@ export default function SLFMonitoring({
               <Tabs
                 defaultActiveKey="slf-dashboard"
                 tabPosition="left"
+                destroyInactiveTabPane
                 style={{ minHeight: 400 }}
                 tabBarStyle={{
                   background: isDark ? "rgba(22,119,255,0.08)" : "#f0f5ff",
@@ -10741,8 +7389,7 @@ export default function SLFMonitoring({
                                       return (
                                         <Collapse
                                           size="small"
-                                          bordered={false}
-                                          destroyOnHidden
+                                          variant="filled" destroyOnHidden
                                           style={{ marginBottom: 8 }}
                                           items={[
                                             {
@@ -12575,7 +9222,7 @@ export default function SLFMonitoring({
                               <Statistic
                                 title="SLF Facilities"
                                 value={inR3.length}
-                                valueStyle={{ color: "#fa8c16", fontSize: 22 }}
+                                styles={{ content: { color: "#fa8c16", fontSize: 22 } }}
                               />
                             </Card>
                           </Col>
@@ -12591,7 +9238,7 @@ export default function SLFMonitoring({
                               <Statistic
                                 title="Total LGUs Served"
                                 value={totalInR3}
-                                valueStyle={{ color: "#fa8c16", fontSize: 22 }}
+                                styles={{ content: { color: "#fa8c16", fontSize: 22 } }}
                               />
                             </Card>
                           </Col>
@@ -12607,7 +9254,7 @@ export default function SLFMonitoring({
                               <Statistic
                                 title="Avg LGUs/SLF"
                                 value={(totalInR3 / inR3.length).toFixed(1)}
-                                valueStyle={{ color: "#fa8c16", fontSize: 22 }}
+                                styles={{ content: { color: "#fa8c16", fontSize: 22 } }}
                               />
                             </Card>
                           </Col>
@@ -12655,7 +9302,7 @@ export default function SLFMonitoring({
                               <Statistic
                                 title="SLF Facilities"
                                 value={outR3.length}
-                                valueStyle={{ color: "#1890ff", fontSize: 22 }}
+                                styles={{ content: { color: "#1890ff", fontSize: 22 } }}
                               />
                             </Card>
                           </Col>
@@ -12671,7 +9318,7 @@ export default function SLFMonitoring({
                               <Statistic
                                 title="Total LGUs Served"
                                 value={totalOutR3}
-                                valueStyle={{ color: "#1890ff", fontSize: 22 }}
+                                styles={{ content: { color: "#1890ff", fontSize: 22 } }}
                               />
                             </Card>
                           </Col>
@@ -12687,7 +9334,7 @@ export default function SLFMonitoring({
                               <Statistic
                                 title="Avg LGUs/SLF"
                                 value={(totalOutR3 / outR3.length).toFixed(1)}
-                                valueStyle={{ color: "#1890ff", fontSize: 22 }}
+                                styles={{ content: { color: "#1890ff", fontSize: 22 } }}
                               />
                             </Card>
                           </Col>
@@ -12788,7 +9435,7 @@ export default function SLFMonitoring({
                       <Statistic
                         title="SLF Facilities"
                         value={barData.length}
-                        valueStyle={{ color, fontSize: 20 }}
+                        styles={{ content: { color, fontSize: 20 } }}
                       />
                     </Card>
                   </Col>
@@ -12804,7 +9451,7 @@ export default function SLFMonitoring({
                       <Statistic
                         title="Total Waste Received"
                         value={total.toLocaleString()}
-                        valueStyle={{ color, fontSize: 20 }}
+                        styles={{ content: { color, fontSize: 20 } }}
                       />
                     </Card>
                   </Col>
@@ -12823,7 +9470,7 @@ export default function SLFMonitoring({
                           undefined,
                           { maximumFractionDigits: 0 },
                         )}
-                        valueStyle={{ color, fontSize: 20 }}
+                        styles={{ content: { color, fontSize: 20 } }}
                       />
                     </Card>
                   </Col>
@@ -13124,7 +9771,17 @@ export default function SLFMonitoring({
                           render: (_, row) => `${Number(row.volume || 0).toLocaleString()} ${normalizeUnit(row.volumeUnit)}`,
                         },
                         {
-                          title: "Active Cell",
+                          title: "Portal Cell",
+                          width: 100,
+                          render: (_, row) => {
+                            const cellName = row.cellSource?.cellName;
+                            return cellName
+                              ? <Tag color="cyan" bordered={false} style={{ fontSize: 11 }}>{cellName}</Tag>
+                              : <Text type="secondary" style={{ fontSize: 11 }}>—</Text>;
+                          },
+                        },
+                        {
+                          title: "Assign Cell",
                           render: (_, row) => {
                             const compatible = activeCells.filter((cell) =>
                               /haz|inert/i.test(row.wasteType)
@@ -13132,16 +9789,17 @@ export default function SLFMonitoring({
                                 : !isHazardousCellType(cell.type),
                             );
                             const cellList = compatible.length ? compatible : activeCells;
+                            // Pre-select the portal-submitted cell index when it maps to
+                            // an active cell; show it ready for the admin to confirm.
+                            const portalIndex = getTruckCellIndex(row.cellSource);
+                            const preselected = cellList.some((cell) => cell.index === portalIndex)
+                              ? portalIndex
+                              : undefined;
                             return (
                               <Select
                                 style={{ width: "100%" }}
-                                placeholder="Select active cell"
-                                value={(() => {
-                                  const index = getTruckCellIndex(row.cellSource);
-                                  return cellList.some((cell) => cell.index === index)
-                                    ? index
-                                    : undefined;
-                                })()}
+                                placeholder={preselected == null ? "Select active cell" : undefined}
+                                value={preselected}
                                 options={cellList.map((cell) => ({ label: cell.label, value: cell.index }))}
                                 onChange={(value) =>
                                   updateCellAssignmentLocal(

@@ -62,6 +62,8 @@ import {
   PlusOutlined,
   EditOutlined,
   UnlockOutlined,
+  DisconnectOutlined,
+  ApiOutlined,
 } from "@ant-design/icons";
 import AccountSettings from "./AccountSettings";
 import Swal from "sweetalert2";
@@ -84,6 +86,22 @@ export default function DeveloperSettings({onSettingsSaved, isDark, initialActiv
   const [announcementSaving, setAnnouncementSaving] = useState(false);
   const [form] = Form.useForm();
   const [announcementForm] = Form.useForm();
+  const [emailForm] = Form.useForm();
+
+  // SMTP / Email config state
+  const [emailStatus, setEmailStatus] = useState(null); // null | "ok" | "error"
+  const [emailStatusMsg, setEmailStatusMsg] = useState("");
+  const [emailSaving, setEmailSaving] = useState(false);
+  const [emailTesting, setEmailTesting] = useState(false);
+  const [smtpProvider, setSmtpProvider] = useState("smtp");
+  const [emailMaintenanceActive, setEmailMaintenanceActive] = useState(false);
+  const [driveStatus, setDriveStatus] = useState(null);
+  const [driveStatusMsg, setDriveStatusMsg] = useState("");
+  const [driveTestResult, setDriveTestResult] = useState(null);
+  const [driveTesting, setDriveTesting] = useState(false);
+  const [driveMaintenance, setDriveMaintenance] = useState(false);
+  const [driveMaintenanceMsg, setDriveMaintenanceMsg] = useState("");
+  const [driveSaving, setDriveSaving] = useState(false);
 
   // Logs state
   const [logs, setLogs] = useState([]);
@@ -188,6 +206,27 @@ export default function DeveloperSettings({onSettingsSaved, isDark, initialActiv
           ? dayjs(data.portalAnnouncementEndAt)
           : null,
       });
+      // Populate email form
+      const provider = data.smtpProvider && data.smtpProvider !== "none"
+        ? data.smtpProvider
+        : data.smtpConfigured ? "smtp" : "gmail-apppw";  // default to Gmail since .env uses Gmail
+      setSmtpProvider(provider);
+      emailForm.setFieldsValue({
+        smtpProvider:              provider,
+        smtpHost:                  data.smtpHost  || (provider === "gmail-apppw" ? "smtp.gmail.com" : ""),
+        smtpPort:                  data.smtpPort  || 587,
+        smtpUser:                  data.smtpUser  || "",
+        smtpPass:                  data.smtpPass  || "",
+        smtpSecure:                data.smtpSecure || false,
+        smtpFrom:                  data.smtpFrom  || "",
+        emailNotificationsEnabled: data.emailNotificationsEnabled !== false,
+        emailMaintenanceMode:      !!data.emailMaintenanceMode,
+        emailMaintenanceMessage:   data.emailMaintenanceMessage || "Email notifications are temporarily disabled for maintenance.",
+        sendTestTo:                "",
+      });
+      setEmailMaintenanceActive(!!data.emailMaintenanceMode);
+      setDriveMaintenance(!!data.driveMaintenanceMode);
+      setDriveMaintenanceMsg(data.driveMaintenanceMessage || "Google Drive is temporarily unavailable. File uploads are disabled.");
       // Parse dashboardTabs map
       if (data.dashboardTabs) {
         const parsed = typeof data.dashboardTabs === "object" ? data.dashboardTabs : {};
@@ -565,6 +604,93 @@ export default function DeveloperSettings({onSettingsSaved, isDark, initialActiv
     fetchLogs({ showLoading: true });
   };
 
+  // ── SMTP / Email config handlers ──────────────────────────────────────────
+  const handleEmailSave = async (values) => {
+    setEmailSaving(true);
+    try {
+      await api.put("/settings/app/email-config", {
+        ...values,
+        smtpConfigured: values.smtpProvider !== "none",
+        emailMaintenanceMode: !!values.emailMaintenanceMode,
+        emailMaintenanceMessage: values.emailMaintenanceMessage || "",
+      });
+      setEmailMaintenanceActive(!!values.emailMaintenanceMode);
+      setEmailStatus(null);
+      setEmailStatusMsg("");
+      Swal.fire({ icon: "success", title: "Email config saved", text: "Settings applied immediately — no restart required.", timer: 2200, showConfirmButton: false });
+    } catch (err) {
+      Swal.fire("Error", err.response?.data?.message || "Could not save email config", "error");
+    } finally {
+      setEmailSaving(false);
+    }
+  };
+
+  const handleEmailTest = async () => {
+    setEmailTesting(true);
+    setEmailStatus(null);
+    setEmailStatusMsg("");
+    try {
+      const values = emailForm.getFieldsValue();
+      const { data } = await api.post("/settings/app/email-test", {
+        smtpProvider: values.smtpProvider,
+        smtpHost:     values.smtpHost,
+        smtpPort:     values.smtpPort,
+        smtpUser:     values.smtpUser,
+        smtpPass:     values.smtpPass,
+        smtpSecure:   values.smtpSecure,
+        sendTestTo:   values.sendTestTo || "",
+      });
+      setEmailStatus("ok");
+      setEmailStatusMsg(data.message);
+    } catch (err) {
+      setEmailStatus("error");
+      setEmailStatusMsg(err.response?.data?.message || "Connection test failed");
+    } finally {
+      setEmailTesting(false);
+    }
+  };
+
+  const handleDriveSave = async () => {
+    setDriveSaving(true);
+    try {
+      await api.put("/settings/app/drive-config", {
+        driveMaintenanceMode: driveMaintenance,
+        driveMaintenanceMessage: driveMaintenanceMsg,
+      });
+      Swal.fire({
+        icon: "success",
+        title: driveMaintenance ? "Drive Maintenance Mode Enabled" : "Drive Maintenance Mode Disabled",
+        text: driveMaintenance
+          ? "All file uploads are now blocked. Data entry and Excel imports are unaffected."
+          : "Drive access is restored. File uploads are now allowed.",
+        timer: 2500,
+        showConfirmButton: false,
+      });
+    } catch (err) {
+      Swal.fire("Error", err.response?.data?.message || "Could not save Drive config", "error");
+    } finally {
+      setDriveSaving(false);
+    }
+  };
+
+  const handleDriveTest = async () => {
+    setDriveTesting(true);
+    setDriveStatus(null);
+    setDriveStatusMsg("");
+    setDriveTestResult(null);
+    try {
+      const { data } = await api.post("/settings/app/drive-test");
+      setDriveStatus("ok");
+      setDriveStatusMsg(data.message || "Google Drive connection verified.");
+      setDriveTestResult(data.data || null);
+    } catch (err) {
+      setDriveStatus("error");
+      setDriveStatusMsg(err.response?.data?.message || "Google Drive test failed");
+    } finally {
+      setDriveTesting(false);
+    }
+  };
+
   // ── Dashboard Tab Visibility ──
   const handleDashTabChange = (tabKey, field, value) => {
     setDashboardTabs(prev => ({
@@ -617,8 +743,7 @@ export default function DeveloperSettings({onSettingsSaved, isDark, initialActiv
       // Invalidate ALL data caches so every page re-fetches fresh data
       // with the updated year-visibility settings applied.
       secureStorage.invalidateAllDataCaches();
-      writeClientLog("settings.update");
-      Swal.fire({
+      writeClientLog("settings.update");      Swal.fire({
         icon: "success",
         title: "Settings Saved",
         timer: 1200,
@@ -936,6 +1061,7 @@ export default function DeveloperSettings({onSettingsSaved, isDark, initialActiv
             key: "portal-email",
             label: <span><MailOutlined /> Portal &amp; Email</span>,
             children: (
+              <>
               <Form form={form} layout="vertical" onFinish={handleSave} initialValues={settings}>
                 {/* Portal Settings */}
                 <Card
@@ -1044,6 +1170,349 @@ export default function DeveloperSettings({onSettingsSaved, isDark, initialActiv
                   </Button>
                 </div>
               </Form>
+
+              {/* ── SMTP / Email Transport Configuration ── */}
+              <Form form={emailForm} layout="vertical" onFinish={handleEmailSave} style={{ marginTop: 24 }}>
+                <Card
+                  style={{ borderRadius: 10 }}
+                  title={
+                    <Space>
+                      <ApiOutlined style={{ color: "#fa8c16" }} />
+                      <Text strong>Email / SMTP Transport</Text>
+                      {emailStatus === "ok" && <Tag color="success" icon={<CheckCircleOutlined />}>Connected</Tag>}
+                      {emailStatus === "error" && <Tag color="error" icon={<CloseCircleOutlined />}>Failed</Tag>}
+                    </Space>
+                  }
+                >
+                  <Alert
+                    type="info"
+                    showIcon
+                    style={{ marginBottom: 16, borderRadius: 8 }}
+                    message="Configure the mail transport used for portal emails."
+                    description={
+                      <span>
+                        Your <code>.env</code> is configured with a Gmail account (<code>embreswmp@gmail.com</code>).
+                        Gmail requires either an <strong>App Password</strong> (needs 2FA enabled) or
+                        <strong> OAuth2</strong> (needs the OAuth client re-enabled in Cloud Console).
+                        Alternatively, switch to <strong>Generic SMTP</strong> with any other provider.
+                        All changes are saved to the database — no server restart needed.
+                      </span>
+                    }
+                  />
+                  {emailMaintenanceActive && (
+                    <Alert
+                      type="warning"
+                      showIcon
+                      style={{ marginBottom: 16, borderRadius: 8 }}
+                      message="Email Maintenance Mode is ACTIVE"
+                      description="All email sends are currently silently skipped. Portal registrations, approvals, acknowledgements, and reset-password emails will NOT be delivered until maintenance mode is turned OFF and settings are saved."
+                      action={
+                        <Button
+                          size="small"
+                          danger
+                          onClick={() => {
+                            emailForm.setFieldsValue({ emailMaintenanceMode: false });
+                            setEmailMaintenanceActive(false);
+                          }}
+                        >
+                          Turn Off
+                        </Button>
+                      }
+                    />
+                  )}
+
+                  <Row gutter={[16, 0]}>
+                    <Col xs={24} md={12}>
+                      <Form.Item name="smtpProvider" label="Mail Provider">
+                        <Select
+                          onChange={(v) => {
+                            if (v === "gmail-apppw") {
+                              emailForm.setFieldsValue({ smtpHost: "smtp.gmail.com", smtpPort: 587, smtpSecure: false });
+                              setSmtpProvider("gmail-apppw");
+                            } else if (v === "gmail-oauth2") {
+                              setSmtpProvider("gmail-oauth2");
+                            } else if (v === "smtp") {
+                              setSmtpProvider("smtp");
+                            } else if (v === "outlook") {
+                              emailForm.setFieldsValue({ smtpHost: "smtp.office365.com", smtpPort: 587, smtpSecure: false, smtpProvider: "smtp" });
+                              setSmtpProvider("smtp");
+                            } else if (v === "yahoo") {
+                              emailForm.setFieldsValue({ smtpHost: "smtp.mail.yahoo.com", smtpPort: 587, smtpSecure: false, smtpProvider: "smtp" });
+                              setSmtpProvider("smtp");
+                            } else {
+                              setSmtpProvider(v);
+                            }
+                          }}
+                          options={[
+                            { label: "Gmail — App Password", value: "gmail-apppw" },
+                            { label: "Gmail — OAuth2", value: "gmail-oauth2" },
+                            { label: "Generic SMTP (any provider)", value: "smtp" },
+                            { label: "—— Quick presets ——", value: "divider", disabled: true },
+                            { label: "Outlook / Hotmail (smtp.office365.com)", value: "outlook" },
+                            { label: "Yahoo Mail (smtp.mail.yahoo.com)", value: "yahoo" },
+                            { label: "None (disable email)", value: "none" },
+                          ]}
+                        />
+                      </Form.Item>
+                    </Col>
+                    <Col xs={24} md={6}>
+                      <Form.Item name="emailNotificationsEnabled" label="Email Notifications" valuePropName="checked">
+                        <Switch checkedChildren="Enabled" unCheckedChildren="Disabled" />
+                      </Form.Item>
+                    </Col>
+                    <Col xs={24} md={6}>
+                      <Form.Item
+                        name="emailMaintenanceMode"
+                        label={<span style={{ color: "#cf1322" }}>Maintenance Mode</span>}
+                        valuePropName="checked"
+                        tooltip="When ON, all email sends are silently skipped. No emails go out until this is turned off."
+                      >
+                        <Switch
+                          checkedChildren="ON"
+                          unCheckedChildren="OFF"
+                          style={{ backgroundColor: emailForm.getFieldValue?.("emailMaintenanceMode") ? "#cf1322" : undefined }}
+                        />
+                      </Form.Item>
+                    </Col>
+                  </Row>
+
+                  {smtpProvider !== "none" && smtpProvider !== "gmail-oauth2" && (
+                    <>
+                      <Row gutter={[16, 0]}>
+                        <Col xs={24} md={14}>
+                          <Form.Item
+                            name="smtpHost"
+                            label="SMTP Host"
+                            rules={[{ required: smtpProvider !== "none", message: "Enter SMTP host" }]}
+                          >
+                            <Input placeholder="smtp.gmail.com" prefix={<ApiOutlined />} />
+                          </Form.Item>
+                        </Col>
+                        <Col xs={24} md={6}>
+                          <Form.Item name="smtpPort" label="Port" rules={[{ required: true }]}>
+                            <InputNumber min={1} max={65535} style={{ width: "100%" }} />
+                          </Form.Item>
+                        </Col>
+                        <Col xs={24} md={4}>
+                          <Form.Item name="smtpSecure" label="SSL (port 465)" valuePropName="checked">
+                            <Switch checkedChildren="SSL" unCheckedChildren="TLS" />
+                          </Form.Item>
+                        </Col>
+                      </Row>
+                      <Row gutter={[16, 0]}>
+                        <Col xs={24} md={12}>
+                          <Form.Item
+                            name="smtpUser"
+                            label="Username / Email"
+                            rules={[{ required: smtpProvider !== "none", message: "Enter username" }]}
+                          >
+                            <Input placeholder="embreswmp@gmail.com" prefix={<MailOutlined />} />
+                          </Form.Item>
+                        </Col>
+                        <Col xs={24} md={12}>
+                          <Form.Item
+                            name="smtpPass"
+                            label="Password / App Password"
+                            rules={[{ required: false }]}
+                          >
+                            <Input.Password placeholder="Leave as-is to keep existing password" />
+                          </Form.Item>
+                        </Col>
+                      </Row>
+                      <Row gutter={[16, 0]}>
+                        <Col xs={24} md={12}>
+                          <Form.Item name="smtpFrom" label="From Address (optional)">
+                            <Input placeholder="EMBR3 ESWMP <embreswmp@gmail.com>" prefix={<MailOutlined />} />
+                          </Form.Item>
+                        </Col>
+                      </Row>
+                    </>
+                  )}
+
+                  <Form.Item
+                    noStyle
+                    shouldUpdate={(prev, cur) => prev.emailMaintenanceMode !== cur.emailMaintenanceMode}
+                  >
+                    {({ getFieldValue }) => getFieldValue("emailMaintenanceMode") && (
+                      <Form.Item
+                        name="emailMaintenanceMessage"
+                        label="Maintenance Message"
+                        tooltip="Shown in server logs when a send is skipped. Not user-facing."
+                      >
+                        <Input.TextArea rows={2} placeholder="Email notifications are temporarily disabled for maintenance." />
+                      </Form.Item>
+                    )}
+                  </Form.Item>
+
+                  {smtpProvider === "gmail-oauth2" && (
+                    <Alert
+                      type="warning"
+                      showIcon
+                      style={{ marginBottom: 12, borderRadius: 8 }}
+                      message="Gmail OAuth2 requires the OAuth client to be enabled in Google Cloud Console."
+                      description={
+                        <span>
+                          1. Re-enable the client at <a href="https://console.cloud.google.com/apis/credentials" target="_blank" rel="noreferrer">console.cloud.google.com/apis/credentials</a><br />
+                          2. Run <code>node utils/generateGmailToken.js</code> from the server directory.<br />
+                          3. Set the resulting <code>GMAIL_REFRESH_TOKEN</code> in <code>server/.env</code>.
+                        </span>
+                      }
+                    />
+                  )}
+
+                  {emailStatusMsg && (
+                    <Alert
+                      type={emailStatus === "ok" ? "success" : "error"}
+                      showIcon
+                      style={{ marginBottom: 12, borderRadius: 8 }}
+                      message={emailStatusMsg}
+                    />
+                  )}
+
+                  {/* Test Email row */}
+                  <Row gutter={[12, 0]} align="bottom" style={{ marginTop: 8 }}>
+                    <Col xs={24} md={14}>
+                      <Form.Item name="sendTestTo" label="Send Test Email To (optional)">
+                        <Input placeholder="admin@example.com" prefix={<SendOutlined />} />
+                      </Form.Item>
+                    </Col>
+                    <Col xs={24} md={10}>
+                      <Form.Item label=" ">
+                        <Space wrap>
+                          <Button
+                            icon={<ApiOutlined />}
+                            onClick={handleEmailTest}
+                            loading={emailTesting}
+                            disabled={smtpProvider === "none" || smtpProvider === "gmail-oauth2"}
+                          >
+                            Test Connection
+                          </Button>
+                          <Button
+                            type="primary"
+                            htmlType="submit"
+                            loading={emailSaving}
+                            icon={<SaveOutlined />}
+                          >
+                            Save Email Config
+                          </Button>
+                        </Space>
+                      </Form.Item>
+                    </Col>
+                  </Row>
+                </Card>
+              </Form>
+
+              <Card
+                style={{ marginTop: 16, borderRadius: 10 }}
+                title={
+                  <Space>
+                    <DatabaseOutlined style={{ color: "#13a8a8" }} />
+                    <Text strong>Google Drive Access</Text>
+                    {driveMaintenance
+                      ? <Tag color="error">Maintenance ON — Uploads Blocked</Tag>
+                      : driveStatus === "ok" ? <Tag color="success" icon={<CheckCircleOutlined />}>Connected</Tag>
+                      : driveStatus === "error" ? <Tag color="error" icon={<CloseCircleOutlined />}>Failed</Tag>
+                      : null}
+                  </Space>
+                }
+              >
+                {driveMaintenance && (
+                  <Alert
+                    type="error"
+                    showIcon
+                    style={{ marginBottom: 16, borderRadius: 8 }}
+                    message="Drive Maintenance Mode is ACTIVE"
+                    description="All file uploads (documents, images, hauler LOI) are blocked. Data entry and Excel imports continue to work normally. Turn this off once your Drive account is restored."
+                  />
+                )}
+
+                <Alert
+                  type="info"
+                  showIcon
+                  style={{ marginBottom: 16, borderRadius: 8 }}
+                  message="Enable maintenance mode while Google Drive credentials are unavailable."
+                  description="When ON, all upload endpoints return 503. All existing files remain accessible (read-only). The Excel/CSV data import in the portal is unaffected."
+                />
+
+                <Row gutter={[16, 12]} align="middle" style={{ marginBottom: 12 }}>
+                  <Col xs={24} md={8}>
+                    <Space direction="vertical" size={2}>
+                      <Text strong>Drive Maintenance Mode</Text>
+                      <Text type="secondary" style={{ fontSize: 12 }}>Blocks all Drive-based file uploads</Text>
+                    </Space>
+                  </Col>
+                  <Col xs={24} md={4}>
+                    <Switch
+                      checked={driveMaintenance}
+                      onChange={setDriveMaintenance}
+                      checkedChildren="ON"
+                      unCheckedChildren="OFF"
+                      style={{ backgroundColor: driveMaintenance ? "#cf1322" : undefined }}
+                    />
+                  </Col>
+                </Row>
+
+                {driveMaintenance && (
+                  <div style={{ marginBottom: 12 }}>
+                    <Text style={{ fontSize: 12, display: "block", marginBottom: 4 }}>Message shown when upload is blocked</Text>
+                    <Input.TextArea
+                      rows={2}
+                      value={driveMaintenanceMsg}
+                      onChange={(e) => setDriveMaintenanceMsg(e.target.value)}
+                      placeholder="Google Drive is temporarily unavailable. File uploads are disabled."
+                    />
+                  </div>
+                )}
+
+                {driveStatusMsg && (
+                  <Alert
+                    type={driveStatus === "ok" ? "success" : "error"}
+                    showIcon
+                    style={{ marginBottom: 12, borderRadius: 8 }}
+                    message={driveStatusMsg}
+                  />
+                )}
+
+                {driveTestResult?.folders?.length > 0 && (
+                  <Descriptions bordered size="small" column={1} style={{ marginBottom: 12 }}>
+                    <Descriptions.Item label="Auth Client">
+                      {driveTestResult.client}
+                    </Descriptions.Item>
+                    {driveTestResult.folders.map((folder) => (
+                      <Descriptions.Item key={folder.key} label={folder.key}>
+                        <Space direction="vertical" size={0}>
+                          <Text strong>{folder.name}</Text>
+                          <Text type="secondary" style={{ fontSize: 12 }}>{folder.id}</Text>
+                          <Tag color={folder.writable ? "success" : "warning"} style={{ width: "fit-content" }}>
+                            {folder.writable ? "Writable" : "Read-only"}
+                          </Tag>
+                        </Space>
+                      </Descriptions.Item>
+                    ))}
+                  </Descriptions>
+                )}
+
+                <Space wrap>
+                  <Button
+                    icon={<DatabaseOutlined />}
+                    onClick={handleDriveTest}
+                    loading={driveTesting}
+                    disabled={driveMaintenance}
+                  >
+                    Test Drive Access
+                  </Button>
+                  <Button
+                    type="primary"
+                    danger={driveMaintenance}
+                    icon={<SaveOutlined />}
+                    loading={driveSaving}
+                    onClick={handleDriveSave}
+                  >
+                    {driveMaintenance ? "Save & Block Uploads" : "Save Drive Config"}
+                  </Button>
+                </Space>
+              </Card>
+              </>
             ),
           },
           {

@@ -142,6 +142,9 @@ export default function SLFPortalModals({
   setUploadPreviewData,
   setUploadPreviewColumns,
   setUploadMissingColumns,
+  uploadProgressOpen, uploadProgress, uploadStatusText, uploadProgressError, setUploadProgressOpen,
+  ticketAttachments = [], setTicketAttachments = () => {},
+  ticketUploading = false, setTicketUploading = () => {},
   activeCellModalOpen, setActiveCellModalOpen,
   activeCellDraft, setActiveCellDraft,
   editingActiveCellKey, setEditingActiveCellKey,
@@ -3247,15 +3250,7 @@ export default function SLFPortalModals({
               children: (
                 <div className="slf-support-pane">
                   <div className="slf-support-grid">
-                    <div className="slf-support-callout">
-                      <div className="slf-support-callout-badge">Help Request</div>
-                      <div className="slf-support-callout-title">Send a clear ticket so the admin team can act quickly</div>
-                      <div className="slf-support-callout-list">
-                        <div><span className="slf-support-mini-icon slf-support-mini-icon-blue"><InfoCircleOutlined /></span> Pick the closest category.</div>
-                        <div><span className="slf-support-mini-icon slf-support-mini-icon-orange"><AuditOutlined /></span> State what record, page, or action failed.</div>
-                        <div><span className="slf-support-mini-icon slf-support-mini-icon-red"><WifiOutlined /></span> Include errors, affected dates, and timing if relevant.</div>
-                      </div>
-                    </div>
+                   
                     <Form
                   form={supportForm}
                   layout="vertical"
@@ -3312,6 +3307,49 @@ export default function SLFPortalModals({
                       rows={5}
                       placeholder="Describe what happened, what you expected, and any record, date, or screen involved."
                     />
+                  </Form.Item>
+                  <Form.Item label="Attachments (optional)" tooltip="Upload a screenshot or photo of the error, or any supporting document (image or PDF).">
+                    <Upload
+                      listType="picture"
+                      multiple
+                      accept="image/*,application/pdf"
+                      fileList={(ticketAttachments || []).map((a, i) => ({
+                        uid: a.url || String(i),
+                        name: a.name || `attachment-${i + 1}`,
+                        status: "done",
+                        url: a.url,
+                      }))}
+                      customRequest={async ({ file, onSuccess, onError }) => {
+                        setTicketUploading(true);
+                        try {
+                          const fd = new FormData();
+                          fd.append("file", file);
+                          const { data } = await api.post("/support-tickets/upload", fd, {
+                            headers: { "Content-Type": "multipart/form-data" },
+                          });
+                          setTicketAttachments((prev) => [...prev, data]);
+                          onSuccess(data, file);
+                        } catch (err) {
+                          const isDriveMaintenance = err.response?.status === 503 || err.response?.data?.driveMaintenanceMode;
+                          if (isDriveMaintenance) {
+                            onError(new Error("File uploads are temporarily unavailable. You can still submit the ticket without an attachment."));
+                          } else {
+                            onError(err);
+                          }
+                        } finally {
+                          setTicketUploading(false);
+                        }
+                      }}
+                      onRemove={(file) =>
+                        setTicketAttachments((prev) =>
+                          prev.filter((a) => (a.url || "") !== (file.url || file.uid)),
+                        )
+                      }
+                    >
+                      <Button icon={<UploadOutlined />} loading={ticketUploading}>
+                        Upload screenshot / proof
+                      </Button>
+                    </Upload>
                   </Form.Item>
                   <Form.Item>
                     <Button
@@ -3483,6 +3521,25 @@ export default function SLFPortalModals({
             >
               <Text>{supportDetailModal.message}</Text>
             </div>
+            {Array.isArray(supportDetailModal.attachments) &&
+              supportDetailModal.attachments.length > 0 && (
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 8, margin: "8px 0" }}>
+                  {supportDetailModal.attachments.map((att, i) =>
+                    (att.mimeType || "").startsWith("image/") ? (
+                      <img
+                        key={i}
+                        src={att.url}
+                        alt={att.name || `attachment-${i + 1}`}
+                        style={{ width: 72, height: 72, objectFit: "cover", borderRadius: 6, border: "1px solid #eee" }}
+                      />
+                    ) : (
+                      <a key={i} href={att.url} target="_blank" rel="noreferrer">
+                        {att.name || `Attachment ${i + 1}`}
+                      </a>
+                    ),
+                  )}
+                </div>
+              )}
             {supportDetailModal.replies?.length > 0 && (
               <>
                 <Divider style={{ margin: "12px 0" }}>Replies</Divider>
@@ -3527,6 +3584,42 @@ export default function SLFPortalModals({
               )}
           </div>
         )}
+      </Modal>
+
+      {/* ── Excel Upload Progress Modal ── */}
+      <Modal
+        title={
+          <Space>
+            <UploadOutlined style={{ color: uploadProgressError ? "#cf1322" : "#1677ff" }} />
+            <Text strong>{uploadProgressError ? "Upload Issue" : "Processing Upload"}</Text>
+          </Space>
+        }
+        open={!!uploadProgressOpen}
+        closable={!!uploadProgressError}
+        maskClosable={false}
+        keyboard={false}
+        onCancel={() => setUploadProgressOpen(false)}
+        footer={
+          uploadProgressError ? (
+            <Button type="primary" className="slf-primary-btn" onClick={() => setUploadProgressOpen(false)}>
+              Close
+            </Button>
+          ) : null
+        }
+        width={460}
+      >
+        <div style={{ padding: "8px 4px" }}>
+          <Progress
+            percent={uploadProgress}
+            status={uploadProgressError ? "exception" : uploadProgress >= 100 ? "success" : "active"}
+            strokeColor={uploadProgressError ? undefined : { from: "#108ee9", to: "#1a3353" }}
+          />
+          <div style={{ marginTop: 12, textAlign: "center" }}>
+            <Text type={uploadProgressError ? "danger" : "secondary"}>
+              {uploadStatusText || "Please wait…"}
+            </Text>
+          </div>
+        </div>
       </Modal>
 
       {/* ── Upload Format Guide Modal ── */}
@@ -3811,7 +3904,7 @@ export default function SLFPortalModals({
           dataSource={uploadPreviewData}
           columns={(uploadPreviewColumns || []).map((col) => {
             // keep the row-number (#) and actions columns as-is
-            if (!col.dataIndex || col.key === "actions" || col.title === "#")
+            if (!col || !col.dataIndex || col.key === "actions" || col.title === "#")
               return col;
             return {
               ...col,

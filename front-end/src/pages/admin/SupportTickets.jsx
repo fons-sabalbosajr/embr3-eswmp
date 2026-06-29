@@ -18,6 +18,8 @@ import {
   Timeline,
   Statistic,
   Alert,
+  Image,
+  Badge,
 } from "antd";
 import {
   SearchOutlined,
@@ -296,7 +298,14 @@ export default function SupportTickets({ canEdit = true }) {
       key: "subject",
       render: (v, r) => (
         <Space direction="vertical" size={2}>
-          <Text style={{ fontSize: 12 }}>{v}</Text>
+          <Space size={6}>
+            <Text style={{ fontSize: 12 }}>{v}</Text>
+            {Array.isArray(r.attachments) && r.attachments.length > 0 && (
+              <Tooltip title={`${r.attachments.length} attachment(s)`}>
+                <Badge count={r.attachments.length} size="small" style={{ backgroundColor: "#2f54eb" }} />
+              </Tooltip>
+            )}
+          </Space>
           <Tag style={{ fontSize: 10 }}>{r.category}</Tag>
         </Space>
       ),
@@ -524,6 +533,93 @@ export default function SupportTickets({ canEdit = true }) {
               {detail.message}
             </Paragraph>
 
+            {Array.isArray(detail.attachments) && detail.attachments.length > 0 && (
+              <div style={{ marginBottom: 16 }}>
+                <Text strong style={{ fontSize: 12, display: "block", marginBottom: 8 }}>
+                  Attachments ({detail.attachments.length})
+                </Text>
+                {/* Image gallery preview group */}
+                {detail.attachments.some((a) => (a.mimeType || "").startsWith("image/")) && (
+                  <Image.PreviewGroup>
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: 10, marginBottom: 8 }}>
+                      {detail.attachments
+                        .filter((a) => (a.mimeType || "").startsWith("image/"))
+                        .map((att, i) => (
+                          <div key={i} style={{ position: "relative" }}>
+                            <Image
+                              src={att.url}
+                              alt={att.name || `screenshot-${i + 1}`}
+                              width={110}
+                              height={110}
+                              style={{
+                                objectFit: "cover",
+                                borderRadius: 10,
+                                border: "1.5px solid #e0e0e0",
+                                cursor: "zoom-in",
+                                boxShadow: "0 1px 6px rgba(0,0,0,0.10)",
+                              }}
+                            />
+                            <div style={{
+                              position: "absolute",
+                              bottom: 4,
+                              left: 4,
+                              right: 4,
+                              background: "rgba(0,0,0,0.45)",
+                              borderRadius: 6,
+                              padding: "1px 4px",
+                              fontSize: 10,
+                              color: "#fff",
+                              overflow: "hidden",
+                              textOverflow: "ellipsis",
+                              whiteSpace: "nowrap",
+                            }}>
+                              {att.name || `Image ${i + 1}`}
+                            </div>
+                          </div>
+                        ))}
+                    </div>
+                  </Image.PreviewGroup>
+                )}
+                {/* Non-image files (PDF, DOC, etc.) */}
+                {detail.attachments
+                  .filter((a) => !(a.mimeType || "").startsWith("image/"))
+                  .map((att, i) => {
+                    const isPdf = (att.mimeType || "").includes("pdf");
+                    return (
+                      <div
+                        key={i}
+                        style={{
+                          display: "inline-flex",
+                          alignItems: "center",
+                          gap: 8,
+                          padding: "6px 12px",
+                          background: "#f5f5f5",
+                          borderRadius: 8,
+                          border: "1px solid #e0e0e0",
+                          marginRight: 8,
+                          marginBottom: 6,
+                        }}
+                      >
+                        <span style={{ fontSize: 20 }}>{isPdf ? "📄" : "📎"}</span>
+                        <span style={{ fontSize: 12, maxWidth: 180, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                          {att.name || `Attachment ${i + 1}`}
+                        </span>
+                        <Button
+                          size="small"
+                          type="link"
+                          href={att.url}
+                          target="_blank"
+                          rel="noreferrer"
+                          style={{ padding: 0, height: "auto", fontSize: 12 }}
+                        >
+                          Open ↗
+                        </Button>
+                      </div>
+                    );
+                  })}
+              </div>
+            )}
+
             <Divider style={{ margin: "12px 0" }}>Conversation</Divider>
             {detail.replies?.length ? (
               <Timeline
@@ -541,9 +637,72 @@ export default function SupportTickets({ canEdit = true }) {
                           {dayjs(reply.createdAt).format("MMM DD, h:mm A")}
                         </Text>
                       </Space>
-                      <Paragraph style={{ fontSize: 13, margin: "2px 0 0", whiteSpace: "pre-wrap" }}>
+                      <Paragraph style={{ fontSize: 13, margin: "2px 0 4px", whiteSpace: "pre-wrap" }}>
                         {reply.message}
                       </Paragraph>
+                      {Array.isArray(reply.attachments) && reply.attachments.length > 0 && (
+                        <div style={{ marginTop: 6 }}>
+                          {reply.attachments.some((a) => (a.mimeType || "").startsWith("image/")) && (
+                            <Image.PreviewGroup>
+                              <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 4 }}>
+                                {reply.attachments
+                                  .filter((a) => (a.mimeType || "").startsWith("image/"))
+                                  .map((att, ai) => (
+                                    <div key={ai} style={{ position: "relative" }}>
+                                      <Image
+                                        src={att.url}
+                                        alt={att.name || `img-${ai + 1}`}
+                                        width={72}
+                                        height={72}
+                                        style={{
+                                          objectFit: "cover",
+                                          borderRadius: 8,
+                                          border: "1.5px solid #e0e0e0",
+                                          cursor: "zoom-in",
+                                        }}
+                                      />
+                                    </div>
+                                  ))}
+                              </div>
+                            </Image.PreviewGroup>
+                          )}
+                          {reply.attachments
+                            .filter((a) => !(a.mimeType || "").startsWith("image/"))
+                            .map((att, ai) => (
+                              <div
+                                key={ai}
+                                style={{
+                                  display: "inline-flex",
+                                  alignItems: "center",
+                                  gap: 6,
+                                  padding: "3px 10px",
+                                  background: "#f5f5f5",
+                                  borderRadius: 6,
+                                  border: "1px solid #e0e0e0",
+                                  marginRight: 6,
+                                  marginBottom: 4,
+                                }}
+                              >
+                                <span style={{ fontSize: 16 }}>
+                                  {(att.mimeType || "").includes("pdf") ? "📄" : "📎"}
+                                </span>
+                                <span style={{ fontSize: 11, maxWidth: 140, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                                  {att.name || `file-${ai + 1}`}
+                                </span>
+                                <Button
+                                  type="link"
+                                  size="small"
+                                  href={att.url}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                  style={{ padding: 0, height: "auto", fontSize: 11 }}
+                                >
+                                  Open ↗
+                                </Button>
+                              </div>
+                            ))}
+                        </div>
+                      )}
                     </div>
                   ),
                 }))}

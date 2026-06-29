@@ -4,6 +4,8 @@ const AppSettings = require("../models/AppSettings");
 const UserPortal = require("../models/UserPortal");
 const { clearYearVisibilityCache } = require("../utils/yearVisibility");
 const { sendPortalAnnouncementEmail } = require("../utils/email");
+const { verifyDriveAccess } = require("../utils/googleDrive");
+const { invalidateDriveMaintenanceCache } = require("../utils/driveMaintenanceGuard");
 const { authMiddleware, adminOnly } = require("../middleware/auth");
 
 const router = express.Router();
@@ -167,7 +169,10 @@ router.get("/app", async (req, res) => {
     }
     migrateLegacyAnnouncement(settings);
     if (settings.isModified?.()) await settings.save();
-    res.json(settings);
+    // Use flattenMaps so Mongoose Map fields (e.g. dashboardTabs) serialize as plain objects
+    const out = settings.toObject({ flattenMaps: true });
+    if (out.smtpPass) out.smtpPass = "••••••••";
+    res.json(out);
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });
   }
@@ -192,7 +197,7 @@ router.put("/app", async (req, res) => {
     }
     await settings.save();
     clearYearVisibilityCache();
-    res.json({ message: "Settings updated", data: settings });
+    res.json({ message: "Settings updated", data: settings.toObject({ flattenMaps: true }) });
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });
   }
@@ -325,6 +330,153 @@ router.post("/app/portal-announcement/email", authMiddleware, adminOnly, async (
     const sent = results.filter((result) => result.status === "fulfilled").length;
     const failed = results.length - sent;
     res.json({ message: "Announcement email processed", sent, failed, total: users.length });
+  } catch (error) {
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+});
+
+// ── Email / SMTP configuration (admin-only) ──────────────────────────────────
+
+const SMTP_PASS_MASK = "••••••••";
+
+// Strip the real password from settings before sending to the client
+function maskSmtpPass(settings) {
+  const obj = settings?.toObject ? settings.toObject() : { ...settings };
+  if (obj.smtpPass) obj.smtpPass = SMTP_PASS_MASK;
+  return obj;
+}
+
+// Save SMTP config — never overwrite pass if the client sends the mask placeholder
+router.put("/app/email-config", authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const {
+      smtpProvider, smtpHost, smtpPort, smtpUser, smtpPass,
+      smtpSecure, smtpFrom, smtpConfigured, emailNotificationsEnabled, emailFrom,
+    } = req.body;
+
+    let settings = await AppSettings.findOne();
+    if (!settings) settings = new AppSettings();
+
+    if (typeof smtpConfigured === "boolean") settings.smtpConfigured = smtpConfigured;
+    if (smtpProvider !== undefined) settings.smtpProvider = smtpProvider;
+    if (smtpHost     !== undefined) settings.smtpHost = smtpHost;
+    if (smtpPort     !== undefined) settings.smtpPort = Number(smtpPort) || 587;
+    if (smtpUser     !== undefined) settings.smtpUser = smtpUser;
+    if (smtpSecure   !== undefined) settings.smtpSecure = !!smtpSecure;
+    if (smtpFrom     !== undefined) settings.smtpFrom = smtpFrom;
+    if (emailNotificationsEnabled !== undefined) settings.emailNotificationsEnabled = !!emailNotificationsEnabled;
+    if (emailFrom    !== undefined) settings.emailFrom = emailFrom;
+    if (typeof req.body.emailMaintenanceMode === "boolean") settings.emailMaintenanceMode = req.body.emailMaintenanceMode;
+    if (req.body.emailMaintenanceMessage !== undefined) settings.emailMaintenanceMessage = req.body.emailMaintenanceMessage;
+    // Only update password if a real value (not the mask) is provided
+    if (smtpPass && smtpPass !== SMTP_PASS_MASK) settings.smtpPass = smtpPass;
+
+    await settings.save();
+
+    // Invalidate email transporter cache so next send picks up new config
+    try { require("../utils/email").invalidateEmailCache(); } catch { /* no-op */ }
+
+    res.json({ message: "Email config saved", data: maskSmtpPass(settings.toObject({ flattenMaps: true })) });
+  } catch (error) {
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+});
+
+// Test SMTP connection and optionally send a test email
+router.post("/app/email-test", authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const nodemailer = require("nodemailer");
+    const {
+      smtpProvider, smtpHost, smtpPort, smtpUser, smtpPass,
+      smtpSecure, smtpFrom, sendTestTo,
+    } = req.body;
+
+    // If caller sends the mask, look up the real pass from DB
+    let realPass = smtpPass;
+    if (!realPass || realPass === SMTP_PASS_MASK) {
+      const s = await AppSettings.findOne();
+      realPass = s?.smtpPass || "";
+    }
+
+    let transport;
+    if (smtpProvider === "gmail-apppw" || (!smtpHost && !smtpProvider)) {
+      transport = nodemailer.createTransport({
+        host: "smtp.gmail.com", port: 587, secure: false,
+        auth: { user: smtpUser || process.env.EMAIL_USER, pass: realPass || process.env.EMAIL_APP_PASS },
+        tls: { rejectUnauthorized: false },
+      });
+    } else if (smtpProvider === "gmail-oauth2") {
+      const clientId = process.env.GDRIVE_CLIENT_ID;
+      const clientSecret = process.env.GDRIVE_CLIENT_SECRET;
+      const refreshToken = realPass || process.env.GMAIL_REFRESH_TOKEN;
+      if (!clientId || !clientSecret || !refreshToken) {
+        return res.status(400).json({ message: "OAuth2 credentials incomplete. Set GDRIVE_CLIENT_ID, GDRIVE_CLIENT_SECRET, and GMAIL_REFRESH_TOKEN in .env." });
+      }
+      transport = nodemailer.createTransport({
+        service: "gmail",
+        auth: { type: "OAuth2", user: smtpUser || process.env.EMAIL_USER, clientId, clientSecret, refreshToken },
+      });
+    } else {
+      if (!smtpHost || !smtpUser || !realPass) {
+        return res.status(400).json({ message: "SMTP host, username, and password are required." });
+      }
+      const port = Number(smtpPort) || 587;
+      transport = nodemailer.createTransport({
+        host: smtpHost, port, secure: smtpSecure === true || smtpSecure === "true" || port === 465,
+        auth: { user: smtpUser, pass: realPass },
+        tls: { rejectUnauthorized: false },
+      });
+    }
+
+    await transport.verify();
+
+    if (sendTestTo) {
+      const fromAddr = smtpFrom || smtpUser || process.env.EMAIL_USER;
+      await transport.sendMail({
+        from: `"EMBR3 ESWMP (Test)" <${fromAddr}>`,
+        to: sendTestTo,
+        subject: "EMBR3 ESWMP — SMTP Test Email",
+        html: `<p style="font-family:sans-serif">This is a test email from <strong>EMBR3 ESWMP</strong>.<br>
+               Your SMTP configuration is working correctly.<br><br>
+               <small style="color:#888">Sent at ${new Date().toISOString()} via ${smtpHost || "Gmail"}</small></p>`,
+      });
+      return res.json({ message: `Connection verified and test email sent to ${sendTestTo}.` });
+    }
+
+    res.json({ message: "SMTP connection verified successfully." });
+  } catch (error) {
+    res.status(400).json({ message: `Connection failed: ${error.message}` });
+  }
+});
+
+router.post("/app/drive-test", authMiddleware, adminOnly, async (_req, res) => {
+  try {
+    const result = await verifyDriveAccess();
+    res.json({
+      message: `Google Drive connection verified via ${result.client}.`,
+      data: result,
+    });
+  } catch (error) {
+    res.status(400).json({ message: `Drive test failed: ${error.message}` });
+  }
+});
+
+// Save Drive maintenance mode config
+router.put("/app/drive-config", authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const { driveMaintenanceMode, driveMaintenanceMessage } = req.body;
+    let settings = await AppSettings.findOne();
+    if (!settings) settings = new AppSettings();
+    if (typeof driveMaintenanceMode === "boolean") settings.driveMaintenanceMode = driveMaintenanceMode;
+    if (driveMaintenanceMessage !== undefined) settings.driveMaintenanceMessage = driveMaintenanceMessage;
+    await settings.save();
+    // Bust the drive maintenance cache immediately
+    invalidateDriveMaintenanceCache();
+    res.json({
+      message: "Drive config saved",
+      driveMaintenanceMode: settings.driveMaintenanceMode,
+      driveMaintenanceMessage: settings.driveMaintenanceMessage,
+    });
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });
   }

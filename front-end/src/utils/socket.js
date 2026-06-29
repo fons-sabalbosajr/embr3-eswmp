@@ -2,9 +2,12 @@ import { io } from "socket.io-client";
 
 let socket = null;
 
-// In dev mode, connect directly to the backend to avoid Vite proxy WS issues.
-// In production, the browser connects to the same origin (nginx proxies).
-const SOCKET_URL = import.meta.env.DEV ? "http://localhost:5000" : undefined;
+// In dev mode, connect directly to the backend on port 5000 using the SAME
+// hostname the page was opened with — so network devices (e.g. 10.14.77.172)
+// reach the server instead of their own localhost. In production, same-origin.
+const SOCKET_URL = import.meta.env.DEV
+  ? `${window.location.protocol}//${window.location.hostname}:5000`
+  : undefined;
 
 /**
  * Connect to Socket.IO server.

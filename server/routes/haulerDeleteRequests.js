@@ -9,6 +9,7 @@ const { saveLocalUpload } = require("../utils/localUploadStorage");
 const { writeLog } = require("../utils/logger");
 const { uploadSingle } = require("../utils/uploadErrorHandler");
 const { notifyAdmin, notifyPortal, refreshAdmin } = require("../utils/socketEmit");
+const { requireDriveActive } = require("../utils/driveMaintenanceGuard");
 
 const router = express.Router();
 const MAX_UPLOAD_MB = 200;
@@ -39,7 +40,7 @@ const upload = multer({
 });
 
 // ── Portal: Submit hauler deletion request ──
-router.post("/", uploadSingle(upload, "letterOfIntent", { maxSizeMb: MAX_UPLOAD_MB }), async (req, res) => {
+router.post("/", requireDriveActive, uploadSingle(upload, "letterOfIntent", { maxSizeMb: MAX_UPLOAD_MB }), async (req, res) => {
   try {
     const {
       portalUserEmail,

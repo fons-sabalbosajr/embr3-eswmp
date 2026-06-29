@@ -15,23 +15,169 @@ function getClientUrl() {
   return "http://localhost:5173/eswm-pipeline";
 }
 
-const transporter = nodemailer.createTransport({
-  host: "smtp.gmail.com",
-  port: 587,
-  secure: false, // STARTTLS
-  auth: {
-    user: process.env.EMAIL_USER,
-    pass: process.env.EMAIL_APP_PASS,
-  },
-  tls: {
-    rejectUnauthorized: false,
-  },
-});
+/**
+ * Build a nodemailer transporter.
+ *
+ * Priority order (first matching config wins):
+ *   1. Generic SMTP  (SMTP_HOST + SMTP_USER + SMTP_PASS) — works with any provider:
+ *        Outlook/Hotmail: SMTP_HOST=smtp.office365.com  SMTP_PORT=587
+ *        Yahoo:           SMTP_HOST=smtp.mail.yahoo.com  SMTP_PORT=587
+ *        Any paid relay:  Mailjet, Brevo, SendGrid, etc.
+ *      No Google account issues; recommended when Gmail is unavailable.
+ *
+ *   2. Gmail OAuth2   (GMAIL_REFRESH_TOKEN) — requires the OAuth client to be
+ *      ENABLED in Google Cloud Console and a Gmail-scoped refresh token.
+ *      Generate with:  node utils/generateGmailToken.js
+ *      Re-enable the client at: https://console.cloud.google.com/apis/credentials
+ *
+ *   3. Gmail App Password (EMAIL_APP_PASS) — requires Google 2-Step Verification
+ *      to be enabled on the sender Gmail account.
+ *      Create App Password at: https://myaccount.google.com/apppasswords
+ */
+function buildTransporter() {
+  const fs   = require("fs");
+  const path = require("path");
 
-// Verify SMTP connection on startup
+  // ── Option 1: Generic SMTP (any provider) ──────────────────────────────────
+  const smtpHost = process.env.SMTP_HOST;
+  const smtpUser = process.env.SMTP_USER || process.env.EMAIL_USER;
+  const smtpPass = process.env.SMTP_PASS;
+
+  if (smtpHost && smtpUser && smtpPass) {
+    const smtpPort   = Number(process.env.SMTP_PORT  || 587);
+    const smtpSecure = process.env.SMTP_SECURE === "true" || smtpPort === 465;
+    console.log(`📧  Email: using generic SMTP (${smtpHost}:${smtpPort})`);
+    return nodemailer.createTransport({
+      host:   smtpHost,
+      port:   smtpPort,
+      secure: smtpSecure,
+      auth:   { user: smtpUser, pass: smtpPass },
+      tls:    { rejectUnauthorized: false },
+    });
+  }
+
+  const user             = process.env.EMAIL_USER;
+  const gmailRefreshToken = process.env.GMAIL_REFRESH_TOKEN;
+  const appPass          = process.env.EMAIL_APP_PASS;
+
+  // ── Option 2: Gmail OAuth2 ────────────────────────────────────────────────
+  if (gmailRefreshToken && user) {
+    let clientId     = process.env.GDRIVE_CLIENT_ID;
+    let clientSecret = process.env.GDRIVE_CLIENT_SECRET;
+
+    const jsonPath = process.env.GDRIVE_OAUTH_CLIENT_JSON
+      ? path.resolve(process.cwd(), process.env.GDRIVE_OAUTH_CLIENT_JSON)
+      : null;
+    if ((!clientId || !clientSecret) && jsonPath && fs.existsSync(jsonPath)) {
+      try {
+        const cfg = (JSON.parse(fs.readFileSync(jsonPath, "utf8"))).web
+                 || (JSON.parse(fs.readFileSync(jsonPath, "utf8"))).installed;
+        if (cfg) {
+          clientId     = clientId     || cfg.client_id;
+          clientSecret = clientSecret || cfg.client_secret;
+        }
+      } catch { /* ignore */ }
+    }
+
+    if (clientId && clientSecret) {
+      console.log("📧  Email: using Gmail OAuth2");
+      return nodemailer.createTransport({
+        service: "gmail",
+        auth: { type: "OAuth2", user, clientId, clientSecret, refreshToken: gmailRefreshToken },
+      });
+    }
+  }
+
+  // ── Option 3: Gmail App Password (STARTTLS) ────────────────────────────────
+  console.log("📧  Email: using Gmail SMTP App Password");
+  return nodemailer.createTransport({
+    host:   "smtp.gmail.com",
+    port:   587,
+    secure: false,
+    auth:   { user, pass: appPass },
+    tls:    { rejectUnauthorized: false },
+  });
+}
+
+const transporter = buildTransporter();
+
+// ── DB-backed transporter cache ───────────────────────────────────────────────
+// When the admin saves SMTP config via the settings UI, the cache is invalidated
+// so the next email send picks up the new settings.
+let _dbCache = { transporter: null, ts: 0 };
+const DB_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+
+function invalidateEmailCache() {
+  _dbCache = { transporter: null, ts: 0 };
+}
+
+// No-op stub returned when email maintenance mode is enabled.
+// All sendMail calls silently succeed without sending anything.
+const _noopTransporter = {
+  sendMail: async (opts) => {
+    console.info(`[email] Maintenance mode ON — skipped send to: ${opts.to || "(unknown)"}`);
+    return { messageId: "noop", skipped: true };
+  },
+};
+
+async function getTransporter() {
+  const now = Date.now();
+  if (_dbCache.transporter && now - _dbCache.ts < DB_CACHE_TTL) {
+    return _dbCache.transporter;
+  }
+  try {
+    // Lazy-require AppSettings to avoid circular dependency at module load time
+    const AppSettings = require("../models/AppSettings");
+    const settings = await AppSettings.findOne().select(
+      "smtpConfigured smtpProvider smtpHost smtpPort smtpUser smtpPass smtpSecure smtpFrom emailMaintenanceMode emailNotificationsEnabled"
+    ).lean();
+
+    // Email maintenance mode — silently skip all sends
+    if (settings?.emailMaintenanceMode) {
+      _dbCache = { transporter: _noopTransporter, ts: now };
+      return _noopTransporter;
+    }
+
+    if (settings?.smtpConfigured && settings.smtpHost && settings.smtpUser && settings.smtpPass) {
+      const port = settings.smtpPort || 587;
+      const t = nodemailer.createTransport({
+        host:   settings.smtpHost,
+        port,
+        secure: settings.smtpSecure || port === 465,
+        auth:   { user: settings.smtpUser, pass: settings.smtpPass },
+        tls:    { rejectUnauthorized: false },
+      });
+      _dbCache = { transporter: t, ts: now };
+      return t;
+    }
+  } catch {
+    // DB unavailable — fall through to env transporter
+  }
+  _dbCache = { transporter, ts: now };
+  return transporter;
+}
+
+// Verify SMTP connection on startup — non-fatal; the server keeps running if email is unavailable
 transporter.verify()
-  .then(() => console.log("✅ Email transporter connected (Gmail SMTP ready)"))
-  .catch((err) => console.error("❌ Email transporter error — emails will NOT send:", err.message));
+  .then(() => console.log("✅ Email transporter connected (SMTP ready)"))
+  .catch((err) => {
+    let hint = "";
+    if (err.message?.includes("disabled_client") || err.message?.includes("401")) {
+      hint =
+        "\n   💡 The Google OAuth client is DISABLED in Cloud Console." +
+        "\n      Quick fix options:" +
+        "\n        A) Configure SMTP in Admin → Developer Settings → Email / SMTP tab (recommended)" +
+        "\n        B) Re-enable the OAuth client: https://console.cloud.google.com/apis/credentials" +
+        "\n        C) Set SMTP_HOST + SMTP_USER + SMTP_PASS in .env to use any other mail provider";
+    } else if (err.message?.includes("534") || err.message?.includes("WebLogin")) {
+      hint =
+        "\n   💡 Gmail App Password failed (2-Step Verification not enabled on the account)." +
+        "\n      Quick fix options:" +
+        "\n        A) Configure SMTP in Admin → Developer Settings → Email / SMTP tab (recommended)" +
+        "\n        B) Enable 2FA then generate an App Password: https://myaccount.google.com/apppasswords";
+    }
+    console.error(`❌ Email transporter error — emails will NOT send: ${err.message}${hint}`);
+  });
 
 function getVerificationEmailHTML(firstName, verifyLink) {
   return `
@@ -119,7 +265,7 @@ async function sendVerificationEmail(email, firstName, token) {
     html: getVerificationEmailHTML(firstName, verifyLink),
   };
 
-  await transporter.sendMail(mailOptions);
+  await (await getTransporter()).sendMail(mailOptions);
 }
 
 function getAcknowledgementEmailHTML(data) {
@@ -212,7 +358,7 @@ async function sendAcknowledgementEmail(email, data) {
     html: getAcknowledgementEmailHTML(data),
   };
 
-  await transporter.sendMail(mailOptions);
+  await (await getTransporter()).sendMail(mailOptions);
 }
 
 // ─── Portal Email Templates ───────────────────────────────────────────────────
@@ -267,7 +413,7 @@ async function sendPortalSignupEmail(email, firstName) {
       </p>
     </div>`;
 
-  return transporter.sendMail({
+  return (await getTransporter()).sendMail({
     from: `"EMBR3 ESWMP" <${process.env.EMAIL_USER}>`,
     to: email,
     subject: "Registration Received — SLF Generators Portal",
@@ -306,7 +452,7 @@ async function sendPortalApprovalEmail(email, firstName, slfName) {
       </td></tr>
     </table>`;
 
-  await transporter.sendMail({
+  await (await getTransporter()).sendMail({
     from: `"EMBR3 ESWMP" <${process.env.EMAIL_USER}>`,
     to: email,
     subject: "Account Approved — SLF Generators Portal",
@@ -338,7 +484,7 @@ async function sendPortalRejectionEmail(email, firstName, reason) {
       If you believe this was a mistake or have questions, please contact the ESWMP administration for further assistance.
     </p>`;
 
-  await transporter.sendMail({
+  await (await getTransporter()).sendMail({
     from: `"EMBR3 ESWMP" <${process.env.EMAIL_USER}>`,
     to: email,
     subject: "Registration Update — SLF Generators Portal",
@@ -367,7 +513,7 @@ async function sendPortalResetPasswordEmail(email, firstName, resetCode) {
       </p>
     </div>`;
 
-  await transporter.sendMail({
+  await (await getTransporter()).sendMail({
     from: `"EMBR3 ESWMP" <${process.env.EMAIL_USER}>`,
     to: email,
     subject: "Password Reset Code — SLF Generators Portal",
@@ -431,7 +577,7 @@ async function sendBulkAcknowledgeEmail(email, data) {
     html: getBulkAcknowledgeEmailHTML(data),
   };
 
-  await transporter.sendMail(mailOptions);
+  await (await getTransporter()).sendMail(mailOptions);
 }
 
 // 6. Admin password reset code
@@ -482,7 +628,7 @@ async function sendAdminResetPasswordEmail(email, firstName, resetCode) {
 </body>
 </html>`;
 
-  await transporter.sendMail({
+  await (await getTransporter()).sendMail({
     from: `"EMBR3 ESWMP" <${process.env.EMAIL_USER}>`,
     to: email,
     subject: "Password Reset Code — EMBR3 ESWMP Admin",
@@ -504,7 +650,7 @@ async function sendSubmissionEmail(email, { subject, message, submissionId, comp
       If you have questions, please reply to this email or contact the administrator.
     </p>`;
 
-  return transporter.sendMail({
+  return (await getTransporter()).sendMail({
     from: `"EMBR3 ESWMP" <${process.env.EMAIL_USER}>`,
     to: email,
     subject: `${subject} — EMBR3 ESWMP`,
@@ -544,7 +690,7 @@ async function sendAdminApprovalRequestEmail(developerEmail, firstName, lastName
       </p>
     </div>`;
 
-  await transporter.sendMail({
+  await (await getTransporter()).sendMail({
     from: `"EMBR3 ESWMP" <${process.env.EMAIL_USER}>`,
     to: developerEmail,
     subject: "New Account Pending Approval — EMBR3 ESWMP",
@@ -577,7 +723,7 @@ async function sendAdminApprovedEmail(email, firstName) {
       </td></tr>
     </table>`;
 
-  await transporter.sendMail({
+  await (await getTransporter()).sendMail({
     from: `"EMBR3 ESWMP" <${process.env.EMAIL_USER}>`,
     to: email,
     subject: "Account Approved — EMBR3 ESWMP",
@@ -609,7 +755,7 @@ async function sendAdminRejectedEmail(email, firstName, reason) {
       If you believe this was a mistake or have questions, please contact the ESWMP administration for further assistance.
     </p>`;
 
-  await transporter.sendMail({
+  await (await getTransporter()).sendMail({
     from: `"EMBR3 ESWMP" <${process.env.EMAIL_USER}>`,
     to: email,
     subject: "Account Registration Update — EMBR3 ESWMP",
@@ -659,7 +805,7 @@ async function sendPortalVerificationReminderEmail(email, firstName) {
       </p>
     </div>`;
 
-  await transporter.sendMail({
+  await (await getTransporter()).sendMail({
     from: `"EMBR3 ESWMP" <${process.env.EMAIL_USER}>`,
     to: email,
     subject: "Action Required: Update Your Verification — SLF Generators Portal",
@@ -710,7 +856,7 @@ async function sendHoldAccountFollowUpEmail(email, firstName) {
       </p>
     </div>`;
 
-  await transporter.sendMail({
+  await (await getTransporter()).sendMail({
     from: `"EMBR3 ESWMP" <${process.env.EMAIL_USER}>`,
     to: email,
     subject: "Follow-Up: Document Requirements for Your SLF Portal Account Verification",
@@ -731,7 +877,7 @@ async function sendPortalCustomEmail(email, { subject, message, firstName }) {
       This message was sent by the EMBR3 ESWMP administration.
     </p>`;
 
-  await transporter.sendMail({
+  await (await getTransporter()).sendMail({
     from: `"EMBR3 ESWMP" <${process.env.EMAIL_USER}>`,
     to: email,
     subject: `${subject} — EMBR3 ESWMP`,
@@ -760,7 +906,7 @@ async function sendPortalAnnouncementEmail(email, { subject, message, title, fir
       This announcement was posted by the EMBR3 ESWMP administration.
     </p>`;
 
-  return transporter.sendMail({
+  return (await getTransporter()).sendMail({
     from: `"EMBR3 ESWMP" <${process.env.EMAIL_USER}>`,
     to: email,
     subject: `${subject || title || "SLF Portal Announcement"} - EMBR3 ESWMP`,
@@ -793,7 +939,7 @@ async function sendInternalMessageEmail(email, firstName, senderName, subject, p
       This is an automated notification. Reply inside the EMBR3 ESWMP app to keep the conversation secured.
     </p>`;
 
-  await transporter.sendMail({
+  await (await getTransporter()).sendMail({
     from: `"EMBR3 ESWMP" <${process.env.EMAIL_USER}>`,
     to: email,
     subject: `New ESWMP Message: ${subject}`,
@@ -820,4 +966,5 @@ module.exports = {
   sendAdminApprovedEmail,
   sendAdminRejectedEmail,
   verifyTransporter: () => transporter.verify(),
+  invalidateEmailCache,
 };

@@ -36,7 +36,6 @@ import interactionPlugin from "@fullcalendar/interaction";
 import api from "../../api";
 import { fetchWithCache, invalidateCache } from "../../utils/pageCache";
 import { getSocket } from "../../utils/socket";
-import { matchesFilter, rowMatchesSearch } from "./shared/tableFilters";
 
 const { Text } = Typography;
 const ACCENT = "#2f54eb";
@@ -77,48 +76,11 @@ const statusColor = {
   revert_requested: "orange",
 };
 
-function emptySummary(slfName) {
-  return {
-    key: slfName || "Unassigned SLF",
-    slfName: slfName || "Unassigned SLF",
-    submissions: 0,
-    trucks: 0,
-    generators: new Set(),
-    submitters: new Set(),
-    statuses: {},
-    residualM3: 0,
-    residualTons: 0,
-    hazardousM3: 0,
-    hazardousTons: 0,
-    totalM3: 0,
-    totalTons: 0,
-    lastDisposalDate: null,
-    records: [],
-  };
-}
-
-function addVolume(target, wasteType, value, unit) {
-  const amount = Number(value || 0);
-  if (!amount) return;
-  const normalizedUnit = normalizeUnit(unit);
-  const isHazardous = /hazard/i.test(String(wasteType || ""));
-  const totalKey = normalizedUnit === "tons" ? "totalTons" : "totalM3";
-  const wasteKey = isHazardous
-    ? normalizedUnit === "tons" ? "hazardousTons" : "hazardousM3"
-    : normalizedUnit === "tons" ? "residualTons" : "residualM3";
-  target[totalKey] += amount;
-  target[wasteKey] += amount;
-}
-
 function formatVolume(m3, tons) {
   const parts = [];
   if (m3 > 0) parts.push(`${m3.toLocaleString()} m³`);
   if (tons > 0) parts.push(`${tons.toLocaleString()} tons`);
   return parts.length ? parts.join(" / ") : "—";
-}
-
-function getRecordSlfName(record) {
-  return record.slfName || record.slfGenerator?.slfName || "Unassigned SLF";
 }
 
 function addNameVariant(map, name, value) {
@@ -337,7 +299,8 @@ function SummaryTile({ icon, color, label, children, subtitle, isDark, delay = 0
 }
 
 export default function SubmissionSummary({ isDark }) {
-  const [records, setRecords] = useState([]);
+  const [tiles, setTiles] = useState(null);
+  const [slfRows, setSlfRows] = useState([]);
   const [facilities, setFacilities] = useState([]);
   const [baselines, setBaselines] = useState([]);
   const [settings, setSettings] = useState({});
@@ -345,6 +308,7 @@ export default function SubmissionSummary({ isDark }) {
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
   const [calendarRecord, setCalendarRecord] = useState(null);
+  const [calendarLoading, setCalendarLoading] = useState(false);
   const [calendarDate, setCalendarDate] = useState(dayjs());
   const [submissionDetail, setSubmissionDetail] = useState(null);
 
@@ -356,17 +320,13 @@ export default function SubmissionSummary({ isDark }) {
     await fetchWithCache(
       SUMMARY_CACHE_KEY,
       async () => {
-        const [recordsRes, facilitiesRes, baselinesRes, settingsRes] = await Promise.all([
-          api.get("/data-slf", { params: { mode: "list" } }),
-          api.get("/slf-facilities"),
-          api.get("/data-slf/baselines"),
-          api.get("/settings/app"),
+        const [tilesRes, rowsRes] = await Promise.all([
+          api.get("/data-slf/summary-tiles"),
+          api.get("/data-slf/summary-by-slf"),
         ]);
         return {
-          records: Array.isArray(recordsRes.data) ? recordsRes.data : [],
-          facilities: Array.isArray(facilitiesRes.data) ? facilitiesRes.data : [],
-          baselines: Array.isArray(baselinesRes.data) ? baselinesRes.data : [],
-          settings: settingsRes.data || {},
+          tiles: tilesRes.data || null,
+          rows: Array.isArray(rowsRes.data) ? rowsRes.data : [],
         };
       },
       {
@@ -375,18 +335,44 @@ export default function SubmissionSummary({ isDark }) {
         onStart: () => !silent && setLoading(true),
         onEnd: () => !silent && setLoading(false),
         onData: (payload = {}) => {
-          setRecords(payload.records || []);
-          setFacilities(payload.facilities || []);
-          setBaselines(payload.baselines || []);
-          setSettings(payload.settings || {});
+          setTiles(payload.tiles || null);
+          setSlfRows(payload.rows || []);
           setLoading(false);
         },
         onError: () => {
           if (!silent) {
-            setRecords([]);
-            setFacilities([]);
-            setBaselines([]);
+            setTiles(null);
+            setSlfRows([]);
           }
+        },
+      },
+    );
+  }, []);
+
+  // Facility/baseline/settings reference data is only needed for the calendar
+  // modal — load it separately so the tiles + table render immediately.
+  const fetchReferenceData = useCallback(async ({ force = false } = {}) => {
+    await fetchWithCache(
+      `${SUMMARY_CACHE_KEY}:ref`,
+      async () => {
+        const [facilitiesRes, baselinesRes, settingsRes] = await Promise.all([
+          api.get("/slf-facilities"),
+          api.get("/data-slf/baselines"),
+          api.get("/settings/app"),
+        ]);
+        return {
+          facilities: Array.isArray(facilitiesRes.data) ? facilitiesRes.data : [],
+          baselines: Array.isArray(baselinesRes.data) ? baselinesRes.data : [],
+          settings: settingsRes.data || {},
+        };
+      },
+      {
+        ttl: SUMMARY_CACHE_TTL,
+        force,
+        onData: (payload = {}) => {
+          setFacilities(payload.facilities || []);
+          setBaselines(payload.baselines || []);
+          setSettings(payload.settings || {});
         },
       },
     );
@@ -394,7 +380,8 @@ export default function SubmissionSummary({ isDark }) {
 
   useEffect(() => {
     fetchRecords();
-  }, [fetchRecords]);
+    fetchReferenceData();
+  }, [fetchRecords, fetchReferenceData]);
 
   useEffect(() => {
     const socket = getSocket();
@@ -403,28 +390,23 @@ export default function SubmissionSummary({ isDark }) {
       if (!target || ["submissions", "baselines"].includes(target)) {
         invalidateCache(SUMMARY_CACHE_KEY);
         fetchRecords({ force: true, silent: true });
+        fetchReferenceData({ force: true });
       }
     };
     socket.on("data-refresh", handler);
     return () => socket.off("data-refresh", handler);
-  }, [fetchRecords]);
+  }, [fetchRecords, fetchReferenceData]);
 
-  const filteredRecords = useMemo(() => {
-    return records.filter((record) => {
-      const statusMatch = statusFilter === "all" || matchesFilter(record.status, statusFilter);
+  const filteredRows = useMemo(() => {
+    const needle = search.trim().toLowerCase();
+    return slfRows.filter((row) => {
+      const statusMatch =
+        statusFilter === "all" || (row.statuses?.[statusFilter] || 0) > 0;
       if (!statusMatch) return false;
-      return rowMatchesSearch(record, search, [
-        "idNo",
-        "submissionId",
-        "lguCompanyName",
-        "submittedBy",
-        "companyType",
-        "slfName",
-        (item) => item.slfGenerator?.slfName,
-        (item) => (item.trucks || []).map((truck) => [truck.plateNumber, truck.hauler, truck.haulerName, truck.wasteType]),
-      ]);
+      if (!needle) return true;
+      return String(row.slfName || "").toLowerCase().includes(needle);
     });
-  }, [records, search, statusFilter]);
+  }, [slfRows, search, statusFilter]);
 
   const facilityMap = useMemo(() => {
     const map = new Map();
@@ -436,8 +418,8 @@ export default function SubmissionSummary({ isDark }) {
     return map;
   }, [facilities]);
 
-  // Index facilities by id so a submission's SLF name always reflects the
-  // CURRENT facility name (fixes stale names after an SLF/LGU rename).
+  // Index facilities by id so a summary row's SLF name reflects the CURRENT
+  // facility name (fixes stale names after an SLF/LGU rename).
   const facilityById = useMemo(() => {
     const map = new Map();
     facilities.forEach((facility) => {
@@ -445,21 +427,6 @@ export default function SubmissionSummary({ isDark }) {
     });
     return map;
   }, [facilities]);
-
-  const resolveCurrentSlfName = useCallback(
-    (record) => {
-      const genId =
-        record?.slfGenerator && typeof record.slfGenerator === "object"
-          ? record.slfGenerator._id
-          : record?.slfGenerator;
-      const facility = genId ? facilityById.get(String(genId)) : null;
-      if (facility?.lgu) {
-        return `${facility.lgu}${facility.ownership ? " (" + facility.ownership + ")" : ""}`;
-      }
-      return getRecordSlfName(record);
-    },
-    [facilityById],
-  );
 
   const baselineMap = useMemo(() => {
     const map = new Map();
@@ -471,39 +438,33 @@ export default function SubmissionSummary({ isDark }) {
   }, [baselines]);
 
   const summaryRows = useMemo(() => {
-    const map = new Map();
-    filteredRecords.forEach((record) => {
-      const slfName = resolveCurrentSlfName(record);
-      if (!map.has(slfName)) map.set(slfName, emptySummary(slfName));
-      const summary = map.get(slfName);
-      summary.submissions += 1;
-      summary.trucks += record.trucks?.length || 0;
-      if (record.lguCompanyName) summary.generators.add(record.lguCompanyName);
-      if (record.submittedBy) summary.submitters.add(record.submittedBy);
-      summary.statuses[record.status || "pending"] = (summary.statuses[record.status || "pending"] || 0) + 1;
-      const disposalDate = record.dateOfDisposal ? dayjs(record.dateOfDisposal) : null;
-      if (disposalDate?.isValid() && (!summary.lastDisposalDate || disposalDate.isAfter(summary.lastDisposalDate))) {
-        summary.lastDisposalDate = disposalDate;
-      }
-      (record.trucks || []).forEach((truck) => {
-        addVolume(summary, truck.wasteType, truck.actualVolume, truck.actualVolumeUnit || record.baselineUnit || "m³");
-      });
-      summary.records.push(record);
-    });
-    return Array.from(map.values()).map((row) => {
-      const facility = facilityMap.get(normalizeKey(row.slfName));
+    return filteredRows.map((row) => {
+      const genId =
+        row?.slfGenerator && typeof row.slfGenerator === "object"
+          ? row.slfGenerator._id
+          : row?.slfGenerator;
+      const facility = facilityMap.get(normalizeKey(row.slfName)) || (genId ? facilityById.get(String(genId)) : null);
       const baseline = baselineMap.get(normalizeKey(row.slfName));
       const baselineTotals = buildBaselineTotals(baseline);
+      const statuses = row.statuses || {};
       return {
         ...row,
+        residualM3: row.residualM3 || 0,
+        residualTons: row.residualTons || 0,
+        hazardousM3: row.hazardousM3 || 0,
+        hazardousTons: row.hazardousTons || 0,
+        totalM3: row.totalM3 || 0,
+        totalTons: row.totalTons || 0,
+        statuses: Object.fromEntries(Object.entries(statuses).filter(([, count]) => count > 0)),
+        lastDisposalDate: row.lastDisposalDate ? dayjs(row.lastDisposalDate) : null,
         facility,
         baseline,
         baselineTotals,
-        generatorCount: row.generators.size,
-        submitterCount: row.submitters.size,
+        records: [],
       };
-    }).sort((a, b) => a.slfName.localeCompare(b.slfName));
-  }, [filteredRecords, facilityMap, baselineMap, resolveCurrentSlfName]);
+    });
+  }, [filteredRows, facilityMap, facilityById, baselineMap]);
+
 
   const selectedDayRecords = useMemo(() => {
     if (!calendarRecord) return [];
@@ -568,24 +529,40 @@ export default function SubmissionSummary({ isDark }) {
     extendedProps: item,
   })), [dayMap]);
 
-  const totals = useMemo(() => summaryRows.reduce((acc, row) => {
-    acc.submissions += row.submissions;
-    acc.trucks += row.trucks;
-    acc.m3 += row.totalM3;
-    acc.tons += row.totalTons;
-    acc.residualM3 += row.residualM3;
-    acc.residualTons += row.residualTons;
-    acc.hazardousM3 += row.hazardousM3;
-    acc.hazardousTons += row.hazardousTons;
-    Object.entries(row.statuses || {}).forEach(([status, count]) => {
-      acc.statuses[status] = (acc.statuses[status] || 0) + count;
-    });
-    return acc;
-  }, {
-    submissions: 0, trucks: 0, m3: 0, tons: 0,
-    residualM3: 0, residualTons: 0, hazardousM3: 0, hazardousTons: 0,
-    statuses: {},
-  }), [summaryRows]);
+  const totals = useMemo(() => ({
+    submissions: tiles?.submissions || 0,
+    trucks: tiles?.trucks || 0,
+    m3: tiles?.totalM3 || 0,
+    tons: tiles?.totalTons || 0,
+    residualM3: tiles?.residualM3 || 0,
+    residualTons: tiles?.residualTons || 0,
+    hazardousM3: tiles?.hazardousM3 || 0,
+    hazardousTons: tiles?.hazardousTons || 0,
+    statuses: tiles?.statuses || {},
+  }), [tiles]);
+
+  // Detail-heavy records (trucks, calendar) are loaded only when an SLF's
+  // calendar is opened — not on initial page render.
+  const openCalendar = useCallback(async (row) => {
+    setCalendarRecord({ ...row, records: [] });
+    setCalendarDate(row.lastDisposalDate || dayjs());
+    setCalendarLoading(true);
+    try {
+      const { data } = await api.get("/data-slf", {
+        params: { mode: "list", includeTrucks: true, search: row.slfName },
+      });
+      const records = Array.isArray(data?.data) ? data.data : Array.isArray(data) ? data : [];
+      const ownRecords = records.filter((record) =>
+        normalizeKey(record.slfName || record.slfGenerator?.slfName) === normalizeKey(row.slfName),
+      );
+      setCalendarRecord((prev) => (prev ? { ...prev, records: ownRecords } : prev));
+    } catch {
+      setCalendarRecord((prev) => (prev ? { ...prev, records: [] } : prev));
+    } finally {
+      setCalendarLoading(false);
+    }
+  }, []);
+
 
   const columns = [
     {
@@ -637,10 +614,7 @@ export default function SubmissionSummary({ isDark }) {
         <Button
           size="small"
           icon={<CalendarOutlined />}
-          onClick={() => {
-            setCalendarRecord(row);
-            setCalendarDate(row.lastDisposalDate || dayjs());
-          }}
+          onClick={() => openCalendar(row)}
         >
           View
         </Button>
@@ -660,7 +634,7 @@ export default function SubmissionSummary({ isDark }) {
             isDark={isDark}
             delay={0}
           >
-            <CountUp value={summaryRows.length} />
+            <CountUp value={slfRows.length} />
           </SummaryTile>
         </Col>
         <Col xs={12} sm={12} md={8} lg={6}>
@@ -777,7 +751,7 @@ export default function SubmissionSummary({ isDark }) {
             <Select.Option value="revert_requested">Revert Requested</Select.Option>
             <Select.Option value="reverted">Reverted</Select.Option>
           </Select>
-          <Button icon={<ReloadOutlined />} loading={loading} onClick={() => fetchRecords({ force: true })}>Refresh</Button>
+          <Button icon={<ReloadOutlined />} loading={loading} onClick={() => { fetchRecords({ force: true }); fetchReferenceData({ force: true }); }}>Refresh</Button>
         </Space>
         <Table
           dataSource={summaryRows}
@@ -891,6 +865,7 @@ export default function SubmissionSummary({ isDark }) {
                   size="small"
                   pagination={{ pageSize: 6, size: "small" }}
                   dataSource={selectedDayRecords}
+                  loading={calendarLoading}
                   rowKey={(record) => record._id}
                   locale={{ emptyText: "No submissions on this date" }}
                   columns={[

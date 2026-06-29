@@ -4,8 +4,70 @@ const Notification = require("../models/Notification");
 const Transaction = require("../models/Transaction");
 const { writeLog } = require("../utils/logger");
 const { notifyAdmin, notifyPortal, refreshAdmin } = require("../utils/socketEmit");
+const multer = require("multer");
+const { uploadFileToDrive } = require("../utils/googleDrive");
+const { saveLocalUpload } = require("../utils/localUploadStorage");
+const { uploadSingle } = require("../utils/uploadErrorHandler");
+const { requireDriveActive } = require("../utils/driveMaintenanceGuard");
 
 const router = express.Router();
+
+const MAX_TICKET_UPLOAD_MB = 15;
+const MAX_TICKET_UPLOAD_BYTES = MAX_TICKET_UPLOAD_MB * 1024 * 1024;
+const ticketUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: MAX_TICKET_UPLOAD_BYTES },
+  fileFilter(req, file, cb) {
+    if (file.mimetype.startsWith("image/") || file.mimetype === "application/pdf") {
+      return cb(null, true);
+    }
+    cb(new Error("Only image or PDF attachments are allowed."));
+  },
+});
+
+// Portal: Upload a screenshot/proof image for a support ticket (stored in image folder)
+router.post(
+  "/upload",
+  requireDriveActive,
+  uploadSingle(ticketUpload, "file", { maxSizeMb: MAX_TICKET_UPLOAD_MB }),
+  async (req, res) => {
+    try {
+      if (!req.file) return res.status(400).json({ message: "No file provided." });
+      const isImage = req.file.mimetype.startsWith("image/");
+      let url = "";
+      let fileId = "";
+      let storage = "drive";
+      try {
+        const driveResult = await uploadFileToDrive(
+          req.file.buffer,
+          req.file.mimetype,
+          req.file.originalname,
+          isImage,
+          process.env.GDRIVE_IMAGE_FOLDER_ID
+        );
+        url = driveResult.viewUrl;
+        fileId = driveResult.fileId;
+      } catch (driveErr) {
+        const local = await saveLocalUpload(req.file);
+        url = local.url;
+        storage = "local";
+        writeLog("warn", "support.upload.local-fallback", {
+          message: `Drive unavailable — ticket attachment stored locally: ${driveErr.message}`,
+        });
+      }
+      res.json({
+        url,
+        fileId,
+        name: req.file.originalname,
+        mimeType: req.file.mimetype,
+        size: req.file.size,
+        storage,
+      });
+    } catch (error) {
+      res.status(500).json({ message: error.message || "Upload failed" });
+    }
+  }
+);
 
 // Portal: Create a support ticket
 router.post("/", async (req, res) => {

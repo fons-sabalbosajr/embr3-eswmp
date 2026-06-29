@@ -122,6 +122,8 @@ const PORTAL_SUBMISSIONS_CACHE_KEY = "portal-submissions-cache";
 const PORTAL_WASTE_RECEIVED_CACHE_KEY = "portal-waste-received-cache";
 const PORTAL_CACHE_TTL = 2 * 60 * 1000;
 const PORTAL_UPDATE_TOUR_SEEN_PREFIX = "slf-portal-update-tour-seen-";
+const PORTAL_TOUR_DISMISSED_PREFIX = "slf-portal-tour-dismissed-"; // stable per-user key
+const ORGANIZE_CELLS_ENABLED = false;
 
 const normalizeUnit = (unit) => String(unit || "m³").replace("m3", "m³");
 const hasBaselinePayload = (data = {}) =>
@@ -575,6 +577,7 @@ export default function SLFPortal() {
   const [baselineSavingLoading, setBaselineSavingLoading] = useState(false);
   const [slfInfo, setSlfInfo] = useState(null);
   const [slfInfoLoading, setSlfInfoLoading] = useState(false);
+  const [slfInfoRefresh, setSlfInfoRefresh] = useState(0);
   const [slfCardExpanded, setSlfCardExpanded] = useState(false);
   const [selectedSlfIdx, setSelectedSlfIdx] = useState(0); // for multi-SLF users
   const [fieldLabels, setFieldLabels] = useState({});
@@ -679,6 +682,14 @@ export default function SLFPortal() {
   const [uploadPreviewData, setUploadPreviewData] = useState([]);
   const [uploadPreviewColumns, setUploadPreviewColumns] = useState([]);
   const [uploadMissingColumns, setUploadMissingColumns] = useState([]);
+  // Excel upload progress UX
+  const [uploadProgressOpen, setUploadProgressOpen] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState(0);
+  const [uploadStatusText, setUploadStatusText] = useState("");
+  const [uploadProgressError, setUploadProgressError] = useState(false);
+  // Support ticket attachments (screenshots / proof)
+  const [ticketAttachments, setTicketAttachments] = useState([]);
+  const [ticketUploading, setTicketUploading] = useState(false);
   // My Requests / Activity Log states
   const [myRequests, setMyRequests] = useState([]);
   const [myRequestsLoading, setMyRequestsLoading] = useState(false);
@@ -728,11 +739,16 @@ export default function SLFPortal() {
     Array.isArray(portalUser?.assignedSlfName) &&
     portalUser.assignedSlfName.length > 1;
   const openPortalUpdateTour = useCallback(() => {
+    // Don't show if this user has permanently dismissed the tour
+    const stableKey = portalUser?.email
+      ? `${PORTAL_TOUR_DISMISSED_PREFIX}${portalUser.email}`
+      : null;
+    if (stableKey && localStorage.getItem(stableKey) === "1") return;
     setAnnouncementDismissed(false);
     setActiveMenu("data-entry");
     setUpdateTourCurrent(0);
     setUpdateTourOpen(true);
-  }, []);
+  }, [portalUser?.email]);
   const updateTourSteps = useMemo(() => {
     const steps = [
       {
@@ -1275,6 +1291,7 @@ export default function SLFPortal() {
   }, [submissions, activeCellOptions.length, submissionHasUnplaced]);
 
   const openCellOrganizer = () => {
+    if (!ORGANIZE_CELLS_ENABLED) return;
     // Build an editable working copy of unplaced submissions.
     const working = unplacedSubmissions.map((sub) => ({
       _id: sub._id,
@@ -1377,6 +1394,8 @@ export default function SLFPortal() {
       });
       setCellOrganizerOpen(false);
       fetchSubmissions(true);
+      // Refresh facility info so the Organized Cells menu reflects the new fills.
+      setSlfInfoRefresh((n) => n + 1);
     } catch (err) {
       showError({
         type: "error",
@@ -1393,6 +1412,7 @@ export default function SLFPortal() {
   // Prompt the user (once) to organize any past submissions that still have
   // waste not yet placed into an open cell.
   useEffect(() => {
+    if (!ORGANIZE_CELLS_ENABLED) return;
     if (cellOrganizerPrompted) return;
     if (!portalUser?.email) return;
     if (unplacedSubmissions.length === 0) return;
@@ -1470,7 +1490,7 @@ export default function SLFPortal() {
       .catch(() => {})
       .finally(() => setSlfInfoLoading(false));
     return () => ac.abort();
-  }, [portalUser, selectedSlfIdx]);
+  }, [portalUser, selectedSlfIdx, slfInfoRefresh]);
 
   // Fetch existing baseline when user is loaded (with retry)
   useEffect(() => {
@@ -1707,7 +1727,7 @@ export default function SLFPortal() {
   const pollingRef = useRef(null);
   const fetchingRef = useRef(false);
 
-  const fetchSubmissions = useCallback(async (silent = false) => {
+  const fetchSubmissions = useCallback(async (silent = false, force = false) => {
     if (fetchingRef.current) return; // deduplicate concurrent requests
     fetchingRef.current = true;
     if (!silent) setLoadingSubmissions(true);
@@ -1721,12 +1741,20 @@ export default function SLFPortal() {
         }).then(({ data }) => data),
         {
           ttl: PORTAL_CACHE_TTL,
-          force: false,
+          force,
           onData: (data) => setSubmissions(Array.isArray(data) ? data : []),
         },
       );
     } catch {
-      // silent
+      // Surface load failures so the table doesn't stay stuck silently
+      if (!silent) {
+        showError({
+          type: "error",
+          title: "Could Not Load Records",
+          message:
+            "We couldn't load your submission records. Please check your connection and tap Refresh to try again.",
+        });
+      }
     } finally {
       fetchingRef.current = false;
       if (!silent) setLoadingSubmissions(false);
@@ -1735,7 +1763,9 @@ export default function SLFPortal() {
 
   useEffect(() => {
     if ((activeMenu === "history" || activeMenu === "overview") && portalUser) {
-      fetchSubmissions();
+      // Force-refresh when entering the history tab so status changes from admin are immediate
+      invalidateCache(`${PORTAL_SUBMISSIONS_CACHE_KEY}-${portalUser?.email || ""}`);
+      fetchSubmissions(false, true);
       // Real-time refresh via socket + fallback 60s polling
       const sock = connectSocket("portal", portalUser.email);
       const handler = () => {
@@ -2976,6 +3006,7 @@ export default function SLFPortal() {
         portalUserName: `${portalUser?.firstName} ${portalUser?.lastName}`,
         companyName: companyForm.getFieldValue("lguCompanyName") || "",
         slfName: activeSlfName,
+        attachments: ticketAttachments,
         ...values,
       });
       Swal.fire({
@@ -2985,6 +3016,7 @@ export default function SLFPortal() {
         confirmButtonColor: "#1a3353",
       });
       supportForm.resetFields();
+      setTicketAttachments([]);
       fetchSupportTickets();
       setSupportTab("my-tickets");
     } catch (err) {
@@ -3021,24 +3053,39 @@ export default function SLFPortal() {
   const handleExcelUpload = (file, type) => {
     const effectiveType = type || uploadType || "truck";
     setUploadType(effectiveType);
+    setUploadProgressError(false);
+    setUploadProgress(8);
+    setUploadStatusText("Reading file…");
+    setUploadProgressOpen(true);
     const reader = new FileReader();
+    reader.onerror = () => {
+      setUploadProgressError(true);
+      setUploadStatusText("Could not read the file. Please try again.");
+    };
     reader.onload = (e) => {
       try {
+        setUploadProgress(30);
+        setUploadStatusText("Parsing spreadsheet…");
         const wb = XLSX.read(e.target.result, { type: "array" });
-        const ws = wb.Sheets[wb.SheetNames[0]];
+        const sheetName = (wb.SheetNames || [])[0];
+        const ws = sheetName ? wb.Sheets[sheetName] : null;
+        if (!ws) {
+          setUploadProgressError(true);
+          setUploadStatusText("No worksheet found in the uploaded file.");
+          return;
+        }
         const jsonData = XLSX.utils
           .sheet_to_json(ws, { defval: "" })
           .filter((row) =>
             Object.values(row || {}).some((value) => cleanUploadText(value) !== ""),
           );
         if (jsonData.length === 0) {
-          Swal.fire({
-            icon: "warning",
-            title: "Empty File",
-            text: "No data found in the uploaded file.",
-          });
+          setUploadProgressError(true);
+          setUploadStatusText("No data rows found in the uploaded file.");
           return;
         }
+        setUploadProgress(55);
+        setUploadStatusText(`Validating ${jsonData.length} row(s)…`);
         const headers = Object.keys(jsonData[0] || {});
         const missingColumns = getUploadMissingColumns(headers, effectiveType);
         setUploadMissingColumns(missingColumns);
@@ -3095,6 +3142,8 @@ export default function SLFPortal() {
         });
         setUploadPreviewData(normalized);
 
+        setUploadProgress(80);
+        setUploadStatusText("Preparing preview…");
         // Build editable columns
         if (effectiveType === "truck") {
           setUploadPreviewColumns([
@@ -3225,25 +3274,21 @@ export default function SLFPortal() {
             },
           ]);
         }
-        setUploadModalOpen(true);
+        setUploadProgress(100);
+        setUploadStatusText("Done! Opening preview…");
+        setTimeout(() => {
+          setUploadProgressOpen(false);
+          setUploadModalOpen(true);
+        }, 400);
       } catch {
-        Swal.fire({
-          icon: "error",
-          title: "Parse Error",
-          text: "Could not parse the uploaded file. Please check the format.",
-        });
-      } finally {
-        Swal.close();
+        setUploadProgressError(true);
+        setUploadStatusText(
+          "Could not parse the uploaded file. Please check the format and try again.",
+        );
       }
     };
-    // Show a non-blocking loader and defer parsing a tick so large files don't
-    // freeze the UI before the spinner can paint.
-    Swal.fire({
-      title: "Reading file...",
-      text: "Parsing your spreadsheet, please wait.",
-      allowOutsideClick: false,
-      didOpen: () => Swal.showLoading(),
-    });
+    // Build columns / normalize were tracked via progress; defer parsing a tick so the
+    // progress modal can paint before heavy work begins.
     setTimeout(() => reader.readAsArrayBuffer(file), 50);
     return false; // prevent auto upload
   };
@@ -4118,11 +4163,11 @@ export default function SLFPortal() {
             </Tag>
           );
         }
-        if (v === "reverted") {
+        if (v === "reverted" || v === "editApproved") {
           return (
             <Space direction="vertical" size={2}>
               <Tag icon={<UndoOutlined />} color="volcano">
-                REVERTED
+                REVERTED — NEEDS EDIT
               </Tag>
               {r.revertReason && (
                 <Text type="secondary" style={{ fontSize: 10 }}>
@@ -4132,13 +4177,20 @@ export default function SLFPortal() {
             </Space>
           );
         }
+        if (v === "revert_requested") {
+          return (
+            <Tag icon={<SyncOutlined />} color="orange">
+              REVERT REQUESTED
+            </Tag>
+          );
+        }
         return (
           <Tag
             icon={<SyncOutlined spin />}
             color="warning"
             className="status-pending"
           >
-            PENDING
+            PENDING REVIEW
           </Tag>
         );
       },
@@ -4228,24 +4280,16 @@ export default function SLFPortal() {
       : {};
 
   // Helper: render status tag for detail modal
-  const renderStatusTag = (v, r) => {
+  const renderStatusTag = (v) => {
     if (v === "acknowledged")
-      return (
-        <Tag icon={<CheckCircleOutlined />} color="success">
-          APPROVED
-        </Tag>
-      );
+      return <Tag icon={<CheckCircleOutlined />} color="success">APPROVED</Tag>;
     if (v === "rejected")
-      return (
-        <Tag icon={<CloseCircleOutlined />} color="error">
-          REJECTED
-        </Tag>
-      );
-    return (
-      <Tag icon={<SyncOutlined spin />} color="warning">
-        PENDING
-      </Tag>
-    );
+      return <Tag icon={<CloseCircleOutlined />} color="error">REJECTED</Tag>;
+    if (v === "reverted" || v === "editApproved")
+      return <Tag icon={<UndoOutlined />} color="volcano">REVERTED — NEEDS EDIT</Tag>;
+    if (v === "revert_requested")
+      return <Tag icon={<SyncOutlined />} color="orange">REVERT REQUESTED</Tag>;
+    return <Tag icon={<SyncOutlined spin />} color="warning">PENDING REVIEW</Tag>;
   };
 
   const renderGuideItems = (items = [], color = "#1677ff") => (
@@ -4527,22 +4571,22 @@ export default function SLFPortal() {
         </span>
       ),
     },
-    {
-      key: "cell-placement",
-      icon: <ContainerOutlined />,
-      label: (
-        <span>
-          Organize Cells
-          {unplacedSubmissions.length > 0 && (
-            <Badge
-              count={unplacedSubmissions.length}
-              size="small"
-              style={{ marginLeft: 8, backgroundColor: "#722ed1" }}
-            />
-          )}
-        </span>
-      ),
-    },
+    // {
+    //   key: "cell-placement",
+    //   icon: <ContainerOutlined />,
+    //   label: (
+    //     <span>
+    //       Organize Cells
+    //       {unplacedSubmissions.length > 0 && (
+    //         <Badge
+    //           count={unplacedSubmissions.length}
+    //           size="small"
+    //           style={{ marginLeft: 8, backgroundColor: "#722ed1" }}
+    //         />
+    //       )}
+    //     </span>
+    //   ),
+    // },
     {
       key: "requests",
       icon: <AuditOutlined />,
@@ -8157,35 +8201,36 @@ export default function SLFPortal() {
           </Text>
         </div>
 
-        <Modal
-          title={
-            <Space>
-              <ContainerOutlined style={{ color: "#722ed1" }} />
-              <span>Organize Cell Placement</span>
-              {cellOrganizerData.length > 0 && (
-                <Tag color="purple">{cellOrganizerData.length} submission(s)</Tag>
-              )}
-            </Space>
-          }
-          open={cellOrganizerOpen}
-          onCancel={() => setCellOrganizerOpen(false)}
-          width={960}
-          okText="Save Placement"
-          okButtonProps={{ icon: <SaveOutlined />, loading: cellOrganizerSaving }}
-          onOk={saveCellOrganizer}
-          destroyOnHidden
-          styles={{ body: { maxHeight: "72vh", overflowY: "auto", padding: "12px 16px" } }}
-        >
-          {cellOrganizerData.length === 0 ? (
-            <Empty description="All your submissions are already organized into cells." />
-          ) : (
-            <Space direction="vertical" size={10} style={{ width: "100%" }}>
-              <Alert
-                type="info"
-                showIcon
-                message="Expand a submission card, check the rows you want to assign, then use the bulk-assign bar or the individual cell selector."
-                style={{ borderRadius: 8 }}
-              />
+        {ORGANIZE_CELLS_ENABLED && (
+          <Modal
+            title={
+              <Space>
+                <ContainerOutlined style={{ color: "#722ed1" }} />
+                <span>Organize Cell Placement</span>
+                {cellOrganizerData.length > 0 && (
+                  <Tag color="purple">{cellOrganizerData.length} submission(s)</Tag>
+                )}
+              </Space>
+            }
+            open={cellOrganizerOpen}
+            onCancel={() => setCellOrganizerOpen(false)}
+            width={960}
+            okText="Save Placement"
+            okButtonProps={{ icon: <SaveOutlined />, loading: cellOrganizerSaving }}
+            onOk={saveCellOrganizer}
+            destroyOnHidden
+            styles={{ body: { maxHeight: "72vh", overflowY: "auto", padding: "12px 16px" } }}
+          >
+            {cellOrganizerData.length === 0 ? (
+              <Empty description="All your submissions are already organized into cells." />
+            ) : (
+              <Space direction="vertical" size={10} style={{ width: "100%" }}>
+                <Alert
+                  type="info"
+                  showIcon
+                  message="Expand a submission card, check the rows you want to assign, then use the bulk-assign bar or the individual cell selector."
+                  style={{ borderRadius: 8 }}
+                />
 
               {/* ── Cell Status Summary ── */}
               {(() => {
@@ -8689,9 +8734,10 @@ export default function SLFPortal() {
                   };
                 })}
               />
-            </Space>
-          )}
-        </Modal>
+              </Space>
+            )}
+          </Modal>
+        )}
 
         <SLFPortalModals
           entryForm={entryForm}
@@ -8783,6 +8829,15 @@ export default function SLFPortal() {
           setUploadPreviewData={setUploadPreviewData}
           setUploadPreviewColumns={setUploadPreviewColumns}
           setUploadMissingColumns={setUploadMissingColumns}
+          uploadProgressOpen={uploadProgressOpen}
+          uploadProgress={uploadProgress}
+          uploadStatusText={uploadStatusText}
+          uploadProgressError={uploadProgressError}
+          setUploadProgressOpen={setUploadProgressOpen}
+          ticketAttachments={ticketAttachments}
+          setTicketAttachments={setTicketAttachments}
+          ticketUploading={ticketUploading}
+          setTicketUploading={setTicketUploading}
           activeCellModalOpen={activeCellModalOpen}
           setActiveCellModalOpen={setActiveCellModalOpen}
           activeCellDraft={activeCellDraft}
@@ -8886,6 +8941,22 @@ export default function SLFPortal() {
           onChange={setUpdateTourCurrent}
           onClose={() => {
             setUpdateTourOpen(false);
+            // Mark as permanently dismissed for this user
+            const stableKey = portalUser?.email
+              ? `${PORTAL_TOUR_DISMISSED_PREFIX}${portalUser.email}`
+              : null;
+            if (stableKey) localStorage.setItem(stableKey, "1");
+            if (portalUpdateTourSeenKey) {
+              localStorage.setItem(portalUpdateTourSeenKey, "1");
+            }
+          }}
+          onFinish={() => {
+            setUpdateTourOpen(false);
+            // Also mark as dismissed when user completes all steps
+            const stableKey = portalUser?.email
+              ? `${PORTAL_TOUR_DISMISSED_PREFIX}${portalUser.email}`
+              : null;
+            if (stableKey) localStorage.setItem(stableKey, "1");
             if (portalUpdateTourSeenKey) {
               localStorage.setItem(portalUpdateTourSeenKey, "1");
             }

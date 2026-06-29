@@ -1244,10 +1244,163 @@ router.get("/generator-summary", async (req, res) => {
   }
 });
 
+// Compact summary tiles for the SLF Submission Summary page. Single aggregation
+// with $facet so the frontend never loads the full dataset just to total tiles.
+// Falls back to computing volumes from trucks when denormalized fields are absent.
+router.get("/summary-tiles", async (req, res) => {
+  try {
+    const ifNullReduce = (denormField, predicate) => ({
+      $ifNull: [
+        denormField,
+        {
+          $reduce: {
+            input: { $ifNull: ["$trucks", []] },
+            initialValue: 0,
+            in: { $add: ["$$value", predicate] },
+          },
+        },
+      ],
+    });
+    const result = await DataSLF.aggregate([
+      { $match: { deletedAt: null } },
+      {
+        $project: {
+          status: 1,
+          companyType: 1,
+          truckCount: ifNullReduce("$truckCount", { $cond: [true, 1, 0] }),
+          totalM3: { $ifNull: ["$totalVolumeM3", 0] },
+          totalTons: { $ifNull: ["$totalVolumeTons", 0] },
+          residualM3: { $ifNull: ["$residualVolumeM3", 0] },
+          residualTons: { $ifNull: ["$residualVolumeTons", 0] },
+          hazardousM3: { $ifNull: ["$hazardousVolumeM3", 0] },
+          hazardousTons: { $ifNull: ["$hazardousVolumeTons", 0] },
+        },
+      },
+      {
+        $group: {
+          _id: null,
+          submissions: { $sum: 1 },
+          trucks: { $sum: "$truckCount" },
+          totalM3: { $sum: "$totalM3" },
+          totalTons: { $sum: "$totalTons" },
+          residualM3: { $sum: "$residualM3" },
+          residualTons: { $sum: "$residualTons" },
+          hazardousM3: { $sum: "$hazardousM3" },
+          hazardousTons: { $sum: "$hazardousTons" },
+          pending: { $sum: { $cond: [{ $eq: ["$status", "pending"] }, 1, 0] } },
+          acknowledged: { $sum: { $cond: [{ $eq: ["$status", "acknowledged"] }, 1, 0] } },
+          rejected: { $sum: { $cond: [{ $eq: ["$status", "rejected"] }, 1, 0] } },
+          reverted: { $sum: { $cond: [{ $eq: ["$status", "reverted"] }, 1, 0] } },
+          revert_requested: { $sum: { $cond: [{ $eq: ["$status", "revert_requested"] }, 1, 0] } },
+          LGU: { $sum: { $cond: [{ $eq: ["$companyType", "LGU"] }, 1, 0] } },
+          Private: { $sum: { $cond: [{ $eq: ["$companyType", "Private"] }, 1, 0] } },
+        },
+      },
+    ]);
+    const r = result[0] || {};
+    res.json({
+      submissions: r.submissions || 0,
+      trucks: r.trucks || 0,
+      totalM3: r.totalM3 || 0,
+      totalTons: r.totalTons || 0,
+      residualM3: r.residualM3 || 0,
+      residualTons: r.residualTons || 0,
+      hazardousM3: r.hazardousM3 || 0,
+      hazardousTons: r.hazardousTons || 0,
+      statuses: {
+        pending: r.pending || 0,
+        acknowledged: r.acknowledged || 0,
+        rejected: r.rejected || 0,
+        reverted: r.reverted || 0,
+        revert_requested: r.revert_requested || 0,
+      },
+      companyTypes: { LGU: r.LGU || 0, Private: r.Private || 0 },
+    });
+  } catch (error) {
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+});
+
+// Grouped per-SLF summary rows for the Submission Summary table. Replaces the
+// previous "load all records + group in React" approach. Compact rows only.
+router.get("/summary-by-slf", async (req, res) => {
+  try {
+    const rows = await DataSLF.aggregate([
+      { $match: { deletedAt: null } },
+      {
+        $project: {
+          slfGenerator: 1,
+          slfName: 1,
+          lguCompanyName: 1,
+          submittedBy: 1,
+          status: 1,
+          dateOfDisposal: 1,
+          truckCount: { $ifNull: ["$truckCount", { $size: { $ifNull: ["$trucks", []] } }] },
+          totalM3: { $ifNull: ["$totalVolumeM3", 0] },
+          totalTons: { $ifNull: ["$totalVolumeTons", 0] },
+          residualM3: { $ifNull: ["$residualVolumeM3", 0] },
+          residualTons: { $ifNull: ["$residualVolumeTons", 0] },
+          hazardousM3: { $ifNull: ["$hazardousVolumeM3", 0] },
+          hazardousTons: { $ifNull: ["$hazardousVolumeTons", 0] },
+        },
+      },
+      {
+        $group: {
+          _id: { $ifNull: ["$slfName", "Unassigned SLF"] },
+          slfGenerator: { $first: "$slfGenerator" },
+          submissions: { $sum: 1 },
+          trucks: { $sum: "$truckCount" },
+          generators: { $addToSet: "$lguCompanyName" },
+          submitters: { $addToSet: "$submittedBy" },
+          totalM3: { $sum: "$totalM3" },
+          totalTons: { $sum: "$totalTons" },
+          residualM3: { $sum: "$residualM3" },
+          residualTons: { $sum: "$residualTons" },
+          hazardousM3: { $sum: "$hazardousM3" },
+          hazardousTons: { $sum: "$hazardousTons" },
+          pending: { $sum: { $cond: [{ $eq: ["$status", "pending"] }, 1, 0] } },
+          acknowledged: { $sum: { $cond: [{ $eq: ["$status", "acknowledged"] }, 1, 0] } },
+          rejected: { $sum: { $cond: [{ $eq: ["$status", "rejected"] }, 1, 0] } },
+          reverted: { $sum: { $cond: [{ $eq: ["$status", "reverted"] }, 1, 0] } },
+          revert_requested: { $sum: { $cond: [{ $eq: ["$status", "revert_requested"] }, 1, 0] } },
+          lastDisposalDate: { $max: "$dateOfDisposal" },
+        },
+      },
+      { $sort: { _id: 1 } },
+    ]);
+    res.json(
+      rows.map((row) => ({
+        key: row._id,
+        slfName: row._id,
+        slfGenerator: row.slfGenerator || null,
+        submissions: row.submissions,
+        trucks: row.trucks,
+        generatorCount: (row.generators || []).filter(Boolean).length,
+        submitterCount: (row.submitters || []).filter(Boolean).length,
+        statuses: {
+          pending: row.pending,
+          acknowledged: row.acknowledged,
+          rejected: row.rejected,
+          reverted: row.reverted,
+          revert_requested: row.revert_requested,
+        },
+        totalM3: row.totalM3,
+        totalTons: row.totalTons,
+        residualM3: row.residualM3,
+        residualTons: row.residualTons,
+        hazardousM3: row.hazardousM3,
+        hazardousTons: row.hazardousTons,
+        lastDisposalDate: row.lastDisposalDate,
+      })),
+    );
+  } catch (error) {
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+});
+
 // Get all SLF data entries (admin) — excludes soft-deleted
 router.get("/", async (req, res) => {
   try {
-    await softDeleteOverdueReverted(req);
     // Admin management view — respects App Settings year visibility filter
     const listMode = req.query.mode === "list";
     const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
@@ -1281,9 +1434,19 @@ router.get("/", async (req, res) => {
       .populate("slfGenerator")
       .sort({ createdAt: -1 });
     if (listMode) {
-      query = query.select(
-        "slfGenerator slfName submissionId idNo previousIdNos dateOfDisposal lguCompanyName companyType address companyRegion companyProvince companyMunicipality companyBarangay trucks status revertRequested editRequested submittedBy createdAt updatedAt baselineUnit totalVolumeAccepted totalVolumeAcceptedUnit activeCellEntries closedCellEntries",
-      );
+      // cellUsage=true → lean projection used only for SLF Data Table cell-fill
+      // enrichment. Returns just the fields buildFacilityCellUsage needs, slashing
+      // payload + client memory vs. the full submission documents.
+      if (String(req.query.cellUsage || "").toLowerCase() === "true") {
+        query = query.select(
+          "slfGenerator slfName status dateOfDisposal trucks.actualVolume trucks.actualVolumeUnit trucks.wasteType trucks.cellName trucks.cellIndex trucks.vehicles.actualVolume trucks.vehicles.cellName trucks.vehicles.cellIndex trucks.vehicles.wasteType",
+        );
+      } else {
+        query = query.select(
+          "slfGenerator slfName submissionId idNo previousIdNos dateOfDisposal lguCompanyName companyType address companyRegion companyProvince companyMunicipality companyBarangay status revertRequested editRequested submittedBy createdAt updatedAt baselineUnit totalVolumeAccepted totalVolumeAcceptedUnit activeCellEntries closedCellEntries truckCount totalVolumeM3 totalVolumeTons residualVolumeM3 residualVolumeTons hazardousVolumeM3 hazardousVolumeTons" +
+            (includeTrucks ? " trucks" : ""),
+        );
+      }
     }
     if (paginated) {
       query = query.skip((page - 1) * limit).limit(limit);
@@ -1296,7 +1459,7 @@ router.get("/", async (req, res) => {
       res.json({
         data: entries.map((entry) => ({
           ...entry,
-          truckCount: Array.isArray(entry.trucks) ? entry.trucks.length : 0,
+          truckCount: entry.truckCount ?? (Array.isArray(entry.trucks) ? entry.trucks.length : 0),
           trucks: includeTrucks ? entry.trucks : [],
         })),
         total,
