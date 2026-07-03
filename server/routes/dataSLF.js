@@ -11,6 +11,29 @@ const Notification = require("../models/Notification");
 const UserPortal = require("../models/UserPortal");
 const { notifyAdmin, notifyPortal, refreshAdmin } = require("../utils/socketEmit");
 const { authMiddleware, developerOnly } = require("../middleware/auth");
+const jwt = require("jsonwebtoken");
+
+// Optional auth: decode the JWT when present so role-aware behaviour (e.g.
+// exposing dummy/sample submissions only to developers) is possible on routes
+// that don't otherwise require a token. Never rejects — req.user stays undefined
+// for anonymous/token-less callers.
+function optionalAuth(req, _res, next) {
+  const token = req.headers.authorization?.split(" ")[1];
+  if (token) {
+    try {
+      req.user = jwt.verify(token, process.env.JWT_SECRET);
+    } catch {
+      /* ignore invalid token — treat as anonymous */
+    }
+  }
+  next();
+}
+
+// Only developers may opt into seeing dummy/sample submissions inline.
+function devWantsDummy(req) {
+  return req.user?.role === "developer" &&
+    String(req.query.includeDummy || "").toLowerCase() === "true";
+}
 
 // Province code mapping (mirrors DataSLF model)
 const PROVINCE_CODES = {
@@ -186,6 +209,136 @@ function normalizeUnit(unit) {
   return String(unit || "m³").replace("m3", "m³");
 }
 
+// Summarize how many truck rows in a submission have a cell assigned. Used by
+// the admin list to show a "Cells Assigned" badge without shipping full trucks.
+function computeCellPlacementSummary(entry) {
+  const trucks = Array.isArray(entry?.trucks) ? entry.trucks : [];
+  const denormTotal = entry?.truckCount ?? trucks.length;
+  if (trucks.length === 0) {
+    return { placed: 0, total: denormTotal || 0, known: false };
+  }
+  const placed = trucks.filter(
+    (t) => t?.cellName || (Array.isArray(t?.vehicles) && t.vehicles.some((v) => v?.cellName))
+  ).length;
+  return { placed, total: trucks.length, known: true };
+}
+
+// Coerce any incoming unit string to one of the schema-allowed enum values so a
+// stray label (e.g. "cubic meters") can never trigger a Mongoose ValidationError
+// (which would surface to the portal user as a 500 server error).
+const VALID_VOLUME_UNITS = new Set(["tons", "m³", "m3"]);
+function normalizeVolumeUnit(unit, fallback = "m³") {
+  const normalized = normalizeUnit(unit || fallback);
+  if (VALID_VOLUME_UNITS.has(normalized)) return normalized;
+  const low = String(unit || "").toLowerCase();
+  if (low.includes("ton")) return "tons";
+  return "m³";
+}
+
+// The truck-level wasteType field is a strict enum. Portal disposal dropdowns
+// always send a valid value, but Excel-imported rows carry free text. Map common
+// variants to the enum and fall back to "Residual" for anything unrecognized so
+// the save never fails with an enum ValidationError.
+const TRUCK_WASTE_TYPE_ENUM = ["Residual", "Hazardous Waste", "Treated Hazardous Waste"];
+function normalizeTruckWasteType(value) {
+  const raw = String(value ?? "").trim();
+  if (!raw) return undefined; // schema allows undefined; empty string would fail enum
+  if (TRUCK_WASTE_TYPE_ENUM.includes(raw)) return raw;
+  const low = raw.toLowerCase();
+  if (low.includes("treated")) return "Treated Hazardous Waste";
+  if (low.includes("haz") || low.includes("inert")) return "Hazardous Waste";
+  if (low.includes("residual")) return "Residual";
+  return "Residual";
+}
+
+// Validate + normalize a numeric volume/capacity. Pushes a readable message to
+// `errors` for negative or non-numeric values so the caller can return a 400.
+function coerceVolume(value, label, errors) {
+  if (value == null || value === "") return undefined;
+  const n = Number(value);
+  if (Number.isNaN(n)) {
+    errors.push(`${label} is not a valid number.`);
+    return undefined;
+  }
+  if (n < 0) {
+    errors.push(`${label} cannot be negative.`);
+    return undefined;
+  }
+  return n;
+}
+
+// Normalize + validate the trucks array of a submission entry. Prevents 500s
+// from enum/type mismatches and collects human-readable validation errors.
+function sanitizeTrucksForSave(trucks, fallbackUnit, errors) {
+  if (!Array.isArray(trucks)) return trucks;
+  return trucks.map((truck, ti) => {
+    if (!truck || typeof truck !== "object") return truck;
+    const cleaned = { ...truck };
+    if (cleaned.wasteType !== undefined) {
+      cleaned.wasteType = normalizeTruckWasteType(cleaned.wasteType);
+    }
+    if (cleaned.truckCapacityUnit) cleaned.truckCapacityUnit = normalizeVolumeUnit(cleaned.truckCapacityUnit, fallbackUnit);
+    if (cleaned.actualVolumeUnit) cleaned.actualVolumeUnit = normalizeVolumeUnit(cleaned.actualVolumeUnit, fallbackUnit);
+
+    const av = coerceVolume(cleaned.actualVolume, `Truck ${ti + 1} actual volume`, errors);
+    if (av !== undefined) cleaned.actualVolume = av;
+    const tc = coerceVolume(cleaned.truckCapacity, `Truck ${ti + 1} capacity`, errors);
+    if (tc !== undefined) cleaned.truckCapacity = tc;
+
+    if (Array.isArray(cleaned.vehicles)) {
+      cleaned.vehicles = cleaned.vehicles.map((vehicle, vi) => {
+        if (!vehicle || typeof vehicle !== "object") return vehicle;
+        const cv = { ...vehicle };
+        if (cv.capacityUnit) cv.capacityUnit = normalizeVolumeUnit(cv.capacityUnit, fallbackUnit);
+        if (cv.actualVolumeUnit) cv.actualVolumeUnit = normalizeVolumeUnit(cv.actualVolumeUnit, fallbackUnit);
+        const vv = coerceVolume(cv.actualVolume, `Truck ${ti + 1} vehicle ${vi + 1} volume`, errors);
+        if (vv !== undefined) cv.actualVolume = vv;
+        const vc = coerceVolume(cv.capacity, `Truck ${ti + 1} vehicle ${vi + 1} capacity`, errors);
+        if (vc !== undefined) cv.capacity = vc;
+        return cv;
+      });
+    }
+    return cleaned;
+  });
+}
+
+// Normalize the enum-constrained unit fields at the top level of an entry so a
+// bad unit string never triggers a 500.
+const ENTRY_UNIT_FIELDS = [
+  "baselineUnit", "totalVolumeAcceptedUnit", "currentCellVolumeUnit",
+  "activeCellResidualUnit", "activeCellInertUnit", "activeCellHazardousUnit",
+  "closedCellResidualUnit", "closedCellInertUnit", "closedCellHazardousUnit",
+];
+
+// Sanitize + validate a full submission entry. Returns the cleaned entry and
+// pushes any validation errors so the route can return a clear 400 response
+// instead of a Mongoose 500.
+function sanitizeSubmissionEntry(item, errors) {
+  if (!item || typeof item !== "object") return item;
+  const fallbackUnit = normalizeVolumeUnit(item.baselineUnit || "m³");
+  const cleaned = { ...item };
+  ENTRY_UNIT_FIELDS.forEach((field) => {
+    if (cleaned[field]) cleaned[field] = normalizeVolumeUnit(cleaned[field], fallbackUnit);
+  });
+  if (Array.isArray(cleaned.trucks)) {
+    cleaned.trucks = sanitizeTrucksForSave(cleaned.trucks, fallbackUnit, errors);
+  }
+  // Normalize cell-entry units (free-text wasteType is fine here)
+  ["activeCellEntries", "closedCellEntries"].forEach((key) => {
+    if (Array.isArray(cleaned[key])) {
+      cleaned[key] = cleaned[key].map((entry, ci) => {
+        if (!entry || typeof entry !== "object") return entry;
+        const ce = { ...entry };
+        if (ce.unit) ce.unit = normalizeVolumeUnit(ce.unit, fallbackUnit);
+        const v = coerceVolume(ce.volume, `${key === "activeCellEntries" ? "Active" : "Closed"} cell entry ${ci + 1} volume`, errors);
+        if (v !== undefined) ce.volume = v;
+        return ce;
+      });
+    }
+  });
+  return cleaned;
+}
+
 function sanitizeClient(client) {
   if (typeof client === "string") {
     return {
@@ -298,7 +451,7 @@ async function findMatchingBaselineOnlyIds({ slfName, slfGenerator, lguCompanyNa
 async function ensurePortalAccountCanSubmit(email) {
   const normalizedEmail = String(email || "").trim().toLowerCase();
   if (!normalizedEmail) return null;
-  const portalUser = await UserPortal.findOne({ email: normalizedEmail }).select("verificationRequired verificationSubmitted status");
+  const portalUser = await UserPortal.findOne({ email: normalizedEmail }).select("verificationRequired verificationSubmitted status isDummy");
   if (!portalUser) return null;
   if (portalUser.status !== "approved") {
     const error = new Error("Your portal account is not approved for submissions.");
@@ -313,87 +466,161 @@ async function ensurePortalAccountCanSubmit(email) {
   return portalUser;
 }
 
+/**
+ * Core submission logic shared by the portal POST route, the draft/scheduled
+ * queue (manual + automatic submit) and the scheduler. Validates + normalizes
+ * every entry, persists DataSLF docs, and fires audit/notification side effects.
+ *
+ * @param {object} params
+ * @param {object[]} params.entries   - Submission entry payload(s)
+ * @param {string}   params.submittedBy - Portal user email
+ * @param {object}   [params.req]      - Express req (optional; enables socket emits + ip)
+ * @returns {Promise<{ saved: object[], submissionId: string }>}
+ * @throws  {Error} with statusCode 400/403 on validation/permission failure
+ */
+async function submitEntries({ entries, submittedBy, req } = {}) {
+  const portalAccount = await ensurePortalAccountCanSubmit(submittedBy);
+  const submitterIsDummy = Boolean(portalAccount?.isDummy);
+  const items = Array.isArray(entries) ? entries : entries ? [entries] : [];
+  if (items.length === 0) {
+    const error = new Error("No submission data was provided.");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  // Validate + normalize every entry up front so an invalid entry can't cause a
+  // partial save or a Mongoose 500.
+  const validationErrors = [];
+  const sanitizedItems = items.map((item, idx) => {
+    const errs = [];
+    const cleaned = sanitizeSubmissionEntry(item, errs);
+    if (errs.length) {
+      validationErrors.push(`${items.length > 1 ? `Entry ${idx + 1}: ` : ""}${errs.join(" ")}`);
+    }
+    return cleaned;
+  });
+  if (validationErrors.length) {
+    const error = new Error(validationErrors.join(" | "));
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const submissionId = `SUB-${Date.now()}-${crypto.randomBytes(3).toString("hex")}`;
+
+  const genCache = new Map();
+  const facilityDummyCache = new Map();
+  const saved = [];
+  for (const item of sanitizedItems) {
+    let genId = item.slfGenerator || null;
+    if (!genId && item.slfName) {
+      const cacheKey = String(item.slfName).trim().toLowerCase();
+      if (genCache.has(cacheKey)) {
+        genId = genCache.get(cacheKey);
+      } else {
+        const gen = await SLFGenerator.findOne({ slfName: item.slfName }).select("_id").lean();
+        genId = gen?._id || null;
+        genCache.set(cacheKey, genId);
+      }
+    }
+
+    // Determine whether the target facility is a dummy/test facility.
+    let facilityIsDummy = false;
+    if (genId) {
+      const key = String(genId);
+      if (facilityDummyCache.has(key)) {
+        facilityIsDummy = facilityDummyCache.get(key);
+      } else {
+        const fac = await SlfFacility.findById(genId).select("isDummy").lean();
+        facilityIsDummy = Boolean(fac?.isDummy);
+        facilityDummyCache.set(key, facilityIsDummy);
+      }
+    }
+
+    // Enforce isolation: dummy accounts submit ONLY against dummy facilities,
+    // and real accounts must never submit against a dummy facility.
+    if (submitterIsDummy && genId && !facilityIsDummy) {
+      const error = new Error("Dummy accounts can only submit against their assigned dummy SLF facility.");
+      error.statusCode = 403;
+      throw error;
+    }
+    if (submitterIsDummy && !genId) {
+      const error = new Error("This dummy account has no assigned dummy SLF facility. Assign one in Dummy Data Config.");
+      error.statusCode = 400;
+      throw error;
+    }
+    if (!submitterIsDummy && facilityIsDummy) {
+      const error = new Error("A real portal account cannot submit against a dummy SLF facility.");
+      error.statusCode = 403;
+      throw error;
+    }
+
+    const doc = new DataSLF({
+      ...item,
+      slfGenerator: genId,
+      submissionId,
+      submittedBy: submittedBy || item.submittedBy || "",
+      isDummy: submitterIsDummy || facilityIsDummy,
+      dummyPortalUserId: submitterIsDummy ? portalAccount?._id : undefined,
+    });
+    await doc.save();
+    saved.push(doc);
+  }
+
+  // Fire-and-forget side effects (audit trail, admin notification, socket, log).
+  (async () => {
+    try {
+      const companies = [...new Set(saved.map((s) => s.lguCompanyName))];
+      const txnDocs = companies.map((company) => {
+        const companyEntries = saved.filter((s) => s.lguCompanyName === company);
+        return {
+          submissionId,
+          dataEntry: companyEntries[0]._id,
+          companyName: company,
+          companyType: companyEntries[0].companyType,
+          submittedBy: submittedBy || "",
+          type: "submission",
+          description: `${companyEntries.length} entr${companyEntries.length === 1 ? "y" : "ies"} submitted by ${submittedBy || "unknown"}`,
+          performedBy: submittedBy || "portal",
+          meta: { entryCount: companyEntries.length, ids: companyEntries.map((e) => e.idNo) },
+        };
+      });
+      if (txnDocs.length) await Transaction.insertMany(txnDocs, { ordered: false });
+    } catch { /* silent */ }
+
+    try {
+      await Notification.create({
+        recipient: "admin",
+        type: "new_submission",
+        title: "New Submission",
+        message: `${submittedBy || "A portal user"} submitted ${saved.length} entr${saved.length === 1 ? "y" : "ies"} (${saved[0]?.lguCompanyName || "Unknown"})`,
+        submissionId,
+        dataEntry: saved[0]?._id,
+        meta: { entryCount: saved.length, companyName: saved[0]?.lguCompanyName, submittedBy },
+      });
+    } catch { /* silent */ }
+    if (req) {
+      notifyAdmin(req, { type: "new_submission", title: "New Submission", message: `${submittedBy || "A portal user"} submitted ${saved.length} entries` });
+      refreshAdmin(req, "submissions");
+    }
+
+    writeLog("info", "submission.create", {
+      message: `New submission: ${saved.length} entries by ${submittedBy || "unknown"}`,
+      user: submittedBy || "",
+      ip: req?.ip || "",
+      meta: { submissionId, count: saved.length },
+    });
+  })();
+
+  return { saved, submissionId };
+}
+
 // Submit SLF data — batch (client portal)
 router.post("/", async (req, res) => {
   try {
     const { entries, submittedBy } = req.body || {};
-    await ensurePortalAccountCanSubmit(submittedBy);
     const items = Array.isArray(entries) ? entries : [req.body];
-    const submissionId = `SUB-${Date.now()}-${crypto.randomBytes(3).toString("hex")}`;
-
-    // Cache SLFGenerator lookups so repeated slfNames in a batch don't re-query.
-    const genCache = new Map();
-    const saved = [];
-    for (const item of items) {
-      // Resolve slfGenerator from slfName if not set
-      let genId = item.slfGenerator || null;
-      if (!genId && item.slfName) {
-        const cacheKey = String(item.slfName).trim().toLowerCase();
-        if (genCache.has(cacheKey)) {
-          genId = genCache.get(cacheKey);
-        } else {
-          const gen = await SLFGenerator.findOne({ slfName: item.slfName }).select("_id").lean();
-          genId = gen?._id || null;
-          genCache.set(cacheKey, genId);
-        }
-      }
-      const doc = new DataSLF({
-        ...item,
-        slfGenerator: genId,
-        submissionId,
-        submittedBy: submittedBy || item.submittedBy || "",
-      });
-      // idNo generation must stay sequential to avoid duplicate sequence numbers.
-      await doc.save();
-      saved.push(doc);
-    }
-
-    // Respond immediately — audit logging, notifications and socket refresh are
-    // non-critical and run after the response so the user isn't blocked on them.
+    const { saved } = await submitEntries({ entries: items, submittedBy, req });
     res.status(201).json({ message: "Data submitted successfully", data: saved });
-
-    (async () => {
-      try {
-        // One transaction per unique company, written in a single round trip.
-        const companies = [...new Set(saved.map((s) => s.lguCompanyName))];
-        const txnDocs = companies.map((company) => {
-          const companyEntries = saved.filter((s) => s.lguCompanyName === company);
-          return {
-            submissionId,
-            dataEntry: companyEntries[0]._id,
-            companyName: company,
-            companyType: companyEntries[0].companyType,
-            submittedBy: submittedBy || "",
-            type: "submission",
-            description: `${companyEntries.length} entr${companyEntries.length === 1 ? "y" : "ies"} submitted by ${submittedBy || "unknown"}`,
-            performedBy: submittedBy || "portal",
-            meta: { entryCount: companyEntries.length, ids: companyEntries.map((e) => e.idNo) },
-          };
-        });
-        if (txnDocs.length) await Transaction.insertMany(txnDocs, { ordered: false });
-      } catch { /* silent */ }
-
-      try {
-        await Notification.create({
-          recipient: "admin",
-          type: "new_submission",
-          title: "New Submission",
-          message: `${submittedBy || "A portal user"} submitted ${saved.length} entr${saved.length === 1 ? "y" : "ies"} (${saved[0]?.lguCompanyName || "Unknown"})`,
-          submissionId,
-          dataEntry: saved[0]?._id,
-          meta: { entryCount: saved.length, companyName: saved[0]?.lguCompanyName, submittedBy },
-        });
-      } catch { /* silent */ }
-      notifyAdmin(req, { type: "new_submission", title: "New Submission", message: `${submittedBy || "A portal user"} submitted ${saved.length} entries` });
-      refreshAdmin(req, "submissions");
-
-      writeLog("info", "submission.create", {
-        message: `New submission: ${saved.length} entries by ${submittedBy || "unknown"}`,
-        user: submittedBy || "",
-        ip: req.ip,
-        meta: { submissionId: saved[0]?.submissionId, count: saved.length },
-      });
-    })();
   } catch (error) {
     if (error.statusCode) return res.status(error.statusCode).json({ message: error.message });
     res.status(500).json({ message: "Server error", error: error.message });
@@ -424,8 +651,15 @@ router.put("/:id", async (req, res) => {
       "activeCellEntries", "closedCellEntries",
       "acceptsHazardousWaste",
     ];
+    // Normalize + validate the incoming payload (units, wasteType enum, volumes)
+    // so a resubmission can't fail with a Mongoose 500 or store invalid data.
+    const updateErrors = [];
+    const sanitizedBody = sanitizeSubmissionEntry(req.body || {}, updateErrors);
+    if (updateErrors.length) {
+      return res.status(400).json({ message: updateErrors.join(" ") });
+    }
     for (const field of allowedFields) {
-      if (req.body[field] !== undefined) entry[field] = req.body[field];
+      if (sanitizedBody[field] !== undefined) entry[field] = sanitizedBody[field];
     }
     entry.status = "pending";
     entry.revertReason = "";
@@ -603,14 +837,21 @@ router.get("/baseline/:slfName", async (req, res) => {
 });
 
 // Get latest baseline info for ALL SLF generators — admin tab
-router.get("/baselines", async (req, res) => {
+router.get("/baselines", optionalAuth, async (req, res) => {
   try {
     // Aggregate from DataSLF directly — covers both SLFGenerator and SlfFacility refs
     // Include soft-deleted records since baseline is facility-level data
     // Match any record that has baseline data: totalVolumeAccepted set, OR activeCellEntries/closedCellEntries present
+    // Dummy/test (SAMPLE) baselines are excluded from the production view by
+    // default; only developers may opt into seeing them inline via
+    // ?includeDummy=true (they are highlighted as SAMPLE on the client).
+    const includeDummy = devWantsDummy(req);
+    const matchStage = includeDummy
+      ? baselineDataMatch
+      : { $and: [baselineDataMatch, { isDummy: { $ne: true } }] };
     const latestPerSlf = await DataSLF.aggregate([
       {
-        $match: baselineDataMatch,
+        $match: matchStage,
       },
       {
         $addFields: {
@@ -655,6 +896,7 @@ router.get("/baselines", async (req, res) => {
       slfGenerator: d.slfGenerator,
       slfName: d.slfName || d.lguCompanyName || "Unknown",
       lguCompanyName: d.lguCompanyName,
+      isDummy: d.isDummy || false,
       baselineUnit,
       totalVolumeAccepted: d.totalVolumeAccepted,
       totalVolumeAcceptedUnit: d.totalVolumeAcceptedUnit || baselineUnit,
@@ -1262,7 +1504,7 @@ router.get("/summary-tiles", async (req, res) => {
       ],
     });
     const result = await DataSLF.aggregate([
-      { $match: { deletedAt: null } },
+      { $match: { deletedAt: null, isDummy: { $ne: true } } },
       {
         $project: {
           status: 1,
@@ -1326,7 +1568,7 @@ router.get("/summary-tiles", async (req, res) => {
 router.get("/summary-by-slf", async (req, res) => {
   try {
     const rows = await DataSLF.aggregate([
-      { $match: { deletedAt: null } },
+      { $match: { deletedAt: null, isDummy: { $ne: true } } },
       {
         $project: {
           slfGenerator: 1,
@@ -1399,7 +1641,7 @@ router.get("/summary-by-slf", async (req, res) => {
 });
 
 // Get all SLF data entries (admin) — excludes soft-deleted
-router.get("/", async (req, res) => {
+router.get("/", optionalAuth, async (req, res) => {
   try {
     // Admin management view — respects App Settings year visibility filter
     const listMode = req.query.mode === "list";
@@ -1407,6 +1649,11 @@ router.get("/", async (req, res) => {
     const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 0, 0), 100);
     const paginated = listMode && limit > 0;
     const filter = { deletedAt: null };
+    // Exclude dummy/test (SAMPLE) submissions from production admin views.
+    // Only developers may opt into seeing them inline via ?includeDummy=true.
+    if (!devWantsDummy(req)) {
+      filter.isDummy = { $ne: true };
+    }
     const status = String(req.query.status || "").trim();
     const search = String(req.query.search || "").trim();
     const includeTrucks = String(req.query.includeTrucks || "").toLowerCase() === "true";
@@ -1418,16 +1665,26 @@ router.get("/", async (req, res) => {
     if (listMode && withTruckVolume) {
       filter["trucks.actualVolume"] = { $gt: 0 };
     }
+    // Precise server-side scoping to a single SLF facility (used by the Summary
+    // disposal calendar) — avoids shipping every SLF's records to the client.
+    if (listMode && req.query.slfGenerator) {
+      const genId = String(req.query.slfGenerator).trim();
+      if (mongoose.isValidObjectId(genId)) filter.slfGenerator = genId;
+    }
     if (listMode && search) {
       const rx = new RegExp(escapeRegExp(search), "i");
-      filter.$or = [
-        { idNo: rx },
-        { submissionId: rx },
-        { lguCompanyName: rx },
-        { companyType: rx },
-        { slfName: rx },
-        { submittedBy: rx },
-      ];
+      // Use $and (not a top-level $or) so the year-visibility plugin — which adds
+      // its OWN top-level $or via .where() — cannot clobber the search clause.
+      (filter.$and = filter.$and || []).push({
+        $or: [
+          { idNo: rx },
+          { submissionId: rx },
+          { lguCompanyName: rx },
+          { companyType: rx },
+          { slfName: rx },
+          { submittedBy: rx },
+        ],
+      });
     }
 
     let query = DataSLF.find(filter)
@@ -1442,9 +1699,16 @@ router.get("/", async (req, res) => {
           "slfGenerator slfName status dateOfDisposal trucks.actualVolume trucks.actualVolumeUnit trucks.wasteType trucks.cellName trucks.cellIndex trucks.vehicles.actualVolume trucks.vehicles.cellName trucks.vehicles.cellIndex trucks.vehicles.wasteType",
         );
       } else {
+        // Base fields shared by both variants. The trucks projection differs:
+        // when includeTrucks is set we pull the FULL `trucks` array, otherwise we
+        // only pull the cell-name sub-paths. Never mix the parent path (`trucks`)
+        // with its sub-paths (`trucks.cellName`) in one projection — Mongoose 9
+        // rejects that with "Path collision at trucks".
+        const baseFields =
+          "slfGenerator slfName submissionId idNo previousIdNos dateOfDisposal lguCompanyName companyType address companyRegion companyProvince companyMunicipality companyBarangay status revertRequested editRequested submittedBy createdAt updatedAt isDummy baselineUnit totalVolumeAccepted totalVolumeAcceptedUnit activeCellEntries closedCellEntries truckCount totalVolumeM3 totalVolumeTons residualVolumeM3 residualVolumeTons hazardousVolumeM3 hazardousVolumeTons";
         query = query.select(
-          "slfGenerator slfName submissionId idNo previousIdNos dateOfDisposal lguCompanyName companyType address companyRegion companyProvince companyMunicipality companyBarangay status revertRequested editRequested submittedBy createdAt updatedAt baselineUnit totalVolumeAccepted totalVolumeAcceptedUnit activeCellEntries closedCellEntries truckCount totalVolumeM3 totalVolumeTons residualVolumeM3 residualVolumeTons hazardousVolumeM3 hazardousVolumeTons" +
-            (includeTrucks ? " trucks" : ""),
+          baseFields +
+            (includeTrucks ? " trucks" : " trucks.cellName trucks.vehicles.cellName"),
         );
       }
     }
@@ -1460,6 +1724,7 @@ router.get("/", async (req, res) => {
         data: entries.map((entry) => ({
           ...entry,
           truckCount: entry.truckCount ?? (Array.isArray(entry.trucks) ? entry.trucks.length : 0),
+          cellPlacement: computeCellPlacementSummary(entry),
           trucks: includeTrucks ? entry.trucks : [],
         })),
         total,
@@ -1468,7 +1733,15 @@ router.get("/", async (req, res) => {
       });
       return;
     }
-    res.json(entries);
+    res.json(
+      listMode && !includeTrucks
+        ? entries.map((entry) => ({
+            ...entry,
+            cellPlacement: computeCellPlacementSummary(entry),
+            trucks: [],
+          }))
+        : entries
+    );
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });
   }
@@ -1630,7 +1903,53 @@ router.patch("/:id/portal-cell-assignments", async (req, res) => {
     ) {
       return res.status(403).json({ message: "You can only organize your own submissions." });
     }
+    // Block organizing once Admin has validated/locked the submission.
+    if (entry.status === "rejected") {
+      writeLog("warn", "organize_cells_validation_failed", {
+        message: "Attempt to organize a locked/validated submission",
+        user: submittedBy,
+        ip: req.ip,
+        meta: { submissionId: entry.idNo, reason: "locked", status: entry.status },
+      });
+      return res.status(400).json({ message: "This submission is already locked or validated by Admin." });
+    }
+
     const list = Array.isArray(assignments) ? assignments : [];
+    if (list.length === 0) {
+      return res.status(400).json({ message: "No cell placement was provided." });
+    }
+
+    // Validate selected cells against the SLF facility (cell must exist / be
+    // within the facility's configured cell count when the facility is known).
+    let facility = null;
+    if (entry.slfGenerator) {
+      facility = await SlfFacility.findById(entry.slfGenerator).select("numberOfCell cellStatuses lgu").lean();
+    }
+    const cellCount = Number(facility?.numberOfCell || facility?.cellStatuses?.length || 0);
+    const validationErrors = [];
+    list.forEach((assignment, i) => {
+      if (assignment.cellIndex === null || assignment.cellIndex === undefined || assignment.cellIndex === "") return;
+      const ci = Number(assignment.cellIndex);
+      if (!Number.isInteger(ci) || ci < 0) {
+        validationErrors.push(`Row ${i + 1}: invalid cell selection.`);
+      } else if (cellCount > 0 && ci >= cellCount) {
+        validationErrors.push(`Row ${i + 1}: selected cell does not belong to this SLF facility.`);
+      }
+    });
+    if (validationErrors.length) {
+      writeLog("warn", "organize_cells_validation_failed", {
+        message: validationErrors.join(" "),
+        user: submittedBy,
+        ip: req.ip,
+        meta: { submissionId: entry.idNo, slfGenerator: String(entry.slfGenerator || ""), errors: validationErrors },
+      });
+      return res.status(400).json({ message: validationErrors.join(" ") });
+    }
+
+    const hadPriorPlacement = (entry.trucks || []).some(
+      (t) => t?.cellName || (t?.vehicles || []).some((v) => v?.cellName)
+    );
+
     list.forEach((assignment) => {
       const truckIndex = Number(assignment.truckIndex);
       if (!Number.isInteger(truckIndex) || truckIndex < 0 || truckIndex >= entry.trucks.length) return;
@@ -1689,6 +2008,19 @@ router.patch("/:id/portal-cell-assignments", async (req, res) => {
         meta: { idNo: entry.idNo, portal: true },
       });
     } catch { /* silent */ }
+
+    writeLog("info", hadPriorPlacement ? "organize_cells_updated" : "organize_cells_created", {
+      message: `Portal user organized waste placement for ${entry.idNo || entry.lguCompanyName}`,
+      user: submittedBy,
+      ip: req.ip,
+      meta: {
+        submissionId: entry.idNo,
+        slfGenerator: String(entry.slfGenerator || ""),
+        cells: list.map((a) => a.cellName).filter(Boolean),
+        result: "success",
+      },
+    });
+
     refreshAdmin(req, "submissions");
     res.json({ message: "Cell placement saved", data: entry });
   } catch (error) {
@@ -2021,7 +2353,9 @@ router.patch("/bulk-revert", async (req, res) => {
 
 // Repair XX province codes in existing idNo values
 // Derives correct province from companyProvince (PSGC code) or companyType-scoped lookup
-router.post("/repair-xx-ids", async (req, res) => {
+// Developer-only (matches repair-type-ids / merge-slf) — an admin must not be able
+// to trigger a bulk ID rewrite, even via a direct API call.
+router.post("/repair-xx-ids", authMiddleware, developerOnly, async (req, res) => {
   try {
     const PSGC_MAP = DataSLF.PSGC_PROVINCE_CODES || {};
     const SlfFacility = require("../models/SlfFacility");
@@ -2765,9 +3099,22 @@ router.patch("/portal-save-baseline/:slfName", async (req, res) => {
       lguCompanyName,
     });
 
+    // Flag baseline records made by dummy accounts / against dummy facilities so
+    // they stay out of production admin views (Task: dummy data isolation).
+    let baselineIsDummy = false;
+    if (genId) {
+      const facDummy = await SlfFacility.findById(genId).select("isDummy").lean();
+      baselineIsDummy = Boolean(facDummy?.isDummy);
+    }
+    if (!baselineIsDummy && submittedBy) {
+      const submitter = await UserPortal.findOne({ email: String(submittedBy).trim().toLowerCase() }).select("isDummy").lean();
+      baselineIsDummy = Boolean(submitter?.isDummy);
+    }
+
     const updateFields = {
       slfName,
       ...(genId ? { slfGenerator: genId } : {}),
+      isDummy: baselineIsDummy,
       baselineUpdateApproved: false,
       baselineUpdateRequested: false,
       baselineUpdateApprovedAt: null,
@@ -2795,6 +3142,12 @@ router.patch("/portal-save-baseline/:slfName", async (req, res) => {
         : accreditedHaulers,
       acceptsHazardousWaste,
     };
+    // Normalize enum-constrained unit fields so an unexpected unit string can't
+    // trigger a Mongoose ValidationError (500) on the baseline-only doc create.
+    const baselineFallbackUnit = normalizeVolumeUnit(baselineUnit || totalVolumeAcceptedUnit || "m³");
+    ENTRY_UNIT_FIELDS.forEach((field) => {
+      if (fieldMap[field]) fieldMap[field] = normalizeVolumeUnit(fieldMap[field], baselineFallbackUnit);
+    });
     for (const [k, v] of Object.entries(fieldMap)) {
       if (v !== undefined) updateFields[k] = v;
     }
@@ -2969,11 +3322,15 @@ router.get("/waste-received-summary/:slfName", async (req, res) => {
     const requestedRegexes = requestedNames.map((name) => new RegExp(`^${escapeRegExp(name)}$`, "i"));
 
     let facilities = [];
+    let facilityIsDummy = false;
     if (slfId && mongoose.isValidObjectId(slfId)) {
       const selectedFacility = await SlfFacility.findOne({ _id: slfId, deletedAt: null })
-        .select("_id lgu province")
+        .select("_id lgu province isDummy")
         .lean();
-      if (selectedFacility) facilities = [selectedFacility];
+      if (selectedFacility) {
+        facilities = [selectedFacility];
+        facilityIsDummy = Boolean(selectedFacility.isDummy);
+      }
     }
     if (!facilities.length && requestedRegexes.length) {
       facilities = await SlfFacility.find({
@@ -3018,6 +3375,9 @@ router.get("/waste-received-summary/:slfName", async (req, res) => {
       ],
       deletedAt: null,
       status: { $ne: "rejected" },
+      // Keep dummy and actual data strictly separated: a dummy facility's
+      // dashboard shows only dummy submissions, and vice-versa.
+      isDummy: facilityIsDummy ? true : { $ne: true },
     };
     if (match.$or.length === 0) {
       match.slfName = { $regex: new RegExp(`^${escapeRegExp(slfName)}`, "i") };
@@ -3224,4 +3584,132 @@ router.get("/waste-received-summary/:slfName", async (req, res) => {
   }
 });
 
+// Distinct SLF names across submissions/baselines — powers the merge-tool
+// pickers and other SLF selectors.
+router.get("/slf-names", async (_req, res) => {
+  try {
+    const names = await DataSLF.distinct("slfName", {
+      slfName: { $ne: null, $ne: "" },
+    });
+    res.json(names.filter(Boolean).sort((a, b) => a.localeCompare(b)));
+  } catch (error) {
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+});
+
+// Developer-only: merge one or more source SLF names into a single canonical
+// target SLF. All matching submissions AND baseline records are reassigned
+// (slfName + slfGenerator), and portal-user facility assignment labels are
+// updated. Pass { dryRun: true } to preview the affected count without writing.
+router.post("/merge-slf", authMiddleware, developerOnly, async (req, res) => {
+  try {
+    const { sourceNames, targetName, targetFacilityId, dryRun } = req.body || {};
+    const rawSources = Array.isArray(sourceNames) ? sourceNames : [sourceNames];
+    const sources = [
+      ...new Set(rawSources.map((s) => String(s || "").trim()).filter(Boolean)),
+    ];
+    const target = String(targetName || "").trim();
+    if (!sources.length || !target) {
+      return res.status(400).json({ message: "sourceNames and targetName are required." });
+    }
+    // Never merge a name into itself.
+    const realSources = sources.filter((s) => s.toLowerCase() !== target.toLowerCase());
+    if (!realSources.length) {
+      return res.status(400).json({ message: "Source and target SLF are the same — nothing to merge." });
+    }
+
+    const nameFilter = {
+      slfName: { $in: realSources.map((n) => new RegExp(`^${escapeRegExp(n)}$`, "i")) },
+    };
+    const affected = await DataSLF.countDocuments(nameFilter);
+
+    if (dryRun) {
+      return res.json({ dryRun: true, affected, sources: realSources, target });
+    }
+
+    // Resolve the target facility id (so reassigned records link to the kept
+    // facility). Prefer an explicit id; otherwise reuse whatever the target's
+    // existing records already point at.
+    let facilityId = targetFacilityId || null;
+    if (!facilityId) {
+      const targetDoc = await DataSLF.findOne({
+        slfName: new RegExp(`^${escapeRegExp(target)}$`, "i"),
+        slfGenerator: { $ne: null },
+      })
+        .select("slfGenerator")
+        .lean();
+      facilityId = targetDoc?.slfGenerator || null;
+    }
+
+    const set = { slfName: target };
+    if (facilityId) set.slfGenerator = facilityId;
+    const result = await DataSLF.updateMany(nameFilter, { $set: set });
+
+    // Re-label portal user facility assignments that used a source name.
+    let portalUsersUpdated = 0;
+    try {
+      const puResult = await UserPortal.updateMany(
+        { assignedSlfName: { $in: realSources } },
+        { $set: { "assignedSlfName.$[elem]": target } },
+        { arrayFilters: [{ elem: { $in: realSources } }] },
+      );
+      portalUsersUpdated = puResult.modifiedCount || 0;
+    } catch { /* assignment re-label is best-effort */ }
+
+    // Soft-delete the leftover source SlfFacility record(s). A facility's display
+    // name is `${lgu}${ownership ? " (" + ownership + ")" : ""}`, so match the
+    // source names against that computed name and never touch the kept target.
+    let facilitiesArchived = 0;
+    try {
+      const buildDisplayName = (lgu, ownership) =>
+        `${lgu || ""}${ownership ? " (" + ownership + ")" : ""}`.trim();
+      const sourceSet = new Set(realSources.map((s) => s.toLowerCase()));
+      // Narrow by lgu (source name minus any trailing "(...)") so we don't scan
+      // the whole collection.
+      const lguGuesses = realSources.map(
+        (s) => new RegExp(`^${escapeRegExp(s.replace(/\s*\(.*?\)\s*$/, "").trim())}$`, "i"),
+      );
+      const candidates = await SlfFacility.find({
+        deletedAt: null,
+        lgu: { $in: lguGuesses },
+      }).select("_id lgu ownership");
+      const idsToArchive = candidates
+        .filter(
+          (f) =>
+            String(f._id) !== String(facilityId) &&
+            sourceSet.has(buildDisplayName(f.lgu, f.ownership).toLowerCase()),
+        )
+        .map((f) => f._id);
+      if (idsToArchive.length) {
+        const archiveRes = await SlfFacility.updateMany(
+          { _id: { $in: idsToArchive } },
+          { $set: { deletedAt: new Date(), deletedBy: req.user?.email || "merge-tool" } },
+        );
+        facilitiesArchived = archiveRes.modifiedCount || idsToArchive.length;
+      }
+    } catch { /* facility archive is best-effort — merge already succeeded */ }
+
+    writeLog("warn", "slf.merge", {
+      message: `Merged SLF [${realSources.join(", ")}] → "${target}" (${result.modifiedCount} records, ${facilitiesArchived} facility record(s) archived)`,
+      user: req.user?.email || req.user?.id || "",
+      ip: req.ip,
+      meta: { sources: realSources, target, affected: result.modifiedCount, portalUsersUpdated, facilitiesArchived },
+    });
+    refreshAdmin(req, "submissions");
+    refreshAdmin(req, "baselines");
+
+    res.json({
+      message: `Merged ${result.modifiedCount} record(s) into "${target}".`,
+      affected: result.modifiedCount,
+      portalUsersUpdated,
+      facilitiesArchived,
+      target,
+    });
+  } catch (error) {
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+});
+
 module.exports = router;
+module.exports.submitEntries = submitEntries;
+module.exports.sanitizeSubmissionEntry = sanitizeSubmissionEntry;

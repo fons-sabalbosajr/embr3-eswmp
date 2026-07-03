@@ -12,6 +12,8 @@ import {
   Table,
   Typography,
   Statistic,
+  Skeleton,
+  Button,
 } from "antd";
 import {
   BarChartOutlined,
@@ -21,7 +23,9 @@ import {
   PieChartOutlined,
   TeamOutlined,
   WarningOutlined,
-  CheckCircleOutlined
+  CheckCircleOutlined,
+  DownOutlined,
+  RightOutlined,
 } from "@ant-design/icons";
 import {
   PieChart,
@@ -36,6 +40,7 @@ import {
   CartesianGrid,
   Tooltip as RTooltip,
   Legend,
+  LabelList,
   ResponsiveContainer,
 } from "recharts";
 import dayjs from "dayjs";
@@ -53,8 +58,59 @@ import ResponsiveTable from "../shared/ResponsiveTable";
 
 const { Text } = Typography;
 
-function SlfDashboardTab({ dashboard, isDark }) {
+// A card whose body can be collapsed/expanded. Keeps the dashboard compact
+// without permanently hiding data (Task 4C).
+function CollapsibleCard({ title, extra, collapsed, onToggle, children, style }) {
+  return (
+    <Card
+      size="small"
+      title={
+        <Space size={6} style={{ cursor: "pointer" }} onClick={onToggle}>
+          {collapsed ? <RightOutlined style={{ fontSize: 10 }} /> : <DownOutlined style={{ fontSize: 10 }} />}
+          {title}
+        </Space>
+      }
+      extra={extra}
+      style={style}
+      styles={{ body: collapsed ? { display: "none" } : undefined }}
+    >
+      {children}
+    </Card>
+  );
+}
+
+function SlfDashboardTab({ dashboard, isDark, loading = false }) {
   const [page, setPage] = useState(1);
+  const [collapsed, setCollapsed] = useState({});
+  const toggle = (key) => setCollapsed((prev) => ({ ...prev, [key]: !prev[key] }));
+
+  // Loading skeleton — shown while the parent is still assembling submission /
+  // baseline data so the modal never renders undefined values (Task 4E).
+  if (loading) {
+    return (
+      <div>
+        <Row gutter={[10, 10]} style={{ marginBottom: 12 }}>
+          {Array.from({ length: 6 }).map((_, i) => (
+            <Col xs={12} sm={8} md={8} lg={4} key={i}>
+              <Card size="small" style={{ borderRadius: 10 }}>
+                <Skeleton active paragraph={false} title={{ width: "80%" }} />
+              </Card>
+            </Col>
+          ))}
+        </Row>
+        <Row gutter={[10, 10]}>
+          {Array.from({ length: 3 }).map((_, i) => (
+            <Col xs={24} md={8} key={i}>
+              <Card size="small" style={{ borderRadius: 10 }}>
+                <Skeleton active paragraph={{ rows: 4 }} />
+              </Card>
+            </Col>
+          ))}
+        </Row>
+      </div>
+    );
+  }
+
   if (!dashboard || dashboard.totalSubmissions === 0) {
     return (
       <Empty
@@ -71,12 +127,12 @@ function SlfDashboardTab({ dashboard, isDark }) {
     residual,
     hazardous,
     generatorCount,
-    companyTypeData,
-    cellData,
-    monthly,
-    topGenerators,
-    statusData,
-    tableRows,
+    companyTypeData = [],
+    cellData = [],
+    monthly = [],
+    topGenerators = [],
+    statusData = [],
+    tableRows = [],
   } = dashboard;
 
   const fmt = (n) =>
@@ -125,8 +181,33 @@ function SlfDashboardTab({ dashboard, isDark }) {
     { name: "Hazardous", value: Math.round(hazardous) },
   ].filter((d) => d.value > 0);
 
-  const cardStyle = { borderRadius: 10, height: "100%" };
+  // Equal-height chart cards for a clean, aligned grid (Task 4A/4D).
+  const CHART_H = 210;
+  const cardStyle = { borderRadius: 10, height: "100%", display: "flex", flexDirection: "column" };
   const axisTick = { fontSize: 11, fill: isDark ? "#aaa" : "#555" };
+  const axisLabelFill = isDark ? "#bbb" : "#666";
+
+  // Section header with a collapse/expand toggle (Task 4C).
+  const SectionHeader = ({ id, icon, title }) => (
+    <div
+      onClick={() => toggle(id)}
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: 8,
+        cursor: "pointer",
+        margin: "4px 0 8px",
+        padding: "4px 8px",
+        borderRadius: 8,
+        background: isDark ? "rgba(255,255,255,0.03)" : "#fafafa",
+        userSelect: "none",
+      }}
+    >
+      {collapsed[id] ? <RightOutlined style={{ fontSize: 10 }} /> : <DownOutlined style={{ fontSize: 10 }} />}
+      {icon}
+      <Text strong style={{ fontSize: 12 }}>{title}</Text>
+    </div>
+  );
 
   return (
     <div>
@@ -175,6 +256,12 @@ function SlfDashboardTab({ dashboard, isDark }) {
         ))}
       </Row>
 
+      <SectionHeader
+        id="composition"
+        icon={<PieChartOutlined style={{ color: "#722ed1" }} />}
+        title="Waste & Generator Breakdown"
+      />
+      {!collapsed.composition && (
       <Row gutter={[10, 10]} style={{ marginBottom: 12 }}>
         <Col xs={24} md={8}>
           <Card
@@ -277,24 +364,29 @@ function SlfDashboardTab({ dashboard, isDark }) {
                 <BarChart
                   data={topGenerators}
                   layout="vertical"
-                  margin={{ left: 8, right: 12 }}
+                  margin={{ left: 8, right: 28, bottom: 16 }}
                 >
                   <CartesianGrid strokeDasharray="3 3" horizontal={false} />
-                  <XAxis type="number" tick={axisTick} />
+                  <XAxis
+                    type="number"
+                    tick={axisTick}
+                    label={{ value: `Volume (${unit})`, position: "insideBottom", offset: -8, fontSize: 10, fill: axisLabelFill }}
+                  />
                   <YAxis
                     type="category"
                     dataKey="name"
                     width={90}
                     tick={{ fontSize: 10, fill: isDark ? "#aaa" : "#555" }}
                   />
-                  <RTooltip />
-                  <Bar dataKey="value" radius={[0, 4, 4, 0]} isAnimationActive={false}>
+                  <RTooltip formatter={(v) => [`${fmt(v)} ${unit}`, "Volume"]} />
+                  <Bar dataKey="value" name={`Volume (${unit})`} radius={[0, 4, 4, 0]} isAnimationActive={false}>
                     {topGenerators.map((d, i) => (
                       <RCell
                         key={d.name}
                         fill={CHART_COLORS[i % CHART_COLORS.length]}
                       />
                     ))}
+                    <LabelList dataKey="value" position="right" formatter={(v) => fmt(v)} style={{ fontSize: 10, fill: axisLabelFill }} />
                   </Bar>
                 </BarChart>
               </ResponsiveContainer>
@@ -307,7 +399,14 @@ function SlfDashboardTab({ dashboard, isDark }) {
           </Card>
         </Col>
       </Row>
+      )}
 
+      <SectionHeader
+        id="trends"
+        icon={<BarChartOutlined style={{ color: "#2f54eb" }} />}
+        title="Disposal Trend & Status"
+      />
+      {!collapsed.trends && (
       <Row gutter={[10, 10]} style={{ marginBottom: 12 }}>
         <Col xs={24} md={14}>
           <Card
@@ -323,15 +422,24 @@ function SlfDashboardTab({ dashboard, isDark }) {
               <ResponsiveContainer width="100%" height={230}>
                 <LineChart
                   data={monthly}
-                  margin={{ left: 4, right: 12, top: 8 }}
+                  margin={{ left: 8, right: 12, top: 8, bottom: 18 }}
                 >
                   <CartesianGrid strokeDasharray="3 3" />
-                  <XAxis dataKey="month" tick={axisTick} />
-                  <YAxis tick={axisTick} />
-                  <RTooltip />
+                  <XAxis
+                    dataKey="month"
+                    tick={axisTick}
+                    label={{ value: "Month", position: "insideBottom", offset: -8, fontSize: 10, fill: axisLabelFill }}
+                  />
+                  <YAxis
+                    tick={axisTick}
+                    label={{ value: `Volume (${unit})`, angle: -90, position: "insideLeft", fontSize: 10, fill: axisLabelFill, style: { textAnchor: "middle" } }}
+                  />
+                  <RTooltip formatter={(v) => [`${fmt(v)} ${unit}`, "Volume"]} />
+                  <Legend wrapperStyle={{ fontSize: 11 }} />
                   <Line
                     type="monotone"
                     dataKey="volume"
+                    name={`Volume (${unit})`}
                     stroke="#2f54eb"
                     strokeWidth={2}
                     dot={{ r: 3 }}
@@ -392,7 +500,14 @@ function SlfDashboardTab({ dashboard, isDark }) {
           </Card>
         </Col>
       </Row>
+      )}
 
+      <SectionHeader
+        id="cells"
+        icon={<DatabaseOutlined style={{ color: "#13c2c2" }} />}
+        title="Cell Utilization"
+      />
+      {!collapsed.cells && (
       <Card
         size="small"
         title={
@@ -408,23 +523,30 @@ function SlfDashboardTab({ dashboard, isDark }) {
               <ResponsiveContainer width="100%" height={240}>
                 <BarChart
                   data={cellData}
-                  margin={{ left: 4, right: 12, top: 8 }}
+                  margin={{ left: 8, right: 12, top: 8, bottom: 18 }}
                 >
                   <CartesianGrid strokeDasharray="3 3" />
-                  <XAxis dataKey="name" tick={axisTick} />
-                  <YAxis tick={axisTick} />
-                  <RTooltip />
+                  <XAxis
+                    dataKey="name"
+                    tick={axisTick}
+                    label={{ value: "Cell", position: "insideBottom", offset: -8, fontSize: 10, fill: axisLabelFill }}
+                  />
+                  <YAxis
+                    tick={axisTick}
+                    label={{ value: `Volume (${unit})`, angle: -90, position: "insideLeft", fontSize: 10, fill: axisLabelFill, style: { textAnchor: "middle" } }}
+                  />
+                  <RTooltip formatter={(v, n) => [`${fmt(v)} ${unit}`, n]} />
                   <Legend wrapperStyle={{ fontSize: 11 }} />
                   <Bar
                     dataKey="capacity"
-                    name="Capacity"
+                    name={`Capacity (${unit})`}
                     fill="#d6e4ff"
                     radius={[4, 4, 0, 0]}
                     isAnimationActive={false}
                   />
                   <Bar
                     dataKey="used"
-                    name="Used"
+                    name={`Used (${unit})`}
                     fill="#2f54eb"
                     radius={[4, 4, 0, 0]}
                     isAnimationActive={false}
@@ -489,7 +611,14 @@ function SlfDashboardTab({ dashboard, isDark }) {
           />
         )}
       </Card>
+      )}
 
+      <SectionHeader
+        id="submissions"
+        icon={<InboxOutlined style={{ color: "#fa8c16" }} />}
+        title="Submissions"
+      />
+      {!collapsed.submissions && (
       <Card
         size="small"
         title={
@@ -586,6 +715,7 @@ function SlfDashboardTab({ dashboard, isDark }) {
           ]}
         />
       </Card>
+      )}
     </div>
   );
 }

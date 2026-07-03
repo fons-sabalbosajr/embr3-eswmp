@@ -193,7 +193,11 @@ router.use(authMiddleware, adminOnly);
 // Get all portal users
 router.get("/", async (req, res) => {
   try {
-    const users = await UserPortal.find()
+    // Dummy/test accounts are managed under Developer Settings > Dummy Data
+    // Configuration and excluded from the real Portal Users list by default.
+    const filter =
+      req.query.includeDummy === "true" ? {} : { isDummy: { $ne: true } };
+    const users = await UserPortal.find(filter)
       .select("-password")
       .populate("approvedBy", "firstName lastName email")
       .sort({ createdAt: -1 });
@@ -219,6 +223,12 @@ router.patch("/:id/approve", async (req, res) => {
     const slfs = await SlfFacility.find({ _id: { $in: slfIds } });
     if (slfs.length !== slfIds.length) {
       return res.status(404).json({ message: "One or more SLF facilities not found" });
+    }
+    // Real portal accounts must never be assigned dummy/test facilities.
+    if (slfs.some((s) => s.isDummy)) {
+      return res.status(400).json({
+        message: "Dummy/test SLF facilities cannot be assigned to real portal accounts. Manage dummy accounts in Developer Settings > Dummy Data Config.",
+      });
     }
 
     const slfDisplayNames = slfs.map(
@@ -266,6 +276,11 @@ router.patch("/:id/update-slf", async (req, res) => {
     const slfs = await SlfFacility.find({ _id: { $in: slfIds } });
     if (slfs.length !== slfIds.length) {
       return res.status(404).json({ message: "One or more SLF facilities not found" });
+    }
+    if (slfs.some((s) => s.isDummy)) {
+      return res.status(400).json({
+        message: "Dummy/test SLF facilities cannot be assigned to real portal accounts. Manage dummy accounts in Developer Settings > Dummy Data Config.",
+      });
     }
 
     const slfDisplayNames = slfs.map(

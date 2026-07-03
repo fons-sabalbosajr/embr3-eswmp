@@ -64,6 +64,11 @@ import {
   UnlockOutlined,
   DisconnectOutlined,
   ApiOutlined,
+  MenuFoldOutlined,
+  MenuUnfoldOutlined,
+  ExperimentOutlined,
+  FolderOpenOutlined,
+  UploadOutlined,
 } from "@ant-design/icons";
 import AccountSettings from "./AccountSettings";
 import Swal from "sweetalert2";
@@ -71,12 +76,14 @@ import api from "../../api";
 import secureStorage from "../../utils/secureStorage";
 import dayjs from "dayjs";
 import ResponsiveTable from "./shared/ResponsiveTable";
+import DummyDataConfig from "./DummyDataConfig";
+import SLFDataTableFiles from "./SLFDataTableFiles";
 
 const { Title, Text } = Typography;
 const { Option } = Select;
 const { TextArea } = Input;
 
-export default function DeveloperSettings({onSettingsSaved, isDark, initialActiveKey = "general"}) {
+export default function DeveloperSettings({onSettingsSaved, isDark, isDeveloper = false, initialActiveKey = "general"}) {
   const [settings, setSettings] = useState(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -102,6 +109,18 @@ export default function DeveloperSettings({onSettingsSaved, isDark, initialActiv
   const [driveMaintenance, setDriveMaintenance] = useState(false);
   const [driveMaintenanceMsg, setDriveMaintenanceMsg] = useState("");
   const [driveSaving, setDriveSaving] = useState(false);
+  const [driveConfig, setDriveConfig] = useState(null); // { ok, missing[], authMethod }
+  const [driveVerified, setDriveVerified] = useState(false); // true after a real test-upload passes
+
+  // Test-upload modal
+  const [testUploadModal, setTestUploadModal] = useState({ open: false });
+  const [testUploading, setTestUploading] = useState(false);
+  const [testUploadResults, setTestUploadResults] = useState(null);
+  const [testFileType, setTestFileType] = useState("text");
+  const [testKeep, setTestKeep] = useState(false);
+
+  // Collapsible left menu
+  const [menuCollapsed, setMenuCollapsed] = useState(false);
 
   // Logs state
   const [logs, setLogs] = useState([]);
@@ -181,6 +200,12 @@ export default function DeveloperSettings({onSettingsSaved, isDark, initialActiv
     fetchSettings();
     fetchLogs({ showLoading: true });
     if (initialActiveKey === "portal-security") fetchPortalSecurityUsers();
+    // Passive Google Drive configuration check (no network call to Drive) so a
+    // readable warning can be shown when required env vars are missing.
+    api
+      .get("/settings/app/drive-status")
+      .then(({ data }) => setDriveConfig(data))
+      .catch(() => setDriveConfig(null));
     const logInterval = setInterval(() => fetchLogs({ showLoading: false }), 8000);
     return () => clearInterval(logInterval);
   }, []);
@@ -686,8 +711,47 @@ export default function DeveloperSettings({onSettingsSaved, isDark, initialActiv
     } catch (err) {
       setDriveStatus("error");
       setDriveStatusMsg(err.response?.data?.message || "Google Drive test failed");
+      setDriveVerified(false);
     } finally {
       setDriveTesting(false);
+    }
+  };
+
+  const handleTestUpload = async () => {
+    setTestUploading(true);
+    setTestUploadResults(null);
+    try {
+      const { data } = await api.post("/settings/app/drive-test-upload", {
+        fileType: testFileType,
+        keep: testKeep,
+      });
+      setTestUploadResults(data);
+      if (data.ok) setDriveVerified(true);
+    } catch (err) {
+      setTestUploadResults({
+        ok: false,
+        message: err.response?.data?.message || "Test upload failed",
+        results: [],
+      });
+      setDriveVerified(false);
+    } finally {
+      setTestUploading(false);
+    }
+  };
+
+  const moveToDummy = async (user) => {
+    try {
+      await api.patch(`/dummy-data/portal-users/${user._id}/mark`, { isDummy: true });
+      setPortalSecurityUsers((prev) => prev.filter((u) => u._id !== user._id));
+      Swal.fire({
+        icon: "success",
+        title: "Moved to Dummy Data",
+        text: `${user.firstName} ${user.lastName} has been moved to Dummy Data Configuration.`,
+        timer: 1800,
+        showConfirmButton: false,
+      });
+    } catch (err) {
+      Swal.fire("Error", err.response?.data?.message || "Could not move user", "error");
     }
   };
 
@@ -864,13 +928,28 @@ export default function DeveloperSettings({onSettingsSaved, isDark, initialActiv
           .developer-settings-tabs .ant-tabs-tab-btn {
             font-weight: 500;
           }
+          /* Collapsed left menu: keep icons, hide label text */
+          .developer-settings-tabs.dev-collapsed .ant-tabs-tab-btn {
+            font-size: 0 !important;
+          }
+          .developer-settings-tabs.dev-collapsed .ant-tabs-tab .anticon {
+            font-size: 16px !important;
+            margin-right: 0 !important;
+          }
+          .developer-settings-tabs.dev-collapsed .ant-tabs-tab {
+            justify-content: center;
+            padding: 8px 0 !important;
+          }
+          @media (max-width: 576px) {
+            .developer-settings-tabs .ant-tabs-nav { width: 100% !important; }
+          }
         `}
       </style>
       <Tabs
         defaultActiveKey={initialActiveKey}
         size="small"
         tabPosition="left"
-        className="developer-settings-tabs"
+        className={`developer-settings-tabs${menuCollapsed ? " dev-collapsed" : ""}`}
         style={{
           marginTop: 8,
           minHeight: 620,
@@ -880,10 +959,26 @@ export default function DeveloperSettings({onSettingsSaved, isDark, initialActiv
           padding: 12,
         }}
         tabBarStyle={{
-          width: 210,
+          width: menuCollapsed ? 52 : 210,
           fontSize: 11,
-          paddingRight: 8,
+          paddingRight: menuCollapsed ? 0 : 8,
+          transition: "width 0.2s ease",
           borderRight: isDark ? "1px solid #303030" : "1px solid #f0f0f0",
+        }}
+        tabBarExtraContent={{
+          left: (
+            <div style={{ padding: "4px 4px 8px", textAlign: "center" }}>
+              <Tooltip title={menuCollapsed ? "Expand menu" : "Collapse menu"} placement="right">
+                <Button
+                  size="small"
+                  type="text"
+                  icon={menuCollapsed ? <MenuUnfoldOutlined /> : <MenuFoldOutlined />}
+                  onClick={() => setMenuCollapsed((v) => !v)}
+                  style={{ width: menuCollapsed ? 36 : "100%", fontSize: 12 }}
+                />
+              </Tooltip>
+            </div>
+          ),
         }}
         onChange={(key) => {
           if (key === "portal-security" && portalSecurityUsers.length === 0) fetchPortalSecurityUsers();
@@ -1426,6 +1521,34 @@ export default function DeveloperSettings({onSettingsSaved, isDark, initialActiv
                   />
                 )}
 
+                {driveConfig && !driveConfig.ok && (
+                  <Alert
+                    type="warning"
+                    showIcon
+                    style={{ marginBottom: 16, borderRadius: 8 }}
+                    message="Google Drive configuration is incomplete"
+                    description={
+                      <div>
+                        <div>Uploads will fall back to local storage until these environment variables are set in <code>server/.env</code>:</div>
+                        <ul style={{ margin: "6px 0 0", paddingLeft: 18 }}>
+                          {(driveConfig.missing || []).map((m) => (
+                            <li key={m}><code>{m}</code></li>
+                          ))}
+                        </ul>
+                      </div>
+                    }
+                  />
+                )}
+                {driveVerified && (
+                  <Alert
+                    type="success"
+                    showIcon
+                    icon={<CheckCircleOutlined />}
+                    style={{ marginBottom: 16, borderRadius: 8 }}
+                    message="Google Drive is connected and all folders are writable."
+                  />
+                )}
+
                 <Alert
                   type="info"
                   showIcon
@@ -1501,6 +1624,15 @@ export default function DeveloperSettings({onSettingsSaved, isDark, initialActiv
                   >
                     Test Drive Access
                   </Button>
+                  {isDeveloper && (
+                    <Button
+                      icon={<UploadOutlined />}
+                      onClick={() => { setTestUploadResults(null); setTestUploadModal({ open: true }); }}
+                      disabled={driveMaintenance}
+                    >
+                      Test Upload
+                    </Button>
+                  )}
                   <Button
                     type="primary"
                     danger={driveMaintenance}
@@ -1875,6 +2007,22 @@ export default function DeveloperSettings({onSettingsSaved, isDark, initialActiv
                                 maintenanceReason: !user.maintenanceMode ? "Account under maintenance by admin" : "",
                               })}
                             />
+                          </Tooltip>
+                          <Tooltip title="Move to Dummy Data (removes from Portal Users list)">
+                            <Popconfirm
+                              title="Move to Dummy Data?"
+                              description={`${user.firstName} ${user.lastName} will no longer appear in Portal Users. You can manage them in Dummy Data Configuration.`}
+                              onConfirm={() => moveToDummy(user)}
+                              okText="Move"
+                              okButtonProps={{ style: { background: "#722ed1", borderColor: "#722ed1" } }}
+                            >
+                              <Button
+                                size="small"
+                                type="text"
+                                icon={<ExperimentOutlined />}
+                                style={{ color: "#722ed1" }}
+                              />
+                            </Popconfirm>
                           </Tooltip>
                         </Space>
                       ),
@@ -2297,6 +2445,20 @@ export default function DeveloperSettings({onSettingsSaved, isDark, initialActiv
               </Card>
             ),
           },
+          ...(isDeveloper
+            ? [
+                {
+                  key: "dummy-data",
+                  label: <span><ExperimentOutlined /> Dummy Data Config</span>,
+                  children: <DummyDataConfig isDark={isDark} />,
+                },
+              ]
+            : []),
+          {
+            key: "slf-data-files",
+            label: <span><FolderOpenOutlined /> SLF Data Table Files</span>,
+            children: <SLFDataTableFiles isDark={isDark} />,
+          },
           // {
           //   key: "accounts",
           //   label: <span><TeamOutlined /> Accounts &amp; Roles</span>,
@@ -2643,6 +2805,137 @@ export default function DeveloperSettings({onSettingsSaved, isDark, initialActiv
             <TextArea rows={5} placeholder="Write the announcement shown on the login page and portal dashboard..." />
           </Form.Item>
         </Form>
+      </Modal>
+
+      {/* Drive Test Upload Modal */}
+      <Modal
+        title={
+          <Space>
+            <UploadOutlined style={{ color: "#13c2c2" }} />
+            <span>Google Drive Test Upload</span>
+          </Space>
+        }
+        open={testUploadModal.open}
+        onCancel={() => setTestUploadModal({ open: false })}
+        footer={
+          <Space>
+            <Button onClick={() => setTestUploadModal({ open: false })}>Close</Button>
+            <Button
+              type="primary"
+              icon={<UploadOutlined />}
+              loading={testUploading}
+              onClick={handleTestUpload}
+            >
+              Run Test Upload
+            </Button>
+          </Space>
+        }
+        width={560}
+        destroyOnHidden
+      >
+        <Alert
+          type="info"
+          showIcon
+          style={{ marginBottom: 16, borderRadius: 8 }}
+          message="Uploads a real sample file to each configured Drive folder and verifies folder access, upload, metadata, view URL, and cleanup."
+          description="Success is only reported after an actual file is uploaded. Choose to keep the file (marked as a test file) or delete it automatically."
+        />
+        <Row gutter={[12, 12]} align="middle" style={{ marginBottom: 16 }}>
+          <Col xs={24} md={12}>
+            <Text style={{ fontSize: 12, display: "block", marginBottom: 4 }}>Sample file type</Text>
+            <Select
+              value={testFileType}
+              onChange={setTestFileType}
+              style={{ width: "100%" }}
+              options={[
+                { value: "text", label: "Text (.txt)" },
+                { value: "image", label: "Image (.png)" },
+                { value: "pdf", label: "PDF (.pdf)" },
+                { value: "excel", label: "Excel/CSV (.csv)" },
+              ]}
+            />
+          </Col>
+          <Col xs={24} md={12}>
+            <Text style={{ fontSize: 12, display: "block", marginBottom: 4 }}>Keep uploaded test file</Text>
+            <Switch
+              checked={testKeep}
+              onChange={setTestKeep}
+              checkedChildren="Keep"
+              unCheckedChildren="Delete"
+            />
+            <Text type="secondary" style={{ fontSize: 11, marginLeft: 8 }}>
+              {testKeep ? "File is kept and tagged [TEST]." : "File is deleted after verification."}
+            </Text>
+          </Col>
+        </Row>
+        {testUploading && (
+          <div style={{ textAlign: "center", padding: "24px 0" }}>
+            <Spin size="large" tip="Uploading test file…" />
+          </div>
+        )}
+        {testUploadResults && !testUploading && (
+          <div>
+            <Alert
+              type={testUploadResults.ok ? "success" : "error"}
+              showIcon
+              icon={testUploadResults.ok ? <CheckCircleOutlined /> : <CloseCircleOutlined />}
+              style={{ marginBottom: 12, borderRadius: 8 }}
+              message={testUploadResults.message}
+            />
+            {(testUploadResults.results || []).map((r) => {
+              const stepLabels = [
+                ["folderAccess", "Folder access"],
+                ["upload", "File upload"],
+                ["metadata", "Metadata"],
+                ["viewUrl", "View URL"],
+                ["cleanup", "Cleanup"],
+              ];
+              return (
+                <div
+                  key={r.key}
+                  style={{
+                    padding: "8px 12px",
+                    marginBottom: 6,
+                    borderRadius: 8,
+                    background: r.success ? "#f6ffed" : "#fff2f0",
+                    border: `1px solid ${r.success ? "#b7eb8f" : "#ffccc7"}`,
+                  }}
+                >
+                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    {r.success
+                      ? <CheckCircleOutlined style={{ color: "#52c41a", fontSize: 16 }} />
+                      : <CloseCircleOutlined style={{ color: "#ff4d4f", fontSize: 16 }} />}
+                    <Text strong style={{ fontSize: 13, flex: 1 }}>{r.label}</Text>
+                    <Tag color={r.success ? "success" : "error"}>{r.success ? "OK" : "Failed"}</Tag>
+                  </div>
+                  <Text type="secondary" style={{ fontSize: 11, display: "block", margin: "4px 0" }}>{r.message}</Text>
+                  {r.steps && (
+                    <Space size={4} wrap style={{ marginTop: 2 }}>
+                      {stepLabels.map(([key, label]) => {
+                        const val = r.steps[key];
+                        if (val === null) return null; // cleanup skipped (keep=true)
+                        return (
+                          <Tag key={key} color={val ? "green" : "default"} style={{ fontSize: 10 }}>
+                            {val ? "✓" : "•"} {label}
+                          </Tag>
+                        );
+                      })}
+                    </Space>
+                  )}
+                  {r.success && (r.fileName || r.mimeType || r.size != null) && (
+                    <Text type="secondary" style={{ fontSize: 11, display: "block", marginTop: 4 }}>
+                      {r.fileName ? `${r.fileName} · ` : ""}{r.mimeType || ""}{r.size != null ? ` · ${(r.size / 1024).toFixed(1)} KB` : ""}
+                      {r.fileId ? ` · ID ${r.fileId}` : ""}
+                    </Text>
+                  )}
+                  {r.webViewLink && (
+                    <a href={r.webViewLink} target="_blank" rel="noreferrer" style={{ fontSize: 11 }}>Open kept test file ↗</a>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
       </Modal>
     </div>
   );

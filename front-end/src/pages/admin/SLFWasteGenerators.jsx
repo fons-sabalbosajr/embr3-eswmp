@@ -34,6 +34,7 @@ export default function SLFWasteGenerators({
   canViewCellPlacement = true,
   canEditCellPlacement = true,
   canRepairIds = false,
+  isDeveloper = false,
 }) {
   const [pendingHaulerReqs, setPendingHaulerReqs] = useState(0);
 
@@ -92,6 +93,7 @@ export default function SLFWasteGenerators({
           canEdit={canEdit}
           canDelete={canDelete}
           canRepairIds={canRepairIds}
+          isDeveloper={isDeveloper}
         />
       ),
       hidden: !canViewSubmissions,

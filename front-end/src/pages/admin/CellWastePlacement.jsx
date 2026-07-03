@@ -95,7 +95,14 @@ function MiniDonut({ pct, color }) {
 }
 
 export default function CellWastePlacement({ canEdit = true }) {
-  const [records, setRecords] = useState([]);
+  // Server-paginated list page (only entries with truck volume). The heavy
+  // full-dataset load was replaced with (a) a paginated list like Portal
+  // Submissions and (b) a lazy per-facility aggregation fetch below.
+  const [pageRecords, setPageRecords] = useState([]);
+  // All records for the currently selected facility — drives cell-fill totals.
+  const [facilityRecords, setFacilityRecords] = useState([]);
+  const [facilityLoading, setFacilityLoading] = useState(false);
+  const [facilityRefresh, setFacilityRefresh] = useState(0);
   const [baselines, setBaselines] = useState([]);
   const [settings, setSettings] = useState({});
   const [loading, setLoading] = useState(false);
@@ -116,51 +123,55 @@ export default function CellWastePlacement({ canEdit = true }) {
   const page = pagination.current;
   const pageSize = pagination.pageSize;
   const searchTerm = debouncedSearch.trim();
-  // Single stable cache key — we load the full submission set once and do all
-  // searching + pagination on the client so the search covers every submission
-  // (not just the current page) and cell-fill totals aggregate across all records.
-  const currentCacheKey = CACHE_KEY;
 
-  const fetchRecords = useCallback(async ({ force = false, silent = false } = {}) => {
-    await fetchWithCache(
-      currentCacheKey,
-      async () => {
-        const [recordsRes, baselinesRes, settingsRes] = await Promise.all([
-          api.get("/data-slf", {
-            params: {
-              mode: "list",
-              includeTrucks: true,
-              withTruckVolume: true,
-            },
-          }),
-          api.get("/data-slf/baselines"),
-          api.get("/settings/app"),
-        ]);
-        const rawRecords = Array.isArray(recordsRes.data)
-          ? recordsRes.data
-          : recordsRes.data?.data || [];
-        return {
-          records: rawRecords,
-          baselines: baselinesRes.data || [],
-          settings: settingsRes.data || {},
-        };
-      },
-      {
-        ttl: CACHE_TTL,
-        force,
-        onStart: () => !silent && setLoading(true),
-        onEnd: () => !silent && setLoading(false),
-        onData: (payload = {}) => {
-          const next = Array.isArray(payload) ? payload : Array.isArray(payload.records) ? payload.records : [];
-          setRecords(next);
-          setBaselines(Array.isArray(payload.baselines) ? payload.baselines : []);
-          setSettings(payload.settings || {});
-          setSelectedId((current) => next.some((row) => row._id === current) ? current : next[0]?._id || null);
-          setLoading(false);
-        },
-      },
-    );
-  }, [currentCacheKey]);
+  // Reference data (baselines + app settings) — small, loaded once and on refresh.
+  const fetchReference = useCallback(async () => {
+    try {
+      const [baselinesRes, settingsRes] = await Promise.all([
+        api.get("/data-slf/baselines"),
+        api.get("/settings/app"),
+      ]);
+      setBaselines(Array.isArray(baselinesRes.data) ? baselinesRes.data : []);
+      setSettings(settingsRes.data || {});
+    } catch {
+      /* non-fatal */
+    }
+  }, []);
+
+  // Server-paginated submissions list (mirrors the Portal Submissions loading).
+  const fetchPage = useCallback(
+    async ({ silent = false } = {}) => {
+      if (!silent) setLoading(true);
+      try {
+        const { data } = await api.get("/data-slf", {
+          params: {
+            mode: "list",
+            includeTrucks: true,
+            withTruckVolume: true,
+            page,
+            limit: pageSize,
+            ...(searchTerm ? { search: searchTerm } : {}),
+          },
+        });
+        const rows = Array.isArray(data?.data)
+          ? data.data
+          : Array.isArray(data)
+            ? data
+            : [];
+        const total = typeof data?.total === "number" ? data.total : rows.length;
+        setPageRecords(rows);
+        setPagination((prev) => ({ ...prev, total }));
+        setSelectedId((cur) =>
+          rows.some((r) => r._id === cur) ? cur : rows[0]?._id || null,
+        );
+      } catch {
+        setPageRecords([]);
+      } finally {
+        if (!silent) setLoading(false);
+      }
+    },
+    [page, pageSize, searchTerm],
+  );
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -171,62 +182,73 @@ export default function CellWastePlacement({ canEdit = true }) {
   }, [search]);
 
   useEffect(() => {
-    fetchRecords();
-  }, [fetchRecords]);
+    fetchReference();
+  }, [fetchReference]);
+
+  useEffect(() => {
+    fetchPage();
+  }, [fetchPage]);
 
   useEffect(() => {
     const socket = getSocket();
     if (!socket) return undefined;
     const handler = ({ target } = {}) => {
       if (!target || target === "submissions") {
-        invalidateCache(currentCacheKey);
-        fetchRecords({ force: true, silent: true });
+        fetchPage({ silent: true });
+        fetchReference();
+        setFacilityRefresh((n) => n + 1);
       }
     };
     socket.on("data-refresh", handler);
     return () => socket.off("data-refresh", handler);
-  }, [currentCacheKey, fetchRecords]);
+  }, [fetchPage, fetchReference]);
 
-  const submissions = useMemo(() => {
-    return records.filter((record) => (record.trucks || []).some((truck) => Number(truck.actualVolume || 0) > 0));
-  }, [records]);
-
-  const filteredSubmissions = useMemo(() => {
-    if (!searchTerm) return submissions;
-    return submissions.filter((record) =>
-      rowMatchesSearch(record, searchTerm, [
-        "idNo",
-        "submissionId",
-        "lguCompanyName",
-        "companyType",
-        "submittedBy",
-        (item) => getFacilityName(item),
-        (item) => (item.createdAt ? dayjs(item.createdAt).format("MM/DD/YYYY") : ""),
-      ]),
-    );
-  }, [searchTerm, submissions]);
-
-  // Client-side pagination over the fully-filtered set so the list reflects
-  // every matching submission, then keep pagination total in sync.
-  useEffect(() => {
-    setPagination((prev) => {
-      const total = filteredSubmissions.length;
-      const maxPage = Math.max(1, Math.ceil(total / prev.pageSize));
-      return {
-        ...prev,
-        total,
-        current: prev.current > maxPage ? 1 : prev.current,
-      };
-    });
-  }, [filteredSubmissions.length]);
-
-  const pagedSubmissions = useMemo(() => {
-    const start = (page - 1) * pageSize;
-    return filteredSubmissions.slice(start, start + pageSize);
-  }, [filteredSubmissions, page, pageSize]);
-
-  const selected = filteredSubmissions.find((record) => record._id === selectedId) || filteredSubmissions[0] || null;
+  const submissions = pageRecords;
+  const selected =
+    pageRecords.find((record) => record._id === selectedId) || pageRecords[0] || null;
   const facility = selected?.slfGenerator || {};
+  const selectedFacilityName = selected ? getFacilityName(selected) : "";
+
+  // Lazy-load every record for the SELECTED facility so cell-fill totals stay
+  // accurate without loading the whole dataset up front.
+  useEffect(() => {
+    if (!selectedFacilityName) {
+      setFacilityRecords([]);
+      return undefined;
+    }
+    let cancelled = false;
+    setFacilityLoading(true);
+    api
+      .get("/data-slf", {
+        params: {
+          mode: "list",
+          includeTrucks: true,
+          withTruckVolume: true,
+          search: selectedFacilityName,
+        },
+      })
+      .then(({ data }) => {
+        if (cancelled) return;
+        const rows = Array.isArray(data?.data)
+          ? data.data
+          : Array.isArray(data)
+            ? data
+            : [];
+        const own = rows.filter(
+          (r) => getFacilityName(r) === selectedFacilityName,
+        );
+        setFacilityRecords(own.length ? own : rows);
+      })
+      .catch(() => {
+        if (!cancelled) setFacilityRecords([]);
+      })
+      .finally(() => {
+        if (!cancelled) setFacilityLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedFacilityName, facilityRefresh]);
   const baselineMap = useMemo(() => {
     const map = new Map();
     baselines.forEach((baseline) => {
@@ -250,8 +272,8 @@ export default function CellWastePlacement({ canEdit = true }) {
   };
 
   const excludedPreBaselineCount = useMemo(() =>
-    records.filter((record) => (record.trucks || []).length && !shouldCountRecord(record)).length,
-  [records, settings.excludePreBaselineDisposalFromCellFill, baselineMap]);
+    facilityRecords.filter((record) => (record.trucks || []).length && !shouldCountRecord(record)).length,
+  [facilityRecords, settings.excludePreBaselineDisposalFromCellFill, baselineMap]);
 
   const cellRows = useMemo(() => {
     if (!selected) return [];
@@ -277,7 +299,7 @@ export default function CellWastePlacement({ canEdit = true }) {
         submissions: [],
       };
     });
-    records.forEach((record) => {
+    facilityRecords.forEach((record) => {
       if (getFacilityName(record) !== getFacilityName(selected) || !shouldCountRecord(record)) return;
       (record.trucks || []).forEach((truck, truckIndex) => {
         // Prefer per-vehicle cell placements (new model); fall back to the
@@ -312,14 +334,14 @@ export default function CellWastePlacement({ canEdit = true }) {
       pct: row.capacity > 0 ? Math.min(100, (row.used / row.capacity) * 100) : null,
       remaining: row.capacity > 0 ? Math.max(0, row.capacity - row.used) : null,
     }));
-  }, [facility, records, selected, settings.excludePreBaselineDisposalFromCellFill, baselineMap]);
+  }, [facility, facilityRecords, selected, settings.excludePreBaselineDisposalFromCellFill, baselineMap]);
 
   const activeCellOptions = cellRows
     .filter((cell) => isActiveCellStatus(cell.status))
     .map((cell) => ({ label: `${cell.label} - ${cell.status}`, value: cell.index }));
 
   const updateTruckCell = (truckIndex, cellIndex) => {
-    setRecords((prev) => prev.map((record) => {
+    setPageRecords((prev) => prev.map((record) => {
       if (record._id !== selected?._id) return record;
       const trucks = (record.trucks || []).map((truck, index) => {
         if (index !== truckIndex) return truck;
@@ -342,7 +364,7 @@ export default function CellWastePlacement({ canEdit = true }) {
 
   const applyBulkCell = () => {
     if (!selected || bulkCellIndex == null || selectedTruckIndexes.length === 0) return;
-    setRecords((prev) => prev.map((record) => {
+    setPageRecords((prev) => prev.map((record) => {
       if (record._id !== selected._id) return record;
       const cell = cellRows.find((item) => item.index === bulkCellIndex);
       const trucks = (record.trucks || []).map((truck, index) => {
@@ -370,8 +392,9 @@ export default function CellWastePlacement({ canEdit = true }) {
       }));
       const { data } = await api.patch(`/data-slf/${selected._id}/cell-assignments`, { assignments });
       const updated = data.data || selected;
-      setRecords((prev) => prev.map((record) => (record._id === selected._id ? updated : record)));
-      invalidateCache(currentCacheKey);
+      setPageRecords((prev) => prev.map((record) => (record._id === selected._id ? updated : record)));
+      // Re-pull the selected facility's records so cell-fill totals reflect the save.
+      setFacilityRefresh((n) => n + 1);
       Swal.fire({ icon: "success", title: "Placement Saved", timer: 1100, showConfirmButton: false });
     } catch (err) {
       Swal.fire("Error", err.response?.data?.message || "Could not save placement.", "error");
@@ -408,7 +431,7 @@ export default function CellWastePlacement({ canEdit = true }) {
             <Text type="secondary">Assign portal submission truck volumes to active landfill cells.</Text>
           </div>
           <Space wrap>
-            <Button icon={<ReloadOutlined />} loading={loading} onClick={() => fetchRecords({ force: true })}>
+            <Button icon={<ReloadOutlined />} loading={loading} onClick={() => { fetchPage(); fetchReference(); setFacilityRefresh((n) => n + 1); }}>
               Refresh
             </Button>
           </Space>
@@ -435,7 +458,7 @@ export default function CellWastePlacement({ canEdit = true }) {
             <List
               size="small"
               loading={loading}
-                dataSource={pagedSubmissions}
+              dataSource={submissions}
               locale={{ emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No submissions with truck volume" /> }}
               style={{ maxHeight: 640, overflow: "auto" }}
               renderItem={(record) => (
@@ -500,7 +523,12 @@ export default function CellWastePlacement({ canEdit = true }) {
               <Card
                 size="small"
                 title={<Space><DatabaseOutlined /> Cell Status</Space>}
-                extra={<Text type="secondary">{cellRows.length} cell(s)</Text>}
+                extra={
+                  <Text type="secondary">
+                    {facilityLoading ? "Loading fills…" : `${cellRows.length} cell(s)`}
+                  </Text>
+                }
+                loading={facilityLoading && cellRows.length === 0}
                 style={{ borderRadius: 8 }}
               >
                 <Row gutter={[10, 10]}>

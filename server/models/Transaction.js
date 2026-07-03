@@ -51,6 +51,11 @@ const transactionSchema = new mongoose.Schema(
 
     // Extra data (status, entry count, error message, etc.)
     meta: { type: mongoose.Schema.Types.Mixed },
+
+    // Portal users who dismissed this entry from their own "My Requests" list.
+    // Admin audit views ignore this — the transaction is never actually deleted,
+    // it is only hidden from the listed portal users.
+    portalHiddenBy: [{ type: String, trim: true, lowercase: true }],
   },
   { timestamps: true }
 );

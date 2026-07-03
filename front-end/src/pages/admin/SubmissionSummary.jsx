@@ -1,15 +1,17 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import {
   Alert,
   Button,
   Card,
   Col,
+  Collapse,
   Empty,
   Input,
   Modal,
   Row,
   Select,
   Space,
+  Spin,
   Statistic,
   Table,
   Tag,
@@ -30,9 +32,8 @@ import {
   ClockCircleOutlined,
 } from "@ant-design/icons";
 import dayjs from "dayjs";
-import FullCalendar from "@fullcalendar/react";
-import dayGridPlugin from "@fullcalendar/daygrid";
-import interactionPlugin from "@fullcalendar/interaction";
+// FullCalendar is heavy; load it only when the disposal calendar modal opens.
+const SummaryDisposalCalendar = lazy(() => import("./SummaryDisposalCalendar"));
 import api from "../../api";
 import { fetchWithCache, invalidateCache } from "../../utils/pageCache";
 import { getSocket } from "../../utils/socket";
@@ -529,17 +530,56 @@ export default function SubmissionSummary({ isDark }) {
     extendedProps: item,
   })), [dayMap]);
 
-  const totals = useMemo(() => ({
-    submissions: tiles?.submissions || 0,
-    trucks: tiles?.trucks || 0,
-    m3: tiles?.totalM3 || 0,
-    tons: tiles?.totalTons || 0,
-    residualM3: tiles?.residualM3 || 0,
-    residualTons: tiles?.residualTons || 0,
-    hazardousM3: tiles?.hazardousM3 || 0,
-    hazardousTons: tiles?.hazardousTons || 0,
-    statuses: tiles?.statuses || {},
-  }), [tiles]);
+  // Tiles are derived from the loaded per-SLF submission rows so they always
+  // reflect the actual submissions (and respond live to the search/status
+  // filter). Falls back to the server summary-tiles only before rows load.
+  const totals = useMemo(() => {
+    if (!filteredRows.length) {
+      return {
+        submissions: tiles?.submissions || 0,
+        trucks: tiles?.trucks || 0,
+        m3: tiles?.totalM3 || 0,
+        tons: tiles?.totalTons || 0,
+        residualM3: tiles?.residualM3 || 0,
+        residualTons: tiles?.residualTons || 0,
+        hazardousM3: tiles?.hazardousM3 || 0,
+        hazardousTons: tiles?.hazardousTons || 0,
+        statuses: tiles?.statuses || {},
+      };
+    }
+    const acc = {
+      submissions: 0,
+      trucks: 0,
+      m3: 0,
+      tons: 0,
+      residualM3: 0,
+      residualTons: 0,
+      hazardousM3: 0,
+      hazardousTons: 0,
+      statuses: {
+        pending: 0,
+        acknowledged: 0,
+        rejected: 0,
+        reverted: 0,
+        revert_requested: 0,
+      },
+    };
+    filteredRows.forEach((row) => {
+      acc.submissions += Number(row.submissions || 0);
+      acc.trucks += Number(row.trucks || 0);
+      acc.m3 += Number(row.totalM3 || 0);
+      acc.tons += Number(row.totalTons || 0);
+      acc.residualM3 += Number(row.residualM3 || 0);
+      acc.residualTons += Number(row.residualTons || 0);
+      acc.hazardousM3 += Number(row.hazardousM3 || 0);
+      acc.hazardousTons += Number(row.hazardousTons || 0);
+      const s = row.statuses || {};
+      Object.keys(acc.statuses).forEach((k) => {
+        acc.statuses[k] += Number(s[k] || 0);
+      });
+    });
+    return acc;
+  }, [filteredRows, tiles]);
 
   // Detail-heavy records (trucks, calendar) are loaded only when an SLF's
   // calendar is opened — not on initial page render.
@@ -548,14 +588,48 @@ export default function SubmissionSummary({ isDark }) {
     setCalendarDate(row.lastDisposalDate || dayjs());
     setCalendarLoading(true);
     try {
+      const genId = row.slfGenerator?._id || row.slfGenerator || undefined;
       const { data } = await api.get("/data-slf", {
-        params: { mode: "list", includeTrucks: true, search: row.slfName },
+        params: {
+          mode: "list",
+          includeTrucks: true,
+          // Scope server-side by facility id when known (fast, exact); otherwise
+          // fall back to a name search. This keeps the calendar from downloading
+          // every SLF's records + trucks on open.
+          ...(genId ? { slfGenerator: genId } : { search: row.slfName }),
+        },
       });
       const records = Array.isArray(data?.data) ? data.data : Array.isArray(data) ? data : [];
-      const ownRecords = records.filter((record) =>
-        normalizeKey(record.slfName || record.slfGenerator?.slfName) === normalizeKey(row.slfName),
-      );
+      // Scope the fetched records to this SLF robustly: match by facility id when
+      // available, otherwise by normalized name (with a contains fallback so a
+      // slightly different stored name format still resolves). This prevents the
+      // day panel/calendar from coming up empty on a strict exact-match miss.
+      const rowKey = normalizeKey(row.slfName);
+      const rowGenId = String(row.slfGenerator?._id || row.slfGenerator || "");
+      const matchesRow = (record) => {
+        const recGenId = String(record.slfGenerator?._id || record.slfGenerator || "");
+        if (rowGenId && recGenId && rowGenId === recGenId) return true;
+        const recKey = normalizeKey(record.slfName || record.slfGenerator?.slfName);
+        return (
+          !!recKey &&
+          !!rowKey &&
+          (recKey === rowKey || recKey.includes(rowKey) || rowKey.includes(recKey))
+        );
+      };
+      let ownRecords = records.filter(matchesRow);
+      // Last-resort: the server already scoped by search=slfName, so if the
+      // client filter still eliminated everything, keep the server-scoped set.
+      if (ownRecords.length === 0 && records.length > 0) ownRecords = records;
       setCalendarRecord((prev) => (prev ? { ...prev, records: ownRecords } : prev));
+      // Open the calendar on the month that actually holds disposal data. The
+      // summary row's lastDisposalDate can be missing/stale, which would leave
+      // the calendar sitting on an empty month with no visible submissions.
+      const latestDate = ownRecords.reduce((latest, record) => {
+        if (!record.dateOfDisposal) return latest;
+        const current = dayjs(record.dateOfDisposal);
+        return !latest || current.isAfter(latest) ? current : latest;
+      }, null);
+      if (latestDate) setCalendarDate(latestDate);
     } catch {
       setCalendarRecord((prev) => (prev ? { ...prev, records: [] } : prev));
     } finally {
@@ -624,7 +698,20 @@ export default function SubmissionSummary({ isDark }) {
 
   return (
     <div>
-      <Row gutter={[12, 12]} style={{ marginBottom: 16 }}>
+      <Collapse
+        defaultActiveKey={["overview", "breakdown"]}
+        expandIconPosition="end"
+        style={{ marginBottom: 16, background: "transparent", borderRadius: 10 }}
+        items={[
+          {
+            key: "overview",
+            label: (
+              <Text strong style={{ fontSize: 14, color: ACCENT }}>
+                Summary Overview
+              </Text>
+            ),
+            children: (
+      <Row gutter={[12, 12]}>
         <Col xs={12} sm={12} md={8} lg={6}>
           <SummaryTile
             icon={<BankOutlined />}
@@ -634,7 +721,7 @@ export default function SubmissionSummary({ isDark }) {
             isDark={isDark}
             delay={0}
           >
-            <CountUp value={slfRows.length} />
+            <CountUp value={filteredRows.length} />
           </SummaryTile>
         </Col>
         <Col xs={12} sm={12} md={8} lg={6}>
@@ -732,8 +819,17 @@ export default function SubmissionSummary({ isDark }) {
           </SummaryTile>
         </Col>
       </Row>
-
-      <Card style={{ borderRadius: 10 }} bodyStyle={{ padding: 16 }}>
+            ),
+          },
+          {
+            key: "breakdown",
+            label: (
+              <Text strong style={{ fontSize: 14, color: ACCENT }}>
+                SLF Submissions Breakdown
+              </Text>
+            ),
+            children: (
+              <>
         <Space style={{ marginBottom: 14, flexWrap: "wrap" }}>
           <Input
             placeholder="Search SLF, generator, ID, or email..."
@@ -763,7 +859,11 @@ export default function SubmissionSummary({ isDark }) {
           scroll={{ x: 1420 }}
           locale={{ emptyText: <Empty description="No submissions to summarize" /> }}
         />
-      </Card>
+              </>
+            ),
+          },
+        ]}
+      />
 
       <Modal
         title={calendarRecord ? <Space><CalendarOutlined /> <span>{calendarRecord.slfName}</span><Text type="secondary" style={{ fontSize: 13 }}>Disposal Calendar</Text></Space> : "Disposal Calendar"}
@@ -803,28 +903,24 @@ export default function SubmissionSummary({ isDark }) {
                   .submission-fc .fc-event { border-radius: 6px; padding: 2px 4px; border: 0; }
                 `}</style>
                 <div className="submission-fc">
-                  <FullCalendar
-                    plugins={[dayGridPlugin, interactionPlugin]}
-                    initialView="dayGridMonth"
-                    initialDate={calendarDate.toDate()}
-                    events={calendarEvents}
-                    height={620}
-                    fixedWeekCount={false}
-                    dayMaxEvents={2}
-                    headerToolbar={{ left: "prev,next today", center: "title", right: "" }}
-                    dateClick={(info) => setCalendarDate(dayjs(info.date))}
-                    eventClick={(info) => setCalendarDate(dayjs(info.event.start))}
-                    dayCellClassNames={(arg) => dayjs(arg.date).isSame(calendarDate, "day") ? ["fc-selected-day"] : []}
-                    eventContent={(eventInfo) => {
-                      const item = eventInfo.event.extendedProps || {};
-                      return (
-                        <div style={{ lineHeight: 1.25, whiteSpace: "normal" }}>
-                          <div style={{ fontWeight: 700 }}>{eventInfo.event.title}</div>
-                          <div style={{ fontSize: 10, opacity: 0.9 }}>{item.count} submission{item.count !== 1 ? "s" : ""}</div>
+                  <Spin
+                    spinning={calendarLoading}
+                    tip="Loading disposal data…"
+                  >
+                    <Suspense
+                      fallback={
+                        <div style={{ height: 620, display: "grid", placeItems: "center" }}>
+                          <Spin tip="Loading calendar…" />
                         </div>
-                      );
-                    }}
-                  />
+                      }
+                    >
+                      <SummaryDisposalCalendar
+                        calendarDate={calendarDate}
+                        calendarEvents={calendarEvents}
+                        onDateChange={setCalendarDate}
+                      />
+                    </Suspense>
+                  </Spin>
                 </div>
               </Card>
             </Col>

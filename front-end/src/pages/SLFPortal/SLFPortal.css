@@ -803,3 +803,20 @@
   overflow-wrap: anywhere;
   word-break: break-word;
 }
+
+/* Compact "My Requests" table — smaller text for a denser, cleaner layout. */
+.slf-compact-requests .ant-table {
+  font-size: 12px;
+}
+.slf-compact-requests .ant-table-thead > tr > th {
+  font-size: 12px;
+  padding-top: 6px;
+  padding-bottom: 6px;
+}
+.slf-compact-requests .ant-table-tbody > tr > td {
+  font-size: 12px;
+}
+.slf-compact-requests .ant-tag {
+  font-size: 11px;
+  line-height: 18px;
+}

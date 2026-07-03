@@ -36,6 +36,7 @@ import {
   DatabaseOutlined,
   TeamOutlined,
   IdcardOutlined,
+  MergeCellsOutlined,
   InboxOutlined,
   BankOutlined,
   ReloadOutlined,
@@ -54,6 +55,7 @@ import { fetchWithCache, invalidateCache } from "../../utils/pageCache";
 import { getSocket } from "../../utils/socket";
 import dayjs from "dayjs";
 import ResponsiveTable from "./shared/ResponsiveTable";
+import MergeSlfModal from "./MergeSlfModal";
 import {
   getTruckCapacityText,
   getTruckPlateText,
@@ -94,6 +96,7 @@ export default function SubmissionSettings({
   canEdit = true,
   canDelete = true,
   canRepairIds = false,
+  isDeveloper = false,
   isDark,
 }) {
   const [data, setData] = useState([]);
@@ -123,6 +126,7 @@ export default function SubmissionSettings({
   const pendingRefreshRef = useRef(false);
   const latestRequestKeyRef = useRef("");
   const [statusFilter, setStatusFilter] = useState("all");
+  const [mergeSlfOpen, setMergeSlfOpen] = useState(false);
   const [pagination, setPagination] = useState({
     current: 1,
     pageSize: DEFAULT_PAGE_SIZE,
@@ -152,8 +156,8 @@ export default function SubmissionSettings({
     currentUser.email ||
     "admin";
   const currentCacheKey = useMemo(
-    () => [CACHE_KEY, statusFilter, debouncedSearch].join(":"),
-    [statusFilter, debouncedSearch],
+    () => [CACHE_KEY, statusFilter, debouncedSearch, isDeveloper ? "dev" : "std"].join(":"),
+    [statusFilter, debouncedSearch, isDeveloper],
   );
   const bumpSubmissionsCache = useCallback(() => {
     // Clear cached lists so the next manual/interval refresh re-fetches fresh data,
@@ -230,6 +234,9 @@ export default function SubmissionSettings({
               .get("/data-slf", {
                 params: {
                   mode: "list",
+                  // Developers additionally see SAMPLE (dummy) submissions inline,
+                  // flagged as SAMPLE. The server only honors this for developers.
+                  ...(isDeveloper ? { includeDummy: "true" } : {}),
                   ...(statusFilter && statusFilter !== "all" ? { status: statusFilter } : {}),
                   ...(debouncedSearch.trim() ? { search: debouncedSearch.trim() } : {}),
                 },
@@ -272,7 +279,7 @@ export default function SubmissionSettings({
         }
       }
     },
-    [currentCacheKey, statusFilter, debouncedSearch],
+    [currentCacheKey, statusFilter, debouncedSearch, isDeveloper],
   );
 
   useEffect(() => {
@@ -1188,13 +1195,22 @@ export default function SubmissionSettings({
       width: 120,
       render: (text, record) => (
         <Space direction="vertical" size={0}>
-          <Text strong style={{ fontSize: 12, ...WRAP_CELL_STYLE }}>
-            {record.isGroupedSubmission
-              ? record.groupedSubmissionCount > 1
-                ? `Multiple (${record.groupedSubmissionCount})`
-                : record.submissionId || text
-              : text}
-          </Text>
+          <Space size={4} wrap>
+            <Text strong style={{ fontSize: 12, ...WRAP_CELL_STYLE }}>
+              {record.isGroupedSubmission
+                ? record.groupedSubmissionCount > 1
+                  ? `Multiple (${record.groupedSubmissionCount})`
+                  : record.submissionId || text
+                : text}
+            </Text>
+            {record.isDummy && (
+              <Tooltip title="Sample / test submission — visible to developers only, excluded from real reporting.">
+                <Tag color="purple" style={{ margin: 0, fontSize: 10, lineHeight: "16px" }}>
+                  SAMPLE
+                </Tag>
+              </Tooltip>
+            )}
+          </Space>
           {record.isGroupedSubmission && (
             <Text type="secondary" style={{ fontSize: 11 }}>
               {record.entryCount} grouped entr
@@ -1254,6 +1270,44 @@ export default function SubmissionSettings({
       key: "trucks",
       width: 70,
       render: (_, r) => r.truckCount ?? r.trucks?.length ?? 0,
+    },
+    {
+      title: "Cell Placement",
+      key: "cellPlacement",
+      width: 150,
+      render: (_, r) => {
+        // Aggregate placement across grouped entries when present, else use the
+        // per-row cellPlacement summary returned by the list API.
+        let placed = 0;
+        let total = 0;
+        let known = false;
+        const sources = Array.isArray(r.groupedEntries) && r.groupedEntries.length
+          ? r.groupedEntries
+          : [r];
+        sources.forEach((e) => {
+          const cp = e?.cellPlacement;
+          if (cp && cp.known) {
+            known = true;
+            placed += cp.placed || 0;
+            total += cp.total || 0;
+          } else if (cp) {
+            total += cp.total || 0;
+          }
+        });
+        if (!known && total === 0) {
+          return <Tag color="default" style={{ fontSize: 10 }}>No Waste Data</Tag>;
+        }
+        if (!known) {
+          return <Tag color="default" style={{ fontSize: 10 }}>—</Tag>;
+        }
+        if (placed === 0) {
+          return <Tag color="orange" style={{ fontSize: 10 }}>No Cells Assigned</Tag>;
+        }
+        if (placed >= total) {
+          return <Tag color="green" style={{ fontSize: 10 }}>Cells Assigned</Tag>;
+        }
+        return <Tag color="gold" style={{ fontSize: 10 }}>{`Partial (${placed}/${total})`}</Tag>;
+      },
     },
     {
       title: "Status",
@@ -1515,6 +1569,14 @@ export default function SubmissionSettings({
                 Fix PVT/LGU IDs
               </Button>
             </Popconfirm>
+          )}
+          {isDeveloper && (
+            <Button
+              icon={<MergeCellsOutlined />}
+              onClick={() => setMergeSlfOpen(true)}
+            >
+              Merge SLF
+            </Button>
           )}
           <Button
             icon={<ReloadOutlined />}
@@ -4580,6 +4642,14 @@ export default function SubmissionSettings({
           </div>
         )}
       </Modal>
+
+      {isDeveloper && (
+        <MergeSlfModal
+          open={mergeSlfOpen}
+          onClose={() => setMergeSlfOpen(false)}
+          onMerged={() => fetchData({ force: true })}
+        />
+      )}
     </div>
   );
 }

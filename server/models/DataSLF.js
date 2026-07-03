@@ -84,7 +84,15 @@ const dataSLFSchema = new mongoose.Schema(
     slfName: { type: String, trim: true },
     submissionId: { type: String, trim: true },
     idNo: { type: String, trim: true },
+    // Marks submissions made by dummy/test portal accounts (or against dummy
+    // facilities) so they can be excluded from production admin views/reports.
+    isDummy: { type: Boolean, default: false, index: true },
+    dummyPortalUserId: { type: mongoose.Schema.Types.ObjectId, ref: "UserPortal" },
     previousIdNos: [{ type: String, trim: true }],
+    // Portal user removed this submission from their own history view. The record
+    // is still fully retained/visible on the admin side — this only hides it from
+    // the submitting portal user's Submission History.
+    hiddenFromPortal: { type: Boolean, default: false },
 
     // Cell Operations
     currentCellVolume: { type: Number },

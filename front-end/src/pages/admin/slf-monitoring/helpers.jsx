@@ -188,6 +188,10 @@ const slfUploadProps = {
   beforeUpload: validateSlfUpload,
   itemRender: renderSlfUploadItem,
   progress: { showInfo: true },
+  // SLF facility media is admin-side: upload it as restricted so it is encrypted
+  // at rest (local) / kept off public Google Drive and served only through the
+  // authenticated /secure media proxy. See server/routes/upload.js.
+  data: { restricted: "true" },
 };
 
 const convertVolume = (value, fromUnit = "tons", toUnit = fromUnit) => {

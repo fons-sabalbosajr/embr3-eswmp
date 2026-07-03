@@ -19,6 +19,7 @@ import {
   Statistic,
   Avatar,
   Timeline,
+  Image,
 } from "antd";
 import {
   EyeOutlined,
@@ -34,6 +35,9 @@ import {
   SafetyCertificateOutlined,
   ReloadOutlined,
   SearchOutlined,
+  FilePdfOutlined,
+  FileOutlined,
+  WarningOutlined,
 } from "@ant-design/icons";
 import Swal from "sweetalert2";
 import dayjs from "dayjs";
@@ -56,6 +60,105 @@ const PRIORITY_CONFIG = {
   High: { color: "#d46b08", bg: "#fff7e6" },
   Urgent: { color: "#cf1322", bg: "#fff1f0" },
 };
+
+// Extract a Google Drive file ID from common Drive URL shapes so an image can be
+// rendered from a direct thumbnail endpoint (webViewLink pages don't load in <img>).
+function driveIdFromUrl(url) {
+  if (!url) return null;
+  const s = String(url);
+  const m =
+    s.match(/\/file\/d\/([a-zA-Z0-9_-]+)/) ||
+    s.match(/[?&]id=([a-zA-Z0-9_-]+)/) ||
+    s.match(/\/d\/([a-zA-Z0-9_-]+)/);
+  return m ? m[1] : null;
+}
+
+// Single image attachment with graceful failure (missing/trashed/restricted file).
+function AttachmentImage({ att, index }) {
+  const [errored, setErrored] = useState(false);
+  const driveId = att.fileId || driveIdFromUrl(att.url);
+  const isDrive = !!driveId && att.storage !== "local";
+  const thumbSrc = isDrive ? `https://drive.google.com/thumbnail?id=${driveId}&sz=w400` : att.url;
+  const fullSrc = isDrive ? `https://drive.google.com/thumbnail?id=${driveId}&sz=w1600` : att.url;
+
+  if (errored) {
+    return (
+      <div style={{
+        width: 100, height: 100, borderRadius: 10, border: "1.5px dashed #ffbfbf",
+        background: "#fff1f0", display: "flex", flexDirection: "column",
+        alignItems: "center", justifyContent: "center", gap: 4, padding: 6, textAlign: "center",
+      }}>
+        <WarningOutlined style={{ color: "#cf1322", fontSize: 18 }} />
+        <span style={{ fontSize: 10, color: "#cf1322", lineHeight: 1.2 }}>File not accessible</span>
+        <a href={att.url} target="_blank" rel="noreferrer" style={{ fontSize: 10 }}>Try open ↗</a>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ position: "relative" }}>
+      <Image
+        src={thumbSrc}
+        alt={att.name || `attachment-${index + 1}`}
+        width={100}
+        height={100}
+        preview={{ src: fullSrc }}
+        onError={() => setErrored(true)}
+        style={{ objectFit: "cover", borderRadius: 10, border: "1.5px solid #e0e0e0", cursor: "zoom-in" }}
+      />
+    </div>
+  );
+}
+
+// Renders all attachments for a ticket message or reply (images + doc/pdf files).
+function TicketAttachments({ attachments }) {
+  if (!Array.isArray(attachments) || attachments.length === 0) return null;
+  const images = attachments.filter((a) => (a.mimeType || "").startsWith("image/"));
+  const files = attachments.filter((a) => !(a.mimeType || "").startsWith("image/"));
+  return (
+    <div style={{ marginTop: 10 }}>
+      <Text strong style={{ fontSize: 11, display: "block", marginBottom: 6 }}>
+        Attachments ({attachments.length})
+      </Text>
+      {images.length > 0 && (
+        <Image.PreviewGroup>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: files.length ? 8 : 0 }}>
+            {images.map((att, i) => (
+              <AttachmentImage key={i} att={att} index={i} />
+            ))}
+          </div>
+        </Image.PreviewGroup>
+      )}
+      {files.map((att, i) => {
+        const isPdf = (att.mimeType || "").includes("pdf");
+        return (
+          <div key={i} style={{
+            display: "inline-flex", alignItems: "center", gap: 8, padding: "6px 12px",
+            background: "#f5f5f5", borderRadius: 8, border: "1px solid #e0e0e0",
+            marginRight: 8, marginBottom: 6,
+          }}>
+            <span style={{ fontSize: 18 }}>
+              {isPdf ? <FilePdfOutlined style={{ color: "#cf1322" }} /> : <FileOutlined style={{ color: "#8c8c8c" }} />}
+            </span>
+            <span style={{ fontSize: 12, maxWidth: 180, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              {att.name || `Attachment ${i + 1}`}
+            </span>
+            {att.url ? (
+              <Button size="small" type="link" href={att.url} target="_blank" rel="noreferrer"
+                style={{ padding: 0, height: "auto", fontSize: 12 }}>
+                Open / Download ↗
+              </Button>
+            ) : (
+              <Text type="danger" style={{ fontSize: 11 }}>
+                <WarningOutlined /> Link unavailable
+              </Text>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
 
 export default function SupportTab({ isDark, canEdit = true, canDelete = true }) {
   const [tickets, setTickets] = useState([]);
@@ -474,6 +577,7 @@ export default function SupportTab({ isDark, canEdit = true, canDelete = true })
                   </div>
                 </div>
                 <Text style={{ fontSize: 13, lineHeight: 1.6, whiteSpace: "pre-wrap" }}>{ticket.message}</Text>
+                <TicketAttachments attachments={ticket.attachments} />
               </div>
 
               {/* Conversation Thread */}
@@ -522,6 +626,7 @@ export default function SupportTab({ isDark, canEdit = true, canDelete = true })
                             </Text>
                           </div>
                           <Text style={{ fontSize: 13, lineHeight: 1.6, whiteSpace: "pre-wrap" }}>{r.message}</Text>
+                          <TicketAttachments attachments={r.attachments} />
                         </div>
                       ),
                     }))}
@@ -554,7 +659,7 @@ export default function SupportTab({ isDark, canEdit = true, canDelete = true })
                   <Button
                     type="primary"
                     icon={<SendOutlined />}
-                    xloading={replying}
+                    loading={replying}
                     disabled={!replyText.trim()}
                     onClick={handleReply}
                   >

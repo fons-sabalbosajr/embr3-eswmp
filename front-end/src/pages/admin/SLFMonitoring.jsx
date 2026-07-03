@@ -249,6 +249,7 @@ export default function SLFMonitoring({
   const [galleryViewMode, setGalleryViewMode] = useState("tiled");
   const [detailYearRecords, setDetailYearRecords] = useState([]);
   const [detailYear, setDetailYear] = useState(null);
+  const [detailHistoryLoading, setDetailHistoryLoading] = useState(false);
   const [baselineData, setBaselineData] = useState(null);
   const [loadingBaseline, setLoadingBaseline] = useState(false);
   const [editing, setEditing] = useState(null);
@@ -485,14 +486,17 @@ export default function SLFMonitoring({
     if (!detailModal) {
       setDetailYearRecords([]);
       setDetailYear(null);
+      setDetailHistoryLoading(false);
       return;
     }
     const lgu = detailModal.lgu;
     if (!lgu) {
       setDetailYearRecords([]);
       setDetailYear(detailModal.dataYear || new Date().getFullYear());
+      setDetailHistoryLoading(false);
       return;
     }
+    setDetailHistoryLoading(true);
     api
       .get(`/slf-facilities/history/${encodeURIComponent(lgu)}`)
       .then(({ data }) => {
@@ -503,7 +507,8 @@ export default function SLFMonitoring({
       .catch(() => {
         setDetailYearRecords([]);
         setDetailYear(detailModal.dataYear || new Date().getFullYear());
-      });
+      })
+      .finally(() => setDetailHistoryLoading(false));
   }, [detailModal]);
 
   const detailViewRecord = useMemo(() => {
@@ -6237,7 +6242,11 @@ export default function SLFMonitoring({
                       </span>
                     ),
                     children: (
-                      <SlfDashboardTab dashboard={detailDashboard} isDark={isDark} />
+                      <SlfDashboardTab
+                        dashboard={detailDashboard}
+                        isDark={isDark}
+                        loading={detailHistoryLoading && detailYearRecords.length === 0}
+                      />
                     ),
                   },
                   {

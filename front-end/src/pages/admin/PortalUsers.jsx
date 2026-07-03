@@ -13,7 +13,7 @@ import {
   UnlockOutlined, FileDoneOutlined, LinkOutlined,
   FileTextOutlined, FileImageOutlined, SafetyCertificateOutlined,
   MessageOutlined, MoreOutlined, SendOutlined, SearchOutlined,
-  HistoryOutlined
+  HistoryOutlined, ExperimentOutlined,
 } from "@ant-design/icons";
 import Swal from "sweetalert2";
 import dayjs from "dayjs";
@@ -254,6 +254,25 @@ export default function PortalUsers({ isDark, canEdit = true, canDelete = true, 
       });
     } catch {
       Swal.fire("Error", "Failed to delete user", "error");
+    }
+  };
+
+  const handleMoveToDummy = async (record) => {
+    const result = await Swal.fire({
+      title: "Move to Dummy Data?",
+      html: `<b>${record.firstName} ${record.lastName}</b> will be removed from the Portal Users list and moved to <b>Developer Settings &gt; Dummy Data Configuration</b>.`,
+      icon: "question",
+      showCancelButton: true,
+      confirmButtonColor: "#722ed1",
+      confirmButtonText: "Move to Dummy",
+    });
+    if (!result.isConfirmed) return;
+    try {
+      await api.patch(`/dummy-data/portal-users/${record._id}/mark`, { isDummy: true });
+      setUsers((prev) => prev.filter((u) => u._id !== record._id));
+      Swal.fire({ icon: "success", title: "Moved to Dummy Data", timer: 1600, showConfirmButton: false });
+    } catch (err) {
+      Swal.fire("Error", err.response?.data?.message || "Failed to move user", "error");
     }
   };
 
@@ -800,6 +819,7 @@ export default function PortalUsers({ isDark, canEdit = true, canDelete = true, 
           },
           canEdit && record.verificationSubmitted && { key: "review", icon: <FileDoneOutlined />, label: "Mark Verification Reviewed" },
           { type: "divider" },
+          canDelete && { key: "move-dummy", icon: <ExperimentOutlined />, label: "Move to Dummy Data", style: { color: "#722ed1" } },
           canDelete && { key: "delete", icon: <DeleteOutlined />, label: "Delete", danger: true },
         ].filter(Boolean);
 
@@ -819,6 +839,7 @@ export default function PortalUsers({ isDark, canEdit = true, canDelete = true, 
                 if (key === "hold") handleHold(record);
                 if (key === "unhold") handleUnhold(record);
                 if (key === "review") handleReviewVerification(record);
+                if (key === "move-dummy") handleMoveToDummy(record);
                 if (key === "delete") handleDelete(record);
               },
             }}

@@ -112,7 +112,8 @@ app.use(cors({
   },
   credentials: true,
 }));
-app.use(express.json());
+app.use(express.json({ limit: "25mb" }));
+app.use(express.urlencoded({ extended: true, limit: "25mb" }));
 
 // ── Socket.IO setup ──
 const { Server: SocketIO } = require("socket.io");
@@ -173,6 +174,12 @@ async function connectToMongo() {
   return mongoose.connect(MONGODB_URI)
   .then(async () => {
     console.log("MongoDB connected successfully");
+    // Start the scheduled-submission worker once the DB is available.
+    try {
+      require("./utils/scheduledSubmissionWorker").startScheduledSubmissionWorker();
+    } catch (err) {
+      console.error("Scheduled submission worker failed to start:", err.message);
+    }
     // Auto-backfill transaction history for existing submissions
     try {
       const Transaction = require("./models/Transaction");
@@ -249,6 +256,22 @@ async function connectToMongo() {
     } catch (err) {
       console.error("Transaction backfill error:", err.message);
     }
+
+    // One-time, idempotent cleanup: merge the duplicate Bataan SLF (Integrated
+    // Waste Management → BESLF) and archive the leftover facility record.
+    try {
+      await require("./utils/mergeBataanSlf").mergeBataanSlf();
+    } catch (err) {
+      console.error("Bataan SLF merge error:", err.message);
+    }
+
+    // One-time, idempotent fix: ensure dummy SLF facilities have cell
+    // infrastructure so dummy portal accounts can select a cell in the baseline.
+    try {
+      await require("./utils/dummyCells").backfillDummyCells();
+    } catch (err) {
+      console.error("Dummy cell backfill error:", err.message);
+    }
   })
   .catch((err) => console.error("MongoDB connection error:", err));
 }
@@ -297,6 +320,9 @@ app.use("/api/support-tickets", supportTicketRoutes);
 app.use("/api/hauler-delete-requests", haulerDeleteRequestRoutes);
 app.use("/api/upload", uploadRoutes);
 app.use("/api/messages", messageRoutes);
+app.use("/api/dummy-data", require("./routes/dummyData"));
+app.use("/api/slf-data-files", require("./routes/slfDataFiles"));
+app.use("/api/portal-queue", require("./routes/portalQueue"));
 
 // Get local IP address
 function getLocalIP() {
@@ -309,6 +335,27 @@ function getLocalIP() {
     }
   }
   return "127.0.0.1";
+}
+
+// Validate Google Drive configuration at startup so misconfiguration surfaces
+// as a readable log line instead of a runtime failure during the first upload.
+try {
+  const { getDriveConfigStatus } = require("./utils/googleDrive");
+  const driveStatus = getDriveConfigStatus();
+  if (driveStatus.ok) {
+    console.log(`Google Drive config OK (auth: ${driveStatus.authMethod}).`);
+  } else {
+    console.warn(
+      "\n[Google Drive] Configuration incomplete — uploads will fall back to " +
+        "local storage until fixed."
+    );
+    console.warn(`  Missing: ${driveStatus.missing.join(", ")}`);
+    console.warn(
+      "  Set the values in server/.env, then restart. See server/.env.example.\n"
+    );
+  }
+} catch (err) {
+  console.warn("[Google Drive] Config check skipped:", err.message);
 }
 
 // Listen on 0.0.0.0 so the server is accessible over the network

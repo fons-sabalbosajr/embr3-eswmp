@@ -13,6 +13,7 @@ import {
   InfoCircleOutlined, MailOutlined, MessageOutlined, PieChartOutlined,
   PlusOutlined, QuestionCircleOutlined, SaveOutlined, SendOutlined,
   TeamOutlined, UndoOutlined, UploadOutlined, UserOutlined, WifiOutlined,
+  ClockCircleOutlined,
 } from "@ant-design/icons";
 import { EMPTY_VEHICLE } from "./constants";
 import api from "../../api";
@@ -21,6 +22,80 @@ import secureStorage from "../../utils/secureStorage";
 const { Text } = Typography;
 const { TextArea } = Input;
 const normalizeUnitLabel = (unit) => String(unit || "m³").replace("m3", "m³");
+
+// Extract a Google Drive file ID from any common Drive URL shape so images can
+// be shown from a direct thumbnail endpoint (webViewLink pages don't load in <img>).
+const driveIdFromUrl = (url) => {
+  if (!url) return null;
+  const s = String(url);
+  const m =
+    s.match(/\/file\/d\/([a-zA-Z0-9_-]+)/) ||
+    s.match(/[?&]id=([a-zA-Z0-9_-]+)/) ||
+    s.match(/\/d\/([a-zA-Z0-9_-]+)/);
+  return m ? m[1] : null;
+};
+
+// Normalize a ticket attachment (object or legacy string) into a safe shape and
+// render it without ever crashing on missing/invalid data.
+const TicketAttachment = ({ att, index }) => {
+  const norm =
+    typeof att === "string"
+      ? { url: att, name: "", mimeType: "" }
+      : att && typeof att === "object"
+        ? att
+        : null;
+  const [errored, setErrored] = useState(false);
+  if (!norm || !norm.url) {
+    return (
+      <span
+        style={{
+          fontSize: 11,
+          color: "#cf1322",
+          border: "1px dashed #ffbfbf",
+          borderRadius: 6,
+          padding: "4px 8px",
+        }}
+      >
+        Attachment unavailable
+      </span>
+    );
+  }
+  const isImage = (norm.mimeType || "").startsWith("image/") || /\.(png|jpe?g|gif|webp)$/i.test(norm.url);
+  const driveId = norm.fileId || driveIdFromUrl(norm.url);
+  const imgSrc = driveId ? `https://drive.google.com/thumbnail?id=${driveId}&sz=w200` : norm.url;
+
+  if (isImage && !errored) {
+    return (
+      <a href={norm.url} target="_blank" rel="noreferrer" title={norm.name || `attachment-${index + 1}`}>
+        <img
+          src={imgSrc}
+          alt={norm.name || `attachment-${index + 1}`}
+          style={{ width: 72, height: 72, objectFit: "cover", borderRadius: 6, border: "1px solid #eee" }}
+          onError={() => setErrored(true)}
+        />
+      </a>
+    );
+  }
+  return (
+    <a
+      href={norm.url}
+      target="_blank"
+      rel="noreferrer"
+      style={{
+        fontSize: 12,
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 4,
+        padding: "6px 10px",
+        border: "1px solid #eee",
+        borderRadius: 6,
+        background: "#fafafa",
+      }}
+    >
+      <FileTextOutlined /> {norm.name || `Attachment ${index + 1}`}
+    </a>
+  );
+};
 
 const SUPPORT_TAB_KEYS = ["faq", "new-ticket", "my-tickets"];
 const SUPPORT_CATEGORY_OPTIONS = [
@@ -204,6 +279,9 @@ export default function SLFPortalModals({
   handleRequestRevert,
   handleConfirmSubmit,
   handleReviewOpen,
+  handleSaveDraft,
+  savingDraft,
+  openScheduleModal,
   handleSubmitTicket,
   handleSupportReply,
   handleSaveActiveCellEntry,
@@ -309,7 +387,7 @@ export default function SLFPortalModals({
   const uploadClientOptions = Array.from(
     new Map(
       (haulers || [])
-        .flatMap((hauler) => hauler.privateSectorClients || [])
+        .flatMap((hauler) => hauler?.privateSectorClients || [])
         .map((client, index) => {
           const name = typeof client === "string" ? client : client?.clientName;
           const trimmedName = String(name || "").trim();
@@ -2407,7 +2485,19 @@ export default function SLFPortalModals({
                               dataSource={d.trucks}
                               rowKey={(_, i) => i}
                               size="small"
-                              pagination={false}
+                              scroll={{ x: 720 }}
+                              pagination={
+                                (d.trucks || []).length > 10
+                                  ? {
+                                      pageSize: 10,
+                                      size: "small",
+                                      showSizeChanger: true,
+                                      pageSizeOptions: [10, 20, 50, 100],
+                                      showTotal: (total) =>
+                                        `${total} truck entr${total === 1 ? "y" : "ies"}`,
+                                    }
+                                  : false
+                              }
                               columns={[
                                 {
                                   title: "#",
@@ -2565,6 +2655,54 @@ export default function SLFPortalModals({
           icon: <SendOutlined />,
         }}
         cancelText="Go Back"
+        footer={
+          editingRevertedId ? undefined : (
+            <div
+              style={{
+                display: "flex",
+                flexWrap: "wrap",
+                alignItems: "center",
+                justifyContent: "space-between",
+                gap: 8,
+              }}
+            >
+              {/* Secondary "save for later" actions, grouped together on the left */}
+              <Space size={8} wrap>
+                <Button
+                  key="draft"
+                  icon={<SaveOutlined />}
+                  loading={savingDraft}
+                  onClick={handleSaveDraft}
+                >
+                  Save as Draft
+                </Button>
+                <Button
+                  key="schedule"
+                  icon={<ClockCircleOutlined />}
+                  onClick={openScheduleModal}
+                >
+                  Schedule
+                </Button>
+              </Space>
+              {/* Primary flow actions on the right */}
+              <Space size={8} wrap>
+                <Button key="back" onClick={() => setReviewModalOpen(false)}>
+                  Go Back
+                </Button>
+                <Button
+                  key="submit"
+                  type="primary"
+                  className="slf-primary-btn"
+                  loading={loading}
+                  icon={<SendOutlined />}
+                  onClick={handleConfirmSubmit}
+                >
+                  Confirm & Submit
+                </Button>
+              </Space>
+            </div>
+          )
+        }
         width={860}
         destroyOnHidden
       >
@@ -3524,20 +3662,9 @@ export default function SLFPortalModals({
             {Array.isArray(supportDetailModal.attachments) &&
               supportDetailModal.attachments.length > 0 && (
                 <div style={{ display: "flex", flexWrap: "wrap", gap: 8, margin: "8px 0" }}>
-                  {supportDetailModal.attachments.map((att, i) =>
-                    (att.mimeType || "").startsWith("image/") ? (
-                      <img
-                        key={i}
-                        src={att.url}
-                        alt={att.name || `attachment-${i + 1}`}
-                        style={{ width: 72, height: 72, objectFit: "cover", borderRadius: 6, border: "1px solid #eee" }}
-                      />
-                    ) : (
-                      <a key={i} href={att.url} target="_blank" rel="noreferrer">
-                        {att.name || `Attachment ${i + 1}`}
-                      </a>
-                    ),
-                  )}
+                  {supportDetailModal.attachments.map((att, i) => (
+                    <TicketAttachment key={i} att={att} index={i} />
+                  ))}
                 </div>
               )}
             {supportDetailModal.replies?.length > 0 && (

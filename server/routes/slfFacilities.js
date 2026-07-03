@@ -5,11 +5,24 @@ const DataSLF = require("../models/DataSLF");
 const UserPortal = require("../models/UserPortal");
 const Notification = require("../models/Notification");
 const { writeLog } = require("../utils/logger");
-const { notifyAdmin, notifyPortal, refreshAdmin } = require("../utils/socketEmit");
+const { notifyAdmin, notifyPortal, refreshAdmin, refreshPortal } = require("../utils/socketEmit");
 
 const router = express.Router();
 
 const escapeRegExp = (value) => String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+// Refresh every portal user assigned to a facility so their Portal Submissions
+// view + facility info reflect an admin-side SLF Data Table edit immediately.
+async function refreshAssignedPortalUsers(req, facilityId, target = "facility") {
+  try {
+    const assigned = await UserPortal.find({ assignedSlf: facilityId })
+      .select("email")
+      .lean();
+    assigned.forEach((pu) => pu.email && refreshPortal(req, pu.email, target));
+  } catch {
+    /* best-effort real-time refresh — never break the request */
+  }
+}
 
 async function findPortalFacility(id, slfName, selectFields) {
   let facility = null;
@@ -139,7 +152,24 @@ async function enrichPortalFacilityVolumes(facilityDoc, requestedSlfName) {
   const names = [...new Set([requestedSlfName, facility.lgu].filter(Boolean))];
   const nameFilters = names.map((name) => ({ slfName: new RegExp(`^${escapeRegExp(name)}$`, "i") }));
   const filters = [{ slfGenerator: facility._id }, ...nameFilters];
-  const entries = await DataSLF.find({ deletedAt: null, $or: filters }).sort({ createdAt: -1 }).lean();
+  // Only pull the fields the enrichment actually needs. Fetching full submission
+  // documents (with their large trucks.vehicles arrays) over the DB connection
+  // made this endpoint take 30s–2min for busy SLFs, which caused the portal to
+  // abort the request and show "no cells configured". The trucks.vehicles nested
+  // arrays are intentionally excluded.
+  // The facility scope MUST be wrapped in $and (not a top-level $or): the
+  // year-visibility plugin adds its OWN top-level $or via .where(), which would
+  // otherwise CLOBBER the $or scope and make this query return every SLF's
+  // records (slow + wrong cell fills).
+  const entries = await DataSLF.find({ deletedAt: null, $and: [{ $or: filters }] })
+    .select(
+      "slfGenerator slfName status createdAt totalVolumeAccepted totalVolumeAcceptedUnit " +
+      "baselineUnit activeCellResidualVolume activeCellResidualUnit activeCellInertVolume " +
+      "activeCellInertUnit activeCellHazardousVolume activeCellHazardousUnit activeCellEntries " +
+      "trucks.actualVolume trucks.actualVolumeUnit trucks.wasteType trucks.cellIndex trucks.cellName",
+    )
+    .sort({ createdAt: -1 })
+    .lean();
 
   const baseline = entries.find((entry) =>
     entry.totalVolumeAccepted != null ||
@@ -197,7 +227,11 @@ async function enrichPortalFacilityVolumes(facilityDoc, requestedSlfName) {
 // Get all records (admin management view — respects App Settings year visibility filter)
 router.get("/", async (req, res) => {
   try {
-    const records = await SlfFacility.find({ deletedAt: null })
+    // Dummy/test SLF records are managed under Developer Settings > Dummy Data
+    // Configuration and excluded from the real SLF Data Table by default.
+    const filter = { deletedAt: null };
+    if (req.query.includeDummy !== "true") filter.isDummy = { $ne: true };
+    const records = await SlfFacility.find(filter)
       .populate("slfGenerator")
       .sort({ province: 1, lgu: 1 });
     res.json(records);
@@ -503,11 +537,14 @@ router.put("/:id", async (req, res) => {
           ip: req.ip,
         });
       }
-      // Tell connected admin views (Summary, SLF Monitoring) to refresh so the
-      // renamed SLF appears immediately everywhere.
-      refreshAdmin(req, "submissions");
-      refreshAdmin(req, "baselines");
     }
+
+    // ANY facility edit (rename, profile, cells, permits, baseline-linked fields)
+    // must reflect on both sides: refresh admin views AND every assigned portal
+    // user so Portal Submissions + the portal facility view update immediately.
+    refreshAdmin(req, "submissions");
+    refreshAdmin(req, "baselines");
+    await refreshAssignedPortalUsers(req, record._id, "facility");
 
     res.json(record);
     writeLog("info", "slfFacility.update", {
@@ -515,6 +552,14 @@ router.put("/:id", async (req, res) => {
       ip: req.ip,
     });
   } catch (error) {
+    // Surface schema/enum validation problems as a clear 400 (validated within
+    // the app) instead of an opaque 500.
+    if (error.name === "ValidationError" || error.name === "CastError") {
+      return res.status(400).json({
+        message: "Some SLF fields are invalid. Please review and try again.",
+        error: error.message,
+      });
+    }
     res.status(500).json({ message: "Server error", error: error.message });
   }
 });
@@ -542,6 +587,11 @@ router.patch("/:id/cell-status", async (req, res) => {
     facility.cellStatuses[cellIndex] = normalizedStatus;
     facility.markModified("cellStatuses");
     await facility.save();
+
+    // Reflect the cell change on both sides in real time.
+    refreshAdmin(req, "submissions");
+    await refreshAssignedPortalUsers(req, facility._id, "facility");
+
     res.json(facility);
     writeLog("info", "slfFacility.cellStatus", {
       message: `Cell ${cellIndex + 1} set to ${normalizedStatus} for ${facility.lgu}`,

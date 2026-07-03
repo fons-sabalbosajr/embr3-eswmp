@@ -4,9 +4,10 @@ const AppSettings = require("../models/AppSettings");
 const UserPortal = require("../models/UserPortal");
 const { clearYearVisibilityCache } = require("../utils/yearVisibility");
 const { sendPortalAnnouncementEmail } = require("../utils/email");
-const { verifyDriveAccess } = require("../utils/googleDrive");
+const { verifyDriveAccess, getDriveConfigStatus } = require("../utils/googleDrive");
 const { invalidateDriveMaintenanceCache } = require("../utils/driveMaintenanceGuard");
-const { authMiddleware, adminOnly } = require("../middleware/auth");
+const { authMiddleware, adminOnly, developerOnly } = require("../middleware/auth");
+const { writeLog } = require("../utils/logger");
 
 const router = express.Router();
 
@@ -458,6 +459,216 @@ router.post("/app/drive-test", authMiddleware, adminOnly, async (_req, res) => {
     });
   } catch (error) {
     res.status(400).json({ message: `Drive test failed: ${error.message}` });
+  }
+});
+
+// Perform a real test upload to each configured Drive folder. Creates a tiny
+// timestamped text file, uploads it, then immediately deletes it so no test
+// junk accumulates. Returns per-folder results so the admin can confirm each
+// folder is truly writable before going live.
+// Sample file generators for the developer Drive test upload. Drive stores raw
+// bytes so these are lightweight but valid enough to confirm a real upload.
+function buildDriveTestFile(fileType, timestamp) {
+  const base = `eswmp-test-${timestamp}`;
+  switch (fileType) {
+    case "image":
+      return {
+        name: `${base}.png`,
+        mimeType: "image/png",
+        buffer: Buffer.from(
+          "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==",
+          "base64"
+        ),
+      };
+    case "pdf":
+      return {
+        name: `${base}.pdf`,
+        mimeType: "application/pdf",
+        buffer: Buffer.from(
+          `%PDF-1.1\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 200 200]>>endobj\ntrailer<</Root 1 0 R>>\n%%EOF\nEMBR3 ESWMP test PDF ${timestamp}`
+        ),
+      };
+    case "excel":
+      return {
+        name: `${base}.csv`,
+        mimeType: "text/csv",
+        buffer: Buffer.from(`Field,Value\nTest,EMBR3 ESWMP\nGenerated,${timestamp}\n`),
+      };
+    case "text":
+    default:
+      return {
+        name: `${base}.txt`,
+        mimeType: "text/plain",
+        buffer: Buffer.from(
+          `EMBR3 ESWMP Drive test upload — ${timestamp}\nThis file was created by the developer Test Upload tool.`
+        ),
+      };
+  }
+}
+
+const DRIVE_FOLDER_TARGETS = () => [
+  { key: "images", label: "Images Folder", id: process.env.GDRIVE_IMAGE_FOLDER_ID },
+  { key: "documents", label: "Documents Folder", id: process.env.GDRIVE_DOCS_FOLDER_ID },
+  { key: "haulerLoi", label: "Hauler LOI Folder", id: process.env.GDRIVE_HAULER_LOI_FOLDER_ID },
+];
+
+// Map a Google Drive error to a safe, human-readable reason (no credentials).
+function driveErrorReason(err) {
+  const status = err?.response?.status || err?.code;
+  const raw = err?.response?.data?.error || err?.errors?.[0]?.reason || err?.message || "";
+  const msg = String(raw).toLowerCase();
+  if (msg.includes("invalid_grant")) return "Expired or revoked OAuth refresh token.";
+  if (status === 401) return "Invalid or expired OAuth credentials.";
+  if (status === 403) return "No permission to write to this folder.";
+  if (status === 404) return "Folder not found (invalid folder ID).";
+  if (msg.includes("stream")) return "Upload stream error.";
+  return `Google Drive API error: ${err?.message || "unknown"}`;
+}
+
+router.post("/app/drive-test-upload", authMiddleware, developerOnly, async (req, res) => {
+  const logUser = req.user?.email || req.user?.username || req.user?.id || "";
+  try {
+    const { getDriveClients } = require("../utils/googleDrive");
+    const { Readable } = require("stream");
+
+    const allowedTypes = ["text", "image", "pdf", "excel"];
+    const fileType = allowedTypes.includes(req.body?.fileType) ? req.body.fileType : "text";
+    const keep = req.body?.keep === true;
+    const folderKey = req.body?.folder; // optional: images|documents|haulerLoi|all
+
+    let clients;
+    try {
+      clients = getDriveClients();
+    } catch (credErr) {
+      writeLog("error", "drive.test-upload.failed", {
+        message: `Drive test upload failed (credentials): ${credErr.message}`,
+        user: logUser, ip: req.ip,
+      });
+      return res.status(400).json({ ok: false, message: driveErrorReason(credErr) });
+    }
+    const drive = clients[0].drive;
+    const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const sample = buildDriveTestFile(fileType, timestamp);
+
+    let targets = DRIVE_FOLDER_TARGETS();
+    if (folderKey && folderKey !== "all") {
+      targets = targets.filter((t) => t.key === folderKey);
+    }
+
+    const results = [];
+    for (const target of targets) {
+      const steps = {
+        folderAccess: false,
+        upload: false,
+        metadata: false,
+        viewUrl: false,
+        cleanup: keep ? null : false,
+      };
+      if (!target.id) {
+        results.push({ ...target, success: false, steps, message: "Missing folder ID (not configured)." });
+        continue;
+      }
+      let fileId = null;
+      try {
+        // 1) Folder access
+        await drive.files.get({ fileId: target.id, fields: "id,name", supportsAllDrives: true });
+        steps.folderAccess = true;
+
+        // 2) Real upload
+        const created = await drive.files.create({
+          requestBody: {
+            name: keep ? `[TEST] ${sample.name}` : sample.name,
+            parents: [target.id],
+            description: keep ? "EMBR3 ESWMP developer test file — safe to delete." : undefined,
+          },
+          media: { mimeType: sample.mimeType, body: Readable.from(sample.buffer) },
+          fields: "id,name,webViewLink,mimeType,size",
+          supportsAllDrives: true,
+        });
+        fileId = created.data.id;
+        steps.upload = true;
+
+        // 3) Metadata retrieval (proves the file really exists)
+        const meta = await drive.files.get({
+          fileId,
+          fields: "id,name,mimeType,size,webViewLink",
+          supportsAllDrives: true,
+        });
+        steps.metadata = true;
+        steps.viewUrl = Boolean(meta.data.webViewLink);
+
+        // 4) Optional cleanup
+        if (!keep) {
+          await drive.files.delete({ fileId, supportsAllDrives: true });
+          steps.cleanup = true;
+        }
+
+        results.push({
+          ...target,
+          success: true,
+          steps,
+          fileId: keep ? fileId : undefined,
+          fileName: meta.data.name,
+          mimeType: meta.data.mimeType,
+          size: meta.data.size ? Number(meta.data.size) : sample.buffer.length,
+          webViewLink: keep ? meta.data.webViewLink : undefined,
+          message: keep
+            ? "Uploaded and kept (marked as test file)."
+            : "Upload, metadata, and cleanup all succeeded.",
+        });
+      } catch (err) {
+        if (fileId && !keep) {
+          await drive.files.delete({ fileId, supportsAllDrives: true }).catch(() => {});
+        }
+        results.push({ ...target, success: false, steps, message: driveErrorReason(err) });
+      }
+    }
+
+    const allOk = results.length > 0 && results.every((r) => r.success);
+    writeLog(allOk ? "info" : "warn", allOk ? "drive.test-upload" : "drive.test-upload.failed", {
+      message: allOk
+        ? `Drive test upload succeeded (${fileType}, keep=${keep})`
+        : `Drive test upload had failures: ${results.filter((r) => !r.success).map((r) => r.label).join(", ")}`,
+      user: logUser, ip: req.ip,
+      meta: { fileType, keep, results: results.map((r) => ({ key: r.key, success: r.success })) },
+    });
+
+    res.json({
+      ok: allOk,
+      message: allOk
+        ? `Real ${fileType} file uploaded successfully to ${results.length} folder(s).`
+        : `Some folders failed: ${results.filter((r) => !r.success).map((r) => r.label).join(", ")}`,
+      fileType,
+      keep,
+      results,
+      client: clients[0].name,
+    });
+  } catch (error) {
+    writeLog("error", "drive.test-upload.failed", {
+      message: `Drive test upload error: ${error.message}`,
+      user: logUser, ip: req.ip,
+    });
+    res.status(400).json({ ok: false, message: `Test upload failed: ${error.message}` });
+  }
+});
+
+// Report Google Drive configuration status without hitting the network. Lets the
+// admin UI show a readable error when required env vars are missing.
+router.get("/app/drive-status", authMiddleware, adminOnly, (_req, res) => {
+  try {
+    const status = getDriveConfigStatus();
+    res.json({
+      ok: status.ok,
+      authMethod: status.authMethod,
+      hasServiceAccountFallback: status.hasServiceAccountFallback,
+      folders: status.folders,
+      missing: status.missing,
+      message: status.ok
+        ? `Google Drive configuration is complete (auth: ${status.authMethod}).`
+        : `Google Drive configuration incomplete. Missing: ${status.missing.join(", ")}.`,
+    });
+  } catch (error) {
+    res.status(500).json({ ok: false, message: `Drive status check failed: ${error.message}` });
   }
 });
 

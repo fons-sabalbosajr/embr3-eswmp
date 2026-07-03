@@ -19,6 +19,7 @@ import {
   Divider,
   Popconfirm,
   Collapse,
+  Segmented,
 } from "antd";
 import {
   DatabaseOutlined,
@@ -28,6 +29,7 @@ import {
   CloseCircleOutlined,
   SaveOutlined,
   PlusOutlined,
+  MinusOutlined,
   DeleteOutlined,
   LockOutlined,
   UnlockOutlined,
@@ -292,11 +294,15 @@ export default function BaselineData({
   const [haulers, setHaulers] = useState([]);
   const [activeCells, setActiveCells] = useState([]);
   const [closedCells, setClosedCells] = useState([]);
+  // Actual vs dummy baseline view (dummy tab is developer-only).
+  const [baselineTab, setBaselineTab] = useState("actual");
 
   const fetchBaselines = useCallback(async ({ force = false, silent = false } = {}) => {
     await fetchWithCache(
       BASELINE_CACHE_KEY,
-      () => api.get("/data-slf/baselines").then(({ data }) => data || []),
+      // Developer view fetches dummy baselines too so they can be shown in a
+      // separate tab; the default production consumers still exclude dummy.
+      () => api.get(`/data-slf/baselines${canOverrideUnlock ? "?includeDummy=true" : ""}`).then(({ data }) => data || []),
       {
         ttl: BASELINE_CACHE_TTL,
         force,
@@ -308,7 +314,7 @@ export default function BaselineData({
         },
       },
     );
-  }, []);
+  }, [canOverrideUnlock]);
 
   useEffect(() => {
     fetchBaselines({ force: true });
@@ -340,6 +346,11 @@ export default function BaselineData({
 
   const filteredBaselines = useMemo(() => {
     return baselines.filter((record) => {
+      // The "actual" tab shows real baselines and — for developers only — the
+      // SAMPLE (dummy) baselines inline, highlighted with a SAMPLE tag. The
+      // "dummy" tab is a developer-only samples-only filter.
+      const isDummyRecord = !!record.isDummy;
+      if (baselineTab === "dummy" && !isDummyRecord) return false;
       const matchesLock = lockFilter === "all" || getLockState(record) === lockFilter;
       if (!matchesLock) return false;
       return rowMatchesSearch(record, search, [
@@ -350,7 +361,12 @@ export default function BaselineData({
         (item) => getLockState(item),
       ]);
     });
-  }, [baselines, getLockState, lockFilter, search]);
+  }, [baselines, getLockState, lockFilter, search, baselineTab]);
+
+  const dummyBaselineCount = useMemo(
+    () => baselines.filter((r) => r.isDummy).length,
+    [baselines],
+  );
 
   const slfFilters = useMemo(() => buildFilters(baselines, "slfName"), [baselines]);
   const submitterFilters = useMemo(() => buildFilters(baselines, "submittedBy"), [baselines]);
@@ -672,9 +688,18 @@ export default function BaselineData({
       onFilter: (value, record) => String(record.slfName || "") === String(value || ""),
       render: (v, r) => (
         <div>
-          <Text strong style={{ fontSize: 13 }}>
-            {v}
-          </Text>
+          <Space size={4} wrap>
+            <Text strong style={{ fontSize: 13 }}>
+              {v}
+            </Text>
+            {r.isDummy && (
+              <Tooltip title="Sample / test baseline — visible to developers only, excluded from real reporting.">
+                <Tag color="purple" style={{ margin: 0, fontSize: 10, lineHeight: "16px" }}>
+                  SAMPLE
+                </Tag>
+              </Tooltip>
+            )}
+          </Space>
           <Text type="secondary" style={{ fontSize: 11, display: "block" }}>
             {r.submittedBy ? `By ${r.submittedBy}` : "No submitter"}
           </Text>
@@ -1061,12 +1086,23 @@ export default function BaselineData({
           flexWrap: "wrap",
         }}
       >
-        <Space align="center">
+        <Space align="center" wrap>
           <DatabaseOutlined style={{ color: PURPLE, fontSize: 16 }} />
           <Text strong style={{ fontSize: 15 }}>
-            Company Baseline Data
+            {baselineTab === "dummy" ? "Dummy Company Baseline Data" : "Company Baseline Data"}
           </Text>
           <Badge count={filteredBaselines.length} style={{ backgroundColor: PURPLE }} />
+          {canOverrideUnlock && (
+            <Segmented
+              size="small"
+              value={baselineTab}
+              onChange={(val) => setBaselineTab(val)}
+              options={[
+                { label: "Actual", value: "actual" },
+                { label: `Dummy${dummyBaselineCount ? ` (${dummyBaselineCount})` : ""}`, value: "dummy" },
+              ]}
+            />
+          )}
         </Space>
         <Space wrap>
           <Input
@@ -1675,42 +1711,271 @@ export default function BaselineData({
                 ),
                 children: (
                   <div>
-                    {haulers.map((h, idx) => (
-                      <div
-                        key={h.key}
-                        style={{
-                          marginBottom: 10,
-                          padding: "10px 12px",
-                          background: isDark ? "#1f1f1f" : "#fafafa",
-                          borderRadius: 8,
-                          border: isDark
-                            ? "1px solid #303030"
-                            : "1px solid #f0f0f0",
-                        }}
+                    <div
+                      style={{
+                        display: "flex",
+                        justifyContent: "flex-end",
+                        marginBottom: 8,
+                      }}
+                    >
+                      <Button
+                        size="small"
+                        type="dashed"
+                        icon={<PlusOutlined />}
+                        onClick={addHauler}
                       >
-                        <div
-                          style={{
-                            display: "flex",
-                            justifyContent: "space-between",
-                            alignItems: "center",
-                            marginBottom: 8,
-                          }}
-                        >
-                          <Text strong style={{ fontSize: 12 }}>
-                            Hauler #{idx + 1}
-                          </Text>
-                          <Space size={4}>
-                            <Tooltip title="Add Truck">
+                        Add Hauler
+                      </Button>
+                    </div>
+                    <Table
+                      size="small"
+                      rowKey="key"
+                      dataSource={haulers}
+                      pagination={{
+                        pageSize: 10,
+                        showSizeChanger: true,
+                        pageSizeOptions: [10, 20, 50, 100, 200],
+                        showTotal: (total) =>
+                          `${total} hauler${total === 1 ? "" : "s"}`,
+                      }}
+                      scroll={{ x: 760 }}
+                      expandable={{
+                        expandedRowRender: (h) => (
+                          <div style={{ padding: "4px 8px" }}>
+                            <div
+                              style={{
+                                display: "flex",
+                                justifyContent: "space-between",
+                                alignItems: "center",
+                                marginBottom: 6,
+                              }}
+                            >
+                              <Text type="secondary" style={{ fontSize: 11 }}>
+                                Trucks / Vehicles ({(h.vehicles || []).length})
+                              </Text>
+                              <Tooltip title="Add Truck">
+                                <Button
+                                  size="small"
+                                  type="text"
+                                  icon={<PlusOutlined />}
+                                  onClick={() => addVehicle(h.key)}
+                                />
+                              </Tooltip>
+                            </div>
+                            {(h.vehicles || []).length === 0 ? (
+                              <Empty
+                                description="No trucks"
+                                image={Empty.PRESENTED_IMAGE_SIMPLE}
+                                style={{ margin: "8px 0" }}
+                              />
+                            ) : (
+                              h.vehicles.map((v) => (
+                                <Row
+                                  key={v.key}
+                                  gutter={6}
+                                  align="middle"
+                                  style={{ marginBottom: 6 }}
+                                >
+                                  <Col span={7}>
+                                    <Input
+                                      size="small"
+                                      placeholder="Plate No."
+                                      value={v.plateNumber}
+                                      onChange={(e) =>
+                                        updateVehicle(
+                                          h.key,
+                                          v.key,
+                                          "plateNumber",
+                                          e.target.value,
+                                        )
+                                      }
+                                    />
+                                  </Col>
+                                  <Col span={6}>
+                                    <Input
+                                      size="small"
+                                      placeholder="Vehicle type"
+                                      value={v.vehicleType}
+                                      onChange={(e) =>
+                                        updateVehicle(
+                                          h.key,
+                                          v.key,
+                                          "vehicleType",
+                                          e.target.value,
+                                        )
+                                      }
+                                    />
+                                  </Col>
+                                  <Col span={5}>
+                                    <InputNumber
+                                      size="small"
+                                      min={0}
+                                      placeholder="Capacity"
+                                      value={v.capacity}
+                                      onChange={(val) =>
+                                        updateVehicle(
+                                          h.key,
+                                          v.key,
+                                          "capacity",
+                                          val,
+                                        )
+                                      }
+                                      style={{ width: "100%" }}
+                                    />
+                                  </Col>
+                                  <Col span={4}>
+                                    <Select
+                                      size="small"
+                                      value={v.capacityUnit}
+                                      onChange={(val) =>
+                                        updateVehicle(
+                                          h.key,
+                                          v.key,
+                                          "capacityUnit",
+                                          val,
+                                        )
+                                      }
+                                      style={{ width: "100%" }}
+                                    >
+                                      {UNIT_OPTIONS.map((u) => (
+                                        <Select.Option key={u} value={u}>
+                                          {u}
+                                        </Select.Option>
+                                      ))}
+                                    </Select>
+                                  </Col>
+                                  <Col
+                                    span={2}
+                                    style={{ textAlign: "right" }}
+                                  >
+                                    <Popconfirm
+                                      title="Remove truck?"
+                                      onConfirm={() =>
+                                        removeVehicle(h.key, v.key)
+                                      }
+                                    >
+                                      <Button
+                                        size="small"
+                                        type="text"
+                                        danger
+                                        icon={<DeleteOutlined />}
+                                      />
+                                    </Popconfirm>
+                                  </Col>
+                                </Row>
+                              ))
+                            )}
+                          </div>
+                        ),
+                      }}
+                      columns={[
+                        {
+                          title: "#",
+                          key: "idx",
+                          width: 48,
+                          render: (_, record) =>
+                            haulers.findIndex((x) => x.key === record.key) +
+                            1,
+                        },
+                        {
+                          title: "Hauler Name",
+                          dataIndex: "haulerName",
+                          render: (val, record) => (
+                            <Input
+                              size="small"
+                              placeholder="Hauler name"
+                              value={val}
+                              onChange={(e) =>
+                                updateHauler(
+                                  record.key,
+                                  "haulerName",
+                                  e.target.value,
+                                )
+                              }
+                            />
+                          ),
+                        },
+                        {
+                          title: "Office Address",
+                          dataIndex: "officeAddress",
+                          render: (val, record) => (
+                            <Input
+                              size="small"
+                              placeholder="Office address"
+                              value={val}
+                              onChange={(e) =>
+                                updateHauler(
+                                  record.key,
+                                  "officeAddress",
+                                  e.target.value,
+                                )
+                              }
+                            />
+                          ),
+                        },
+                        {
+                          title: "Trucks",
+                          dataIndex: "numberOfTrucks",
+                          width: 140,
+                          render: (val, record) => (
+                            <Space.Compact>
                               <Button
                                 size="small"
-                                type="text"
-                                icon={<PlusOutlined />}
-                                onClick={() => addVehicle(h.key)}
+                                icon={<MinusOutlined />}
+                                onClick={() =>
+                                  updateHauler(
+                                    record.key,
+                                    "numberOfTrucks",
+                                    Math.max(0, (val || 0) - 1),
+                                  )
+                                }
                               />
-                            </Tooltip>
+                              <InputNumber
+                                size="small"
+                                min={0}
+                                controls={false}
+                                value={val}
+                                onChange={(v) =>
+                                  updateHauler(
+                                    record.key,
+                                    "numberOfTrucks",
+                                    v ?? 0,
+                                  )
+                                }
+                                style={{ width: 56, textAlign: "center" }}
+                              />
+                              <Button
+                                size="small"
+                                icon={<PlusOutlined />}
+                                onClick={() =>
+                                  updateHauler(
+                                    record.key,
+                                    "numberOfTrucks",
+                                    (val || 0) + 1,
+                                  )
+                                }
+                              />
+                            </Space.Compact>
+                          ),
+                        },
+                        {
+                          title: "Vehicles",
+                          key: "vehicleCount",
+                          width: 90,
+                          render: (_, record) => (
+                            <Tag color={PURPLE}>
+                              {(record.vehicles || []).length}
+                            </Tag>
+                          ),
+                        },
+                        {
+                          title: "",
+                          key: "actions",
+                          width: 56,
+                          render: (_, record) => (
                             <Popconfirm
                               title="Remove hauler?"
-                              onConfirm={() => removeHauler(h.key)}
+                              onConfirm={() => removeHauler(record.key)}
                             >
                               <Button
                                 size="small"
@@ -1719,204 +1984,10 @@ export default function BaselineData({
                                 icon={<DeleteOutlined />}
                               />
                             </Popconfirm>
-                          </Space>
-                        </div>
-                        <Row gutter={8} style={{ marginBottom: 4 }}>
-                          <Col span={10}>
-                            <Text
-                              type="secondary"
-                              style={{
-                                fontSize: 11,
-                                display: "block",
-                                marginBottom: 2,
-                              }}
-                            >
-                              Hauler Name
-                            </Text>
-                            <Input
-                              size="small"
-                              placeholder="Hauler name"
-                              value={h.haulerName}
-                              onChange={(e) =>
-                                updateHauler(
-                                  h.key,
-                                  "haulerName",
-                                  e.target.value,
-                                )
-                              }
-                            />
-                          </Col>
-                          <Col span={4}>
-                            <Text
-                              type="secondary"
-                              style={{
-                                fontSize: 11,
-                                display: "block",
-                                marginBottom: 2,
-                              }}
-                            >
-                              Trucks
-                            </Text>
-                            <InputNumber
-                              size="small"
-                              min={0}
-                              value={h.numberOfTrucks}
-                              onChange={(v) =>
-                                updateHauler(h.key, "numberOfTrucks", v)
-                              }
-                              style={{ width: "100%" }}
-                            />
-                          </Col>
-                          <Col span={10}>
-                            <Text
-                              type="secondary"
-                              style={{
-                                fontSize: 11,
-                                display: "block",
-                                marginBottom: 2,
-                              }}
-                            >
-                              Office Address
-                            </Text>
-                            <Input
-                              size="small"
-                              placeholder="Office address"
-                              value={h.officeAddress}
-                              onChange={(e) =>
-                                updateHauler(
-                                  h.key,
-                                  "officeAddress",
-                                  e.target.value,
-                                )
-                              }
-                            />
-                          </Col>
-                        </Row>
-                        {(h.vehicles || []).length > 0 && (
-                          <div
-                            style={{
-                              marginTop: 8,
-                              paddingTop: 8,
-                              borderTop: isDark
-                                ? "1px solid #303030"
-                                : "1px solid #f0f0f0",
-                            }}
-                          >
-                            <Text
-                              type="secondary"
-                              style={{
-                                fontSize: 11,
-                                display: "block",
-                                marginBottom: 6,
-                              }}
-                            >
-                              Trucks / Vehicles ({h.vehicles.length})
-                            </Text>
-                            {h.vehicles.map((v) => (
-                              <Row
-                                key={v.key}
-                                gutter={6}
-                                align="middle"
-                                style={{ marginBottom: 6 }}
-                              >
-                                <Col span={7}>
-                                  <Input
-                                    size="small"
-                                    placeholder="Plate No."
-                                    value={v.plateNumber}
-                                    onChange={(e) =>
-                                      updateVehicle(
-                                        h.key,
-                                        v.key,
-                                        "plateNumber",
-                                        e.target.value,
-                                      )
-                                    }
-                                  />
-                                </Col>
-                                <Col span={6}>
-                                  <Input
-                                    size="small"
-                                    placeholder="Vehicle type"
-                                    value={v.vehicleType}
-                                    onChange={(e) =>
-                                      updateVehicle(
-                                        h.key,
-                                        v.key,
-                                        "vehicleType",
-                                        e.target.value,
-                                      )
-                                    }
-                                  />
-                                </Col>
-                                <Col span={5}>
-                                  <InputNumber
-                                    size="small"
-                                    min={0}
-                                    placeholder="Capacity"
-                                    value={v.capacity}
-                                    onChange={(val) =>
-                                      updateVehicle(
-                                        h.key,
-                                        v.key,
-                                        "capacity",
-                                        val,
-                                      )
-                                    }
-                                    style={{ width: "100%" }}
-                                  />
-                                </Col>
-                                <Col span={4}>
-                                  <Select
-                                    size="small"
-                                    value={v.capacityUnit}
-                                    onChange={(val) =>
-                                      updateVehicle(
-                                        h.key,
-                                        v.key,
-                                        "capacityUnit",
-                                        val,
-                                      )
-                                    }
-                                    style={{ width: "100%" }}
-                                  >
-                                    {UNIT_OPTIONS.map((u) => (
-                                      <Select.Option key={u} value={u}>
-                                        {u}
-                                      </Select.Option>
-                                    ))}
-                                  </Select>
-                                </Col>
-                                <Col span={2} style={{ textAlign: "right" }}>
-                                  <Popconfirm
-                                    title="Remove truck?"
-                                    onConfirm={() =>
-                                      removeVehicle(h.key, v.key)
-                                    }
-                                  >
-                                    <Button
-                                      size="small"
-                                      type="text"
-                                      danger
-                                      icon={<DeleteOutlined />}
-                                    />
-                                  </Popconfirm>
-                                </Col>
-                              </Row>
-                            ))}
-                          </div>
-                        )}
-                      </div>
-                    ))}
-                    <Button
-                      size="small"
-                      type="dashed"
-                      icon={<PlusOutlined />}
-                      onClick={addHauler}
-                      style={{ marginTop: 4 }}
-                    >
-                      Add Hauler
-                    </Button>
+                          ),
+                        },
+                      ]}
+                    />
                   </div>
                 ),
               },

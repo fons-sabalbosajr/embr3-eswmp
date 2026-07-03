@@ -961,6 +961,7 @@ export default function AdminHome() {
             canViewCellPlacement={hasAccess("cellWastePlacement")}
             canEditCellPlacement={canEdit("cellWastePlacement")}
             canRepairIds={isDeveloper}
+            isDeveloper={isDeveloper}
           />
         ) : (
           denied
@@ -973,6 +974,7 @@ export default function AdminHome() {
         return (isDeveloper || hasExplicitAccess("developerSettings")) ? (
           <DeveloperSettings
             isDark={isDark}
+            isDeveloper={isDeveloper}
             initialActiveKey={developerSettingsInitialTab}
             onSettingsSaved={(s) => {
               if (s.primaryColor) {

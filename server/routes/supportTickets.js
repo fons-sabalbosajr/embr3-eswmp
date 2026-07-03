@@ -132,8 +132,13 @@ router.post("/", async (req, res) => {
 // Portal: Get my tickets
 router.get("/my-tickets/:email", async (req, res) => {
   try {
-    const tickets = await SupportTicket.find({ portalUserEmail: req.params.email })
-      .sort({ createdAt: -1 });
+    // Case-insensitive exact match so a mixed-case stored email still resolves
+    // the portal user's own tickets (they otherwise come up empty).
+    const email = String(req.params.email || "").trim();
+    const escaped = email.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const tickets = await SupportTicket.find({
+      portalUserEmail: new RegExp(`^${escaped}$`, "i"),
+    }).sort({ createdAt: -1 });
     res.json(tickets);
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });

@@ -518,12 +518,84 @@ router.get("/my-submissions", async (req, res) => {
     const submissions = await DataSLF.find({
       submittedBy: user.email,
       deletedAt: null,
+      hiddenFromPortal: { $ne: true },
     })
       .populate("slfGenerator")
       .sort({ createdAt: -1 })
       .lean();
 
     res.json(submissions);
+  } catch (error) {
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+});
+
+// Portal user hides one of their own submissions from their Submission History.
+// The record stays intact and visible on the admin side — this only sets the
+// hiddenFromPortal flag so it no longer appears in the portal user's own list.
+router.patch("/my-submissions/:id/hide", async (req, res) => {
+  try {
+    const token = req.headers.authorization?.split(" ")[1];
+    if (!token) return res.status(401).json({ message: "No token provided" });
+
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    const user = await UserPortal.findById(decoded.id);
+    if (!user) return res.status(404).json({ message: "User not found" });
+
+    const DataSLF = require("../models/DataSLF");
+    const submission = await DataSLF.findById(req.params.id).select("submittedBy hiddenFromPortal idNo");
+    if (!submission) return res.status(404).json({ message: "Submission not found" });
+    if (String(submission.submittedBy || "").toLowerCase() !== String(user.email).toLowerCase()) {
+      return res.status(403).json({ message: "You can only remove your own submissions." });
+    }
+
+    submission.hiddenFromPortal = true;
+    await submission.save();
+
+    writeLog("info", "portal.submission.hide", {
+      message: `Portal user hid submission ${submission.idNo || submission._id} from their history`,
+      user: user.email,
+      ip: req.ip,
+      meta: { submissionId: submission._id },
+    });
+
+    res.json({ message: "Removed from your history. EMB Region III still keeps this record." });
+  } catch (error) {
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+});
+
+// Portal user dismisses one of their own "My Requests" entries. The underlying
+// transaction (audit log) is retained — the user's email is added to
+// portalHiddenBy so it stops appearing in their own list.
+router.patch("/my-requests/:id/hide", async (req, res) => {
+  try {
+    const token = req.headers.authorization?.split(" ")[1];
+    if (!token) return res.status(401).json({ message: "No token provided" });
+
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    const user = await UserPortal.findById(decoded.id);
+    if (!user) return res.status(404).json({ message: "User not found" });
+
+    const Transaction = require("../models/Transaction");
+    const txn = await Transaction.findById(req.params.id).select("submittedBy performedBy portalHiddenBy");
+    if (!txn) return res.status(404).json({ message: "Request not found" });
+
+    const email = String(user.email).toLowerCase();
+    const owns =
+      String(txn.submittedBy || "").toLowerCase() === email ||
+      String(txn.performedBy || "").toLowerCase() === email;
+    if (!owns) {
+      return res.status(403).json({ message: "You can only remove your own requests." });
+    }
+
+    if (!Array.isArray(txn.portalHiddenBy)) txn.portalHiddenBy = [];
+    if (!txn.portalHiddenBy.includes(email)) {
+      txn.portalHiddenBy.push(email);
+      await txn.save();
+    }
+
+    res.json({ message: "Removed from your list." });
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });
   }

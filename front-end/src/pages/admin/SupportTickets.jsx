@@ -19,7 +19,6 @@ import {
   Statistic,
   Alert,
   Image,
-  Badge,
 } from "antd";
 import {
   SearchOutlined,
@@ -37,6 +36,10 @@ import {
   ExclamationCircleOutlined,
   BankOutlined,
   TagsOutlined,
+  PaperClipOutlined,
+  WarningOutlined,
+  FilePdfOutlined,
+  FileOutlined,
 } from "@ant-design/icons";
 import Swal from "sweetalert2";
 import dayjs from "dayjs";
@@ -48,6 +51,97 @@ import ResponsiveTable from "./shared/ResponsiveTable";
 
 const { Title, Text, Paragraph } = Typography;
 const { TextArea } = Input;
+
+// Extract a Google Drive file ID from any of the common Drive URL shapes so an
+// image can be rendered from a direct thumbnail endpoint (webViewLink pages do
+// not load inside <img>).
+function driveIdFromUrl(url) {
+  if (!url) return null;
+  const s = String(url);
+  const m =
+    s.match(/\/file\/d\/([a-zA-Z0-9_-]+)/) ||
+    s.match(/[?&]id=([a-zA-Z0-9_-]+)/) ||
+    s.match(/\/d\/([a-zA-Z0-9_-]+)/);
+  return m ? m[1] : null;
+}
+
+// Renders a single image attachment with graceful failure handling. If the
+// underlying Drive file is missing, trashed, or permission-restricted the
+// thumbnail request fails and a clear prompt is shown instead of a broken icon.
+function AttachmentImage({ att, index }) {
+  const [errored, setErrored] = useState(false);
+  const driveId = att.fileId || driveIdFromUrl(att.url);
+  const isDrive = !!driveId && att.storage !== "local";
+  const thumbSrc = isDrive ? `https://drive.google.com/thumbnail?id=${driveId}&sz=w400` : att.url;
+  const fullSrc = isDrive ? `https://drive.google.com/thumbnail?id=${driveId}&sz=w1600` : att.url;
+
+  if (errored) {
+    return (
+      <div
+        style={{
+          width: 110,
+          height: 110,
+          borderRadius: 10,
+          border: "1.5px dashed #ffbfbf",
+          background: "#fff1f0",
+          display: "flex",
+          flexDirection: "column",
+          alignItems: "center",
+          justifyContent: "center",
+          gap: 4,
+          padding: 6,
+          textAlign: "center",
+        }}
+      >
+        <WarningOutlined style={{ color: "#cf1322", fontSize: 18 }} />
+        <span style={{ fontSize: 10, color: "#cf1322", lineHeight: 1.2 }}>
+          File not accessible
+        </span>
+        <a href={att.url} target="_blank" rel="noreferrer" style={{ fontSize: 10 }}>
+          Try open ↗
+        </a>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ position: "relative" }}>
+      <Image
+        src={thumbSrc}
+        alt={att.name || `screenshot-${index + 1}`}
+        width={110}
+        height={110}
+        preview={{ src: fullSrc }}
+        onError={() => setErrored(true)}
+        style={{
+          objectFit: "cover",
+          borderRadius: 10,
+          border: "1.5px solid #e0e0e0",
+          cursor: "zoom-in",
+          boxShadow: "0 1px 6px rgba(0,0,0,0.10)",
+        }}
+      />
+      <div
+        style={{
+          position: "absolute",
+          bottom: 4,
+          left: 4,
+          right: 4,
+          background: "rgba(0,0,0,0.45)",
+          borderRadius: 6,
+          padding: "1px 4px",
+          fontSize: 10,
+          color: "#fff",
+          overflow: "hidden",
+          textOverflow: "ellipsis",
+          whiteSpace: "nowrap",
+        }}
+      >
+        {att.name || `Image ${index + 1}`}
+      </div>
+    </div>
+  );
+}
 
 const STATUS_META = {
   open: { color: "red", label: "Open", icon: <ExclamationCircleOutlined /> },
@@ -302,7 +396,9 @@ export default function SupportTickets({ canEdit = true }) {
             <Text style={{ fontSize: 12 }}>{v}</Text>
             {Array.isArray(r.attachments) && r.attachments.length > 0 && (
               <Tooltip title={`${r.attachments.length} attachment(s)`}>
-                <Badge count={r.attachments.length} size="small" style={{ backgroundColor: "#2f54eb" }} />
+                <Tag icon={<PaperClipOutlined />} color="blue" style={{ fontSize: 10, marginInlineEnd: 0 }}>
+                  {r.attachments.length} file{r.attachments.length > 1 ? "s" : ""}
+                </Tag>
               </Tooltip>
             )}
           </Space>
@@ -545,37 +641,7 @@ export default function SupportTickets({ canEdit = true }) {
                       {detail.attachments
                         .filter((a) => (a.mimeType || "").startsWith("image/"))
                         .map((att, i) => (
-                          <div key={i} style={{ position: "relative" }}>
-                            <Image
-                              src={att.url}
-                              alt={att.name || `screenshot-${i + 1}`}
-                              width={110}
-                              height={110}
-                              style={{
-                                objectFit: "cover",
-                                borderRadius: 10,
-                                border: "1.5px solid #e0e0e0",
-                                cursor: "zoom-in",
-                                boxShadow: "0 1px 6px rgba(0,0,0,0.10)",
-                              }}
-                            />
-                            <div style={{
-                              position: "absolute",
-                              bottom: 4,
-                              left: 4,
-                              right: 4,
-                              background: "rgba(0,0,0,0.45)",
-                              borderRadius: 6,
-                              padding: "1px 4px",
-                              fontSize: 10,
-                              color: "#fff",
-                              overflow: "hidden",
-                              textOverflow: "ellipsis",
-                              whiteSpace: "nowrap",
-                            }}>
-                              {att.name || `Image ${i + 1}`}
-                            </div>
-                          </div>
+                          <AttachmentImage key={i} att={att} index={i} />
                         ))}
                     </div>
                   </Image.PreviewGroup>
@@ -600,20 +666,28 @@ export default function SupportTickets({ canEdit = true }) {
                           marginBottom: 6,
                         }}
                       >
-                        <span style={{ fontSize: 20 }}>{isPdf ? "📄" : "📎"}</span>
+                        <span style={{ fontSize: 20 }}>
+                          {isPdf ? <FilePdfOutlined style={{ color: "#cf1322" }} /> : <FileOutlined style={{ color: "#8c8c8c" }} />}
+                        </span>
                         <span style={{ fontSize: 12, maxWidth: 180, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                           {att.name || `Attachment ${i + 1}`}
                         </span>
-                        <Button
-                          size="small"
-                          type="link"
-                          href={att.url}
-                          target="_blank"
-                          rel="noreferrer"
-                          style={{ padding: 0, height: "auto", fontSize: 12 }}
-                        >
-                          Open ↗
-                        </Button>
+                        {att.url ? (
+                          <Button
+                            size="small"
+                            type="link"
+                            href={att.url}
+                            target="_blank"
+                            rel="noreferrer"
+                            style={{ padding: 0, height: "auto", fontSize: 12 }}
+                          >
+                            Open / Download ↗
+                          </Button>
+                        ) : (
+                          <Text type="danger" style={{ fontSize: 11 }}>
+                            <WarningOutlined /> Link unavailable
+                          </Text>
+                        )}
                       </div>
                     );
                   })}

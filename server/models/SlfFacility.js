@@ -5,6 +5,10 @@ const slfFacilitySchema = new mongoose.Schema(
   {
     dataYear: { type: Number, default: () => new Date().getFullYear(), index: true },
 
+    // Marks demo/test SLF records created via Developer Settings > Dummy Data
+    // Configuration so they can be filtered out of real reporting.
+    isDummy: { type: Boolean, default: false, index: true },
+
     // Location
     province: { type: String, trim: true },
     lgu: { type: String, trim: true },
