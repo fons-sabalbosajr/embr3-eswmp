@@ -24,6 +24,7 @@ import {
   TeamOutlined,
   WarningOutlined,
   CheckCircleOutlined,
+  CloseCircleOutlined,
   DownOutlined,
   RightOutlined,
 } from "@ant-design/icons";

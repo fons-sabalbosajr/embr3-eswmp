@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Alert, Button, Modal, Space, Spin, Table, Tag, Typography } from "antd";
-import { PrinterOutlined, FileWordOutlined, FilePdfOutlined } from "@ant-design/icons";
+import { PrinterOutlined, FileWordOutlined, FilePdfOutlined, CloseCircleOutlined, UndoOutlined } from "@ant-design/icons";
 import {
   Bar,
   BarChart,
@@ -37,6 +37,38 @@ const normalizeKey = (value) =>
     .replace(/\s+/g, " ")
     .trim()
     .toLowerCase();
+
+// Sample/test portal accounts excluded from every report metric, table, and
+// chart. Matched case-insensitively on trimmed email / display name / username
+// / company. Report-only — no DB records or submissions are touched.
+const EXCLUDED_SAMPLE_EMAILS = new Set(["fonssabalbosa.27@gmail.com"]);
+const EXCLUDED_SAMPLE_NAMES = new Set(["eswm portal user"]);
+const normLower = (v) => String(v || "").trim().toLowerCase();
+const isSampleIdentity = (value) => {
+  const s = normLower(value);
+  return !!s && (EXCLUDED_SAMPLE_EMAILS.has(s) || EXCLUDED_SAMPLE_NAMES.has(s));
+};
+const isSamplePortalUser = (u) => {
+  if (!u) return false;
+  if (EXCLUDED_SAMPLE_EMAILS.has(normLower(u.email))) return true;
+  const fullName = normLower(`${u.firstName || ""} ${u.lastName || ""}`);
+  if (EXCLUDED_SAMPLE_NAMES.has(fullName)) return true;
+  if (EXCLUDED_SAMPLE_NAMES.has(normLower(u.username))) return true;
+  if (EXCLUDED_SAMPLE_NAMES.has(normLower(u.companyName))) return true;
+  return false;
+};
+
+// Canonical grouping key for a portal user. Shared by the operators filter, the
+// operator summary table, and the per-operator cell report so a "Remove from
+// Report" action in any of them targets the same merged entity. Prefixes keep a
+// company and an SLF with the same name from colliding.
+const computeOperatorGroupKey = (u) => {
+  const company = normLower(u?.companyName);
+  if (company) return `co:${normalizeKey(u.companyName)}`;
+  const slf = Array.isArray(u?.assignedSlfName) && u.assignedSlfName[0] ? u.assignedSlfName[0] : "";
+  if (slf) return `slf:${normalizeKey(slf)}`;
+  return `op:${normalizeKey(`${u?.firstName || ""} ${u?.lastName || ""}`)}`;
+};
 
 function formatVolume(m3, tons) {
   const parts = [];
@@ -234,11 +266,33 @@ export default function SlfSubmissionReport({
   const [trend, setTrend] = useState([]);
   const [trendLoading, setTrendLoading] = useState(false);
   const [exporting, setExporting] = useState(false);
+  // Report-only removals (never touches the DB). Keys reset each time the modal
+  // opens so every report session starts from the full dataset.
+  const [removedOpKeys, setRemovedOpKeys] = useState(() => new Set());
+  const [removedBaselineKeys, setRemovedBaselineKeys] = useState(() => new Set());
   const printRef = useRef(null);
+
+  const removeOperator = (key) =>
+    setRemovedOpKeys((prev) => new Set(prev).add(key));
+  const removeBaseline = (key) =>
+    setRemovedBaselineKeys((prev) => new Set(prev).add(key));
+  const restoreRemoved = () => {
+    setRemovedOpKeys(new Set());
+    setRemovedBaselineKeys(new Set());
+  };
+  const removedCount = removedOpKeys.size + removedBaselineKeys.size;
 
   useEffect(() => {
     ensurePrintStyles();
   }, []);
+
+  // Start each report session with nothing removed.
+  useEffect(() => {
+    if (open) {
+      setRemovedOpKeys(new Set());
+      setRemovedBaselineKeys(new Set());
+    }
+  }, [open]);
 
   // Monthly submission trend is fetched lazily — only when the report opens.
   useEffect(() => {
@@ -264,10 +318,17 @@ export default function SlfSubmissionReport({
     };
   }, [open]);
 
-  // Approved, non-dummy operators (portalUsers already excludes dummy).
+  // Approved, non-dummy operators — sample/test accounts (see isSamplePortalUser)
+  // are excluded here so every downstream metric, table, and chart omits them.
   const operators = useMemo(
-    () => portalUsers.filter((u) => u.status === "approved"),
-    [portalUsers],
+    () =>
+      portalUsers.filter(
+        (u) =>
+          u.status === "approved" &&
+          !isSamplePortalUser(u) &&
+          !removedOpKeys.has(computeOperatorGroupKey(u)),
+      ),
+    [portalUsers, removedOpKeys],
   );
 
   // Join each operator to its assigned SLF submission rows by normalised name.
@@ -289,6 +350,7 @@ export default function SlfSubmissionReport({
       }, null);
       return {
         key: u._id,
+        _gkey: computeOperatorGroupKey(u),
         operator: `${u.firstName || ""} ${u.lastName || ""}`.trim() || "—",
         company: u.companyName || "—",
         slf: assigned.length ? assigned.join(", ") : "— (no SLF assigned)",
@@ -310,9 +372,7 @@ export default function SlfSubmissionReport({
   const operatorGroups = useMemo(() => {
     const map = new Map();
     operatorRows.forEach((r) => {
-      const companyKey = r.company && r.company !== "—" ? normalizeKey(r.company) : "";
-      const slfKey = !r.noAssignment && r.slf ? normalizeKey(r.slf.split(",")[0]) : "";
-      const key = companyKey || slfKey || `op:${normalizeKey(r.operator)}`;
+      const key = r._gkey;
       const label =
         r.company && r.company !== "—"
           ? r.company
@@ -462,7 +522,7 @@ export default function SlfSubmissionReport({
       const company = u.companyName && u.companyName.trim() ? u.companyName.trim() : "";
       const assignedNames = Array.isArray(u.assignedSlfName) ? u.assignedSlfName : [];
       const label = company || assignedNames[0] || `${u.firstName || ""} ${u.lastName || ""}`.trim() || "—";
-      const key = normalizeKey(company || assignedNames[0] || label);
+      const key = computeOperatorGroupKey(u);
       const facs = new Map();
       (u.assignedSlf || []).forEach((id) => {
         const f = facById.get(String(id?._id || id));
@@ -510,7 +570,9 @@ export default function SlfSubmissionReport({
   const baselineRows = useMemo(
     () =>
       (baselines || [])
-        .filter((b) => !b.isDummy)
+        .filter(
+          (b) => !b.isDummy && !isSampleIdentity(b.submittedBy) && !removedBaselineKeys.has(b._id),
+        )
         .map((b) => {
           const unit = (b.baselineUnit || "m³").replace("m3", "m³");
           const activeTotal =
@@ -531,7 +593,24 @@ export default function SlfSubmissionReport({
           };
         })
         .sort((a, b) => a.slfName.localeCompare(b.slfName)),
-    [baselines],
+    [baselines, removedBaselineKeys],
+  );
+
+  // Headline totals derived from the filtered operator dataset so removing rows
+  // from the report recalculates the summary cards + export (single source).
+  const reportTotals = useMemo(
+    () =>
+      operatorGroups.reduce(
+        (acc, g) => {
+          acc.submissions += g.submissions;
+          acc.trucks += g.trucks;
+          acc.m3 += g._m3;
+          acc.tons += g._tons;
+          return acc;
+        },
+        { submissions: 0, trucks: 0, m3: 0, tons: 0 },
+      ),
+    [operatorGroups],
   );
 
   const pieData = [
@@ -706,8 +785,8 @@ export default function SlfSubmissionReport({
           <li>Operators With Submissions: <b>${withSubs}</b></li>
           <li>Operators Without Submissions: <b>${withoutSubs}</b></li>
           <li>Reporting SLFs: <b>${slfRows.length}</b></li>
-          <li>Total Submissions: <b>${(totals?.submissions ?? tiles?.submissions ?? 0).toLocaleString()}</b> (${pending} pending)</li>
-          <li>Total Waste Volume: <b>${esc(formatVolume(totals?.m3 ?? tiles?.totalM3 ?? 0, totals?.tons ?? tiles?.totalTons ?? 0))}</b></li>
+          <li>Total Submissions: <b>${reportTotals.submissions.toLocaleString()}</b> (${pending} pending)</li>
+          <li>Total Waste Volume: <b>${esc(formatVolume(reportTotals.m3, reportTotals.tons))}</b></li>
         </ul>
         ${chartsHtml}
         <br style="page-break-before:always"/>
@@ -760,22 +839,45 @@ export default function SlfSubmissionReport({
     }
   };
 
+  // "Remove from Report" column — hidden from the printed/exported output via
+  // slf-report-noprint. onRemove receives the row and excludes it from the
+  // centralized filtered dataset (no DB change).
+  const removeColumn = (onRemove) => ({
+    title: "Report",
+    key: "__remove",
+    width: 96,
+    align: "center",
+    className: "slf-report-noprint",
+    onHeaderCell: () => ({ className: "slf-report-noprint" }),
+    render: (_, r) => (
+      <Button
+        size="small"
+        danger
+        type="text"
+        icon={<CloseCircleOutlined />}
+        onClick={() => onRemove(r)}
+      >
+        Remove
+      </Button>
+    ),
+  });
+
   return (
     <Modal
       title={
         <Space>
-          <PrinterOutlined /> SLF Data & Portal Submissions — PDF Summary
+          <PrinterOutlined /> SLF Data & Portal Submissions — Reporting Summary
         </Space>
       }
       open={open}
       onCancel={onClose}
-      width={900}
+      width={1400}
       styles={{ body: { maxHeight: "72vh", overflow: "auto" } }}
       footer={
         <Space className="slf-report-noprint">
           <Button onClick={onClose}>Close</Button>
           <Button icon={<FileWordOutlined />} loading={exporting} onClick={exportDocx}>
-            Export DOCX
+            Export Word (.docx)
           </Button>
           <Button type="primary" icon={<PrinterOutlined />} onClick={doPrint}>
             Print / Save as PDF
@@ -783,14 +885,33 @@ export default function SlfSubmissionReport({
         </Space>
       }
     >
+      {removedCount > 0 && (
+        <Alert
+          type="info"
+          showIcon
+          className="slf-report-noprint"
+          style={{ marginBottom: 10 }}
+          title={
+            <Space>
+              <span>
+                {removedCount} item(s) removed from this report ({removedOpKeys.size} operator/cell,
+                {" "}{removedBaselineKeys.size} baseline). Charts, totals, and exports exclude them.
+              </span>
+              <Button size="small" icon={<UndoOutlined />} onClick={restoreRemoved}>
+                Restore Removed Items
+              </Button>
+            </Space>
+          }
+        />
+      )}
       <div id="slf-report-printable" ref={printRef} style={{ background: "#fff", color: "#222", padding: 4 }}>
         {/* Header */}
         <div style={{ borderBottom: "2px solid #2f54eb", paddingBottom: 8, marginBottom: 4 }}>
           <Title level={4} style={{ margin: 0, color: "#1a3353" }}>
-            SLF Data &amp; Portal Submissions Summary
+            Sanitary Landfill Data Portal Submissions Summary
           </Title>
           <Text type="secondary" style={{ fontSize: 12 }}>
-            EMB Region III — ESWMP · Generated {generatedAt}
+            EMB Region III — Ecological Solid Waste Management Pipeline · Generated {generatedAt}
           </Text>
         </div>
 
@@ -803,13 +924,13 @@ export default function SlfSubmissionReport({
             <StatCard label="Reporting SLFs" value={slfRows.length} color="#13c2c2" />
             <StatCard
               label="Total Submissions"
-              value={(totals?.submissions ?? tiles?.submissions ?? 0).toLocaleString()}
+              value={reportTotals.submissions.toLocaleString()}
               sub={`${pending} pending review`}
               color="#722ed1"
             />
             <StatCard
               label="Total Waste Volume"
-              value={formatVolume(totals?.m3 ?? tiles?.totalM3 ?? 0, totals?.tons ?? tiles?.totalTons ?? 0)}
+              value={formatVolume(reportTotals.m3, reportTotals.tons)}
               color="#cf1322"
             />
           </div>
@@ -951,6 +1072,7 @@ export default function SlfSubmissionReport({
                     <Tag color="orange">None</Tag>
                   ),
               },
+              removeColumn((r) => removeOperator(r.key)),
             ]}
           />
         </Section>
@@ -1041,6 +1163,7 @@ export default function SlfSubmissionReport({
                   { title: "Full/Closed", dataIndex: "full", align: "center", width: 84 },
                   { title: "Under Dev.", dataIndex: "underDev", align: "center", width: 84 },
                   { title: "Other", dataIndex: "other", align: "center", width: 64 },
+                  removeColumn((r) => removeOperator(r.key)),
                 ]}
               />
               <Text type="secondary" style={{ fontSize: 10, display: "block", marginTop: 4 }}>
@@ -1074,6 +1197,7 @@ export default function SlfSubmissionReport({
                 { title: "Active Hazardous", dataIndex: "activeHazardous", align: "right", render: (v) => Math.round(v).toLocaleString() },
                 { title: "Accepts Haz.", dataIndex: "acceptsHazardous", width: 90, align: "center" },
                 { title: "Last Updated", dataIndex: "lastUpdated", width: 110 },
+                removeColumn((r) => removeBaseline(r.key)),
               ]}
             />
           ) : (
