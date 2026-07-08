@@ -223,6 +223,21 @@ function computeCellPlacementSummary(entry) {
   return { placed, total: trucks.length, known: true };
 }
 
+// Collect the distinct cell names a submission's waste was placed into. The list
+// query already selects trucks.cellName / trucks.vehicles.cellName, so this adds
+// the assigned-cell labels to the admin list without shipping full trucks.
+function collectCellNames(entry) {
+  const trucks = Array.isArray(entry?.trucks) ? entry.trucks : [];
+  const names = new Set();
+  for (const truck of trucks) {
+    if (truck?.cellName) names.add(String(truck.cellName).trim());
+    for (const vehicle of Array.isArray(truck?.vehicles) ? truck.vehicles : []) {
+      if (vehicle?.cellName) names.add(String(vehicle.cellName).trim());
+    }
+  }
+  return [...names].filter(Boolean);
+}
+
 // Coerce any incoming unit string to one of the schema-allowed enum values so a
 // stray label (e.g. "cubic meters") can never trigger a Mongoose ValidationError
 // (which would surface to the portal user as a 500 server error).
@@ -1725,6 +1740,7 @@ router.get("/", optionalAuth, async (req, res) => {
           ...entry,
           truckCount: entry.truckCount ?? (Array.isArray(entry.trucks) ? entry.trucks.length : 0),
           cellPlacement: computeCellPlacementSummary(entry),
+          cellNames: collectCellNames(entry),
           trucks: includeTrucks ? entry.trucks : [],
         })),
         total,
@@ -1738,6 +1754,7 @@ router.get("/", optionalAuth, async (req, res) => {
         ? entries.map((entry) => ({
             ...entry,
             cellPlacement: computeCellPlacementSummary(entry),
+            cellNames: collectCellNames(entry),
             trucks: [],
           }))
         : entries

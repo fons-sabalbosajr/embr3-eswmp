@@ -22,6 +22,7 @@ import {
   EyeOutlined,
   ReloadOutlined,
   SearchOutlined,
+  FilePdfOutlined,
   BankOutlined,
   InboxOutlined,
   CarOutlined,
@@ -34,6 +35,7 @@ import {
 import dayjs from "dayjs";
 // FullCalendar is heavy; load it only when the disposal calendar modal opens.
 const SummaryDisposalCalendar = lazy(() => import("./SummaryDisposalCalendar"));
+const SlfSubmissionReport = lazy(() => import("./SlfSubmissionReport"));
 import api from "../../api";
 import { fetchWithCache, invalidateCache } from "../../utils/pageCache";
 import { getSocket } from "../../utils/socket";
@@ -312,6 +314,8 @@ export default function SubmissionSummary({ isDark }) {
   const [calendarLoading, setCalendarLoading] = useState(false);
   const [calendarDate, setCalendarDate] = useState(dayjs());
   const [submissionDetail, setSubmissionDetail] = useState(null);
+  const [portalUsers, setPortalUsers] = useState([]);
+  const [reportOpen, setReportOpen] = useState(false);
 
   useEffect(() => {
     ensureSummaryTileStyles();
@@ -356,15 +360,17 @@ export default function SubmissionSummary({ isDark }) {
     await fetchWithCache(
       `${SUMMARY_CACHE_KEY}:ref`,
       async () => {
-        const [facilitiesRes, baselinesRes, settingsRes] = await Promise.all([
+        const [facilitiesRes, baselinesRes, settingsRes, portalUsersRes] = await Promise.all([
           api.get("/slf-facilities"),
           api.get("/data-slf/baselines"),
           api.get("/settings/app"),
+          api.get("/portal-users").catch(() => ({ data: [] })),
         ]);
         return {
           facilities: Array.isArray(facilitiesRes.data) ? facilitiesRes.data : [],
           baselines: Array.isArray(baselinesRes.data) ? baselinesRes.data : [],
           settings: settingsRes.data || {},
+          portalUsers: Array.isArray(portalUsersRes.data) ? portalUsersRes.data : [],
         };
       },
       {
@@ -374,6 +380,7 @@ export default function SubmissionSummary({ isDark }) {
           setFacilities(payload.facilities || []);
           setBaselines(payload.baselines || []);
           setSettings(payload.settings || {});
+          setPortalUsers(payload.portalUsers || []);
         },
       },
     );
@@ -848,6 +855,7 @@ export default function SubmissionSummary({ isDark }) {
             <Select.Option value="reverted">Reverted</Select.Option>
           </Select>
           <Button icon={<ReloadOutlined />} loading={loading} onClick={() => { fetchRecords({ force: true }); fetchReferenceData({ force: true }); }}>Refresh</Button>
+          <Button type="primary" icon={<FilePdfOutlined />} onClick={() => setReportOpen(true)}>Generate PDF Report</Button>
         </Space>
         <Table
           dataSource={summaryRows}
@@ -1075,6 +1083,21 @@ export default function SubmissionSummary({ isDark }) {
           </Space>
         )}
       </Modal>
+
+      {reportOpen && (
+        <Suspense fallback={null}>
+          <SlfSubmissionReport
+            open={reportOpen}
+            onClose={() => setReportOpen(false)}
+            tiles={tiles}
+            slfRows={slfRows}
+            portalUsers={portalUsers}
+            facilities={facilities}
+            baselines={baselines}
+            totals={totals}
+          />
+        </Suspense>
+      )}
     </div>
   );
 }

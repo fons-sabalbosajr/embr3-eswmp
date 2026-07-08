@@ -134,6 +134,23 @@ export default function SubmissionSettings({
   });
   const [viewRecord, setViewRecord] = useState(null);
   const [groupedEntriesRecord, setGroupedEntriesRecord] = useState(null);
+  // Compact summary for the Group Entries modal — derived only from fields the
+  // list API already returns (cellNames, totalVolumeM3/Tons, status).
+  const groupedSummary = useMemo(() => {
+    const entries = groupedEntriesRecord?.groupedEntries || [];
+    const cellSet = new Set();
+    let m3 = 0;
+    let tons = 0;
+    const statusCounts = {};
+    entries.forEach((e) => {
+      (e.cellNames || []).forEach((c) => c && cellSet.add(c));
+      m3 += Number(e.totalVolumeM3 || 0);
+      tons += Number(e.totalVolumeTons || 0);
+      const s = e.status || "pending";
+      statusCounts[s] = (statusCounts[s] || 0) + 1;
+    });
+    return { totalEntries: entries.length, cells: [...cellSet], m3, tons, statusCounts };
+  }, [groupedEntriesRecord]);
   const [editRecord, setEditRecord] = useState(null);
   const [editLoading, setEditLoading] = useState(false);
   const [selectedRowKeys, setSelectedRowKeys] = useState([]);
@@ -1170,6 +1187,14 @@ export default function SubmissionSettings({
     reverted: "volcano",
     editApproved: "cyan",
   };
+  // Hex equivalents for Progress bars (Ant tag color names aren't all valid CSS).
+  const statusHex = {
+    pending: "#fa8c16",
+    acknowledged: "#52c41a",
+    rejected: "#ff4d4f",
+    reverted: "#fa541c",
+    editApproved: "#13c2c2",
+  };
 
   const openGroupedEntriesModal = useCallback((record) => {
     setGroupedEntriesRecord(record);
@@ -1694,6 +1719,79 @@ export default function SubmissionSettings({
                 actions below.
               </Text>
             </div>
+
+            {/* Summary cards for the selected group */}
+            <Row gutter={[10, 10]}>
+              <Col xs={12} md={6}>
+                <Card size="small" styles={{ body: { padding: "10px 12px" } }}>
+                  <Text type="secondary" style={{ fontSize: 11 }}>Total Entries</Text>
+                  <div style={{ fontSize: 20, fontWeight: 700, color: ACCENT }}>
+                    {groupedSummary.totalEntries}
+                  </div>
+                </Card>
+              </Col>
+              <Col xs={12} md={6}>
+                <Card size="small" styles={{ body: { padding: "10px 12px" } }}>
+                  <Text type="secondary" style={{ fontSize: 11 }}>Assigned Cell(s)</Text>
+                  <div style={{ fontSize: 20, fontWeight: 700, color: "#13c2c2" }}>
+                    {groupedSummary.cells.length || "—"}
+                  </div>
+                  {groupedSummary.cells.length > 0 && (
+                    <div style={{ marginTop: 2 }}>
+                      {groupedSummary.cells.slice(0, 4).map((c) => (
+                        <Tag key={c} color="cyan" style={{ margin: "2px 2px 0 0", fontSize: 10 }}>{c}</Tag>
+                      ))}
+                      {groupedSummary.cells.length > 4 && (
+                        <Tag style={{ fontSize: 10 }}>+{groupedSummary.cells.length - 4}</Tag>
+                      )}
+                    </div>
+                  )}
+                </Card>
+              </Col>
+              <Col xs={12} md={6}>
+                <Card size="small" styles={{ body: { padding: "10px 12px" } }}>
+                  <Text type="secondary" style={{ fontSize: 11 }}>Total Waste Volume</Text>
+                  <div style={{ fontSize: 16, fontWeight: 700, color: "#722ed1" }}>
+                    {groupedSummary.m3 > 0 || groupedSummary.tons > 0
+                      ? [
+                          groupedSummary.m3 > 0 ? `${Math.round(groupedSummary.m3).toLocaleString()} m³` : null,
+                          groupedSummary.tons > 0 ? `${Math.round(groupedSummary.tons).toLocaleString()} t` : null,
+                        ].filter(Boolean).join(" / ")
+                      : "—"}
+                  </div>
+                </Card>
+              </Col>
+              <Col xs={12} md={6}>
+                <Card size="small" styles={{ body: { padding: "10px 12px" } }}>
+                  <Text type="secondary" style={{ fontSize: 11 }}>Status Summary</Text>
+                  <div style={{ marginTop: 4 }}>
+                    {Object.entries(groupedSummary.statusCounts).map(([s, n]) => (
+                      <Tag key={s} color={statusColors[s] || "default"} style={{ margin: "0 4px 4px 0" }}>
+                        {s}: {n}
+                      </Tag>
+                    ))}
+                  </div>
+                </Card>
+              </Col>
+            </Row>
+
+            {/* Simple status distribution visual */}
+            {groupedSummary.totalEntries > 0 && (
+              <div>
+                {Object.entries(groupedSummary.statusCounts).map(([s, n]) => (
+                  <div key={s} style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 2 }}>
+                    <Text style={{ fontSize: 11, width: 96, textTransform: "capitalize" }}>{s}</Text>
+                    <Progress
+                      percent={Math.round((n / groupedSummary.totalEntries) * 100)}
+                      size="small"
+                      strokeColor={statusHex[s] || "#8c8c8c"}
+                      style={{ flex: 1, margin: 0 }}
+                    />
+                  </div>
+                ))}
+              </div>
+            )}
+
             <Table
               className="portal-user-wrap-table"
               size="small"
@@ -1730,6 +1828,31 @@ export default function SubmissionSettings({
                       {entry.truckCount ?? entry.trucks?.length ?? 0}
                     </Text>
                   ),
+                },
+                {
+                  title: "Assigned Cell",
+                  key: "cell",
+                  width: 150,
+                  render: (_, entry) => {
+                    const cells = entry.cellNames && entry.cellNames.length
+                      ? entry.cellNames
+                      : [...new Set(
+                          (entry.trucks || []).flatMap((t) => [
+                            t.cellName,
+                            ...(t.vehicles || []).map((v) => v.cellName),
+                          ]).filter(Boolean),
+                        )];
+                    if (!cells.length) {
+                      return <Tag color="orange" style={{ fontSize: 10, margin: 0 }}>Unassigned</Tag>;
+                    }
+                    return (
+                      <Space size={2} wrap>
+                        {cells.map((c) => (
+                          <Tag key={c} color="cyan" style={{ fontSize: 10, margin: 0 }}>{c}</Tag>
+                        ))}
+                      </Space>
+                    );
+                  },
                 },
                 {
                   title: "Status",

@@ -601,9 +601,13 @@ export default function AdminHome() {
   }, []);
 
   useEffect(() => {
+    // Wait until the authenticated admin is resolved (/auth/me) before hitting
+    // protected endpoints or opening the socket — otherwise the first render
+    // fires /messages/conversations (401) and connects a socket with no identity.
+    if (!user?.email) return undefined;
     fetchNotifications();
     fetchMessagePreview();
-    const socket = connectSocket("admin", { email: user?.email, userId: user?.id || user?._id });
+    const socket = connectSocket("admin", { email: user.email, userId: user.id || user._id });
     socket.on("notification", applyRealtimeNotification);
     socket.on("data-refresh", ({ target } = {}) => {
       fetchNotifications();
