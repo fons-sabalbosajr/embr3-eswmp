@@ -27,7 +27,12 @@ export function connectSocket(role, identity) {
   socket = io(SOCKET_URL, {
     path: "/eswm-pipeline/socket.io",
     query,
-    transports: ["websocket", "polling"],
+    // Start with polling then upgrade to WebSocket. Behind the /eswm-pipeline
+    // reverse proxy a websocket-first connection can fail its handshake (logging
+    // "WebSocket connection ... failed" in the console) before any fallback; the
+    // polling→upgrade order establishes the session reliably and still uses WS.
+    transports: ["polling", "websocket"],
+    withCredentials: true,
   });
 
   return socket;

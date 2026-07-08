@@ -1261,9 +1261,13 @@ export default function SLFPortal() {
         allowedCells.length === 0 || allowedCells.includes(cellValue);
       // Once a cell is 100% filled, it is no longer available for portal waste
       // placement even if it is still marked Active/Open in the infra status.
+      // Custom cell name (admin Cell Infra rename) drives the label; the stored
+      // value stays "Cell N" so existing placements are never orphaned.
+      const customName = String(slfInfo?.cellNames?.[index] || "").trim();
+      const baseLabel = customName || `Cell ${index + 1}`;
       return isOpen && submissionAllowed && userAllowed && !isFull
         ? {
-            label: `Cell ${index + 1}${slfInfo?.cellTypes?.[index] ? ` - ${slfInfo.cellTypes[index]}` : ""}`,
+            label: `${baseLabel}${slfInfo?.cellTypes?.[index] ? ` - ${slfInfo.cellTypes[index]}` : ""}`,
             value: cellValue,
             cellType: slfInfo?.cellTypes?.[index] || "Residual",
             cellIndex: index,
@@ -1282,8 +1286,10 @@ export default function SLFPortal() {
     return Array.from({ length: count }, (_, index) => {
       const status = normalizeCellStatus(slfInfo?.cellStatuses?.[index]);
       const type = slfInfo?.cellTypes?.[index] || "Residual";
+      const customName = String(slfInfo?.cellNames?.[index] || "").trim();
+      const baseLabel = customName || `Cell ${index + 1}`;
       return {
-        label: `Cell ${index + 1} - ${type}${status ? ` (${status})` : ""}`,
+        label: `${baseLabel} - ${type}${status ? ` (${status})` : ""}`,
         value: `Cell ${index + 1}`,
         cellType: type,
         cellIndex: index,
@@ -1318,6 +1324,49 @@ export default function SLFPortal() {
       return Number(truck.actualVolume || 0) > 0 && !truck.cellName;
     });
   }, []);
+
+  // Admin-configurable allowance: how far a truck's actual waste volume may
+  // exceed its stated capacity before a submission is blocked. Falls back to 10%.
+  const capacityAllowancePct = (() => {
+    const pct = Number(portalSettings?.truckCapacityAllowancePercent);
+    return Number.isFinite(pct) && pct >= 0 ? pct : 10;
+  })();
+
+  // Compare an entered waste volume against a truck/vehicle capacity, honoring the
+  // configured allowance. Returns whether it exceeds the allowed threshold and the
+  // computed maximum. Units are normalized to the capacity's unit before comparing.
+  const evaluateCapacity = useCallback(
+    (actualVolume, actualVolumeUnit, capacity, capacityUnit) => {
+      const cap = Number(capacity || 0);
+      const vol = Number(actualVolume || 0);
+      if (!(cap > 0) || !(vol > 0)) {
+        return { hasCapacity: cap > 0, exceeded: false, maxAllowed: null };
+      }
+      const volInCapUnit = convertVolume(
+        vol,
+        actualVolumeUnit || capacityUnit || "m³",
+        capacityUnit || "m³",
+      );
+      const maxAllowed = cap + (cap * capacityAllowancePct) / 100;
+      // Small epsilon so exact matches (e.g. 11 vs 11) are never flagged.
+      return {
+        hasCapacity: true,
+        exceeded: volInCapUnit > maxAllowed + 1e-9,
+        maxAllowed,
+      };
+    },
+    [capacityAllowancePct],
+  );
+
+  // Effective capacity for a vehicle: its own capacity, else the parent truck's.
+  const vehicleEffectiveCapacity = useCallback(
+    (truck, vehicle) => ({
+      capacity: vehicle?.capacity ?? truck?.truckCapacity ?? null,
+      capacityUnit:
+        vehicle?.capacityUnit || truck?.truckCapacityUnit || "m³",
+    }),
+    [],
+  );
 
   const unplacedSubmissions = useMemo(() => {
     if (activeCellOptions.length === 0) return [];
@@ -1980,6 +2029,19 @@ export default function SLFPortal() {
         !hasHazardousWasteCode(v.hazWasteCode)
       )
         vehErr.hazWasteCode = "Hazardous code required";
+      // Truck capacity exceedance (with configurable allowance).
+      const { capacity, capacityUnit } = vehicleEffectiveCapacity(truckDraft, v);
+      const cap = evaluateCapacity(
+        v.actualVolume,
+        v.actualVolumeUnit,
+        capacity,
+        capacityUnit,
+      );
+      if (cap.exceeded) {
+        vehErr.actualVolume = `Waste volume exceeds the allowed truck capacity (max ${Number(
+          cap.maxAllowed.toFixed(2),
+        )} ${(capacityUnit || "m³").replace("m3", "m³")} at ${capacityAllowancePct}% allowance).`;
+      }
       if (Object.keys(vehErr).length) vehicleErrors[idx] = vehErr;
     });
     if (vehicleErrors.length) {
@@ -3985,6 +4047,123 @@ export default function SLFPortal() {
     };
   };
 
+  // Final pre-submit validation across ALL added trucks/vehicles. Enforces two
+  // rules that a bulk upload or loaded draft could otherwise bypass:
+  //   \u2022 Waste Generation cell placement is required (Issue 3).
+  //   \u2022 Truck capacity exceedance beyond the configured allowance is blocked (Issue 2).
+  // Returns { ok, capacityMessages, placementMessages }.
+  const validateSubmissionTrucks = useCallback(() => {
+    const capacityMessages = [];
+    const placementMessages = [];
+    const requireCell = activeCellOptions.length > 0;
+    (trucks || []).forEach((truck, ti) => {
+      const label = truck.disposalTicketNo
+        ? `Ticket ${truck.disposalTicketNo}`
+        : `Truck ${ti + 1}`;
+      const vehs = (truck.vehicles || []).filter(
+        (v) => Number(v.actualVolume || 0) > 0 || v.plateNumber?.trim(),
+      );
+      const rows = vehs.length
+        ? vehs.map((v) => ({
+            actualVolume: v.actualVolume,
+            actualVolumeUnit: v.actualVolumeUnit,
+            cellName: v.cellName,
+            ...vehicleEffectiveCapacity(truck, v),
+          }))
+        : [
+            {
+              actualVolume: truck.actualVolume,
+              actualVolumeUnit: truck.actualVolumeUnit,
+              cellName: truck.cellName,
+              capacity: truck.truckCapacity,
+              capacityUnit: truck.truckCapacityUnit || "m\u00b3",
+            },
+          ];
+      rows.forEach((row) => {
+        const vol = Number(row.actualVolume || 0);
+        if (vol > 0 && requireCell && !row.cellName?.trim()) {
+          placementMessages.push(label);
+        }
+        const cap = evaluateCapacity(
+          row.actualVolume,
+          row.actualVolumeUnit,
+          row.capacity,
+          row.capacityUnit,
+        );
+        if (cap.exceeded) {
+          capacityMessages.push(
+            `${label}: ${vol} exceeds max ${Number(
+              cap.maxAllowed.toFixed(2),
+            )} ${(row.capacityUnit || "m\u00b3").replace("m3", "m\u00b3")}`,
+          );
+        }
+      });
+    });
+    return {
+      ok: capacityMessages.length === 0 && placementMessages.length === 0,
+      capacityMessages,
+      placementMessages: [...new Set(placementMessages)],
+    };
+  }, [trucks, activeCellOptions.length, evaluateCapacity, vehicleEffectiveCapacity]);
+
+  // Task 1: a reverted submission left unresolved for 24h+ blocks new submissions
+  // until the user corrects/resubmits it (which flips its status to pending).
+  const unresolvedRevert = useMemo(() => {
+    const cutoff = Date.now() - 24 * 60 * 60 * 1000;
+    return (
+      (submissions || []).find((s) => {
+        if (s?.status !== "reverted") return false;
+        const ts = s.revertedAt || s.updatedAt;
+        return ts && new Date(ts).getTime() <= cutoff;
+      }) || null
+    );
+  }, [submissions]);
+
+  // Task 2: project this submission's per-cell waste against the cell's current
+  // fill/capacity (from the facility Cell Infra). Full = projected >= capacity
+  // (blocks); near-full = projected >= 80% but < 100% (warns, non-blocking).
+  const evaluateCellFill = useCallback(() => {
+    const fullCells = [];
+    const nearFullCells = [];
+    const perCell = new Map();
+    (trucks || []).forEach((truck) => {
+      const rows = (truck.vehicles || []).filter((v) => Number(v.actualVolume || 0) > 0);
+      const list = rows.length ? rows : [truck];
+      list.forEach((row) => {
+        const idx = Number.isInteger(row.cellIndex)
+          ? row.cellIndex
+          : Number.isInteger(truck.cellIndex)
+            ? truck.cellIndex
+            : null;
+        const vol = Number(row.actualVolume || 0);
+        if (idx == null || !(vol > 0)) return;
+        const capUnit = normalizeUnit(
+          slfInfo?.cellCapacityUnits?.[idx] || slfInfo?.cellFillUnits?.[idx] || "m³",
+        );
+        const converted = convertVolume(vol, row.actualVolumeUnit || capUnit, capUnit);
+        perCell.set(idx, (perCell.get(idx) || 0) + converted);
+      });
+    });
+    perCell.forEach((addedVol, idx) => {
+      const capacity = Number(slfInfo?.cellCapacities?.[idx] || 0);
+      if (!(capacity > 0)) return;
+      const capUnit = normalizeUnit(
+        slfInfo?.cellCapacityUnits?.[idx] || slfInfo?.cellFillUnits?.[idx] || "m³",
+      );
+      const currentFill = convertVolume(
+        Number(slfInfo?.cellFillValues?.[idx] || 0),
+        slfInfo?.cellFillUnits?.[idx] || capUnit,
+        capUnit,
+      );
+      const projected = currentFill + addedVol;
+      const label = String(slfInfo?.cellNames?.[idx] || "").trim() || `Cell ${idx + 1}`;
+      const pct = Math.round((projected / capacity) * 100);
+      if (projected >= capacity) fullCells.push({ label, pct });
+      else if (pct >= 80) nearFullCells.push({ label, pct });
+    });
+    return { fullCells, nearFullCells };
+  }, [trucks, slfInfo]);
+
   const handleConfirmSubmit = async () => {
     if (portalUser?.portalAccess?.canSubmitDisposal === false) {
       showError({
@@ -3994,6 +4173,64 @@ export default function SLFPortal() {
           "Your account is not permitted to submit disposal entries. Please contact EMB Region III.",
       });
       return;
+    }
+    // Task 1: block new submissions while a reverted submission stays unresolved
+    // for 24h+. The user must correct/resubmit it first.
+    if (unresolvedRevert) {
+      showError({
+        type: "error",
+        title: "Resolve Reverted Submission First",
+        message: `You have a reverted submission${unresolvedRevert.idNo ? ` (${unresolvedRevert.idNo})` : ""} that has been unresolved for over 24 hours. Please correct and resubmit it before submitting a new transaction.`,
+      });
+      return;
+    }
+    // Block submission when cell placement is missing or a truck exceeds its
+    // allowed capacity threshold. Show a clear, actionable message.
+    const preCheck = validateSubmissionTrucks();
+    if (!preCheck.ok) {
+      const parts = [];
+      if (preCheck.placementMessages.length) {
+        parts.push(
+          `Assign a disposal cell for: ${preCheck.placementMessages.join(", ")}.`,
+        );
+      }
+      if (preCheck.capacityMessages.length) {
+        parts.push(
+          `Waste volume exceeds the allowed truck capacity threshold (${capacityAllowancePct}% allowance) \u2014 ${preCheck.capacityMessages.join("; ")}.`,
+        );
+      }
+      showError({
+        type: "error",
+        title: "Cannot Submit Yet",
+        message: parts.join(" "),
+      });
+      return;
+    }
+    // Task 2: active cell capacity. Full cells block; near-full cells warn only.
+    const cellFill = evaluateCellFill();
+    if (cellFill.fullCells.length) {
+      showError({
+        type: "error",
+        title: "Cell Full",
+        message: `${cellFill.fullCells
+          .map((c) => `${c.label} (${c.pct}%)`)
+          .join(", ")} would exceed capacity. Please place this waste in another active cell that is not full.`,
+      });
+      return;
+    }
+    if (cellFill.nearFullCells.length) {
+      const proceed = await Swal.fire({
+        icon: "warning",
+        title: "Cell Nearing Full",
+        html: `${cellFill.nearFullCells
+          .map((c) => `<b>${c.label}</b> is at ~${c.pct}% capacity`)
+          .join("<br/>")}<br/><br/>You may still submit, but consider using another cell soon.`,
+        showCancelButton: true,
+        confirmButtonText: "Submit Anyway",
+        cancelButtonText: "Review",
+        confirmButtonColor: "#1a3353",
+      });
+      if (!proceed.isConfirmed) return;
     }
     if (!navigator.onLine) {
       showError({

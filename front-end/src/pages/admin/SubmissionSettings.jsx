@@ -126,7 +126,17 @@ export default function SubmissionSettings({
   const pendingRefreshRef = useRef(false);
   const latestRequestKeyRef = useRef("");
   const [statusFilter, setStatusFilter] = useState("all");
+  const [cellPlacementFilter, setCellPlacementFilter] = useState("all");
   const [mergeSlfOpen, setMergeSlfOpen] = useState(false);
+  // ID-fix preview modal (dry-run before applying Fix XX / Fix PVT-LGU).
+  const [idFixPreview, setIdFixPreview] = useState({
+    open: false,
+    type: null,
+    loading: false,
+    applying: false,
+    changes: [],
+    message: "",
+  });
   const [pagination, setPagination] = useState({
     current: 1,
     pageSize: DEFAULT_PAGE_SIZE,
@@ -226,6 +236,37 @@ export default function SubmissionSettings({
       setRepairingType(false);
     }
   };
+
+  // Load a dry-run preview of the affected ID No. rows before applying a fix.
+  const openIdFixPreview = async (type) => {
+    setIdFixPreview({ open: true, type, loading: true, applying: false, changes: [], message: "" });
+    try {
+      const endpoint = type === "xx" ? "/data-slf/repair-xx-ids" : "/data-slf/repair-type-ids";
+      const { data } = await api.post(endpoint, { preview: true });
+      setIdFixPreview((prev) => ({
+        ...prev,
+        loading: false,
+        changes: Array.isArray(data.changes) ? data.changes : [],
+        message: data.message || "",
+      }));
+    } catch {
+      setIdFixPreview({ open: false, type: null, loading: false, applying: false, changes: [], message: "" });
+      Swal.fire("Error", "Could not load the ID fix preview.", "error");
+    }
+  };
+
+  // Apply the fix only after the admin confirms the preview.
+  const confirmIdFix = async () => {
+    const { type } = idFixPreview;
+    setIdFixPreview((prev) => ({ ...prev, applying: true }));
+    try {
+      if (type === "xx") await handleRepairXX();
+      else await handleRepairTypeIds();
+    } finally {
+      setIdFixPreview({ open: false, type: null, loading: false, applying: false, changes: [], message: "" });
+    }
+  };
+
   // Address cascading dropdowns for admin edit
   const [addrRegions, setAddrRegions] = useState([]);
   const [addrProvinces, setAddrProvinces] = useState([]);
@@ -443,14 +484,42 @@ export default function SubmissionSettings({
       .filter(Boolean);
   }, [buildGroupedRow, data, getPortalSubmissionGroupKey]);
 
+  // Derive a single cell-placement status for a row (aggregated across grouped
+  // entries) — mirrors the Cell Placement column and drives the filter dropdown.
+  const getRowCellPlacementStatus = useCallback((row) => {
+    const sources =
+      Array.isArray(row.groupedEntries) && row.groupedEntries.length
+        ? row.groupedEntries
+        : [row];
+    let placed = 0;
+    let total = 0;
+    let known = false;
+    sources.forEach((e) => {
+      const cp = e?.cellPlacement;
+      if (cp?.known) {
+        known = true;
+        placed += cp.placed || 0;
+        total += cp.total || 0;
+      } else if (cp) {
+        total += cp.total || 0;
+      }
+    });
+    if (!known && total === 0) return "nowaste";
+    if (!known) return "unknown";
+    if (placed === 0) return "none";
+    if (placed >= total) return "assigned";
+    return "partial";
+  }, []);
+
   const filteredTableRows = useMemo(() => {
     // Status and search are now handled server-side;
     // only secondary client-side fields (e.g. grouped-batch matching) need filtering here.
     const needle = debouncedSearch.trim();
-    if (!needle) return tableRows;
     // Server already filtered by the plain fields. Do an additional pass only
     // for grouped-batch metadata that the server cannot see.
-    return tableRows.filter((row) =>
+    const searchFiltered = !needle
+      ? tableRows
+      : tableRows.filter((row) =>
       rowMatchesSearch(
         {
           ...row,
@@ -481,9 +550,13 @@ export default function SubmissionSettings({
           "groupedCompanies",
           "groupedSlfNames",
         ],
-      ),
+          ),
+        );
+    if (cellPlacementFilter === "all") return searchFiltered;
+    return searchFiltered.filter(
+      (row) => getRowCellPlacementStatus(row) === cellPlacementFilter,
     );
-  }, [debouncedSearch, tableRows]);
+  }, [debouncedSearch, tableRows, cellPlacementFilter, getRowCellPlacementStatus]);
 
   useEffect(() => {
     setPagination((prev) => {
@@ -1335,6 +1408,42 @@ export default function SubmissionSettings({
       },
     },
     {
+      title: "Remarks",
+      key: "remarks",
+      width: 200,
+      render: (_, r) => {
+        // Computed server-side (not stored) and aggregated across grouped entries.
+        const sources =
+          Array.isArray(r.groupedEntries) && r.groupedEntries.length
+            ? r.groupedEntries
+            : [r];
+        const severity = { error: 3, warning: 2, info: 1 };
+        const merged = new Map();
+        sources.forEach((e) => {
+          (e?.remarks || []).forEach((rm) => {
+            if (!rm?.text) return;
+            const prev = merged.get(rm.text);
+            if (!prev || (severity[rm.level] || 0) > (severity[prev] || 0)) {
+              merged.set(rm.text, rm.level || "info");
+            }
+          });
+        });
+        const items = [...merged.entries()];
+        if (!items.length)
+          return <Text type="secondary" style={{ fontSize: 11 }}>—</Text>;
+        const color = { error: "red", warning: "orange", info: "blue" };
+        return (
+          <Space size={[2, 2]} wrap>
+            {items.map(([text, level]) => (
+              <Tag key={text} color={color[level] || "default"} style={{ fontSize: 10, margin: 0 }}>
+                {text}
+              </Tag>
+            ))}
+          </Space>
+        );
+      },
+    },
+    {
       title: "Status",
       dataIndex: "status",
       key: "status",
@@ -1567,33 +1676,39 @@ export default function SubmissionSettings({
             <Option value="reverted">Reverted</Option>
             <Option value="editApproved">Edit Approved</Option>
           </Select>
+          <Select
+            value={cellPlacementFilter}
+            onChange={(value) => {
+              setCellPlacementFilter(value);
+              setSelectedRowKeys([]);
+              setPagination((prev) => ({ ...prev, current: 1 }));
+            }}
+            style={{ width: "100%", maxWidth: 190 }}
+          >
+            <Option value="all">All Cell Placement</Option>
+            <Option value="assigned">Cells Assigned</Option>
+            <Option value="partial">Partial</Option>
+            <Option value="none">No Cells Assigned</Option>
+            <Option value="nowaste">No Waste Data</Option>
+          </Select>
           {canRepairIds && (
-            <Popconfirm
-              title="Fix XX Province Codes"
-              description="This will update all ID Nos with 'XX' province code using the stored company province data."
-              onConfirm={handleRepairXX}
-              okText="Yes, Fix Now"
-              cancelText="Cancel"
-              okButtonProps={{ loading: repairingXX }}
+            <Button
+              icon={<ToolOutlined />}
+              loading={repairingXX || (idFixPreview.open && idFixPreview.type === "xx")}
+              danger
+              onClick={() => openIdFixPreview("xx")}
             >
-              <Button icon={<ToolOutlined />} loading={repairingXX} danger>
-                Fix XX IDs
-              </Button>
-            </Popconfirm>
+              Fix XX IDs
+            </Button>
           )}
           {canRepairIds && (
-            <Popconfirm
-              title="Fix PVT/LGU ID Mismatches (Developer)"
-              description="Realigns each ID No.'s LGU/PVT segment using the SLF ownership, province, and name as a strict match. Records whose SLF cannot be confidently identified are skipped."
-              onConfirm={handleRepairTypeIds}
-              okText="Yes, Fix Now"
-              cancelText="Cancel"
-              okButtonProps={{ loading: repairingType }}
+            <Button
+              icon={<IdcardOutlined />}
+              loading={repairingType || (idFixPreview.open && idFixPreview.type === "type")}
+              onClick={() => openIdFixPreview("type")}
             >
-              <Button icon={<IdcardOutlined />} loading={repairingType}>
-                Fix PVT/LGU IDs
-              </Button>
-            </Popconfirm>
+              Fix PVT/LGU IDs
+            </Button>
           )}
           {isDeveloper && (
             <Button
@@ -1665,7 +1780,7 @@ export default function SubmissionSettings({
             }));
           }}
           size="middle"
-          scroll={{ x: 1250, y: 640 }}
+          scroll={{ x: 1450, y: 640 }}
           virtual
           rowSelection={{
             selectedRowKeys,
@@ -4773,6 +4888,81 @@ export default function SubmissionSettings({
           onMerged={() => fetchData({ force: true })}
         />
       )}
+
+      <Modal
+        open={idFixPreview.open}
+        title={
+          idFixPreview.type === "xx"
+            ? "Preview — Fix XX Province Codes"
+            : "Preview — Fix PVT/LGU ID Mismatches"
+        }
+        onCancel={() =>
+          setIdFixPreview({ open: false, type: null, loading: false, applying: false, changes: [], message: "" })
+        }
+        onOk={confirmIdFix}
+        okText={`Confirm & Fix${idFixPreview.changes.length ? ` (${idFixPreview.changes.length})` : ""}`}
+        okButtonProps={{
+          disabled: idFixPreview.loading || idFixPreview.changes.length === 0,
+          loading: idFixPreview.applying,
+          danger: idFixPreview.type === "xx",
+        }}
+        cancelText="Cancel"
+        width={760}
+        destroyOnHidden
+      >
+        <Text type="secondary" style={{ display: "block", marginBottom: 10 }}>
+          {idFixPreview.loading
+            ? "Loading affected records…"
+            : idFixPreview.message ||
+              "Review the proposed ID No. changes below. No records are modified until you confirm."}
+        </Text>
+        <Table
+          size="small"
+          loading={idFixPreview.loading}
+          dataSource={idFixPreview.changes}
+          rowKey={(r) => String(r._id)}
+          pagination={{ pageSize: 8, showTotal: (t) => `${t} record(s) to fix` }}
+          scroll={{ x: 680, y: 360 }}
+          locale={{ emptyText: <Empty description="No records need fixing" /> }}
+          columns={[
+            {
+              title: "Current ID No.",
+              dataIndex: "currentIdNo",
+              key: "currentIdNo",
+              width: 150,
+              render: (v) => <Text delete style={{ fontSize: 12 }}>{v}</Text>,
+            },
+            {
+              title: "Proposed ID No.",
+              dataIndex: "proposedIdNo",
+              key: "proposedIdNo",
+              width: 150,
+              render: (v) => <Text strong style={{ fontSize: 12, color: "#52c41a" }}>{v}</Text>,
+            },
+            {
+              title: "SLF / Company",
+              key: "slf",
+              render: (_, r) => (
+                <Text style={{ fontSize: 12 }}>{r.slfName || r.lguCompanyName || "—"}</Text>
+              ),
+            },
+            {
+              title: "Type",
+              dataIndex: "companyType",
+              key: "companyType",
+              width: 70,
+              render: (v) => v || "—",
+            },
+            {
+              title: "Disposal Date",
+              dataIndex: "dateOfDisposal",
+              key: "dateOfDisposal",
+              width: 110,
+              render: (v) => (v ? dayjs(v).format("MM/DD/YYYY") : "—"),
+            },
+          ]}
+        />
+      </Modal>
     </div>
   );
 }

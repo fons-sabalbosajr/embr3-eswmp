@@ -1117,8 +1117,22 @@ export default function DeveloperSettings({onSettingsSaved, isDark, isDeveloper 
                   </Row>
                 </Card>
 
+                <div style={{ marginTop: 24, textAlign: "right" }}>
+                  <Button type="primary" htmlType="submit" loading={saving} icon={<SaveOutlined />} size="large"
+                    style={{ borderRadius: 8, fontWeight: 600, paddingLeft: 32, paddingRight: 32 }}>
+                    Save Settings
+                  </Button>
+                </div>
+              </Form>
+            ),
+          },
+          {
+            key: "volume-analysis",
+            label: <span><DatabaseOutlined /> Volume Analysis</span>,
+            children: (
+              <Form form={form} layout="vertical" onFinish={handleSave} initialValues={settings}>
                 <Card
-                  style={{ marginTop: 16, borderRadius: 10 }}
+                  style={{ marginTop: 0, borderRadius: 10 }}
                   title={
                     <Space>
                       <DatabaseOutlined style={{ color: "#52c41a" }} />
@@ -1138,6 +1152,17 @@ export default function DeveloperSettings({onSettingsSaved, isDark, isDeveloper 
                     <Col xs={24} md={12}>
                       <Form.Item name="preBaselineDisposalDetectorEnabled" label="Enable detector badges" valuePropName="checked">
                         <Switch checkedChildren="On" unCheckedChildren="Off" />
+                      </Form.Item>
+                    </Col>
+                  </Row>
+                  <Row gutter={[16, 0]}>
+                    <Col xs={24} md={12}>
+                      <Form.Item
+                        name="truckCapacityAllowancePercent"
+                        label="Truck Capacity Allowance (%)"
+                        tooltip="Maximum percentage a truck's actual waste volume may exceed its stated capacity before a portal submission is blocked. Example: capacity 10 + 10% = max 11. Default 10%."
+                      >
+                        <InputNumber min={0} max={100} step={1} style={{ width: "100%" }} placeholder="10" addonAfter="%" />
                       </Form.Item>
                     </Col>
                   </Row>

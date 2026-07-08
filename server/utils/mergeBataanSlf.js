@@ -144,4 +144,4 @@ async function mergeBataanSlf() {
   });
 }
 
-module.exports = { mergeBataanSlf };
+module.exports = { mergeBataanSlf, isBataanSlfName };

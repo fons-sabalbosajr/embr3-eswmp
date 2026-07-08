@@ -136,6 +136,7 @@ function buildCellStatusRows(summary, throughDate, settings = {}) {
   const capacityUnits = facility?.cellCapacityUnits || [];
   const fillValues = facility?.cellFillValues || [];
   const fillUnits = facility?.cellFillUnits || [];
+  const cellNames = facility?.cellNames || [];
   const baselineDate = baseline?.lastUpdated || baseline?.createdAt;
   const cumulativeRecords = summary.records.filter((record) => {
     if (!record.dateOfDisposal) return false;
@@ -166,7 +167,7 @@ function buildCellStatusRows(summary, throughDate, settings = {}) {
     const pct = capacity > 0 ? Math.min(Math.round((used / capacity) * 100), 100) : null;
     return {
       key: index,
-      cell: `Cell ${index + 1}`,
+      cell: String(cellNames[index] || "").trim() || `Cell ${index + 1}`,
       status,
       used,
       capacity,
@@ -835,35 +836,49 @@ export default function SubmissionSummary({ isDark }) {
                 SLF Submissions Breakdown
               </Text>
             ),
+            // Filters/buttons aligned on the right of the header text; the header
+            // text stays on the left. stopPropagation keeps clicks from toggling
+            // the Collapse panel.
+            extra: (
+              <Space
+                size={8}
+                style={{ flexWrap: "wrap" }}
+                onClick={(event) => event.stopPropagation()}
+              >
+                <Input
+                  placeholder="Search SLF, generator, ID, or email..."
+                  prefix={<SearchOutlined />}
+                  value={search}
+                  onChange={(event) => setSearch(event.target.value)}
+                  allowClear
+                  style={{ width: 260, maxWidth: "100%" }}
+                />
+                <Select value={statusFilter} onChange={setStatusFilter} style={{ width: 170 }}>
+                  <Select.Option value="all">All Statuses</Select.Option>
+                  <Select.Option value="pending">Pending</Select.Option>
+                  <Select.Option value="acknowledged">Acknowledged</Select.Option>
+                  <Select.Option value="rejected">Rejected</Select.Option>
+                  <Select.Option value="revert_requested">Revert Requested</Select.Option>
+                  <Select.Option value="reverted">Reverted</Select.Option>
+                </Select>
+                <Button icon={<ReloadOutlined />} loading={loading} onClick={() => { fetchRecords({ force: true }); fetchReferenceData({ force: true }); }}>Refresh</Button>
+                <Button type="primary" icon={<FilePdfOutlined />} onClick={() => setReportOpen(true)}>Generate PDF Report</Button>
+              </Space>
+            ),
             children: (
               <>
-        <Space style={{ marginBottom: 14, flexWrap: "wrap" }}>
-          <Input
-            placeholder="Search SLF, generator, ID, or email..."
-            prefix={<SearchOutlined />}
-            value={search}
-            onChange={(event) => setSearch(event.target.value)}
-            allowClear
-            style={{ width: 300, maxWidth: "100%" }}
-          />
-          <Select value={statusFilter} onChange={setStatusFilter} style={{ width: 180 }}>
-            <Select.Option value="all">All Statuses</Select.Option>
-            <Select.Option value="pending">Pending</Select.Option>
-            <Select.Option value="acknowledged">Acknowledged</Select.Option>
-            <Select.Option value="rejected">Rejected</Select.Option>
-            <Select.Option value="revert_requested">Revert Requested</Select.Option>
-            <Select.Option value="reverted">Reverted</Select.Option>
-          </Select>
-          <Button icon={<ReloadOutlined />} loading={loading} onClick={() => { fetchRecords({ force: true }); fetchReferenceData({ force: true }); }}>Refresh</Button>
-          <Button type="primary" icon={<FilePdfOutlined />} onClick={() => setReportOpen(true)}>Generate PDF Report</Button>
-        </Space>
         <Table
           dataSource={summaryRows}
           columns={columns}
           loading={loading}
           rowKey="key"
           size="middle"
-          pagination={{ pageSize: 12, showTotal: (total) => `${total} SLF summary row(s)` }}
+          pagination={{
+            defaultPageSize: 12,
+            showSizeChanger: true,
+            pageSizeOptions: ["12", "25", "50", "100"],
+            showTotal: (total) => `${total} SLF summary row(s)`,
+          }}
           scroll={{ x: 1420 }}
           locale={{ emptyText: <Empty description="No submissions to summarize" /> }}
         />

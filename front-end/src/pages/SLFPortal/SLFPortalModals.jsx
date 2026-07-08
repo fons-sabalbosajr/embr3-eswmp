@@ -1348,12 +1348,19 @@ export default function SLFPortalModals({
                         </Text>
                       }
                       style={{ marginBottom: 4 }}
+                      validateStatus={
+                        truckErrors?.vehicles?.[vi]?.actualVolume ? "error" : ""
+                      }
+                      help={truckErrors?.vehicles?.[vi]?.actualVolume || ""}
                     >
                       <InputNumber
                         placeholder="Volume to this cell"
                         style={{ width: "100%" }}
                         min={0}
                         step={0.01}
+                        status={
+                          truckErrors?.vehicles?.[vi]?.actualVolume ? "error" : ""
+                        }
                         value={veh.actualVolume}
                         onChange={(val) => patchVehicle({ actualVolume: val })}
                       />
@@ -1380,10 +1387,17 @@ export default function SLFPortalModals({
                       }
                       tooltip="Active/open cell (set by the admin) where THIS vehicle's waste will be placed."
                       style={{ marginBottom: 4 }}
+                      validateStatus={
+                        truckErrors?.vehicles?.[vi]?.cellName ? "error" : ""
+                      }
+                      help={truckErrors?.vehicles?.[vi]?.cellName || ""}
                     >
                       <Select
                         showSearch
                         allowClear
+                        status={
+                          truckErrors?.vehicles?.[vi]?.cellName ? "error" : ""
+                        }
                         placeholder={
                           !veh.wasteType
                             ? "Select waste type first"

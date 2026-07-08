@@ -10,6 +10,7 @@ const Transaction = require("../models/Transaction");
 const Notification = require("../models/Notification");
 const UserPortal = require("../models/UserPortal");
 const { notifyAdmin, notifyPortal, refreshAdmin } = require("../utils/socketEmit");
+const { isBataanSlfName } = require("../utils/mergeBataanSlf");
 const { authMiddleware, developerOnly } = require("../middleware/auth");
 const jwt = require("jsonwebtoken");
 
@@ -88,6 +89,60 @@ function matchesBaselineName(item, requestedName) {
   const requestedKeys = getNameVariants(requestedName).map((name) => normalizeSlfName(name)).filter(Boolean);
   const itemKeys = getBaselineNameKeys(item);
   return requestedKeys.some((key) => itemKeys.includes(key));
+}
+
+// Like matchesBaselineName, but also treats the Bataan Engineered Sanitary
+// Landfill Facility (BESLF) aliases as one identity. The BESLF site was merged
+// from several legacy names ("Bataan Integrated Waste Management Facility", etc.)
+// whose records may still carry an old lguCompanyName/slfName alias. Without this
+// a baseline update requested under one alias would silently miss records saved
+// under another, so the update would appear to "not work". See mergeBataanSlf.js.
+function matchesSlfIdentity(item, requestedName) {
+  if (matchesBaselineName(item, requestedName)) return true;
+  if (isBataanSlfName(requestedName)) {
+    return isBataanSlfName(item?.slfName) || isBataanSlfName(item?.lguCompanyName);
+  }
+  return false;
+}
+
+// Resolve every DataSLF _id that belongs to an SLF, matching by name variants and
+// (for BESLF) merged legacy aliases. Used by the baseline update/approve/reject
+// routes so merged/legacy data never breaks a baseline update. Optionally restrict
+// to records that actually carry baseline data.
+async function resolveSlfRecordIds(slfName, { requireBaselineData = false, slfGenerator = null } = {}) {
+  const variants = getNameVariants(slfName);
+  if (variants.length === 0 && !slfGenerator) return [];
+
+  const orClauses = [];
+  variants.forEach((name) => {
+    // Prefix match so a paren-suffixed canonical name (e.g. "… (BESLF) (Private)")
+    // is still caught by its paren-stripped variant.
+    const rx = new RegExp(`^${escapeRegExp(name)}`, "i");
+    orClauses.push({ slfName: rx });
+    orClauses.push({ lguCompanyName: rx });
+  });
+  if (slfGenerator && mongoose.Types.ObjectId.isValid(String(slfGenerator))) {
+    orClauses.push({ slfGenerator });
+  }
+  // For the merged BESLF site, widen the candidate scan to every Bataan-ish record
+  // so aliases that don't share a prefix are still considered.
+  if (isBataanSlfName(slfName)) {
+    orClauses.push({ slfName: /bataan/i });
+    orClauses.push({ lguCompanyName: /bataan/i });
+  }
+  if (orClauses.length === 0) return [];
+
+  const candidates = await DataSLF.find({ $or: orClauses })
+    .setOptions({ includeHiddenYears: true })
+    .select("_id slfName lguCompanyName slfGenerator totalVolumeAccepted activeCellResidualVolume activeCellInertVolume activeCellHazardousVolume closedCellResidualVolume closedCellInertVolume closedCellHazardousVolume activeCellEntries closedCellEntries accreditedHaulers")
+    .lean();
+
+  const matched = candidates.filter((item) => {
+    if (slfGenerator && String(item.slfGenerator || "") === String(slfGenerator)) return true;
+    return matchesSlfIdentity(item, slfName);
+  });
+  const finalMatched = requireBaselineData ? matched.filter(hasBaselineData) : matched;
+  return [...new Set(finalMatched.map((item) => String(item._id)).filter(Boolean))];
 }
 
 async function softDeleteOverdueReverted(req) {
@@ -236,6 +291,62 @@ function collectCellNames(entry) {
     }
   }
   return [...names].filter(Boolean);
+}
+
+// Compute admin-review "remarks" for a submission from existing fields (never
+// stored — always derived so they can't go stale). Covers truck-capacity and
+// cell-placement attention flags. Cell near-full/full are cell-level and require
+// facility fill data, so they are surfaced in the Cell Waste Placement view.
+const TON_PER_M3 = 0.2;
+function toComparableVolume(value, fromUnit, toUnit) {
+  const num = Number(value || 0);
+  const from = normalizeUnit(fromUnit || "m³");
+  const to = normalizeUnit(toUnit || from);
+  if (!num || from === to) return num;
+  if (from === "tons" && to === "m³") return num / TON_PER_M3;
+  if (from === "m³" && to === "tons") return num * TON_PER_M3;
+  return num;
+}
+function computeSubmissionRemarks(entry, allowancePct = 10) {
+  const remarks = [];
+  const trucks = Array.isArray(entry?.trucks) ? entry.trucks : [];
+  const pct = Number.isFinite(Number(allowancePct)) && Number(allowancePct) >= 0 ? Number(allowancePct) : 10;
+
+  let noCapacity = false;
+  let exceeded = false;
+  const evalRow = (vol, volUnit, cap, capUnit) => {
+    const volume = Number(vol || 0);
+    if (!(volume > 0)) return;
+    if (!(Number(cap) > 0)) { noCapacity = true; return; }
+    const volInCap = toComparableVolume(volume, volUnit || capUnit || "m³", capUnit || "m³");
+    const maxAllowed = Number(cap) + (Number(cap) * pct) / 100;
+    if (volInCap > maxAllowed + 1e-9) exceeded = true;
+  };
+  for (const truck of trucks) {
+    const vehs = (truck?.vehicles || []).filter((v) => Number(v?.actualVolume || 0) > 0 || v?.plateNumber);
+    if (vehs.length) {
+      vehs.forEach((v) =>
+        evalRow(v.actualVolume, v.actualVolumeUnit, v.capacity ?? truck?.truckCapacity, v.capacityUnit || truck?.truckCapacityUnit),
+      );
+    } else {
+      evalRow(truck?.actualVolume, truck?.actualVolumeUnit, truck?.truckCapacity, truck?.truckCapacityUnit);
+    }
+  }
+  if (exceeded) remarks.push({ text: "Exceeded truck capacity", level: "error" });
+  if (noCapacity) remarks.push({ text: "No truck capacity", level: "warning" });
+
+  const placement = computeCellPlacementSummary(entry);
+  if (placement.known && placement.total > 0) {
+    if (placement.placed === 0) {
+      remarks.push({ text: "Missing cell placement", level: "error" });
+    } else if (placement.placed < placement.total) {
+      remarks.push({ text: "Missing cell placement", level: "warning" });
+      remarks.push({ text: "Cell used for waste placement", level: "info" });
+    } else {
+      remarks.push({ text: "Cell used for waste placement", level: "info" });
+    }
+  }
+  return remarks;
 }
 
 // Coerce any incoming unit string to one of the schema-allowed enum values so a
@@ -445,7 +556,7 @@ async function findMatchingBaselineOnlyIds({ slfName, slfGenerator, lguCompanyNa
     if (slfGenerator && String(item.slfGenerator || "") === String(slfGenerator)) {
       return true;
     }
-    return namesToMatch.some((name) => matchesBaselineName(item, name));
+    return namesToMatch.some((name) => matchesSlfIdentity(item, name));
   });
 
   if (matches.length === 0 && namesToMatch.length > 0) {
@@ -456,7 +567,7 @@ async function findMatchingBaselineOnlyIds({ slfName, slfGenerator, lguCompanyNa
       if (slfGenerator && String(item.slfGenerator || "") === String(slfGenerator)) {
         return true;
       }
-      return namesToMatch.some((name) => matchesBaselineName(item, name));
+      return namesToMatch.some((name) => matchesSlfIdentity(item, name));
     });
   }
 
@@ -493,8 +604,38 @@ async function ensurePortalAccountCanSubmit(email) {
  * @returns {Promise<{ saved: object[], submissionId: string }>}
  * @throws  {Error} with statusCode 400/403 on validation/permission failure
  */
+// Block a NEW submission when the portal user has a reverted submission that has
+// stayed unresolved for 24h+. "Unresolved" = still status "reverted" (a resubmit
+// via PUT /:id flips it back to "pending", clearing the block). Users with no
+// reverted submissions — or whose reverts are within 24h — are never blocked.
+const REVERT_ACTION_GRACE_MS = 24 * 60 * 60 * 1000;
+async function assertNoUnresolvedRevert(email) {
+  const normalizedEmail = String(email || "").trim().toLowerCase();
+  if (!normalizedEmail) return;
+  const cutoff = new Date(Date.now() - REVERT_ACTION_GRACE_MS);
+  const stale = await DataSLF.findOne({
+    submittedBy: normalizedEmail,
+    status: "reverted",
+    deletedAt: null,
+  })
+    .setOptions({ includeHiddenYears: true })
+    .select("idNo revertedAt updatedAt")
+    .sort({ revertedAt: 1 })
+    .lean();
+  if (!stale) return;
+  const revertedAt = stale.revertedAt || stale.updatedAt;
+  if (revertedAt && new Date(revertedAt) <= cutoff) {
+    const error = new Error(
+      `You have a reverted submission${stale.idNo ? ` (${stale.idNo})` : ""} that has been unresolved for over 24 hours. Please correct and resubmit the reverted submission before submitting a new one.`,
+    );
+    error.statusCode = 409;
+    throw error;
+  }
+}
+
 async function submitEntries({ entries, submittedBy, req } = {}) {
   const portalAccount = await ensurePortalAccountCanSubmit(submittedBy);
+  await assertNoUnresolvedRevert(submittedBy);
   const submitterIsDummy = Boolean(portalAccount?.isDummy);
   const items = Array.isArray(entries) ? entries : entries ? [entries] : [];
   if (items.length === 0) {
@@ -1071,12 +1212,9 @@ router.patch("/baseline-update-approve/:slfName", async (req, res) => {
     const slfName = req.params.slfName;
     const { approvedBy } = req.body || {};
 
-    const filter = {
-      $and: [
-        { $or: [{ slfName }, { lguCompanyName: slfName }] },
-        baselineDataMatch,
-      ],
-    };
+    // Match by name variants + merged BESLF aliases so legacy/merged data is covered.
+    const ids = await resolveSlfRecordIds(slfName, { requireBaselineData: true });
+    const filter = { _id: { $in: ids } };
 
     // Update ALL docs for this company so aggregation always picks up the flag
     await DataSLF.updateMany(filter, {
@@ -1088,7 +1226,9 @@ router.patch("/baseline-update-approve/:slfName", async (req, res) => {
       },
     });
 
-    const latest = await DataSLF.findOne(filter).sort({ createdAt: -1 });
+    const latest = ids.length
+      ? await DataSLF.findOne(filter).setOptions({ includeHiddenYears: true }).sort({ createdAt: -1 })
+      : null;
     if (!latest) return res.status(404).json({ message: "Baseline not found" });
 
     // Notify the portal user
@@ -1134,12 +1274,8 @@ router.patch("/baseline-update-lock/:slfName", async (req, res) => {
     const slfName = req.params.slfName;
     const { lockedBy } = req.body || {};
 
-    const filter = {
-      $and: [
-        { $or: [{ slfName }, { lguCompanyName: slfName }] },
-        baselineDataMatch,
-      ],
-    };
+    const ids = await resolveSlfRecordIds(slfName, { requireBaselineData: true });
+    const filter = { _id: { $in: ids } };
 
     const result = await DataSLF.updateMany(filter, {
       $set: { baselineUpdateApproved: false },
@@ -1147,7 +1283,7 @@ router.patch("/baseline-update-lock/:slfName", async (req, res) => {
 
     if (result.matchedCount === 0) return res.status(404).json({ message: "Baseline not found" });
 
-    const latest = await DataSLF.findOne(filter).sort({ createdAt: -1 });
+    const latest = await DataSLF.findOne(filter).setOptions({ includeHiddenYears: true }).sort({ createdAt: -1 });
 
     // Notify the portal user in real time
     if (latest?.submittedBy) {
@@ -1194,19 +1330,17 @@ router.patch("/baseline-update-reject/:slfName", async (req, res) => {
     const slfName = req.params.slfName;
     const { rejectedBy, reason } = req.body || {};
 
-    const filter = {
-      $and: [
-        { $or: [{ slfName }, { lguCompanyName: slfName }] },
-        baselineDataMatch,
-      ],
-    };
+    const ids = await resolveSlfRecordIds(slfName, { requireBaselineData: true });
+    const filter = { _id: { $in: ids } };
 
     // Clear flags on ALL matching docs
     await DataSLF.updateMany(filter, {
       $set: { baselineUpdateRequested: false, baselineUpdateApproved: false },
     });
 
-    const latest = await DataSLF.findOne(filter).sort({ createdAt: -1 });
+    const latest = ids.length
+      ? await DataSLF.findOne(filter).setOptions({ includeHiddenYears: true }).sort({ createdAt: -1 })
+      : null;
     if (!latest) return res.status(404).json({ message: "Baseline not found" });
 
     // Notify the portal user
@@ -1723,7 +1857,10 @@ router.get("/", optionalAuth, async (req, res) => {
           "slfGenerator slfName submissionId idNo previousIdNos dateOfDisposal lguCompanyName companyType address companyRegion companyProvince companyMunicipality companyBarangay status revertRequested editRequested submittedBy createdAt updatedAt isDummy baselineUnit totalVolumeAccepted totalVolumeAcceptedUnit activeCellEntries closedCellEntries truckCount totalVolumeM3 totalVolumeTons residualVolumeM3 residualVolumeTons hazardousVolumeM3 hazardousVolumeTons";
         query = query.select(
           baseFields +
-            (includeTrucks ? " trucks" : " trucks.cellName trucks.vehicles.cellName"),
+            (includeTrucks
+              ? " trucks"
+              : " trucks.cellName trucks.truckCapacity trucks.truckCapacityUnit trucks.actualVolume trucks.actualVolumeUnit" +
+                " trucks.vehicles.cellName trucks.vehicles.plateNumber trucks.vehicles.capacity trucks.vehicles.capacityUnit trucks.vehicles.actualVolume trucks.vehicles.actualVolumeUnit"),
         );
       }
     }
@@ -1734,6 +1871,16 @@ router.get("/", optionalAuth, async (req, res) => {
       query.lean(),
       paginated ? DataSLF.countDocuments(filter) : Promise.resolve(null),
     ]);
+    // Configured truck-capacity allowance (default 10%) — used to compute the
+    // "Exceeded truck capacity" admin remark. Fetched once per request.
+    let allowancePct = 10;
+    try {
+      const AppSettings = require("../models/AppSettings");
+      const cfg = await AppSettings.findOne().select("truckCapacityAllowancePercent").lean();
+      if (cfg && Number.isFinite(Number(cfg.truckCapacityAllowancePercent))) {
+        allowancePct = Number(cfg.truckCapacityAllowancePercent);
+      }
+    } catch { /* fall back to 10% */ }
     if (paginated) {
       res.json({
         data: entries.map((entry) => ({
@@ -1741,6 +1888,7 @@ router.get("/", optionalAuth, async (req, res) => {
           truckCount: entry.truckCount ?? (Array.isArray(entry.trucks) ? entry.trucks.length : 0),
           cellPlacement: computeCellPlacementSummary(entry),
           cellNames: collectCellNames(entry),
+          remarks: computeSubmissionRemarks(entry, allowancePct),
           trucks: includeTrucks ? entry.trucks : [],
         })),
         total,
@@ -1755,6 +1903,7 @@ router.get("/", optionalAuth, async (req, res) => {
             ...entry,
             cellPlacement: computeCellPlacementSummary(entry),
             cellNames: collectCellNames(entry),
+            remarks: computeSubmissionRemarks(entry, allowancePct),
             trucks: [],
           }))
         : entries
@@ -2394,12 +2543,17 @@ router.post("/repair-xx-ids", authMiddleware, developerOnly, async (req, res) =>
       .setOptions({ includeHiddenYears: true })
       .lean();
 
+    // Dry-run: compute proposed IDs and return them without persisting so the
+    // admin can review the affected rows in a preview modal before confirming.
+    const preview = req.body?.preview === true || req.query?.preview === "true";
+
     if (xxDocs.length === 0) {
-      return res.json({ message: "No XX records found.", updated: 0 });
+      return res.json({ message: "No XX records found.", updated: 0, preview, changes: [] });
     }
 
     let updated = 0;
     const errors = [];
+    const changes = [];
     const sequenceCache = new Map();
     const assignedIds = new Set();
 
@@ -2480,6 +2634,19 @@ router.post("/repair-xx-ids", authMiddleware, developerOnly, async (req, res) =>
         const typeCode = parts[1];
         const finalIdNo = await getNextIdNo(typeCode, provCode);
 
+        changes.push({
+          _id: doc._id,
+          currentIdNo: oldIdNo,
+          proposedIdNo: finalIdNo,
+          slfName: doc.slfName || doc.lguCompanyName || "",
+          lguCompanyName: doc.lguCompanyName || "",
+          companyType: doc.companyType || "",
+          dateOfDisposal: doc.dateOfDisposal || null,
+        });
+
+        // Preview mode: do not persist — just record the proposed change.
+        if (preview) continue;
+
         const submissionId = doc.submissionId || doc._id.toString();
         await DataSLF.updateOne(
           { _id: doc._id },
@@ -2524,6 +2691,15 @@ router.post("/repair-xx-ids", authMiddleware, developerOnly, async (req, res) =>
       }
     }
 
+    if (preview) {
+      return res.json({
+        preview: true,
+        message: `${changes.length} of ${xxDocs.length} XX record(s) can be fixed.`,
+        total: xxDocs.length,
+        changes,
+      });
+    }
+
     writeLog("warn", "id.repair-xx", {
       message: `Repaired ${updated} XX province code records`,
       user: getRequestActor(req),
@@ -2535,6 +2711,7 @@ router.post("/repair-xx-ids", authMiddleware, developerOnly, async (req, res) =>
       updated,
       skipped: xxDocs.length - updated - errors.length,
       errors,
+      changes,
     });
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });
@@ -2604,9 +2781,13 @@ router.post("/repair-type-ids", authMiddleware, developerOnly, async (req, res) 
       .setOptions({ includeHiddenYears: true })
       .lean();
 
+    // Dry-run preview support (see repair-xx-ids).
+    const preview = req.body?.preview === true || req.query?.preview === "true";
+
     let updated = 0;
     let skipped = 0;
     const errors = [];
+    const changes = [];
     const sequenceCache = new Map();
     const assignedIds = new Set();
 
@@ -2665,6 +2846,21 @@ router.post("/repair-type-ids", authMiddleware, developerOnly, async (req, res) 
 
         const oldIdNo = doc.idNo;
         const finalIdNo = await getNextIdNo(desiredType, provCode);
+
+        changes.push({
+          _id: doc._id,
+          currentIdNo: oldIdNo,
+          proposedIdNo: finalIdNo,
+          slfName: doc.slfName || doc.lguCompanyName || "",
+          lguCompanyName: doc.lguCompanyName || "",
+          companyType: doc.companyType || "",
+          dateOfDisposal: doc.dateOfDisposal || null,
+          ownership: facility.ownership || "",
+        });
+
+        // Preview mode: do not persist — just record the proposed change.
+        if (preview) continue;
+
         await DataSLF.updateOne(
           { _id: doc._id },
           {
@@ -2702,6 +2898,16 @@ router.post("/repair-type-ids", authMiddleware, developerOnly, async (req, res) 
       }
     }
 
+    if (preview) {
+      return res.json({
+        preview: true,
+        message: `${changes.length} PVT/LGU ID No. mismatch(es) can be fixed.${skipped ? ` ${skipped} skipped (SLF could not be strictly identified).` : ""}`,
+        total: docs.length,
+        skipped,
+        changes,
+      });
+    }
+
     writeLog("warn", "id.repair-type", {
       message: `Repaired ${updated} ID No. type mismatches (PVT/LGU)`,
       user: getRequestActor(req),
@@ -2713,6 +2919,7 @@ router.post("/repair-type-ids", authMiddleware, developerOnly, async (req, res) 
       updated,
       skipped,
       errors,
+      changes,
     });
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });
@@ -3291,11 +3498,12 @@ router.post("/baseline-update-request", async (req, res) => {
     notifyAdmin(req, { type: "baseline_update_request", title: "Baseline Update Request", message: `${requestedBy} requested baseline update for ${slfName}` });
     refreshAdmin(req, "baselines");
 
-    // Mark ALL baseline entries for this company as having a pending update request
-    // updateMany ensures the aggregation picks up the flag regardless of which doc is $first
-    const filter = {
-      $or: [{ slfName }, { lguCompanyName: slfName }],
-    };
+    // Mark ALL baseline entries for this company as having a pending update request.
+    // Match by name variants + merged BESLF aliases so legacy/merged data is covered.
+    const requestIds = await resolveSlfRecordIds(slfName);
+    const filter = requestIds.length
+      ? { _id: { $in: requestIds } }
+      : { $or: [{ slfName }, { lguCompanyName: slfName }] };
     await DataSLF.updateMany(filter, {
       $set: {
         baselineUpdateRequested: true,

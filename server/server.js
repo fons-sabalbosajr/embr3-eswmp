@@ -91,6 +91,17 @@ function getAllowedOrigins() {
   // Always allow localhost variants
   origins.add("http://localhost:5173");
   origins.add("http://127.0.0.1:5173");
+  // Production origin(s). Comma-separated ALLOWED_ORIGINS env overrides/extends;
+  // the live domain is included as a safe default so Socket.IO/CORS keep working
+  // even if CLIENT_URL/ALLOWED_ORIGINS are not set in the deployment environment.
+  (process.env.ALLOWED_ORIGINS || "https://embr3-onlinesystems.cloud")
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean)
+    .forEach((value) => {
+      try { origins.add(new URL(value).origin); }
+      catch { origins.add(value); }
+    });
   // Auto-detect the current network IP so CORS survives IP changes
   const nets = os.networkInterfaces();
   for (const name of Object.keys(nets)) {

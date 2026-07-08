@@ -290,7 +290,7 @@ export default function CellWastePlacement({ canEdit = true }) {
       return {
         index,
         key: index,
-        label: `Cell ${index + 1}`,
+        label: String(facility.cellNames?.[index] || "").trim() || `Cell ${index + 1}`,
         status: facility.cellStatuses?.[index] || "Active Cell",
         type: facility.cellTypes?.[index] || "Residual",
         unit,

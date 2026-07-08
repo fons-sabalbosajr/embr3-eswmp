@@ -109,6 +109,11 @@ const appSettingsSchema = new mongoose.Schema(
     excludePreBaselineDisposalFromCellFill: { type: Boolean, default: true },
     preBaselineDisposalDetectorEnabled: { type: Boolean, default: true },
 
+    // Truck capacity validation — max % a truck's actual waste volume may exceed
+    // its stated capacity before a portal submission is blocked. Default 10%.
+    // maxAllowedVolume = truckCapacity + (truckCapacity * pct / 100)
+    truckCapacityAllowancePercent: { type: Number, default: 10 },
+
     // Dashboard Visibility & Maintenance (per-tab)
     dashboardTabs: {
       type: Map,

@@ -81,6 +81,9 @@ const slfFacilitySchema = new mongoose.Schema(
     wasteReceivedUnit: { type: String, trim: true, default: 'm³' },
     estimatedVolumeWasteUnit: { type: String, trim: true, default: 'm³' },
     numberOfCell: { type: Number },
+    // Optional per-cell custom display names. Index-aligned with the other cell
+    // arrays. Empty/missing entry => fall back to the derived "Cell N" label.
+    cellNames: [{ type: String, trim: true }],
     cellCapacities: [{ type: Number }],
     cellCapacityUnits: [{ type: String, enum: ["m³", "tons", "m3"], default: "m³" }],
     cellStatuses: [{ type: String, enum: ["Active Cell", "Used/Completed", "Under Construction", "Reserved Area", "Not Existed", "Operational", "Closed", "Reserved Cell"], default: "Active Cell" }],

@@ -772,6 +772,9 @@ export default function SLFMonitoring({
         : [];
     form.setFieldsValue({
       ...record,
+      cellNames:
+        record.cellNames ||
+        Array.from({ length: record.numberOfCell || 0 }, () => ""),
       cellCapacities: record.cellCapacities || [],
       cellCapacityUnits:
         record.cellCapacityUnits ||
@@ -1181,6 +1184,7 @@ export default function SLFMonitoring({
           : lguServedList.length,
         lguServedList,
         privateCompaniesServed,
+        cellNames: fieldValue("cellNames", []).map((n) => String(n || "").trim()),
         cellStatuses: fieldValue("cellStatuses", []).map(normalizeCellStatus),
         cellCapacities: fieldValue("cellCapacities", []),
         cellCapacityUnits: fieldValue("cellCapacityUnits", []),
@@ -4141,6 +4145,7 @@ export default function SLFMonitoring({
                       noStyle
                       dependencies={[
                         "numberOfCell",
+                        "cellNames",
                         "cellCapacities",
                         "cellStatuses",
                         "cellTypes",
@@ -4210,7 +4215,12 @@ export default function SLFMonitoring({
                                                 strong
                                                 style={{ fontSize: 12 }}
                                               >
-                                                Cell {i + 1}
+                                                {String(
+                                                  form.getFieldValue([
+                                                    "cellNames",
+                                                    i,
+                                                  ]) || "",
+                                                ).trim() || `Cell ${i + 1}`}
                                               </Text>
                                               <Tag
                                                 color={sc.tag}
@@ -4225,6 +4235,18 @@ export default function SLFMonitoring({
                                           ),
                                           children: (
                                             <>
+                                      <Form.Item
+                                        label="Cell Name"
+                                        name={["cellNames", i]}
+                                        style={{ marginBottom: 8 }}
+                                        tooltip={`Optional custom name for this cell. Leave blank to use the default "Cell ${i + 1}". Renaming updates how this cell appears in the SLF Portal, baseline, breakdown, and reports.`}
+                                      >
+                                        <Input
+                                          placeholder={`Cell ${i + 1}`}
+                                          maxLength={60}
+                                          allowClear
+                                        />
+                                      </Form.Item>
                                       <Form.Item
                                         label="Capacity"
                                         style={{ marginBottom: 8 }}
