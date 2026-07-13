@@ -20,7 +20,9 @@ import {
   Tooltip,
   Spin,
   Empty,
+  Alert,
   Progress,
+  Pagination,
 } from "antd";
 import {
   CheckOutlined,
@@ -53,6 +55,7 @@ import secureStorage from "../../utils/secureStorage";
 import { getAdminDisplayName } from "../../utils/adminIdentity";
 import { fetchWithCache, invalidateCache } from "../../utils/pageCache";
 import { getSocket } from "../../utils/socket";
+import { withSizeChanger } from "../../utils/tablePagination";
 import dayjs from "dayjs";
 import ResponsiveTable from "./shared/ResponsiveTable";
 import MergeSlfModal from "./MergeSlfModal";
@@ -85,7 +88,7 @@ const wrapColumn = (column) => ({
     ...(typeof column.onCell === "function" ? column.onCell(...args) : {}),
   }),
   onHeaderCell: (...args) => ({
-    style: WRAP_CELL_STYLE,
+    style: { ...WRAP_CELL_STYLE, fontSize: 12 },
     ...(typeof column.onHeaderCell === "function"
       ? column.onHeaderCell(...args)
       : {}),
@@ -136,7 +139,12 @@ export default function SubmissionSettings({
     applying: false,
     changes: [],
     message: "",
+    error: "",
+    total: 0,
+    truncated: false,
   });
+  // Guards against duplicate/concurrent preview fetches (double-click, re-open).
+  const idFixLoadingRef = useRef(false);
   const [pagination, setPagination] = useState({
     current: 1,
     pageSize: DEFAULT_PAGE_SIZE,
@@ -183,8 +191,17 @@ export default function SubmissionSettings({
     currentUser.email ||
     "admin";
   const currentCacheKey = useMemo(
-    () => [CACHE_KEY, statusFilter, debouncedSearch, isDeveloper ? "dev" : "std"].join(":"),
-    [statusFilter, debouncedSearch, isDeveloper],
+    () =>
+      [
+        CACHE_KEY,
+        statusFilter,
+        cellPlacementFilter,
+        debouncedSearch,
+        pagination.current,
+        pagination.pageSize,
+        isDeveloper ? "dev" : "std",
+      ].join(":"),
+    [statusFilter, cellPlacementFilter, debouncedSearch, pagination.current, pagination.pageSize, isDeveloper],
   );
   const bumpSubmissionsCache = useCallback(() => {
     // Clear cached lists so the next manual/interval refresh re-fetches fresh data,
@@ -238,21 +255,43 @@ export default function SubmissionSettings({
   };
 
   // Load a dry-run preview of the affected ID No. rows before applying a fix.
+  // Keeps the modal open on error (shows an inline error + Retry) and guards
+  // against duplicate/concurrent fetches so the preview always reflects the
+  // latest source data without freezing on a stuck request.
   const openIdFixPreview = async (type) => {
-    setIdFixPreview({ open: true, type, loading: true, applying: false, changes: [], message: "" });
+    if (idFixLoadingRef.current) return; // prevent duplicate/concurrent fetch
+    idFixLoadingRef.current = true;
+    setIdFixPreview({
+      open: true, type, loading: true, applying: false,
+      changes: [], message: "", error: "", total: 0, truncated: false,
+    });
     try {
       const endpoint = type === "xx" ? "/data-slf/repair-xx-ids" : "/data-slf/repair-type-ids";
       const { data } = await api.post(endpoint, { preview: true });
+      const changes = Array.isArray(data.changes) ? data.changes : [];
       setIdFixPreview((prev) => ({
         ...prev,
         loading: false,
-        changes: Array.isArray(data.changes) ? data.changes : [],
+        changes,
         message: data.message || "",
+        error: "",
+        total: Number.isFinite(data.total) ? data.total : changes.length,
+        truncated: Boolean(data.truncated),
       }));
-    } catch {
-      setIdFixPreview({ open: false, type: null, loading: false, applying: false, changes: [], message: "" });
-      Swal.fire("Error", "Could not load the ID fix preview.", "error");
+    } catch (err) {
+      setIdFixPreview((prev) => ({
+        ...prev,
+        loading: false,
+        error:
+          err.response?.data?.message ||
+          "Could not load the ID fix preview. Please retry.",
+      }));
+    } finally {
+      idFixLoadingRef.current = false;
     }
+  };
+  const retryIdFixPreview = () => {
+    if (idFixPreview.type) openIdFixPreview(idFixPreview.type);
   };
 
   // Apply the fix only after the admin confirms the preview.
@@ -292,10 +331,18 @@ export default function SubmissionSettings({
               .get("/data-slf", {
                 params: {
                   mode: "list",
+                  // Server-side grouped pagination: the backend groups submissions
+                  // into batches and returns only the current page's groups' rows.
+                  grouped: "true",
+                  page: pagination.current,
+                  limit: pagination.pageSize,
                   // Developers additionally see SAMPLE (dummy) submissions inline,
                   // flagged as SAMPLE. The server only honors this for developers.
                   ...(isDeveloper ? { includeDummy: "true" } : {}),
                   ...(statusFilter && statusFilter !== "all" ? { status: statusFilter } : {}),
+                  ...(cellPlacementFilter && cellPlacementFilter !== "all"
+                    ? { cellPlacement: cellPlacementFilter }
+                    : {}),
                   ...(debouncedSearch.trim() ? { search: debouncedSearch.trim() } : {}),
                 },
               })
@@ -306,15 +353,23 @@ export default function SubmissionSettings({
                   : Array.isArray(resp?.data)
                     ? resp.data
                     : [];
-                return rows.map(normalizeSubmissionRecord);
+                const total = typeof resp?.total === "number" ? resp.total : rows.length;
+                return { rows: rows.map(normalizeSubmissionRecord), total };
               }),
           {
             ttl: CACHE_TTL,
             force,
             onData: (payload) => {
               if (latestRequestKeyRef.current !== requestKey) return;
-              const rows = Array.isArray(payload) ? payload : [];
+              const rows = Array.isArray(payload?.rows)
+                ? payload.rows
+                : Array.isArray(payload)
+                  ? payload
+                  : [];
               setData(rows);
+              if (payload && typeof payload.total === "number") {
+                setPagination((prev) => ({ ...prev, total: payload.total }));
+              }
               setLoading(false);
             },
             onError: () => {
@@ -337,8 +392,14 @@ export default function SubmissionSettings({
         }
       }
     },
-    [currentCacheKey, statusFilter, debouncedSearch, isDeveloper],
+    [currentCacheKey, statusFilter, cellPlacementFilter, debouncedSearch, pagination.current, pagination.pageSize, isDeveloper],
   );
+
+  // Reset to the first page whenever a server-side filter changes so we never
+  // request a page beyond the new result set.
+  useEffect(() => {
+    setPagination((prev) => (prev.current === 1 ? prev : { ...prev, current: 1 }));
+  }, [statusFilter, cellPlacementFilter]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -511,64 +572,11 @@ export default function SubmissionSettings({
     return "partial";
   }, []);
 
-  const filteredTableRows = useMemo(() => {
-    // Status and search are now handled server-side;
-    // only secondary client-side fields (e.g. grouped-batch matching) need filtering here.
-    const needle = debouncedSearch.trim();
-    // Server already filtered by the plain fields. Do an additional pass only
-    // for grouped-batch metadata that the server cannot see.
-    const searchFiltered = !needle
-      ? tableRows
-      : tableRows.filter((row) =>
-      rowMatchesSearch(
-        {
-          ...row,
-          groupedIds: (row.groupedEntries || []).map(
-            (entry) => entry.idNo || entry.submissionId,
-          ),
-          groupedSubmitters: (row.groupedEntries || []).map(
-            (entry) => entry.submittedBy,
-          ),
-          groupedCompanies: (row.groupedEntries || []).map(
-            (entry) => entry.lguCompanyName,
-          ),
-          groupedSlfNames: (row.groupedEntries || []).map(
-            (entry) => entry.slfName || entry.slfGenerator?.slfName,
-          ),
-        },
-        needle,
-        [
-          "idNo",
-          "submissionId",
-          "lguCompanyName",
-          "companyType",
-          "submittedBy",
-          "slfName",
-          (record) => record.slfGenerator?.slfName,
-          "groupedIds",
-          "groupedSubmitters",
-          "groupedCompanies",
-          "groupedSlfNames",
-        ],
-          ),
-        );
-    if (cellPlacementFilter === "all") return searchFiltered;
-    return searchFiltered.filter(
-      (row) => getRowCellPlacementStatus(row) === cellPlacementFilter,
-    );
-  }, [debouncedSearch, tableRows, cellPlacementFilter, getRowCellPlacementStatus]);
-
-  useEffect(() => {
-    setPagination((prev) => {
-      const total = filteredTableRows.length;
-      const maxPage = Math.max(1, Math.ceil(total / prev.pageSize));
-      return {
-        ...prev,
-        total,
-        current: prev.current > maxPage ? 1 : prev.current,
-      };
-    });
-  }, [filteredTableRows.length]);
+  // Status, search, and cell-placement filtering are all applied server-side
+  // (grouped pagination), and `data` already holds only the current page's
+  // groups, so the table renders the grouped rows as-is. `pagination.total`
+  // (group count) comes from the server — do not derive it from row length.
+  const filteredTableRows = tableRows;
 
   const selectedEntryIds = useMemo(() => {
     const ids = new Set();
@@ -1326,7 +1334,7 @@ export default function SubmissionSettings({
       ),
       dataIndex: "lguCompanyName",
       key: "lguCompanyName",
-      width: 300,
+      width: 210,
       render: (text) => <Text style={WRAP_CELL_STYLE}>{text || "—"}</Text>,
     },
     {
@@ -1355,7 +1363,7 @@ export default function SubmissionSettings({
       title: "Date & Time Submitted",
       dataIndex: "createdAt",
       key: "createdAt",
-      width: 175,
+      width: 150,
       sorter: (a, b) => new Date(a.createdAt || 0) - new Date(b.createdAt || 0),
       render: (val) => (val ? dayjs(val).format("MM/DD/YYYY hh:mm A") : "—"),
     },
@@ -1372,7 +1380,7 @@ export default function SubmissionSettings({
     {
       title: "Cell Placement",
       key: "cellPlacement",
-      width: 150,
+      width: 120,
       render: (_, r) => {
         // Aggregate placement across grouped entries when present, else use the
         // per-row cellPlacement summary returned by the list API.
@@ -1410,7 +1418,7 @@ export default function SubmissionSettings({
     {
       title: "Remarks",
       key: "remarks",
-      width: 200,
+      width: 150,
       render: (_, r) => {
         // Computed server-side (not stored) and aggregated across grouped entries.
         const sources =
@@ -1447,7 +1455,7 @@ export default function SubmissionSettings({
       title: "Status",
       dataIndex: "status",
       key: "status",
-      width: 140,
+      width: 104,
       render: (val, r) => (
         <Space direction="vertical" size={2}>
           <Tag color={statusColors[val] || "default"}>
@@ -1469,7 +1477,7 @@ export default function SubmissionSettings({
     {
       title: "Progress",
       key: "ackProgress",
-      width: 150,
+      width: 120,
       render: (_, r) => {
         const prog = rowProgress[r._id];
         const acking = isActing(`${r._id}:acknowledged`);
@@ -1506,10 +1514,10 @@ export default function SubmissionSettings({
     {
       title: "Actions",
       key: "actions",
-      width: 220,
+      width: 128,
       render: (_, r) => {
         return (
-          <Space size={4} wrap={false}>
+          <Space size={4} wrap>
             {r.isGroupedSubmission ? (
               <Tooltip title="View Group Entries">
                 <Button
@@ -1763,24 +1771,9 @@ export default function SubmissionSettings({
           columns={columns}
           rowKey="_id"
           loading={loading}
-          pagination={{
-            current: pagination.current,
-            pageSize: pagination.pageSize,
-            total: filteredTableRows.length,
-            showSizeChanger: true,
-            pageSizeOptions: ["15", "25", "50", "100"],
-            showTotal: (total, range) => `${range[0]}-${range[1]} of ${total}`,
-          }}
-          onChange={(nextPagination) => {
-            setSelectedRowKeys([]);
-            setPagination((prev) => ({
-              ...prev,
-              current: nextPagination.current || 1,
-              pageSize: nextPagination.pageSize || prev.pageSize,
-            }));
-          }}
+          pagination={false}
           size="middle"
-          scroll={{ x: 1450, y: 640 }}
+          scroll={{ x: 1180, y: 640 }}
           virtual
           rowSelection={{
             selectedRowKeys,
@@ -1788,6 +1781,28 @@ export default function SubmissionSettings({
             columnWidth: 42,
           }}
         />
+        {/* Server-side pagination: `data` holds only the current page's groups,
+            so pagination is driven here (not by the Table's client slicing).
+            Mirrors the Cell Waste Placement tab's pattern. */}
+        <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 12 }}>
+          <Pagination
+            current={pagination.current}
+            pageSize={pagination.pageSize}
+            total={pagination.total}
+            showSizeChanger
+            pageSizeOptions={["15", "25", "50", "100"]}
+            showTotal={(total, range) => `${range[0]}-${range[1]} of ${total}`}
+            onChange={(nextPage, nextPageSize) => {
+              setSelectedRowKeys([]);
+              setPagination((prev) => ({
+                ...prev,
+                // Reset to page 1 when page size changes so we never land past the end.
+                current: nextPageSize !== prev.pageSize ? 1 : nextPage,
+                pageSize: nextPageSize || prev.pageSize,
+              }));
+            }}
+          />
+        </div>
       </Card>
 
       <Modal
@@ -1914,7 +1929,7 @@ export default function SubmissionSettings({
               dataSource={groupedEntriesRecord.groupedEntries || []}
               pagination={
                 (groupedEntriesRecord.groupedEntries || []).length > 10
-                  ? { pageSize: 10, size: "small" }
+                  ? withSizeChanger({ pageSize: 10, size: "small" })
                   : false
               }
               scroll={{ y: 360 }}
@@ -4910,18 +4925,50 @@ export default function SubmissionSettings({
         width={760}
         destroyOnHidden
       >
-        <Text type="secondary" style={{ display: "block", marginBottom: 10 }}>
-          {idFixPreview.loading
-            ? "Loading affected records…"
-            : idFixPreview.message ||
+        {idFixPreview.error ? (
+          <Alert
+            type="error"
+            showIcon
+            style={{ marginBottom: 12 }}
+            message="Could not load preview"
+            description={idFixPreview.error}
+            action={
+              <Button size="small" onClick={retryIdFixPreview} loading={idFixPreview.loading}>
+                Retry
+              </Button>
+            }
+          />
+        ) : idFixPreview.loading ? (
+          <div style={{ textAlign: "center", padding: "40px 0 32px" }}>
+            <Spin size="large" />
+            <div style={{ marginTop: 16, fontSize: 13, fontWeight: 600 }}>
+              Scanning SLF records for{" "}
+              {idFixPreview.type === "xx" ? "XX province-code" : "PVT/LGU ID"} mismatches…
+            </div>
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              Matching each submission to its SLF record. No records are modified during the scan.
+            </Text>
+          </div>
+        ) : (
+          <Text type="secondary" style={{ display: "block", marginBottom: 10 }}>
+            {idFixPreview.message ||
               "Review the proposed ID No. changes below. No records are modified until you confirm."}
-        </Text>
+          </Text>
+        )}
+        {idFixPreview.truncated && !idFixPreview.loading && !idFixPreview.error && (
+          <Alert
+            type="warning"
+            showIcon
+            style={{ marginBottom: 10 }}
+            message={`Showing the first ${idFixPreview.changes.length} of ${idFixPreview.total} affected records. Confirm & Fix applies to all of them.`}
+          />
+        )}
+        {!idFixPreview.loading && !idFixPreview.error && (
         <Table
           size="small"
-          loading={idFixPreview.loading}
           dataSource={idFixPreview.changes}
           rowKey={(r) => String(r._id)}
-          pagination={{ pageSize: 8, showTotal: (t) => `${t} record(s) to fix` }}
+          pagination={withSizeChanger({ pageSize: 8, showTotal: (t) => `${t} record(s) to fix` })}
           scroll={{ x: 680, y: 360 }}
           locale={{ emptyText: <Empty description="No records need fixing" /> }}
           columns={[
@@ -4962,6 +5009,7 @@ export default function SubmissionSettings({
             },
           ]}
         />
+        )}
       </Modal>
     </div>
   );

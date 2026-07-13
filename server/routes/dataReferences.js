@@ -3,6 +3,10 @@ const DataReference = require("../models/DataReference");
 
 const router = express.Router();
 
+// All routes here are admin data-management; require an authenticated admin.
+const { authMiddleware, adminOnly } = require("../middleware/auth");
+router.use(authMiddleware, adminOnly);
+
 // Get all active references (for frontend dropdowns)
 router.get("/", async (req, res) => {
   try {

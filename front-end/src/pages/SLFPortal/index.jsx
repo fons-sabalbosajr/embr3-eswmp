@@ -1313,6 +1313,8 @@ export default function SLFPortal() {
   // Pagination for the Organize Cell Placement modal (bulk submissions).
   const [cellOrganizerPage, setCellOrganizerPage] = useState(1);
   const [cellOrganizerPageSize, setCellOrganizerPageSize] = useState(5);
+  // Collapsible state for the Cell Infra Overview card inside the organizer.
+  const [cellInfraCollapsed, setCellInfraCollapsed] = useState(false);
 
   // A vehicle/truck is "unplaced" when it carries waste volume but has no cell.
   const submissionHasUnplaced = useCallback((sub) => {
@@ -5391,7 +5393,7 @@ export default function SLFPortal() {
         {data.length ? (
           <ResponsiveContainer width="100%" height="100%">
             <PieChart>
-              <Pie data={data} dataKey="value" nameKey="name" innerRadius={48} outerRadius={78} paddingAngle={3}>
+              <Pie data={data} dataKey="value" nameKey="name" innerRadius={48} outerRadius={78} paddingAngle={3} isAnimationActive={false}>
                 {data.map((entry, index) => (
                   <RCell key={`${title}-${entry.name}`} fill={categoryColors[entry.name] || statusColors[index % statusColors.length]} />
                 ))}
@@ -5435,7 +5437,7 @@ export default function SLFPortal() {
           </Col>
           <Col xs={24} md={12} xl={6}>
             <Card title={<Text strong style={{ fontSize: 14 }}>Landfill Cells</Text>} style={{ borderRadius: 8, height: "100%" }} bodyStyle={{ height: 250 }}>
-              {cellData.length ? <ResponsiveContainer width="100%" height="100%"><PieChart><Pie data={cellData} dataKey="value" nameKey="name" innerRadius={48} outerRadius={78}>{cellData.map((_, index) => <RCell key={index} fill={index === 0 ? "#52c41a" : "#8c8c8c"} />)}</Pie><RTooltip /><Legend /></PieChart></ResponsiveContainer> : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No cell data encoded" />}
+              {cellData.length ? <ResponsiveContainer width="100%" height="100%"><PieChart><Pie data={cellData} dataKey="value" nameKey="name" innerRadius={48} outerRadius={78} isAnimationActive={false}>{cellData.map((_, index) => <RCell key={index} fill={index === 0 ? "#52c41a" : "#8c8c8c"} />)}</Pie><RTooltip /><Legend /></PieChart></ResponsiveContainer> : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No cell data encoded" />}
             </Card>
           </Col>
           <Col xs={24} md={12} xl={6}>
@@ -9186,15 +9188,25 @@ export default function SLFPortal() {
                             </Text>
                           </div>
                         </Space>
-                        <Space size={6} wrap>
-                          <Tag color="green">{activeCellOptions.length} open</Tag>
-                          {cells.filter((c) => c.isFull).length > 0 && (
-                            <Tag color="red">{cells.filter((c) => c.isFull).length} full / disabled</Tag>
-                          )}
+                        <Space size={8} wrap>
+                          <Space size={6} wrap>
+                            <Tag color="green">{activeCellOptions.length} open</Tag>
+                            {cells.filter((c) => c.isFull).length > 0 && (
+                              <Tag color="red">{cells.filter((c) => c.isFull).length} full / disabled</Tag>
+                            )}
+                          </Space>
+                          <Button
+                            type="text"
+                            size="small"
+                            aria-label={cellInfraCollapsed ? "Expand Cell Infra Overview" : "Collapse Cell Infra Overview"}
+                            icon={cellInfraCollapsed ? <DownOutlined /> : <UpOutlined />}
+                            onClick={() => setCellInfraCollapsed((v) => !v)}
+                          />
                         </Space>
                       </div>
                     }
                   >
+                    {!cellInfraCollapsed && (
                     <Row gutter={[10, 10]} align="middle">
                       {/* Pie chart */}
                       <Col xs={24} sm={8} style={{ textAlign: "center" }}>
@@ -9208,6 +9220,7 @@ export default function SLFPortal() {
                               outerRadius={56}
                               paddingAngle={2}
                               dataKey="value"
+                              isAnimationActive={false}
                             >
                               {pieData.map((entry) => (
                                 <RCell
@@ -9347,6 +9360,7 @@ export default function SLFPortal() {
                         </div>
                       </Col>
                     </Row>
+                    )}
                   </Card>
                 );
               })()}

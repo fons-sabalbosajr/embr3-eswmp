@@ -6,6 +6,7 @@ const UserPortal = require("../models/UserPortal");
 const Notification = require("../models/Notification");
 const { writeLog } = require("../utils/logger");
 const { notifyAdmin, notifyPortal, refreshAdmin, refreshPortal } = require("../utils/socketEmit");
+const { NON_DUMMY_CLAUSE } = require("../utils/dummyFilter");
 
 const router = express.Router();
 
@@ -291,18 +292,78 @@ router.patch("/portal/:id/facility-details", async (req, res) => {
 router.get("/stats", async (req, res) => {
   try {
     const yearFilter = req.query.year ? { dataYear: Number(req.query.year) } : {};
-    const baseFilter = { deletedAt: null, ...yearFilter };
+    // Exclude dummy/test facilities from every dashboard tile, map point, and
+    // drill-down (capacity, waste received, trash-slide, fire-prevention,
+    // leachate, gas vents). Developer views may opt in via ?includeDummy=true.
+    const dummyFilter = req.query.includeDummy === "true" ? {} : NON_DUMMY_CLAUSE;
+    const baseFilter = { deletedAt: null, ...yearFilter, ...dummyFilter };
+
+    // Match the SLF Data Table's record set exactly: it deduplicates by
+    // province|lgu|barangay and keeps only the latest dataYear per facility.
+    // Aggregate the same deduped set here so every dashboard tile counts the
+    // same facilities the table shows — not every historical yearly record.
+    const dedupRows = await SlfFacility.aggregate([
+      { $match: baseFilter },
+      {
+        $addFields: {
+          _dedupKey: {
+            $let: {
+              vars: {
+                parts: {
+                  $filter: {
+                    input: [
+                      { $ifNull: ["$province", ""] },
+                      { $ifNull: ["$lgu", ""] },
+                      { $ifNull: ["$barangay", ""] },
+                    ],
+                    cond: { $ne: ["$$this", ""] },
+                  },
+                },
+              },
+              in: {
+                $cond: [
+                  { $eq: [{ $size: "$$parts" }, 0] },
+                  { $toString: "$_id" },
+                  {
+                    $toLower: {
+                      $reduce: {
+                        input: "$$parts",
+                        initialValue: "",
+                        in: {
+                          $cond: [
+                            { $eq: ["$$value", ""] },
+                            "$$this",
+                            { $concat: ["$$value", "|", "$$this"] },
+                          ],
+                        },
+                      },
+                    },
+                  },
+                ],
+              },
+            },
+          },
+          _dy: { $ifNull: ["$dataYear", 0] },
+        },
+      },
+      { $sort: { _dy: -1, _id: 1 } },
+      { $group: { _id: "$_dedupKey", keepId: { $first: "$_id" } } },
+    ]);
+    const dedupedIds = dedupRows.map((d) => d.keepId);
+    // Every metric below is scoped to this deduped facility set.
+    const scopedFilter = { _id: { $in: dedupedIds } };
+
     const [totalRecords, byProvince, byStatus, byCategory, byOwnership, byManilaBayArea, operationStats, mapData, managementData] =
       await Promise.all([
-        SlfFacility.countDocuments(baseFilter),
+        Promise.resolve(dedupedIds.length),
         SlfFacility.aggregate([
-        { $match: baseFilter },
+        { $match: scopedFilter },
           { $addFields: { _normProvince: { $replaceAll: { input: "$province", find: "Province of ", replacement: "" } } } },
           { $group: { _id: "$_normProvince", count: { $sum: 1 } } },
           { $sort: { count: -1 } },
         ]),
         SlfFacility.aggregate([
-        { $match: baseFilter },
+        { $match: scopedFilter },
           {
             $group: {
               _id: {
@@ -323,19 +384,19 @@ router.get("/stats", async (req, res) => {
           },
         ]),
         SlfFacility.aggregate([
-        { $match: baseFilter },
+        { $match: scopedFilter },
           { $group: { _id: { $ifNull: ["$category", "Unspecified"] }, count: { $sum: 1 } } },
         ]),
         SlfFacility.aggregate([
-        { $match: baseFilter },
+        { $match: scopedFilter },
           { $group: { _id: { $ifNull: ["$ownership", "Unspecified"] }, count: { $sum: 1 } } },
         ]),
         SlfFacility.aggregate([
-        { $match: baseFilter },
+        { $match: scopedFilter },
           { $group: { _id: { $ifNull: ["$manilaBayArea", "Non-MBA"] }, count: { $sum: 1 } } },
         ]),
         SlfFacility.aggregate([
-        { $match: baseFilter },
+        { $match: scopedFilter },
           {
             $group: {
               _id: null,
@@ -354,11 +415,11 @@ router.get("/stats", async (req, res) => {
           },
         ]),
         SlfFacility.find(
-        { ...baseFilter, latitude: { $ne: null }, longitude: { $ne: null } },
+        { ...scopedFilter, latitude: { $ne: null }, longitude: { $ne: null } },
           { province: 1, lgu: 1, barangay: 1, manilaBayArea: 1, latitude: 1, longitude: 1, statusOfSLF: 1, category: 1, ownership: 1, volumeCapacity: 1, noOfLGUServed: 1, focalPerson: 1, enmo: 1, yearStartedOperation: 1 }
         ),
         // Per-facility management details for dashboard drill-down modals
-        SlfFacility.find(baseFilter, {
+        SlfFacility.find(scopedFilter, {
           province: 1, lgu: 1, statusOfSLF: 1, dataYear: 1,
           noOfLeachatePond: 1, numberOfGasVents: 1,
           numberOfCell: 1, cellCapacities: 1, cellCapacityUnits: 1, cellStatuses: 1, cellTypes: 1, cellFillValues: 1, cellFillUnits: 1,

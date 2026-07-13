@@ -11,6 +11,7 @@ import {
   Pagination,
   Progress,
   Row,
+  Segmented,
   Select,
   Space,
   Table,
@@ -107,6 +108,9 @@ export default function CellWastePlacement({ canEdit = true }) {
   const [settings, setSettings] = useState({});
   const [loading, setLoading] = useState(false);
   const [selectedId, setSelectedId] = useState(null);
+  // "unassigned" = submissions still awaiting cell placement; "assigned" =
+  // submissions already placed (historical/current placement records).
+  const [assignmentTab, setAssignmentTab] = useState("unassigned");
   const [search, setSearch] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
   const [pagination, setPagination] = useState({
@@ -148,6 +152,7 @@ export default function CellWastePlacement({ canEdit = true }) {
             mode: "list",
             includeTrucks: true,
             withTruckVolume: true,
+            assignment: assignmentTab,
             page,
             limit: pageSize,
             ...(searchTerm ? { search: searchTerm } : {}),
@@ -170,7 +175,7 @@ export default function CellWastePlacement({ canEdit = true }) {
         if (!silent) setLoading(false);
       }
     },
-    [page, pageSize, searchTerm],
+    [page, pageSize, searchTerm, assignmentTab],
   );
 
   useEffect(() => {
@@ -395,6 +400,9 @@ export default function CellWastePlacement({ canEdit = true }) {
       setPageRecords((prev) => prev.map((record) => (record._id === selected._id ? updated : record)));
       // Re-pull the selected facility's records so cell-fill totals reflect the save.
       setFacilityRefresh((n) => n + 1);
+      // Re-filter the current tab so a now-assigned submission moves out of
+      // "For Cell Assignment" into "Assigned Records" (and totals update).
+      fetchPage({ silent: true });
       Swal.fire({ icon: "success", title: "Placement Saved", timer: 1100, showConfirmButton: false });
     } catch (err) {
       Swal.fire("Error", err.response?.data?.message || "Could not save placement.", "error");
@@ -455,11 +463,36 @@ export default function CellWastePlacement({ canEdit = true }) {
             }
             style={{ borderRadius: 8 }}
           >
+            <Segmented
+              block
+              value={assignmentTab}
+              onChange={(v) => {
+                setAssignmentTab(v);
+                setSelectedId(null);
+                setPagination((prev) => ({ ...prev, current: 1 }));
+              }}
+              options={[
+                { label: "For Cell Assignment", value: "unassigned" },
+                { label: "Assigned Records", value: "assigned" },
+              ]}
+              style={{ marginBottom: 10 }}
+            />
             <List
               size="small"
               loading={loading}
               dataSource={submissions}
-              locale={{ emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No submissions with truck volume" /> }}
+              locale={{
+                emptyText: (
+                  <Empty
+                    image={Empty.PRESENTED_IMAGE_SIMPLE}
+                    description={
+                      assignmentTab === "unassigned"
+                        ? "No submissions awaiting cell placement"
+                        : "No placed submissions yet"
+                    }
+                  />
+                ),
+              }}
               style={{ maxHeight: 640, overflow: "auto" }}
               renderItem={(record) => (
                 <List.Item

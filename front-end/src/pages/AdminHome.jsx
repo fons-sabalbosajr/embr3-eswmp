@@ -118,6 +118,7 @@ import api from "../api";
 import { getAdminDisplayName } from "../utils/adminIdentity";
 import secureStorage from "../utils/secureStorage";
 import { DataRefProvider } from "../utils/dataRef";
+import GaugeMeter, { computeGaugePercent } from "../components/GaugeMeter";
 import embLogo from "../assets/emblogo.svg";
 import {
   MapContainer,
@@ -822,14 +823,17 @@ export default function AdminHome() {
 
     {
       const devChildren = [];
-      if (isDeveloper || hasExplicitAccess("developerSettings")) {
+      // Developer-only: App Settings (incl. Dev Portal Credential) and
+      // Accounts & Roles are restricted to the real developer role — no explicit
+      // permission grant can open them. Enforced again on the backend.
+      if (isDeveloper) {
         devChildren.push({
           key: "dev-settings",
           icon: <ToolOutlined />,
           label: "App Settings",
         });
       }
-      if (isDeveloper || hasExplicitAccess("accountSettings")) {
+      if (isDeveloper) {
         devChildren.push({
           key: "settings-accounts",
           icon: <TeamOutlined />,
@@ -927,7 +931,8 @@ export default function AdminHome() {
       case "cs-tech-assist":
         return <TechnicalAssistance isDark={isDark} canEdit={canEdit("technicalAssistance")} canDelete={canDelete("technicalAssistance")} />;
       case "settings-accounts":
-        return (isDeveloper || hasExplicitAccess("accountSettings")) ? <AccountSettings isDark={isDark} /> : denied;
+        // Developer-only (direct-URL/menu-selection guard).
+        return isDeveloper ? <AccountSettings isDark={isDark} /> : denied;
       case "settings-portal-users":
         return (isDeveloper || hasAccess("portalUsers")) ? (
           <PortalUsers
@@ -975,7 +980,8 @@ export default function AdminHome() {
       case "dev-notifications":
         return (isDeveloper || hasExplicitAccess("notificationManagement")) ? <NotificationManagement isDark={isDark} /> : denied;
       case "dev-settings":
-        return (isDeveloper || hasExplicitAccess("developerSettings")) ? (
+        // Developer-only (direct-URL/menu-selection guard).
+        return isDeveloper ? (
           <DeveloperSettings
             isDark={isDark}
             isDeveloper={isDeveloper}
@@ -1762,6 +1768,7 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
   const [slfFilterProvince, setSlfFilterProvince] = useState(null);
   const [slfFilterStatus, setSlfFilterStatus] = useState(null);
   const [slfDashModal, setSlfDashModal] = useState(null); // { type: dashboard metric key }
+  const [slfCellDrill, setSlfCellDrill] = useState(null); // selected SLF in Cell Infrastructure modal → per-cell cards
 
   const mapPts = useMemo(
     () =>
@@ -7490,7 +7497,7 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
       key: "slf-monitoring",
       label: (
         <span>
-          <BankOutlined /> SLF Monitoring
+          <BankOutlined /> General Dashboard
         </span>
       ),
       children: (
@@ -7502,7 +7509,7 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
               key: "slf-facilities",
               label: (
                 <span>
-                  <BankOutlined /> SLF Monitoring
+                  <BankOutlined /> SLF Monitoring General Dashboard
                 </span>
               ),
               children: (
@@ -8393,6 +8400,7 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                         filter: (r) => (r.numberOfCell || 0) > 0,
                         flatten: (r) => {
                           const caps = r.cellCapacities || [];
+                          const fills = r.cellFillValues || [];
                           const maxCap = Math.max(...caps.filter(c => c != null), 1);
                           return Array.from({ length: r.numberOfCell || 0 }, (_, i) => ({
                             key: `${r.lgu}_${i}`,
@@ -8401,6 +8409,7 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                             cellNo: i + 1,
                             type: (r.cellTypes || [])[i] || "—",
                             capacity: caps[i] ?? null,
+                            fill: fills[i] ?? null,
                             maxCap,
                             status: (r.cellStatuses || [])[i] || "—",
                           }));
@@ -8413,16 +8422,18 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                             const color = v.toLowerCase().includes("hazard") ? "red" : v.toLowerCase().includes("resid") ? "geekblue" : "blue";
                             return <Tag color={color}>{v}</Tag>;
                           }},
-                          { title: "Capacity (m³)", key: "capacityViz", width: 200, render: (_, row) => {
+                          { title: "Fill / Capacity", key: "capacityViz", width: 150, align: "center", render: (_, row) => {
                             if (row.capacity == null) return <Text type="secondary">—</Text>;
-                            const pct = Math.round((row.capacity / (row.maxCap || 1)) * 100);
+                            // Gauge = cell fill vs this cell's capacity (falls back to
+                            // relative-to-largest when no fill value is recorded).
+                            const pct = row.fill != null
+                              ? computeGaugePercent({ usedCapacity: row.fill, totalCapacity: row.capacity })
+                              : computeGaugePercent({ usedCapacity: row.capacity, totalCapacity: row.maxCap });
+                            const gcolor = (pct ?? 0) > 75 ? "#ff4d4f" : (pct ?? 0) > 40 ? "#fa8c16" : "#52c41a";
                             return (
                               <div>
-                                <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 2 }}>
-                                  <Text style={{ fontSize: 11 }}>{Number(row.capacity).toLocaleString()} m³</Text>
-                                  <Text type="secondary" style={{ fontSize: 10 }}>{pct}%</Text>
-                                </div>
-                                <Progress percent={pct} size="small" showInfo={false} strokeColor={pct > 75 ? "#ff4d4f" : pct > 40 ? "#fa8c16" : "#52c41a"} trailColor="#f0f0f0" />
+                                <GaugeMeter percent={pct} size={72} thickness={7} color={gcolor} noDataText="—" />
+                                <Text type="secondary" style={{ fontSize: 10 }}>{Number(row.capacity).toLocaleString()} m³</Text>
                               </div>
                             );
                           }},
@@ -8507,15 +8518,81 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                       .slice(0, 8);
                     const maxProvince = Math.max(...provinceData.map((item) => item.value), 1);
                     const maxFacility = Math.max(...topFacilities.map((item) => item.value), 1);
+
+                    // ── Gauge data for Cell Infrastructure & Total Capacity ──
+                    // Per-facility cell utilization = summed cell fill / summed cell
+                    // capacity. computeGaugePercent returns null when capacity data
+                    // is missing so the gauge shows "No capacity data available".
+                    const cellGaugeFacilities = mgmtData
+                      .filter((r) => (r.numberOfCell || 0) > 0)
+                      .map((r) => {
+                        const caps = r.cellCapacities || [];
+                        const fills = r.cellFillValues || [];
+                        const statuses = r.cellStatuses || [];
+                        const types = r.cellTypes || [];
+                        const names = r.cellNames || [];
+                        const capUnits = r.cellCapacityUnits || [];
+                        const fillUnits = r.cellFillUnits || [];
+                        const n = r.numberOfCell || 0;
+                        let totalCap = 0, totalFill = 0, opCells = 0;
+                        const cells = [];
+                        for (let i = 0; i < n; i++) {
+                          const cap = Number(caps[i] || 0);
+                          const fillRaw = fills[i];
+                          const fill = fillRaw != null && fillRaw !== "" ? Number(fillRaw) : null;
+                          if (cap > 0) { totalCap += cap; totalFill += Number(fill || 0); }
+                          if (/oper|active/i.test(statuses[i] || "")) opCells++;
+                          const unit = capUnits[i] || fillUnits[i] || "m³";
+                          cells.push({
+                            index: i,
+                            name: names[i] || `Cell ${i + 1}`,
+                            type: types[i] || "—",
+                            status: statuses[i] || "—",
+                            capacity: cap > 0 ? cap : null,
+                            fill: Number.isFinite(fill) ? fill : null,
+                            remaining: cap > 0 && Number.isFinite(fill) ? Math.max(0, cap - fill) : null,
+                            unit,
+                            percent: computeGaugePercent({ usedCapacity: fill, totalCapacity: cap }),
+                          });
+                        }
+                        return {
+                          key: r._id || r.lgu, name: r.lgu, province: r.province,
+                          status: r.statusOfSLF, numberOfCell: n, opCells, totalCap, totalFill, cells,
+                          percent: computeGaugePercent({ usedCapacity: totalFill, totalCapacity: totalCap }),
+                        };
+                      })
+                      .sort((a, b) => (b.opCells - a.opCells) || (b.numberOfCell - a.numberOfCell));
+                    const cellsOverall = cellGaugeFacilities.reduce(
+                      (a, f) => ({ cap: a.cap + f.totalCap, fill: a.fill + f.totalFill, cells: a.cells + f.numberOfCell, op: a.op + f.opCells }),
+                      { cap: 0, fill: 0, cells: 0, op: 0 },
+                    );
+                    const cellsOverallPercent = computeGaugePercent({ usedCapacity: cellsOverall.fill, totalCapacity: cellsOverall.cap });
+                    // Selected SLF for the Cell Infrastructure per-cell drill-down.
+                    const drillFacility = slfCellDrill ? cellGaugeFacilities.find((f) => f.key === slfCellDrill) : null;
+
+                    // Per-facility volume-capacity utilization = waste received / volume capacity.
+                    const capacityGaugeFacilities = mgmtData
+                      .filter((r) => (r.volumeCapacity || 0) > 0)
+                      .map((r) => ({
+                        key: r._id || r.lgu, name: r.lgu, province: r.province, status: r.statusOfSLF,
+                        totalCap: Number(r.volumeCapacity || 0), used: Number(r.actualResidualWasteReceived || 0),
+                        percent: computeGaugePercent({ usedCapacity: r.actualResidualWasteReceived, totalCapacity: r.volumeCapacity }),
+                      }))
+                      .sort((a, b) => b.totalCap - a.totalCap);
+                    const capacityOverall = capacityGaugeFacilities.reduce(
+                      (a, f) => ({ cap: a.cap + f.totalCap, used: a.used + f.used }),
+                      { cap: 0, used: 0 },
+                    );
+                    const capacityOverallPercent = computeGaugePercent({ usedCapacity: capacityOverall.used, totalCapacity: capacityOverall.cap });
                     return (
                       <Modal
                         open
                         title={cfg.title}
-                        onCancel={() => setSlfDashModal(null)}
+                        onCancel={() => { setSlfDashModal(null); setSlfCellDrill(null); }}
                         footer={
                           <div style={{ display: "flex", justifyContent: "space-between" }}>
-                            <Button onClick={() => setSlfDashModal(null)}>Close</Button>
-                            <Button type="primary" icon={<TableOutlined />} onClick={() => { setSlfDashModal(null); setActiveMenu("slf-monitoring"); }}>
+                            <Button onClick={() => { setSlfDashModal(null); setSlfCellDrill(null); }}>Close</Button>
+                            <Button type="primary" icon={<TableOutlined />} onClick={() => { setSlfDashModal(null); setSlfCellDrill(null); setActiveMenu("slf-monitoring"); }}>
                               View in SLF Monitoring
                             </Button>
                           </div>
@@ -8532,7 +8609,219 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                               {
                                 key: "dashboard",
                                 label: <span><PieChartOutlined /> Dashboard</span>,
-                                children: (
+                                children: slfDashModal.type === "cells" ? (
+                                  <>
+                                    <Row gutter={[12, 12]} style={{ marginBottom: 16 }}>
+                                      <Col xs={24} md={8}>
+                                        <Card size="small" style={{ borderRadius: 8, border: `1px solid ${color}33`, background: `${color}0d` }}>
+                                          <GaugeMeter
+                                            percent={cellsOverallPercent}
+                                            color={color}
+                                            label="Overall Cell Utilization"
+                                            valueText={cellsOverall.cap > 0 ? `${cellsOverall.fill.toLocaleString()} / ${cellsOverall.cap.toLocaleString()} m³` : undefined}
+                                          />
+                                        </Card>
+                                      </Col>
+                                      <Col xs={12} md={8}>
+                                        <Card size="small" style={{ borderRadius: 8, marginBottom: 12 }}>
+                                          <Statistic title="Total Cells" value={cellsOverall.cells} valueStyle={{ color, fontSize: 22 }} />
+                                        </Card>
+                                        <Card size="small" style={{ borderRadius: 8 }}>
+                                          <Statistic title="Operational Cells" value={cellsOverall.op} valueStyle={{ fontSize: 22 }} />
+                                        </Card>
+                                      </Col>
+                                      <Col xs={12} md={8}>
+                                        <Card size="small" style={{ borderRadius: 8, marginBottom: 12 }}>
+                                          <Statistic title="Facilities w/ Cells" value={cellGaugeFacilities.length} valueStyle={{ fontSize: 22 }} />
+                                        </Card>
+                                        <Card size="small" style={{ borderRadius: 8 }}>
+                                          <Statistic title="With Capacity Data" value={cellGaugeFacilities.filter((f) => f.percent != null).length} valueStyle={{ fontSize: 22 }} />
+                                        </Card>
+                                      </Col>
+                                    </Row>
+                                    <Card
+                                      size="small"
+                                      title={
+                                        drillFacility ? (
+                                          <Space wrap>
+                                            <Button size="small" onClick={() => setSlfCellDrill(null)}>← Back to all SLFs</Button>
+                                            <span><ContainerOutlined /> {drillFacility.name} — Cell Breakdown</span>
+                                          </Space>
+                                        ) : (
+                                          <><ContainerOutlined /> Operational SLF Cells — Capacity Gauges <Text type="secondary" style={{ fontSize: 11, fontWeight: 400 }}>(click a card for cell details)</Text></>
+                                        )
+                                      }
+                                      style={{ borderRadius: 8 }}
+                                      styles={{ body: { maxHeight: 460, overflowY: "auto" } }}
+                                    >
+                                      {cellGaugeFacilities.length === 0 ? (
+                                        <Empty description="No cell infrastructure data available." />
+                                      ) : drillFacility ? (
+                                        <>
+                                          <div style={{ marginBottom: 12 }}>
+                                            <Text type="secondary" style={{ fontSize: 12 }}>
+                                              {drillFacility.province} • {drillFacility.numberOfCell} cells • {drillFacility.opCells} operational
+                                            </Text>
+                                          </div>
+                                          <Row gutter={[12, 12]}>
+                                            {drillFacility.cells.map((c) => (
+                                              <Col xs={12} sm={8} md={6} key={c.index}>
+                                                <Card size="small" style={{ borderRadius: 8, height: "100%", borderTop: `3px solid ${color}` }}>
+                                                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6, gap: 6 }}>
+                                                    <Text strong style={{ fontSize: 12 }}>{c.name}</Text>
+                                                    <Tag color={/oper|active/i.test(c.status) ? "green" : c.status === "—" ? "default" : "orange"} style={{ margin: 0, fontSize: 10 }}>{c.status}</Tag>
+                                                  </div>
+                                                  <GaugeMeter percent={c.percent} size={96} thickness={9} color={color} />
+                                                  <div style={{ fontSize: 11, marginTop: 6 }}>
+                                                    <div><Text type="secondary">Type: </Text>{c.type}</div>
+                                                    <div>
+                                                      <Text type="secondary">Capacity: </Text>
+                                                      {c.capacity != null ? `${c.capacity.toLocaleString()} ${c.unit}` : <Text type="secondary">No capacity data available</Text>}
+                                                    </div>
+                                                    {c.fill != null && <div><Text type="secondary">Used: </Text>{c.fill.toLocaleString()} {c.unit}</div>}
+                                                    {c.remaining != null && <div><Text type="secondary">Remaining: </Text>{c.remaining.toLocaleString()} {c.unit}</div>}
+                                                    {c.capacity == null && c.fill == null && (
+                                                      <div><Text type="secondary" italic>No numeric data recorded for this cell.</Text></div>
+                                                    )}
+                                                  </div>
+                                                </Card>
+                                              </Col>
+                                            ))}
+                                          </Row>
+                                        </>
+                                      ) : (
+                                        <Row gutter={[12, 12]}>
+                                          {cellGaugeFacilities.slice(0, 12).map((f) => (
+                                            <Col xs={12} sm={8} md={6} key={f.key}>
+                                              <Card size="small" hoverable onClick={() => setSlfCellDrill(f.key)} style={{ borderRadius: 8, textAlign: "center", height: "100%", cursor: "pointer" }}>
+                                                <GaugeMeter percent={f.percent} size={112} color={color} />
+                                                <div style={{ fontSize: 12, fontWeight: 600, marginTop: 4 }}>{f.name}</div>
+                                                <Text type="secondary" style={{ fontSize: 11 }}>{f.province}</Text>
+                                                <div style={{ marginTop: 4 }}>
+                                                  <Tag color="cyan">{f.numberOfCell} cells</Tag>
+                                                  <Tag color="green">{f.opCells} op</Tag>
+                                                </div>
+                                                <div style={{ marginTop: 2 }}><Text type="secondary" style={{ fontSize: 10 }}>Click to view cells</Text></div>
+                                              </Card>
+                                            </Col>
+                                          ))}
+                                        </Row>
+                                      )}
+                                    </Card>
+                                  </>
+                                ) : slfDashModal.type === "capacity" ? (
+                                  <>
+                                    <Row gutter={[12, 12]} style={{ marginBottom: 16 }}>
+                                      <Col xs={24} md={8}>
+                                        <Card size="small" style={{ borderRadius: 8, border: `1px solid ${color}33`, background: `${color}0d` }}>
+                                          <GaugeMeter
+                                            percent={capacityOverallPercent}
+                                            color={color}
+                                            label="Overall Capacity Used"
+                                            valueText={capacityOverall.cap > 0 ? `${capacityOverall.used.toLocaleString()} / ${capacityOverall.cap.toLocaleString()} m³` : undefined}
+                                          />
+                                        </Card>
+                                      </Col>
+                                      <Col xs={12} md={8}>
+                                        <Card size="small" style={{ borderRadius: 8, marginBottom: 12 }}>
+                                          <Statistic title="Total Capacity (m³)" value={capacityOverall.cap} valueStyle={{ color, fontSize: 22 }} formatter={(v) => Number(v || 0).toLocaleString()} />
+                                        </Card>
+                                        <Card size="small" style={{ borderRadius: 8 }}>
+                                          <Statistic title="Waste Received (m³)" value={capacityOverall.used} valueStyle={{ fontSize: 22 }} formatter={(v) => Number(v || 0).toLocaleString()} />
+                                        </Card>
+                                      </Col>
+                                      <Col xs={12} md={8}>
+                                        <Card size="small" style={{ borderRadius: 8, marginBottom: 12 }}>
+                                          <Statistic title="Facilities w/ Capacity" value={capacityGaugeFacilities.length} valueStyle={{ fontSize: 22 }} />
+                                        </Card>
+                                        <Card size="small" style={{ borderRadius: 8 }}>
+                                          <Statistic title="Province Coverage" value={provinceData.length} valueStyle={{ fontSize: 22 }} />
+                                        </Card>
+                                      </Col>
+                                    </Row>
+                                    <Card size="small" title={<><BarChartOutlined /> SLF Capacity Gauges</>} style={{ borderRadius: 8 }}>
+                                      {capacityGaugeFacilities.length === 0 ? (
+                                        <Empty description="No capacity data available." />
+                                      ) : (
+                                        <Row gutter={[12, 12]}>
+                                          {capacityGaugeFacilities.slice(0, 12).map((f) => (
+                                            <Col xs={12} sm={8} md={6} key={f.key}>
+                                              <Card size="small" style={{ borderRadius: 8, textAlign: "center", height: "100%" }}>
+                                                <GaugeMeter percent={f.percent} size={112} color={color} />
+                                                <div style={{ fontSize: 12, fontWeight: 600, marginTop: 4 }}>{f.name}</div>
+                                                <Text type="secondary" style={{ fontSize: 11 }}>{f.province}</Text>
+                                                <div style={{ marginTop: 4 }}>
+                                                  <Tag color="magenta">{Number(f.totalCap).toLocaleString()} m³</Tag>
+                                                </div>
+                                              </Card>
+                                            </Col>
+                                          ))}
+                                        </Row>
+                                      )}
+                                    </Card>
+                                  </>
+                                ) : slfDashModal.type === "waste" ? (
+                                  <>
+                                    {/* Waste Received — charts sourced from Portal Submissions (/data-slf/stats). */}
+                                    <Row gutter={[12, 12]} style={{ marginBottom: 16 }}>
+                                      <Col xs={12} md={6}>
+                                        <Card size="small" style={{ borderRadius: 8, border: `1px solid ${color}33`, background: `${color}0d` }}>
+                                          <Statistic title="Facility Waste Received" value={totalMetricValue} suffix={cfg.metricLabel} valueStyle={{ color, fontSize: 20 }} formatter={(v) => Number(v || 0).toLocaleString()} />
+                                        </Card>
+                                      </Col>
+                                      <Col xs={12} md={6}>
+                                        <Card size="small" style={{ borderRadius: 8 }}>
+                                          <Statistic title="Portal Submissions" value={stats?.submissions || 0} valueStyle={{ fontSize: 20 }} />
+                                        </Card>
+                                      </Col>
+                                      <Col xs={12} md={6}>
+                                        <Card size="small" style={{ borderRadius: 8 }}>
+                                          <Statistic title="Portal Truck Trips" value={stats?.totalTrucks || 0} valueStyle={{ fontSize: 20 }} />
+                                        </Card>
+                                      </Col>
+                                      <Col xs={12} md={6}>
+                                        <Card size="small" style={{ borderRadius: 8 }}>
+                                          <Statistic title="Reporting SLFs" value={sourceRows.length} valueStyle={{ fontSize: 20 }} />
+                                        </Card>
+                                      </Col>
+                                    </Row>
+                                    <Row gutter={[16, 16]}>
+                                      <Col xs={24} lg={14}>
+                                        <Card size="small" title={<><BarChartOutlined /> Monthly Waste Volume — Portal Submissions</>} style={{ borderRadius: 8, height: "100%" }}>
+                                          {monthlyChartData.length === 0 ? (
+                                            <Empty description="No portal submission data available." />
+                                          ) : (
+                                            <ResponsiveContainer width="100%" height={260}>
+                                              <BarChart data={monthlyChartData}>
+                                                <CartesianGrid strokeDasharray="3 3" vertical={false} />
+                                                <XAxis dataKey="name" fontSize={11} />
+                                                <YAxis fontSize={11} />
+                                                <RechartsTooltip formatter={(v, n) => [Number(v).toLocaleString(), n === "volume" ? "Volume" : "Submissions"]} />
+                                                <Bar dataKey="volume" fill={color} radius={[4, 4, 0, 0]} name="volume" isAnimationActive={false} />
+                                              </BarChart>
+                                            </ResponsiveContainer>
+                                          )}
+                                        </Card>
+                                      </Col>
+                                      <Col xs={24} lg={10}>
+                                        <Card size="small" title="Waste by Type — Portal Submissions" style={{ borderRadius: 8, height: "100%" }}>
+                                          {wasteTypeChartData.length === 0 ? (
+                                            <Empty description="No waste-type data available." />
+                                          ) : (
+                                            <ResponsiveContainer width="100%" height={260}>
+                                              <BarChart data={wasteTypeChartData} layout="vertical">
+                                                <XAxis type="number" fontSize={11} />
+                                                <YAxis type="category" dataKey="name" width={90} fontSize={11} />
+                                                <RechartsTooltip formatter={(v) => Number(v).toLocaleString()} />
+                                                <Bar dataKey="volume" fill={color} radius={[0, 4, 4, 0]} name="volume" isAnimationActive={false} />
+                                              </BarChart>
+                                            </ResponsiveContainer>
+                                          )}
+                                        </Card>
+                                      </Col>
+                                    </Row>
+                                  </>
+                                ) : (
                                   <>
                                     <Row gutter={[12, 12]} style={{ marginBottom: 16 }}>
                                       <Col xs={24} md={6}>
@@ -8712,7 +9001,7 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                               <XAxis dataKey="name" tick={{ fontSize: 11 }} />
                               <YAxis allowDecimals={false} tick={{ fontSize: 11 }} />
                               <RechartsTooltip />
-                              <Line type="monotone" dataKey="submissions" stroke="#2f54eb" strokeWidth={2.5} dot={{ r: 3 }} name="Submissions" />
+                              <Line type="monotone" dataKey="submissions" stroke="#2f54eb" strokeWidth={2.5} dot={{ r: 3 }} name="Submissions" isAnimationActive={false} />
                             </LineChart>
                           </ResponsiveContainer>
                         </div>
@@ -8727,7 +9016,7 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                               <XAxis dataKey="name" tick={{ fontSize: 11 }} />
                               <YAxis tick={{ fontSize: 11 }} />
                               <RechartsTooltip />
-                              <Bar dataKey="volume" name="Volume" radius={[4, 4, 0, 0]}>
+                              <Bar dataKey="volume" name="Volume" radius={[4, 4, 0, 0]} isAnimationActive={false}>
                                 {wasteTypeChartData.map((_, index) => (
                                   <Cell key={index} fill={chartPalette[index % chartPalette.length]} />
                                 ))}
@@ -8742,7 +9031,7 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                         <div style={{ height: 240 }}>
                           <ResponsiveContainer width="100%" height="100%">
                             <RePieChart>
-                              <Pie data={statusChartData} dataKey="value" nameKey="name" innerRadius={54} outerRadius={84} paddingAngle={2} label>
+                              <Pie data={statusChartData} dataKey="value" nameKey="name" innerRadius={54} outerRadius={84} paddingAngle={2} label isAnimationActive={false}>
                                 {statusChartData.map((_, index) => (
                                   <Cell key={index} fill={chartPalette[index % chartPalette.length]} />
                                 ))}
@@ -8762,7 +9051,7 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                               <XAxis type="number" allowDecimals={false} tick={{ fontSize: 11 }} />
                               <YAxis type="category" dataKey="name" tick={{ fontSize: 11 }} width={80} />
                               <RechartsTooltip />
-                              <Bar dataKey="value" name="Records" radius={[0, 4, 4, 0]}>
+                              <Bar dataKey="value" name="Records" radius={[0, 4, 4, 0]} isAnimationActive={false}>
                                 {companyTypeChartData.map((_, index) => (
                                   <Cell key={index} fill={chartPalette[(index + 2) % chartPalette.length]} />
                                 ))}
@@ -9299,7 +9588,7 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
       { key: "lgu-mrf", label: <span><ApartmentOutlined /> LGU Initiated MRF</span> },
       { key: "trash-traps", label: <span><DeleteOutlined /> Trash Traps</span> },
       { key: "swm-equip", label: <span><CarOutlined /> SWM Equipment</span> },
-      { key: "slf-monitoring", label: <span><BankOutlined /> SLF Monitoring</span> },
+      { key: "slf-monitoring", label: <span><BankOutlined /> General Dashboard</span> },
       { key: "open-dumpsites", label: <span><EnvironmentOutlined /> Open Dumpsites</span> },
       { key: "residual-containment", label: <span><SafetyCertificateOutlined /> Residual Containment</span> },
       { key: "transfer-stations", label: <span><SwapOutlined /> Transfer Stations</span> },

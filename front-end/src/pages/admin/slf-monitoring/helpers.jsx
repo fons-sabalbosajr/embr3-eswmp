@@ -239,8 +239,10 @@ const resolveMediaUrl = (url, { thumbnail = false } = {}) => {
   if (isDriveUrl(s)) {
     const id = extractDriveId(s);
     if (id) {
+      // Grid thumbnails are downscaled (w800) so many photos don't decode to
+      // hundreds of MB in memory; full resolution is still used for preview/open.
       return thumbnail
-        ? `https://drive.google.com/thumbnail?id=${id}&sz=w1200`
+        ? `https://drive.google.com/thumbnail?id=${id}&sz=w800`
         : `https://drive.google.com/uc?export=view&id=${id}`;
     }
   }

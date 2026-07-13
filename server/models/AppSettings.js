@@ -90,6 +90,14 @@ const appSettingsSchema = new mongoose.Schema(
       default: "Google Drive is temporarily unavailable. File uploads are disabled. Please try again later.",
     },
 
+    // Dev Portal Credential — lets ONLY the developer role impersonate a portal
+    // user for debugging, gated behind the developer password + a hashed PIN.
+    // The PIN hash is never returned by any API.
+    devPortalPinHash: { type: String, default: "" },
+    devPortalPinUpdatedAt: { type: Date, default: null },
+    devPortalPinFailedAttempts: { type: Number, default: 0 },
+    devPortalPinLockedUntil: { type: Date, default: null },
+
     // Security
     sessionTimeout: { type: Number, default: 7 },        // days
     maxLoginAttempts: { type: Number, default: 5 },

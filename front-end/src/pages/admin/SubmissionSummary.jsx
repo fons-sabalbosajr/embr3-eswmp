@@ -37,8 +37,10 @@ import dayjs from "dayjs";
 const SummaryDisposalCalendar = lazy(() => import("./SummaryDisposalCalendar"));
 const SlfSubmissionReport = lazy(() => import("./SlfSubmissionReport"));
 import api from "../../api";
+import CellInfraOverview from "./CellInfraOverview";
 import { fetchWithCache, invalidateCache } from "../../utils/pageCache";
 import { getSocket } from "../../utils/socket";
+import excludeDummy from "../../utils/excludeDummy";
 
 const { Text } = Typography;
 const ACCENT = "#2f54eb";
@@ -79,10 +81,20 @@ const statusColor = {
   revert_requested: "orange",
 };
 
+// Format a numeric volume to a maximum of 2 decimal places. Safely handles
+// null/undefined/strings/NaN — returns null so the caller can skip it.
+function formatVolumeValue(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  return n.toLocaleString(undefined, { maximumFractionDigits: 2 });
+}
+
 function formatVolume(m3, tons) {
   const parts = [];
-  if (m3 > 0) parts.push(`${m3.toLocaleString()} m³`);
-  if (tons > 0) parts.push(`${tons.toLocaleString()} tons`);
+  const m = formatVolumeValue(m3);
+  const t = formatVolumeValue(tons);
+  if (m) parts.push(`${m} m³`);
+  if (t) parts.push(`${t} tons`);
   return parts.length ? parts.join(" / ") : "—";
 }
 
@@ -367,11 +379,13 @@ export default function SubmissionSummary({ isDark }) {
           api.get("/settings/app"),
           api.get("/portal-users").catch(() => ({ data: [] })),
         ]);
+        // Defensive: keep dummy/test facilities and accounts out of the summary
+        // (backend already excludes them from these endpoints by default).
         return {
-          facilities: Array.isArray(facilitiesRes.data) ? facilitiesRes.data : [],
+          facilities: excludeDummy(Array.isArray(facilitiesRes.data) ? facilitiesRes.data : []),
           baselines: Array.isArray(baselinesRes.data) ? baselinesRes.data : [],
           settings: settingsRes.data || {},
-          portalUsers: Array.isArray(portalUsersRes.data) ? portalUsersRes.data : [],
+          portalUsers: excludeDummy(Array.isArray(portalUsersRes.data) ? portalUsersRes.data : []),
         };
       },
       {
@@ -763,7 +777,7 @@ export default function SubmissionSummary({ isDark }) {
             label="Total Waste Volume"
             subtitle={
               totals.tons > 0 && totals.m3 > 0
-                ? `${totals.tons.toLocaleString()} tons combined`
+                ? `${formatVolumeValue(totals.tons)} tons combined`
                 : "All accepted waste"
             }
             isDark={isDark}
@@ -829,6 +843,23 @@ export default function SubmissionSummary({ isDark }) {
       </Row>
             ),
           },
+        ]}
+      />
+      {/* Cell Infra Overview — its own collapsible card, above the SLF
+          Submissions Breakdown (kept as a separate card, not merged). */}
+      <CellInfraOverview
+        rows={summaryRows}
+        isDark={isDark}
+        onEdited={() => {
+          fetchReferenceData({ force: true });
+          fetchRecords({ force: true, silent: true });
+        }}
+      />
+      <Collapse
+        defaultActiveKey={["breakdown"]}
+        expandIconPosition="end"
+        style={{ marginBottom: 16, background: "transparent", borderRadius: 10 }}
+        items={[
           {
             key: "breakdown",
             label: (

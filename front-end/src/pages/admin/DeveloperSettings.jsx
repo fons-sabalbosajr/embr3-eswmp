@@ -23,6 +23,7 @@ import {
   Alert,
   DatePicker,
   Modal,
+  Collapse,
 } from "antd";
 import {
   SettingOutlined,
@@ -73,6 +74,7 @@ import {
 import AccountSettings from "./AccountSettings";
 import Swal from "sweetalert2";
 import api from "../../api";
+import { withSizeChanger } from "../../utils/tablePagination";
 import secureStorage from "../../utils/secureStorage";
 import dayjs from "dayjs";
 import ResponsiveTable from "./shared/ResponsiveTable";
@@ -111,6 +113,11 @@ export default function DeveloperSettings({onSettingsSaved, isDark, isDeveloper 
   const [driveSaving, setDriveSaving] = useState(false);
   const [driveConfig, setDriveConfig] = useState(null); // { ok, missing[], authMethod }
   const [driveVerified, setDriveVerified] = useState(false); // true after a real test-upload passes
+  // Dev Portal Credential (developer-only portal impersonation for debugging)
+  const [devPortalStatus, setDevPortalStatus] = useState(null); // { pinSet, locked, lockedUntil, overrideUsername }
+  const [devPinForm] = Form.useForm();
+  const [devPinSaving, setDevPinSaving] = useState(false);
+  const [devPinRegenerating, setDevPinRegenerating] = useState(false);
 
   // Test-upload modal
   const [testUploadModal, setTestUploadModal] = useState({ open: false });
@@ -206,6 +213,7 @@ export default function DeveloperSettings({onSettingsSaved, isDark, isDeveloper 
       .get("/settings/app/drive-status")
       .then(({ data }) => setDriveConfig(data))
       .catch(() => setDriveConfig(null));
+    loadDevPortalStatus();
     const logInterval = setInterval(() => fetchLogs({ showLoading: false }), 8000);
     return () => clearInterval(logInterval);
   }, []);
@@ -672,6 +680,53 @@ export default function DeveloperSettings({onSettingsSaved, isDark, isDeveloper 
       setEmailStatusMsg(err.response?.data?.message || "Connection test failed");
     } finally {
       setEmailTesting(false);
+    }
+  };
+
+  const loadDevPortalStatus = async () => {
+    try {
+      const { data } = await api.get("/dev-portal/status");
+      setDevPortalStatus(data);
+    } catch {
+      setDevPortalStatus(null);
+    }
+  };
+
+  const handleSetDevPin = async (values) => {
+    setDevPinSaving(true);
+    try {
+      await api.post("/dev-portal/pin", {
+        pin: values.pin,
+        currentPassword: values.currentPassword,
+      });
+      devPinForm.resetFields();
+      await loadDevPortalStatus();
+      Swal.fire("Saved", "Dev Portal PIN updated.", "success");
+    } catch (err) {
+      Swal.fire("Error", err.response?.data?.message || "Could not update PIN.", "error");
+    } finally {
+      setDevPinSaving(false);
+    }
+  };
+
+  const handleRegenerateDevPin = async () => {
+    const confirm = await Swal.fire({
+      icon: "warning",
+      title: "Generate a new PIN?",
+      text: "A new PIN will be emailed to your developer email. The current PIN will stop working.",
+      showCancelButton: true,
+      confirmButtonText: "Generate & Email",
+    });
+    if (!confirm.isConfirmed) return;
+    setDevPinRegenerating(true);
+    try {
+      const { data } = await api.post("/dev-portal/regenerate-pin");
+      await loadDevPortalStatus();
+      Swal.fire("PIN Sent", data.message || "A new PIN was emailed to you.", "success");
+    } catch (err) {
+      Swal.fire("Error", err.response?.data?.message || "Could not regenerate PIN.", "error");
+    } finally {
+      setDevPinRegenerating(false);
     }
   };
 
@@ -1692,7 +1747,7 @@ export default function DeveloperSettings({onSettingsSaved, isDark, isDeveloper 
                   dataSource={announcements}
                   rowKey="_id"
                   size="small"
-                  pagination={{ pageSize: 8, pageSizeOptions: ["8", "15", "30"], showTotal: (total, range) => `${range[0]}-${range[1]} of ${total}` }}
+                  pagination={{ pageSize: 8, showSizeChanger: true, pageSizeOptions: ["8", "15", "30"], showTotal: (total, range) => `${range[0]}-${range[1]} of ${total}` }}
                   locale={{ emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No announcements yet" /> }}
                   columns={[
                     {
@@ -1758,6 +1813,150 @@ export default function DeveloperSettings({onSettingsSaved, isDark, isDeveloper 
                     },
                   ]}
                 />
+              </Card>
+            ),
+          },
+          {
+            key: "dev-portal-credential",
+            label: <span><SafetyCertificateOutlined /> Dev Portal Credential</span>,
+            children: (
+              <Card
+                style={{ marginTop: 0, borderRadius: 10 }}
+                title={
+                  <Space>
+                    <SafetyCertificateOutlined style={{ color: "#722ed1" }} />
+                    <Text strong>Dev Portal Credential</Text>
+                  </Space>
+                }
+              >
+                <Alert
+                  type="warning"
+                  showIcon
+                  style={{ marginBottom: 16 }}
+                  message="Developer-only debugging access"
+                  description={
+                    <span>
+                      This PIN gates developer access on the portal login page that lets you
+                      open a portal user's session for debugging. Access requires
+                      your developer email, your developer password, <b>and</b> this PIN. All
+                      impersonation activity is logged. Never share the PIN.
+                    </span>
+                  }
+                />
+                <Collapse
+                  style={{ marginBottom: 16 }}
+                  items={[
+                    {
+                      key: "how-to",
+                      label: (
+                        <span>
+                          <SafetyCertificateOutlined style={{ color: "#722ed1", marginRight: 6 }} />
+                          How to Access a Portal Account
+                        </span>
+                      ),
+                      children: (
+                        <>
+                          <ol style={{ paddingLeft: 18, margin: 0, lineHeight: 1.9 }}>
+                            <li>
+                              <b>Set the PIN here first.</b> On this tab (Developer Settings →
+                              Dev Portal Credential), set or update the Dev Portal PIN using your
+                              developer account password. The PIN is stored hashed; it is never shown again.
+                            </li>
+                            <li>
+                              <b>Go to the Portal login page</b> and open Developer Portal Access.
+                              Enter your developer email and your developer password.
+                            </li>
+                            <li>
+                              <b>Enter this PIN</b> when prompted. It is validated on the server against
+                              the stored hash (5 attempts, then a temporary lockout).
+                            </li>
+                            <li>
+                              <b>Select the target Portal user</b> from the list shown after the PIN is
+                              verified — this is the SLF/portal account you want to open.
+                            </li>
+                            <li>
+                              <b>Start the session.</b> A short-lived debug (impersonation) session opens
+                              that Portal user's account. The whole action is audit-logged.
+                            </li>
+                            <li>
+                              <b>Exit</b> by logging out of the Portal — this ends the impersonation
+                              session and returns you to the login page for the Admin/Developer side.
+                            </li>
+                          </ol>
+                          <Alert
+                            type="info"
+                            showIcon
+                            style={{ marginTop: 12 }}
+                            message="Authorized use only"
+                            description={
+                              <ul style={{ paddingLeft: 18, margin: 0 }}>
+                                <li>For authorized developer/administrator debugging access only.</li>
+                                <li>Portal user passwords are never exposed — access uses your developer email + password and the PIN, never the portal user's password.</li>
+                                <li>The PIN and session tokens are not displayed or logged; do not share or record them.</li>
+                                <li>Confirm the selected Portal user before making any changes to avoid acting on the wrong account.</li>
+                              </ul>
+                            }
+                          />
+                        </>
+                      ),
+                    },
+                  ]}
+                />
+                <Space style={{ marginBottom: 16 }} wrap>
+                  <Tag color={devPortalStatus?.pinSet ? "green" : "red"}>
+                    {devPortalStatus?.pinSet ? "PIN is set" : "No PIN set"}
+                  </Tag>
+                  {devPortalStatus?.locked && (
+                    <Tag color="volcano">
+                      Locked until {devPortalStatus.lockedUntil ? new Date(devPortalStatus.lockedUntil).toLocaleTimeString() : ""}
+                    </Tag>
+                  )}
+                  {devPortalStatus?.updatedAt && (
+                    <Text type="secondary" style={{ fontSize: 12 }}>
+                      Last updated {new Date(devPortalStatus.updatedAt).toLocaleString()}
+                    </Text>
+                  )}
+                </Space>
+                <Form form={devPinForm} layout="vertical" onFinish={handleSetDevPin} style={{ maxWidth: 420 }}>
+                  <Form.Item
+                    name="currentPassword"
+                    label="Your Developer Password"
+                    rules={[{ required: true, message: "Enter your developer account password" }]}
+                  >
+                    <Input.Password autoComplete="current-password" placeholder="Developer account password" />
+                  </Form.Item>
+                  <Form.Item
+                    name="pin"
+                    label={devPortalStatus?.pinSet ? "New PIN (4–8 digits)" : "Set PIN (4–8 digits)"}
+                    rules={[{ required: true, pattern: /^\d{4,8}$/, message: "PIN must be 4 to 8 digits" }]}
+                  >
+                    <Input.Password inputMode="numeric" maxLength={8} placeholder="Numeric PIN" />
+                  </Form.Item>
+                  <Form.Item
+                    name="confirmPin"
+                    label="Confirm PIN"
+                    dependencies={["pin"]}
+                    rules={[
+                      { required: true, message: "Re-enter the PIN" },
+                      ({ getFieldValue }) => ({
+                        validator: (_, v) =>
+                          !v || v === getFieldValue("pin")
+                            ? Promise.resolve()
+                            : Promise.reject(new Error("PINs do not match")),
+                      }),
+                    ]}
+                  >
+                    <Input.Password inputMode="numeric" maxLength={8} placeholder="Re-enter PIN" />
+                  </Form.Item>
+                  <Space wrap>
+                    <Button type="primary" htmlType="submit" loading={devPinSaving}>
+                      {devPortalStatus?.pinSet ? "Update PIN" : "Set PIN"}
+                    </Button>
+                    <Button onClick={handleRegenerateDevPin} loading={devPinRegenerating}>
+                      Forgot / Generate New PIN (email)
+                    </Button>
+                  </Space>
+                </Form>
               </Card>
             ),
           },
@@ -1888,7 +2087,7 @@ export default function DeveloperSettings({onSettingsSaved, isDark, isDeveloper 
                   dataSource={filteredPortalSecurityUsers}
                   rowKey="_id"
                   loading={portalSecurityLoading}
-                  pagination={{ pageSize: 15, size: "small" }}
+                  pagination={withSizeChanger({ pageSize: 15, size: "small" })}
                   scroll={{ x: 1120 }}
                   columns={[
                     {
@@ -2146,7 +2345,7 @@ export default function DeveloperSettings({onSettingsSaved, isDark, isDeveloper 
                     rowKey="_id"
                     size="small"
                     loading={logsLoading}
-                    pagination={{ pageSize: 30, size: "small" }}
+                    pagination={withSizeChanger({ pageSize: 30, size: "small" })}
                     scroll={{ x: 950 }}
                     style={{ fontSize: 11 }}
                     className="compact-logs-table"
@@ -2263,7 +2462,7 @@ export default function DeveloperSettings({onSettingsSaved, isDark, isDeveloper 
                     rowKey="_id"
                     size="small"
                     loading={deletedLoading}
-                    pagination={{ pageSize: 15, size: "small" }}
+                    pagination={withSizeChanger({ pageSize: 15, size: "small" })}
                     scroll={{ x: 900 }}
                     columns={[
                       { title: "ID No.", dataIndex: "idNo", key: "idNo", width: 160, render: (v) => <Text strong style={{ fontSize: 12 }}>{v}</Text> },
@@ -2431,7 +2630,7 @@ export default function DeveloperSettings({onSettingsSaved, isDark, isDeveloper 
                     rowKey="_id"
                     size="small"
                     loading={deletedSlfLoading}
-                    pagination={{ pageSize: 15, size: "small" }}
+                    pagination={withSizeChanger({ pageSize: 15, size: "small" })}
                     scroll={{ x: 900 }}
                     columns={[
                       { title: "Data Year", dataIndex: "dataYear", key: "dataYear", width: 90, render: (v) => <Tag color="blue">{v || "—"}</Tag> },
@@ -2653,7 +2852,7 @@ export default function DeveloperSettings({onSettingsSaved, isDark, isDeveloper 
           dataSource={submissionRecords}
           rowKey="_id"
           loading={submissionRecordsLoading}
-          pagination={{ pageSize: 8, size: "small" }}
+          pagination={withSizeChanger({ pageSize: 8, size: "small" })}
           scroll={{ x: 820 }}
           columns={[
             {

@@ -947,8 +947,37 @@ async function sendInternalMessageEmail(email, firstName, senderName, subject, p
   });
 }
 
+// Dev Portal Credential — deliver a newly generated PIN to the developer only.
+// The PIN is emailed once and stored only as a bcrypt hash; it is never shown
+// in the UI or logged.
+async function sendDevPortalPinEmail(email, firstName, pin) {
+  const body = `
+    <h2 style="margin:0 0 8px;color:#1a3353;font-size:22px;">Dev Portal Credential PIN</h2>
+    <p style="margin:0 0 20px;color:#666;font-size:15px;line-height:1.6;">
+      Hi <strong>${firstName || "Developer"}</strong>, a new Dev Portal Credential PIN was generated for developer portal-impersonation debugging.
+    </p>
+    <div style="text-align:center;margin:0 0 24px;">
+      <div style="display:inline-block;background:#f5f7fa;border:2px dashed #2d5f8a;border-radius:12px;padding:20px 40px;">
+        <span style="font-size:34px;font-weight:800;letter-spacing:10px;color:#1a3353;">${pin}</span>
+      </div>
+    </div>
+    <div style="border-top:1px solid #eee;padding-top:20px;margin-top:8px;">
+      <p style="margin:0;color:#999;font-size:13px;line-height:1.5;">
+        Keep this PIN private. It grants developer-only debug access to portal accounts. If you did not request it, change it immediately from Developer &gt; App Settings &gt; Dev Portal Credential.
+      </p>
+    </div>`;
+
+  await (await getTransporter()).sendMail({
+    from: `"EMBR3 ESWMP" <${process.env.EMAIL_USER}>`,
+    to: email,
+    subject: "Dev Portal Credential PIN — EMBR3 ESWMP",
+    html: portalEmailWrapper(body),
+  });
+}
+
 module.exports = {
   sendVerificationEmail,
+  sendDevPortalPinEmail,
   sendAcknowledgementEmail,
   sendBulkAcknowledgeEmail,
   sendPortalSignupEmail,

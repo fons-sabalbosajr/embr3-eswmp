@@ -67,8 +67,19 @@
   justify-content: center;
   min-height: 100vh;
   min-height: 100svh;
-  padding: 40px 24px;
+  padding: 20px 24px;
   overflow: hidden;
+}
+
+/* Short viewports (e.g. laptops with browser chrome): allow the content to
+   scroll gracefully instead of being clipped by the decorative overflow:hidden. */
+@media (max-height: 760px) {
+  .auth-page {
+    align-items: flex-start;
+    overflow-y: auto;
+    padding-top: 16px;
+    padding-bottom: 16px;
+  }
 }
 
 /* Background image layer */
@@ -183,21 +194,21 @@
 /* Brand header above card */
 .auth-brand-header {
   text-align: center;
-  margin-bottom: 28px;
+  margin-bottom: 16px;
   animation: authFadeInUp 0.6s ease-out 0.1s both;
 }
 
 .auth-brand-logo-circle {
-  width: 72px;
-  height: 72px;
-  border-radius: 18px;
+  width: 60px;
+  height: 60px;
+  border-radius: 16px;
   background: rgba(255,255,255,0.08);
   backdrop-filter: blur(12px);
   border: 1px solid rgba(255,255,255,0.12);
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  margin-bottom: 16px;
+  margin-bottom: 10px;
 }
 
 .auth-brand-logo-circle img {
@@ -395,7 +406,7 @@
   width: 100%;
   border-radius: 18px !important;
   box-shadow: 0 20px 60px rgba(0,0,0,0.25), 0 4px 20px rgba(0,0,0,0.15) !important;
-  padding: 32px 24px !important;
+  padding: 22px 24px !important;
   border: 1px solid rgba(255,255,255,0.08) !important;
   backdrop-filter: blur(16px);
   background: rgba(255,255,255,0.96) !important;
@@ -415,14 +426,14 @@
 
 /* Avatar icon circle */
 .auth-avatar {
-  width: 56px;
-  height: 56px;
+  width: 50px;
+  height: 50px;
   border-radius: 50%;
   background: linear-gradient(135deg, #1a3353, #2d5f8a);
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  margin-bottom: 14px;
+  margin-bottom: 10px;
   animation: authPulseGlow 3.5s ease-in-out infinite;
   transition: transform 0.3s ease;
 }
@@ -480,7 +491,12 @@
    ══════════════════════════════════════════════════ */
 
 .auth-form {
-  margin-top: 20px;
+  margin-top: 12px;
+}
+
+/* Tighter default field spacing so the card fits the viewport without scroll. */
+.auth-form .ant-form-item {
+  margin-bottom: 14px;
 }
 
 .auth-form .ant-form-item-label > label {
@@ -493,7 +509,7 @@
 .auth-form .ant-input-password,
 .auth-form .ant-input-affix-wrapper {
   border-radius: 10px !important;
-  height: 46px !important;
+  height: 42px !important;
   border-color: #e0e5ec !important;
   transition: all 0.3s ease !important;
 }
@@ -516,7 +532,7 @@
 
 /* Primary button */
 .auth-btn-primary {
-  height: 50px !important;
+  height: 46px !important;
   border-radius: 12px !important;
   font-weight: 600 !important;
   font-size: 16px !important;
@@ -568,7 +584,7 @@
 
 /* Divider */
 .auth-divider {
-  margin: 16px 0 !important;
+  margin: 10px 0 !important;
 }
 
 .auth-divider .ant-divider-inner-text {

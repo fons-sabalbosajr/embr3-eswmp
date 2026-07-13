@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Form, Input, Button, Card, Typography, Divider, Alert, Space, Tag, Collapse, Modal } from "antd";
+import { Form, Input, Button, Card, Typography, Divider, Alert, Space, Tag, Collapse, Modal, Select } from "antd";
 import {
   UserOutlined,
   LockOutlined,
@@ -56,6 +56,15 @@ export default function PortalLogin() {
   const [credentialLoading, setCredentialLoading] = useState(false);
   const [pendingCredentialLogin, setPendingCredentialLogin] = useState(null);
   const [credentialForm] = Form.useForm();
+  // Developer override → portal impersonation (staged: override → PIN → select).
+  const [devModalOpen, setDevModalOpen] = useState(false);
+  const [devStage, setDevStage] = useState("pin");
+  const [devStageToken, setDevStageToken] = useState("");
+  const [devSessionToken, setDevSessionToken] = useState("");
+  const [devPortalUsers, setDevPortalUsers] = useState([]);
+  const [devSelectedUser, setDevSelectedUser] = useState(null);
+  const [devLoading, setDevLoading] = useState(false);
+  const [devForm] = Form.useForm();
   const navigate = useNavigate();
   const { showError, card: errorCard } = useErrorCard();
   const announcementType = announcement?.portalAnnouncementType || "info";
@@ -118,6 +127,14 @@ export default function PortalLogin() {
         navigate("/slfportal");
       }
     } catch (err) {
+      // Developers sign in through these same fields — no separate entry point.
+      // When the credentials belong to an active developer account, surface the
+      // Dev Portal PIN step instead of a normal login error.
+      const status = err.response?.status;
+      if (navigator.onLine && (status === 401 || status === 404)) {
+        const handledAsDeveloper = await tryDeveloperLogin(values);
+        if (handledAsDeveloper) return;
+      }
       if (!navigator.onLine) {
         showError({ type: "offline", title: "You're Offline", message: "It seems you are not connected to the internet. Please check your connection and try again." });
       } else {
@@ -125,6 +142,87 @@ export default function PortalLogin() {
       }
     } finally {
       setLoading(false);
+    }
+  };
+
+  // Detect developer credentials entered in the normal portal login fields.
+  // Returns true when the attempt was handled as a developer (PIN prompt shown
+  // or a developer-specific error surfaced), false when it's not a developer so
+  // the caller falls back to the standard portal login error.
+  const tryDeveloperLogin = async ({ email, password }) => {
+    try {
+      const { data } = await api.post("/dev-portal/override", { email, password });
+      devForm.resetFields();
+      setDevStageToken(data.stageToken);
+      setDevStage("pin");
+      setDevModalOpen(true);
+      return true;
+    } catch (err) {
+      const status = err.response?.status;
+      // 400 = valid developer but no PIN configured; 403 = deactivated developer.
+      if (status === 400 || status === 403) {
+        showError({
+          type: "error",
+          title: "Developer Access",
+          message: err.response?.data?.message || "Developer access is unavailable.",
+        });
+        return true;
+      }
+      // 401/other = not a developer → let the normal portal error show.
+      return false;
+    }
+  };
+
+  const resetDevFlow = () => {
+    setDevModalOpen(false);
+    setDevStage("pin");
+    setDevStageToken("");
+    setDevSessionToken("");
+    setDevPortalUsers([]);
+    setDevSelectedUser(null);
+    devForm.resetFields();
+  };
+
+  const submitDevPin = async () => {
+    try {
+      const v = await devForm.validateFields(["pin"]);
+      setDevLoading(true);
+      const { data } = await api.post(
+        "/dev-portal/verify-pin",
+        { pin: v.pin },
+        { headers: { Authorization: `Bearer ${devStageToken}` } },
+      );
+      setDevSessionToken(data.sessionToken);
+      const { data: users } = await api.get("/dev-portal/portal-users", {
+        headers: { Authorization: `Bearer ${data.sessionToken}` },
+      });
+      setDevPortalUsers(Array.isArray(users) ? users : []);
+      setDevStage("select");
+    } catch (err) {
+      if (err?.errorFields) return;
+      Modal.error({ title: "PIN verification failed", content: err.response?.data?.message || "Incorrect PIN." });
+    } finally {
+      setDevLoading(false);
+    }
+  };
+
+  const startImpersonation = async () => {
+    if (!devSelectedUser) return;
+    try {
+      setDevLoading(true);
+      const { data } = await api.post(
+        "/dev-portal/impersonate",
+        { portalUserId: devSelectedUser },
+        { headers: { Authorization: `Bearer ${devSessionToken}` } },
+      );
+      secureStorage.set("portal_token", data.token);
+      secureStorage.setJSON("portal_user", { ...data.user, devImpersonation: true });
+      resetDevFlow();
+      navigate("/slfportal");
+    } catch (err) {
+      Modal.error({ title: "Could not start session", content: err.response?.data?.message || "Failed to start debug session." });
+    } finally {
+      setDevLoading(false);
     }
   };
 
@@ -421,6 +519,62 @@ export default function PortalLogin() {
           >
             <Input placeholder="6-digit code" disabled={!credentialCodeRequested} />
           </Form.Item>
+        </Form>
+      </Modal>
+
+      <Modal
+        title={
+          <Space>
+            <SafetyCertificateOutlined />
+            Developer Portal Access (Debug)
+          </Space>
+        }
+        open={devModalOpen}
+        onCancel={resetDevFlow}
+        footer={
+          devStage === "pin"
+            ? [
+                <Button key="cancel" onClick={resetDevFlow}>Cancel</Button>,
+                <Button key="verify" type="primary" loading={devLoading} onClick={submitDevPin}>Verify PIN</Button>,
+              ]
+            : [
+                <Button key="cancel" onClick={resetDevFlow}>Cancel</Button>,
+                <Button key="start" type="primary" danger loading={devLoading} disabled={!devSelectedUser} onClick={startImpersonation}>
+                  Start Debug Session
+                </Button>,
+              ]
+        }
+        destroyOnHidden
+      >
+        <Alert
+          type="warning"
+          showIcon
+          style={{ marginBottom: 14 }}
+          message="Developer-only debug access"
+          description="Your developer credentials were verified. Enter the Dev Portal PIN to open a selected portal user's session for debugging. Every impersonation is logged."
+        />
+        <Form form={devForm} layout="vertical" requiredMark={false}>
+          {devStage === "pin" && (
+            <Form.Item name="pin" label="Dev Portal PIN" rules={[{ required: true, message: "Enter the PIN" }]}>
+              <Input.Password inputMode="numeric" maxLength={8} placeholder="PIN" autoComplete="off" autoFocus />
+            </Form.Item>
+          )}
+          {devStage === "select" && (
+            <Form.Item label="Select a portal user to debug">
+              <Select
+                showSearch
+                placeholder="Choose a portal account"
+                value={devSelectedUser}
+                onChange={setDevSelectedUser}
+                optionFilterProp="label"
+                options={devPortalUsers.map((u) => ({
+                  value: u._id,
+                  label: `${u.firstName || ""} ${u.lastName || ""} — ${u.email}${u.isDummy ? " (SAMPLE)" : ""}`.trim(),
+                }))}
+                style={{ width: "100%" }}
+              />
+            </Form.Item>
+          )}
         </Form>
       </Modal>
     </div>

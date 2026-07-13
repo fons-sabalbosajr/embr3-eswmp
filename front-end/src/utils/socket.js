@@ -15,7 +15,13 @@ const SOCKET_URL = import.meta.env.DEV
  * @param {string|object} [identity] - Portal email, or admin { email, userId }
  */
 export function connectSocket(role, identity) {
-  if (socket?.connected) return socket;
+  // Return the existing instance whenever one exists — connected OR still
+  // mid-handshake. Guarding only on `socket.connected` let concurrent effects
+  // (many mount at once on the portal/admin pages) each call io() during the
+  // brief connecting window, overwriting the module socket and orphaning the
+  // previous instances. Orphaned sockets keep their connections, reconnect
+  // timers and listener buffers alive — a steady memory grow-over-time leak.
+  if (socket) return socket;
 
   const query = { role };
   if (role === "portal" && identity) query.email = identity;

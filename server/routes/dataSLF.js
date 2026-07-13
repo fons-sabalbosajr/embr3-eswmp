@@ -12,6 +12,7 @@ const UserPortal = require("../models/UserPortal");
 const { notifyAdmin, notifyPortal, refreshAdmin } = require("../utils/socketEmit");
 const { isBataanSlfName } = require("../utils/mergeBataanSlf");
 const { authMiddleware, developerOnly } = require("../middleware/auth");
+const { NON_DUMMY_CLAUSE } = require("../utils/dummyFilter");
 const jwt = require("jsonwebtoken");
 
 // Optional auth: decode the JWT when present so role-aware behaviour (e.g.
@@ -1528,19 +1529,22 @@ router.patch("/:id/reject-edit", async (req, res) => {
 // Dashboard stats
 router.get("/stats", async (req, res) => {
   try {
+    // Exclude dummy/test entries from all production dashboard tiles. Developers
+    // may opt in via ?includeDummy=true (requires a developer token).
+    const match = devWantsDummy(req) ? { deletedAt: null } : { deletedAt: null, ...NON_DUMMY_CLAUSE };
     const [submissions, generators, totalTrucks, byStatus, byCompanyType, wasteByType, monthlyData] =
       await Promise.all([
-        DataSLF.countDocuments({ deletedAt: null }),
+        DataSLF.countDocuments(match),
         SLFGenerator.countDocuments(),
         DataSLF.aggregate([
-          { $match: { deletedAt: null } },
+          { $match: match },
           { $project: { count: { $size: { $ifNull: ["$trucks", []] } } } },
           { $group: { _id: null, total: { $sum: "$count" } } },
         ]),
-        DataSLF.aggregate([{ $match: { deletedAt: null } }, { $group: { _id: "$status", count: { $sum: 1 } } }]),
-        DataSLF.aggregate([{ $match: { deletedAt: null } }, { $group: { _id: "$companyType", count: { $sum: 1 } } }]),
+        DataSLF.aggregate([{ $match: match }, { $group: { _id: "$status", count: { $sum: 1 } } }]),
+        DataSLF.aggregate([{ $match: match }, { $group: { _id: "$companyType", count: { $sum: 1 } } }]),
         DataSLF.aggregate([
-          { $match: { deletedAt: null } },
+          { $match: match },
           { $unwind: "$trucks" },
           {
             $group: {
@@ -1551,7 +1555,7 @@ router.get("/stats", async (req, res) => {
           },
         ]),
         DataSLF.aggregate([
-          { $match: { deletedAt: null } },
+          { $match: match },
           {
             $group: {
               _id: {
@@ -1581,7 +1585,7 @@ router.get("/stats", async (req, res) => {
     const companyMap = {};
     byCompanyType.forEach((c) => (companyMap[c._id] = c.count));
 
-    const recentSubmissions = await DataSLF.find({ deletedAt: null })
+    const recentSubmissions = await DataSLF.find(match)
       .sort({ createdAt: -1 })
       .limit(5)
       .select("idNo lguCompanyName companyType status createdAt trucks");
@@ -1605,7 +1609,8 @@ router.get("/stats", async (req, res) => {
 router.get("/generator-summary", async (req, res) => {
   try {
     const summary = await DataSLF.aggregate([
-      { $match: { slfGenerator: { $ne: null }, deletedAt: null } },
+      // Exclude dummy/test entries from the Waste Generators tab tiles.
+      { $match: { slfGenerator: { $ne: null }, deletedAt: null, ...NON_DUMMY_CLAUSE } },
       {
         $group: {
           _id: "$slfGenerator",
@@ -1834,6 +1839,246 @@ router.get("/", optionalAuth, async (req, res) => {
           { submittedBy: rx },
         ],
       });
+    }
+
+    // Cell-assignment-filtered, server-paginated list for the Cell Waste
+    // Placement tab. Splits submissions into those still awaiting a cell
+    // ("unassigned": at least one truck without a cell) and those fully placed
+    // ("assigned"). Placement is detected from the actual truck/vehicle
+    // cellIndex/cellName — the same fields savePlacement persists.
+    if (
+      paginated &&
+      ["assigned", "unassigned"].includes(String(req.query.assignment || "").toLowerCase())
+    ) {
+      const assignment = String(req.query.assignment).toLowerCase();
+      const skip = (page - 1) * limit;
+      const pipeline = [
+        { $match: filter },
+        { $addFields: { _trucksArr: { $ifNull: ["$trucks", []] } } },
+        {
+          $addFields: {
+            _tcount: { $size: "$_trucksArr" },
+            _placed: {
+              $size: {
+                $filter: {
+                  input: "$_trucksArr",
+                  as: "t",
+                  cond: {
+                    $or: [
+                      { $ne: [{ $ifNull: ["$$t.cellName", ""] }, ""] },
+                      { $ne: [{ $ifNull: ["$$t.cellIndex", null] }, null] },
+                      {
+                        $anyElementTrue: {
+                          $map: {
+                            input: { $ifNull: ["$$t.vehicles", []] },
+                            as: "v",
+                            in: {
+                              $or: [
+                                { $ne: [{ $ifNull: ["$$v.cellName", ""] }, ""] },
+                                { $ne: [{ $ifNull: ["$$v.cellIndex", null] }, null] },
+                              ],
+                            },
+                          },
+                        },
+                      },
+                    ],
+                  },
+                },
+              },
+            },
+          },
+        },
+        {
+          $match:
+            assignment === "assigned"
+              ? { $expr: { $and: [{ $gt: ["$_tcount", 0] }, { $gte: ["$_placed", "$_tcount"] }] } }
+              : { $expr: { $lt: ["$_placed", "$_tcount"] } },
+        },
+        { $sort: { createdAt: -1 } },
+        { $facet: { page: [{ $skip: skip }, { $limit: limit }], meta: [{ $count: "total" }] } },
+      ];
+      const aggRes = await DataSLF.aggregate(pipeline).allowDiskUse(true);
+      const facet = aggRes[0] || {};
+      const idOrder = (facet.page || []).map((d) => d._id);
+      const total = facet.meta?.[0]?.total || 0;
+      const docs = idOrder.length
+        ? await DataSLF.find({ _id: { $in: idOrder } })
+            .setOptions({ includeHiddenYears: true })
+            .populate("slfGenerator")
+            .lean()
+        : [];
+      const byId = new Map(docs.map((d) => [String(d._id), d]));
+      const data = idOrder.map((id) => byId.get(String(id))).filter(Boolean);
+      return res.json({ data, total, page, limit });
+    }
+
+    // Grouped, server-paginated admin list. The Submissions tab batches
+    // submissions by submittedBy+company+status; doing that grouping (and paging
+    // over the resulting rows) in the DB means the client only ever loads one
+    // page. Year-visibility is auto-applied to the aggregation by the schema
+    // plugin, so it stays consistent with the find() path.
+    if (paginated && String(req.query.grouped || "").toLowerCase() === "true") {
+      const skip = (page - 1) * limit;
+      const placementFilter = String(req.query.cellPlacement || "all").trim();
+      // Batch key mirrors the client's getPortalSubmissionGroupKey: group only
+      // when submittedBy (an email), company, and a non-reverted status exist;
+      // everything else stays a standalone row keyed by its _id.
+      const rowKeyExpr = {
+        $let: {
+          vars: {
+            sb: { $toLower: { $trim: { input: { $ifNull: ["$submittedBy", ""] } } } },
+            co: { $toLower: { $trim: { input: { $ifNull: ["$lguCompanyName", ""] } } } },
+            st: { $toLower: { $trim: { input: { $ifNull: ["$status", ""] } } } },
+          },
+          in: {
+            $cond: [
+              {
+                $and: [
+                  { $ne: ["$$sb", ""] },
+                  { $ne: ["$$co", ""] },
+                  { $ne: [{ $indexOfBytes: ["$$sb", "@"] }, -1] },
+                  { $ne: ["$$st", "reverted"] },
+                ],
+              },
+              { $concat: ["$$sb", "::", "$$co", "::", "$$st"] },
+              { $concat: ["singleton:", { $toString: "$_id" }] },
+            ],
+          },
+        },
+      };
+      const pipeline = [
+        { $match: filter },
+        { $addFields: { _trucksArr: { $ifNull: ["$trucks", []] } } },
+        {
+          $addFields: {
+            _tcount: { $size: "$_trucksArr" },
+            _placed: {
+              $size: {
+                $filter: {
+                  input: "$_trucksArr",
+                  as: "t",
+                  cond: {
+                    $or: [
+                      { $ne: [{ $ifNull: ["$$t.cellName", ""] }, ""] },
+                      {
+                        $anyElementTrue: {
+                          $map: {
+                            input: { $ifNull: ["$$t.vehicles", []] },
+                            as: "v",
+                            in: { $ne: [{ $ifNull: ["$$v.cellName", ""] }, ""] },
+                          },
+                        },
+                      },
+                    ],
+                  },
+                },
+              },
+            },
+          },
+        },
+        {
+          $addFields: {
+            _etotal: { $cond: [{ $gt: ["$_tcount", 0] }, "$_tcount", { $ifNull: ["$truckCount", 0] }] },
+            _known: { $cond: [{ $gt: ["$_tcount", 0] }, 1, 0] },
+            _rowKey: rowKeyExpr,
+          },
+        },
+        {
+          // No pre-group $sort (that sorts the whole collection in memory and
+          // overflows). sortDate uses $max; per-group entry order (primary =
+          // most recent) is restored from each doc's createdAt in Node below.
+          $group: {
+            _id: "$_rowKey",
+            entryIds: { $push: "$_id" },
+            sortDate: { $max: "$createdAt" },
+            count: { $sum: 1 },
+            gPlaced: { $sum: "$_placed" },
+            gTotal: { $sum: "$_etotal" },
+            gKnown: { $max: "$_known" },
+          },
+        },
+      ];
+      if (placementFilter && placementFilter !== "all") {
+        pipeline.push({
+          $addFields: {
+            _cat: {
+              $switch: {
+                branches: [
+                  { case: { $and: [{ $eq: ["$gKnown", 0] }, { $eq: ["$gTotal", 0] }] }, then: "nowaste" },
+                  { case: { $eq: ["$gKnown", 0] }, then: "unknown" },
+                  { case: { $eq: ["$gPlaced", 0] }, then: "none" },
+                  { case: { $gte: ["$gPlaced", "$gTotal"] }, then: "assigned" },
+                ],
+                default: "partial",
+              },
+            },
+          },
+        });
+        pipeline.push({ $match: { _cat: placementFilter } });
+      }
+      pipeline.push({ $sort: { sortDate: -1 } });
+      pipeline.push({
+        $facet: {
+          page: [{ $skip: skip }, { $limit: limit }],
+          meta: [{ $count: "total" }],
+        },
+      });
+
+      const aggRes = await DataSLF.aggregate(pipeline).allowDiskUse(true);
+      const facet = aggRes[0] || {};
+      const pageGroups = facet.page || [];
+      const total = facet.meta?.[0]?.total || 0;
+
+      const idOrder = [];
+      pageGroups.forEach((g) => (g.entryIds || []).forEach((id) => idOrder.push(id)));
+      const baseFields =
+        "slfGenerator slfName submissionId idNo previousIdNos dateOfDisposal lguCompanyName companyType address companyRegion companyProvince companyMunicipality companyBarangay status revertRequested editRequested submittedBy createdAt updatedAt isDummy baselineUnit totalVolumeAccepted totalVolumeAcceptedUnit activeCellEntries closedCellEntries truckCount totalVolumeM3 totalVolumeTons residualVolumeM3 residualVolumeTons hazardousVolumeM3 hazardousVolumeTons";
+      const projection =
+        baseFields +
+        (includeTrucks
+          ? " trucks"
+          : " trucks.cellName trucks.truckCapacity trucks.truckCapacityUnit trucks.actualVolume trucks.actualVolumeUnit" +
+            " trucks.vehicles.cellName trucks.vehicles.plateNumber trucks.vehicles.capacity trucks.vehicles.capacityUnit trucks.vehicles.actualVolume trucks.vehicles.actualVolumeUnit");
+      const entryDocs = idOrder.length
+        ? await DataSLF.find({ _id: { $in: idOrder } })
+            .setOptions({ includeHiddenYears: true })
+            .populate("slfGenerator")
+            .select(projection)
+            .lean()
+        : [];
+      const byId = new Map(entryDocs.map((d) => [String(d._id), d]));
+
+      let allowancePct = 10;
+      try {
+        const AppSettings = require("../models/AppSettings");
+        const cfg = await AppSettings.findOne().select("truckCapacityAllowancePercent").lean();
+        if (cfg && Number.isFinite(Number(cfg.truckCapacityAllowancePercent))) {
+          allowancePct = Number(cfg.truckCapacityAllowancePercent);
+        }
+      } catch { /* fall back to 10% */ }
+
+      const enrich = (entry) => ({
+        ...entry,
+        truckCount: entry.truckCount ?? (Array.isArray(entry.trucks) ? entry.trucks.length : 0),
+        cellPlacement: computeCellPlacementSummary(entry),
+        cellNames: collectCellNames(entry),
+        remarks: computeSubmissionRemarks(entry, allowancePct),
+        trucks: includeTrucks ? entry.trucks : [],
+      });
+      // Return the RAW entries for this page's groups (every group is returned
+      // whole, so no batch is split across pages). The admin table regroups them
+      // client-side exactly as before — keeping all existing grouped-row actions
+      // intact — while `total` (group count) drives server-side pagination.
+      const rows = [];
+      pageGroups.forEach((g) => {
+        (g.entryIds || [])
+          .map((id) => byId.get(String(id)))
+          .filter(Boolean)
+          .sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0))
+          .forEach((e) => rows.push(enrich(e)));
+      });
+
+      return res.json({ data: rows, total, page, limit });
     }
 
     let query = DataSLF.find(filter)
@@ -2692,11 +2937,17 @@ router.post("/repair-xx-ids", authMiddleware, developerOnly, async (req, res) =>
     }
 
     if (preview) {
+      // Cap the payload so a very large mismatch set can't bloat the response /
+      // freeze the modal. Confirm & Fix re-runs the full repair, so every record
+      // is still fixed even when the preview list is truncated.
+      const PREVIEW_LIMIT = 500;
+      const truncated = changes.length > PREVIEW_LIMIT;
       return res.json({
         preview: true,
         message: `${changes.length} of ${xxDocs.length} XX record(s) can be fixed.`,
-        total: xxDocs.length,
-        changes,
+        total: changes.length,
+        truncated,
+        changes: truncated ? changes.slice(0, PREVIEW_LIMIT) : changes,
       });
     }
 
@@ -2791,7 +3042,13 @@ router.post("/repair-type-ids", authMiddleware, developerOnly, async (req, res) 
     const sequenceCache = new Map();
     const assignedIds = new Set();
 
-    const getNextIdNo = async (typeCode, provCode) => {
+    // `verify` runs a per-candidate DB uniqueness check. It is only needed when
+    // actually persisting; for the dry-run preview the proposed IDs are
+    // display-only, so we skip the per-row DataSLF.exists() round-trip (that was
+    // an N+1 that made the Fix PVT/LGU preview modal slow). The seed query below
+    // already reads the current max sequence from the DB, so in-memory
+    // incrementing yields collision-free proposed IDs for the preview.
+    const getNextIdNo = async (typeCode, provCode, verify = true) => {
       const key = `${typeCode}-${provCode}`;
       let seq = sequenceCache.get(key);
       if (seq == null) {
@@ -2812,7 +3069,8 @@ router.post("/repair-type-ids", authMiddleware, developerOnly, async (req, res) 
         candidate = `SLF-${typeCode}-${provCode}-${String(seq).padStart(4, "0")}`;
       } while (
         assignedIds.has(candidate) ||
-        (await DataSLF.exists({ idNo: candidate }).setOptions({ includeHiddenYears: true }))
+        (verify &&
+          (await DataSLF.exists({ idNo: candidate }).setOptions({ includeHiddenYears: true })))
       );
       sequenceCache.set(key, seq);
       assignedIds.add(candidate);
@@ -2845,7 +3103,7 @@ router.post("/repair-type-ids", authMiddleware, developerOnly, async (req, res) 
         }
 
         const oldIdNo = doc.idNo;
-        const finalIdNo = await getNextIdNo(desiredType, provCode);
+        const finalIdNo = await getNextIdNo(desiredType, provCode, !preview);
 
         changes.push({
           _id: doc._id,
@@ -2899,12 +3157,17 @@ router.post("/repair-type-ids", authMiddleware, developerOnly, async (req, res) 
     }
 
     if (preview) {
+      // See repair-xx-ids: cap the preview payload; the confirmed fix re-runs
+      // the full repair so all mismatches are still corrected.
+      const PREVIEW_LIMIT = 500;
+      const truncated = changes.length > PREVIEW_LIMIT;
       return res.json({
         preview: true,
         message: `${changes.length} PVT/LGU ID No. mismatch(es) can be fixed.${skipped ? ` ${skipped} skipped (SLF could not be strictly identified).` : ""}`,
-        total: docs.length,
+        total: changes.length,
+        truncated,
         skipped,
-        changes,
+        changes: truncated ? changes.slice(0, PREVIEW_LIMIT) : changes,
       });
     }
 

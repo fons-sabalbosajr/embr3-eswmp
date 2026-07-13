@@ -21,6 +21,8 @@ import relativeTime from "dayjs/plugin/relativeTime";
 import api from "../../api";
 import ResponsiveTable from "./shared/ResponsiveTable";
 import { matchesFilter, rowMatchesSearch } from "./shared/tableFilters";
+import excludeDummy from "../../utils/excludeDummy";
+import { withSizeChanger } from "../../utils/tablePagination";
 
 dayjs.extend(relativeTime);
 
@@ -166,8 +168,10 @@ export default function PortalUsers({ isDark, canEdit = true, canDelete = true, 
         api.get("/portal-users"),
         api.get("/slf-facilities"),
       ]);
-      setUsers(usersRes.data);
-      setGenerators(genRes.data);
+      // Defensive: never show dummy/test accounts or facilities in this
+      // production account-management view (backend already excludes them).
+      setUsers(excludeDummy(usersRes.data));
+      setGenerators(excludeDummy(genRes.data));
     } catch {
       // silent
     } finally {
@@ -1019,6 +1023,7 @@ export default function PortalUsers({ isDark, canEdit = true, canDelete = true, 
         size="small"
         pagination={{
           defaultPageSize: 15,
+          showSizeChanger: true,
           pageSizeOptions: ["10", "15", "25", "50"],
           showTotal: (total, range) => `${range[0]}-${range[1]} of ${total} portal users`,
         }}
@@ -1438,7 +1443,7 @@ export default function PortalUsers({ isDark, canEdit = true, canDelete = true, 
                       dataSource={historyData.submissions}
                       rowKey="_id"
                       size="small"
-                      pagination={{ pageSize: 8 }}
+                      pagination={withSizeChanger({ pageSize: 8, size: "small" })}
                       scroll={{ x: "max-content" }}
                       columns={[
                         { title: "ID No.", dataIndex: "idNo", key: "idNo", width: 140, render: (value) => wrapHistoryText(value, true) },
@@ -1486,7 +1491,7 @@ export default function PortalUsers({ isDark, canEdit = true, canDelete = true, 
                       dataSource={historyData.verificationHistory || []}
                       rowKey={(row, index) => row._id || `${row.fileUrl}-${index}`}
                       size="small"
-                      pagination={{ pageSize: 8 }}
+                      pagination={withSizeChanger({ pageSize: 8, size: "small" })}
                       scroll={{ x: 900 }}
                       locale={{ emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No verification attachment history" /> }}
                       columns={[
@@ -1787,6 +1792,8 @@ export default function PortalUsers({ isDark, canEdit = true, canDelete = true, 
                           <img
                             src={normalizeVerificationFileUrl(u.verificationFileUrl)}
                             alt="Verification attachment"
+                            loading="lazy"
+                            decoding="async"
                             style={{ maxWidth: "100%", maxHeight: 240, objectFit: "contain", display: "block", margin: "0 auto" }}
                             onError={(e) => { e.target.style.display = "none"; }}
                           />

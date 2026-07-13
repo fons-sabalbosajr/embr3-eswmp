@@ -4,7 +4,10 @@ const { writeLog } = require("../utils/logger");
 const { resolveIpLocation } = require("../utils/ipLocation");
 
 const router = express.Router();
+const { authMiddleware, adminOnly } = require("../middleware/auth");
 
+// POST /client-error stays public so the front-end can report errors even when
+// no user is signed in; reading and clearing logs are admin-only.
 router.post("/client-error", async (req, res) => {
   try {
     const {
@@ -32,13 +35,16 @@ router.post("/client-error", async (req, res) => {
 });
 
 // Get logs (paginated, filterable)
-router.get("/", async (req, res) => {
+router.get("/", authMiddleware, adminOnly, async (req, res) => {
   try {
     const { level, search, limit = 100, skip = 0 } = req.query;
     const filter = {};
     if (level && level !== "all") filter.level = level;
     if (search) {
-      const regex = new RegExp(search, "i");
+      // Escape user input so special characters can't break the regex (500s)
+      // or cause ReDoS. Mirrors the escaping used across the other routes.
+      const escaped = String(search).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const regex = new RegExp(escaped, "i");
       filter.$or = [
         { action: regex },
         { message: regex },
@@ -78,7 +84,7 @@ router.get("/", async (req, res) => {
 });
 
 // Clear all logs
-router.delete("/", async (_req, res) => {
+router.delete("/", authMiddleware, adminOnly, async (_req, res) => {
   try {
     await AppLog.deleteMany({});
     res.json({ message: "All logs cleared" });

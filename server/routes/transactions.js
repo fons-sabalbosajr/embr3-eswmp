@@ -1,9 +1,46 @@
 const express = require("express");
 const Transaction = require("../models/Transaction");
 const DataSLF = require("../models/DataSLF");
+const UserPortal = require("../models/UserPortal");
+const { backfillTransactions } = require("../utils/backfillTransactions");
+const { wantsIncludeDummy } = require("../utils/dummyFilter");
 
 const router = express.Router();
-const ADMIN_DISPLAY_NAME = "EMBR3 ESWMP Admin";
+
+// Transactions carry no isDummy flag of their own — they are an audit trail that
+// links back to a submission (dataEntry / submissionId) and/or a portal account
+// (submittedBy). Resolve the (small) set of dummy submissions and dummy accounts,
+// then build a `$nor` clause that hides any transaction tied to them. Returns {}
+// when there is nothing to exclude. This stays correct automatically as new dummy
+// data is created — no per-transaction stamping or backfill required.
+// Pass includeDummy=true (developer views) to skip exclusion entirely.
+async function buildDummyExclusion(includeDummy) {
+  if (includeDummy) return {};
+  const [dummyEntries, dummyAccounts] = await Promise.all([
+    DataSLF.find({ isDummy: true })
+      .setOptions({ includeHiddenYears: true })
+      .select("_id submissionId submittedBy")
+      .lean(),
+    UserPortal.find({ isDummy: true }).select("email").lean(),
+  ]);
+  const ids = dummyEntries.map((d) => d._id);
+  const submissionIds = uniq(dummyEntries.map((d) => d.submissionId));
+  const emails = [
+    ...new Set(
+      [
+        ...dummyEntries.map((d) => d.submittedBy),
+        ...dummyAccounts.map((u) => u.email),
+      ]
+        .map((e) => String(e || "").trim().toLowerCase())
+        .filter(Boolean),
+    ),
+  ];
+  const nor = [];
+  if (ids.length) nor.push({ dataEntry: { $in: ids } });
+  if (submissionIds.length) nor.push({ submissionId: { $in: submissionIds } });
+  if (emails.length) nor.push({ submittedBy: { $in: emails } });
+  return nor.length ? { $nor: nor } : {};
+}
 
 function getXXAlias(idNo = "") {
   const parts = String(idNo || "").split("-");
@@ -17,81 +54,15 @@ function uniq(values = []) {
   return [...new Set(values.map((value) => String(value || "").trim()).filter(Boolean))];
 }
 
-// Backfill transactions from existing data-slf entries that have no transaction records
+// Backfill transactions from existing data-slf entries that have no transaction
+// records. Shared with the startup backfill via utils/backfillTransactions.
 router.post("/seed", async (req, res) => {
   try {
-    // Get all submission IDs that already have transactions
-    const existing = await Transaction.distinct("submissionId");
-    const entries = await DataSLF.find({
-      submissionId: { $nin: existing },
+    const seeded = await backfillTransactions();
+    res.json({
+      message: seeded > 0 ? "Transactions seeded" : "No new entries to seed",
+      seeded,
     });
-
-    if (entries.length === 0) {
-      return res.json({ message: "No new entries to seed", seeded: 0 });
-    }
-
-    // Group entries by submissionId
-    const groups = {};
-    for (const e of entries) {
-      const sid = e.submissionId || e._id.toString();
-      if (!groups[sid]) groups[sid] = [];
-      groups[sid].push(e);
-    }
-
-    const toInsert = [];
-    for (const [sid, items] of Object.entries(groups)) {
-      // Submission transaction
-      toInsert.push({
-        submissionId: sid,
-        dataEntry: items[0]._id,
-        companyName: items[0].lguCompanyName,
-        companyType: items[0].companyType,
-        submittedBy: items[0].submittedBy || "",
-        type: "submission",
-        description: `${items.length} entr${items.length === 1 ? "y" : "ies"} submitted by ${items[0].submittedBy || "unknown"}`,
-        performedBy: items[0].submittedBy || "portal",
-        meta: { entryCount: items.length, ids: items.map((e) => e.idNo) },
-        createdAt: items[0].createdAt,
-        updatedAt: items[0].createdAt,
-      });
-
-      // Email ack sent (if submittedBy exists, assume email was attempted)
-      if (items[0].submittedBy) {
-        toInsert.push({
-          submissionId: sid,
-          companyName: items[0].lguCompanyName,
-          submittedBy: items[0].submittedBy,
-          type: "email_ack_sent",
-          description: `Acknowledgement email sent to ${items[0].submittedBy}`,
-          performedBy: "system",
-          meta: { email: items[0].submittedBy },
-          createdAt: new Date(items[0].createdAt.getTime() + 2000),
-          updatedAt: new Date(items[0].createdAt.getTime() + 2000),
-        });
-      }
-
-      // Status change if not pending
-      for (const e of items) {
-        if (e.status && e.status !== "pending") {
-          toInsert.push({
-            submissionId: sid,
-            dataEntry: e._id,
-            companyName: e.lguCompanyName,
-            companyType: e.companyType,
-            submittedBy: e.submittedBy || "",
-            type: "status_change",
-            description: `Entry ${e.idNo} marked as ${e.status}`,
-            performedBy: ADMIN_DISPLAY_NAME,
-            meta: { status: e.status, idNo: e.idNo },
-            createdAt: e.updatedAt || e.createdAt,
-            updatedAt: e.updatedAt || e.createdAt,
-          });
-        }
-      }
-    }
-
-    await Transaction.insertMany(toInsert);
-    res.json({ message: "Transactions seeded", seeded: toInsert.length });
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });
   }
@@ -105,13 +76,19 @@ router.get("/", async (req, res) => {
     if (company) filter.companyName = company;
     if (type) filter.type = type;
     if (search) {
+      // Escape user input so special characters can't break the query regex
+      // (HTTP 500) or cause ReDoS. Mirrors the escaping used across the routes.
+      const escaped = String(search).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
       filter.$or = [
-        { companyName: { $regex: search, $options: "i" } },
-        { description: { $regex: search, $options: "i" } },
-        { submissionId: { $regex: search, $options: "i" } },
-        { submittedBy: { $regex: search, $options: "i" } },
+        { companyName: { $regex: escaped, $options: "i" } },
+        { description: { $regex: escaped, $options: "i" } },
+        { submissionId: { $regex: escaped, $options: "i" } },
+        { submittedBy: { $regex: escaped, $options: "i" } },
       ];
     }
+
+    // Keep dummy/test submissions and accounts out of the production report.
+    Object.assign(filter, await buildDummyExclusion(wantsIncludeDummy(req)));
 
     const skip = (Number(page) - 1) * Number(limit);
     const [transactions, total] = await Promise.all([
@@ -131,7 +108,9 @@ router.get("/", async (req, res) => {
 // Get distinct company names for filter dropdown
 router.get("/companies", async (req, res) => {
   try {
-    const companies = await Transaction.distinct("companyName");
+    // Exclude dummy companies from the report's filter dropdown.
+    const exclusion = await buildDummyExclusion(wantsIncludeDummy(req));
+    const companies = await Transaction.distinct("companyName", exclusion);
     res.json(companies.filter(Boolean).sort());
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });

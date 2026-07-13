@@ -2,10 +2,16 @@ const express = require("express");
 const User = require("../models/User");
 const { sendAdminApprovedEmail, sendAdminRejectedEmail } = require("../utils/email");
 const { writeLog } = require("../utils/logger");
+const { authMiddleware, developerOnly } = require("../middleware/auth");
 
 const router = express.Router();
 
-// Get all users (admin)
+// Accounts & Roles management is developer-only. Enforced here on the backend
+// (not just the frontend menu) so non-developers — even with a valid admin
+// token — get a 403 and cannot list, re-role, permission, or delete users.
+router.use(authMiddleware, developerOnly);
+
+// Get all users (developer)
 router.get("/", async (req, res) => {
   try {
     const users = await User.find().select("-password").sort({ createdAt: -1 });

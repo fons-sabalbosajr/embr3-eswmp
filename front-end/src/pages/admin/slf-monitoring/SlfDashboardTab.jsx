@@ -14,6 +14,7 @@ import {
   Statistic,
   Skeleton,
   Button,
+  Alert,
 } from "antd";
 import {
   BarChartOutlined,
@@ -27,6 +28,10 @@ import {
   CloseCircleOutlined,
   DownOutlined,
   RightOutlined,
+  ArrowUpOutlined,
+  ArrowDownOutlined,
+  MinusOutlined,
+  RiseOutlined,
 } from "@ant-design/icons";
 import {
   PieChart,
@@ -36,6 +41,8 @@ import {
   Bar,
   LineChart,
   Line,
+  AreaChart,
+  Area,
   XAxis,
   YAxis,
   CartesianGrid,
@@ -80,7 +87,7 @@ function CollapsibleCard({ title, extra, collapsed, onToggle, children, style })
   );
 }
 
-function SlfDashboardTab({ dashboard, isDark, loading = false }) {
+function SlfDashboardTab({ dashboard, isDark, loading = false, error = null }) {
   const [page, setPage] = useState(1);
   const [collapsed, setCollapsed] = useState({});
   const toggle = (key) => setCollapsed((prev) => ({ ...prev, [key]: !prev[key] }));
@@ -91,14 +98,31 @@ function SlfDashboardTab({ dashboard, isDark, loading = false }) {
     return (
       <div>
         <Row gutter={[10, 10]} style={{ marginBottom: 12 }}>
-          {Array.from({ length: 6 }).map((_, i) => (
-            <Col xs={12} sm={8} md={8} lg={4} key={i}>
-              <Card size="small" style={{ borderRadius: 10 }}>
-                <Skeleton active paragraph={false} title={{ width: "80%" }} />
-              </Card>
-            </Col>
-          ))}
+          <Col xs={24} lg={9}>
+            <Card style={{ borderRadius: 12 }}>
+              <Skeleton active paragraph={{ rows: 3 }} title={{ width: "60%" }} />
+            </Card>
+          </Col>
+          <Col xs={24} lg={15}>
+            <Row gutter={[10, 10]}>
+              {Array.from({ length: 3 }).map((_, i) => (
+                <Col xs={24} sm={8} key={i}>
+                  <Card size="small" style={{ borderRadius: 10 }}>
+                    <Skeleton active paragraph={false} title={{ width: "80%" }} />
+                  </Card>
+                </Col>
+              ))}
+              <Col xs={24}>
+                <Card size="small" style={{ borderRadius: 10 }}>
+                  <Skeleton active paragraph={false} title={{ width: "50%" }} />
+                </Card>
+              </Col>
+            </Row>
+          </Col>
         </Row>
+        <Card size="small" style={{ borderRadius: 10, marginBottom: 12 }}>
+          <Skeleton active paragraph={{ rows: 4 }} />
+        </Card>
         <Row gutter={[10, 10]}>
           {Array.from({ length: 3 }).map((_, i) => (
             <Col xs={24} md={8} key={i}>
@@ -109,6 +133,20 @@ function SlfDashboardTab({ dashboard, isDark, loading = false }) {
           ))}
         </Row>
       </div>
+    );
+  }
+
+  // Surface a real fetch error instead of silently showing an empty dashboard,
+  // so a failed load is distinguishable from a facility with no submissions.
+  if (error) {
+    return (
+      <Alert
+        type="error"
+        showIcon
+        message="Couldn't load dashboard data"
+        description={error}
+        style={{ margin: 8 }}
+      />
     );
   }
 
@@ -138,57 +176,200 @@ function SlfDashboardTab({ dashboard, isDark, loading = false }) {
 
   const fmt = (n) =>
     Number(n || 0).toLocaleString(undefined, { maximumFractionDigits: 1 });
-  const tiles = [
+
+  // Unified semantic palette. One accent (brand blue) carries emphasis;
+  // green/red encode residual vs hazardous; the rest stay categorical.
+  const PALETTE = {
+    brand: "#2f54eb",
+    residual: "#52c41a",
+    hazardous: "#cf1322",
+    trucks: "#fa8c16",
+    generators: "#13c2c2",
+    submissions: "#722ed1",
+    warning: "#faad14",
+  };
+
+  // Month-over-month delta derived from the monthly trend. No prior-period
+  // field exists on the data contract, so it's computed from the series.
+  const lastMonth = monthly.length ? monthly[monthly.length - 1] : null;
+  const prevMonth = monthly.length > 1 ? monthly[monthly.length - 2] : null;
+  const momDelta =
+    prevMonth && prevMonth.volume > 0
+      ? ((lastMonth.volume - prevMonth.volume) / prevMonth.volume) * 100
+      : null;
+
+  // Residual / hazardous split for the inline composition bar on the hero.
+  const wasteTotal = residual + hazardous;
+  const residualPct = wasteTotal > 0 ? (residual / wasteTotal) * 100 : 0;
+  const hazardPct = wasteTotal > 0 ? (hazardous / wasteTotal) * 100 : 0;
+
+  // Cells nearing / at capacity — surfaced as an operational alert.
+  const cellsAtRisk = cellData.filter((c) => c.pct != null && c.pct >= 90);
+  const cellsWarning = cellData.filter(
+    (c) => c.pct != null && c.pct >= 75 && c.pct < 90,
+  );
+
+  const secondaryTiles = [
     {
       label: "Submissions",
-      value: totalSubmissions,
-      color: "#2f54eb",
+      value: fmt(totalSubmissions),
+      color: PALETTE.submissions,
       icon: <InboxOutlined />,
     },
     {
       label: "Truck Trips",
-      value: totalTrucks,
-      color: "#fa8c16",
+      value: fmt(totalTrucks),
+      color: PALETTE.trucks,
       icon: <CarOutlined />,
     },
     {
-      label: `Total Volume (${unit})`,
-      value: fmt(totalVolume),
-      color: "#722ed1",
-      icon: <DatabaseOutlined />,
-    },
-    {
       label: "Generators",
-      value: generatorCount,
-      color: "#13c2c2",
+      value: fmt(generatorCount),
+      color: PALETTE.generators,
       icon: <TeamOutlined />,
-    },
-    {
-      label: `Residual (${unit})`,
-      value: fmt(residual),
-      color: "#52c41a",
-      icon: <BarChartOutlined />,
-    },
-    {
-      label: `Hazardous (${unit})`,
-      value: fmt(hazardous),
-      color: "#cf1322",
-      icon: <WarningOutlined />,
     },
   ];
 
-  const wasteComposition = [
-    { name: "Residual", value: Math.round(residual) },
-    { name: "Hazardous", value: Math.round(hazardous) },
-  ].filter((d) => d.value > 0);
-
-  // Equal-height chart cards for a clean, aligned grid (Task 4A/4D).
-  const CHART_H = 210;
   const cardStyle = { borderRadius: 10, height: "100%", display: "flex", flexDirection: "column" };
   const axisTick = { fontSize: 11, fill: isDark ? "#aaa" : "#555" };
   const axisLabelFill = isDark ? "#bbb" : "#666";
+  const gridStroke = isDark ? "rgba(255,255,255,0.08)" : "#eee";
 
-  // Section header with a collapse/expand toggle (Task 4C).
+  // Month-over-month delta pill shown on the hero card.
+  const DeltaBadge = () => {
+    if (momDelta == null)
+      return (
+        <Text type="secondary" style={{ fontSize: 11 }}>
+          No prior month to compare
+        </Text>
+      );
+    const flat = Math.abs(momDelta) < 0.05;
+    const up = momDelta >= 0;
+    const color = flat ? "#8c8c8c" : up ? PALETTE.residual : PALETTE.hazardous;
+    const Icon = flat ? MinusOutlined : up ? ArrowUpOutlined : ArrowDownOutlined;
+    return (
+      <span
+        style={{
+          display: "inline-flex",
+          alignItems: "center",
+          gap: 4,
+          fontSize: 12,
+          fontWeight: 600,
+          color,
+          background: `${color}1f`,
+          padding: "1px 8px",
+          borderRadius: 20,
+        }}
+      >
+        <Icon style={{ fontSize: 10 }} />
+        {Math.abs(momDelta).toFixed(1)}% vs last month
+      </span>
+    );
+  };
+
+  // Compact secondary KPI tile.
+  const StatTile = ({ label, value, color, icon }) => (
+    <Card
+      size="small"
+      style={{ borderRadius: 10, height: "100%" }}
+      styles={{ body: { padding: "12px 14px" } }}
+    >
+      <Space align="center" size={10}>
+        <span
+          style={{
+            width: 34,
+            height: 34,
+            borderRadius: 9,
+            background: `${color}1f`,
+            color,
+            display: "inline-flex",
+            alignItems: "center",
+            justifyContent: "center",
+            fontSize: 16,
+          }}
+        >
+          {icon}
+        </span>
+        <div>
+          <div style={{ fontSize: 20, fontWeight: 700, lineHeight: 1.1, fontVariantNumeric: "tabular-nums" }}>
+            {value}
+          </div>
+          <Text type="secondary" style={{ fontSize: 11 }}>
+            {label}
+          </Text>
+        </div>
+      </Space>
+    </Card>
+  );
+
+  // Reusable donut with a center total and a compact custom legend.
+  const DonutCard = ({ title, icon, data, height = 190 }) => {
+    const total = data.reduce((s, d) => s + Number(d.value || 0), 0);
+    return (
+      <Card
+        size="small"
+        title={<Text style={{ fontSize: 12 }}>{icon} {title}</Text>}
+        style={cardStyle}
+      >
+        {data.length ? (
+          <>
+            <div style={{ position: "relative" }}>
+              <ResponsiveContainer width="100%" height={height}>
+                <PieChart>
+                  <Pie
+                    data={data}
+                    cx="50%"
+                    cy="50%"
+                    innerRadius={52}
+                    outerRadius={78}
+                    paddingAngle={data.length > 1 ? 2 : 0}
+                    dataKey="value"
+                    isAnimationActive={false}
+                    stroke="none"
+                  >
+                    {data.map((d, i) => (
+                      <RCell key={d.name} fill={CHART_COLORS[i % CHART_COLORS.length]} />
+                    ))}
+                  </Pie>
+                  <RTooltip formatter={(v, n) => [fmt(v), n]} contentStyle={{ fontSize: 11, borderRadius: 8 }} />
+                </PieChart>
+              </ResponsiveContainer>
+              <div
+                style={{
+                  position: "absolute",
+                  inset: 0,
+                  height,
+                  display: "flex",
+                  flexDirection: "column",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  pointerEvents: "none",
+                }}
+              >
+                <span style={{ fontSize: 22, fontWeight: 700, lineHeight: 1, color: isDark ? "#fff" : "#1f1f1f", fontVariantNumeric: "tabular-nums" }}>
+                  {fmt(total)}
+                </span>
+                <Text type="secondary" style={{ fontSize: 10 }}>Total</Text>
+              </div>
+            </div>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: "4px 12px", marginTop: 8, justifyContent: "center" }}>
+              {data.map((d, i) => (
+                <span key={d.name} style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 11 }}>
+                  <span style={{ width: 9, height: 9, borderRadius: 2, background: CHART_COLORS[i % CHART_COLORS.length] }} />
+                  <Text style={{ fontSize: 11 }}>{d.name}</Text>
+                  <Text type="secondary" style={{ fontSize: 11 }}>{fmt(d.value)}</Text>
+                </span>
+              ))}
+            </div>
+          </>
+        ) : (
+          <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No data" />
+        )}
+      </Card>
+    );
+  };
+
+  // Section header with a collapse/expand toggle.
   const SectionHeader = ({ id, icon, title }) => (
     <div
       onClick={() => toggle(id)}
@@ -212,145 +393,217 @@ function SlfDashboardTab({ dashboard, isDark, loading = false }) {
 
   return (
     <div>
+      {/* Hero row: Total Volume leads, with a sparkline, MoM delta, and an
+          inline residual/hazardous split; secondary KPIs and a capacity
+          alert sit alongside. */}
       <Row gutter={[10, 10]} style={{ marginBottom: 12 }}>
-        {tiles.map((t) => (
-          <Col xs={12} sm={8} md={8} lg={4} key={t.label}>
-            <Card
-              size="small"
-              style={{ borderRadius: 10, borderLeft: `4px solid ${t.color}` }}
-              styles={{ body: { padding: "10px 12px" } }}
-            >
-              <Space align="center" size={8}>
-                <span
-                  style={{
-                    width: 32,
-                    height: 32,
-                    borderRadius: 8,
-                    background: `${t.color}1f`,
-                    color: t.color,
-                    display: "inline-flex",
-                    alignItems: "center",
-                    justifyContent: "center",
-                    fontSize: 15,
-                  }}
-                >
-                  {t.icon}
-                </span>
-                <div>
-                  <div
-                    style={{
-                      fontSize: 18,
-                      fontWeight: 700,
-                      color: t.color,
-                      lineHeight: 1.1,
-                    }}
-                  >
-                    {t.value}
-                  </div>
-                  <Text type="secondary" style={{ fontSize: 10 }}>
-                    {t.label}
-                  </Text>
+        <Col xs={24} lg={9}>
+          <Card
+            style={{
+              borderRadius: 12,
+              height: "100%",
+              border: `1px solid ${isDark ? "rgba(47,84,235,0.32)" : "rgba(47,84,235,0.16)"}`,
+              background: isDark
+                ? "linear-gradient(135deg, rgba(47,84,235,0.16), rgba(47,84,235,0.02))"
+                : "linear-gradient(135deg, rgba(47,84,235,0.07), rgba(47,84,235,0))",
+            }}
+            styles={{ body: { padding: 16 } }}
+          >
+            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+              <span
+                style={{
+                  width: 30,
+                  height: 30,
+                  borderRadius: 8,
+                  background: `${PALETTE.brand}1f`,
+                  color: PALETTE.brand,
+                  display: "inline-flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  fontSize: 15,
+                }}
+              >
+                <DatabaseOutlined />
+              </span>
+              <Text type="secondary" style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: 0.5 }}>
+                Total Volume Disposed
+              </Text>
+            </div>
+            <div style={{ display: "flex", alignItems: "baseline", gap: 6 }}>
+              <span style={{ fontSize: 34, fontWeight: 800, lineHeight: 1, color: isDark ? "#fff" : "#1f1f1f", fontVariantNumeric: "tabular-nums" }}>
+                {fmt(totalVolume)}
+              </span>
+              <span style={{ fontSize: 15, fontWeight: 600, color: PALETTE.brand }}>{unit}</span>
+            </div>
+            <div style={{ marginTop: 8 }}>
+              <DeltaBadge />
+            </div>
+
+            {monthly.length > 0 && (
+              <div style={{ margin: "12px -4px 0" }}>
+                <ResponsiveContainer width="100%" height={56}>
+                  <AreaChart data={monthly} margin={{ top: 4, right: 4, left: 4, bottom: 0 }}>
+                    <defs>
+                      <linearGradient id="heroSpark" x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="0%" stopColor={PALETTE.brand} stopOpacity={0.35} />
+                        <stop offset="100%" stopColor={PALETTE.brand} stopOpacity={0} />
+                      </linearGradient>
+                    </defs>
+                    <Area type="monotone" dataKey="volume" stroke={PALETTE.brand} strokeWidth={2} fill="url(#heroSpark)" isAnimationActive={false} />
+                    <RTooltip formatter={(v) => [`${fmt(v)} ${unit}`, "Volume"]} contentStyle={{ fontSize: 11, borderRadius: 8 }} />
+                  </AreaChart>
+                </ResponsiveContainer>
+              </div>
+            )}
+
+            {wasteTotal > 0 && (
+              <div style={{ marginTop: 12 }}>
+                <div style={{ display: "flex", height: 8, borderRadius: 5, overflow: "hidden", background: isDark ? "rgba(255,255,255,0.08)" : "#f0f0f0" }}>
+                  <div style={{ width: `${residualPct}%`, background: PALETTE.residual }} />
+                  <div style={{ width: `${hazardPct}%`, background: PALETTE.hazardous }} />
                 </div>
-              </Space>
-            </Card>
-          </Col>
-        ))}
+                <div style={{ display: "flex", justifyContent: "space-between", marginTop: 6, fontSize: 11 }}>
+                  <span style={{ color: PALETTE.residual, fontWeight: 600 }}>
+                    Residual {fmt(residual)} {unit} ({Math.round(residualPct)}%)
+                  </span>
+                  <span style={{ color: PALETTE.hazardous, fontWeight: 600 }}>
+                    Hazardous {fmt(hazardous)} ({Math.round(hazardPct)}%)
+                  </span>
+                </div>
+              </div>
+            )}
+          </Card>
+        </Col>
+        <Col xs={24} lg={15}>
+          <Row gutter={[10, 10]}>
+            {secondaryTiles.map((t) => (
+              <Col xs={24} sm={8} key={t.label}>
+                <StatTile {...t} />
+              </Col>
+            ))}
+            <Col xs={24}>
+              {cellsAtRisk.length > 0 ? (
+                <Card
+                  size="small"
+                  style={{
+                    borderRadius: 10,
+                    borderLeft: `4px solid ${PALETTE.hazardous}`,
+                    background: isDark ? "rgba(207,19,34,0.08)" : "#fff1f0",
+                  }}
+                  styles={{ body: { padding: "10px 14px" } }}
+                >
+                  <Space align="start" size={10}>
+                    <WarningOutlined style={{ color: PALETTE.hazardous, fontSize: 18, marginTop: 2 }} />
+                    <div>
+                      <Text strong style={{ fontSize: 12, color: PALETTE.hazardous }}>
+                        {cellsAtRisk.length} cell{cellsAtRisk.length > 1 ? "s" : ""} at/near capacity (≥90%)
+                      </Text>
+                      <div>
+                        <Text type="secondary" style={{ fontSize: 11 }}>
+                          {cellsAtRisk.map((c) => `${c.name} ${Math.round(c.pct)}%`).join(" · ")}
+                          {cellsWarning.length > 0 ? ` · ${cellsWarning.length} more ≥75%` : ""}
+                        </Text>
+                      </div>
+                    </div>
+                  </Space>
+                </Card>
+              ) : (
+                <Card
+                  size="small"
+                  style={{
+                    borderRadius: 10,
+                    borderLeft: `4px solid ${PALETTE.residual}`,
+                    background: isDark ? "rgba(82,196,26,0.08)" : "#f6ffed",
+                  }}
+                  styles={{ body: { padding: "10px 14px" } }}
+                >
+                  <Space align="center" size={10}>
+                    <CheckCircleOutlined style={{ color: PALETTE.residual, fontSize: 18 }} />
+                    <div>
+                      <Text strong style={{ fontSize: 12, color: PALETTE.residual }}>
+                        All cells within safe capacity
+                      </Text>
+                      <div>
+                        <Text type="secondary" style={{ fontSize: 11 }}>
+                          {cellsWarning.length > 0
+                            ? `${cellsWarning.length} cell${cellsWarning.length > 1 ? "s" : ""} above 75% — monitor closely`
+                            : cellData.length
+                              ? "No cells above 75% utilization"
+                              : "No cell infrastructure configured"}
+                        </Text>
+                      </div>
+                    </div>
+                  </Space>
+                </Card>
+              )}
+            </Col>
+          </Row>
+        </Col>
       </Row>
 
       <SectionHeader
-        id="composition"
-        icon={<PieChartOutlined style={{ color: "#722ed1" }} />}
-        title="Waste & Generator Breakdown"
+        id="trends"
+        icon={<RiseOutlined style={{ color: PALETTE.brand }} />}
+        title="Monthly Disposal Trend"
       />
-      {!collapsed.composition && (
+      {!collapsed.trends && (
+      <Card
+        size="small"
+        title={
+          <Text style={{ fontSize: 12 }}>
+            <RiseOutlined /> Monthly Disposal Trend ({unit})
+          </Text>
+        }
+        style={{ borderRadius: 10, marginBottom: 12 }}
+      >
+        {monthly.length ? (
+          <ResponsiveContainer width="100%" height={260}>
+            <AreaChart data={monthly} margin={{ left: 8, right: 12, top: 8, bottom: 18 }}>
+              <defs>
+                <linearGradient id="trendFill" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="0%" stopColor={PALETTE.brand} stopOpacity={0.3} />
+                  <stop offset="100%" stopColor={PALETTE.brand} stopOpacity={0.02} />
+                </linearGradient>
+              </defs>
+              <CartesianGrid strokeDasharray="3 3" stroke={gridStroke} />
+              <XAxis
+                dataKey="month"
+                tick={axisTick}
+                label={{ value: "Month", position: "insideBottom", offset: -8, fontSize: 10, fill: axisLabelFill }}
+              />
+              <YAxis
+                tick={axisTick}
+                width={48}
+                label={{ value: `Volume (${unit})`, angle: -90, position: "insideLeft", fontSize: 10, fill: axisLabelFill, style: { textAnchor: "middle" } }}
+              />
+              <RTooltip formatter={(v) => [`${fmt(v)} ${unit}`, "Volume"]} contentStyle={{ fontSize: 11, borderRadius: 8 }} />
+              <Area
+                type="monotone"
+                dataKey="volume"
+                name={`Volume (${unit})`}
+                stroke={PALETTE.brand}
+                strokeWidth={2.5}
+                fill="url(#trendFill)"
+                dot={{ r: 2.5 }}
+                activeDot={{ r: 4 }}
+                isAnimationActive={false}
+              />
+            </AreaChart>
+          </ResponsiveContainer>
+        ) : (
+          <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No trend data yet" style={{ padding: 24 }} />
+        )}
+      </Card>
+      )}
+
+      <SectionHeader
+        id="breakdown"
+        icon={<PieChartOutlined style={{ color: PALETTE.submissions }} />}
+        title="Generators & Submission Breakdown"
+      />
+      {!collapsed.breakdown && (
       <Row gutter={[10, 10]} style={{ marginBottom: 12 }}>
-        <Col xs={24} md={8}>
-          <Card
-            size="small"
-            title={
-              <Text style={{ fontSize: 12 }}>
-                <PieChartOutlined /> Waste Composition ({unit})
-              </Text>
-            }
-            style={cardStyle}
-          >
-            {wasteComposition.length ? (
-              <ResponsiveContainer width="100%" height={200}>
-                <PieChart>
-                  <Pie
-                    data={wasteComposition}
-                    cx="50%"
-                    cy="50%"
-                    innerRadius={45}
-                    outerRadius={75}
-                    paddingAngle={3}
-                    dataKey="value"
-                    isAnimationActive={false}
-                    label={({ name, value }) =>
-                      `${name}: ${value.toLocaleString()}`
-                    }
-                    labelLine={false}
-                  >
-                    {wasteComposition.map((d, i) => (
-                      <RCell
-                        key={d.name}
-                        fill={d.name === "Hazardous" ? "#cf1322" : "#52c41a"}
-                      />
-                    ))}
-                  </Pie>
-                  <RTooltip />
-                </PieChart>
-              </ResponsiveContainer>
-            ) : (
-              <Empty
-                image={Empty.PRESENTED_IMAGE_SIMPLE}
-                description="No volume"
-              />
-            )}
-          </Card>
-        </Col>
-        <Col xs={24} md={8}>
-          <Card
-            size="small"
-            title={
-              <Text style={{ fontSize: 12 }}>
-                <PieChartOutlined /> Submissions by Source
-              </Text>
-            }
-            style={cardStyle}
-          >
-            {companyTypeData.length ? (
-              <ResponsiveContainer width="100%" height={200}>
-                <PieChart>
-                  <Pie
-                    data={companyTypeData}
-                    cx="50%"
-                    cy="50%"
-                    outerRadius={75}
-                    dataKey="value"
-                    isAnimationActive={false}
-                    label={({ name, value }) => `${name}: ${value}`}
-                    labelLine={false}
-                  >
-                    {companyTypeData.map((d, i) => (
-                      <RCell
-                        key={d.name}
-                        fill={CHART_COLORS[i % CHART_COLORS.length]}
-                      />
-                    ))}
-                  </Pie>
-                  <RTooltip />
-                </PieChart>
-              </ResponsiveContainer>
-            ) : (
-              <Empty
-                image={Empty.PRESENTED_IMAGE_SIMPLE}
-                description="No data"
-              />
-            )}
-          </Card>
-        </Col>
-        <Col xs={24} md={8}>
+        <Col xs={24} md={9}>
           <Card
             size="small"
             title={
@@ -361,144 +614,47 @@ function SlfDashboardTab({ dashboard, isDark, loading = false }) {
             style={cardStyle}
           >
             {topGenerators.length ? (
-              <ResponsiveContainer width="100%" height={200}>
+              <ResponsiveContainer width="100%" height={230}>
                 <BarChart
                   data={topGenerators}
                   layout="vertical"
-                  margin={{ left: 8, right: 28, bottom: 16 }}
+                  margin={{ left: 8, right: 30, bottom: 8 }}
                 >
-                  <CartesianGrid strokeDasharray="3 3" horizontal={false} />
-                  <XAxis
-                    type="number"
-                    tick={axisTick}
-                    label={{ value: `Volume (${unit})`, position: "insideBottom", offset: -8, fontSize: 10, fill: axisLabelFill }}
-                  />
+                  <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke={gridStroke} />
+                  <XAxis type="number" tick={axisTick} />
                   <YAxis
                     type="category"
                     dataKey="name"
-                    width={90}
+                    width={92}
                     tick={{ fontSize: 10, fill: isDark ? "#aaa" : "#555" }}
                   />
-                  <RTooltip formatter={(v) => [`${fmt(v)} ${unit}`, "Volume"]} />
+                  <RTooltip formatter={(v) => [`${fmt(v)} ${unit}`, "Volume"]} contentStyle={{ fontSize: 11, borderRadius: 8 }} />
                   <Bar dataKey="value" name={`Volume (${unit})`} radius={[0, 4, 4, 0]} isAnimationActive={false}>
                     {topGenerators.map((d, i) => (
-                      <RCell
-                        key={d.name}
-                        fill={CHART_COLORS[i % CHART_COLORS.length]}
-                      />
+                      <RCell key={d.name} fill={CHART_COLORS[i % CHART_COLORS.length]} />
                     ))}
                     <LabelList dataKey="value" position="right" formatter={(v) => fmt(v)} style={{ fontSize: 10, fill: axisLabelFill }} />
                   </Bar>
                 </BarChart>
               </ResponsiveContainer>
             ) : (
-              <Empty
-                image={Empty.PRESENTED_IMAGE_SIMPLE}
-                description="No data"
-              />
+              <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No data" />
             )}
           </Card>
         </Col>
-      </Row>
-      )}
-
-      <SectionHeader
-        id="trends"
-        icon={<BarChartOutlined style={{ color: "#2f54eb" }} />}
-        title="Disposal Trend & Status"
-      />
-      {!collapsed.trends && (
-      <Row gutter={[10, 10]} style={{ marginBottom: 12 }}>
-        <Col xs={24} md={14}>
-          <Card
-            size="small"
-            title={
-              <Text style={{ fontSize: 12 }}>
-                <BarChartOutlined /> Monthly Disposal Trend ({unit})
-              </Text>
-            }
-            style={cardStyle}
-          >
-            {monthly.length ? (
-              <ResponsiveContainer width="100%" height={230}>
-                <LineChart
-                  data={monthly}
-                  margin={{ left: 8, right: 12, top: 8, bottom: 18 }}
-                >
-                  <CartesianGrid strokeDasharray="3 3" />
-                  <XAxis
-                    dataKey="month"
-                    tick={axisTick}
-                    label={{ value: "Month", position: "insideBottom", offset: -8, fontSize: 10, fill: axisLabelFill }}
-                  />
-                  <YAxis
-                    tick={axisTick}
-                    label={{ value: `Volume (${unit})`, angle: -90, position: "insideLeft", fontSize: 10, fill: axisLabelFill, style: { textAnchor: "middle" } }}
-                  />
-                  <RTooltip formatter={(v) => [`${fmt(v)} ${unit}`, "Volume"]} />
-                  <Legend wrapperStyle={{ fontSize: 11 }} />
-                  <Line
-                    type="monotone"
-                    dataKey="volume"
-                    name={`Volume (${unit})`}
-                    stroke="#2f54eb"
-                    strokeWidth={2}
-                    dot={{ r: 3 }}
-                    isAnimationActive={false}
-                  />
-                </LineChart>
-              </ResponsiveContainer>
-            ) : (
-              <Empty
-                image={Empty.PRESENTED_IMAGE_SIMPLE}
-                description="No trend data"
-              />
-            )}
-          </Card>
+        <Col xs={24} md={8}>
+          <DonutCard
+            title="Submissions by Source"
+            icon={<PieChartOutlined />}
+            data={companyTypeData}
+          />
         </Col>
-        <Col xs={24} md={10}>
-          <Card
-            size="small"
-            title={
-              <Text style={{ fontSize: 12 }}>
-                <PieChartOutlined /> Submission Status
-              </Text>
-            }
-            style={cardStyle}
-          >
-            {statusData.length ? (
-              <ResponsiveContainer width="100%" height={230}>
-                <PieChart>
-                  <Pie
-                    data={statusData}
-                    cx="50%"
-                    cy="50%"
-                    innerRadius={40}
-                    outerRadius={75}
-                    paddingAngle={2}
-                    dataKey="value"
-                    isAnimationActive={false}
-                    label={({ name, value }) => `${name}: ${value}`}
-                    labelLine={false}
-                  >
-                    {statusData.map((d, i) => (
-                      <RCell
-                        key={d.name}
-                        fill={CHART_COLORS[i % CHART_COLORS.length]}
-                      />
-                    ))}
-                  </Pie>
-                  <RTooltip />
-                  <Legend wrapperStyle={{ fontSize: 11 }} />
-                </PieChart>
-              </ResponsiveContainer>
-            ) : (
-              <Empty
-                image={Empty.PRESENTED_IMAGE_SIMPLE}
-                description="No data"
-              />
-            )}
-          </Card>
+        <Col xs={24} md={7}>
+          <DonutCard
+            title="Submission Status"
+            icon={<CheckCircleOutlined />}
+            data={statusData}
+          />
         </Col>
       </Row>
       )}

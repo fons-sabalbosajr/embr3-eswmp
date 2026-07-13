@@ -6,6 +6,8 @@ dns.setDefaultResultOrder("ipv4first");
 const express = require("express");
 const mongoose = require("mongoose");
 const cors = require("cors");
+const helmet = require("helmet");
+const rateLimit = require("express-rate-limit");
 const os = require("os");
 const http = require("http");
 require("dotenv").config();
@@ -40,7 +42,6 @@ const uploadRoutes = require("./routes/upload");
 const messageRoutes = require("./routes/messages");
 
 const app = express();
-const ADMIN_DISPLAY_NAME = "EMBR3 ESWMP Admin";
 const server = http.createServer(app);
 server.requestTimeout = 10 * 60 * 1000;
 server.headersTimeout = 11 * 60 * 1000;
@@ -114,7 +115,39 @@ function getAllowedOrigins() {
   return [...origins];
 }
 const allowedOrigins = getAllowedOrigins();
-app.set("trust proxy", true);
+// Trust the reverse proxy in front of the app (Cloudflare / nginx) so req.ip
+// reflects the real client. A specific hop count is used instead of `true`:
+// `true` trusts every hop, which lets clients spoof X-Forwarded-For to bypass
+// IP-based rate limiting (express-rate-limit ERR_ERL_PERMISSIVE_TRUST_PROXY).
+// Override TRUST_PROXY_HOPS in the env if the deployment has a different number
+// of proxies in front of it (set to 0 for direct/local with no proxy).
+const TRUST_PROXY_HOPS = Number(process.env.TRUST_PROXY_HOPS ?? 1);
+app.set("trust proxy", Number.isFinite(TRUST_PROXY_HOPS) ? TRUST_PROXY_HOPS : 1);
+
+// Security headers. CSP is left to the front-end host (this server returns JSON
+// + serves uploaded media to the SPA on a different origin), and cross-origin
+// resource policy is relaxed so that media can be loaded by the client.
+app.use(helmet({
+  contentSecurityPolicy: false,
+  crossOriginResourcePolicy: false,
+  crossOriginEmbedderPolicy: false,
+}));
+
+// Throttle authentication endpoints against credential brute-forcing.
+// A resilient key generator falls back to the socket address (and normalizes
+// IPv6 via ipKeyGenerator) so a request with an undefined req.ip can't crash
+// the limiter (express-rate-limit ERR_ERL_UNDEFINED_IP_ADDRESS).
+const { ipKeyGenerator } = rateLimit;
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 50,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { message: "Too many attempts, please try again later." },
+  keyGenerator: (req) =>
+    ipKeyGenerator(req.ip || req.socket?.remoteAddress || "unknown"),
+});
+
 app.use(cors({
   origin(origin, cb) {
     // Allow requests with no origin (e.g. server-to-server, curl)
@@ -191,78 +224,13 @@ async function connectToMongo() {
     } catch (err) {
       console.error("Scheduled submission worker failed to start:", err.message);
     }
-    // Auto-backfill transaction history for existing submissions
+    // Auto-backfill transaction history for existing submissions.
+    // Shared with POST /api/transactions/seed via utils/backfillTransactions.
     try {
-      const Transaction = require("./models/Transaction");
-      const DataSLF = require("./models/DataSLF");
-      const existing = await Transaction.distinct("submissionId");
-      const untracked = await DataSLF.countDocuments({
-        submissionId: { $nin: existing },
-      });
-      if (untracked > 0) {
-        console.log(
-          `Backfilling transactions for ${untracked} untracked entries...`,
-        );
-        // Trigger the seed via internal logic
-        const entries = await DataSLF.find({
-          submissionId: { $nin: existing },
-        });
-        const groups = {};
-        for (const e of entries) {
-          const sid = e.submissionId || e._id.toString();
-          if (!groups[sid]) groups[sid] = [];
-          groups[sid].push(e);
-        }
-        const toInsert = [];
-        for (const [sid, items] of Object.entries(groups)) {
-          toInsert.push({
-            submissionId: sid,
-            dataEntry: items[0]._id,
-            companyName: items[0].lguCompanyName,
-            companyType: items[0].companyType,
-            submittedBy: items[0].submittedBy || "",
-            type: "submission",
-            description: `${items.length} entr${items.length === 1 ? "y" : "ies"} submitted by ${items[0].submittedBy || "unknown"}`,
-            performedBy: items[0].submittedBy || "portal",
-            meta: { entryCount: items.length, ids: items.map((e) => e.idNo) },
-            createdAt: items[0].createdAt,
-            updatedAt: items[0].createdAt,
-          });
-          if (items[0].submittedBy) {
-            toInsert.push({
-              submissionId: sid,
-              companyName: items[0].lguCompanyName,
-              submittedBy: items[0].submittedBy,
-              type: "email_ack_sent",
-              description: `Acknowledgement email sent to ${items[0].submittedBy}`,
-              performedBy: "system",
-              meta: { email: items[0].submittedBy },
-              createdAt: new Date(items[0].createdAt.getTime() + 2000),
-              updatedAt: new Date(items[0].createdAt.getTime() + 2000),
-            });
-          }
-          for (const e of items) {
-            if (e.status && e.status !== "pending") {
-              toInsert.push({
-                submissionId: sid,
-                dataEntry: e._id,
-                companyName: e.lguCompanyName,
-                companyType: e.companyType,
-                submittedBy: e.submittedBy || "",
-                type: "status_change",
-                description: `Entry ${e.idNo} marked as ${e.status}`,
-                performedBy: ADMIN_DISPLAY_NAME,
-                meta: { status: e.status, idNo: e.idNo },
-                createdAt: e.updatedAt || e.createdAt,
-                updatedAt: e.updatedAt || e.createdAt,
-              });
-            }
-          }
-        }
-        if (toInsert.length > 0) {
-          await Transaction.insertMany(toInsert);
-          console.log(`Backfilled ${toInsert.length} transaction records.`);
-        }
+      const { backfillTransactions } = require("./utils/backfillTransactions");
+      const seeded = await backfillTransactions();
+      if (seeded > 0) {
+        console.log(`Backfilled ${seeded} transaction records.`);
       }
     } catch (err) {
       console.error("Transaction backfill error:", err.message);
@@ -302,7 +270,7 @@ app.get("/api/health/email", async (req, res) => {
     res.status(500).json({ status: "error", message: err.message, user: process.env.EMAIL_USER || "(not set)" });
   }
 });
-app.use("/api/auth", authRoutes);
+app.use("/api/auth", authLimiter, authRoutes);
 app.use("/api/slf-generators", slfGeneratorRoutes);
 app.use("/api/data-slf", dataSLFRoutes);
 app.use("/api/settings", settingsRoutes);
@@ -322,8 +290,9 @@ app.use("/api/project-desc-scoping", projectDescScopingRoutes);
 app.use("/api/transfer-stations", transferStationRoutes);
 app.use("/api/lgu-assist-diversion", lguAssistDiversionRoutes);
 app.use("/api/technical-assistance", technicalAssistanceRoutes);
-app.use("/api/portal-auth", portalAuthRoutes);
-app.use("/api/porta-auth", portalAuthRoutes); // Backward compatibility for previously stored typo URLs
+app.use("/api/portal-auth", authLimiter, portalAuthRoutes);
+// TODO(cleanup): remove once no stored records/links reference the "porta-auth" typo.
+app.use("/api/porta-auth", authLimiter, portalAuthRoutes); // Backward compatibility for previously stored typo URLs
 app.use("/api/portal-users", portalUsersRoutes);
 app.use("/api/data-history", dataHistoryRoutes);
 app.use("/api/notifications", notificationRoutes);
@@ -334,6 +303,20 @@ app.use("/api/messages", messageRoutes);
 app.use("/api/dummy-data", require("./routes/dummyData"));
 app.use("/api/slf-data-files", require("./routes/slfDataFiles"));
 app.use("/api/portal-queue", require("./routes/portalQueue"));
+app.use("/api/dev-portal", require("./routes/devPortal"));
+
+// Global error handler — keeps unhandled errors from leaking stack traces /
+// internals to clients (Express's default handler exposes them when NODE_ENV
+// is not "production"). Logs the full error server-side; returns a safe body.
+app.use((err, req, res, _next) => {
+  console.error(`Unhandled error on ${req.method} ${req.originalUrl}:`, err);
+  if (res.headersSent) return;
+  const isProd = process.env.NODE_ENV === "production";
+  res.status(err.status || 500).json({
+    message: "Server error",
+    ...(isProd ? {} : { error: err.message }),
+  });
+});
 
 // Get local IP address
 function getLocalIP() {

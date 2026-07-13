@@ -146,7 +146,9 @@ export default function SLFDataTableFiles({ isDark }) {
     async (file) => {
       const status = await validateFile(file);
       if (status.accessible) {
-        window.open(file.url, "_blank", "noopener,noreferrer");
+        // Prefer the canonical Drive link the backend resolved (webViewLink);
+        // the stored url may be a non-openable form (thumbnail / uc?export).
+        window.open(status.webViewLink || file.url, "_blank", "noopener,noreferrer");
       } else {
         Swal.fire({ icon: "warning", title: "Cannot open file", text: status.message });
       }
@@ -406,7 +408,7 @@ export default function SLFDataTableFiles({ isDark }) {
               <Button
                 type="primary"
                 icon={<DownloadOutlined />}
-                onClick={() => window.open(preview.file.url, "_blank", "noopener,noreferrer")}
+                onClick={() => window.open(preview.status?.webViewLink || preview.file.url, "_blank", "noopener,noreferrer")}
               >
                 Open / Download
               </Button>

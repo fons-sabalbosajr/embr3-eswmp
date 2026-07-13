@@ -97,6 +97,7 @@ import { getAdminDisplayName } from "../../utils/adminIdentity";
 import { fetchWithCache, invalidateCache } from "../../utils/pageCache";
 import { getSocket } from "../../utils/socket";
 import { useDataRef } from "../../utils/dataRef";
+import excludeDummy from "../../utils/excludeDummy";
 import dayjs from "dayjs";
 import { buildFilters, matchesFilter, rowMatchesSearch } from "./shared/tableFilters";
 import {
@@ -252,6 +253,8 @@ export default function SLFMonitoring({
   const [detailHistoryLoading, setDetailHistoryLoading] = useState(false);
   const [baselineData, setBaselineData] = useState(null);
   const [loadingBaseline, setLoadingBaseline] = useState(false);
+  const [detailSubmissionsLoading, setDetailSubmissionsLoading] = useState(false);
+  const [detailDashboardError, setDetailDashboardError] = useState(null);
   const [editing, setEditing] = useState(null);
   const [editYear, setEditYear] = useState(null);
   const [editYearRecords, setEditYearRecords] = useState([]);
@@ -307,7 +310,9 @@ export default function SLFMonitoring({
           api.get("/data-slf/baselines"),
           api.get("/data-slf/summary-by-slf").catch(() => ({ data: [] })),
         ]);
-        facilitiesCache = facilities || [];
+        // Defensive: exclude dummy/test facilities from the monitoring dashboard
+        // (backend already excludes them from /slf-facilities by default).
+        facilitiesCache = excludeDummy(facilities || []);
         baselineMapCache = buildBaselineMap(baselines || []);
         // Per-SLF waste totals from a fast server aggregation seed the summary
         // tiles immediately, so they no longer wait for the heavy submissions
@@ -368,7 +373,7 @@ export default function SLFMonitoring({
           const res = await Promise.all(calls);
           const submissions = res[0].data;
           let idx = 1;
-          if (!facilitiesCache) facilitiesCache = res[idx++]?.data || [];
+          if (!facilitiesCache) facilitiesCache = excludeDummy(res[idx++]?.data || []);
           if (!baselineMapCache) baselineMapCache = buildBaselineMap(res[idx]?.data || []);
           const normalizedSubmissions = normalizeSlfSubmissions(
             Array.isArray(submissions) ? submissions : submissions?.data || []
@@ -440,29 +445,35 @@ export default function SLFMonitoring({
 
   // Fetch baseline data when detail modal opens for a facility.
   useEffect(() => {
+    setDetailDashboardError(null);
     if (!detailModal) {
       setBaselineData(null);
+      setDetailSubmissionsLoading(false);
       return;
     }
     const candidateNames = expandSlfNames(getFacilitySlfNames(detailModal));
     if (candidateNames.length === 0) {
       setBaselineData(null);
-      return;
+    } else {
+      setLoadingBaseline(true);
+      api
+        .get("/data-slf/baselines")
+        .then(({ data }) => {
+          const baselineMap = buildBaselineMap(data || []);
+          setBaselineData(findBaselineForFacility(detailModal, baselineMap));
+        })
+        .catch(() => {
+          setBaselineData(null);
+          setDetailDashboardError("Failed to load baseline data.");
+        })
+        .finally(() => setLoadingBaseline(false));
     }
-    setLoadingBaseline(true);
-    api
-      .get("/data-slf/baselines")
-      .then(({ data }) => {
-        const baselineMap = buildBaselineMap(data || []);
-        setBaselineData(findBaselineForFacility(detailModal, baselineMap));
-      })
-      .catch(() => setBaselineData(null))
-      .finally(() => setLoadingBaseline(false));
 
     // Lazy-load FULL submissions for just this facility so the detail modal shows
     // rich data (company, ID, trucks) without keeping every submission in memory.
     const slfName = detailModal.slfName || detailModal.lgu || "";
     if (slfName) {
+      setDetailSubmissionsLoading(true);
       api
         .get("/data-slf", {
           params: { mode: "list", includeTrucks: true, search: slfName },
@@ -477,7 +488,10 @@ export default function SLFMonitoring({
             return [...byId.values()];
           });
         })
-        .catch(() => {});
+        .catch(() => setDetailDashboardError("Failed to load submission data."))
+        .finally(() => setDetailSubmissionsLoading(false));
+    } else {
+      setDetailSubmissionsLoading(false);
     }
   }, [detailModal]);
 
@@ -2058,6 +2072,7 @@ export default function SLFMonitoring({
                         innerRadius={48}
                         outerRadius={78}
                         paddingAngle={2}
+                        isAnimationActive={false}
                       >
                         {config.pieData.map((_, index) => (
                           <RCell
@@ -6267,7 +6282,12 @@ export default function SLFMonitoring({
                       <SlfDashboardTab
                         dashboard={detailDashboard}
                         isDark={isDark}
-                        loading={detailHistoryLoading && detailYearRecords.length === 0}
+                        loading={
+                          detailHistoryLoading ||
+                          loadingBaseline ||
+                          detailSubmissionsLoading
+                        }
+                        error={detailDashboardError}
                       />
                     ),
                   },
@@ -7821,8 +7841,9 @@ export default function SLFMonitoring({
                                             dataKey="value"
                                             fill="#52c41a"
                                             radius={[4, 4, 0, 0]}
+                                           isAnimationActive={false}
                                           >
-                                            {volumeData.map((_, i) => (
+                                           {volumeData.map((_, i) => (
                                               <RCell
                                                 key={i}
                                                 fill={
@@ -7869,8 +7890,9 @@ export default function SLFMonitoring({
                                             dataKey="value"
                                             fill="#722ed1"
                                             radius={[4, 4, 0, 0]}
+                                           isAnimationActive={false}
                                           >
-                                            {cellVolumeData.map((_, i) => (
+                                           {cellVolumeData.map((_, i) => (
                                               <RCell
                                                 key={i}
                                                 fill={
@@ -8549,6 +8571,8 @@ export default function SLFMonitoring({
                                                 preview={{ src: resolveMediaUrl(item.url) }}
                                                 width={64}
                                                 height={48}
+                                                loading="lazy"
+                                                decoding="async"
                                                 style={{ objectFit: "cover", borderRadius: 4 }}
                                                 fallback="data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='64' height='48'%3E%3Crect width='100%25' height='100%25' fill='%23f0f0f0'/%3E%3C/svg%3E"
                                               />
@@ -8575,6 +8599,8 @@ export default function SLFMonitoring({
                                           <Image
                                             src={resolveMediaUrl(item.url, { thumbnail: true })}
                                             preview={{ src: resolveMediaUrl(item.url) }}
+                                            loading="lazy"
+                                            decoding="async"
                                             fallback="data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='200' height='110'%3E%3Crect width='100%25' height='100%25' fill='%23f0f0f0'/%3E%3Ctext x='50%25' y='50%25' dominant-baseline='middle' text-anchor='middle' fill='%23999' font-size='12' font-family='sans-serif'%3EImage unavailable%3C/text%3E%3C/svg%3E"
                                             style={{
                                               width: "100%",
@@ -9539,6 +9565,7 @@ export default function SLFMonitoring({
                       dataKey="waste"
                       fill={color}
                       radius={[0, 4, 4, 0]}
+                      isAnimationActive={false}
                       label={{
                         position: "right",
                         fontSize: 10,

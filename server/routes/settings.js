@@ -8,6 +8,7 @@ const { verifyDriveAccess, getDriveConfigStatus } = require("../utils/googleDriv
 const { invalidateDriveMaintenanceCache } = require("../utils/driveMaintenanceGuard");
 const { authMiddleware, adminOnly, developerOnly } = require("../middleware/auth");
 const { writeLog } = require("../utils/logger");
+const { NON_DUMMY_CLAUSE } = require("../utils/dummyFilter");
 
 const router = express.Router();
 
@@ -302,9 +303,11 @@ router.post("/app/portal-announcement/email", authMiddleware, adminOnly, async (
       return res.status(400).json({ message: "Announcement email message is required." });
     }
 
+    // Never send production announcement emails to dummy/test accounts.
     const users = await UserPortal.find({
       status: "approved",
       email: { $exists: true, $ne: "" },
+      ...NON_DUMMY_CLAUSE,
     }).select("email firstName");
 
     const results = await Promise.allSettled(
@@ -458,7 +461,19 @@ router.post("/app/drive-test", authMiddleware, adminOnly, async (_req, res) => {
       data: result,
     });
   } catch (error) {
-    res.status(400).json({ message: `Drive test failed: ${error.message}` });
+    // Safe, credential-free reason. Flag re-authentication when the OAuth refresh
+    // token is expired/revoked so the developer gets an actionable next step.
+    const reason = driveErrorReason(error);
+    const needsReauth = /invalid_grant|expired|revoked|401/i.test(
+      `${error?.message || ""} ${reason}`,
+    );
+    res.status(400).json({
+      ok: false,
+      needsReauth,
+      message: needsReauth
+        ? `Drive test failed: ${reason} Re-authenticate Google Drive — regenerate GDRIVE_REFRESH_TOKEN and ensure the OAuth consent screen is published to Production (Testing-mode tokens expire).`
+        : `Drive test failed: ${reason}`,
+    });
   }
 });
 

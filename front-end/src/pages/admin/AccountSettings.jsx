@@ -42,6 +42,7 @@ import {
 import Swal from "sweetalert2";
 import api from "../../api";
 import { exportToExcel } from "../../utils/exportExcel";
+import { withSizeChanger } from "../../utils/tablePagination";
 import secureStorage from "../../utils/secureStorage";
 import { getAdminDisplayName } from "../../utils/adminIdentity";
 import { rowMatchesSearch } from "./shared/tableFilters";
@@ -427,7 +428,7 @@ export default function AccountSettings({ isDark }) {
           columns={columns}
           rowKey="_id"
           loading={loading}
-          pagination={{ pageSize: 10 }}
+          pagination={withSizeChanger({ pageSize: 10 })}
           size="middle"
           scroll={{ x: 900 }}
         />

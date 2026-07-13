@@ -4,6 +4,10 @@ const { writeLog } = require("../utils/logger");
 
 const router = express.Router();
 
+// All routes here are admin data-management; require an authenticated admin.
+const { authMiddleware, adminOnly } = require("../middleware/auth");
+router.use(authMiddleware, adminOnly);
+
 // Get all records
 router.get("/", async (req, res) => {
   try {

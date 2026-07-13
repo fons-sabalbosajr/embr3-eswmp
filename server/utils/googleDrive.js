@@ -229,15 +229,20 @@ async function uploadFileToDrive(fileBuffer, mimeType, originalName, isImage, ov
 }
 
 async function verifyDriveAccess() {
-  const folderTargets = [
-    { key: "images", id: process.env.GDRIVE_IMAGE_FOLDER_ID },
-    { key: "documents", id: process.env.GDRIVE_DOCS_FOLDER_ID },
-    { key: "haulerLoi", id: process.env.GDRIVE_HAULER_LOI_FOLDER_ID },
+  // Only the image + document folders are required for uploads. The hauler-LOI
+  // folder is optional — verify it only when configured so the test connection
+  // reflects actual upload capability (previously it hard-failed when hauler-LOI
+  // was unset, even though normal uploads still worked).
+  const allTargets = [
+    { key: "images", id: process.env.GDRIVE_IMAGE_FOLDER_ID, required: true },
+    { key: "documents", id: process.env.GDRIVE_DOCS_FOLDER_ID, required: true },
+    { key: "haulerLoi", id: process.env.GDRIVE_HAULER_LOI_FOLDER_ID, required: false },
   ];
-  const missing = folderTargets.filter((item) => !hasValue(item.id)).map((item) => item.key);
+  const missing = allTargets.filter((item) => item.required && !hasValue(item.id)).map((item) => item.key);
   if (missing.length > 0) {
     throw new Error(`Google Drive folder IDs not configured for: ${missing.join(", ")}.`);
   }
+  const folderTargets = allTargets.filter((item) => hasValue(item.id));
 
   const clients = getDriveClients();
   const attempts = [];
@@ -307,6 +312,9 @@ function getDriveConfigStatus() {
     GDRIVE_DOCS_FOLDER_ID: hasValue(process.env.GDRIVE_DOCS_FOLDER_ID),
     GDRIVE_HAULER_LOI_FOLDER_ID: hasValue(process.env.GDRIVE_HAULER_LOI_FOLDER_ID),
   };
+  // Only image + document folders are required for uploads; hauler-LOI is
+  // optional (kept in `folders` for visibility but never blocks `ok`).
+  const REQUIRED_FOLDER_KEYS = ["GDRIVE_IMAGE_FOLDER_ID", "GDRIVE_DOCS_FOLDER_ID"];
 
   const missing = [];
   // A usable auth method requires either full OAuth (client + refresh token) or
@@ -320,8 +328,8 @@ function getDriveConfigStatus() {
       missing.push("GDRIVE_REFRESH_TOKEN");
     }
   }
-  for (const [key, present] of Object.entries(folders)) {
-    if (!present) missing.push(key);
+  for (const key of REQUIRED_FOLDER_KEYS) {
+    if (!folders[key]) missing.push(key);
   }
 
   let authMethod = "none";

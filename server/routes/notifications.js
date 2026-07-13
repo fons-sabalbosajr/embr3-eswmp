@@ -1,6 +1,6 @@
 const express = require("express");
 const Notification = require("../models/Notification");
-const { notifyPortal } = require("../utils/socketEmit");
+const { notifyPortal, refreshAdmin } = require("../utils/socketEmit");
 
 const router = express.Router();
 
@@ -86,6 +86,8 @@ router.patch("/bulk-read", async (req, res) => {
       { _id: { $in: ids }, read: false },
       { read: true }
     );
+    // Tell the admin bell to re-read the authoritative unread count from the DB.
+    refreshAdmin(req, "notifications");
     res.json({ success: true, modified: result.modifiedCount || 0 });
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });
@@ -137,6 +139,8 @@ router.get("/:recipient/unread-count", async (req, res) => {
 router.patch("/:id/read", async (req, res) => {
   try {
     await Notification.findByIdAndUpdate(req.params.id, { read: true });
+    // Keep the admin bell's unread count in sync with the DB.
+    refreshAdmin(req, "notifications");
     res.json({ success: true });
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });
@@ -150,6 +154,8 @@ router.patch("/:recipient/read-all", async (req, res) => {
       { recipient: req.params.recipient, read: false },
       { read: true }
     );
+    // Keep the admin bell's unread count in sync with the DB.
+    refreshAdmin(req, "notifications");
     res.json({ success: true });
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });
