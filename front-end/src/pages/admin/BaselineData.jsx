@@ -1,4 +1,4 @@
-import { useCallback, useState, useEffect, useMemo } from "react";
+import { useCallback, useState, useEffect, useMemo, useDeferredValue } from "react";
 import {
   Table,
   Tag,
@@ -344,6 +344,11 @@ export default function BaselineData({
     return "locked";
   }, []);
 
+  // Filter against the DEFERRED search text, not the raw input value: the
+  // keystroke updates the box immediately while the (row-scanning) re-filter is
+  // deprioritised, so typing stays responsive on large baseline sets.
+  const deferredSearch = useDeferredValue(search);
+
   const filteredBaselines = useMemo(() => {
     return baselines.filter((record) => {
       // The "actual" tab shows real baselines and — for developers only — the
@@ -353,7 +358,7 @@ export default function BaselineData({
       if (baselineTab === "dummy" && !isDummyRecord) return false;
       const matchesLock = lockFilter === "all" || getLockState(record) === lockFilter;
       if (!matchesLock) return false;
-      return rowMatchesSearch(record, search, [
+      return rowMatchesSearch(record, deferredSearch, [
         "slfName",
         "lguCompanyName",
         "submittedBy",
@@ -361,7 +366,7 @@ export default function BaselineData({
         (item) => getLockState(item),
       ]);
     });
-  }, [baselines, getLockState, lockFilter, search, baselineTab]);
+  }, [baselines, getLockState, lockFilter, deferredSearch, baselineTab]);
 
   const dummyBaselineCount = useMemo(
     () => baselines.filter((r) => r.isDummy).length,

@@ -4,6 +4,12 @@ const { notifyPortal, refreshAdmin } = require("../utils/socketEmit");
 
 const router = express.Router();
 
+// Require an authenticated caller on every route below. Prevents anonymous
+// callers from reading or deleting any recipient's notifications by guessing an
+// email/id (was fully open). Both frontends always send a Bearer token.
+const { requireAnyAuth } = require("../middleware/auth");
+router.use(requireAnyAuth);
+
 const TEST_ADMIN_MESSAGE_REGEX =
   /^(admin (sent you a message|replied to .*?):\s*)?(test|testing|test message|test notification|sample message)(\s*\d*)?$/i;
 

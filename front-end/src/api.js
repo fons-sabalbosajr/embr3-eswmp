@@ -23,11 +23,33 @@ export function logClientError(payload = {}) {
   }).catch(() => {});
 }
 
-// Attach token to every request if available (skip if already set explicitly)
+// True while the SLF Portal is the active app (including its login/verify pages).
+function inPortalApp() {
+  return typeof window !== "undefined" && window.location.pathname.includes("/slfportal");
+}
+
+// Attach token to every request if available (skip if already set explicitly).
+//
+// The Portal signs in with `portal_token` and NEVER stores the admin `token`, but
+// this interceptor only ever read `token` — so every Portal request that did not
+// hand-set its own Authorization header went out with NO credentials at all, and
+// any authenticated portal route answered 401. That is why the Portal dashboard
+// cards, Data Entry tabs and drafts came up empty.
+//
+// It also broke Developer Portal Mode in the opposite direction: a developer has
+// BOTH tokens in storage, so their Portal requests carried the ADMIN token, and
+// the portal-context resolver (which sees a developer with no bound context)
+// rejected them.
+//
+// Pick the token that matches the app the request is coming from.
 api.interceptors.request.use((config) => {
   config.headers = config.headers || {};
   if (!config.headers.Authorization) {
-    const token = secureStorage.get("token");
+    const portalToken = secureStorage.get("portal_token");
+    const adminToken = secureStorage.get("token");
+    // In the Portal, the portal session wins — even when an admin/developer token
+    // is also present in the same browser.
+    const token = inPortalApp() ? portalToken || adminToken : adminToken;
     if (token) {
       config.headers.Authorization = `Bearer ${token}`;
     }

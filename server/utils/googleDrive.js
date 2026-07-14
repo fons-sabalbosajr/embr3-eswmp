@@ -93,16 +93,78 @@ function getDriveClients() {
   return clients;
 }
 
-function isRetryableAuthError(error) {
+// Classify a Drive failure so callers can tell an AUTHENTICATION problem (the
+// stored refresh token is dead → an administrator must re-authorize) apart from a
+// FILE/FOLDER PERMISSION problem, a quota problem, or a missing folder. These
+// used to be conflated, so the UI showed the same opaque failure for all of them
+// and kept retrying a token that could never succeed.
+//
+// Codes:
+//   auth_revoked  — refresh token expired/revoked. NOT recoverable by retrying.
+//   auth_failed   — 401 from this credential; another credential may still work.
+//   no_permission — authenticated fine, but this account can't touch the folder/file.
+//   quota         — rate/storage limit; retrying later may work.
+//   not_found     — folder/file id is wrong or deleted.
+//   unknown       — anything else.
+function classifyDriveError(error) {
   const status = error?.response?.status || error?.code;
-  const reason = error?.response?.data?.error || error?.errors?.[0]?.reason || "";
-  const message = error?.message || "";
-  return (
-    status === 401 ||
-    status === 403 ||
-    reason === "invalid_grant" ||
-    message.includes("invalid_grant")
-  );
+  const data = error?.response?.data || {};
+  const reason = data.error || error?.errors?.[0]?.reason || "";
+  const message = `${error?.message || ""} ${data.error_description || ""}`;
+  const haystack = `${reason} ${message}`;
+
+  if (reason === "invalid_grant" || /invalid_grant/i.test(message)) return "auth_revoked";
+  if (status === 404) return "not_found";
+  // MUST be tested before the generic quota rule below: this string contains the
+  // word "quota" but is a PERMANENT configuration limit (a service account has no
+  // My Drive storage of its own), not a transient rate limit. Retrying never helps.
+  if (/Service Accounts do not have storage quota/i.test(haystack)) return "service_account_no_quota";
+  if (status === 429 || /rateLimit|userRateLimitExceeded|storageQuotaExceeded|quotaExceeded/i.test(haystack)) {
+    return "quota";
+  }
+  if (status === 403) return "no_permission";
+  if (status === 401) return "auth_failed";
+  return "unknown";
+}
+
+const DRIVE_ERROR_HINTS = {
+  auth_revoked:
+    "Google Drive authorization has expired or been revoked. An administrator must re-authorize the Drive connection (regenerate GDRIVE_REFRESH_TOKEN). Note: if the Google Cloud OAuth consent screen is still in \"Testing\" status, refresh tokens expire every 7 days — publish the app to \"In production\" to stop this recurring.",
+  auth_failed: "Google rejected the stored Drive credentials.",
+  no_permission:
+    "Authenticated with Google, but this account has no permission on the target Drive folder/file. Share the folder with the authorized account (Editor).",
+  quota: "Google Drive quota or rate limit reached. Try again later.",
+  service_account_no_quota:
+    "The service-account fallback cannot upload: service accounts have no Drive storage of their own. It can only write into a Shared Drive. Restore the OAuth refresh token, or move the target folders into a Shared Drive and grant the service account access.",
+  not_found: "The configured Google Drive folder/file was not found. Check the GDRIVE_*_FOLDER_ID values.",
+  unknown: "Google Drive request failed.",
+};
+
+// Attach the classification to the error so routes can return a meaningful,
+// actionable response instead of a generic 500 — and so the client knows whether
+// retrying is even sensible.
+function decorateDriveError(error) {
+  const code = classifyDriveError(error);
+  error.driveErrorCode = code;
+  error.requiresReauth = code === "auth_revoked";
+  // Never retryable: a revoked refresh token stays revoked.
+  error.retryable = code === "quota";
+  error.hint = DRIVE_ERROR_HINTS[code];
+  return error;
+}
+
+// Should we try the NEXT configured credential (e.g. the service-account
+// fallback)? Only for credential-level failures — a 403 folder-permission error
+// or a 404 is not going to be fixed by swapping credentials in the general case,
+// but a dead/rejected OAuth token genuinely might be.
+function shouldTryNextClient(error) {
+  const code = classifyDriveError(error);
+  return code === "auth_revoked" || code === "auth_failed" || code === "no_permission";
+}
+
+// Back-compat name used by streamDriveFile below.
+function isRetryableAuthError(error) {
+  return shouldTryNextClient(error);
 }
 
 async function createDriveFile(drive, fileBuffer, mimeType, originalName, folderId, makePublic = true) {
@@ -203,29 +265,37 @@ async function uploadFileToDrive(fileBuffer, mimeType, originalName, isImage, ov
     : process.env.GDRIVE_DOCS_FOLDER_ID;
 
   let lastError;
+  let revokedError = null; // the PRIMARY cause, if a credential was revoked
   const attempts = [];
   for (let index = 0; index < clients.length; index += 1) {
     const client = clients[index];
     try {
       return await createDriveFile(client.drive, fileBuffer, mimeType, originalName, folderId, makePublic);
     } catch (error) {
-      lastError = error;
+      lastError = decorateDriveError(error);
+      if (error.driveErrorCode === "auth_revoked" && !revokedError) revokedError = error;
       attempts.push(`${client.name}: ${error.message || error}`);
       const hasFallback = index < clients.length - 1;
-      if (!hasFallback || !isRetryableAuthError(error)) {
-        if (attempts.length > 1) {
-          error.message = `Google Drive upload failed after ${attempts.length} attempts. ${attempts.join(" | ")}`;
-        }
-        throw error;
-      }
-      // Auth error on this client — try next client silently; caller handles Drive failure logging
+      // Only fall through to another CREDENTIAL for credential-level failures.
+      // A 404 folder or a quota error will fail identically on every client.
+      if (!hasFallback || !shouldTryNextClient(error)) break;
     }
   }
 
-  if (lastError && attempts.length > 1) {
-    lastError.message = `Google Drive upload failed after ${attempts.length} attempts. ${attempts.join(" | ")}`;
+  // Report the ROOT cause, not merely the last symptom. When the OAuth token is
+  // revoked, the service-account fallback then fails with its own unrelated
+  // complaint ("Service Accounts do not have storage quota") — surfacing that
+  // would send an operator chasing the wrong problem. A revoked credential is
+  // what actually has to be fixed, so it wins.
+  const primary = revokedError || lastError;
+  if (primary) {
+    const detail =
+      attempts.length > 1
+        ? `Google Drive upload failed after ${attempts.length} attempts. ${attempts.join(" | ")}`
+        : primary.message;
+    primary.message = primary.hint ? `${primary.hint} (${detail})` : detail;
   }
-  throw lastError;
+  throw primary;
 }
 
 async function verifyDriveAccess() {
@@ -438,9 +508,9 @@ async function validateDriveFile(urlOrId) {
         },
       };
     } catch (error) {
-      lastError = error;
-      const status = error?.response?.status || error?.code;
-      if (status === 404) {
+      lastError = decorateDriveError(error);
+      const code = error.driveErrorCode;
+      if (code === "not_found") {
         return {
           accessible: false,
           reason: "not_found",
@@ -449,7 +519,7 @@ async function validateDriveFile(urlOrId) {
           meta: null,
         };
       }
-      if (status === 403) {
+      if (code === "no_permission") {
         return {
           accessible: false,
           reason: "no_permission",
@@ -459,14 +529,24 @@ async function validateDriveFile(urlOrId) {
           meta: null,
         };
       }
-      // 401/invalid_grant — try the next client (service account fallback)
+      if (code === "quota") {
+        return { accessible: false, reason: "quota", message: DRIVE_ERROR_HINTS.quota, fileId, meta: null };
+      }
+      // Credential failure — try the next client (service-account fallback).
     }
   }
 
+  // Every configured credential failed to authenticate. Report this as an AUTH
+  // problem needing re-authorization, NOT as "the file link is invalid" — the
+  // file is very likely fine; it is our token that is dead.
+  const revoked = lastError?.driveErrorCode === "auth_revoked";
   return {
     accessible: false,
-    reason: "auth_error",
-    message: `The file link is invalid or expired. ${lastError?.message || ""}`.trim(),
+    reason: revoked ? "auth_revoked" : "auth_error",
+    requiresReauth: !!revoked,
+    message: revoked
+      ? DRIVE_ERROR_HINTS.auth_revoked
+      : `Could not authenticate with Google Drive. ${lastError?.message || ""}`.trim(),
     fileId,
     meta: null,
   };
@@ -480,4 +560,7 @@ module.exports = {
   extractDriveFileId,
   validateDriveFile,
   getDriveClients,
+  classifyDriveError,
+  decorateDriveError,
+  DRIVE_ERROR_HINTS,
 };

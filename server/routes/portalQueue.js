@@ -5,13 +5,54 @@ const { writeLog } = require("../utils/logger");
 const dataSLFRoutes = require("./dataSLF");
 
 const router = express.Router();
+
+// Require an authenticated caller on every route below. The queue drives portal
+// submissions into the admin pipeline; anonymous submit/cancel/delete must not
+// be possible. Both frontends always send a Bearer token.
+const { requireAnyAuth } = require("../middleware/auth");
+router.use(requireAnyAuth);
 const { submitEntries } = dataSLFRoutes;
+const {
+  resolvePortalContext,
+  assertPortalWriteAllowed,
+  sendPortalContextError,
+} = require("../utils/portalContext");
 
 const ACTIVE_STATUSES = ["draft", "scheduled"];
 
-// Resolve the portal user for a request. The portal is authenticated via the
-// shared axios token; the email is passed explicitly (same pattern as the
-// existing portal submission routes).
+// Every route below acts on a queue record that BELONGS to someone. The caller's
+// identity now comes from the token (see utils/portalContext), never from the
+// request body/query — previously `submittedBy` / `?email=` were taken at face
+// value while auth only checked that *a* valid token existed, so any signed-in
+// portal user could read, edit, cancel, delete or submit another user's drafts
+// and scheduled submissions just by naming their email or record id.
+//
+// Developers may act on another portal user's context; that is the privileged
+// Developer Portal Mode and it is audited by resolvePortalContext.
+// For READ access to a queue record.
+async function ownedRecordOr403(req, res, record) {
+  const ctx = await resolvePortalContext(req, {
+    targetEmail: req.body?.submittedBy || req.query.email,
+    targetPortalUserId: req.body?.targetPortalUserId || req.query.targetPortalUserId,
+  });
+  if (!ctx.isDeveloper && String(record.portalUserEmail || "").toLowerCase() !== String(ctx.email).toLowerCase()) {
+    res.status(403).json({ message: "You may only act on your own drafts and scheduled submissions." });
+    return null;
+  }
+  return ctx;
+}
+
+// For WRITE access. Ownership as above, PLUS: Developer Portal Mode is read-only,
+// so a developer cannot edit, cancel, delete or submit another user's queued work
+// through these endpoints. Corrections go through Submission RAW Data.
+async function writableRecordOr403(req, res, record) {
+  const ctx = await ownedRecordOr403(req, res, record);
+  if (!ctx) return null;
+  assertPortalWriteAllowed(ctx, req);
+  return ctx;
+}
+
+// Resolve the portal user for a request.
 async function resolvePortalUser(email) {
   const normalized = String(email || "").trim().toLowerCase();
   if (!normalized) return null;
@@ -28,8 +69,13 @@ function sanitizeScheduledAt(value) {
 // List a user's drafts and scheduled submissions.
 router.get("/", async (req, res) => {
   try {
-    const email = String(req.query.email || "").trim().toLowerCase();
-    if (!email) return res.status(400).json({ message: "email is required" });
+    // The listed email comes from the TOKEN, not the query string. A portal user
+    // asking for someone else's email is rejected; a developer may target one.
+    const ctx = await resolvePortalContext(req, {
+      targetEmail: req.query.email,
+      targetPortalUserId: req.query.targetPortalUserId,
+    });
+    const email = ctx.email;
     const filter = { portalUserEmail: email };
     if (req.query.type && ["draft", "scheduled"].includes(req.query.type)) {
       filter.type = req.query.type;
@@ -38,16 +84,25 @@ router.get("/", async (req, res) => {
     const records = await PortalSubmissionQueue.find(filter).sort({ updatedAt: -1 });
     res.json(records);
   } catch (error) {
-    res.status(500).json({ message: "Server error", error: error.message });
+    return sendPortalContextError(res, error);
   }
 });
 
 // Create a draft or scheduled submission.
 router.post("/", async (req, res) => {
   try {
-    const { type, payload, scheduledAt, submittedBy, slfName, slfGenerator } = req.body || {};
-    const email = String(submittedBy || "").trim().toLowerCase();
-    if (!email) return res.status(400).json({ message: "submittedBy (email) is required" });
+    const { type, payload, scheduledAt, slfName, slfGenerator, clientRequestId } = req.body || {};
+    // Owner comes from the TOKEN. `submittedBy` in the body used to be trusted,
+    // which let a signed-in user queue a submission AS SOMEONE ELSE — the worker
+    // would then submit it under that person's name.
+    const ctx = await resolvePortalContext(req, {
+      targetEmail: req.body?.submittedBy,
+      targetPortalUserId: req.body?.targetPortalUserId,
+    });
+    // WRITE: a developer inspecting an account must not queue a draft or schedule
+    // a submission that would later be sent under that user's name.
+    assertPortalWriteAllowed(ctx, req);
+    const email = ctx.email;
     const kind = type === "scheduled" ? "scheduled" : "draft";
 
     if (kind === "scheduled") {
@@ -58,8 +113,26 @@ router.post("/", async (req, res) => {
       }
     }
 
+    // Idempotency: a double-click / axios retry must not create two drafts or
+    // schedule the same submission twice. The client sends a stable
+    // clientRequestId per save action; a repeat returns the record it already made.
+    if (clientRequestId) {
+      const existing = await PortalSubmissionQueue.findOne({
+        portalUserEmail: email,
+        clientRequestId: String(clientRequestId),
+      });
+      if (existing) {
+        return res.status(200).json({
+          message: kind === "scheduled" ? "Submission scheduled" : "Draft saved",
+          data: existing,
+          deduplicated: true,
+        });
+      }
+    }
+
     const portalUser = await resolvePortalUser(email);
     const record = await PortalSubmissionQueue.create({
+      clientRequestId: clientRequestId ? String(clientRequestId) : undefined,
       portalUser: portalUser?._id,
       portalUserEmail: email,
       slfGenerator: slfGenerator || payload?.slfGenerator || undefined,
@@ -81,7 +154,7 @@ router.post("/", async (req, res) => {
 
     res.status(201).json({ message: kind === "scheduled" ? "Submission scheduled" : "Draft saved", data: record });
   } catch (error) {
-    res.status(500).json({ message: "Server error", error: error.message });
+    return sendPortalContextError(res, error);
   }
 });
 
@@ -90,10 +163,11 @@ router.put("/:id", async (req, res) => {
   try {
     const record = await PortalSubmissionQueue.findById(req.params.id);
     if (!record) return res.status(404).json({ message: "Record not found" });
-    const email = String(req.body?.submittedBy || "").trim().toLowerCase();
-    if (email && email !== record.portalUserEmail) {
-      return res.status(403).json({ message: "You can only edit your own drafts." });
-    }
+    // Ownership from the token. The old check was `if (email && email !== …)` —
+    // simply omitting `submittedBy` skipped it entirely.
+    const ctx = await writableRecordOr403(req, res, record);
+    if (!ctx) return undefined;
+    const email = ctx.email;
     if (!ACTIVE_STATUSES.includes(record.status)) {
       return res.status(400).json({ message: `A ${record.status} submission can no longer be edited.` });
     }
@@ -128,7 +202,7 @@ router.put("/:id", async (req, res) => {
 
     res.json({ message: "Saved", data: record });
   } catch (error) {
-    res.status(500).json({ message: "Server error", error: error.message });
+    return sendPortalContextError(res, error);
   }
 });
 
@@ -137,21 +211,25 @@ router.patch("/:id/cancel", async (req, res) => {
   try {
     const record = await PortalSubmissionQueue.findById(req.params.id);
     if (!record) return res.status(404).json({ message: "Record not found" });
+    // Had NO ownership check at all: any signed-in user could cancel anyone's
+    // scheduled submission just by knowing/guessing its id.
+    const ctx = await writableRecordOr403(req, res, record);
+    if (!ctx) return undefined;
     if (!ACTIVE_STATUSES.includes(record.status)) {
       return res.status(400).json({ message: `A ${record.status} submission cannot be cancelled.` });
     }
     record.status = "cancelled";
-    record.updatedBy = String(req.body?.submittedBy || record.portalUserEmail).toLowerCase();
+    record.updatedBy = ctx.actor;
     await record.save();
     writeLog("info", "portal.queue.cancel", {
       message: `Portal ${record.type} cancelled (${record.slfName || "SLF"})`,
-      user: record.updatedBy,
+      user: ctx.actor,
       ip: req.ip,
-      meta: { queueId: record._id },
+      meta: { queueId: record._id, developerContext: ctx.impersonating || undefined },
     });
     res.json({ message: "Cancelled", data: record });
   } catch (error) {
-    res.status(500).json({ message: "Server error", error: error.message });
+    return sendPortalContextError(res, error);
   }
 });
 
@@ -160,16 +238,19 @@ router.delete("/:id", async (req, res) => {
   try {
     const record = await PortalSubmissionQueue.findById(req.params.id);
     if (!record) return res.status(404).json({ message: "Record not found" });
+    // Had NO ownership check at all — see the cancel route above.
+    const ctx = await writableRecordOr403(req, res, record);
+    if (!ctx) return undefined;
     await record.deleteOne();
     writeLog("warn", "portal.queue.delete", {
       message: `Portal ${record.type} deleted (${record.slfName || "SLF"})`,
-      user: record.portalUserEmail,
+      user: ctx.actor,
       ip: req.ip,
-      meta: { queueId: record._id },
+      meta: { queueId: record._id, owner: record.portalUserEmail, developerContext: ctx.impersonating || undefined },
     });
     res.json({ message: "Deleted" });
   } catch (error) {
-    res.status(500).json({ message: "Server error", error: error.message });
+    return sendPortalContextError(res, error);
   }
 });
 
@@ -179,6 +260,10 @@ router.post("/:id/submit", async (req, res) => {
   try {
     const record = await PortalSubmissionQueue.findById(req.params.id);
     if (!record) return res.status(404).json({ message: "Record not found" });
+    // Had NO ownership check: any signed-in user could FINALISE another user's
+    // draft into a real submission under that user's name.
+    const ctx = await writableRecordOr403(req, res, record);
+    if (!ctx) return undefined;
     if (record.status === "submitted") {
       return res.status(400).json({ message: "This submission was already submitted." });
     }

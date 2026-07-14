@@ -9,6 +9,11 @@ const portalSubmissionQueueSchema = new mongoose.Schema(
   {
     portalUser: { type: mongoose.Schema.Types.ObjectId, ref: "UserPortal" },
     portalUserEmail: { type: String, trim: true, lowercase: true, index: true },
+    // Idempotency key for the SAVE action. A double-click (or an axios retry on a
+    // flaky connection) previously created a second draft / a duplicate schedule;
+    // the client sends one stable id per save and a repeat returns the existing
+    // record instead of creating another.
+    clientRequestId: { type: String, trim: true },
     slfGenerator: { type: mongoose.Schema.Types.ObjectId, ref: "SlfFacility" },
     slfName: { type: String, trim: true },
 
@@ -46,6 +51,12 @@ const portalSubmissionQueueSchema = new mongoose.Schema(
 );
 
 portalSubmissionQueueSchema.index({ status: 1, scheduledAt: 1 });
+// Enforces the idempotency guarantee at the DB level too: one queue record per
+// (user, clientRequestId). Sparse so records without the key are unaffected.
+portalSubmissionQueueSchema.index(
+  { portalUserEmail: 1, clientRequestId: 1 },
+  { unique: true, sparse: true },
+);
 
 module.exports = mongoose.model(
   "PortalSubmissionQueue",

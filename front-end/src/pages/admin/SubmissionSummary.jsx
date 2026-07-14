@@ -1,4 +1,4 @@
-import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Alert,
   Button,
@@ -41,10 +41,13 @@ import CellInfraOverview from "./CellInfraOverview";
 import { fetchWithCache, invalidateCache } from "../../utils/pageCache";
 import { getSocket } from "../../utils/socket";
 import excludeDummy from "../../utils/excludeDummy";
+import { convertVolume } from "../../utils/volumeUnits";
 
 const { Text } = Typography;
 const ACCENT = "#2f54eb";
-const TON_PER_M3 = 0.2;
+// Stable empty array — a fresh [] would give every dependent memo a new identity.
+const EMPTY_ROWS = [];
+
 const SUMMARY_CACHE_KEY = "submission-summary-cache";
 const SUMMARY_CACHE_TTL = 10 * 60 * 1000;
 
@@ -63,15 +66,6 @@ const normalizeKey = (value) => String(value || "")
   .toLowerCase();
 const isActiveCellStatus = (status) => /active|operational|open|current/i.test(String(status || "Active"));
 
-const convertVolume = (value, fromUnit = "m³", toUnit = fromUnit) => {
-  const number = Number(value || 0);
-  const from = normalizeUnit(fromUnit);
-  const to = normalizeUnit(toUnit || from);
-  if (!number || from === to) return number;
-  if (from === "tons" && to === "m³") return number / TON_PER_M3;
-  if (from === "m³" && to === "tons") return number * TON_PER_M3;
-  return number;
-};
 
 const statusColor = {
   pending: "gold",
@@ -321,6 +315,7 @@ export default function SubmissionSummary({ isDark }) {
   const [baselines, setBaselines] = useState([]);
   const [settings, setSettings] = useState({});
   const [loading, setLoading] = useState(false);
+  const [refLoading, setRefLoading] = useState(true);
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
   const [calendarRecord, setCalendarRecord] = useState(null);
@@ -332,6 +327,26 @@ export default function SubmissionSummary({ isDark }) {
 
   useEffect(() => {
     ensureSummaryTileStyles();
+  }, []);
+
+  // Page-exit cleanup. Both fetches below are background SWR chains that can still
+  // be in flight when the admin navigates away — `aliveRef` stops them re-seating a
+  // large payload (the baselines response alone is ~440 KB) into an unmounted
+  // component, and the state is dropped here so it is released immediately rather
+  // than staying reachable from the pending closures.
+  const aliveRef = useRef(true);
+  useEffect(() => {
+    aliveRef.current = true;
+    return () => {
+      aliveRef.current = false;
+      setSlfRows(EMPTY_ROWS);
+      setFacilities(EMPTY_ROWS);
+      setBaselines(EMPTY_ROWS);
+      setPortalUsers(EMPTY_ROWS);
+      setCalendarRecord(null);
+      setSubmissionDetail(null);
+      setTiles(null);
+    };
   }, []);
 
   const fetchRecords = useCallback(async ({ force = false, silent = false } = {}) => {
@@ -353,12 +368,13 @@ export default function SubmissionSummary({ isDark }) {
         onStart: () => !silent && setLoading(true),
         onEnd: () => !silent && setLoading(false),
         onData: (payload = {}) => {
+          if (!aliveRef.current) return; // navigated away — don't re-seat data
           setTiles(payload.tiles || null);
           setSlfRows(payload.rows || []);
           setLoading(false);
         },
         onError: () => {
-          if (!silent) {
+          if (!silent && aliveRef.current) {
             setTiles(null);
             setSlfRows([]);
           }
@@ -391,12 +407,19 @@ export default function SubmissionSummary({ isDark }) {
       {
         ttl: SUMMARY_CACHE_TTL,
         force,
+        // Cell Infra Overview renders from this reference data, so it needs to
+        // know when the facilities are still in flight (it shows skeletons).
+        onStart: () => setRefLoading(true),
+        onEnd: () => setRefLoading(false),
         onData: (payload = {}) => {
+          if (!aliveRef.current) return; // navigated away — don't re-seat data
           setFacilities(payload.facilities || []);
           setBaselines(payload.baselines || []);
           setSettings(payload.settings || {});
           setPortalUsers(payload.portalUsers || []);
+          setRefLoading(false);
         },
+        onError: () => setRefLoading(false),
       },
     );
   }, []);
@@ -850,6 +873,8 @@ export default function SubmissionSummary({ isDark }) {
       <CellInfraOverview
         rows={summaryRows}
         isDark={isDark}
+        loading={loading || refLoading}
+        portalUsers={portalUsers}
         onEdited={() => {
           fetchReferenceData({ force: true });
           fetchRecords({ force: true, silent: true });

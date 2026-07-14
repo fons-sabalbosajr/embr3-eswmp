@@ -188,7 +188,28 @@ io.on("connection", (socket) => {
 // Make io accessible to routes via req.app
 app.set("io", io);
 
-// Attach user info from JWT to req for logging
+// Strip internal error details from 5xx responses in production. Many route
+// handlers return `{ message, error: err.message }` for debugging; that leaks
+// internal messages (stack fragments, driver errors) to clients when live.
+// Sanitizing centrally here covers every handler without editing each one, and
+// only touches 5xx — 4xx validation bodies keep their `error` field for the UI.
+app.use((_req, res, next) => {
+  if (process.env.NODE_ENV !== "production") return next();
+  const originalJson = res.json.bind(res);
+  res.json = (body) => {
+    if (res.statusCode >= 500 && body && typeof body === "object" && "error" in body) {
+      const { error, ...safe } = body;
+      return originalJson(safe);
+    }
+    return originalJson(body);
+  };
+  next();
+});
+
+// Attach the caller's verified identity to req for logging and non-spoofable
+// audit actors. The email is resolved from the JWT's `id` against the DB (admin
+// User first, then portal UserPortal), so it cannot be forged via request
+// headers/body the way client-supplied X-User-* / performedBy values can.
 app.use((req, _res, next) => {
   const auth = req.headers.authorization;
   if (auth?.startsWith("Bearer ")) {
@@ -197,10 +218,19 @@ app.use((req, _res, next) => {
       const decoded = jwt.verify(auth.split(" ")[1], process.env.JWT_SECRET);
       if (decoded.id) {
         const User = require("./models/User");
+        const UserPortal = require("./models/UserPortal");
         User.findById(decoded.id)
           .select("email")
           .then((u) => {
-            if (u) req.logUser = u.email;
+            if (u) {
+              req.logUser = u.email;
+              return;
+            }
+            return UserPortal.findById(decoded.id)
+              .select("email")
+              .then((p) => {
+                if (p) req.logUser = p.email;
+              });
           })
           .catch(() => {})
           .finally(() => next());
@@ -304,6 +334,9 @@ app.use("/api/dummy-data", require("./routes/dummyData"));
 app.use("/api/slf-data-files", require("./routes/slfDataFiles"));
 app.use("/api/portal-queue", require("./routes/portalQueue"));
 app.use("/api/dev-portal", require("./routes/devPortal"));
+// Developer-only raw submission maintenance + volume analysis. The router itself
+// applies authMiddleware + developerOnly to every route.
+app.use("/api/raw-submissions", require("./routes/rawSubmissions"));
 
 // Global error handler — keeps unhandled errors from leaking stack traces /
 // internals to clients (Express's default handler exposes them when NODE_ENV

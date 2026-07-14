@@ -12,6 +12,12 @@ const { requireDriveActive } = require("../utils/driveMaintenanceGuard");
 
 const router = express.Router();
 
+// Require an authenticated caller on every route below. Support tickets contain
+// user contact details and attachments; they must not be readable/editable
+// anonymously. Both frontends always send a Bearer token.
+const { requireAnyAuth } = require("../middleware/auth");
+router.use(requireAnyAuth);
+
 const MAX_TICKET_UPLOAD_MB = 15;
 const MAX_TICKET_UPLOAD_BYTES = MAX_TICKET_UPLOAD_MB * 1024 * 1024;
 const ticketUpload = multer({

@@ -3,6 +3,17 @@ import { Tag, Typography, Upload, message } from 'antd';
 import { CheckCircleOutlined, CloseCircleOutlined, SyncOutlined } from '@ant-design/icons';
 import secureStorage from '../../../utils/secureStorage';
 import { getAdminDisplayName } from '../../../utils/adminIdentity';
+// Volume conversion lives in ONE place — see utils/volumeUnits.js. These are
+// re-exported below so the existing `from './helpers'` imports keep working.
+import {
+  TON_PER_M3,
+  normalizeUnit,
+  convertVolume,
+  convertVolumeSafe,
+  resolveFacilityUnit,
+  resolveCellUnit,
+  formatVolume,
+} from '../../../utils/volumeUnits';
 
 const { Text } = Typography;
 
@@ -106,8 +117,6 @@ const GALLERY_COMPONENT_OPTIONS = [
   "Office / Support Facility",
   "Other",
 ].map((value) => ({ label: value, value }));
-const normalizeUnit = (unit) => (unit || "m³").replace("m3", "m³");
-const TON_PER_M3 = 0.2;
 const ACTIVE_VOLUME_STATUSES = new Set([
   "pending",
   "acknowledged",
@@ -194,16 +203,6 @@ const slfUploadProps = {
   data: { restricted: "true" },
 };
 
-const convertVolume = (value, fromUnit = "tons", toUnit = fromUnit) => {
-  const number = Number(value || 0);
-  const from = normalizeUnit(fromUnit);
-  const to = normalizeUnit(toUnit || from);
-  if (!number || from === to) return number;
-  if (from === "tons" && to === "m³") return number / TON_PER_M3;
-  if (from === "m³" && to === "tons") return number * TON_PER_M3;
-  return number;
-};
-
 const getWasteKind = (wasteType) => {
   const value = String(wasteType || "").toLowerCase();
   if (value.includes("haz") || value.includes("inert")) return "hazardous";
@@ -282,6 +281,10 @@ export {
   renderSlfUploadItem,
   slfUploadProps,
   convertVolume,
+  convertVolumeSafe,
+  resolveFacilityUnit,
+  resolveCellUnit,
+  formatVolume,
   getWasteKind,
   isHazardousCellType,
   extractDriveId,

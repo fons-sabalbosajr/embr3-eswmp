@@ -379,6 +379,13 @@ dataSLFSchema.pre("save", async function () {
 dataSLFSchema.index({ deletedAt: 1, createdAt: -1 });
 dataSLFSchema.index({ deletedAt: 1, status: 1, createdAt: -1 });
 dataSLFSchema.index({ deletedAt: 1, idNo: 1 });
+// Standalone idNo index. The compound index above is keyed on `deletedAt` first,
+// so it cannot serve a bare `idNo` filter — and the ID-repair tooling
+// (repair-xx-ids / repair-type-ids), the `$in` collision check, and
+// nextIdNoSequence() all query idNo WITHOUT a deletedAt predicate. Those are
+// anchored `^SLF-…` prefix regexes and `$in` lookups, both of which this index
+// turns from a full collection scan into a bounded index scan.
+dataSLFSchema.index({ idNo: 1 });
 dataSLFSchema.index({ deletedAt: 1, submissionId: 1 });
 dataSLFSchema.index({ deletedAt: 1, lguCompanyName: 1 });
 dataSLFSchema.index({ submissionId: 1 });
@@ -405,4 +412,8 @@ dataSLFSchema.plugin(dateFieldYearVisibilityPlugin("dateOfDisposal"));
 const DataSLFModel = mongoose.model("DataSLF", dataSLFSchema, "data-slf");
 DataSLFModel.PSGC_PROVINCE_CODES = PSGC_PROVINCE_CODES;
 DataSLFModel.computeSlfMetrics = computeSlfMetrics;
+// Exposed so volume analysis compares tons against m³ using the SAME conversion
+// the metrics pipeline already uses, instead of re-deriving the ratio.
+DataSLFModel.TON_PER_M3 = TON_PER_M3;
+DataSLFModel.normalizeVolumeUnit = normalizeVolumeUnit;
 module.exports = DataSLFModel;

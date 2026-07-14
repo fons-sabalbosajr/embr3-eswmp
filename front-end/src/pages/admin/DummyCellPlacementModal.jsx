@@ -15,20 +15,11 @@ import {
 } from "antd";
 import { DatabaseOutlined } from "@ant-design/icons";
 import api from "../../api";
+import { convertVolume } from "../../utils/volumeUnits";
 
 const { Text } = Typography;
-const TON_PER_M3 = 0.2;
-
+// Display-only unit label. Conversion comes from utils/volumeUnits.js.
 const normalizeUnit = (unit) => String(unit || "m³").replace("m3", "m³");
-const convertVolume = (value, fromUnit = "m³", toUnit = fromUnit) => {
-  const amount = Number(value || 0);
-  const from = normalizeUnit(fromUnit);
-  const to = normalizeUnit(toUnit || from);
-  if (!amount || from === to) return amount;
-  if (from === "tons" && to === "m³") return amount / TON_PER_M3;
-  if (from === "m³" && to === "tons") return amount * TON_PER_M3;
-  return amount;
-};
 const isActiveCellStatus = (status) =>
   /active|operational|open/i.test(String(status || "Active Cell"));
 const statusColor = (pct) => {

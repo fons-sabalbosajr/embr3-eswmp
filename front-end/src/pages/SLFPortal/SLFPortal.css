@@ -156,7 +156,7 @@
 .slf-support-hero-title {
   max-width: 420px;
   font-size: 24px;
-  font-weight: 800;
+  font-weight: 500;
   line-height: 1.15;
 }
 
@@ -303,6 +303,28 @@
 .slf-support-faq-copy {
   color: #41556d;
   line-height: 1.65;
+}
+
+/* ── Support & FAQ body copy: normal weight ──────────────────────────────────
+   Body text in these panes was rendering bold — the FAQ question rides on antd's
+   collapse header weight, and detail VALUES sat under labels that are already
+   bold, so whole blocks read as headings.
+
+   Deliberately scoped to the Support/FAQ + Messages-from-Admin modal content:
+   section titles, callout titles, stat values, field LABELS, badges and links are
+   left bold on purpose and are NOT touched. */
+.slf-support-faq .ant-collapse-header,
+.slf-support-faq-label,
+.slf-support-faq-label span,
+.slf-support-faq-copy,
+.slf-support-detail-value,
+.slf-support-message-body {
+  font-weight: 400;
+}
+
+/* Ticket/message body text inside the detail view. */
+.slf-support-detail-descriptions .ant-descriptions-item-content {
+  font-weight: 400;
 }
 
 .slf-support-grid {

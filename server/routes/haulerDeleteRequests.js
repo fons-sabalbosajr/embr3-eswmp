@@ -12,6 +12,12 @@ const { notifyAdmin, notifyPortal, refreshAdmin } = require("../utils/socketEmit
 const { requireDriveActive } = require("../utils/driveMaintenanceGuard");
 
 const router = express.Router();
+
+// Require an authenticated caller on every route below. These requests carry
+// uploaded letters-of-intent and drive hauler record deletion; anonymous access
+// must be closed. Both frontends always send a Bearer token.
+const { requireAnyAuth } = require("../middleware/auth");
+router.use(requireAnyAuth);
 const MAX_UPLOAD_MB = 200;
 const MAX_UPLOAD_BYTES = MAX_UPLOAD_MB * 1024 * 1024;
 const DIRECT_LOCAL_UPLOAD_MB = 25;

@@ -54,6 +54,19 @@ export const EMPTY_HAULER = {
 };
 
 /**
+ * A fresh idempotency key for one draft/schedule SAVE action.
+ *
+ * Sent as `clientRequestId`. The server stores it against the queue record
+ * (unique per user), so an axios retry — or a request the browser sent twice —
+ * returns the record that was already created instead of duplicating it.
+ * `withRetry` above makes retries genuinely likely, which is why this matters.
+ */
+export function newClientRequestId() {
+  if (typeof crypto !== "undefined" && crypto.randomUUID) return crypto.randomUUID();
+  return `req-${Date.now()}-${Math.random().toString(16).slice(2, 10)}`;
+}
+
+/**
  * Retry helper: calls fn up to `retries` times with exponential backoff.
  * Skips retries when browser is offline. Respects AbortSignal.
  */

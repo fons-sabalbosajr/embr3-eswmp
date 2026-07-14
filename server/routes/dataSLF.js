@@ -11,8 +11,16 @@ const Notification = require("../models/Notification");
 const UserPortal = require("../models/UserPortal");
 const { notifyAdmin, notifyPortal, refreshAdmin } = require("../utils/socketEmit");
 const { isBataanSlfName } = require("../utils/mergeBataanSlf");
-const { authMiddleware, developerOnly } = require("../middleware/auth");
+const { authMiddleware, requireAnyAuth, developerOnly } = require("../middleware/auth");
 const { NON_DUMMY_CLAUSE } = require("../utils/dummyFilter");
+const { validateWasteGeneration } = require("../utils/wasteGenerationValidation");
+// Named to avoid colliding with this file's own `normalizeVolumeUnit`, which is a
+// lenient SANITIZER for Excel-imported free text (it always yields a unit). These
+// are the strict shared helpers: they return "" / null rather than guessing.
+const {
+  normalizeUnit: strictNormalizeUnit,
+  convertVolume: convertVolumeStrict,
+} = require("../utils/volumeUnits");
 const jwt = require("jsonwebtoken");
 
 // Optional auth: decode the JWT when present so role-aware behaviour (e.g.
@@ -31,11 +39,99 @@ function optionalAuth(req, _res, next) {
   next();
 }
 
+// Push the unit the PORTAL declared (its baseline "Unit of Measurement") onto the
+// linked SLF facility, so the admin side reads the same declared unit.
+//
+// The portal is the source of truth for the WASTE VOLUME unit: it is where the
+// operator declares what they are reporting in. The admin, however, reads the unit
+// off the facility (`wasteReceivedUnit`, `cellFillUnits`) — so without this the two
+// sides could disagree about what a number means.
+//
+// Deliberately limited to the fields the portal actually owns:
+//   • wasteReceivedUnit / estimatedVolumeWasteUnit — waste RECEIVED (portal-declared)
+//   • cellFillUnits[]                              — how full a cell is (portal-driven)
+// It never touches cellCapacityUnits / volumeCapacityUnit: those describe capacities
+// the ADMIN entered, and re-labelling them without converting the values would
+// silently reinterpret every capacity in the facility.
+//
+// Existing cellFillValues are CONVERTED into the new unit so the stored numbers stay
+// truthful rather than merely being re-labelled.
+async function syncFacilityDeclaredUnit(slfGeneratorId, declaredUnit) {
+  const unit = strictNormalizeUnit(declaredUnit);
+  if (!slfGeneratorId || !unit) return;
+  try {
+    const facility = await SlfFacility.findById(slfGeneratorId).select(
+      "wasteReceivedUnit estimatedVolumeWasteUnit cellFillUnits cellFillValues",
+    );
+    if (!facility) return;
+    if (strictNormalizeUnit(facility.wasteReceivedUnit) === unit) return; // already agrees
+
+    const fills = facility.cellFillValues || [];
+    const fillUnits = facility.cellFillUnits || [];
+    const convertedFills = fills.map((value, i) => {
+      const from = strictNormalizeUnit(fillUnits[i] || facility.wasteReceivedUnit);
+      const converted = convertVolumeStrict(value, from, unit);
+      // Unconvertible (missing/unknown unit) → leave the value untouched rather
+      // than writing a guessed number.
+      return converted === null ? value : converted;
+    });
+
+    facility.wasteReceivedUnit = unit;
+    facility.estimatedVolumeWasteUnit = unit;
+    facility.cellFillValues = convertedFills;
+    facility.cellFillUnits = fills.map(() => unit);
+    await facility.save();
+
+    writeLog("info", "slf.unit-sync", {
+      message: `Facility declared unit synced to portal unit "${unit}"`,
+      meta: { facilityId: String(slfGeneratorId), unit },
+    });
+  } catch (err) {
+    // Never fail a submission because the unit sync failed — the submission's own
+    // units are stored on the record and every read path normalizes from them.
+    writeLog("error", "slf.unit-sync.failed", {
+      message: `Facility unit sync failed: ${err.message}`,
+      meta: { facilityId: String(slfGeneratorId) },
+    });
+  }
+}
+
+// Returns the portal user id a DEVELOPER-context token is pointed at, or null.
+// Used to refuse portal WRITES from a read-only Developer Portal Mode session
+// (see utils/portalContext.js). Never throws on a bad/absent token.
+function getDeveloperPortalContext(req) {
+  const token = req.headers.authorization?.split(" ")[1];
+  if (!token) return null;
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    if (decoded?.role === "developer" && decoded?.portalContextUserId) {
+      return String(decoded.portalContextUserId);
+    }
+  } catch {
+    /* not our problem here — the route's own auth handles invalid tokens */
+  }
+  return null;
+}
+
 // Only developers may opt into seeing dummy/sample submissions inline.
 function devWantsDummy(req) {
   return req.user?.role === "developer" &&
     String(req.query.includeDummy || "").toLowerCase() === "true";
 }
+
+// Fields to project when populating a submission's `slfGenerator` ref.
+//
+// Un-projected, `.populate("slfGenerator")` inlines the ENTIRE SlfFacility
+// document (galleryItems, slfDocuments, permit arrays, every cell array) into
+// each submission. On a list endpoint that means the same handful of facilities
+// is serialized once per submission — it was 2.4 MB of a 2.6 MB response and the
+// same duplication in browser memory. Consumers only read the id/name/province
+// off the populated ref; the full facility list comes from /slf-facilities.
+// `cellNames` is included because it is the CANONICAL source of a cell's display
+// name — collectCellNames() resolves cellIndex against it rather than trusting the
+// name copied onto the submission at submit time (which goes stale on rename).
+// It is a short string array, so it costs almost nothing.
+const SLF_GENERATOR_REF_FIELDS = "_id lgu slfName province dataYear cellNames";
 
 // Province code mapping (mirrors DataSLF model)
 const PROVINCE_CODES = {
@@ -211,12 +307,27 @@ async function markSubmissionNotificationsRead(entries) {
 }
 
 const router = express.Router();
+
+// Require an authenticated caller (admin or portal realm) on every route below.
+// This is the core submissions surface, reached by both frontends, both of
+// which always send a Bearer token — so this closes anonymous read/bulk-delete/
+// revert/status access without changing client behaviour. Role-scoped checks
+// (developerOnly on the repair routes) still apply on top. The per-route
+// optionalAuth calls remain harmless: req.user is already populated here.
+router.use(requireAnyAuth);
+
 const ADMIN_DISPLAY_NAME = "EMBR3 ESWMP Admin";
 
 function getRequestActor(req, fallback = ADMIN_DISPLAY_NAME) {
+  // Prefer the server-verified identity (resolved from the JWT against the DB in
+  // server.js) so the audit actor can't be spoofed. The X-User-* headers are
+  // client-supplied and only used as a display fallback for older/tokenless
+  // callers; never let them override a verified email.
+  const verified = String(req.logUser || "").trim();
+  if (verified) return verified;
   const headerName = String(req.get("x-user-name") || "").trim();
   const headerEmail = String(req.get("x-user-email") || "").trim();
-  return headerName || headerEmail || req.logUser || fallback;
+  return headerName || headerEmail || fallback;
 }
 
 const baselineDataMatch = {
@@ -232,6 +343,42 @@ const baselineDataMatch = {
     { "closedCellEntries.0": { $exists: true } },
     { "accreditedHaulers.0": { $exists: true } },
   ],
+};
+
+// Exactly the fields GET /baselines returns (plus the internal `_hasTruckVolume`
+// ranking flag). Applied as a $project before the aggregation's $sort/$group so
+// those stages never carry the `trucks[]` array — see the pipeline for why.
+const BASELINE_PROJECTION = {
+  _hasTruckVolume: 1,
+  createdAt: 1,
+  updatedAt: 1,
+  slfGenerator: 1,
+  slfName: 1,
+  lguCompanyName: 1,
+  companyType: 1,
+  isDummy: 1,
+  baselineUnit: 1,
+  totalVolumeAccepted: 1,
+  totalVolumeAcceptedUnit: 1,
+  activeCellResidualVolume: 1,
+  activeCellResidualUnit: 1,
+  activeCellInertVolume: 1,
+  activeCellInertUnit: 1,
+  activeCellHazardousVolume: 1,
+  activeCellHazardousUnit: 1,
+  closedCellResidualVolume: 1,
+  closedCellResidualUnit: 1,
+  closedCellInertVolume: 1,
+  closedCellInertUnit: 1,
+  closedCellHazardousVolume: 1,
+  closedCellHazardousUnit: 1,
+  acceptsHazardousWaste: 1,
+  accreditedHaulers: 1,
+  activeCellEntries: 1,
+  closedCellEntries: 1,
+  submittedBy: 1,
+  baselineUpdateApproved: 1,
+  baselineUpdateRequested: 1,
 };
 
 function hasTruckVolume(entry) {
@@ -282,13 +429,41 @@ function computeCellPlacementSummary(entry) {
 // Collect the distinct cell names a submission's waste was placed into. The list
 // query already selects trucks.cellName / trucks.vehicles.cellName, so this adds
 // the assigned-cell labels to the admin list without shipping full trucks.
+// Resolve the CURRENT display name of a cell.
+//
+// A submission stores both `cellIndex` (the canonical relationship to the
+// facility's cell infrastructure) and `cellName` (a copy of the label as it read
+// at submit time). Rendering the copy is what made renamed cells show stale names
+// forever, so the index wins whenever we have it and the facility's live
+// `cellNames` array is the source of truth.
+//
+// Legacy rows that only ever stored a name (no cellIndex) keep working: they fall
+// back to the stored copy, so historical relationships stay intact.
+function resolveCellName(facilityCellNames, cellIndex, storedName) {
+  // NB: Number(null) === 0, so a legacy row with cellIndex: null would otherwise
+  // resolve to cell 0 and report a different cell's name. Reject empties first.
+  const hasIndex = cellIndex !== null && cellIndex !== undefined && cellIndex !== "";
+  const idx = hasIndex ? Number(cellIndex) : NaN;
+  if (Number.isInteger(idx) && idx >= 0) {
+    const current = facilityCellNames?.[idx];
+    if (current) return String(current).trim();
+    return `Cell ${idx + 1}`; // facility declares no custom name for this cell
+  }
+  return storedName ? String(storedName).trim() : "";
+}
+
 function collectCellNames(entry) {
   const trucks = Array.isArray(entry?.trucks) ? entry.trucks : [];
+  // slfGenerator is populated with `cellNames` (see SLF_GENERATOR_REF_FIELDS), so
+  // this is a lookup against already-loaded data — no per-cell query, no N+1.
+  const facilityCellNames = entry?.slfGenerator?.cellNames;
   const names = new Set();
   for (const truck of trucks) {
-    if (truck?.cellName) names.add(String(truck.cellName).trim());
+    const name = resolveCellName(facilityCellNames, truck?.cellIndex, truck?.cellName);
+    if (name) names.add(name);
     for (const vehicle of Array.isArray(truck?.vehicles) ? truck.vehicles : []) {
-      if (vehicle?.cellName) names.add(String(vehicle.cellName).trim());
+      const vName = resolveCellName(facilityCellNames, vehicle?.cellIndex, vehicle?.cellName);
+      if (vName) names.add(vName);
     }
   }
   return [...names].filter(Boolean);
@@ -662,6 +837,35 @@ async function submitEntries({ entries, submittedBy, req } = {}) {
     throw error;
   }
 
+  // ── Waste Generation Information: every field required for FINAL submission ──
+  // This is the AUTHORITATIVE gate. The Portal runs the same rules to highlight the
+  // offending fields before uploading, but that is a convenience — a request that
+  // reaches here with an incomplete truck (notably a missing/zero Truck Capacity)
+  // is rejected outright, so a submission can never be partially finalized.
+  //
+  // Drafts and queued/scheduled entries do NOT come through here; they are stored
+  // in PortalSubmissionQueue and are only validated when the scheduler promotes
+  // them to a real submission via this same route.
+  const wasteGenIssues = [];
+  sanitizedItems.forEach((item, idx) => {
+    validateWasteGeneration(item?.trucks).forEach((i) => {
+      wasteGenIssues.push({ ...i, entryIndex: sanitizedItems.length > 1 ? idx : null });
+    });
+  });
+  if (wasteGenIssues.length) {
+    const summary = wasteGenIssues
+      .slice(0, 8)
+      .map((i) => `${i.truckIndex != null ? `Truck ${i.truckIndex + 1}: ` : ""}${i.message}`)
+      .join(" | ");
+    const error = new Error(
+      `Waste Generation Information is incomplete. ${summary}${wasteGenIssues.length > 8 ? ` (+${wasteGenIssues.length - 8} more)` : ""}`,
+    );
+    error.statusCode = 400;
+    // Field-specific feedback so the Portal can focus the offending input.
+    error.validationIssues = wasteGenIssues;
+    throw error;
+  }
+
   const submissionId = `SUB-${Date.now()}-${crypto.randomBytes(3).toString("hex")}`;
 
   const genCache = new Map();
@@ -723,6 +927,18 @@ async function submitEntries({ entries, submittedBy, req } = {}) {
     saved.push(doc);
   }
 
+  // The unit the portal DECLARED on this submission becomes the facility's declared
+  // waste-volume unit, so the admin side reads the same unit the operator chose.
+  {
+    const withUnit = saved.find((s) => s.slfGenerator && (s.baselineUnit || s.totalVolumeAcceptedUnit));
+    if (withUnit) {
+      await syncFacilityDeclaredUnit(
+        withUnit.slfGenerator,
+        withUnit.baselineUnit || withUnit.totalVolumeAcceptedUnit,
+      );
+    }
+  }
+
   // Fire-and-forget side effects (audit trail, admin notification, socket, log).
   (async () => {
     try {
@@ -774,12 +990,37 @@ async function submitEntries({ entries, submittedBy, req } = {}) {
 // Submit SLF data — batch (client portal)
 router.post("/", async (req, res) => {
   try {
+    // A developer holding a read-only portal context must never be able to create
+    // a REAL submission under the inspected user's name. This is the single most
+    // consequential portal write, so it is refused explicitly rather than relying
+    // on the client hiding the button.
+    const devContext = getDeveloperPortalContext(req);
+    if (devContext) {
+      writeLog("warn", "portal.context.write-blocked", {
+        message: `Developer blocked from submitting as portal user (context ${devContext})`,
+        user: req.headers.authorization ? "developer" : "",
+        ip: req.ip,
+        meta: { path: req.originalUrl },
+      });
+      return res.status(403).json({
+        message:
+          "Developer Portal Mode is read-only. Use Developer Settings → Submission RAW Data to correct records.",
+      });
+    }
+
     const { entries, submittedBy } = req.body || {};
     const items = Array.isArray(entries) ? entries : [req.body];
     const { saved } = await submitEntries({ entries: items, submittedBy, req });
     res.status(201).json({ message: "Data submitted successfully", data: saved });
   } catch (error) {
-    if (error.statusCode) return res.status(error.statusCode).json({ message: error.message });
+    if (error.statusCode) {
+      return res.status(error.statusCode).json({
+        message: error.message,
+        // Field-specific Waste Generation feedback (tab / truckIndex / field), so
+        // the Portal can point at the exact input instead of failing silently.
+        ...(error.validationIssues ? { validationIssues: error.validationIssues } : {}),
+      });
+    }
     res.status(500).json({ message: "Server error", error: error.message });
   }
 });
@@ -1006,24 +1247,36 @@ router.get("/baselines", optionalAuth, async (req, res) => {
     const matchStage = includeDummy
       ? baselineDataMatch
       : { $and: [baselineDataMatch, { isDummy: { $ne: true } }] };
+    const startedAt = Date.now();
     const latestPerSlf = await DataSLF.aggregate([
       {
         $match: matchStage,
       },
       {
+        // Reduce `trucks[]` to the single boolean the ranking below needs...
         $addFields: {
-          _truckVolumeTotal: {
-            $sum: {
-              $map: {
-                input: { $ifNull: ["$trucks", []] },
-                as: "truck",
-                in: { $ifNull: ["$$truck.actualVolume", 0] },
+          _hasTruckVolume: {
+            $gt: [
+              {
+                $sum: {
+                  $map: {
+                    input: { $ifNull: ["$trucks", []] },
+                    as: "truck",
+                    in: { $ifNull: ["$$truck.actualVolume", 0] },
+                  },
+                },
               },
-            },
+              0,
+            ],
           },
         },
       },
-      { $addFields: { _hasTruckVolume: { $gt: ["$_truckVolumeTotal", 0] } } },
+      // ...then drop `trucks` (and every other unused field) BEFORE the sort.
+      // The $sort + `$group: { $first: "$$ROOT" }` below used to carry each
+      // submission's whole trucks[]/vehicles[] payload through an in-memory
+      // blocking sort — that, not the $match scan, was the bottleneck here.
+      // Every field kept is one the response actually returns.
+      { $project: BASELINE_PROJECTION },
       { $sort: { _hasTruckVolume: 1, createdAt: -1 } },
       {
         $group: {
@@ -1044,7 +1297,7 @@ router.get("/baselines", optionalAuth, async (req, res) => {
         },
       },
       { $sort: { slfName: 1 } },
-    ]);
+    ]).allowDiskUse(true);
 
     const results = latestPerSlf.map((d) => {
       const baselineUnit = d.baselineUnit || d.totalVolumeAcceptedUnit || "m³";
@@ -1053,6 +1306,9 @@ router.get("/baselines", optionalAuth, async (req, res) => {
       slfGenerator: d.slfGenerator,
       slfName: d.slfName || d.lguCompanyName || "Unknown",
       lguCompanyName: d.lguCompanyName,
+      // The Baseline Data table already searches on companyType — it was just
+      // never included in this payload, so that filter key matched nothing.
+      companyType: d.companyType || "",
       isDummy: d.isDummy || false,
       baselineUnit,
       totalVolumeAccepted: d.totalVolumeAccepted,
@@ -1079,6 +1335,14 @@ router.get("/baselines", optionalAuth, async (req, res) => {
       lastUpdated: d.updatedAt || d.createdAt,
     });
     });
+
+    const durationMs = Date.now() - startedAt;
+    if (durationMs > 1500) {
+      writeLog("warn", "baselines.slow", {
+        message: `GET /baselines took ${durationMs}ms for ${results.length} SLF`,
+        meta: { durationMs, slfCount: results.length, includeDummy },
+      });
+    }
 
     res.json(results);
   } catch (error) {
@@ -1111,6 +1375,14 @@ router.put("/baselines/:id", async (req, res) => {
       if (req.body[f] !== undefined) entry[f] = req.body[f];
     }
     await entry.save();
+
+    // Keep the facility's declared unit in step with the baseline's unit, so an
+    // admin editing the baseline unit doesn't leave the facility (and every admin
+    // view that reads it) describing the volumes with the old one.
+    await syncFacilityDeclaredUnit(
+      entry.slfGenerator,
+      entry.baselineUnit || entry.totalVolumeAcceptedUnit,
+    );
 
     await Transaction.create({
       dataEntry: entry._id,
@@ -1904,7 +2176,7 @@ router.get("/", optionalAuth, async (req, res) => {
       const docs = idOrder.length
         ? await DataSLF.find({ _id: { $in: idOrder } })
             .setOptions({ includeHiddenYears: true })
-            .populate("slfGenerator")
+            .populate("slfGenerator", SLF_GENERATOR_REF_FIELDS)
             .lean()
         : [];
       const byId = new Map(docs.map((d) => [String(d._id), d]));
@@ -2042,7 +2314,7 @@ router.get("/", optionalAuth, async (req, res) => {
       const entryDocs = idOrder.length
         ? await DataSLF.find({ _id: { $in: idOrder } })
             .setOptions({ includeHiddenYears: true })
-            .populate("slfGenerator")
+            .populate("slfGenerator", SLF_GENERATOR_REF_FIELDS)
             .select(projection)
             .lean()
         : [];
@@ -2082,7 +2354,7 @@ router.get("/", optionalAuth, async (req, res) => {
     }
 
     let query = DataSLF.find(filter)
-      .populate("slfGenerator")
+      .populate("slfGenerator", SLF_GENERATOR_REF_FIELDS)
       .sort({ createdAt: -1 });
     if (listMode) {
       // cellUsage=true → lean projection used only for SLF Data Table cell-fill
@@ -2783,8 +3055,13 @@ router.post("/repair-xx-ids", authMiddleware, developerOnly, async (req, res) =>
       return PROVINCE_NAME_MAP[key] || null;
     };
 
-    // Fetch all records that have an XX province code in idNo
-    const xxDocs = await DataSLF.find({ idNo: /^SLF-\w+-XX-/ })
+    const startedAt = Date.now();
+
+    // Fetch only the fields the repair reads — never the full `trucks[]` payload.
+    const xxDocs = await DataSLF.find(
+      { idNo: /^SLF-\w+-XX-/ },
+      "idNo slfGenerator slfName lguCompanyName companyType companyProvince dateOfDisposal submissionId submittedBy",
+    )
       .setOptions({ includeHiddenYears: true })
       .lean();
 
@@ -2799,39 +3076,81 @@ router.post("/repair-xx-ids", authMiddleware, developerOnly, async (req, res) =>
     let updated = 0;
     const errors = [];
     const changes = [];
-    const sequenceCache = new Map();
+    const pending = [];
     const assignedIds = new Set();
 
-    const getSequenceKey = (typeCode, provCode) => `${typeCode}-${provCode}`;
-    const getMaxSequence = async (typeCode, provCode) => {
-      const key = getSequenceKey(typeCode, provCode);
-      if (sequenceCache.has(key)) return sequenceCache.get(key);
+    // Everything the per-doc loop used to query is prefetched in three batched
+    // reads instead of two-to-three round-trips per document:
+    //   1. the facilities referenced by these docs (was: findById per doc)
+    //   2. a non-XX sibling ID per SLF        (was: findOne per doc)
+    //   3. the max sequence per ID prefix     (was: a full find per new prefix)
+    const facilityIds = [...new Set(xxDocs.map((d) => d.slfGenerator).filter(Boolean).map(String))];
+    const slfNames = [...new Set(xxDocs.map((d) => d.slfName).filter(Boolean))];
 
-      const pattern = new RegExp(`^SLF-${typeCode}-${provCode}-(\\d{4,})(?:\\D.*)?$`);
-      const docs = await DataSLF.find({ idNo: pattern })
-        .setOptions({ includeHiddenYears: true })
-        .select("idNo")
-        .lean();
-      const maxSeq = docs.reduce((max, item) => {
-        const match = String(item.idNo || "").match(pattern);
-        const seq = match ? Number(match[1]) : 0;
-        return Number.isFinite(seq) && seq > max ? seq : max;
-      }, 0);
-      sequenceCache.set(key, maxSeq);
-      return maxSeq;
-    };
+    const [facilityDocs, siblingDocs, seedRows] = await Promise.all([
+      facilityIds.length
+        ? SlfFacility.find({ _id: { $in: facilityIds } }).select("province").lean()
+        : [],
+      // Non-XX siblings for every SLF referenced above — one query covers all of
+      // them. Deliberately NOT sorted in the DB: `slfGenerator`/`slfName` aren't
+      // indexed without a `deletedAt` prefix, so a server-side sort here would be
+      // an unindexed blocking sort (32MB limit). The set is small and already
+      // projected, so "newest wins" is resolved in memory below instead.
+      facilityIds.length || slfNames.length
+        ? DataSLF.find(
+            {
+              idNo: { $exists: true, $not: /XX/ },
+              $or: [
+                ...(facilityIds.length ? [{ slfGenerator: { $in: facilityIds } }] : []),
+                ...(slfNames.length ? [{ slfName: { $in: slfNames } }] : []),
+              ],
+            },
+            "idNo slfGenerator slfName createdAt",
+          )
+            .setOptions({ includeHiddenYears: true })
+            .lean()
+        : [],
+      DataSLF.aggregate([
+        { $match: { idNo: /^SLF-/ } },
+        { $project: { parts: { $split: ["$idNo", "-"] } } },
+        { $match: { "parts.3": { $exists: true } } },
+        {
+          $project: {
+            key: {
+              $concat: [{ $arrayElemAt: ["$parts", 1] }, "-", { $arrayElemAt: ["$parts", 2] }],
+            },
+            seq: {
+              $convert: { input: { $arrayElemAt: ["$parts", 3] }, to: "int", onError: 0, onNull: 0 },
+            },
+          },
+        },
+        { $group: { _id: "$key", maxSeq: { $max: "$seq" } } },
+      ]).option({ includeHiddenYears: true }),
+    ]);
 
-    const getNextIdNo = async (typeCode, provCode) => {
-      const key = getSequenceKey(typeCode, provCode);
-      let seq = await getMaxSequence(typeCode, provCode);
+    const facilityById = new Map(facilityDocs.map((f) => [String(f._id), f]));
+    const sequenceCache = new Map(seedRows.map((r) => [r._id, r.maxSeq || 0]));
+
+    // Newest sibling per generator id / slfName (preserves the previous
+    // `.sort({ createdAt: -1 }).findOne()` semantics, resolved in memory).
+    const siblingByGenerator = new Map();
+    const siblingByName = new Map();
+    const wins = (incoming, current) =>
+      !current || new Date(incoming?.createdAt || 0) > new Date(current?.createdAt || 0);
+    for (const s of siblingDocs) {
+      const gid = s.slfGenerator ? String(s.slfGenerator) : null;
+      if (gid && wins(s, siblingByGenerator.get(gid))) siblingByGenerator.set(gid, s);
+      if (s.slfName && wins(s, siblingByName.get(s.slfName))) siblingByName.set(s.slfName, s);
+    }
+
+    const nextIdNo = (typeCode, provCode) => {
+      const key = `${typeCode}-${provCode}`;
+      let seq = sequenceCache.get(key) || 0;
       let candidate;
       do {
         seq += 1;
         candidate = `SLF-${typeCode}-${provCode}-${String(seq).padStart(4, "0")}`;
-      } while (
-        assignedIds.has(candidate) ||
-        (await DataSLF.exists({ idNo: candidate }).setOptions({ includeHiddenYears: true }))
-      );
+      } while (assignedIds.has(candidate));
       sequenceCache.set(key, seq);
       assignedIds.add(candidate);
       return candidate;
@@ -2843,7 +3162,7 @@ router.post("/repair-xx-ids", authMiddleware, developerOnly, async (req, res) =>
 
         // 1. Try facility province
         if (doc.slfGenerator) {
-          const facility = await SlfFacility.findById(doc.slfGenerator).select("province").lean();
+          const facility = facilityById.get(String(doc.slfGenerator));
           if (facility?.province) provCode = getProvCode(facility.province);
         }
 
@@ -2854,20 +3173,13 @@ router.post("/repair-xx-ids", authMiddleware, developerOnly, async (req, res) =>
 
         // 3. Try another approved doc for the same SLF
         if (!provCode) {
-          const filter = doc.slfGenerator
-            ? { slfGenerator: doc.slfGenerator, idNo: { $exists: true, $not: /XX/ } }
-            : doc.slfName
-            ? { slfName: doc.slfName, idNo: { $exists: true, $not: /XX/ } }
-            : null;
-          if (filter) {
-            const sibling = await DataSLF.findOne(filter)
-              .setOptions({ includeHiddenYears: true })
-              .sort({ createdAt: -1 })
-              .lean();
-            if (sibling?.idNo) {
-              const parts = sibling.idNo.split("-");
-              if (parts.length >= 4 && parts[2] !== "XX") provCode = parts[2];
-            }
+          const sibling =
+            (doc.slfGenerator && siblingByGenerator.get(String(doc.slfGenerator))) ||
+            (doc.slfName && siblingByName.get(doc.slfName)) ||
+            null;
+          if (sibling?.idNo) {
+            const parts = sibling.idNo.split("-");
+            if (parts.length >= 4 && parts[2] !== "XX") provCode = parts[2];
           }
         }
 
@@ -2877,7 +3189,7 @@ router.post("/repair-xx-ids", authMiddleware, developerOnly, async (req, res) =>
         const parts = oldIdNo.split("-"); // ["SLF", typeCode, "XX", seq]
         if (parts.length < 4) continue;
         const typeCode = parts[1];
-        const finalIdNo = await getNextIdNo(typeCode, provCode);
+        const finalIdNo = nextIdNo(typeCode, provCode);
 
         changes.push({
           _id: doc._id,
@@ -2889,48 +3201,7 @@ router.post("/repair-xx-ids", authMiddleware, developerOnly, async (req, res) =>
           dateOfDisposal: doc.dateOfDisposal || null,
         });
 
-        // Preview mode: do not persist — just record the proposed change.
-        if (preview) continue;
-
-        const submissionId = doc.submissionId || doc._id.toString();
-        await DataSLF.updateOne(
-          { _id: doc._id },
-          {
-            $set: { idNo: finalIdNo, submissionId },
-            $addToSet: { previousIdNos: oldIdNo },
-          }
-        );
-        await Transaction.updateMany(
-          {
-            $or: [
-              { dataEntry: doc._id },
-              { submissionId: oldIdNo },
-              { submissionId: doc._id.toString() },
-              { "meta.idNo": oldIdNo },
-              { "meta.ids": oldIdNo },
-            ],
-          },
-          {
-            $set: {
-              dataEntry: doc._id,
-              submissionId,
-              "meta.idNo": finalIdNo,
-            },
-            $addToSet: { "meta.previousIdNos": oldIdNo },
-          }
-        );
-        await Transaction.create({
-          submissionId,
-          dataEntry: doc._id,
-          companyName: doc.lguCompanyName,
-          companyType: doc.companyType,
-          submittedBy: doc.submittedBy,
-          type: "admin_edit",
-          description: `Fixed province code ID from ${oldIdNo} to ${finalIdNo}`,
-          performedBy: getRequestActor(req),
-          meta: { idNo: finalIdNo, previousIdNo: oldIdNo, repairXX: true },
-        });
-        updated++;
+        if (!preview) pending.push({ doc, oldIdNo, finalIdNo });
       } catch (err) {
         errors.push({ id: doc._id, error: err.message });
       }
@@ -2942,19 +3213,90 @@ router.post("/repair-xx-ids", authMiddleware, developerOnly, async (req, res) =>
       // is still fixed even when the preview list is truncated.
       const PREVIEW_LIMIT = 500;
       const truncated = changes.length > PREVIEW_LIMIT;
+      const durationMs = Date.now() - startedAt;
       return res.json({
         preview: true,
         message: `${changes.length} of ${xxDocs.length} XX record(s) can be fixed.`,
         total: changes.length,
         truncated,
+        durationMs,
         changes: truncated ? changes.slice(0, PREVIEW_LIMIT) : changes,
       });
     }
 
+    if (pending.length) {
+      // Same single-query collision check + bulk writes as repair-type-ids.
+      const taken = new Set(
+        (
+          await DataSLF.find({ idNo: { $in: pending.map((p) => p.finalIdNo) } })
+            .setOptions({ includeHiddenYears: true })
+            .select("idNo")
+            .lean()
+        ).map((d) => d.idNo),
+      );
+      const safe = pending.filter((p) => !taken.has(p.finalIdNo));
+
+      if (safe.length) {
+        await DataSLF.bulkWrite(
+          safe.map(({ doc, oldIdNo, finalIdNo }) => ({
+            updateOne: {
+              filter: { _id: doc._id },
+              update: {
+                $set: { idNo: finalIdNo, submissionId: doc.submissionId || doc._id.toString() },
+                $addToSet: { previousIdNos: oldIdNo },
+              },
+            },
+          })),
+          { ordered: false },
+        );
+
+        await Transaction.bulkWrite(
+          safe.map(({ doc, oldIdNo, finalIdNo }) => {
+            const submissionId = doc.submissionId || doc._id.toString();
+            return {
+              updateMany: {
+                filter: {
+                  $or: [
+                    { dataEntry: doc._id },
+                    { submissionId: oldIdNo },
+                    { submissionId: doc._id.toString() },
+                    { "meta.idNo": oldIdNo },
+                    { "meta.ids": oldIdNo },
+                  ],
+                },
+                update: {
+                  $set: { dataEntry: doc._id, submissionId, "meta.idNo": finalIdNo },
+                  $addToSet: { "meta.previousIdNos": oldIdNo },
+                },
+              },
+            };
+          }),
+          { ordered: false },
+        );
+
+        await Transaction.insertMany(
+          safe.map(({ doc, oldIdNo, finalIdNo }) => ({
+            submissionId: doc.submissionId || doc._id.toString(),
+            dataEntry: doc._id,
+            companyName: doc.lguCompanyName,
+            companyType: doc.companyType,
+            submittedBy: doc.submittedBy,
+            type: "admin_edit",
+            description: `Fixed province code ID from ${oldIdNo} to ${finalIdNo}`,
+            performedBy: getRequestActor(req),
+            meta: { idNo: finalIdNo, previousIdNo: oldIdNo, repairXX: true },
+          })),
+          { ordered: false },
+        );
+        updated = safe.length;
+      }
+    }
+
+    const durationMs = Date.now() - startedAt;
     writeLog("warn", "id.repair-xx", {
-      message: `Repaired ${updated} XX province code records`,
+      message: `Repaired ${updated} XX province code records in ${durationMs}ms`,
       user: getRequestActor(req),
-      meta: { total: xxDocs.length, updated, errors: errors.length },
+      meta: { total: xxDocs.length, updated, errors: errors.length, durationMs },
     });
 
     res.json({
@@ -2962,6 +3304,7 @@ router.post("/repair-xx-ids", authMiddleware, developerOnly, async (req, res) =>
       updated,
       skipped: xxDocs.length - updated - errors.length,
       errors,
+      durationMs,
       changes,
     });
   } catch (error) {
@@ -3028,9 +3371,20 @@ router.post("/repair-type-ids", authMiddleware, developerOnly, async (req, res) 
       return null;
     };
 
-    const docs = await DataSLF.find({ idNo: /^SLF-(PVT|LGU)-/ })
+    const startedAt = Date.now();
+
+    // Only the fields the mismatch comparison actually reads. Without this
+    // projection Mongo streams every full submission — including the `trucks[]`
+    // array and its nested `vehicles[]` — which is what made this endpoint take
+    // minutes. Two literal-prefix regexes (instead of one `^SLF-(PVT|LGU)-`
+    // alternation) so each can use the `idNo` index bounds.
+    const docs = await DataSLF.find(
+      { $or: [{ idNo: /^SLF-PVT-/ }, { idNo: /^SLF-LGU-/ }] },
+      "idNo slfGenerator slfName lguCompanyName companyType companyProvince dateOfDisposal submissionId submittedBy",
+    )
       .setOptions({ includeHiddenYears: true })
       .lean();
+    const fetchedAt = Date.now();
 
     // Dry-run preview support (see repair-xx-ids).
     const preview = req.body?.preview === true || req.query?.preview === "true";
@@ -3039,142 +3393,191 @@ router.post("/repair-type-ids", authMiddleware, developerOnly, async (req, res) 
     let skipped = 0;
     const errors = [];
     const changes = [];
-    const sequenceCache = new Map();
+
+    // Seed the max sequence for EVERY `SLF-<TYPE>-<PROV>-` prefix in one
+    // aggregation. Previously each new (type, province) pair triggered its own
+    // `.find()` over all matching idNos; now the max is computed in the DB and
+    // only ~14 small rows come back, so the whole sequence allocation below is
+    // pure in-memory arithmetic.
+    const seedRows = await DataSLF.aggregate([
+      { $match: { idNo: /^SLF-/ } },
+      { $project: { parts: { $split: ["$idNo", "-"] } } },
+      { $match: { "parts.3": { $exists: true } } },
+      {
+        $project: {
+          key: {
+            $concat: [
+              { $arrayElemAt: ["$parts", 1] },
+              "-",
+              { $arrayElemAt: ["$parts", 2] },
+            ],
+          },
+          seq: {
+            $convert: { input: { $arrayElemAt: ["$parts", 3] }, to: "int", onError: 0, onNull: 0 },
+          },
+        },
+      },
+      { $group: { _id: "$key", maxSeq: { $max: "$seq" } } },
+    ]).option({ includeHiddenYears: true });
+
+    const sequenceCache = new Map(seedRows.map((r) => [r._id, r.maxSeq || 0]));
     const assignedIds = new Set();
 
-    // `verify` runs a per-candidate DB uniqueness check. It is only needed when
-    // actually persisting; for the dry-run preview the proposed IDs are
-    // display-only, so we skip the per-row DataSLF.exists() round-trip (that was
-    // an N+1 that made the Fix PVT/LGU preview modal slow). The seed query below
-    // already reads the current max sequence from the DB, so in-memory
-    // incrementing yields collision-free proposed IDs for the preview.
-    const getNextIdNo = async (typeCode, provCode, verify = true) => {
+    // Fully in-memory: the seed above already read the current DB max for every
+    // prefix, and `assignedIds` prevents collisions inside this run. The old
+    // per-candidate `DataSLF.exists()` round-trip is gone; the persist path
+    // re-checks every proposed ID against the DB in a single query instead.
+    const nextIdNo = (typeCode, provCode) => {
       const key = `${typeCode}-${provCode}`;
-      let seq = sequenceCache.get(key);
-      if (seq == null) {
-        const pattern = new RegExp(`^SLF-${typeCode}-${provCode}-(\\d{4,})`);
-        const existing = await DataSLF.find({ idNo: pattern })
-          .setOptions({ includeHiddenYears: true })
-          .select("idNo")
-          .lean();
-        seq = existing.reduce((max, item) => {
-          const match = String(item.idNo || "").match(pattern);
-          const n = match ? Number(match[1]) : 0;
-          return n > max ? n : max;
-        }, 0);
-      }
+      let seq = sequenceCache.get(key) || 0;
       let candidate;
       do {
         seq += 1;
         candidate = `SLF-${typeCode}-${provCode}-${String(seq).padStart(4, "0")}`;
-      } while (
-        assignedIds.has(candidate) ||
-        (verify &&
-          (await DataSLF.exists({ idNo: candidate }).setOptions({ includeHiddenYears: true })))
-      );
+      } while (assignedIds.has(candidate));
       sequenceCache.set(key, seq);
       assignedIds.add(candidate);
       return candidate;
     };
 
+    // Single in-memory pass — no awaits inside the loop.
+    const pending = [];
     for (const doc of docs) {
-      try {
-        const parts = String(doc.idNo).split("-");
-        if (parts.length < 4 || parts[0] !== "SLF") continue;
-        const currentType = parts[1];
-        const provCode = parts[2];
+      const parts = String(doc.idNo).split("-");
+      if (parts.length < 4 || parts[0] !== "SLF") continue;
+      const currentType = parts[1];
+      const provCode = parts[2];
 
-        // Strict identity: require a confidently-matched facility (slfGenerator
-        // or name+province) so we never re-type the wrong SLF's records.
-        const facility = resolveFacility(doc);
-        if (!facility) {
-          skipped++;
-          continue;
-        }
-
-        // The submission's companyType drives the type; fall back to the
-        // facility ownership when companyType is missing/ambiguous.
-        const desiredType =
-          typeCodeForCompanyType(doc.companyType) ||
-          typeCodeForOwnership(facility.ownership);
-        if (!desiredType || desiredType === currentType) {
-          if (!desiredType) skipped++;
-          continue;
-        }
-
-        const oldIdNo = doc.idNo;
-        const finalIdNo = await getNextIdNo(desiredType, provCode, !preview);
-
-        changes.push({
-          _id: doc._id,
-          currentIdNo: oldIdNo,
-          proposedIdNo: finalIdNo,
-          slfName: doc.slfName || doc.lguCompanyName || "",
-          lguCompanyName: doc.lguCompanyName || "",
-          companyType: doc.companyType || "",
-          dateOfDisposal: doc.dateOfDisposal || null,
-          ownership: facility.ownership || "",
-        });
-
-        // Preview mode: do not persist — just record the proposed change.
-        if (preview) continue;
-
-        await DataSLF.updateOne(
-          { _id: doc._id },
-          {
-            $set: { idNo: finalIdNo },
-            $addToSet: { previousIdNos: oldIdNo },
-          },
-        );
-        await Transaction.updateMany(
-          {
-            $or: [
-              { dataEntry: doc._id },
-              { "meta.idNo": oldIdNo },
-              { "meta.ids": oldIdNo },
-            ],
-          },
-          {
-            $set: { "meta.idNo": finalIdNo },
-            $addToSet: { "meta.previousIdNos": oldIdNo },
-          },
-        );
-        await Transaction.create({
-          submissionId: doc.submissionId || doc._id.toString(),
-          dataEntry: doc._id,
-          companyName: doc.lguCompanyName,
-          companyType: doc.companyType,
-          submittedBy: doc.submittedBy,
-          type: "admin_edit",
-          description: `Fixed ID No. type from ${oldIdNo} to ${finalIdNo} (${currentType}→${desiredType}; ownership: ${facility.ownership || "n/a"})`,
-          performedBy: getRequestActor(req),
-          meta: { idNo: finalIdNo, previousIdNo: oldIdNo, repairType: true, ownership: facility.ownership || "" },
-        });
-        updated++;
-      } catch (err) {
-        errors.push({ id: doc._id, error: err.message });
+      // Strict identity: require a confidently-matched facility (slfGenerator
+      // or name+province) so we never re-type the wrong SLF's records.
+      const facility = resolveFacility(doc);
+      if (!facility) {
+        skipped++;
+        continue;
       }
+
+      // The submission's companyType drives the type; fall back to the
+      // facility ownership when companyType is missing/ambiguous.
+      const desiredType =
+        typeCodeForCompanyType(doc.companyType) ||
+        typeCodeForOwnership(facility.ownership);
+      if (!desiredType || desiredType === currentType) {
+        if (!desiredType) skipped++;
+        continue;
+      }
+
+      const oldIdNo = doc.idNo;
+      const finalIdNo = nextIdNo(desiredType, provCode);
+
+      changes.push({
+        _id: doc._id,
+        currentIdNo: oldIdNo,
+        proposedIdNo: finalIdNo,
+        slfName: doc.slfName || doc.lguCompanyName || "",
+        lguCompanyName: doc.lguCompanyName || "",
+        companyType: doc.companyType || "",
+        dateOfDisposal: doc.dateOfDisposal || null,
+        ownership: facility.ownership || "",
+      });
+      pending.push({ doc, oldIdNo, finalIdNo, currentType, desiredType, facility });
     }
+    const analyzedAt = Date.now();
 
     if (preview) {
       // See repair-xx-ids: cap the preview payload; the confirmed fix re-runs
       // the full repair so all mismatches are still corrected.
       const PREVIEW_LIMIT = 500;
       const truncated = changes.length > PREVIEW_LIMIT;
+      const durationMs = analyzedAt - startedAt;
+      writeLog("info", "id.repair-type.preview", {
+        message: `PVT/LGU mismatch analysis: ${changes.length} of ${docs.length} in ${durationMs}ms`,
+        user: getRequestActor(req),
+        meta: {
+          scanned: docs.length,
+          mismatches: changes.length,
+          skipped,
+          durationMs,
+          fetchMs: fetchedAt - startedAt,
+          analyzeMs: analyzedAt - fetchedAt,
+        },
+      });
       return res.json({
         preview: true,
         message: `${changes.length} PVT/LGU ID No. mismatch(es) can be fixed.${skipped ? ` ${skipped} skipped (SLF could not be strictly identified).` : ""}`,
         total: changes.length,
         truncated,
         skipped,
+        durationMs,
         changes: truncated ? changes.slice(0, PREVIEW_LIMIT) : changes,
       });
     }
 
+    if (pending.length) {
+      // One query (not one per candidate) proves the proposed IDs are still free.
+      // A collision can only happen if another writer allocated an ID after our
+      // seed aggregation; those rows are skipped rather than silently clobbering
+      // an existing submission's ID.
+      const taken = new Set(
+        (
+          await DataSLF.find({ idNo: { $in: pending.map((p) => p.finalIdNo) } })
+            .setOptions({ includeHiddenYears: true })
+            .select("idNo")
+            .lean()
+        ).map((d) => d.idNo),
+      );
+      const safe = pending.filter((p) => !taken.has(p.finalIdNo));
+      skipped += pending.length - safe.length;
+
+      // Three bulk round-trips instead of three per document.
+      if (safe.length) {
+        await DataSLF.bulkWrite(
+          safe.map(({ doc, oldIdNo, finalIdNo }) => ({
+            updateOne: {
+              filter: { _id: doc._id },
+              update: { $set: { idNo: finalIdNo }, $addToSet: { previousIdNos: oldIdNo } },
+            },
+          })),
+          { ordered: false },
+        );
+
+        await Transaction.bulkWrite(
+          safe.map(({ doc, oldIdNo, finalIdNo }) => ({
+            updateMany: {
+              filter: {
+                $or: [{ dataEntry: doc._id }, { "meta.idNo": oldIdNo }, { "meta.ids": oldIdNo }],
+              },
+              update: {
+                $set: { "meta.idNo": finalIdNo },
+                $addToSet: { "meta.previousIdNos": oldIdNo },
+              },
+            },
+          })),
+          { ordered: false },
+        );
+
+        await Transaction.insertMany(
+          safe.map(({ doc, oldIdNo, finalIdNo, currentType, desiredType, facility }) => ({
+            submissionId: doc.submissionId || doc._id.toString(),
+            dataEntry: doc._id,
+            companyName: doc.lguCompanyName,
+            companyType: doc.companyType,
+            submittedBy: doc.submittedBy,
+            type: "admin_edit",
+            description: `Fixed ID No. type from ${oldIdNo} to ${finalIdNo} (${currentType}→${desiredType}; ownership: ${facility.ownership || "n/a"})`,
+            performedBy: getRequestActor(req),
+            meta: { idNo: finalIdNo, previousIdNo: oldIdNo, repairType: true, ownership: facility.ownership || "" },
+          })),
+          { ordered: false },
+        );
+        updated = safe.length;
+      }
+    }
+
+    const durationMs = Date.now() - startedAt;
     writeLog("warn", "id.repair-type", {
-      message: `Repaired ${updated} ID No. type mismatches (PVT/LGU)`,
+      message: `Repaired ${updated} ID No. type mismatches (PVT/LGU) in ${durationMs}ms`,
       user: getRequestActor(req),
-      meta: { total: docs.length, updated, skipped, errors: errors.length },
+      meta: { total: docs.length, updated, skipped, errors: errors.length, durationMs },
     });
 
     res.json({
@@ -3182,6 +3585,7 @@ router.post("/repair-type-ids", authMiddleware, developerOnly, async (req, res) 
       updated,
       skipped,
       errors,
+      durationMs,
       changes,
     });
   } catch (error) {
@@ -3227,7 +3631,7 @@ router.get("/trash/list", async (req, res) => {
   try {
     const entries = await DataSLF.find({ deletedAt: { $ne: null } })
       .setOptions({ includeHiddenYears: true })
-      .populate("slfGenerator")
+      .populate("slfGenerator", SLF_GENERATOR_REF_FIELDS)
       .sort({ deletedAt: -1 });
     res.json(entries);
   } catch (error) {

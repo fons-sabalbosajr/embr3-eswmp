@@ -33,23 +33,15 @@ import api from "../../api";
 import { fetchWithCache, invalidateCache } from "../../utils/pageCache";
 import { getSocket } from "../../utils/socket";
 import { rowMatchesSearch } from "./shared/tableFilters";
+import { convertVolume } from "../../utils/volumeUnits";
 
 const { Text, Title } = Typography;
 const CACHE_KEY = "cell-waste-placement-cache";
 const CACHE_TTL = 2 * 60 * 1000;
 const DEFAULT_PAGE_SIZE = 12;
-const TON_PER_M3 = 0.2;
-
+// Display-only unit label (a missing unit renders as m³, as it always has).
+// Conversion itself comes from the shared module — see utils/volumeUnits.js.
 const normalizeUnit = (unit) => String(unit || "m³").replace("m3", "m³");
-const convertVolume = (value, fromUnit = "m³", toUnit = fromUnit) => {
-  const amount = Number(value || 0);
-  const from = normalizeUnit(fromUnit);
-  const to = normalizeUnit(toUnit || from);
-  if (!amount || from === to) return amount;
-  if (from === "tons" && to === "m³") return amount / TON_PER_M3;
-  if (from === "m³" && to === "tons") return amount * TON_PER_M3;
-  return amount;
-};
 
 const isActiveCellStatus = (status) =>
   /active|operational|open/i.test(String(status || "Active Cell"));

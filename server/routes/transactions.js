@@ -7,6 +7,12 @@ const { wantsIncludeDummy } = require("../utils/dummyFilter");
 
 const router = express.Router();
 
+// Require an authenticated caller on every route below. Both frontends always
+// send a Bearer token, so this closes anonymous read/write/delete access to the
+// activity/audit log without changing client behaviour.
+const { requireAnyAuth } = require("../middleware/auth");
+router.use(requireAnyAuth);
+
 // Transactions carry no isDummy flag of their own — they are an audit trail that
 // links back to a submission (dataEntry / submissionId) and/or a portal account
 // (submittedBy). Resolve the (small) set of dummy submissions and dummy accounts,

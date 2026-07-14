@@ -160,6 +160,7 @@ import SlfDashboardTab, {
 } from './slf-monitoring/SlfDashboardTab';
 import WasteBaselineInfo from './slf-monitoring/WasteBaselineInfo';
 import PortalGenerators from './slf-monitoring/PortalGenerators';
+import { resolveCellName } from '../../utils/cellVisuals';
 import {
   ACCENT, CHART_COLORS,
   managementStatusSummary, asStringArray, formatStringArray,
@@ -174,6 +175,11 @@ import {
   convertVolume, getWasteKind, isHazardousCellType,
   extractDriveId, isDriveUrl, resolveMediaUrl, normalizeStoredFileUrl,
 } from './slf-monitoring/helpers.jsx';
+
+// Stable empty array — returning a fresh [] from a memo would give it a new
+// identity every render and re-run every downstream memo that depends on it.
+const EMPTY_ROWS = [];
+
 export default function SLFMonitoring({
   canEdit = true,
   canDelete = true,
@@ -255,6 +261,14 @@ export default function SLFMonitoring({
   const [loadingBaseline, setLoadingBaseline] = useState(false);
   const [detailSubmissionsLoading, setDetailSubmissionsLoading] = useState(false);
   const [detailDashboardError, setDetailDashboardError] = useState(null);
+  // FULL submissions (with trucks[]/vehicles[]) for the ONE facility whose detail
+  // modal is open. Kept out of the page-wide `slfSubmissions` so the heavy payload
+  // is dropped the moment the modal closes instead of accumulating per facility.
+  const [detailSubmissions, setDetailSubmissions] = useState([]);
+  // Real, measured progress for the detail-modal load — { stage, done, total }.
+  // Never a fabricated percentage: `done`/`total` are actual record counts and the
+  // stage names are the actual steps the effect runs.
+  const [detailProgress, setDetailProgress] = useState(null);
   const [editing, setEditing] = useState(null);
   const [editYear, setEditYear] = useState(null);
   const [editYearRecords, setEditYearRecords] = useState([]);
@@ -288,6 +302,9 @@ export default function SLFMonitoring({
     rows: [],
   });
   const [form] = Form.useForm();
+  // False once the page unmounts — guards the async fetch chains below from
+  // seating a large dataset into a component that is already gone.
+  const aliveRef = useRef(true);
 
   const normalizeSlfSubmissions = (items = []) =>
     (items || []).map(normalizeSubmissionRecord);
@@ -345,10 +362,13 @@ export default function SLFMonitoring({
         ttl: CACHE_TTL,
         force: skipCache,
         onData: (data) => {
+          if (!aliveRef.current) return; // page already left — don't re-seat data
           const rows = Array.isArray(data) ? data : data?.records || [];
           setRecords(rows.map((r) => ({ ...r, ...computeFields(r) })));
         },
-        onError: () => Swal.fire("Error", "Failed to load SLF facilities", "error"),
+        onError: () => {
+          if (aliveRef.current) Swal.fire("Error", "Failed to load SLF facilities", "error");
+        },
         onStart: () => setLoading(true),
         onEnd: () => setLoading(false),
       },
@@ -396,6 +416,10 @@ export default function SLFMonitoring({
           ttl: CACHE_TTL,
           force: skipCache,
           onData: (data) => {
+            // Phase 2 resolves in the background. If the admin navigated away while
+            // it was in flight, bailing here is what stops a large submissions array
+            // from being seated into a component that no longer exists.
+            if (!aliveRef.current) return;
             const rows = Array.isArray(data) ? data : data?.records || [];
             setSlfSubmissions(Array.isArray(data) ? [] : data?.submissions || []);
             // Silently replace records with fully-enriched version (no spinner)
@@ -425,6 +449,26 @@ export default function SLFMonitoring({
     fetchGenerators();
   }, [fetchRecords, fetchGenerators]);
 
+  // Page-exit cleanup. `fetchRecords` runs a two-phase background chain that can
+  // still be in flight when the admin navigates away; without this, a response
+  // landing after unmount would push a fresh multi-hundred-KB array back into
+  // state, and React keeps that final state object reachable from the pending
+  // closure until it settles. Marking the page dead lets those callbacks bail,
+  // and dropping the big arrays here releases them immediately rather than
+  // waiting on the closures to unwind.
+  useEffect(() => {
+    aliveRef.current = true;
+    return () => {
+      aliveRef.current = false;
+      setRecords(EMPTY_ROWS);
+      setSlfSubmissions(EMPTY_ROWS);
+      setDetailSubmissions(EMPTY_ROWS);
+      setGenerators(EMPTY_ROWS);
+      setDetailYearRecords(EMPTY_ROWS);
+      setDailySubmissionsModal({ open: false, cell: null, rows: EMPTY_ROWS });
+    };
+  }, []);
+
   // Keep the SLF Monitoring Dashboard + Waste Generators tabs in sync with newly
   // submitted portal data. Driven by live socket events (no aggressive polling),
   // so it stays fresh without adding load to the SLF Data Table page.
@@ -443,30 +487,55 @@ export default function SLFMonitoring({
     return () => socket.off("data-refresh", handler);
   }, [fetchRecords, fetchGenerators]);
 
-  // Fetch baseline data when detail modal opens for a facility.
+  // Fetch baseline + submission data when the detail modal opens for a facility.
+  //
+  // Both requests are ABORTED and their results ignored when the user switches to
+  // another facility (or closes the modal) before they land. Without this, opening
+  // facility A then quickly opening B let A's slower response overwrite B's
+  // submissions/baseline — the modal would show B's title over A's data.
   useEffect(() => {
     setDetailDashboardError(null);
     if (!detailModal) {
       setBaselineData(null);
       setDetailSubmissionsLoading(false);
-      return;
+      setDetailProgress(null);
+      setDetailSubmissions(EMPTY_ROWS); // release the heavy per-facility payload
+      return undefined;
     }
+
+    // Switching facilities must not stack payloads: drop the previous facility's
+    // full submissions before loading the next one.
+    setDetailSubmissions(EMPTY_ROWS);
+
+    const controller = new AbortController();
+    let cancelled = false; // guards the state writes even after an abort resolves
+
     const candidateNames = expandSlfNames(getFacilitySlfNames(detailModal));
     if (candidateNames.length === 0) {
       setBaselineData(null);
     } else {
       setLoadingBaseline(true);
-      api
-        .get("/data-slf/baselines")
-        .then(({ data }) => {
-          const baselineMap = buildBaselineMap(data || []);
-          setBaselineData(findBaselineForFacility(detailModal, baselineMap));
-        })
-        .catch(() => {
-          setBaselineData(null);
-          setDetailDashboardError("Failed to load baseline data.");
-        })
-        .finally(() => setLoadingBaseline(false));
+      // Cached: this endpoint returns EVERY SLF's baseline (a ~440 KB payload) and
+      // was re-downloaded on every single facility open just to pick one row out
+      // of it. The cache collapses that to one request per TTL.
+      fetchWithCache(
+        `${CACHE_KEY}-baselines`,
+        () => api.get("/data-slf/baselines", { signal: controller.signal }).then(({ data }) => data || []),
+        {
+          ttl: CACHE_TTL,
+          onData: (data) => {
+            if (cancelled) return;
+            setBaselineData(findBaselineForFacility(detailModal, buildBaselineMap(data || [])));
+          },
+          onError: () => {
+            if (cancelled) return;
+            setBaselineData(null);
+            setDetailDashboardError("Failed to load baseline data.");
+          },
+        },
+      ).finally(() => {
+        if (!cancelled) setLoadingBaseline(false);
+      });
     }
 
     // Lazy-load FULL submissions for just this facility so the detail modal shows
@@ -474,25 +543,54 @@ export default function SLFMonitoring({
     const slfName = detailModal.slfName || detailModal.lgu || "";
     if (slfName) {
       setDetailSubmissionsLoading(true);
+      setDetailProgress({ stage: "Loading submissions", done: 0, total: 0 });
       api
         .get("/data-slf", {
           params: { mode: "list", includeTrucks: true, search: slfName },
+          signal: controller.signal,
         })
         .then(({ data }) => {
+          if (cancelled) return;
           const rows = Array.isArray(data) ? data : data?.data || [];
+          setDetailProgress({ stage: "Normalizing records", done: 0, total: rows.length });
           const full = rows.map(normalizeSubmissionRecord);
-          // Merge: full per-facility records replace lean ones by _id
-          setSlfSubmissions((prev) => {
-            const byId = new Map(prev.map((s) => [s._id, s]));
-            full.forEach((s) => byId.set(s._id, s));
-            return [...byId.values()];
-          });
+          setDetailProgress({ stage: "Preparing results", done: rows.length, total: rows.length });
+          // Held SEPARATELY from the page-wide lean `slfSubmissions`, and released
+          // when the modal closes (see the cleanup below).
+          //
+          // This used to merge the heavy records — each carrying its full
+          // trucks[]/vehicles[] payload — straight into `slfSubmissions`, where
+          // they stayed for the life of the page. Every facility you opened
+          // permanently upgraded another slice of the array to full-fat, so
+          // browsing facilities grew the heap monotonically and nothing was ever
+          // freed until you left the page entirely.
+          setDetailSubmissions(full);
         })
-        .catch(() => setDetailDashboardError("Failed to load submission data."))
-        .finally(() => setDetailSubmissionsLoading(false));
+        .catch((err) => {
+          // An aborted request is an expected outcome of navigating away, not a failure.
+          if (cancelled || err?.name === "CanceledError" || err?.code === "ERR_CANCELED") return;
+          setDetailDashboardError("Failed to load submission data.");
+        })
+        .finally(() => {
+          if (!cancelled) {
+            setDetailSubmissionsLoading(false);
+            setDetailProgress(null);
+          }
+        });
     } else {
       setDetailSubmissionsLoading(false);
     }
+
+    return () => {
+      cancelled = true;
+      controller.abort();
+      // Drop the heavy payload when the modal closes or the page unmounts, so a
+      // late-resolving response can never re-seat a large dataset we no longer show.
+      setDetailSubmissions(EMPTY_ROWS);
+      // Its rows hold references INTO that payload (each row keeps a `submission`
+      // and a `truck`), so leaving them behind would pin the whole thing.
+      setDailySubmissionsModal({ open: false, cell: null, rows: EMPTY_ROWS });
+    };
   }, [detailModal]);
 
   // Fetch cross-year history when viewing a facility record
@@ -511,19 +609,45 @@ export default function SLFMonitoring({
       return;
     }
     setDetailHistoryLoading(true);
+    // Same stale-response guard as the effect above — switching facilities must
+    // not let the previous facility's history land in the open modal.
+    const controller = new AbortController();
+    let cancelled = false;
     api
-      .get(`/slf-facilities/history/${encodeURIComponent(lgu)}`)
+      .get(`/slf-facilities/history/${encodeURIComponent(lgu)}`, { signal: controller.signal })
       .then(({ data }) => {
+        if (cancelled) return;
         const enriched = data.map((r) => ({ ...r, ...computeFields(r) }));
         setDetailYearRecords(enriched);
         setDetailYear(detailModal.dataYear || new Date().getFullYear());
       })
-      .catch(() => {
+      .catch((err) => {
+        if (cancelled || err?.name === "CanceledError" || err?.code === "ERR_CANCELED") return;
         setDetailYearRecords([]);
         setDetailYear(detailModal.dataYear || new Date().getFullYear());
       })
-      .finally(() => setDetailHistoryLoading(false));
+      .finally(() => {
+        if (!cancelled) setDetailHistoryLoading(false);
+      });
+    return () => {
+      cancelled = true;
+      controller.abort();
+    };
   }, [detailModal]);
+
+  // ONE canonical set of submissions for the open facility. Previously three
+  // separate places each re-filtered the whole page-wide array and kept their own
+  // copy; now they all read this. Prefers the full per-facility payload when it has
+  // arrived, else falls back to the lean page-wide list.
+  const facilitySubmissions = useMemo(() => {
+    if (!detailModal) return EMPTY_ROWS;
+    const source = detailSubmissions.length ? detailSubmissions : slfSubmissions;
+    return source.filter(
+      (sub) =>
+        ACTIVE_VOLUME_STATUSES.has(sub.status || "pending") &&
+        submissionMatchesFacility(detailModal, sub),
+    );
+  }, [detailModal, detailSubmissions, slfSubmissions]);
 
   const detailViewRecord = useMemo(() => {
     if (!detailModal) return null;
@@ -534,11 +658,6 @@ export default function SLFMonitoring({
             (r) => (r.dataYear || new Date().getFullYear()) === detailYear,
           ) || null;
     // Include portal submissions so cell fill values reflect submitted volumes
-    const facilitySubmissions = slfSubmissions.filter(
-      (sub) =>
-        ACTIVE_VOLUME_STATUSES.has(sub.status || "pending") &&
-        submissionMatchesFacility(detailModal, sub),
-    );
     return enrichFacilityWithBaseline(
       baseRecord,
       baselineData,
@@ -549,18 +668,14 @@ export default function SLFMonitoring({
     detailModal,
     detailYearRecords,
     detailYear,
-    slfSubmissions,
+    facilitySubmissions,
   ]);
 
   // Consolidated dashboard data for the "SLF Dashboard" tab in the view modal.
   const detailDashboard = useMemo(() => {
     const facility = detailViewRecord;
     if (!facility || !detailModal) return null;
-    const subs = slfSubmissions.filter(
-      (sub) =>
-        ACTIVE_VOLUME_STATUSES.has(sub.status || "pending") &&
-        submissionMatchesFacility(detailModal, sub),
-    );
+    const subs = facilitySubmissions; // shared — no second full-array filter pass
     const unit = normalizeUnit(
       facility.wasteReceivedUnit ||
         facility.volumeCapacityUnit ||
@@ -652,7 +767,9 @@ export default function SLFMonitoring({
       );
       const used = Math.round(base + cellUsed[i]);
       return {
-        name: `Cell ${i + 1}`,
+        // Read the CURRENT name from the facility's cell infrastructure, so a
+        // renamed cell updates here instead of showing a stale "Cell N".
+        name: resolveCellName(facility, i),
         capacity: Math.round(capacity),
         used,
         type: facility.cellTypes?.[i] || "Residual",
@@ -698,19 +815,14 @@ export default function SLFMonitoring({
       topGenerators,
       tableRows,
     };
-  }, [detailViewRecord, detailModal, slfSubmissions]);
+  }, [detailViewRecord, detailModal, facilitySubmissions]);
 
   const openDailySubmissionsModal = (cellRow) => {
     if (!detailViewRecord) return;
     const targetIndex =
       cellRow?.index != null ? cellRow.index : parseCellIndex(cellRow?.cellName);
     const fallbackIndex = targetIndex != null ? targetIndex : 0;
-    const rows = slfSubmissions
-      .filter(
-        (submission) =>
-          ACTIVE_VOLUME_STATUSES.has(submission.status || "pending") &&
-          submissionMatchesFacility(detailViewRecord, submission),
-      )
+    const rows = facilitySubmissions
       .flatMap((submission) =>
         (submission.trucks || []).map((truck, truckIndex) => ({
           key: `${submission._id}-${truckIndex}`,
@@ -1002,12 +1114,15 @@ export default function SLFMonitoring({
     const count = Number(form.getFieldValue("numberOfCell") || editing?.numberOfCell || 0);
     const statuses = form.getFieldValue("cellStatuses") || editing?.cellStatuses || [];
     const types = form.getFieldValue("cellTypes") || editing?.cellTypes || [];
+    const names = form.getFieldValue("cellNames") || editing?.cellNames || [];
     return Array.from({ length: count }, (_, index) => {
       const status = normalizeCellStatus(statuses[index]);
+      // Canonical name from the cell infrastructure, not a hardcoded "Cell N".
+      const name = resolveCellName({ cellNames: names }, index);
       return {
         index,
-        label: `Cell ${index + 1} - ${types[index] || "Residual"} (${status})`,
-        name: `Cell ${index + 1}`,
+        label: `${name} - ${types[index] || "Residual"} (${status})`,
+        name,
         type: types[index] || "Residual",
         status,
       };
@@ -4986,7 +5101,7 @@ export default function SLFMonitoring({
                                 );
                                 return (
                                   <>
-                                    <Divider
+                                    {/* <Divider
                                       plain
                                       style={{
                                         fontSize: 11,
@@ -5030,7 +5145,7 @@ export default function SLFMonitoring({
                                         </Divider>
                                         {renderDonutGroup(hazDonuts)}
                                       </>
-                                    )}
+                                    )} */}
                                   </>
                                 );
                               })()}
@@ -6287,6 +6402,7 @@ export default function SLFMonitoring({
                           loadingBaseline ||
                           detailSubmissionsLoading
                         }
+                        progress={detailProgress}
                         error={detailDashboardError}
                       />
                     ),
@@ -6934,7 +7050,7 @@ export default function SLFMonitoring({
                                                     Active cell reached 80% capacity
                                                   </Text>
                                                   <Tag color="orange">
-                                                    Cell {alertCells[0].index + 1}: {alertCells[0].pct}% full
+                                                    {resolveCellName(detailViewRecord, alertCells[0].index)}: {alertCells[0].pct}% full
                                                   </Tag>
                                                   <Button
                                                     size="small"
@@ -7108,7 +7224,7 @@ export default function SLFMonitoring({
                                                     fontWeight: 600,
                                                   }}
                                                 >
-                                                  Cell {i + 1}
+                                                  {resolveCellName(detailViewRecord, i)}
                                                 </div>
                                                 <Tag
                                                   color={isHaz ? "red" : "blue"}

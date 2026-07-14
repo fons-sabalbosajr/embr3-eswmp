@@ -8,6 +8,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+- Closed anonymous access to the core API. A new `requireAnyAuth` middleware
+  (valid admin- or portal-realm JWT) now gates every route in `dataSLF`,
+  `transactions`, `notifications`, `slfFacilities`, `supportTickets`,
+  `portalQueue`, and `haulerDeleteRequests`, plus the mutating `settings`
+  routes (`PUT /app`, `/fields` create/update/delete, `/org-chart`). Previously
+  these were reachable with no token — including `bulk-delete`, `bulk-revert`,
+  transaction edit/delete, and cross-recipient notification read/delete (IDOR).
+  Read-only pre-login settings routes (`GET /app`, `/address/*`) stay public.
+- Audit actor is no longer spoofable. `getRequestActor` and request logging now
+  prefer the server-verified email (resolved from the JWT against the DB,
+  covering both `User` and `UserPortal`) over the client-supplied `X-User-*`
+  headers / `performedBy` body field.
+- 5xx responses no longer leak internals. When `NODE_ENV=production`, a response
+  sanitizer strips the internal `error` field from 5xx bodies app-wide (4xx
+  validation detail is preserved for the UI). Document `NODE_ENV=production` in
+  `.env.example`.
+- Documented `JWT_SECRET` rotation (`docs/JWT_SECRET_ROTATION.md`); flagged the
+  short existing secret for rotation to ≥ 32 random bytes.
+
+### Added
+- `server/utils/validate.js` — dependency-free request-body validation
+  (required fields, type/range/enum checks) returning structured 400s. Applied
+  to `POST /api/slf-facilities` as the reference pattern for other write routes.
+
 ### Added
 - `server/utils/dummyFilter.js` and `front-end/src/utils/excludeDummy.js` —
   reusable helpers that keep dummy/test SLF facilities and portal accounts out of

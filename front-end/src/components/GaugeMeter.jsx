@@ -1,3 +1,5 @@
+import { useId } from "react";
+
 // Lightweight, dependency-free SVG semicircular gauge.
 //
 // Reusable across dashboards for "X of capacity used" style metrics. No heavy
@@ -43,6 +45,12 @@ export default function GaugeMeter({
   percentFontSize = 20,
   noDataFontSize = 11,
   labelFontSize = 12,
+  // Operational-state modifiers (see utils/cellVisuals → getCellStatusConfig).
+  // They change HOW the arc is drawn, never its colour — the colour stays owned
+  // by the cell TYPE so the two axes never conflict.
+  //   "solid"  normal · "muted" faded · "dashed" not-yet-real · "none" no arc
+  fillStyle = "solid",
+  fillOpacity = 1,
 }) {
   const hasData = percent != null && Number.isFinite(Number(percent));
   const pct = hasData ? Math.min(100, Math.max(0, Number(percent))) : 0;
@@ -57,6 +65,17 @@ export default function GaugeMeter({
   const arcPath = `M ${thickness / 2} ${cy} A ${r} ${r} 0 0 1 ${size - thickness / 2} ${cy}`;
   const svgHeight = cy + thickness;
 
+  // A "dashed" cell draws its filled portion as a broken arc. The fill length is
+  // still driven by `pct`, so the dash pattern has to be composed against a
+  // clip-free stroke: draw the arc masked to `pct` via a second path.
+  const dashPattern = fillStyle === "dashed" ? `${Math.max(3, thickness * 0.9)} ${Math.max(2, thickness * 0.6)}` : null;
+  const showArc = hasData && fillStyle !== "none";
+  // SVG ids are document-global, and many gauges render at once. useId gives one
+  // stable unique id per mounted instance — stable across rerenders, so the
+  // clipPath is not recreated on every render.
+  const gaugeId = useId().replace(/:/g, "");
+  const clipPathId = `gauge-clip-${gaugeId}`;
+
   return (
     <div style={{ textAlign: "center", width: size, margin: "0 auto" }}>
       <div style={{ position: "relative" }}>
@@ -67,17 +86,49 @@ export default function GaugeMeter({
             stroke={trackColor}
             strokeWidth={thickness}
             strokeLinecap="round"
+            strokeDasharray={fillStyle === "dashed" || fillStyle === "none" ? "3 3" : undefined}
           />
-          {hasData && (
-            <path
-              d={arcPath}
-              fill="none"
-              stroke={color}
-              strokeWidth={thickness}
-              strokeLinecap="round"
-              strokeDasharray={arcLength}
-              strokeDashoffset={dashOffset}
-            />
+          {showArc && (
+            <g opacity={fillOpacity}>
+              {/* Length-limited to `pct` by the dashoffset trick, then optionally
+                  re-dashed for the "dashed" state via a stroke on a clipped copy. */}
+              {dashPattern ? (
+                <>
+                  <defs>
+                    <clipPath id={clipPathId}>
+                      <path
+                        d={arcPath}
+                        fill="none"
+                        stroke="#000"
+                        strokeWidth={thickness + 2}
+                        strokeLinecap="butt"
+                        strokeDasharray={arcLength}
+                        strokeDashoffset={dashOffset}
+                      />
+                    </clipPath>
+                  </defs>
+                  <path
+                    d={arcPath}
+                    fill="none"
+                    stroke={color}
+                    strokeWidth={thickness}
+                    strokeLinecap="butt"
+                    strokeDasharray={dashPattern}
+                    clipPath={`url(#${clipPathId})`}
+                  />
+                </>
+              ) : (
+                <path
+                  d={arcPath}
+                  fill="none"
+                  stroke={color}
+                  strokeWidth={thickness}
+                  strokeLinecap="round"
+                  strokeDasharray={arcLength}
+                  strokeDashoffset={dashOffset}
+                />
+              )}
+            </g>
           )}
         </svg>
         <div

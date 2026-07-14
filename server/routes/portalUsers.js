@@ -713,7 +713,10 @@ router.get("/:id/submission-history", async (req, res) => {
     if (!user) return res.status(404).json({ message: "User not found" });
 
     const [submissions, conversations] = await Promise.all([
-      DataSLF.find({ submittedBy: user.email }).setOptions({ includeHiddenYears: true }).populate("slfGenerator").sort({ createdAt: -1 }).lean(),
+      // Projected populate — un-projected this inlined the whole SlfFacility doc
+      // into every submission in the user's history (see SLF_GENERATOR_REF_FIELDS
+      // in routes/dataSLF.js).
+      DataSLF.find({ submittedBy: user.email }).setOptions({ includeHiddenYears: true }).populate("slfGenerator", "_id lgu slfName province dataYear").sort({ createdAt: -1 }).lean(),
       SupportTicket.find({ $or: [{ portalUser: user._id }, { portalUserEmail: user.email }] }).sort({ updatedAt: -1 }).lean(),
     ]);
     const submissionIds = submissions.map((submission) => submission.submissionId).filter(Boolean);

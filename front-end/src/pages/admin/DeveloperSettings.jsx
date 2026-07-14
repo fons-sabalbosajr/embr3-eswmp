@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, Children, isValidElement } from "react";
 import {
   Card,
   Typography,
@@ -80,12 +80,88 @@ import dayjs from "dayjs";
 import ResponsiveTable from "./shared/ResponsiveTable";
 import DummyDataConfig from "./DummyDataConfig";
 import SLFDataTableFiles from "./SLFDataTableFiles";
+import SubmissionRawData from "./SubmissionRawData";
 
 const { Title, Text } = Typography;
 const { Option } = Select;
 const { TextArea } = Input;
 
+// App Settings had grown to 13 flat top-level tabs. They are grouped here by
+// responsibility — the tab PANES themselves are untouched, this only decides
+// which group each one hangs under. `tabs` lists the leaf keys in display order;
+// a leaf that is conditionally rendered (e.g. dummy-data) simply won't appear.
+//
+// Direct navigation still uses the LEAF key (AdminHome passes e.g.
+// "announcements" as initialActiveKey) — the owning group is resolved from it,
+// so existing deep links keep working unchanged.
+const TAB_GROUPS = [
+  {
+    key: "grp-general",
+    label: "General",
+    icon: <GlobalOutlined />,
+    tabs: ["general", "dashboard-display", "announcements"],
+  },
+  {
+    key: "grp-submissions",
+    label: "Submissions & Data",
+    icon: <DatabaseOutlined />,
+    tabs: ["volume-analysis", "submission-raw-data"],
+  },
+  {
+    key: "grp-maintenance",
+    label: "Data Maintenance",
+    icon: <DeleteOutlined />,
+    tabs: ["deleted-submissions", "deleted-slf-data", "slf-data-files", "dummy-data"],
+  },
+  {
+    key: "grp-integrations",
+    label: "Integrations & Services",
+    icon: <MailOutlined />,
+    tabs: ["portal-email"],
+  },
+  {
+    key: "grp-security",
+    label: "Security & Access",
+    icon: <LockOutlined />,
+    tabs: ["security", "portal-security", "dev-portal-credential"],
+  },
+  {
+    key: "grp-system",
+    label: "System & Logs",
+    icon: <ToolOutlined />,
+    tabs: ["system"],
+  },
+];
+
+const LEAF_TO_GROUP = new Map(
+  TAB_GROUPS.flatMap((group) => group.tabs.map((leaf) => [leaf, group.key])),
+);
+
+// Leaf tab labels are authored as `<span><SomeIcon /> Name</span>`. Second-level
+// subtabs render without their icon (the group nav above them already carries
+// one), so drop the element children and keep the text. Falls back to the
+// original label if there is no text to salvage.
+function stripLabelIcon(label) {
+  if (!isValidElement(label)) return label;
+  const text = Children.toArray(label.props?.children ?? [])
+    .filter((child) => typeof child === "string" || typeof child === "number")
+    .join("")
+    .trim();
+  return text || label;
+}
+
 export default function DeveloperSettings({onSettingsSaved, isDark, isDeveloper = false, initialActiveKey = "general"}) {
+  // Tab selection is tracked by LEAF key; the group is derived from it. Callers
+  // (and the AdminHome deep links) therefore keep passing plain leaf keys.
+  const [activeLeaf, setActiveLeaf] = useState(initialActiveKey);
+  const activeGroup = LEAF_TO_GROUP.get(activeLeaf) || TAB_GROUPS[0].key;
+
+  // AdminHome flips initialActiveKey to jump straight to a pane (e.g. from an
+  // announcement notification), so follow it rather than only reading it once.
+  useEffect(() => {
+    if (initialActiveKey && LEAF_TO_GROUP.has(initialActiveKey)) setActiveLeaf(initialActiveKey);
+  }, [initialActiveKey]);
+
   const [settings, setSettings] = useState(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -955,6 +1031,72 @@ export default function DeveloperSettings({onSettingsSaved, isDark, isDeveloper 
     }
   };
 
+  // Panes that fetch lazily on first visit — unchanged behaviour, just moved off
+  // the old flat <Tabs onChange> now that the leaf tabs live one level down.
+  const handleLeafChange = (key) => {
+    setActiveLeaf(key);
+    if (key === "portal-security" && portalSecurityUsers.length === 0) fetchPortalSecurityUsers();
+    if (key === "deleted-submissions" && deletedEntries.length === 0) fetchDeletedEntries();
+    if (key === "deleted-slf-data" && deletedSlfEntries.length === 0) fetchDeletedSlfEntries();
+  };
+
+  // Which leaf keys actually rendered this pass (some are developer-gated).
+  // Populated by buildGroupedItems during render, read by handleGroupChange on click.
+  const renderedLeafKeys = new Set();
+
+  // Selecting a GROUP opens its first available leaf.
+  const handleGroupChange = (groupKey) => {
+    const group = TAB_GROUPS.find((g) => g.key === groupKey);
+    const first = group?.tabs.find((leaf) => renderedLeafKeys.has(leaf));
+    if (first) handleLeafChange(first);
+  };
+
+  // Takes the flat leaf-tab array (defined inline below, unchanged) and nests it
+  // under TAB_GROUPS: each group tab renders an inner <Tabs> holding only its own
+  // leaves. Tab CONTENT is never duplicated — every leaf is placed exactly once,
+  // and a leaf missing from TAB_GROUPS still shows up (under the first group)
+  // rather than silently disappearing.
+  const buildGroupedItems = (leafItems) => {
+    const byKey = new Map(leafItems.map((item) => [item.key, item]));
+    leafItems.forEach((item) => renderedLeafKeys.add(item.key));
+
+    const placed = new Set();
+    const groups = TAB_GROUPS.map((group) => {
+      const children = group.tabs.map((leaf) => byKey.get(leaf)).filter(Boolean);
+      children.forEach((child) => placed.add(child.key));
+      return { group, children };
+    });
+
+    // Safety net: a newly added leaf that nobody assigned to a group.
+    const orphans = leafItems.filter((item) => !placed.has(item.key));
+    if (orphans.length) groups[0].children.push(...orphans);
+
+    return groups
+      .filter(({ children }) => children.length > 0)
+      .map(({ group, children }) => ({
+        key: group.key,
+        // Icons stay on the PRIMARY (group) nav…
+        label: (
+          <span>
+            {group.icon} {menuCollapsed ? "" : group.label}
+          </span>
+        ),
+        children: (
+          <Tabs
+            size="small"
+            className="app-settings-subtabs"
+            activeKey={children.some((c) => c.key === activeLeaf) ? activeLeaf : children[0].key}
+            onChange={handleLeafChange}
+            // …and are stripped from the second-level subtabs, to cut the visual
+            // clutter of nested icon rows. Only the icon is dropped — the tab
+            // name, key, pane and active state are untouched.
+            items={children.map((child) => ({ ...child, label: stripLabelIcon(child.label) }))}
+            style={{ marginTop: -8 }}
+          />
+        ),
+      }));
+  };
+
   if (loading) {
     return (
       <div style={{ textAlign: "center", padding: 80 }}>
@@ -983,25 +1125,61 @@ export default function DeveloperSettings({onSettingsSaved, isDark, isDeveloper 
           .developer-settings-tabs .ant-tabs-tab-btn {
             font-weight: 500;
           }
-          /* Collapsed left menu: keep icons, hide label text */
-          .developer-settings-tabs.dev-collapsed .ant-tabs-tab-btn {
+
+          /* ── Nested (second-level) subtabs ──────────────────────────────────
+             The rules above target the VERTICAL left-hand group menu, but they
+             also match these nested horizontal subtabs, which inherited
+             "margin: 1px 0" — i.e. zero HORIZONTAL margin — leaving the labels
+             jammed together. Spacing is restored with a gap on the flex nav list
+             (one parent property) rather than margins on each tab. */
+          .developer-settings-tabs .app-settings-subtabs .ant-tabs-nav-list {
+            gap: 10px;
+            row-gap: 4px;
+          }
+          .developer-settings-tabs .app-settings-subtabs .ant-tabs-tab {
+            font-size: 12px;
+            padding: 6px 4px !important;
+            margin: 0 !important;   /* the gap above owns the spacing now */
+            line-height: 1.4;
+          }
+          .developer-settings-tabs .app-settings-subtabs .ant-tabs-nav {
+            margin-bottom: 12px;
+          }
+          /* Tablet/mobile: tighten the gap so more subtabs stay reachable before
+             antd's overflow control kicks in. Wrapping/overflow behaviour itself
+             is left to antd — unchanged. */
+          @media (max-width: 768px) {
+            .developer-settings-tabs .app-settings-subtabs .ant-tabs-nav-list {
+              gap: 6px;
+            }
+            .developer-settings-tabs .app-settings-subtabs .ant-tabs-tab {
+              padding: 5px 2px !important;
+            }
+          }
+
+          /* Collapsed left menu: keep icons, hide label text.
+             Scoped with "> .ant-tabs-nav" so it hits ONLY the outer group menu.
+             Unscoped, these also matched the nested subtabs — and since those no
+             longer carry icons, collapsing the menu would have blanked their
+             labels to font-size 0, leaving empty subtabs. */
+          .developer-settings-tabs.dev-collapsed > .ant-tabs-nav .ant-tabs-tab-btn {
             font-size: 0 !important;
           }
-          .developer-settings-tabs.dev-collapsed .ant-tabs-tab .anticon {
+          .developer-settings-tabs.dev-collapsed > .ant-tabs-nav .ant-tabs-tab .anticon {
             font-size: 16px !important;
             margin-right: 0 !important;
           }
-          .developer-settings-tabs.dev-collapsed .ant-tabs-tab {
+          .developer-settings-tabs.dev-collapsed > .ant-tabs-nav .ant-tabs-tab {
             justify-content: center;
             padding: 8px 0 !important;
           }
           @media (max-width: 576px) {
-            .developer-settings-tabs .ant-tabs-nav { width: 100% !important; }
+            .developer-settings-tabs > .ant-tabs-nav { width: 100% !important; }
           }
         `}
       </style>
       <Tabs
-        defaultActiveKey={initialActiveKey}
+        activeKey={activeGroup}
         size="small"
         tabPosition="left"
         className={`developer-settings-tabs${menuCollapsed ? " dev-collapsed" : ""}`}
@@ -1035,12 +1213,8 @@ export default function DeveloperSettings({onSettingsSaved, isDark, isDeveloper 
             </div>
           ),
         }}
-        onChange={(key) => {
-          if (key === "portal-security" && portalSecurityUsers.length === 0) fetchPortalSecurityUsers();
-          if (key === "deleted-submissions" && deletedEntries.length === 0) fetchDeletedEntries();
-          if (key === "deleted-slf-data" && deletedSlfEntries.length === 0) fetchDeletedSlfEntries();
-        }}
-        items={[
+        onChange={handleGroupChange}
+        items={buildGroupedItems([
           {
             key: "general",
             label: <span><GlobalOutlined /> General</span>,
@@ -2683,12 +2857,24 @@ export default function DeveloperSettings({onSettingsSaved, isDark, isDeveloper 
             label: <span><FolderOpenOutlined /> SLF Data Table Files</span>,
             children: <SLFDataTableFiles isDark={isDark} />,
           },
+          // Developer-only raw submission maintenance + volume analysis. Gated
+          // here AND on every backend route it calls (frontend hiding alone is
+          // not access control).
+          ...(isDeveloper
+            ? [
+                {
+                  key: "submission-raw-data",
+                  label: <span><DatabaseOutlined /> Submission RAW Data</span>,
+                  children: <SubmissionRawData isDark={isDark} />,
+                },
+              ]
+            : []),
           // {
           //   key: "accounts",
           //   label: <span><TeamOutlined /> Accounts &amp; Roles</span>,
           //   children: <AccountSettings isDark={isDark} />,
           // },
-        ]}
+        ])}
       />
       <Modal
         title="Portal User Security"

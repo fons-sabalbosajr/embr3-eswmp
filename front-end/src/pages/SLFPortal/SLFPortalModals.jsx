@@ -18,10 +18,54 @@ import {
 import { EMPTY_VEHICLE } from "./constants";
 import api from "../../api";
 import secureStorage from "../../utils/secureStorage";
+import { convertVolume } from "../../utils/volumeUnits";
 
 const { Text } = Typography;
 const { TextArea } = Input;
 const normalizeUnitLabel = (unit) => String(unit || "m³").replace("m3", "m³");
+
+// Switching a cell entry's unit must CONVERT the volume, not merely relabel it.
+// Relabelling turned "100" encoded as m³ into "100 tons" — a 5× overstatement that
+// then flowed straight into the baseline and every capacity calculation built on it.
+//
+// Uses the one shared conversion module (utils/volumeUnits), so this can never
+// drift from the factor the rest of the app — admin included — uses.
+function convertCellDraftUnit(draft, nextUnit, declaredUnit) {
+  const from = normalizeUnitLabel(draft.unit || declaredUnit || "m³");
+  const to = normalizeUnitLabel(nextUnit);
+  if (from === to) return { ...draft, unit: to };
+
+  const converted = convertVolume(draft.volume, from, to);
+  return {
+    ...draft,
+    unit: to,
+    // Unconvertible (blank/garbage) → keep what the user typed rather than
+    // writing a guessed number. Rounded to 2dp so the field stays usable.
+    volume:
+      converted === null ? draft.volume : Math.round(converted * 100) / 100,
+  };
+}
+
+// Tells the user when this entry's unit differs from the SLF's DECLARED unit, and
+// what the value comes to in that declared unit — the declared unit is the source
+// of truth every capacity/utilization figure is computed in.
+function CellEntryUnitHint({ draftUnit, declaredUnit }) {
+  const declared = normalizeUnitLabel(declaredUnit || "m³");
+  const current = normalizeUnitLabel(draftUnit || declaredUnit || "m³");
+  if (current === declared) {
+    return (
+      <span style={{ fontSize: 11 }}>
+        Declared unit for this SLF: <strong>{declared}</strong>
+      </span>
+    );
+  }
+  return (
+    <span style={{ fontSize: 11, color: "#d46b08" }}>
+      This SLF declares <strong>{declared}</strong>. Saving in {current} — the value
+      is converted to {declared} for all capacity calculations.
+    </span>
+  );
+}
 
 // Extract a Google Drive file ID from any common Drive URL shape so images can
 // be shown from a direct thumbnail endpoint (webViewLink pages don't load in <img>).
@@ -189,6 +233,7 @@ export default function SLFPortalModals({
   editingTruckKey, setEditingTruckKey,
   truckErrors, setTruckErrors,
   historyDetailModal, setHistoryDetailModal,
+  historyDetailLoading, historyDetailError, closeHistoryDetail,
   reviewModalOpen, setReviewModalOpen,
   revertModalOpen, setRevertModalOpen,
   revertRecord, setRevertRecord,
@@ -765,8 +810,30 @@ export default function SLFPortalModals({
                           </Form.Item>
                         </Col>
                         <Col xs={12} sm={5}>
+                          {/* Vehicle Capacity is REQUIRED: a truck's capacity is
+                              what the submission's over-capacity check measures
+                              against, and a submission cannot be finalised without
+                              it. Flag it inline so it is fixed here, not at submit. */}
                           <Form.Item
                             label="Capacity"
+                            required
+                            validateStatus={
+                              v.capacity === null ||
+                              v.capacity === undefined ||
+                              v.capacity === "" ||
+                              !(Number(v.capacity) > 0)
+                                ? "error"
+                                : ""
+                            }
+                            help={
+                              v.capacity === null ||
+                              v.capacity === undefined ||
+                              v.capacity === ""
+                                ? "Required"
+                                : !(Number(v.capacity) > 0)
+                                  ? "Must be > 0"
+                                  : undefined
+                            }
                             style={{ marginBottom: 8 }}
                           >
                             <InputNumber
@@ -1779,11 +1846,15 @@ export default function SLFPortalModals({
         )}
       </Modal>
 
-      {/* ── Submission Detail Modal ── */}
+      {/* ── Submission Detail Modal ──
+          Opens INSTANTLY on the lean history row (id / company / date / status are
+          already there) and fills in the heavy per-truck detail behind a skeleton as
+          the full record arrives — instead of blocking on the request first, which
+          is what made it feel slow. See openHistoryDetail() for the bounded cache. */}
       <Modal
         title={null}
         open={!!historyDetailModal}
-        onCancel={() => setHistoryDetailModal(null)}
+        onCancel={closeHistoryDetail || (() => setHistoryDetailModal(null))}
         footer={null}
         width={1100}
         destroyOnHidden
@@ -1927,6 +1998,30 @@ export default function SLFPortalModals({
                   </div>
                 </div>
 
+                {/* The header above renders from the lean row we already have, so the
+                    modal is never blank. Everything below needs the FULL record
+                    (trucks, baseline, capacity), so it skeletons until that lands. */}
+                {historyDetailError ? (
+                  <div style={{ padding: "24px 28px" }}>
+                    <Alert
+                      type="error"
+                      showIcon
+                      message="Could not load submission details"
+                      description={historyDetailError}
+                    />
+                  </div>
+                ) : historyDetailLoading ? (
+                  <div style={{ padding: "24px 28px" }}>
+                    <Row gutter={16} style={{ marginBottom: 24 }}>
+                      {[0, 1, 2].map((i) => (
+                        <Col xs={8} key={i}>
+                          <Skeleton.Input active block style={{ height: 72 }} />
+                        </Col>
+                      ))}
+                    </Row>
+                    <Skeleton active paragraph={{ rows: 6 }} />
+                  </div>
+                ) : (
                 <div style={{ padding: "24px 28px" }}>
                   {/* Summary Stats Bar */}
                   <Row gutter={16} style={{ marginBottom: 24 }}>
@@ -2644,6 +2739,7 @@ export default function SLFPortalModals({
                     </div>
                   )}
                 </div>
+                )}
               </div>
             );
           })()}
@@ -3639,7 +3735,9 @@ export default function SLFPortalModals({
                 <span className="slf-support-mini-icon slf-support-mini-icon-green"><FileTextOutlined /></span>
                 <div>
                   <div className="slf-support-detail-label">Category</div>
-                  <Text strong>{supportDetailModal.category}</Text>
+                  {/* The LABEL above already carries the emphasis; bolding the
+                      value too made the whole block read as a heading. */}
+                  <Text className="slf-support-detail-value">{supportDetailModal.category}</Text>
                 </div>
               </div>
             </div>
@@ -3937,8 +4035,10 @@ export default function SLFPortalModals({
                 },
                 {
                   col: "Truck Capacity",
-                  desc: "Truck capacity in m³ or tons",
-                  required: false,
+                  // Required: a submission cannot be finalised without it, so an
+                  // upload missing it would only fail later at submit time.
+                  desc: "Truck capacity in m³ or tons — must be greater than 0",
+                  required: true,
                 },
                 {
                   col: "Actual Volume",
@@ -4204,7 +4304,16 @@ export default function SLFPortalModals({
               ]}
             />
           </Form.Item>
-          <Form.Item label="Volume" required>
+          <Form.Item
+            label="Volume"
+            required
+            extra={
+              <CellEntryUnitHint
+                draftUnit={activeCellDraft.unit}
+                declaredUnit={baselineUnit}
+              />
+            }
+          >
             <Space.Compact style={{ width: "100%" }}>
               <InputNumber
                 placeholder="Volume"
@@ -4218,7 +4327,12 @@ export default function SLFPortalModals({
               />
               <Select
                 value={normalizeUnitLabel(activeCellDraft.unit || baselineUnit || "m³")}
-                onChange={(unit) => setActiveCellDraft((d) => ({ ...d, unit }))}
+                // Switching the unit CONVERTS the value instead of just relabelling
+                // it. Previously "100" encoded as m³ became "100 tons" on switch —
+                // a 5× overstatement — because only the label changed.
+                onChange={(unit) =>
+                  setActiveCellDraft((d) => convertCellDraftUnit(d, unit, baselineUnit))
+                }
                 style={{ width: 96 }}
               >
                 <Option value="m³">m³</Option>
@@ -4293,7 +4407,16 @@ export default function SLFPortalModals({
               ]}
             />
           </Form.Item>
-          <Form.Item label="Volume" required>
+          <Form.Item
+            label="Volume"
+            required
+            extra={
+              <CellEntryUnitHint
+                draftUnit={closedCellDraft.unit}
+                declaredUnit={baselineUnit}
+              />
+            }
+          >
             <Space.Compact style={{ width: "100%" }}>
               <InputNumber
                 placeholder="Volume"
@@ -4307,7 +4430,10 @@ export default function SLFPortalModals({
               />
               <Select
                 value={normalizeUnitLabel(closedCellDraft.unit || baselineUnit || "m³")}
-                onChange={(unit) => setClosedCellDraft((d) => ({ ...d, unit }))}
+                // Converts the value on unit change — see the active-cell modal.
+                onChange={(unit) =>
+                  setClosedCellDraft((d) => convertCellDraftUnit(d, unit, baselineUnit))
+                }
                 style={{ width: 96 }}
               >
                 <Option value="m³">m³</Option>

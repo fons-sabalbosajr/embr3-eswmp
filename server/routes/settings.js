@@ -100,7 +100,7 @@ router.get("/fields/all", async (req, res) => {
 });
 
 // Seed default portal fields (creates only if none exist)
-router.post("/fields/seed", async (req, res) => {
+router.post("/fields/seed", authMiddleware, adminOnly, async (req, res) => {
   try {
     const count = await PortalField.countDocuments();
     if (count > 0) {
@@ -129,7 +129,7 @@ router.post("/fields/seed", async (req, res) => {
 });
 
 // Create field
-router.post("/fields", async (req, res) => {
+router.post("/fields", authMiddleware, adminOnly, async (req, res) => {
   try {
     const field = new PortalField(req.body);
     await field.save();
@@ -140,7 +140,7 @@ router.post("/fields", async (req, res) => {
 });
 
 // Update field
-router.put("/fields/:id", async (req, res) => {
+router.put("/fields/:id", authMiddleware, adminOnly, async (req, res) => {
   try {
     const field = await PortalField.findByIdAndUpdate(req.params.id, req.body, { returnDocument: "after" });
     if (!field) return res.status(404).json({ message: "Field not found" });
@@ -151,7 +151,7 @@ router.put("/fields/:id", async (req, res) => {
 });
 
 // Delete field
-router.delete("/fields/:id", async (req, res) => {
+router.delete("/fields/:id", authMiddleware, adminOnly, async (req, res) => {
   try {
     await PortalField.findByIdAndDelete(req.params.id);
     res.json({ message: "Field deleted" });
@@ -181,7 +181,7 @@ router.get("/app", async (req, res) => {
 });
 
 // Update app settings
-router.put("/app", async (req, res) => {
+router.put("/app", authMiddleware, adminOnly, async (req, res) => {
   try {
     let settings = await AppSettings.findOne();
     if (!settings) {
@@ -709,7 +709,7 @@ router.put("/app/drive-config", authMiddleware, adminOnly, async (req, res) => {
 });
 
 // Update org chart
-router.put("/org-chart", async (req, res) => {
+router.put("/org-chart", authMiddleware, adminOnly, async (req, res) => {
   try {
     let settings = await AppSettings.findOne();
     if (!settings) settings = new AppSettings();

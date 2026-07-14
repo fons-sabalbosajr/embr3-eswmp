@@ -87,16 +87,52 @@ function CollapsibleCard({ title, extra, collapsed, onToggle, children, style })
   );
 }
 
-function SlfDashboardTab({ dashboard, isDark, loading = false, error = null }) {
+// Every collapsible SLF Dashboard section starts COLLAPSED. Each section is
+// conditionally rendered (`{!collapsed.x && …}`), so a collapsed section also
+// keeps its Recharts charts unmounted until the user opens it.
+//
+// This is `useState` INITIAL state, so an API refresh or an ordinary rerender
+// cannot re-expand a section the user closed — only the user's own toggle moves it.
+const DEFAULT_COLLAPSED_SECTIONS = {
+  trends: true,
+  breakdown: true,
+  cells: true,
+  submissions: true,
+};
+
+function SlfDashboardTab({ dashboard, isDark, loading = false, error = null, progress = null }) {
   const [page, setPage] = useState(1);
-  const [collapsed, setCollapsed] = useState({});
+  const [collapsed, setCollapsed] = useState(DEFAULT_COLLAPSED_SECTIONS);
   const toggle = (key) => setCollapsed((prev) => ({ ...prev, [key]: !prev[key] }));
 
   // Loading skeleton — shown while the parent is still assembling submission /
   // baseline data so the modal never renders undefined values (Task 4E).
   if (loading) {
+    // Progress is only shown when the parent reports a REAL measured count
+    // (records processed / records total). No fabricated percentage — if there is
+    // nothing measurable yet we show the stage name alone.
+    const measurable = progress && progress.total > 0;
+    const pct = measurable
+      ? Math.min(100, Math.round((progress.done / progress.total) * 100))
+      : null;
     return (
       <div>
+        {progress?.stage && (
+          <div style={{ marginBottom: 10 }}>
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              {progress.stage}
+              {measurable ? ` — ${progress.done.toLocaleString()} / ${progress.total.toLocaleString()} records` : "…"}
+            </Text>
+            <Progress
+              percent={pct ?? 0}
+              status="active"
+              showInfo={measurable}
+              size="small"
+              // Indeterminate stages get a striped bar instead of a fake number.
+              strokeColor={measurable ? undefined : { from: "#2f54eb", to: "#91caff" }}
+            />
+          </div>
+        )}
         <Row gutter={[10, 10]} style={{ marginBottom: 12 }}>
           <Col xs={24} lg={9}>
             <Card style={{ borderRadius: 12 }}>

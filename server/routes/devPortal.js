@@ -221,8 +221,19 @@ router.get("/portal-users", async (req, res) => {
   }
 });
 
-// Stage 4: start impersonation — issue a portal session token for the chosen
-// user, marked as developer debug/impersonation, and audit-log the action.
+// Stage 4: open a Developer Portal CONTEXT on the chosen portal user.
+//
+// This does NOT impersonate the user's authentication token. It issues a token
+// that is explicitly the DEVELOPER's (`role: "developer"`, `id` = the developer)
+// carrying an explicit target context (`portalContextUserId`). Every portal route
+// resolves that through utils/portalContext, which re-checks the developer role
+// before honouring the target — so:
+//
+//   • the session can never be mistaken for the portal user's own session,
+//   • revoking the developer's role immediately revokes this access,
+//   • Developer Portal Mode is READ-ONLY (assertPortalWriteAllowed blocks writes
+//     to the target's data through ordinary portal endpoints),
+//   • every context resolution is audited.
 router.post("/impersonate", async (req, res) => {
   try {
     const dev = await requireDevStage(req, res, "devImpersonate");
@@ -232,16 +243,17 @@ router.post("/impersonate", async (req, res) => {
 
     const token = jwt.sign(
       {
-        id: String(portalUser._id),
-        role: "portal_user",
-        impersonatedBy: String(dev._id),
+        id: String(dev._id),          // the DEVELOPER — not the portal user
+        role: "developer",            // authorization is developer, explicitly
+        email: dev.email,
+        portalContextUserId: String(portalUser._id), // the explicit target context
         debug: true,
       },
       process.env.JWT_SECRET,
       { expiresIn: "2h" },
     );
-    writeLog("warn", "dev-portal.impersonate", {
-      message: `Developer ${dev.email} started portal impersonation of ${portalUser.email}`,
+    writeLog("warn", "dev-portal.context.open", {
+      message: `Developer ${dev.email} opened a read-only portal context on ${portalUser.email}`,
       user: dev.email,
       ip: req.ip,
       meta: {
@@ -253,7 +265,17 @@ router.post("/impersonate", async (req, res) => {
     });
     const safe = portalUser.toObject();
     delete safe.password;
-    res.json({ message: "Developer debug session started.", token, user: safe, impersonation: true });
+    delete safe.resetToken;
+    delete safe.resetTokenExpiry;
+    res.json({
+      message: "Developer portal context opened (read-only).",
+      token,
+      user: safe,
+      impersonation: true,       // kept: the Portal client already reads this flag
+      developerContext: true,
+      readOnly: true,
+      developerEmail: dev.email,
+    });
   } catch (e) {
     res.status(500).json({ message: "Server error", error: e.message });
   }

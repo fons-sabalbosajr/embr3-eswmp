@@ -216,7 +216,17 @@ export default function PortalLogin() {
         { headers: { Authorization: `Bearer ${devSessionToken}` } },
       );
       secureStorage.set("portal_token", data.token);
-      secureStorage.setJSON("portal_user", { ...data.user, devImpersonation: true });
+      // The token issued here is the DEVELOPER's, carrying an explicit portal
+      // context — it is not the portal user's own token. The session is read-only
+      // and the backend enforces that; these flags only drive the UI badge and
+      // disable the write controls.
+      secureStorage.setJSON("portal_user", {
+        ...data.user,
+        devImpersonation: true,
+        developerContext: true,
+        readOnly: data.readOnly !== false,
+        developerEmail: data.developerEmail || "",
+      });
       resetDevFlow();
       navigate("/slfportal");
     } catch (err) {

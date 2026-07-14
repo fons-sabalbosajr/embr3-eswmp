@@ -1,4 +1,5 @@
 const express = require("express");
+const mongoose = require("mongoose");
 const jwt = require("jsonwebtoken");
 const crypto = require("crypto");
 const multer = require("multer");
@@ -18,9 +19,111 @@ const {
 } = require("../utils/email");
 const { notifyAdmin } = require("../utils/socketEmit");
 const Notification = require("../models/Notification");
+const {
+  resolvePortalContext,
+  assertPortalWriteAllowed,
+  sendPortalContextError,
+} = require("../utils/portalContext");
 
 const router = express.Router();
 
+// ── Projections for the portal Submission History payload ───────────────────
+//
+// The history view reads identity, status, location and the per-truck detail it
+// expands into rows. It does NOT read the baseline sub-documents
+// (accreditedHaulers / activeCellEntries / closedCellEntries / totalVolumeAccepted…)
+// — those come from GET /data-slf/baseline/:slfName — so shipping them here was
+// pure waste, as was inlining the entire SlfFacility document into every row.
+// LIST projection. `trucks` is pulled down to its CELL-PLACEMENT sub-paths only —
+// enough to derive the "Cell Assigned" column and the unplaced-placement flag
+// server-side — and is then stripped from the response entirely. The full
+// trucks[] (with nested vehicles[] and their selectedClients[]) was 83% of this
+// payload: 300 KB of 363 KB for one user, and the list never rendered any of it.
+//
+// Anything needing the whole record (Edit & Resubmit, the cell organizer) fetches
+// it by id from GET /my-submissions/:id.
+const PORTAL_SUBMISSION_LIST_FIELDS = [
+  "idNo submissionId previousIdNos slfName slfGenerator",
+  "dateOfDisposal lguCompanyName companyType address",
+  "companyRegion companyProvince companyMunicipality companyBarangay",
+  "status revertRequested revertReason revertRequestedAt revertedAt revertedBy",
+  "submittedBy createdAt updatedAt isDummy hiddenFromPortal",
+  "truckCount totalVolumeM3 totalVolumeTons residualVolumeM3 residualVolumeTons",
+  "hazardousVolumeM3 hazardousVolumeTons",
+  "trucks.cellIndex trucks.cellName trucks.cellType trucks.wasteType trucks.actualVolume",
+  "trucks.vehicles.cellIndex trucks.vehicles.cellName trucks.vehicles.cellType trucks.vehicles.actualVolume",
+].join(" ");
+
+// Only the facility identity the history rows display. `cellNames` is included so
+// a cell's CURRENT name can be resolved from its cellIndex rather than the stale
+// name copied onto the truck at submit time.
+const PORTAL_SLF_REF_FIELDS = "_id lgu slfName province cellNames";
+
+// Resolve the CURRENT display name of a cell from its canonical index, exactly as
+// the admin side does (see routes/dataSLF.js#resolveCellName). NB: Number(null) is
+// 0, so the empty values must be rejected before coercing or a truck with NO cell
+// would resolve to cell 0 and appear assigned.
+function resolvePortalCellName(facilityCellNames, cellIndex, storedName) {
+  const hasIndex = cellIndex !== null && cellIndex !== undefined && cellIndex !== "";
+  const idx = hasIndex ? Number(cellIndex) : NaN;
+  if (Number.isInteger(idx) && idx >= 0) {
+    const current = facilityCellNames?.[idx];
+    return current ? String(current).trim() : `Cell ${idx + 1}`;
+  }
+  return storedName ? String(storedName).trim() : "";
+}
+
+// Summarize which cells a submission's waste was placed into, and how many
+// placements are still UNASSIGNED. Computed here so the browser never has to walk
+// every truck/vehicle of every submission just to render a column — and so the
+// name always reflects an admin rename rather than the copy frozen at submit time.
+function summarizeCellAssignment(entry) {
+  const facilityCellNames = entry?.slfGenerator?.cellNames;
+  const byName = new Map();
+  let unplaced = 0;
+
+  const record = (cellIndex, cellName, cellType, volume) => {
+    const name = resolvePortalCellName(facilityCellNames, cellIndex, cellName);
+    if (!name) {
+      // Only waste that actually EXISTS can be "unplaced" — a zero-volume truck
+      // has nothing to assign. This mirrors the rule the Portal's cell organizer
+      // has always used, so the organizer keeps offering exactly the same set.
+      if (Number(volume || 0) > 0) unplaced += 1;
+      return;
+    }
+    const existing = byName.get(name);
+    if (existing) {
+      existing.count += 1;
+      return;
+    }
+    byName.set(name, {
+      cellName: name,
+      cellIndex: Number.isInteger(Number(cellIndex)) ? Number(cellIndex) : null,
+      cellType: cellType || "",
+      count: 1,
+    });
+  };
+
+  for (const truck of Array.isArray(entry?.trucks) ? entry.trucks : []) {
+    const vehicles = (Array.isArray(truck?.vehicles) ? truck.vehicles : []).filter(
+      (v) => Number(v?.actualVolume || 0) > 0,
+    );
+    if (vehicles.length) {
+      // Placement lives on each vehicle when the truck carries them.
+      for (const v of vehicles) record(v?.cellIndex, v?.cellName, v?.cellType, v?.actualVolume);
+    } else {
+      record(truck?.cellIndex, truck?.cellName, truck?.cellType, truck?.actualVolume);
+    }
+  }
+
+  return { cellsAssigned: [...byName.values()], unplacedCount: unplaced };
+}
+
+// Used by the CREDENTIAL flows, which act on the caller's own account only.
+// A developer-context token is refused here outright: changing a portal user's
+// username/password is never a debugging operation, and a developer holding a
+// context token is not that user. (Without this it would fall through to a
+// confusing 404, since decoded.id would be the developer's id.)
 async function getPortalUserFromToken(req, res) {
   const token = req.headers.authorization?.split(" ")[1];
   if (!token) {
@@ -28,6 +131,18 @@ async function getPortalUserFromToken(req, res) {
     return null;
   }
   const decoded = jwt.verify(token, process.env.JWT_SECRET);
+  if (decoded.role !== "portal_user") {
+    writeLog("warn", "portal.credentials.denied", {
+      message: "Non-portal token attempted a portal credential operation",
+      user: decoded.email || decoded.id || "",
+      ip: req.ip,
+      meta: { role: decoded.role || "none", path: req.originalUrl },
+    });
+    res.status(403).json({
+      message: "Credential changes can only be made by the portal account holder.",
+    });
+    return null;
+  }
   const user = await UserPortal.findById(decoded.id);
   if (!user) {
     res.status(404).json({ message: "User not found" });
@@ -421,28 +536,54 @@ router.get("/me", async (req, res) => {
   try {
     if (await enforcePortalMaintenance(res)) return;
 
-    const token = req.headers.authorization?.split(" ")[1];
-    if (!token) return res.status(401).json({ message: "No token provided" });
-
-    const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    const user = await UserPortal.findById(decoded.id).select("-password");
+    // Resolves to the caller's own account, or — for a developer holding an
+    // explicit portal context — the TARGET user's account. The role is re-checked
+    // inside resolvePortalContext, so this cannot be reached with a portal token
+    // pointing at someone else.
+    const ctx = await resolvePortalContext(req, {
+      targetPortalUserId: req.query.targetPortalUserId,
+      targetEmail: req.query.email,
+    });
+    // The shared context projection is intentionally narrow; /me needs the fuller
+    // profile the Portal actually renders. Re-read it here with credentials
+    // explicitly excluded rather than widening the shared projection (which is
+    // also used by developer-facing routes).
+    const user = await UserPortal.findById(ctx.portalUser._id).select(
+      "-password -resetToken -resetTokenExpiry",
+    );
     if (!user) return res.status(404).json({ message: "User not found" });
-    if (user.blocked) {
-      return res.status(403).json({ message: user.blockedReason || "Portal account blocked" });
-    }
-    if (user.maintenanceMode) {
-      return res.status(403).json({ message: user.maintenanceReason || "Portal account under maintenance" });
+
+    // A developer inspecting a blocked / under-maintenance account must still be
+    // able to SEE it — that is exactly the state they are debugging. These gates
+    // only stop the portal user themselves from getting in.
+    if (!ctx.impersonating) {
+      if (user.blocked) {
+        return res.status(403).json({ message: user.blockedReason || "Portal account blocked" });
+      }
+      if (user.maintenanceMode) {
+        return res.status(403).json({ message: user.maintenanceReason || "Portal account under maintenance" });
+      }
+
+      // Touch presence (throttled to once/minute) so admins can see online status.
+      // Skipped in developer context — a developer looking at an account must not
+      // make that account appear "online".
+      const now = Date.now();
+      if (!user.lastActiveAt || now - new Date(user.lastActiveAt).getTime() > 60000) {
+        UserPortal.updateOne({ _id: user._id }, { lastActiveAt: new Date() }).catch(() => {});
+      }
     }
 
-    // Touch presence (throttled to once/minute) so admins can see online status.
-    const now = Date.now();
-    if (!user.lastActiveAt || now - new Date(user.lastActiveAt).getTime() > 60000) {
-      UserPortal.updateOne({ _id: user._id }, { lastActiveAt: new Date() }).catch(() => {});
+    // Tell the Portal it is in a read-only developer context so it can badge the
+    // session and disable write actions. (The backend enforces it regardless.)
+    const payload = user.toObject ? user.toObject() : { ...user };
+    if (ctx.impersonating) {
+      payload.developerContext = true;
+      payload.readOnly = true;
+      payload.developerEmail = ctx.actor;
     }
-
-    res.json(user);
+    res.json(payload);
   } catch (error) {
-    res.status(401).json({ message: "Invalid token" });
+    return sendPortalContextError(res, error);
   }
 });
 
@@ -450,10 +591,11 @@ router.get("/me", async (req, res) => {
 // record their current browser location for activity tracing.
 router.patch("/location", async (req, res) => {
   try {
-    const token = req.headers.authorization?.split(" ")[1];
-    if (!token) return res.status(401).json({ message: "No token provided" });
-    const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    const user = await UserPortal.findById(decoded.id).select("-password");
+    // WRITE: a developer inspecting this account must not stamp their own browser
+    // location onto the portal user's record.
+    const ctx = await resolvePortalContext(req);
+    assertPortalWriteAllowed(ctx, req);
+    const user = await UserPortal.findById(ctx.portalUser._id).select("-password");
     if (!user) return res.status(404).json({ message: "User not found" });
 
     const { enabled, lat, lng, accuracy, label } = req.body || {};
@@ -507,26 +649,201 @@ router.patch("/location", async (req, res) => {
 });
 router.get("/my-submissions", async (req, res) => {
   try {
-    const token = req.headers.authorization?.split(" ")[1];
-    if (!token) return res.status(401).json({ message: "No token provided" });
-
-    const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    const user = await UserPortal.findById(decoded.id);
-    if (!user) return res.status(404).json({ message: "User not found" });
+    // Identity comes from the token. A portal user always gets their OWN history —
+    // a `targetPortalUserId`/`email` naming anyone else is rejected. A developer
+    // may explicitly select another portal user's context (Developer Portal Mode),
+    // which resolvePortalContext audits.
+    const ctx = await resolvePortalContext(req, {
+      targetPortalUserId: req.query.targetPortalUserId,
+      targetEmail: req.query.email,
+    });
+    const user = ctx.portalUser;
 
     const DataSLF = require("../models/DataSLF");
-    const submissions = await DataSLF.find({
-      submittedBy: user.email,
-      deletedAt: null,
-      hiddenFromPortal: { $ne: true },
-    })
-      .populate("slfGenerator")
+    const submissions = await DataSLF.find(
+      {
+        submittedBy: user.email,
+        deletedAt: null,
+        hiddenFromPortal: { $ne: true },
+      },
+      PORTAL_SUBMISSION_LIST_FIELDS,
+    )
+      .populate("slfGenerator", PORTAL_SLF_REF_FIELDS)
       .sort({ createdAt: -1 })
       .lean();
 
-    res.json(submissions);
+    // Derive the cell-placement summary, then DROP trucks — the list renders none
+    // of it, and it was the bulk of the payload.
+    const rows = submissions.map((entry) => {
+      const { cellsAssigned, unplacedCount } = summarizeCellAssignment(entry);
+      const { trucks, ...rest } = entry;
+      return { ...rest, cellsAssigned, unplacedCount };
+    });
+
+    res.json(rows);
   } catch (error) {
-    res.status(500).json({ message: "Server error", error: error.message });
+    return sendPortalContextError(res, error);
+  }
+});
+
+// FULL records for MANY submissions, in ONE request.
+//
+// The cell organizer needs the whole record (trucks + per-vehicle placements) for
+// every submission with unplaced waste. Fetching them one-by-one meant ~60 requests
+// fired at once, which tripped the /api/portal-auth rate limiter (50 per 15 min →
+// HTTP 429) and spiked browser memory with ~60 concurrent responses in flight.
+//
+// Same authorization as the single-record route: rows that don't belong to the
+// resolved context are simply not returned — an id from another user's account
+// yields nothing rather than leaking a record.
+//
+// Declared BEFORE "/my-submissions/:id" so "batch" isn't captured as an id.
+const MAX_BATCH_IDS = 300;
+
+router.post("/my-submissions/batch", async (req, res) => {
+  try {
+    const ctx = await resolvePortalContext(req, {
+      targetPortalUserId: req.body?.targetPortalUserId,
+      targetEmail: req.body?.email,
+    });
+    const ids = Array.isArray(req.body?.ids) ? req.body.ids : [];
+    if (!ids.length) return res.json([]);
+    if (ids.length > MAX_BATCH_IDS) {
+      return res.status(400).json({ message: `Too many ids (max ${MAX_BATCH_IDS}).` });
+    }
+    const valid = ids.filter((id) => mongoose.Types.ObjectId.isValid(String(id)));
+    if (!valid.length) return res.json([]);
+
+    const DataSLF = require("../models/DataSLF");
+    const unassignedOnly = req.body?.unassignedOnly === true;
+
+    const query = DataSLF.find({
+      _id: { $in: valid },
+      // Ownership enforced in the QUERY, so another user's id can never come back.
+      submittedBy: ctx.email,
+      deletedAt: null,
+    }).populate("slfGenerator", PORTAL_SLF_REF_FIELDS);
+
+    // The cell organizer only ever touches placements that still need a cell, so it
+    // asks for exactly those. A submission with 20 trucks of which 1 is unassigned
+    // ships 1 placement, not 20 full trucks — that is what made opening the organizer
+    // slow and memory-heavy. Everything else (Edit & Resubmit) still gets the whole
+    // record.
+    if (unassignedOnly) {
+      query.select(
+        "idNo submissionId slfName slfGenerator dateOfDisposal lguCompanyName status " +
+          "trucks.hauler trucks.plateNumber trucks.wasteType trucks.actualVolume " +
+          "trucks.actualVolumeUnit trucks.truckCapacity trucks.truckCapacityUnit " +
+          "trucks.cellIndex trucks.cellName trucks.cellType " +
+          "trucks.vehicles.plateNumber trucks.vehicles.wasteType trucks.vehicles.actualVolume " +
+          "trucks.vehicles.actualVolumeUnit trucks.vehicles.capacity trucks.vehicles.capacityUnit " +
+          "trucks.vehicles.cellIndex trucks.vehicles.cellName trucks.vehicles.cellType",
+      );
+    }
+
+    const submissions = await query.lean();
+
+    if (!unassignedOnly) {
+      return res.json(submissions.map((s) => ({ ...s, ...summarizeCellAssignment(s) })));
+    }
+
+    // Flatten to the UNASSIGNED placements only, preserving the canonical
+    // truckIndex / vehicleIndex so a save still targets the exact slot.
+    const rows = submissions.map((sub) => {
+      const placements = [];
+      (sub.trucks || []).forEach((truck, truckIndex) => {
+        const vehicles = (truck.vehicles || []).filter(
+          (v) => Number(v?.actualVolume || 0) > 0,
+        );
+        if (vehicles.length) {
+          (truck.vehicles || []).forEach((v, vehicleIndex) => {
+            if (Number(v?.actualVolume || 0) <= 0) return; // nothing to place
+            if (v?.cellName) return; // already assigned
+            placements.push({
+              truckIndex,
+              vehicleIndex,
+              hauler: truck.hauler || "",
+              plateNumber: v.plateNumber || truck.plateNumber || "",
+              wasteType: v.wasteType || truck.wasteType || "",
+              actualVolume: v.actualVolume,
+              actualVolumeUnit: v.actualVolumeUnit || truck.actualVolumeUnit || "",
+              capacity: v.capacity ?? truck.truckCapacity ?? null,
+              capacityUnit: v.capacityUnit || truck.truckCapacityUnit || "",
+              cellName: "",
+              cellIndex: null,
+              cellType: "",
+            });
+          });
+          return;
+        }
+        // Truck-level placement (no per-vehicle split).
+        if (Number(truck?.actualVolume || 0) <= 0) return;
+        if (truck?.cellName) return;
+        placements.push({
+          truckIndex,
+          vehicleIndex: null,
+          hauler: truck.hauler || "",
+          plateNumber: truck.plateNumber || "",
+          wasteType: truck.wasteType || "",
+          actualVolume: truck.actualVolume,
+          actualVolumeUnit: truck.actualVolumeUnit || "",
+          capacity: truck.truckCapacity ?? null,
+          capacityUnit: truck.truckCapacityUnit || "",
+          cellName: "",
+          cellIndex: null,
+          cellType: "",
+        });
+      });
+      return {
+        _id: sub._id,
+        idNo: sub.idNo,
+        submissionId: sub.submissionId,
+        slfName: sub.slfName,
+        dateOfDisposal: sub.dateOfDisposal,
+        lguCompanyName: sub.lguCompanyName,
+        status: sub.status,
+        placements,
+      };
+    });
+
+    // A submission whose waste is now fully placed has nothing to organize.
+    res.json(rows.filter((r) => r.placements.length > 0));
+  } catch (error) {
+    return sendPortalContextError(res, error);
+  }
+});
+
+// FULL single submission — trucks, haulers, baseline fields and all.
+//
+// The history LIST is deliberately lean, so everything that needs the whole record
+// (Edit & Resubmit, the cell organizer) pulls it from here, by id, on demand. Same
+// authorization as the list: a portal user can only read their own submission; a
+// developer may read one inside an explicit portal context.
+router.get("/my-submissions/:id", async (req, res) => {
+  try {
+    const ctx = await resolvePortalContext(req, {
+      targetPortalUserId: req.query.targetPortalUserId,
+      targetEmail: req.query.email,
+    });
+    const DataSLF = require("../models/DataSLF");
+    const submission = await DataSLF.findById(req.params.id)
+      .populate("slfGenerator", PORTAL_SLF_REF_FIELDS)
+      .lean();
+    if (!submission) return res.status(404).json({ message: "Submission not found" });
+
+    // Ownership is checked against the RESOLVED context, so a portal user cannot
+    // read another user's submission by guessing its id.
+    if (
+      String(submission.submittedBy || "").toLowerCase() !==
+      String(ctx.email).toLowerCase()
+    ) {
+      return res.status(403).json({ message: "You can only view your own submissions." });
+    }
+
+    const { cellsAssigned, unplacedCount } = summarizeCellAssignment(submission);
+    res.json({ ...submission, cellsAssigned, unplacedCount });
+  } catch (error) {
+    return sendPortalContextError(res, error);
   }
 });
 
@@ -535,12 +852,11 @@ router.get("/my-submissions", async (req, res) => {
 // hiddenFromPortal flag so it no longer appears in the portal user's own list.
 router.patch("/my-submissions/:id/hide", async (req, res) => {
   try {
-    const token = req.headers.authorization?.split(" ")[1];
-    if (!token) return res.status(401).json({ message: "No token provided" });
-
-    const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    const user = await UserPortal.findById(decoded.id);
-    if (!user) return res.status(404).json({ message: "User not found" });
+    // WRITE: a developer must not hide another user's submissions from their
+    // history while merely inspecting the account.
+    const ctx = await resolvePortalContext(req);
+    assertPortalWriteAllowed(ctx, req);
+    const user = ctx.portalUser;
 
     const DataSLF = require("../models/DataSLF");
     const submission = await DataSLF.findById(req.params.id).select("submittedBy hiddenFromPortal idNo");
@@ -561,7 +877,7 @@ router.patch("/my-submissions/:id/hide", async (req, res) => {
 
     res.json({ message: "Removed from your history. EMB Region III still keeps this record." });
   } catch (error) {
-    res.status(500).json({ message: "Server error", error: error.message });
+    return sendPortalContextError(res, error);
   }
 });
 
@@ -570,12 +886,10 @@ router.patch("/my-submissions/:id/hide", async (req, res) => {
 // portalHiddenBy so it stops appearing in their own list.
 router.patch("/my-requests/:id/hide", async (req, res) => {
   try {
-    const token = req.headers.authorization?.split(" ")[1];
-    if (!token) return res.status(401).json({ message: "No token provided" });
-
-    const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    const user = await UserPortal.findById(decoded.id);
-    if (!user) return res.status(404).json({ message: "User not found" });
+    // WRITE: read-only in developer context (see assertPortalWriteAllowed).
+    const ctx = await resolvePortalContext(req);
+    assertPortalWriteAllowed(ctx, req);
+    const user = ctx.portalUser;
 
     const Transaction = require("../models/Transaction");
     const txn = await Transaction.findById(req.params.id).select("submittedBy performedBy portalHiddenBy");
@@ -597,7 +911,7 @@ router.patch("/my-requests/:id/hide", async (req, res) => {
 
     res.json({ message: "Removed from your list." });
   } catch (error) {
-    res.status(500).json({ message: "Server error", error: error.message });
+    return sendPortalContextError(res, error);
   }
 });
 
@@ -829,11 +1143,11 @@ router.post("/credentials/update", async (req, res) => {
 
 router.post("/submit-verification", uploadSingle(upload, "verificationFile", { maxSizeMb: MAX_UPLOAD_MB }), async (req, res) => {
   try {
-    const token = req.headers.authorization?.split(" ")[1];
-    if (!token) return res.status(401).json({ message: "No token provided" });
-
-    const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    const user = await UserPortal.findById(decoded.id);
+    // WRITE: a developer must never upload verification documents on behalf of a
+    // portal user — that would forge an identity record under their name.
+    const ctx = await resolvePortalContext(req);
+    assertPortalWriteAllowed(ctx, req);
+    const user = await UserPortal.findById(ctx.portalUser._id);
     if (!user) return res.status(404).json({ message: "User not found" });
 
     if (!user.verificationRequired) {

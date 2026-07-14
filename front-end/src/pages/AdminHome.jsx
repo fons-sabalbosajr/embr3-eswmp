@@ -119,6 +119,15 @@ import { getAdminDisplayName } from "../utils/adminIdentity";
 import secureStorage from "../utils/secureStorage";
 import { DataRefProvider } from "../utils/dataRef";
 import GaugeMeter, { computeGaugePercent } from "../components/GaugeMeter";
+// Centralized cell + unit logic — shared with Cell Infra Overview and SLF Monitoring
+// so the General Dashboard cannot drift into its own formulas.
+import {
+  resolveCellName,
+  getCellStatusConfig,
+  getCellTypeConfig,
+  isNonExistentCell,
+} from "../utils/cellVisuals";
+import { convertVolume, resolveCellUnit } from "../utils/volumeUnits";
 import embLogo from "../assets/emblogo.svg";
 import {
   MapContainer,
@@ -609,20 +618,27 @@ export default function AdminHome() {
     fetchNotifications();
     fetchMessagePreview();
     const socket = connectSocket("admin", { email: user.email, userId: user.id || user._id });
-    socket.on("notification", applyRealtimeNotification);
-    socket.on("data-refresh", ({ target } = {}) => {
+    // Named handlers so cleanup removes ONLY this component's listeners.
+    // (`socket.off(event)` with no handler also tears down the listeners other
+    // pages registered on the same shared socket, and leaves their closures
+    // attached to an orphaned socket instance.)
+    const onDataRefresh = ({ target } = {}) => {
       fetchNotifications();
       if (["submissions", "baselines", "tickets", "portal-users", "notifications"].includes(target)) {
         fetchMessagePreview();
       }
-    });
-    socket.on("internal-message", () => fetchMessagePreview());
-    socket.on("message-refresh", () => fetchMessagePreview());
+    };
+    const onInternalMessage = () => fetchMessagePreview();
+    const onMessageRefresh = () => fetchMessagePreview();
+    socket.on("notification", applyRealtimeNotification);
+    socket.on("data-refresh", onDataRefresh);
+    socket.on("internal-message", onInternalMessage);
+    socket.on("message-refresh", onMessageRefresh);
     return () => {
-      socket.off("notification");
-      socket.off("data-refresh");
-      socket.off("internal-message");
-      socket.off("message-refresh");
+      socket.off("notification", applyRealtimeNotification);
+      socket.off("data-refresh", onDataRefresh);
+      socket.off("internal-message", onInternalMessage);
+      socket.off("message-refresh", onMessageRefresh);
       disconnectSocket();
     };
   }, [applyRealtimeNotification, fetchNotifications, fetchMessagePreview, user?.email, user?.id, user?._id]);
@@ -7504,6 +7520,11 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
         <Tabs
           defaultActiveKey="slf-facilities"
           size="small"
+          // Unmount the pane you are not looking at. These panes carry the SLF
+          // gauge grids and Recharts instances; without this, antd keeps every
+          // pane you have ever visited mounted, so their charts, ResizeObservers
+          // and derived cell arrays all stay live at once.
+          destroyOnHidden
           items={[
             {
               key: "slf-facilities",
@@ -8523,6 +8544,14 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                     // Per-facility cell utilization = summed cell fill / summed cell
                     // capacity. computeGaugePercent returns null when capacity data
                     // is missing so the gauge shows "No capacity data available".
+                    // Every total below is rendered as m³, so every value is
+                    // NORMALIZED to m³ first. Previously the raw stored numbers were
+                    // summed straight into an "m³" label — a facility that declares
+                    // tons (via Set Field Units) silently contributed tons, making
+                    // the total 5× too low for that SLF. Cell capacity and cell fill
+                    // can even carry DIFFERENT units on the same cell, so each is
+                    // converted from its own declared unit.
+                    const toM3 = (value, unit) => convertVolume(value, unit, "m³");
                     const cellGaugeFacilities = mgmtData
                       .filter((r) => (r.numberOfCell || 0) > 0)
                       .map((r) => {
@@ -8530,34 +8559,39 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                         const fills = r.cellFillValues || [];
                         const statuses = r.cellStatuses || [];
                         const types = r.cellTypes || [];
-                        const names = r.cellNames || [];
-                        const capUnits = r.cellCapacityUnits || [];
-                        const fillUnits = r.cellFillUnits || [];
                         const n = r.numberOfCell || 0;
                         let totalCap = 0, totalFill = 0, opCells = 0;
                         const cells = [];
                         for (let i = 0; i < n; i++) {
-                          const cap = Number(caps[i] || 0);
-                          const fillRaw = fills[i];
-                          const fill = fillRaw != null && fillRaw !== "" ? Number(fillRaw) : null;
+                          const status = statuses[i] || "";
+                          // Same rule as the Cell Infra Overview: a cell that does
+                          // not exist is neither listed nor counted.
+                          if (isNonExistentCell(status)) continue;
+                          const statusConfig = getCellStatusConfig(status);
+                          const capUnit = resolveCellUnit(r, i, "capacity");
+                          const fillUnit = resolveCellUnit(r, i, "fill");
+                          const cap = toM3(caps[i], capUnit) ?? 0;
+                          const fill = toM3(fills[i], fillUnit);
                           if (cap > 0) { totalCap += cap; totalFill += Number(fill || 0); }
-                          if (/oper|active/i.test(statuses[i] || "")) opCells++;
-                          const unit = capUnits[i] || fillUnits[i] || "m³";
+                          if (statusConfig.key === "active") opCells++;
                           cells.push({
                             index: i,
-                            name: names[i] || `Cell ${i + 1}`,
+                            // Canonical name from the cell infrastructure.
+                            name: resolveCellName(r, i),
                             type: types[i] || "—",
-                            status: statuses[i] || "—",
+                            status: status || "—",
+                            statusConfig,
+                            typeConfig: getCellTypeConfig(types[i]),
                             capacity: cap > 0 ? cap : null,
                             fill: Number.isFinite(fill) ? fill : null,
                             remaining: cap > 0 && Number.isFinite(fill) ? Math.max(0, cap - fill) : null,
-                            unit,
+                            unit: "m³", // normalized
                             percent: computeGaugePercent({ usedCapacity: fill, totalCapacity: cap }),
                           });
                         }
                         return {
                           key: r._id || r.lgu, name: r.lgu, province: r.province,
-                          status: r.statusOfSLF, numberOfCell: n, opCells, totalCap, totalFill, cells,
+                          status: r.statusOfSLF, numberOfCell: cells.length, opCells, totalCap, totalFill, cells,
                           percent: computeGaugePercent({ usedCapacity: totalFill, totalCapacity: totalCap }),
                         };
                       })
@@ -8571,13 +8605,21 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                     const drillFacility = slfCellDrill ? cellGaugeFacilities.find((f) => f.key === slfCellDrill) : null;
 
                     // Per-facility volume-capacity utilization = waste received / volume capacity.
+                    // volumeCapacity and actualResidualWasteReceived each carry their
+                    // OWN declared unit (volumeCapacityUnit / wasteReceivedUnit) and
+                    // may disagree, so both are normalized to m³ before the ratio and
+                    // before summing across SLFs.
                     const capacityGaugeFacilities = mgmtData
                       .filter((r) => (r.volumeCapacity || 0) > 0)
-                      .map((r) => ({
-                        key: r._id || r.lgu, name: r.lgu, province: r.province, status: r.statusOfSLF,
-                        totalCap: Number(r.volumeCapacity || 0), used: Number(r.actualResidualWasteReceived || 0),
-                        percent: computeGaugePercent({ usedCapacity: r.actualResidualWasteReceived, totalCapacity: r.volumeCapacity }),
-                      }))
+                      .map((r) => {
+                        const cap = toM3(r.volumeCapacity, r.volumeCapacityUnit) ?? 0;
+                        const used = toM3(r.actualResidualWasteReceived, r.wasteReceivedUnit) ?? 0;
+                        return {
+                          key: r._id || r.lgu, name: r.lgu, province: r.province, status: r.statusOfSLF,
+                          totalCap: cap, used,
+                          percent: computeGaugePercent({ usedCapacity: used, totalCapacity: cap }),
+                        };
+                      })
                       .sort((a, b) => b.totalCap - a.totalCap);
                     const capacityOverall = capacityGaugeFacilities.reduce(
                       (a, f) => ({ cap: a.cap + f.totalCap, used: a.used + f.used }),
@@ -10311,6 +10353,12 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
             items={filteredTabs}
             size="large"
             style={{ marginTop: 8 }}
+            // Top-level dashboard tabs. antd keeps every pane you have visited
+            // mounted, so without this the SLF gauge grids, charts and their
+            // derived arrays from earlier tabs all stayed live behind the one you
+            // are actually looking at — memory grew with each tab visited and only
+            // came back on a full page change.
+            destroyOnHidden
           />
         );
       })()}

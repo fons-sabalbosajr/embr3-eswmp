@@ -10,6 +10,13 @@ const { NON_DUMMY_CLAUSE } = require("../utils/dummyFilter");
 
 const router = express.Router();
 
+// Require an authenticated caller on every route below. Closes anonymous access
+// to facility master data (create/update/delete included). Both frontends
+// always send a Bearer token.
+const { requireAnyAuth } = require("../middleware/auth");
+const { validateBody } = require("../utils/validate");
+router.use(requireAnyAuth);
+
 const escapeRegExp = (value) => String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 // Refresh every portal user assigned to a facility so their Portal Submissions
@@ -60,21 +67,17 @@ async function findPortalFacility(id, slfName, selectFields) {
   return facility;
 }
 
-const TON_PER_M3 = 0.2;
 const ACTIVE_VOLUME_STATUSES = new Set(["pending", "acknowledged", "revert_requested"]);
 
+// Conversion comes from the shared module. The local copy this replaced defaulted
+// a MISSING source unit to "tons", while every other copy in the app defaulted to
+// "m³" — the same unlabelled value was therefore counted 25× apart depending on
+// which code path saw it. The shared convertVolume refuses to guess.
+const { convertVolume, normalizeUnit: strictUnit } = require("../utils/volumeUnits");
+
+// Display label only — a missing unit still renders as m³, as before.
 function normalizeUnit(unit) {
   return String(unit || "m³").replace("m3", "m³");
-}
-
-function convertVolume(value, fromUnit = "tons", toUnit = fromUnit) {
-  const number = Number(value || 0);
-  const from = normalizeUnit(fromUnit);
-  const to = normalizeUnit(toUnit || from);
-  if (!number || from === to) return number;
-  if (from === "tons" && to === "m³") return number / TON_PER_M3;
-  if (from === "m³" && to === "tons") return number * TON_PER_M3;
-  return number;
 }
 
 function parseCellIndex(cellName) {
@@ -145,7 +148,15 @@ function findBestCellIndex(rows, wasteType, preferredIndex = null) {
 function addVolume(rows, index, value, fromUnit, targetUnit) {
   const row = rows[index] || rows[0];
   if (!row) return;
-  row.total += convertVolume(value, fromUnit, targetUnit);
+  const converted = convertVolume(value, fromUnit, targetUnit);
+  if (converted === null) {
+    // Unit missing or unconvertible: EXCLUDE it from the capacity total rather
+    // than guessing a unit (`total += null` would also have produced NaN). The
+    // count is surfaced so the record can be flagged instead of silently dropped.
+    row.unconvertible = (row.unconvertible || 0) + 1;
+    return;
+  }
+  row.total += converted;
 }
 
 async function enrichPortalFacilityVolumes(facilityDoc, requestedSlfName) {
@@ -455,7 +466,16 @@ router.get("/stats", async (req, res) => {
 });
 
 // Create
-router.post("/", async (req, res) => {
+router.post("/", validateBody({
+  lgu: { type: "string", required: true, maxLength: 200 },
+  province: { type: "string", maxLength: 100 },
+  latitude: { type: "number", min: -90, max: 90 },
+  longitude: { type: "number", min: -180, max: 180 },
+  volumeCapacity: { type: "number", min: 0 },
+  receivingVolumeCapacity: { type: "number", min: 0 },
+  yearStartedOperation: { type: "number", min: 1900, max: 2200 },
+  noOfLGUServed: { type: "number", min: 0 },
+}), async (req, res) => {
   try {
     const record = await SlfFacility.create(req.body);
     res.status(201).json(record);
@@ -483,6 +503,9 @@ router.put("/:id", async (req, res) => {
     const prevLgu = record.lgu;
     const prevOwnership = record.ownership;
     const prevDisplayName = buildDisplayName(prevLgu, prevOwnership);
+    // Cell names BEFORE the update, so a rename can be cascaded to the copies
+    // stored on existing submissions (see the propagation block after save()).
+    const prevCellNames = [...(record.cellNames || [])];
 
     ["leachatePondDetails", "gasVentDetails", "trashSlideMeasures", "firePrevMeasures", "scrpDetails"].forEach((key) => {
       if (!Array.isArray(update[key])) return;
@@ -499,6 +522,69 @@ router.put("/:id", async (req, res) => {
 
     record.set(update);
     await record.save();
+
+    // ── Propagate a CELL rename across the app ────────────────────────────────
+    //
+    // A submission stores `cellIndex` (canonical) AND a `cellName` copy taken at
+    // submit time. Everything that renders from the index already follows a rename,
+    // but the stored COPY does not — so exports, reports, admin history tables and
+    // any other consumer reading `truck.cellName` kept showing the old label
+    // forever. Rewrite the copies for the cells that actually changed, keyed on the
+    // canonical index, so the new name is effective everywhere at once.
+    //
+    // Keyed on cellIndex — never on the old name — so a cell renamed twice, or two
+    // cells that once shared a label, can't be confused with each other.
+    try {
+      const nextCellNames = record.cellNames || [];
+      const renamed = [];
+      const cellCount = Math.max(prevCellNames.length, nextCellNames.length);
+      for (let i = 0; i < cellCount; i += 1) {
+        const before = String(prevCellNames[i] || "").trim();
+        const after = String(nextCellNames[i] || "").trim();
+        // Only act on a real rename. An emptied name falls back to the derived
+        // "Cell N" everywhere, so push that rather than a blank label.
+        if (before !== after) renamed.push({ index: i, name: after || `Cell ${i + 1}` });
+      }
+
+      if (renamed.length) {
+        const ops = [];
+        for (const { index, name } of renamed) {
+          // Truck-level placement.
+          ops.push({
+            updateMany: {
+              filter: { slfGenerator: record._id, "trucks.cellIndex": index },
+              update: { $set: { "trucks.$[t].cellName": name } },
+              arrayFilters: [{ "t.cellIndex": index }],
+            },
+          });
+          // Per-vehicle placement (a truck can split its load across cells).
+          ops.push({
+            updateMany: {
+              filter: { slfGenerator: record._id, "trucks.vehicles.cellIndex": index },
+              update: { $set: { "trucks.$[].vehicles.$[v].cellName": name } },
+              arrayFilters: [{ "v.cellIndex": index }],
+            },
+          });
+        }
+        const result = await DataSLF.bulkWrite(ops, { ordered: false });
+        writeLog("info", "slf.cell-rename", {
+          message: `Cell rename propagated to submissions for ${record.lgu || record._id}`,
+          ip: req.ip,
+          meta: {
+            facilityId: String(record._id),
+            renamed,
+            submissionsUpdated: result?.modifiedCount ?? 0,
+          },
+        });
+      }
+    } catch (err) {
+      // A failed cascade must not fail the facility save — the canonical index is
+      // still correct, and every index-resolved view already shows the new name.
+      writeLog("error", "slf.cell-rename.failed", {
+        message: `Cell rename propagation failed: ${err.message}`,
+        meta: { facilityId: String(record._id) },
+      });
+    }
 
     // Propagate an SLF/LGU rename so submissions, baseline records and portal
     // user assignments stay linked (prevents "lost" baseline data on rename).

@@ -19,6 +19,7 @@ import {
 } from "recharts";
 import dayjs from "dayjs";
 import api from "../../api";
+import { convertVolume } from "../../utils/volumeUnits";
 
 const { Title, Text, Paragraph } = Typography;
 
@@ -643,7 +644,8 @@ export default function SlfSubmissionReport({
           : !r.noAssignment && r.slf
             ? r.slf.split(",")[0].trim()
             : r.operator;
-      const volume = (r._m3 || 0) + (r._tons || 0) / 0.2;
+      // tons → m³ via the shared factor, not a bare literal.
+      const volume = (r._m3 || 0) + (convertVolume(r._tons || 0, "tons", "m³") || 0);
       byCompany.set(label, (byCompany.get(label) || 0) + volume);
     });
     return [...byCompany.entries()]
@@ -877,10 +879,10 @@ export default function SlfSubmissionReport({
         <Space className="slf-report-noprint">
           <Button onClick={onClose}>Close</Button>
           <Button icon={<FileWordOutlined />} loading={exporting} onClick={exportDocx}>
-            Export Word (.docx)
+            Export (.docx)
           </Button>
           <Button type="primary" icon={<PrinterOutlined />} onClick={doPrint}>
-            Print / Save as PDF
+            Save as PDF
           </Button>
         </Space>
       }
@@ -908,7 +910,7 @@ export default function SlfSubmissionReport({
         {/* Header */}
         <div style={{ borderBottom: "2px solid #2f54eb", paddingBottom: 8, marginBottom: 4 }}>
           <Title level={4} style={{ margin: 0, color: "#1a3353" }}>
-            Sanitary Landfill Data Portal Submissions Summary
+            Sanitary Landfill Data Submissions Summary
           </Title>
           <Text type="secondary" style={{ fontSize: 12 }}>
             EMB Region III — Ecological Solid Waste Management Pipeline · Generated {generatedAt}
