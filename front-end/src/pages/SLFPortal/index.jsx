@@ -110,6 +110,7 @@ import RequestsPanel from "./RequestsPanel";
 import HistoryPanel from "./HistoryPanel";
 import OverviewPanel from "./OverviewPanel";
 import AssignedSlfDashboard from "./AssignedSlfDashboard";
+import RequiredDot from "./RequiredDot";
 import {
   EMPTY_TRUCK,
   EMPTY_HAULER,
@@ -553,10 +554,6 @@ export default function SLFPortal() {
 
     return steps;
   }, [baselineSaved, baselineUpdatePending, hasMultipleAssignedSlf]);
-  const RequiredDot = ({ show }) =>
-    show ? (
-      <Badge dot offset={[2, -2]} style={{ backgroundColor: "#ff4d4f" }} />
-    ) : null;
   // Facility management modals (Leachate, Gas Management, Trash Slide, Fire Prevention)
   const [leachateModalOpen, setLeachateModalOpen] = useState(false);
   const [gasVentModalOpen, setGasVentModalOpen] = useState(false);
