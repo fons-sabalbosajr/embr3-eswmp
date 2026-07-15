@@ -113,6 +113,13 @@ import {
   KNOWN_TRANSPORT_KEYS,
   withRetry,
   newClientRequestId,
+  PORTAL_SETTINGS_CACHE_KEY,
+  PORTAL_SUBMISSIONS_CACHE_KEY,
+  PORTAL_WASTE_RECEIVED_CACHE_KEY,
+  PORTAL_CACHE_TTL,
+  PORTAL_UPDATE_TOUR_SEEN_PREFIX,
+  PORTAL_TOUR_DISMISSED_PREFIX,
+  ORGANIZE_CELLS_ENABLED,
 } from "./constants";
 import {
   validateWasteGeneration,
@@ -135,13 +142,6 @@ const { Option } = Select;
 const { Header, Sider, Content } = Layout;
 const { useBreakpoint } = Grid;
 const { TextArea } = Input;
-const PORTAL_SETTINGS_CACHE_KEY = "portal-settings-cache";
-const PORTAL_SUBMISSIONS_CACHE_KEY = "portal-submissions-cache";
-const PORTAL_WASTE_RECEIVED_CACHE_KEY = "portal-waste-received-cache";
-const PORTAL_CACHE_TTL = 2 * 60 * 1000;
-const PORTAL_UPDATE_TOUR_SEEN_PREFIX = "slf-portal-update-tour-seen-";
-const PORTAL_TOUR_DISMISSED_PREFIX = "slf-portal-tour-dismissed-"; // stable per-user key
-const ORGANIZE_CELLS_ENABLED = true;
 
 const normalizeUnit = (unit) => String(unit || "m³").replace("m3", "m³");
 const hasBaselinePayload = (data = {}) =>

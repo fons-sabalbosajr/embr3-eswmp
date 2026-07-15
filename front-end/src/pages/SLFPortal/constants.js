@@ -1,5 +1,13 @@
 // ── SLF Portal — Constants & Utilities ──
 
+export const PORTAL_SETTINGS_CACHE_KEY = "portal-settings-cache";
+export const PORTAL_SUBMISSIONS_CACHE_KEY = "portal-submissions-cache";
+export const PORTAL_WASTE_RECEIVED_CACHE_KEY = "portal-waste-received-cache";
+export const PORTAL_CACHE_TTL = 2 * 60 * 1000;
+export const PORTAL_UPDATE_TOUR_SEEN_PREFIX = "slf-portal-update-tour-seen-";
+export const PORTAL_TOUR_DISMISSED_PREFIX = "slf-portal-tour-dismissed-"; // stable per-user key
+export const ORGANIZE_CELLS_ENABLED = true;
+
 export const EMPTY_TRUCK = {
   disposalTicketNo: "",
   hauler: "",
