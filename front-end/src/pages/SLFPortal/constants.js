@@ -8,6 +8,23 @@ export const PORTAL_UPDATE_TOUR_SEEN_PREFIX = "slf-portal-update-tour-seen-";
 export const PORTAL_TOUR_DISMISSED_PREFIX = "slf-portal-tour-dismissed-"; // stable per-user key
 export const ORGANIZE_CELLS_ENABLED = true;
 
+// Request/amendment type → label + tag color, used by the "My Requests" table.
+export const REQUEST_TYPE_MAP = {
+  baseline_update_request: {
+    label: "Baseline Update Request",
+    color: "blue",
+  },
+  baseline_update_approved: {
+    label: "Baseline Update Approved",
+    color: "green",
+  },
+  submission_edit_request: { label: "Edit Request", color: "blue" },
+  submission_edit_approved: { label: "Edit Approved", color: "green" },
+  submission_edit_rejected: { label: "Edit Rejected", color: "red" },
+  support_ticket: { label: "Support Ticket", color: "purple" },
+  support_ticket_reply: { label: "Support Reply", color: "cyan" },
+};
+
 export const EMPTY_TRUCK = {
   disposalTicketNo: "",
   hauler: "",

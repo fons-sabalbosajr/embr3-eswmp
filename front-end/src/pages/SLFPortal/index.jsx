@@ -106,6 +106,7 @@ import embLogo from "../../assets/emblogo.svg";
 import "./SLFPortal.css";
 import SLFPortalModals from "./SLFPortalModals";
 import DraftsScheduledPanel from "./DraftsScheduledPanel";
+import RequestsPanel from "./RequestsPanel";
 import {
   EMPTY_TRUCK,
   EMPTY_HAULER,
@@ -210,9 +211,6 @@ export default function SLFPortal() {
   const [baselineSavingLoading, setBaselineSavingLoading] = useState(false);
   const [slfInfo, setSlfInfo] = useState(null);
   const [slfInfoLoading, setSlfInfoLoading] = useState(false);
-  // Baseline had NO loading flag, so Data Entry could not tell "still loading" from
-  // "loaded, no records" — cell/baseline dropdowns rendered empty mid-flight and
-  // looked like the facility genuinely had no cells.
   const [baselineLoading, setBaselineLoading] = useState(false);
   const [slfInfoRefresh, setSlfInfoRefresh] = useState(0);
   const [slfCardExpanded, setSlfCardExpanded] = useState(false);
@@ -232,12 +230,10 @@ export default function SLFPortal() {
   const [revertReason, setRevertReason] = useState("");
   const [revertLoading, setRevertLoading] = useState(false);
   const [reviewModalOpen, setReviewModalOpen] = useState(false);
-  // Drafts & Scheduled submissions
   const [savingDraft, setSavingDraft] = useState(false);
   const [scheduleModalOpen, setScheduleModalOpen] = useState(false);
   const [scheduleAt, setScheduleAt] = useState(null);
   const [schedulingSubmit, setSchedulingSubmit] = useState(false);
-  // Active cell entries (table-based)
   const [activeCellEntries, setActiveCellEntries] = useState([]);
   const [activeCellModalOpen, setActiveCellModalOpen] = useState(false);
   const [activeCellDraft, setActiveCellDraft] = useState({
@@ -8586,22 +8582,6 @@ export default function SLFPortal() {
   };
 
   // ── My Requests Content ──
-  const REQUEST_TYPE_MAP = {
-    baseline_update_request: {
-      label: "Baseline Update Request",
-      color: "blue",
-    },
-    baseline_update_approved: {
-      label: "Baseline Update Approved",
-      color: "green",
-    },
-    submission_edit_request: { label: "Edit Request", color: "blue" },
-    submission_edit_approved: { label: "Edit Approved", color: "green" },
-    submission_edit_rejected: { label: "Edit Rejected", color: "red" },
-    support_ticket: { label: "Support Ticket", color: "purple" },
-    support_ticket_reply: { label: "Support Reply", color: "cyan" },
-  };
-
   const handleHideRequest = async (record) => {
     const result = await Swal.fire({
       icon: "warning",
@@ -8636,135 +8616,6 @@ export default function SLFPortal() {
       fetchMyRequests();
     }
   };
-
-  const renderRequests = () => (
-    <div style={{ maxWidth: 1680, margin: "0 auto" }}>
-      <Card
-        className="slf-section"
-        title={
-          <Space>
-            <AuditOutlined style={{ color: "#1a3353" }} />
-            <span>My Requests &amp; Amendments</span>
-          </Space>
-        }
-      >
-        <Table
-          className="slf-compact-requests"
-          size="small"
-          dataSource={myRequests}
-          rowKey={(r) => r._id}
-          loading={myRequestsLoading}
-          pagination={{
-            defaultPageSize: 10,
-            showSizeChanger: true,
-            pageSizeOptions: [10, 20, 50, 100],
-            showTotal: (total) => `${total} request(s)`,
-          }}
-          locale={{ emptyText: "No requests found" }}
-          columns={[
-            {
-              title: "Date / Time",
-              dataIndex: "createdAt",
-              key: "date",
-              width: 180,
-              sorter: (a, b) => new Date(a.createdAt) - new Date(b.createdAt),
-              defaultSortOrder: "descend",
-              render: (v) =>
-                v
-                  ? new Date(v).toLocaleString("en-PH", {
-                      dateStyle: "medium",
-                      timeStyle: "short",
-                    })
-                  : "—",
-            },
-            {
-              title: "Type",
-              dataIndex: "type",
-              key: "type",
-              width: 200,
-              filters: Object.entries(REQUEST_TYPE_MAP).map(
-                ([val, { label }]) => ({
-                  text: label,
-                  value: val,
-                }),
-              ),
-              onFilter: (value, record) => record.type === value,
-              render: (t) => {
-                const cfg = REQUEST_TYPE_MAP[t] || {
-                  label: t,
-                  color: "default",
-                };
-                return <Tag color={cfg.color}>{cfg.label}</Tag>;
-              },
-            },
-            {
-              title: "Description",
-              dataIndex: "description",
-              key: "description",
-              ellipsis: true,
-            },
-            {
-              title: "Status",
-              dataIndex: "type",
-              key: "status",
-              width: 120,
-              render: (type, record) => {
-                const approved = type.includes("approved");
-                const rejected =
-                  type.includes("rejected") ||
-                  record.meta?.action === "rejected";
-                if (approved) return <Tag color="green">APPROVED</Tag>;
-                if (rejected) return <Tag color="red">REJECTED</Tag>;
-                // For request types, check if a resolution exists in the list
-                if (type.includes("request")) {
-                  const company = record.companyName || record.meta?.slfName;
-                  const resolutionType = type.replace("_request", "");
-                  const resolved = myRequests.find(
-                    (t) =>
-                      t._id !== record._id &&
-                      new Date(t.createdAt) >= new Date(record.createdAt) &&
-                      (t.companyName === company ||
-                        t.meta?.slfName === company) &&
-                      (t.type === `${resolutionType}_approved` ||
-                        t.type === `${resolutionType}_rejected` ||
-                        t.meta?.action === "rejected"),
-                  );
-                  if (resolved) {
-                    if (resolved.type.includes("approved"))
-                      return <Tag color="green">APPROVED</Tag>;
-                    if (
-                      resolved.type.includes("rejected") ||
-                      resolved.meta?.action === "rejected"
-                    )
-                      return <Tag color="red">REJECTED</Tag>;
-                  }
-                  return <Tag color="orange">PENDING</Tag>;
-                }
-                return <Tag color="blue">INFO</Tag>;
-              },
-            },
-            {
-              title: "Actions",
-              key: "actions",
-              width: 80,
-              align: "center",
-              render: (_, record) => (
-                <Tooltip title="Remove from my list (admin keeps a record)">
-                  <Button
-                    type="text"
-                    size="small"
-                    danger
-                    icon={<DeleteOutlined />}
-                    onClick={() => handleHideRequest(record)}
-                  />
-                </Tooltip>
-              ),
-            },
-          ]}
-        />
-      </Card>
-    </div>
-  );
 
   // ── History Content ──
   const renderHistory = () => (
@@ -9186,7 +9037,13 @@ export default function SLFPortal() {
           {activeMenu === "overview" && renderOverview()}
           {activeMenu === "data-entry" && renderDataEntry()}
           {activeMenu === "history" && renderHistory()}
-          {activeMenu === "requests" && renderRequests()}
+          {activeMenu === "requests" && (
+            <RequestsPanel
+              myRequests={myRequests}
+              myRequestsLoading={myRequestsLoading}
+              onHideRequest={handleHideRequest}
+            />
+          )}
           {activeMenu === "drafts" && (
             <DraftsScheduledPanel
               portalUser={portalUser}
