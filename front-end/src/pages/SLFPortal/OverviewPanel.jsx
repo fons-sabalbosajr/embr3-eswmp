@@ -1,5 +1,7 @@
+import { memo } from "react";
 import { Row, Col, Card, Statistic, Space, Typography, Empty } from "antd";
 import { DashboardOutlined } from "@ant-design/icons";
+import { resolveFacilityUnit, normalizeUnit } from "../../utils/volumeUnits";
 import {
   PieChart,
   Pie,
@@ -15,7 +17,11 @@ const { Text } = Typography;
 // Presentational: KPI cards, SLF facility grid, and waste-received breakdown
 // charts. All figures are derived here from the container's fetched data,
 // which is passed in as props (no state, no handlers of its own).
-export default function OverviewPanel({
+//
+// Memoized: the 8k-line container re-renders on many unrelated state changes,
+// but this panel only depends on stable fetched-data props, so it should not
+// re-run its chart computations unless that data actually changes.
+function OverviewPanel({
   submissions,
   activeCellEntries,
   closedCellEntries,
@@ -40,6 +46,13 @@ export default function OverviewPanel({
     }),
     { m3: 0, tons: 0 },
   );
+  // #7: show the recorded volume in the facility's single declared baseline unit,
+  // never "m³ / tons" side-by-side. m³ and tons are kept in lockstep upstream.
+  const baselineUnit = resolveFacilityUnit(slfInfo);
+  const recordedVolume = normalizeUnit(baselineUnit) === "tons" ? volumeTotals.tons : volumeTotals.m3;
+  const recordedVolumeLabel = recordedVolume
+    ? `${recordedVolume.toLocaleString(undefined, { maximumFractionDigits: 2 })} ${baselineUnit}`
+    : `0 ${baselineUnit}`;
   const statusColors = ["#1677ff", "#52c41a", "#faad14", "#ff4d4f", "#722ed1", "#13c2c2"];
   const cellData = [
     { name: "Active Cells", value: activeCellEntries.length || Number(slfInfo?.activeCells || 0) || 0 },
@@ -121,7 +134,7 @@ export default function OverviewPanel({
         <Col xs={24} md={6}><Card size="small" loading={kpisLoading} style={{ borderRadius: 8 }}><Statistic title="My Submissions" value={ownSubmissions.length} valueStyle={{ color: "#1677ff" }} /></Card></Col>
         <Col xs={24} md={6}><Card size="small" loading={kpisLoading} style={{ borderRadius: 8 }}><Statistic title="Truck Entries" value={ownSubmissions.reduce((sum, item) => sum + Number(item.truckCount || 0), 0)} /></Card></Col>
         <Col xs={24} md={6}><Card size="small" loading={kpisLoading} style={{ borderRadius: 8 }}><Statistic title="Accredited Haulers" value={haulers.length} /></Card></Col>
-        <Col xs={24} md={6}><Card size="small" loading={kpisLoading} style={{ borderRadius: 8 }}><Statistic title="My Recorded Volume" value={`${volumeTotals.m3 ? `${volumeTotals.m3.toLocaleString()} m³` : ""}${volumeTotals.m3 && volumeTotals.tons ? " / " : ""}${volumeTotals.tons ? `${volumeTotals.tons.toLocaleString()} tons` : ""}` || "0"} valueStyle={{ fontSize: 16, color: "#52c41a" }} /></Card></Col>
+        <Col xs={24} md={6}><Card size="small" loading={kpisLoading} style={{ borderRadius: 8 }}><Statistic title="My Recorded Volume" value={recordedVolumeLabel} valueStyle={{ fontSize: 16, color: "#52c41a" }} /></Card></Col>
       </Row>
       <Row gutter={[12, 12]}>
         <Col xs={24}>
@@ -169,3 +182,5 @@ export default function OverviewPanel({
     </div>
   );
 }
+
+export default memo(OverviewPanel);

@@ -1304,6 +1304,18 @@ export default function SLFMonitoring({
       const lguServedList = fieldValue("lguServedList", []);
       const privateCompaniesServed = fieldValue("privateCompaniesServed", []);
       const ownership = fieldValue("ownership", "");
+      // #5/#7: cells follow the facility's single declared baseline unit. The edit
+      // cards no longer offer a per-cell unit picker, so stamp every cell's unit to
+      // the baseline here (values are already entered/kept in that unit facility-wide
+      // via the unit-change handlers).
+      const baselineCellUnit =
+        normalizeUnit(
+          fieldValue("wasteReceivedUnit") || fieldValue("volumeCapacityUnit") || "m³",
+        ) || "m³";
+      const cellCountForUnits =
+        Number(fieldValue("numberOfCell", 0)) ||
+        (fieldValue("cellCapacities", []) || []).length;
+      const uniformCellUnits = Array.from({ length: cellCountForUnits }, () => baselineCellUnit);
       const payload = {
         ...values,
         dataYear: editYear,
@@ -1316,12 +1328,12 @@ export default function SLFMonitoring({
         cellNames: fieldValue("cellNames", []).map((n) => String(n || "").trim()),
         cellStatuses: fieldValue("cellStatuses", []).map(normalizeCellStatus),
         cellCapacities: fieldValue("cellCapacities", []),
-        cellCapacityUnits: fieldValue("cellCapacityUnits", []),
+        cellCapacityUnits: uniformCellUnits,
         cellTypes: fieldValue("cellTypes", []),
         cellSubmissionAllowed: fieldValue("cellSubmissionAllowed", []),
         cellNotes: fieldValue("cellNotes", []),
         cellFillValues: fieldValue("cellFillValues", []),
-        cellFillUnits: fieldValue("cellFillUnits", []),
+        cellFillUnits: uniformCellUnits,
         hasWastewaterTreatmentFacility,
         wastewaterTreatmentFacilityType: hasWastewaterTreatmentFacility
           ? asStringArray(fieldValue("wastewaterTreatmentFacilityType", []))
@@ -2798,9 +2810,6 @@ export default function SLFMonitoring({
             ),
             children: (
               <>
-                {/* {renderSlfSummaryTiles()} */}
-
-                {/* Header with Search + Export */}
                 <div
                   style={{
                     display: "flex",
@@ -2962,25 +2971,25 @@ export default function SLFMonitoring({
               </>
             ),
           },
-          {
-            key: "portal",
-            label: (
-              <>
-                <LinkOutlined /> Waste Generators
-              </>
-            ),
-            children: (
-              <PortalGenerators
-                generators={generators}
-                loadingGen={loadingGen}
-                fetchGenerators={fetchGenerators}
-                slfRecords={records}
-                canEdit={canEdit}
-                canDelete={canDelete}
-                isDark={isDark}
-              />
-            ),
-          },
+          // {
+          //   key: "portal",
+          //   label: (
+          //     <>
+          //       <LinkOutlined /> Waste Generators
+          //     </>
+          //   ),
+          //   children: (
+          //     <PortalGenerators
+          //       generators={generators}
+          //       loadingGen={loadingGen}
+          //       fetchGenerators={fetchGenerators}
+          //       slfRecords={records}
+          //       canEdit={canEdit}
+          //       canDelete={canDelete}
+          //       isDark={isDark}
+          //     />
+          //   ),
+          // },
         ]}
       />
 
@@ -4258,17 +4267,6 @@ export default function SLFMonitoring({
                           />
                         </Form.Item>
                       </Col>
-                      <Col span={16}>
-                        <Form.Item label="Submission Cell Placement">
-                          <Button
-                            icon={<HistoryOutlined />}
-                            onClick={openCellAssignmentModal}
-                            disabled={!editing}
-                          >
-                            View Submission History and Assign Active Cells
-                          </Button>
-                        </Form.Item>
-                      </Col>
                     </Row>
 
                     <Form.Item
@@ -4290,6 +4288,14 @@ export default function SLFMonitoring({
                         const cellCount =
                           form.getFieldValue("numberOfCell") || 0;
                         if (cellCount < 1) return null;
+                        // #5/#7: cells use the facility's single declared baseline
+                        // unit (shown as a locked addon), not a per-cell picker.
+                        const cellBaselineUnit =
+                          normalizeUnit(
+                            form.getFieldValue("wasteReceivedUnit") ||
+                              form.getFieldValue("volumeCapacityUnit") ||
+                              "m³",
+                          ) || "m³";
                         return (
                           <>
                             <Divider
@@ -4297,7 +4303,10 @@ export default function SLFMonitoring({
                               orientation="left"
                               style={{ fontSize: 12, margin: "8px 0 12px" }}
                             >
-                              Cell Capacities, Status &amp; Type
+                              Cell Capacities, Status &amp; Type{" "}
+                              <Text type="secondary" style={{ fontSize: 11, fontWeight: 400 }}>
+                                (units in {cellBaselineUnit})
+                              </Text>
                             </Divider>
                             <Row gutter={[12, 12]}>
                               {Array.from({ length: cellCount }, (_, i) => {
@@ -4312,7 +4321,7 @@ export default function SLFMonitoring({
                                   CELL_STATUS_COLORS[cellStatus] ||
                                   CELL_STATUS_COLORS["Active Cell"];
                                 return (
-                                  <Col span={8} key={i}>
+                                  <Col xs={24} md={12} key={i}>
                                     <Collapse
                                       size="small"
                                       variant="filled" defaultActiveKey={[]}
@@ -4365,6 +4374,10 @@ export default function SLFMonitoring({
                                           ),
                                           children: (
                                             <>
+                                      {/* #5: related fields grouped into rows to cut
+                                          wasted vertical space; units locked to the
+                                          facility baseline unit (addon), no per-cell
+                                          picker. */}
                                       <Form.Item
                                         label="Cell Name"
                                         name={["cellNames", i]}
@@ -4377,87 +4390,124 @@ export default function SLFMonitoring({
                                           allowClear
                                         />
                                       </Form.Item>
-                                      <Form.Item
-                                        label="Capacity"
-                                        style={{ marginBottom: 8 }}
-                                      >
-                                        <Space.Compact
-                                          style={{ width: "100%" }}
-                                        >
+                                      <Row gutter={8}>
+                                        <Col span={12}>
                                           <Form.Item
+                                            label="Capacity"
                                             name={["cellCapacities", i]}
-                                            noStyle
+                                            style={{ marginBottom: 8 }}
                                           >
                                             <InputNumber
-                                              style={{
-                                                width: "calc(100% - 78px)",
-                                              }}
+                                              style={{ width: "100%" }}
                                               min={0}
                                               step={0.01}
                                               placeholder="Capacity"
+                                              addonAfter={cellBaselineUnit}
                                             />
                                           </Form.Item>
+                                        </Col>
+                                        <Col span={12}>
                                           <Form.Item
-                                            name={["cellCapacityUnits", i]}
-                                            noStyle
-                                            initialValue="m³"
+                                            label="Waste in Cell"
+                                            name={["cellFillValues", i]}
+                                            style={{ marginBottom: 8 }}
                                           >
-                                            <Select
-                                              style={{ width: 78 }}
-                                              options={UNIT_OPTIONS}
+                                            <InputNumber
+                                              style={{ width: "100%" }}
+                                              min={0}
+                                              step={0.01}
+                                              placeholder="Deposited"
+                                              addonAfter={cellBaselineUnit}
                                               onChange={(value) =>
-                                                handleCellCapacityUnitChange(
-                                                  i,
-                                                  value,
-                                                )
+                                                handleCellFillValueChange(i, value)
                                               }
                                             />
                                           </Form.Item>
-                                        </Space.Compact>
-                                      </Form.Item>
-                                      <Form.Item
-                                        label="Cell ON/OFF"
-                                        style={{ marginBottom: 8 }}
-                                      >
-                                        <Switch
-                                          checked={isActiveCellStatus(
-                                            cellStatus,
-                                          )}
-                                          checkedChildren="ON"
-                                          unCheckedChildren="OFF"
-                                          onChange={(checked) => {
-                                            const current =
-                                              form.getFieldValue(
-                                                "cellStatuses",
-                                              ) || [];
-                                            current[i] = checked
-                                              ? "Active Cell"
-                                              : "Used/Completed";
-                                            form.setFieldsValue({
-                                              cellStatuses: [...current],
-                                            });
-                                          }}
-                                        />
-                                      </Form.Item>
-                                      <Form.Item
-                                        name={["cellStatuses", i]}
-                                        label="Status"
-                                        initialValue="Active Cell"
-                                        style={{ marginBottom: 8 }}
-                                      >
-                                        <Select options={CELL_STATUS_OPTIONS} />
-                                      </Form.Item>
+                                        </Col>
+                                      </Row>
+                                      <Row gutter={8}>
+                                        <Col span={12}>
+                                          <Form.Item
+                                            name={["cellStatuses", i]}
+                                            label="Status"
+                                            initialValue="Active Cell"
+                                            style={{ marginBottom: 8 }}
+                                          >
+                                            <Select options={CELL_STATUS_OPTIONS} />
+                                          </Form.Item>
+                                        </Col>
+                                        <Col span={12}>
+                                          <Form.Item
+                                            name={["cellTypes", i]}
+                                            label="Type"
+                                            initialValue="Residual"
+                                            style={{ marginBottom: 8 }}
+                                          >
+                                            <Select
+                                              options={[
+                                                { label: "Residual Cell", value: "Residual" },
+                                                { label: "Treated Haz Waste Cell", value: "Treated Haz Waste" },
+                                              ]}
+                                            />
+                                          </Form.Item>
+                                        </Col>
+                                      </Row>
+                                      <Row gutter={8} align="bottom">
+                                        <Col span={12}>
+                                          <Form.Item
+                                            label="Cell ON/OFF"
+                                            style={{ marginBottom: 0 }}
+                                          >
+                                            <Switch
+                                              checked={isActiveCellStatus(cellStatus)}
+                                              checkedChildren="ON"
+                                              unCheckedChildren="OFF"
+                                              onChange={(checked) => {
+                                                const current =
+                                                  form.getFieldValue("cellStatuses") || [];
+                                                current[i] = checked
+                                                  ? "Active Cell"
+                                                  : "Used/Completed";
+                                                form.setFieldsValue({
+                                                  cellStatuses: [...current],
+                                                });
+                                              }}
+                                            />
+                                          </Form.Item>
+                                        </Col>
+                                        <Col span={12}>
+                                          <Form.Item
+                                            name={["cellSubmissionAllowed", i]}
+                                            label={
+                                              <Tooltip title="When ON, SLF/portal users can select this cell when disposing their volume-waste submissions in the Add Transport Entry form. Only Active/Open cells appear in the portal.">
+                                                <span>
+                                                  Allow Portal Submissions{" "}
+                                                  <InfoCircleOutlined style={{ color: "#13c2c2" }} />
+                                                </span>
+                                              </Tooltip>
+                                            }
+                                            valuePropName="checked"
+                                            initialValue={true}
+                                            style={{ marginBottom: 0 }}
+                                          >
+                                            <Switch
+                                              checkedChildren="Open"
+                                              unCheckedChildren="Off"
+                                              disabled={!isActiveCellStatus(cellStatus)}
+                                            />
+                                          </Form.Item>
+                                        </Col>
+                                      </Row>
                                       {needsNote && (
                                         <Form.Item
                                           name={["cellNotes", i]}
                                           label="Notes"
-                                          style={{ marginBottom: 8 }}
+                                          style={{ marginBottom: 0, marginTop: 8 }}
                                         >
                                           <Input.TextArea
                                             rows={2}
                                             placeholder={
-                                              cellStatus ===
-                                              "Under Construction"
+                                              cellStatus === "Under Construction"
                                                 ? "Target completion date, contractor, current progress..."
                                                 : "Planned use, estimated activation date, reserved for..."
                                             }
@@ -4465,92 +4515,6 @@ export default function SLFMonitoring({
                                           />
                                         </Form.Item>
                                       )}
-                                      <Form.Item
-                                        name={["cellTypes", i]}
-                                        label="Type"
-                                        initialValue="Residual"
-                                        style={{ marginBottom: 0 }}
-                                      >
-                                        <Select
-                                          options={[
-                                            {
-                                              label: "Residual Cell",
-                                              value: "Residual",
-                                            },
-                                            {
-                                              label: "Treated Haz Waste Cell",
-                                              value: "Treated Haz Waste",
-                                            },
-                                          ]}
-                                        />
-                                      </Form.Item>
-                                      <Form.Item
-                                        name={["cellSubmissionAllowed", i]}
-                                        label={
-                                          <Tooltip title="When ON, SLF/portal users can select this cell when disposing their volume-waste submissions in the Add Transport Entry form. Only Active/Open cells appear in the portal.">
-                                            <span>
-                                              Allow Portal Submissions{" "}
-                                              <InfoCircleOutlined style={{ color: "#13c2c2" }} />
-                                            </span>
-                                          </Tooltip>
-                                        }
-                                        valuePropName="checked"
-                                        initialValue={true}
-                                        style={{ marginBottom: 0, marginTop: 8 }}
-                                      >
-                                        <Switch
-                                          checkedChildren="Open"
-                                          unCheckedChildren="Off"
-                                          disabled={!isActiveCellStatus(cellStatus)}
-                                        />
-                                      </Form.Item>
-                                      <Form.Item
-                                        label="Waste in Cell"
-                                        style={{
-                                          marginBottom: 0,
-                                          marginTop: 8,
-                                        }}
-                                      >
-                                        <Space.Compact
-                                          style={{ width: "100%" }}
-                                        >
-                                          <Form.Item
-                                            name={["cellFillValues", i]}
-                                            noStyle
-                                          >
-                                            <InputNumber
-                                              style={{
-                                                width: "calc(100% - 78px)",
-                                              }}
-                                              min={0}
-                                              step={0.01}
-                                              placeholder="Amount deposited"
-                                              onChange={(value) =>
-                                                handleCellFillValueChange(
-                                                  i,
-                                                  value,
-                                                )
-                                              }
-                                            />
-                                          </Form.Item>
-                                          <Form.Item
-                                            name={["cellFillUnits", i]}
-                                            noStyle
-                                            initialValue="m³"
-                                          >
-                                            <Select
-                                              style={{ width: 78 }}
-                                              options={UNIT_OPTIONS}
-                                              onChange={(value) =>
-                                                handleCellFillUnitChange(
-                                                  i,
-                                                  value,
-                                                )
-                                              }
-                                            />
-                                          </Form.Item>
-                                        </Space.Compact>
-                                      </Form.Item>
                                             </>
                                           ),
                                         },

@@ -74,6 +74,22 @@ const isUserOnline = (user) =>
   !!user?.lastActiveAt &&
   Date.now() - new Date(user.lastActiveAt).getTime() <= ONLINE_WINDOW_MS;
 
+// Internal / sample "staff" portal accounts (e.g. Test Portal User, ESWM Portal
+// User) — real accounts used for demos and testing, not actual SLF operators.
+// Matched by name/company/email so they can be split into their own tab instead
+// of cluttering the real operator list. UI-only: no DB records are changed.
+const normLower = (v) => String(v || "").trim().toLowerCase();
+const STAFF_PORTAL_EMAILS = new Set(["fonssabalbosa.27@gmail.com"]);
+const STAFF_PORTAL_NEEDLES = ["test portal user", "eswm portal"];
+const isStaffPortalUser = (user) => {
+  if (!user) return false;
+  if (STAFF_PORTAL_EMAILS.has(normLower(user.email))) return true;
+  const haystack = normLower(
+    `${user.firstName || ""} ${user.lastName || ""} ${user.username || ""} ${user.companyName || ""}`,
+  );
+  return STAFF_PORTAL_NEEDLES.some((needle) => haystack.includes(needle));
+};
+
 function normalizeVerificationFileUrl(url) {
   if (!url) return "";
   let normalized = String(url).replace("/porta-auth/", "/portal-auth/");
@@ -165,7 +181,10 @@ export default function PortalUsers({ isDark, canEdit = true, canDelete = true, 
     if (!silent) setLoading(true);
     try {
       const [usersRes, genRes] = await Promise.all([
-        api.get("/portal-users"),
+        // includeSystem: this management view keeps system/sample accounts (they
+        // are separated into the "Staff Portal Users" tab). The default list —
+        // used by Developer Portal Access — excludes them at the source.
+        api.get("/portal-users", { params: { includeSystem: true } }),
         api.get("/slf-facilities"),
       ]);
       // Defensive: never show dummy/test accounts or facilities in this
@@ -675,6 +694,18 @@ export default function PortalUsers({ isDark, canEdit = true, canDelete = true, 
     });
   }, [assignmentFilter, fileFilter, searchText, slfFilter, statusFilter, users, verificationFilter]);
 
+  // Real SLF operators vs internal/sample staff accounts (Test Portal User,
+  // ESWM Portal User). Both honour the active filters above; they are just
+  // shown under separate tabs.
+  const realUsers = useMemo(
+    () => filteredUsers.filter((user) => !isStaffPortalUser(user)),
+    [filteredUsers],
+  );
+  const staffUsers = useMemo(
+    () => filteredUsers.filter((user) => isStaffPortalUser(user)),
+    [filteredUsers],
+  );
+
   const resetFilters = () => {
     setSearchText("");
     setStatusFilter("all");
@@ -689,12 +720,13 @@ export default function PortalUsers({ isDark, canEdit = true, canDelete = true, 
       title: "#",
       key: "index",
       width: 50,
+      align: "center",
       render: (_, __, i) => i + 1,
     },
     {
       title: "Portal User",
       key: "portalUser",
-      width: 360,
+      width: 300,
       sorter: (a, b) =>
         `${a.firstName} ${a.lastName}`.localeCompare(
           `${b.firstName} ${b.lastName}`
@@ -713,16 +745,28 @@ export default function PortalUsers({ isDark, canEdit = true, canDelete = true, 
       key: "assignedSlfName",
       render: (v) => {
         const names = Array.isArray(v) ? v : v ? [v] : [];
-        return names.length > 0
-          ? names.map((n, i) => <Tag key={i} color="blue" style={{ marginBottom: 2 }}>{n}</Tag>)
-          : <Text type="secondary">Not assigned</Text>;
+        return names.length > 0 ? (
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 2 }}>
+            {names.map((n, i) => (
+              <Tag
+                key={i}
+                color="blue"
+                style={{ margin: 0, whiteSpace: "normal", maxWidth: "100%" }}
+              >
+                {n}
+              </Tag>
+            ))}
+          </div>
+        ) : (
+          <Text type="secondary">Not assigned</Text>
+        );
       },
-      width: 140,
+      width: 400,
     },
     {
-      title: "Presence",
+      title: "Account Status",
       key: "presence",
-      width: 150,
+      width: 200,
       filters: [
         { text: "Online", value: "online" },
         { text: "Offline", value: "offline" },
@@ -859,6 +903,28 @@ export default function PortalUsers({ isDark, canEdit = true, canDelete = true, 
 
   const pendingCount = users.filter((u) => u.status === "pending").length;
 
+  const renderUserTable = (data, emptyText) => (
+    <ResponsiveTable
+      className="portal-user-wrap-table"
+      dataSource={data}
+      columns={columns}
+      rowKey="_id"
+      loading={loading}
+      size="small"
+      pagination={{
+        defaultPageSize: 20,
+        showSizeChanger: true,
+        pageSizeOptions: ["10", "15", "25", "50"],
+        showTotal: (total, range) => `${range[0]}-${range[1]} of ${total} portal users`,
+      }}
+      locale={{
+        emptyText: (
+          <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={emptyText} />
+        ),
+      }}
+    />
+  );
+
   const userSummary = useMemo(() => {
     const acc = {
       total: users.length,
@@ -952,7 +1018,7 @@ export default function PortalUsers({ isDark, canEdit = true, canDelete = true, 
 
       <Card size="small" style={{ marginBottom: 16, borderRadius: 8 }}>
         <Row gutter={[12, 12]} align="middle">
-          <Col xs={24} md={8} lg={7}>
+          <Col xs={24} sm={12} md={8} lg={5}>
             <Input
               allowClear
               prefix={<SearchOutlined />}
@@ -961,7 +1027,7 @@ export default function PortalUsers({ isDark, canEdit = true, canDelete = true, 
               onChange={(event) => setSearchText(event.target.value)}
             />
           </Col>
-          <Col xs={24} sm={12} md={4}>
+          <Col xs={12} sm={8} md={4} lg={3}>
             <Select value={statusFilter} onChange={setStatusFilter} style={{ width: "100%" }}>
               <Option value="all">All Status</Option>
               <Option value="pending">Pending</Option>
@@ -969,14 +1035,14 @@ export default function PortalUsers({ isDark, canEdit = true, canDelete = true, 
               <Option value="rejected">Rejected</Option>
             </Select>
           </Col>
-          <Col xs={24} sm={12} md={4}>
+          <Col xs={12} sm={8} md={4} lg={4}>
             <Select value={assignmentFilter} onChange={setAssignmentFilter} style={{ width: "100%" }}>
               <Option value="all">All Assignments</Option>
               <Option value="assigned">Assigned</Option>
               <Option value="unassigned">Unassigned</Option>
             </Select>
           </Col>
-          <Col xs={24} sm={12} md={4}>
+          <Col xs={12} sm={8} md={4} lg={4}>
             <Select value={verificationFilter} onChange={setVerificationFilter} style={{ width: "100%" }}>
               <Option value="all">All Verification</Option>
               <Option value="held">Held</Option>
@@ -984,14 +1050,14 @@ export default function PortalUsers({ isDark, canEdit = true, canDelete = true, 
               <Option value="needs-docs">Needs Docs</Option>
             </Select>
           </Col>
-          <Col xs={24} sm={12} md={4}>
+          <Col xs={12} sm={8} md={4} lg={3}>
             <Select value={fileFilter} onChange={setFileFilter} style={{ width: "100%" }}>
               <Option value="all">All Files</Option>
               <Option value="with-file">With File</Option>
               <Option value="no-file">No File</Option>
             </Select>
           </Col>
-          <Col xs={24} md={8} lg={7}>
+          <Col xs={24} sm={12} md={8} lg={5}>
             <Select
               allowClear
               showSearch
@@ -1003,7 +1069,7 @@ export default function PortalUsers({ isDark, canEdit = true, canDelete = true, 
               style={{ width: "100%" }}
             />
           </Col>
-          <Col xs={24} md={16} lg={17}>
+          <Col xs={24}>
             <Space wrap style={{ width: "100%", justifyContent: "space-between" }}>
               <Text type="secondary" style={{ fontSize: 12 }}>
                 Showing <Text strong>{filteredUsers.length}</Text> of <Text strong>{users.length}</Text> portal users
@@ -1014,27 +1080,20 @@ export default function PortalUsers({ isDark, canEdit = true, canDelete = true, 
         </Row>
       </Card>
 
-      <ResponsiveTable
-        className="portal-user-wrap-table"
-        dataSource={filteredUsers}
-        columns={columns}
-        rowKey="_id"
-        loading={loading}
-        size="small"
-        pagination={{
-          defaultPageSize: 15,
-          showSizeChanger: true,
-          pageSizeOptions: ["10", "15", "25", "50"],
-          showTotal: (total, range) => `${range[0]}-${range[1]} of ${total} portal users`,
-        }}
-        locale={{
-          emptyText: (
-            <Empty
-              image={Empty.PRESENTED_IMAGE_SIMPLE}
-              description="No portal users"
-            />
-          ),
-        }}
+      <Tabs
+        defaultActiveKey="portal-users"
+        items={[
+          {
+            key: "portal-users",
+            label: `Portal Users (${realUsers.length})`,
+            children: renderUserTable(realUsers, "No portal users"),
+          },
+          {
+            key: "staff-portal-users",
+            label: `Staff Portal Users (${staffUsers.length})`,
+            children: renderUserTable(staffUsers, "No staff portal users"),
+          },
+        ]}
       />
 
       {/* Approve Modal */}

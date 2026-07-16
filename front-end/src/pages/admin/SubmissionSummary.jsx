@@ -5,6 +5,7 @@ import {
   Card,
   Col,
   Collapse,
+  DatePicker,
   Empty,
   Input,
   Modal,
@@ -15,6 +16,7 @@ import {
   Statistic,
   Table,
   Tag,
+  Tooltip,
   Typography,
 } from "antd";
 import {
@@ -27,12 +29,14 @@ import {
   InboxOutlined,
   CarOutlined,
   DatabaseOutlined,
+  DownloadOutlined,
   ExperimentOutlined,
   WarningOutlined,
   CheckCircleOutlined,
   ClockCircleOutlined,
 } from "@ant-design/icons";
 import dayjs from "dayjs";
+import GaugeMeter, { computeGaugePercent } from "../../components/GaugeMeter";
 // FullCalendar is heavy; load it only when the disposal calendar modal opens.
 const SummaryDisposalCalendar = lazy(() => import("./SummaryDisposalCalendar"));
 const SlfSubmissionReport = lazy(() => import("./SlfSubmissionReport"));
@@ -83,13 +87,14 @@ function formatVolumeValue(value) {
   return n.toLocaleString(undefined, { maximumFractionDigits: 2 });
 }
 
-function formatVolume(m3, tons) {
-  const parts = [];
-  const m = formatVolumeValue(m3);
-  const t = formatVolumeValue(tons);
-  if (m) parts.push(`${m} m³`);
-  if (t) parts.push(`${t} tons`);
-  return parts.length ? parts.join(" / ") : "—";
+// Display a volume in the SINGLE declared baseline unit (#7: one unit everywhere,
+// never "m³ / tons" side-by-side). The m³ and tons figures are kept in lockstep
+// upstream (the 0.2 factor), so we simply pick the one matching the baseline unit.
+function formatVolume(m3, tons, unit = "m³") {
+  const u = normalizeUnit(unit);
+  const value = u === "tons" ? tons : m3;
+  const v = formatVolumeValue(value);
+  return v ? `${v} ${u}` : "—";
 }
 
 function addNameVariant(map, name, value) {
@@ -321,6 +326,9 @@ export default function SubmissionSummary({ isDark }) {
   const [calendarRecord, setCalendarRecord] = useState(null);
   const [calendarLoading, setCalendarLoading] = useState(false);
   const [calendarDate, setCalendarDate] = useState(dayjs());
+  // #4: disposal-calendar export — a custom date range, or "Export All" from the
+  // first recorded submission.
+  const [exportRange, setExportRange] = useState(null);
   const [submissionDetail, setSubmissionDetail] = useState(null);
   const [portalUsers, setPortalUsers] = useState([]);
   const [reportOpen, setReportOpen] = useState(false);
@@ -454,6 +462,22 @@ export default function SubmissionSummary({ isDark }) {
     });
   }, [slfRows, search, statusFilter]);
 
+  // The single unit this summary displays in (#7). Facilities declare their own
+  // baseline unit; for the aggregate table/totals we surface the most common one
+  // among the loaded rows (m³ when none is declared). Per-facility rows still show
+  // their OWN unit where available; this only governs the shared aggregate figures.
+  // Declared here (before dayMap/calendarEvents) so those memos can read it without
+  // hitting a temporal-dead-zone error.
+  const displayUnit = useMemo(() => {
+    const counts = { "m³": 0, tons: 0 };
+    (filteredRows || []).forEach((r) => {
+      const u = normalizeUnit(r.baselineUnit || "");
+      if (u === "tons") counts.tons += 1;
+      else if (u === "m³") counts["m³"] += 1;
+    });
+    return counts.tons > counts["m³"] ? "tons" : "m³";
+  }, [filteredRows]);
+
   const facilityMap = useMemo(() => {
     const map = new Map();
     facilities.forEach((facility) => {
@@ -553,27 +577,132 @@ export default function SubmissionSummary({ isDark }) {
     calendarRecord.records.forEach((record) => {
       if (!record.dateOfDisposal) return;
       const key = dayjs(record.dateOfDisposal).format("YYYY-MM-DD");
-      if (!map[key]) map[key] = { count: 0, m3: 0, tons: 0 };
+      if (!map[key]) map[key] = { count: 0, m3: 0, tons: 0, issues: new Set() };
       map[key].count += 1;
+      // #4: flag submissions that have issues so the calendar can recolor the day.
+      const st = String(record.status || "").toLowerCase();
+      if (["rejected", "reverted", "revert_requested"].includes(st)) {
+        map[key].issues.add("error:Validation / revert issue");
+      }
       (record.trucks || []).forEach((truck) => {
         const unit = normalizeUnit(truck.actualVolumeUnit || record.baselineUnit || "m³");
         if (unit === "tons") map[key].tons += Number(truck.actualVolume || 0);
         else map[key].m3 += Number(truck.actualVolume || 0);
+        const vol = Number(truck.actualVolume || 0);
+        const cap = Number(truck.truckCapacity || 0);
+        if (cap > 0 && vol > cap) map[key].issues.add("error:Exceeded truck capacity");
+        const vehicles = Array.isArray(truck.vehicles) ? truck.vehicles : [];
+        const hasVolume = vol > 0 || vehicles.some((v) => Number(v.actualVolume || 0) > 0);
+        const hasCell =
+          !!truck.cellName ||
+          (truck.cellIndex != null && truck.cellIndex !== "") ||
+          vehicles.some((v) => v.cellName || (v.cellIndex != null && v.cellIndex !== ""));
+        if (hasVolume && !hasCell) map[key].issues.add("warning:Missing cell placement");
+        vehicles.forEach((v) => {
+          const vcap = Number(v.capacity ?? truck.truckCapacity ?? 0);
+          const vvol = Number(v.actualVolume || 0);
+          if (vcap > 0 && vvol > vcap) map[key].issues.add("error:Exceeded vehicle capacity");
+        });
       });
+    });
+    // Freeze the issue sets into { level, reasons } for the calendar.
+    Object.values(map).forEach((d) => {
+      const reasons = [...d.issues];
+      d.issueReasons = reasons.map((r) => r.split(":")[1]);
+      d.issueLevel = reasons.some((r) => r.startsWith("error:"))
+        ? "error"
+        : reasons.some((r) => r.startsWith("warning:"))
+          ? "warning"
+          : null;
     });
     return map;
   }, [calendarRecord]);
 
-  const calendarEvents = useMemo(() => Object.entries(dayMap).map(([date, item]) => ({
-    id: date,
-    start: date,
-    allDay: true,
-    title: formatVolume(item.m3 || 0, item.tons || 0),
-    backgroundColor: ACCENT,
-    borderColor: ACCENT,
-    textColor: "#fff",
-    extendedProps: item,
-  })), [dayMap]);
+  // #4: submission tag colors change when a day has issues — red for exceeded
+  // capacity / rejected-reverted, amber for missing required data (unplaced cell).
+  const ISSUE_COLORS = { error: "#ff4d4f", warning: "#fa8c16" };
+  const calendarEvents = useMemo(() => Object.entries(dayMap).map(([date, item]) => {
+    const color = ISSUE_COLORS[item.issueLevel] || ACCENT;
+    return {
+      id: date,
+      start: date,
+      allDay: true,
+      title: formatVolume(item.m3 || 0, item.tons || 0, calendarRecord?.baselineUnit || displayUnit),
+      backgroundColor: color,
+      borderColor: color,
+      textColor: "#fff",
+      extendedProps: item,
+    };
+  }), [dayMap, calendarRecord?.baselineUnit, displayUnit]);
+
+  // #4: export the open SLF's disposal submissions as CSV — either a custom date
+  // range or "all" (from the first recorded submission). Volumes are written in the
+  // facility's single baseline unit, consistent with everything else on screen.
+  const handleExportCalendar = (mode) => {
+    if (!calendarRecord) return;
+    const recs = (calendarRecord.records || []).filter((r) => r.dateOfDisposal);
+    let filtered = recs;
+    if (mode === "range") {
+      if (!exportRange || !exportRange[0] || !exportRange[1]) {
+        Modal.warning({ title: "Select a date range", content: "Choose a start and end date, or use Export All." });
+        return;
+      }
+      const [start, end] = exportRange;
+      filtered = recs.filter((r) => {
+        const d = dayjs(r.dateOfDisposal);
+        return (d.isSame(start, "day") || d.isAfter(start)) && (d.isSame(end, "day") || d.isBefore(end));
+      });
+    }
+    if (filtered.length === 0) {
+      Modal.info({ title: "Nothing to export", content: "No submissions fall in the selected range." });
+      return;
+    }
+    const unit = normalizeUnit(calendarRecord.baselineUnit || displayUnit);
+    const volumeOf = (record) => {
+      const trucks = record.trucks || [];
+      if (trucks.length === 0) {
+        return unit === "tons" ? Number(record.totalVolumeTons || 0) : Number(record.totalVolumeM3 || 0);
+      }
+      return trucks.reduce((sum, t) => {
+        const v = convertVolume(Number(t.actualVolume || 0), t.actualVolumeUnit || record.baselineUnit || unit, unit);
+        return sum + (v || 0);
+      }, 0);
+    };
+    const esc = (v) => `"${String(v ?? "").replace(/"/g, '""')}"`;
+    const header = ["Date", "SLF", "Submission ID", "Generator", "Trucks", `Volume (${unit})`, "Status"];
+    const rows = filtered
+      .slice()
+      .sort((a, b) => dayjs(a.dateOfDisposal).valueOf() - dayjs(b.dateOfDisposal).valueOf())
+      .map((r) =>
+        [
+          dayjs(r.dateOfDisposal).format("YYYY-MM-DD"),
+          calendarRecord.slfName || r.slfName || "",
+          r.idNo || r.submissionId || "",
+          r.lguCompanyName || r.companyName || "",
+          r.truckCount ?? (r.trucks?.length ?? 0),
+          Number(volumeOf(r).toFixed(2)),
+          r.status || "pending",
+        ]
+          .map(esc)
+          .join(","),
+      );
+    const csv = [header.map(esc).join(","), ...rows].join("\n");
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    const label =
+      mode === "range"
+        ? `${exportRange[0].format("YYYYMMDD")}-${exportRange[1].format("YYYYMMDD")}`
+        : "all";
+    a.href = url;
+    a.download = `disposal-calendar-${String(calendarRecord.slfName || "slf")
+      .replace(/[^a-z0-9]+/gi, "-")
+      .toLowerCase()}-${label}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
 
   // Tiles are derived from the loaded per-SLF submission rows so they always
   // reflect the actual submissions (and respond live to the search/status
@@ -688,23 +817,24 @@ export default function SubmissionSummary({ isDark }) {
       title: "SLF",
       dataIndex: "slfName",
       fixed: "left",
-      width: 240,
+      width: 300,
       render: (value, row) => (
         <Space direction="vertical" size={2}>
-          <Text strong>{value}</Text>
+          <Text strong style={{ fontSize: 12 }}>{value}</Text>
           <Text type="secondary" style={{ fontSize: 11 }}>{row.generatorCount} generator(s) / {row.submitterCount} submitter(s)</Text>
         </Space>
       ),
     },
-    { title: "Submissions", dataIndex: "submissions", width: 110, align: "center", sorter: (a, b) => a.submissions - b.submissions },
-    { title: "Trucks", dataIndex: "trucks", width: 90, align: "center", sorter: (a, b) => a.trucks - b.trucks },
+    { title: "No. of Submissions", dataIndex: "submissions", width: 110, align: "center", sorter: (a, b) => a.submissions - b.submissions },
+    { title: "No. of Trucks", dataIndex: "trucks", width: 90, align: "center", sorter: (a, b) => a.trucks - b.trucks },
     {
       title: "Waste Volume",
       width: 190,
-      render: (_, row) => <Text strong>{formatVolume(row.totalM3, row.totalTons)}</Text>,
+      align: "center",
+      render: (_, row) => <Text strong style={{ fontSize: 12 }}>{formatVolume(row.totalM3, row.totalTons, row.baselineUnit || displayUnit)}</Text>,
     },
-    { title: "Residual", width: 170, render: (_, row) => formatVolume(row.residualM3, row.residualTons) },
-    { title: "Hazardous", width: 170, render: (_, row) => formatVolume(row.hazardousM3, row.hazardousTons) },
+    { title: "Residual", width: 170, render: (_, row) => <Text style={{ fontSize: 12 }}>{formatVolume(row.residualM3, row.residualTons, row.baselineUnit || displayUnit)}</Text> },
+    { title: "Hazardous", width: 170, render: (_, row) => <Text style={{ fontSize: 12 }}>{formatVolume(row.hazardousM3, row.hazardousTons, row.baselineUnit || displayUnit)}</Text> },
     {
       title: "Status Summary",
       width: 230,
@@ -726,13 +856,13 @@ export default function SubmissionSummary({ isDark }) {
       sorter: (a, b) => (a.lastDisposalDate?.valueOf() || 0) - (b.lastDisposalDate?.valueOf() || 0),
     },
     {
-      title: "Calendar",
+      title: "Action",
       width: 110,
       align: "center",
       render: (_, row) => (
         <Button
           size="small"
-          icon={<CalendarOutlined />}
+          type="primary"
           onClick={() => openCalendar(row)}
         >
           View
@@ -798,16 +928,12 @@ export default function SubmissionSummary({ isDark }) {
             icon={<DatabaseOutlined />}
             color="#722ed1"
             label="Total Waste Volume"
-            subtitle={
-              totals.tons > 0 && totals.m3 > 0
-                ? `${formatVolumeValue(totals.tons)} tons combined`
-                : "All accepted waste"
-            }
+            subtitle="All accepted waste"
             isDark={isDark}
             delay={180}
           >
             <span style={{ fontSize: 19, fontWeight: 700 }}>
-              {formatVolume(totals.m3, totals.tons)}
+              {formatVolume(totals.m3, totals.tons, displayUnit)}
             </span>
           </SummaryTile>
         </Col>
@@ -821,7 +947,7 @@ export default function SubmissionSummary({ isDark }) {
             delay={240}
           >
             <span style={{ fontSize: 17, fontWeight: 700 }}>
-              {formatVolume(totals.residualM3, totals.residualTons)}
+              {formatVolume(totals.residualM3, totals.residualTons, displayUnit)}
             </span>
           </SummaryTile>
         </Col>
@@ -835,7 +961,7 @@ export default function SubmissionSummary({ isDark }) {
             delay={300}
           >
             <span style={{ fontSize: 17, fontWeight: 700 }}>
-              {formatVolume(totals.hazardousM3, totals.hazardousTons)}
+              {formatVolume(totals.hazardousM3, totals.hazardousTons, displayUnit)}
             </span>
           </SummaryTile>
         </Col>
@@ -948,7 +1074,26 @@ export default function SubmissionSummary({ isDark }) {
         title={calendarRecord ? <Space><CalendarOutlined /> <span>{calendarRecord.slfName}</span><Text type="secondary" style={{ fontSize: 13 }}>Disposal Calendar</Text></Space> : "Disposal Calendar"}
         open={!!calendarRecord}
         onCancel={() => setCalendarRecord(null)}
-        footer={<Button onClick={() => setCalendarRecord(null)}>Close</Button>}
+        footer={
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
+            {/* #4: export a custom date range, or everything from the first record. */}
+            <Space wrap size={6}>
+              <DatePicker.RangePicker
+                size="small"
+                value={exportRange}
+                onChange={(v) => setExportRange(v)}
+                allowClear
+              />
+              <Button size="small" icon={<DownloadOutlined />} onClick={() => handleExportCalendar("range")}>
+                Export Range
+              </Button>
+              <Button size="small" type="primary" ghost icon={<DownloadOutlined />} onClick={() => handleExportCalendar("all")}>
+                Export All
+              </Button>
+            </Space>
+            <Button onClick={() => setCalendarRecord(null)}>Close</Button>
+          </div>
+        }
         width={1600}
         destroyOnHidden
       >
@@ -966,7 +1111,7 @@ export default function SubmissionSummary({ isDark }) {
                   <Card size="small" style={{ borderRadius: 8 }}><Statistic title="Selected Date" value={selectedDayTotals.submissions} suffix="submission(s)" valueStyle={{ fontSize: 20, color: ACCENT }} /></Card>
                 </Col>
                 <Col xs={12} md={6}>
-                  <Card size="small" style={{ borderRadius: 8 }}><Statistic title="Selected Volume" value={formatVolume(selectedDayTotals.m3, selectedDayTotals.tons)} valueStyle={{ fontSize: 16 }} /></Card>
+                  <Card size="small" style={{ borderRadius: 8 }}><Statistic title="Selected Volume" value={formatVolume(selectedDayTotals.m3, selectedDayTotals.tons, calendarRecord.baselineUnit || displayUnit)} valueStyle={{ fontSize: 16 }} /></Card>
                 </Col>
               </Row>
             </Col>
@@ -1008,8 +1153,8 @@ export default function SubmissionSummary({ isDark }) {
                 <Space size={6} wrap style={{ marginBottom: 12 }}>
                   <Tag color="blue">{selectedDayTotals.submissions} submission(s)</Tag>
                   <Tag color="cyan">{selectedDayTotals.trucks} truck(s)</Tag>
-                  <Tag color="green">{formatVolume(selectedDayTotals.m3, selectedDayTotals.tons)}</Tag>
-                  <Tag color="purple">Baseline + submissions: {formatVolume(selectedCumulativeTotals.m3, selectedCumulativeTotals.tons)}</Tag>
+                  <Tag color="green">{formatVolume(selectedDayTotals.m3, selectedDayTotals.tons, calendarRecord.baselineUnit || displayUnit)}</Tag>
+                  <Tag color="purple">Baseline + submissions: {formatVolume(selectedCumulativeTotals.m3, selectedCumulativeTotals.tons, calendarRecord.baselineUnit || displayUnit)}</Tag>
                 </Space>
                 <Table
                   size="small"
@@ -1031,8 +1176,29 @@ export default function SubmissionSummary({ isDark }) {
                     },
                     {
                       title: "Remaining",
-                      //width: 105,
-                      render: (_, row) => row.remaining == null ? "—" : `${row.remaining.toLocaleString(undefined, { maximumFractionDigits: 2 })} ${row.unit}`,
+                      width: 150,
+                      // #4: compact gauge beside the remaining figure showing the
+                      // active cell's utilization at a glance.
+                      render: (_, row) => (
+                        <Space size={8} align="center">
+                          <span>
+                            {row.remaining == null
+                              ? "—"
+                              : `${row.remaining.toLocaleString(undefined, { maximumFractionDigits: 2 })} ${row.unit}`}
+                          </span>
+                          {row.pct != null && (
+                            <Tooltip title={`${row.pct}% utilized`}>
+                              <GaugeMeter
+                                percent={row.pct}
+                                size={34}
+                                thickness={4}
+                                percentFontSize={9}
+                                color={row.pct >= 90 ? "#ff4d4f" : row.pct >= 75 ? "#fa8c16" : "#52c41a"}
+                              />
+                            </Tooltip>
+                          )}
+                        </Space>
+                      ),
                     },
                   ]}
                 />
@@ -1057,7 +1223,7 @@ export default function SubmissionSummary({ isDark }) {
                           else acc.m3 += Number(truck.actualVolume || 0);
                           return acc;
                         }, { m3: 0, tons: 0 });
-                        return formatVolume(dayTotal.m3, dayTotal.tons);
+                        return formatVolume(dayTotal.m3, dayTotal.tons, record.baselineUnit || calendarRecord.baselineUnit || displayUnit);
                       },
                     },
                     { title: "Status", dataIndex: "status", width: 90, render: (value) => <Tag color={statusColor[value] || "default"}>{value?.replace("_", " ") || "pending"}</Tag> },

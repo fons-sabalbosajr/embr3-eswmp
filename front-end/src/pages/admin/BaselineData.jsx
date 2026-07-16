@@ -688,13 +688,22 @@ export default function BaselineData({
       title: "SLF Name",
       dataIndex: "slfName",
       key: "slfName",
+      width: 220,
       filters: slfFilters,
       filterSearch: true,
       onFilter: (value, record) => String(record.slfName || "") === String(value || ""),
       render: (v, r) => (
         <div>
           <Space size={4} wrap>
-            <Text strong style={{ fontSize: 13 }}>
+            <Text
+              strong
+              style={{
+                fontSize: 13,
+                whiteSpace: "normal",
+                overflowWrap: "anywhere",
+                wordBreak: "break-word",
+              }}
+            >
               {v}
             </Text>
             {r.isDummy && (
@@ -731,32 +740,31 @@ export default function BaselineData({
       ),
     },
     {
-      title: "Active Cells",
-      key: "active",
-      width: 110,
+      title: "Cells",
+      key: "cells",
+      width: 150,
       render: (_, r) => {
-        const has = (r.activeCellEntries || []).length > 0;
+        const activeHas = (r.activeCellEntries || []).length > 0;
+        const closedHas = (r.closedCellEntries || []).length > 0;
+        const activeText = activeHas
+          ? `${r.activeCellEntries.length} cell(s)`
+          : fmtVol(r.activeCellResidualVolume, r.activeCellResidualUnit);
+        const closedText = closedHas
+          ? `${r.closedCellEntries.length} cell(s)`
+          : fmtVol(r.closedCellResidualVolume, r.closedCellResidualUnit);
         return (
-          <Tag color="green">
-            {has
-              ? `${r.activeCellEntries.length} cell(s)`
-              : fmtVol(r.activeCellResidualVolume, r.activeCellResidualUnit)}
-          </Tag>
-        );
-      },
-    },
-    {
-      title: "Closed Cells",
-      key: "closed",
-      width: 110,
-      render: (_, r) => {
-        const has = (r.closedCellEntries || []).length > 0;
-        return (
-          <Tag color="orange">
-            {has
-              ? `${r.closedCellEntries.length} cell(s)`
-              : fmtVol(r.closedCellResidualVolume, r.closedCellResidualUnit)}
-          </Tag>
+          <Space direction="vertical" size={2}>
+            <Tooltip title="Active Cells">
+              <Tag color="green" style={{ margin: 0 }} icon={<CheckCircleOutlined />}>
+                {activeText}
+              </Tag>
+            </Tooltip>
+            <Tooltip title="Closed Cells">
+              <Tag color="orange" style={{ margin: 0 }} icon={<CloseCircleOutlined />}>
+                {closedText}
+              </Tag>
+            </Tooltip>
+          </Space>
         );
       },
     },
@@ -1130,8 +1138,8 @@ export default function BaselineData({
             ]}
           />
           <Button
-            type="text"
-            size="small"
+            type="primary"
+            
             icon={<ReloadOutlined spin={loading} />}
             onClick={() => fetchBaselines({ force: true })}
           >

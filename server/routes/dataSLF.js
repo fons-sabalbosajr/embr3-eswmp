@@ -13,7 +13,11 @@ const { notifyAdmin, notifyPortal, refreshAdmin } = require("../utils/socketEmit
 const { isBataanSlfName } = require("../utils/mergeBataanSlf");
 const { authMiddleware, requireAnyAuth, developerOnly } = require("../middleware/auth");
 const { NON_DUMMY_CLAUSE } = require("../utils/dummyFilter");
-const { validateWasteGeneration } = require("../utils/wasteGenerationValidation");
+const {
+  validateWasteGeneration,
+  validateTransportUnits,
+  validateTruckCapacityElevation,
+} = require("../utils/wasteGenerationValidation");
 // Named to avoid colliding with this file's own `normalizeVolumeUnit`, which is a
 // lenient SANITIZER for Excel-imported free text (it always yields a unit). These
 // are the strict shared helpers: they return "" / null rather than guessing.
@@ -840,8 +844,11 @@ async function submitEntries({ entries, submittedBy, req } = {}) {
   // ── Waste Generation Information: every field required for FINAL submission ──
   // This is the AUTHORITATIVE gate. The Portal runs the same rules to highlight the
   // offending fields before uploading, but that is a convenience — a request that
-  // reaches here with an incomplete truck (notably a missing/zero Truck Capacity)
-  // is rejected outright, so a submission can never be partially finalized.
+  // reaches here with an incomplete truck (e.g. a truck with no disposal cell) is
+  // rejected outright, so a submission can never be partially finalized. Truck
+  // Capacity is REQUIRED for UPLOADED rows (truck.entrySource === "upload") and
+  // OPTIONAL for manually-entered rows; a present value must always be > 0. Missing
+  // capacity on already-saved historical records is completed via Organize Cells.
   //
   // Drafts and queued/scheduled entries do NOT come through here; they are stored
   // in PortalSubmissionQueue and are only validated when the scheduler promotes
@@ -863,6 +870,66 @@ async function submitEntries({ entries, submittedBy, req } = {}) {
     error.statusCode = 400;
     // Field-specific feedback so the Portal can focus the offending input.
     error.validationIssues = wasteGenIssues;
+    throw error;
+  }
+
+  // ── Declared baseline unit + truck-capacity elevation (authoritative gate) ──
+  // Every transport-entry unit must match the entry's declared baseline unit, and
+  // no truck/vehicle capacity may exceed its registered (accredited-hauler)
+  // capacity by more than 10%. The Portal runs the same rules for inline feedback;
+  // this server-side check is what actually blocks a mismatched/over-capacity
+  // submission. Declared capacities are read from the SLF's own baseline haulers,
+  // never trusted from the client payload.
+  const declaredCapacityCache = new Map(); // slf key -> Map(plate -> declared capacity)
+  const getDeclaredCapacityMap = async (item) => {
+    const slfName = item?.slfName ? String(item.slfName).trim() : "";
+    const key = (item?.slfGenerator && String(item.slfGenerator)) || slfName.toLowerCase();
+    if (!key) return new Map();
+    if (declaredCapacityCache.has(key)) return declaredCapacityCache.get(key);
+    const query = item?.slfGenerator
+      ? { slfGenerator: item.slfGenerator, "accreditedHaulers.0": { $exists: true } }
+      : { slfName: item.slfName, "accreditedHaulers.0": { $exists: true } };
+    const baselines = await DataSLF.find(query).select("accreditedHaulers").lean();
+    const map = new Map();
+    baselines.forEach((b) => {
+      (b.accreditedHaulers || []).forEach((h) => {
+        (h.vehicles || []).forEach((v) => {
+          const plate = String(v?.plateNumber || "").trim().toLowerCase();
+          const cap = Number(v?.capacity);
+          if (plate && Number.isFinite(cap) && cap > 0 && !map.has(plate)) {
+            map.set(plate, cap);
+          }
+        });
+      });
+    });
+    declaredCapacityCache.set(key, map);
+    return map;
+  };
+
+  const transportIssues = [];
+  for (let idx = 0; idx < sanitizedItems.length; idx += 1) {
+    const item = sanitizedItems[idx];
+    const entryIndex = sanitizedItems.length > 1 ? idx : null;
+    validateTransportUnits(item?.trucks, item?.baselineUnit).forEach((i) => {
+      transportIssues.push({ ...i, entryIndex });
+    });
+    const capMap = await getDeclaredCapacityMap(item);
+    const getDeclared = (_hauler, plate) =>
+      capMap.get(String(plate || "").trim().toLowerCase()) || null;
+    validateTruckCapacityElevation(item?.trucks, getDeclared).forEach((i) => {
+      transportIssues.push({ ...i, entryIndex });
+    });
+  }
+  if (transportIssues.length) {
+    const summary = transportIssues
+      .slice(0, 8)
+      .map((i) => `${i.truckIndex != null ? `Truck ${i.truckIndex + 1}: ` : ""}${i.message}`)
+      .join(" | ");
+    const error = new Error(
+      `Transport entry validation failed. ${summary}${transportIssues.length > 8 ? ` (+${transportIssues.length - 8} more)` : ""}`,
+    );
+    error.statusCode = 400;
+    error.validationIssues = transportIssues;
     throw error;
   }
 
@@ -2633,6 +2700,12 @@ router.patch("/:id/portal-cell-assignments", async (req, res) => {
       (t) => t?.cellName || (t?.vehicles || []).some((v) => v?.cellName)
     );
 
+    // A completion may carry a cell, a Truck Capacity, or both. Capacity-only rows
+    // (a historical truck that already has a cell but no capacity) must NOT clear
+    // the existing cell — cell fields are only written when a cell is supplied.
+    const isPositiveCap = (v) => Number.isFinite(Number(v)) && Number(v) > 0;
+    const normCapUnit = (u) => (u ? String(u).trim().replace("m3", "m³") : null);
+
     list.forEach((assignment) => {
       const truckIndex = Number(assignment.truckIndex);
       if (!Number.isInteger(truckIndex) || truckIndex < 0 || truckIndex >= entry.trucks.length) return;
@@ -2642,8 +2715,11 @@ router.patch("/:id/portal-cell-assignments", async (req, res) => {
           ? undefined
           : Number(assignment.cellIndex);
       if (cellIndex !== undefined && (!Number.isInteger(cellIndex) || cellIndex < 0)) return;
-      const cellName = cellIndex === undefined ? "" : (assignment.cellName || `Cell ${cellIndex + 1}`);
+      const hasCell = cellIndex !== undefined;
+      const cellName = hasCell ? (assignment.cellName || `Cell ${cellIndex + 1}`) : "";
       const cellType = assignment.cellType || "";
+      const cap = isPositiveCap(assignment.truckCapacity) ? Number(assignment.truckCapacity) : null;
+      const capUnit = normCapUnit(assignment.truckCapacityUnit);
       const vehicleIndex =
         assignment.vehicleIndex === null || assignment.vehicleIndex === undefined
           ? null
@@ -2654,25 +2730,37 @@ router.patch("/:id/portal-cell-assignments", async (req, res) => {
         vehicleIndex >= 0 &&
         vehicleIndex < truck.vehicles.length
       ) {
-        truck.vehicles[vehicleIndex].cellIndex = cellIndex;
-        truck.vehicles[vehicleIndex].cellName = cellName;
-        truck.vehicles[vehicleIndex].cellType = cellType;
-        if (vehicleIndex === 0) {
-          truck.cellIndex = cellIndex;
-          truck.cellName = cellName;
-          truck.cellType = cellType;
+        if (hasCell) {
+          truck.vehicles[vehicleIndex].cellIndex = cellIndex;
+          truck.vehicles[vehicleIndex].cellName = cellName;
+          truck.vehicles[vehicleIndex].cellType = cellType;
+          if (vehicleIndex === 0) {
+            truck.cellIndex = cellIndex;
+            truck.cellName = cellName;
+            truck.cellType = cellType;
+          }
+        }
+        if (cap != null) {
+          truck.vehicles[vehicleIndex].capacity = cap;
+          if (capUnit) truck.vehicles[vehicleIndex].capacityUnit = capUnit;
         }
         return;
       }
-      truck.cellIndex = cellIndex;
-      truck.cellName = cellName;
-      truck.cellType = cellType;
-      if (Array.isArray(truck.vehicles)) {
-        truck.vehicles.forEach((veh) => {
-          veh.cellIndex = cellIndex;
-          veh.cellName = cellName;
-          veh.cellType = cellType;
-        });
+      if (hasCell) {
+        truck.cellIndex = cellIndex;
+        truck.cellName = cellName;
+        truck.cellType = cellType;
+        if (Array.isArray(truck.vehicles)) {
+          truck.vehicles.forEach((veh) => {
+            veh.cellIndex = cellIndex;
+            veh.cellName = cellName;
+            veh.cellType = cellType;
+          });
+        }
+      }
+      if (cap != null) {
+        truck.truckCapacity = cap;
+        if (capUnit) truck.truckCapacityUnit = capUnit;
       }
     });
     entry.markModified("trucks");

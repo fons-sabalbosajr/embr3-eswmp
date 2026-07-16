@@ -3,8 +3,8 @@ import dayjs from "dayjs";
 import {
   Avatar, Badge, Button, Checkbox, Col, Collapse, DatePicker, Descriptions, Divider,
   Empty, Form, Input, InputNumber, List,
-  Modal, Progress, Row, Select, Space, Spin, Table, Tabs, Tag, Upload,
-  Typography, Card, Alert
+  Modal, Progress, Radio, Row, Select, Space, Spin, Table, Tabs, Tag, Upload,
+  Typography, Card, Alert, Skeleton
 } from "antd";
 import {
   AuditOutlined, BankOutlined, BarChartOutlined, CarOutlined, CheckCircleOutlined,
@@ -157,36 +157,107 @@ const SUPPORT_PRIORITY_OPTIONS = [
   { label: "High", value: "High" },
   { label: "Urgent", value: "Urgent" },
 ];
+// Support & FAQ content — kept in step with the current portal workflow: locked
+// baseline unit, required vehicle capacity, Review-and-Submit gating, and the
+// Organize Cells rules for approved submissions with unassigned waste.
 const SUPPORT_FAQ_ITEMS = [
   {
     key: "1",
-    label: "How do I submit disposal data?",
+    label: "What information is required to submit?",
     icon: <FileTextOutlined style={{ color: "#1677ff" }} />,
-    content: "Navigate to Data Entry, complete all required tabs, add at least one transport entry, then submit the record for review.",
+    content:
+      "A submission needs: your Waste Generator (company) information, saved Baseline Data, the Date of Disposal, and at least one transport entry. Each transport entry requires a disposal ticket no., hauler, plate number, actual volume, waste type, and a disposal cell. Hazardous Waste Code is required for every Treated Hazardous Waste entry. All volumes use your declared baseline unit.",
   },
   {
     key: "2",
-    label: "How do I update baseline data?",
-    icon: <DatabaseOutlined style={{ color: "#389e0d" }} />,
-    content: "Baseline data is locked after your first submission. Use Request Update from the Baseline tab and wait for admin approval.",
+    label: "How do I submit disposal data?",
+    icon: <SendOutlined style={{ color: "#1677ff" }} />,
+    content:
+      "Go to Data Entry, complete the Basic Information, Baseline, and Waste Generator Information tabs, add your transport entries, then use Review & Submit. The button stays disabled until every requirement is met — hover it to see exactly what is still missing.",
   },
   {
     key: "3",
-    label: "How do I edit a submitted entry?",
-    icon: <AuditOutlined style={{ color: "#d48806" }} />,
-    content: "Open History, choose the submitted record, and send a Request Edit. The admin team will approve or reject the change request.",
+    label: "How do I add and select accredited haulers?",
+    icon: <TeamOutlined style={{ color: "#fa8c16" }} />,
+    content:
+      "Add your accredited haulers (with their vehicles) on the Baseline / Accredited Haulers tab before your first submission. When encoding a transport entry, pick the hauler and plate number from your accredited list so the portal can validate the truck against its registered capacity.",
   },
   {
     key: "4",
-    label: "What file formats are supported for upload?",
-    icon: <UploadOutlined style={{ color: "#722ed1" }} />,
-    content: "The portal accepts Excel (.xlsx, .xls) and CSV files for bulk hauler and waste generator uploads.",
+    label: "What are Hauler Clients and where do they show?",
+    icon: <BankOutlined style={{ color: "#722ed1" }} />,
+    content:
+      "Hauler Clients are the private-sector clients associated with an accredited hauler. They appear in a Hauler Clients column right after the Hauler Name in your Waste Generator Information and in the admin submission view. Leave it blank if a hauler has no clients — it shows as “—”.",
   },
   {
     key: "5",
-    label: "Who do I contact for technical issues?",
+    label: "Is Vehicle Capacity required?",
+    icon: <CarOutlined style={{ color: "#eb2f96" }} />,
+    content:
+      "Every accredited-hauler vehicle must have a Vehicle Capacity greater than 0. For Truck Capacity: it is REQUIRED on every uploaded disposal row (the parser and server reject a missing/zero value), and OPTIONAL when you add a transport entry manually — any missing historical truck capacity is completed later in Organize Cells. A present value must always be greater than 0.",
+  },
+  {
+    key: "6",
+    label: "Why is Review & Submit disabled?",
+    icon: <CheckCircleOutlined style={{ color: "#52c41a" }} />,
+    content:
+      "Review & Submit is disabled while any requirement is unmet — incomplete company/baseline/disposal info, a missing disposal cell or hazardous code, a vehicle without capacity, an unresolved reverted submission, or past submissions still needing Organize Cells. Hover the button for the exact checklist. The server re-validates everything again on submit.",
+  },
+  {
+    key: "7",
+    label: "How do I organize and assign SLF cells?",
+    icon: <ContainerOutlined style={{ color: "#13c2c2" }} />,
+    content:
+      "Open Organize Cells from the menu. For each unassigned waste record, pick an open (active, not full) disposal cell; you can also complete any missing historical truck capacity there. Use the checkboxes and the bulk-assign bar to place many rows at once, then Save Placement.",
+  },
+  {
+    key: "8",
+    label: "I have approved submissions with unassigned waste — what now?",
+    icon: <ContainerOutlined style={{ color: "#722ed1" }} />,
+    content:
+      "Approved submissions that still contain waste not placed into a cell appear in Organize Cells. Assign the remaining records to cells (already-assigned records stay as they are, and the approved status is not reverted). Once every record is assigned, the submission drops off the list. New submissions are blocked until this is done.",
+  },
+  {
+    key: "9",
+    label: "How do I update baseline data?",
+    icon: <DatabaseOutlined style={{ color: "#389e0d" }} />,
+    content:
+      "Baseline data locks after your first submission. Use Request Update on the Baseline tab; an admin reviews and approves or rejects it. Track the request under My Requests.",
+  },
+  {
+    key: "10",
+    label: "How do I edit a submitted entry?",
+    icon: <AuditOutlined style={{ color: "#d48806" }} />,
+    content:
+      "Open Submission History, select the record, and send a Request Edit. The admin team approves or rejects it. If a submission is reverted, correct and resubmit it — an unresolved revert older than 24 hours blocks new submissions.",
+  },
+  {
+    key: "11",
+    label: "How do I read Submission History and statuses?",
+    icon: <BarChartOutlined style={{ color: "#1677ff" }} />,
+    content:
+      "Pending = awaiting admin review. Acknowledged/Approved = accepted (may still need cells organized). Revert Requested / Reverted = sent back for correction. Rejected = not accepted and locked. Use History to see each record's status and cell-placement progress.",
+  },
+  {
+    key: "12",
+    label: "Common validation errors and how to fix them",
+    icon: <InfoCircleOutlined style={{ color: "#fa8c16" }} />,
+    content:
+      "“Disposal Cell required” — pick a cell for the entry. “Unit must be <baseline>” — every entry uses your declared baseline unit. “Capacity exceeds +10%” — the entered capacity is too high versus the registered vehicle. “Vehicle Capacity required” — fill capacity on Accredited Haulers. “Organize past submissions first” — complete Organize Cells before submitting.",
+  },
+  {
+    key: "13",
+    label: "What file formats can I upload?",
+    icon: <UploadOutlined style={{ color: "#722ed1" }} />,
+    content:
+      "The portal accepts Excel (.xlsx, .xls) and CSV files for bulk accredited-hauler and transport-entry uploads. Rows are validated on import; fix any flagged rows before adding them.",
+  },
+  {
+    key: "14",
+    label: "Who do I contact for help?",
     icon: <MailOutlined style={{ color: "#cf1322" }} />,
-    content: "Open a support ticket from this panel for portal issues, account problems, or submission concerns. You can also email emb_region3@emb.gov.ph.",
+    content:
+      "Open a support ticket from this panel for portal, account, or submission concerns. You can also email emb_region3@emb.gov.ph.",
   },
 ];
 
@@ -290,6 +361,8 @@ export default function SLFPortalModals({
   wasteReceivedLoading,
   activeCellEntries,
   activeCellOptions = [],
+  slfInfoLoading = false,
+  slfCellCount = 0,
   baselineCellOptions = [],
   closedCellEntries,
   haulers,
@@ -354,6 +427,25 @@ export default function SLFPortalModals({
   const [locationLabel, setLocationLabel] = useState(
     portalUser?.lastKnownLocation?.label || "",
   );
+  // #1: open-cell picker table. Holds { vi, options } for the vehicle whose cell
+  // is being chosen from the compact selectable table; null when closed.
+  const [cellPicker, setCellPicker] = useState(null);
+
+  // Apply a picked open cell to the vehicle the picker was opened for.
+  const applyPickedCell = (opt) => {
+    if (!cellPicker) return;
+    const vi = cellPicker.vi;
+    const updated = [...(truckDraft.vehicles || [])];
+    if (!updated[vi]) return;
+    updated[vi] = {
+      ...updated[vi],
+      cellName: opt?.value || "",
+      cellType: opt?.cellType || "",
+      cellIndex: opt && typeof opt.cellIndex === "number" ? opt.cellIndex : null,
+    };
+    updateTruckDraft("vehicles", updated);
+    setCellPicker(null);
+  };
 
   // Toggle browser location sharing for activity tracing.
   const handleLocationSharingToggle = async (enabled) => {
@@ -1237,6 +1329,18 @@ export default function SLFPortalModals({
                     : !String(o.cellType || "").toLowerCase().includes("haz"),
                 )
               : activeCellOptions;
+            // #1: distinct, diagnostic empty state. Never shown while the facility's
+            // cell data is still loading — only once we KNOW no cell qualifies, and
+            // then it says WHY (no cells / none open / none for this waste type).
+            const cellEmptyReason = slfInfoLoading
+              ? null
+              : slfCellCount === 0
+                ? "This facility has no cells configured yet. Contact EMB Region III."
+                : activeCellOptions.length === 0
+                  ? "No cells are currently open for disposal — they may be inactive, full, or restricted for your account. Contact EMB Region III."
+                  : veh.wasteType && vehCellOptions.length === 0
+                    ? `No open cell accepts ${vehIsHaz ? "hazardous" : "non-hazardous"} waste. Change the waste type or contact EMB Region III.`
+                    : null;
             const patchVehicle = (patch) => {
               const updated = [...(truckDraft.vehicles || [])];
               updated[vi] = { ...updated[vi], ...patch };
@@ -1338,12 +1442,19 @@ export default function SLFPortalModals({
                     <Form.Item
                       label="Truck Capacity"
                       style={{ marginBottom: 4 }}
+                      validateStatus={
+                        truckErrors?.vehicles?.[vi]?.capacity ? "error" : ""
+                      }
+                      help={truckErrors?.vehicles?.[vi]?.capacity || ""}
                     >
                       <InputNumber
                         placeholder="Capacity"
                         style={{ width: "100%" }}
                         min={0}
                         step={0.1}
+                        status={
+                          truckErrors?.vehicles?.[vi]?.capacity ? "error" : ""
+                        }
                         value={veh.capacity}
                         onChange={(val) => {
                           const updated = [...(truckDraft.vehicles || [])];
@@ -1354,16 +1465,14 @@ export default function SLFPortalModals({
                     </Form.Item>
                   </Col>
                   <Col xs={10} sm={5}>
-                    <Form.Item label="Unit" style={{ marginBottom: 4 }}>
-                      <Select
-                        value={veh.capacityUnit || baselineUnit || "m³"}
-                        placeholder="Select unit"
-                        onChange={(val) => {
-                          const updated = [...(truckDraft.vehicles || [])];
-                          updated[vi] = { ...updated[vi], capacityUnit: val };
-                          updateTruckDraft("vehicles", updated);
-                        }}
-                      >
+                    <Form.Item
+                      label="Unit"
+                      style={{ marginBottom: 4 }}
+                      tooltip="Locked to your declared baseline unit"
+                    >
+                      {/* Locked to the declared baseline unit so no transport
+                          entry can carry a mismatched unit. */}
+                      <Select value={baselineUnit || "m³"} disabled>
                         <Option value="m³">m³</Option>
                         <Option value="tons">tons</Option>
                       </Select>
@@ -1434,17 +1543,19 @@ export default function SLFPortalModals({
                     </Form.Item>
                   </Col>
                   <Col xs={10} sm={4}>
-                    <Form.Item label="Unit" style={{ marginBottom: 4 }}>
-                      <Select
-                        value={veh.actualVolumeUnit || baselineUnit || "m³"}
-                        onChange={(val) => patchVehicle({ actualVolumeUnit: val })}
-                      >
+                    <Form.Item
+                      label="Unit"
+                      style={{ marginBottom: 4 }}
+                      tooltip="Locked to your declared baseline unit"
+                    >
+                      {/* Locked to the declared baseline unit (see capacity unit). */}
+                      <Select value={baselineUnit || "m³"} disabled>
                         <Option value="tons">tons</Option>
                         <Option value="m³">m³</Option>
                       </Select>
                     </Form.Item>
                   </Col>
-                  <Col xs={24} sm={12}>
+                  <Col xs={24}>
                     <Form.Item
                       label={
                         <Space size={4}>
@@ -1462,17 +1573,22 @@ export default function SLFPortalModals({
                       <Select
                         showSearch
                         allowClear
+                        loading={slfInfoLoading}
                         status={
                           truckErrors?.vehicles?.[vi]?.cellName ? "error" : ""
                         }
                         placeholder={
                           !veh.wasteType
                             ? "Select waste type first"
-                            : vehCellOptions.length
-                              ? "Select active open cell"
-                              : "No matching open cells"
+                            : slfInfoLoading
+                              ? "Loading open cells…"
+                              : vehCellOptions.length
+                                ? "Select active open cell"
+                                : "No open cells available"
                         }
-                        disabled={!veh.wasteType}
+                        // Only the loading state disables independently of waste type,
+                        // so a valid open cell is always selectable once data is in.
+                        disabled={!veh.wasteType || slfInfoLoading}
                         value={veh.cellName || undefined}
                         onChange={(val) => {
                           const opt = vehCellOptions.find((o) => o.value === val);
@@ -1491,9 +1607,15 @@ export default function SLFPortalModals({
                             .includes(input.toLowerCase())
                         }
                         notFoundContent={
-                          <Text type="secondary" style={{ fontSize: 12 }}>
-                            No matching open cells. Contact EMB Region III.
-                          </Text>
+                          slfInfoLoading ? (
+                            <span style={{ fontSize: 12 }}>
+                              <Spin size="small" style={{ marginRight: 6 }} /> Loading open cells…
+                            </span>
+                          ) : (
+                            <Text type="secondary" style={{ fontSize: 12 }}>
+                              {cellEmptyReason || "No matching open cells. Contact EMB Region III."}
+                            </Text>
+                          )
                         }
                       >
                         {vehCellOptions.map((o) => (
@@ -1502,6 +1624,28 @@ export default function SLFPortalModals({
                           </Option>
                         ))}
                       </Select>
+                      {/* #1: open the compact selectable open-cell TABLE (capacity,
+                          used, remaining, status) — only valid open cells appear and
+                          are selectable. */}
+                      {veh.wasteType && !slfInfoLoading && vehCellOptions.length > 0 && (
+                        <Button
+                          type="link"
+                          size="small"
+                          icon={<ContainerOutlined />}
+                          style={{ padding: 0, marginTop: 4, height: "auto", fontSize: 12 }}
+                          onClick={() => setCellPicker({ vi, options: vehCellOptions })}
+                        >
+                          Browse open cells in a table
+                        </Button>
+                      )}
+                      {/* Distinct empty/error hint shown inline (not only in the
+                          dropdown) so the user sees WHY no cell is selectable, and
+                          never sees it while data is still loading. */}
+                      {cellEmptyReason && veh.wasteType && (
+                        <Text type="warning" style={{ fontSize: 11, display: "block", marginTop: 4 }}>
+                          {cellEmptyReason}
+                        </Text>
+                      )}
                       {veh.cellType && (
                         <Tag
                           color={vehIsHaz ? "volcano" : "geekblue"}
@@ -2552,6 +2696,14 @@ export default function SLFPortalModals({
                                         render: (v) => <Text strong style={{ fontSize: 12 }}>{v || "Unnamed"}</Text>,
                                       },
                                       {
+                                        // #6: Hauler Clients immediately after Hauler Name.
+                                        title: "Hauler Clients",
+                                        dataIndex: "clientStr",
+                                        render: (v) => (
+                                          <Text style={{ fontSize: 12, whiteSpace: "normal", wordBreak: "break-word" }}>{v || "—"}</Text>
+                                        ),
+                                      },
+                                      {
                                         title: "No. of Trucks",
                                         dataIndex: "numberOfTrucks",
                                         width: 100,
@@ -2562,13 +2714,6 @@ export default function SLFPortalModals({
                                         title: "Office Address",
                                         dataIndex: "officeAddress",
                                         render: (v) => <Text style={{ fontSize: 12 }}>{v || "—"}</Text>,
-                                      },
-                                      {
-                                        title: "Clients",
-                                        dataIndex: "clientStr",
-                                        render: (v) => (
-                                          <Text style={{ fontSize: 12, whiteSpace: "normal", wordBreak: "break-word" }}>{v}</Text>
-                                        ),
                                       },
                                     ]}
                                   />
@@ -2743,6 +2888,131 @@ export default function SLFPortalModals({
               </div>
             );
           })()}
+      </Modal>
+
+      {/* ── #1: Open-Cell Picker — a compact selectable TABLE of the valid open
+             cells (only open/compatible cells appear, so every row is selectable).
+             Selecting a row places THIS vehicle's waste into that cell. ── */}
+      <Modal
+        title={
+          <Space>
+            <ContainerOutlined style={{ color: "#722ed1" }} /> Select an Open Disposal Cell
+          </Space>
+        }
+        open={!!cellPicker}
+        onCancel={() => setCellPicker(null)}
+        footer={<Button onClick={() => setCellPicker(null)}>Close</Button>}
+        width={880}
+        destroyOnHidden
+      >
+        <Text type="secondary" style={{ fontSize: 12, display: "block", marginBottom: 10 }}>
+          Only cells open for disposal and compatible with the selected waste type are
+          listed. Click a row to place this vehicle&apos;s waste there.
+        </Text>
+        <Table
+          size="small"
+          rowKey="value"
+          dataSource={cellPicker?.options || []}
+          pagination={
+            (cellPicker?.options || []).length > 8
+              ? { pageSize: 8, size: "small", showSizeChanger: false }
+              : false
+          }
+          scroll={{ x: 760 }}
+          onRow={(record) => ({
+            onClick: () => applyPickedCell(record),
+            style: { cursor: "pointer" },
+          })}
+          rowClassName={(record) =>
+            record.value === truckDraft.vehicles?.[cellPicker?.vi]?.cellName
+              ? "ant-table-row-selected"
+              : ""
+          }
+          locale={{ emptyText: <Empty description="No open cells available." /> }}
+          columns={[
+            {
+              title: "Select",
+              key: "select",
+              width: 64,
+              align: "center",
+              render: (_, record) => (
+                <Radio
+                  checked={record.value === truckDraft.vehicles?.[cellPicker?.vi]?.cellName}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    applyPickedCell(record);
+                  }}
+                />
+              ),
+            },
+            {
+              title: "Cell Name",
+              dataIndex: "cellName",
+              key: "cellName",
+              width: 130,
+              ellipsis: true,
+              render: (v, r) => <Text strong>{v || r.value}</Text>,
+            },
+            {
+              title: "Facility",
+              dataIndex: "facility",
+              key: "facility",
+              width: 150,
+              ellipsis: true,
+              render: (v) => v || "—",
+            },
+            {
+              title: "Waste Type",
+              dataIndex: "cellType",
+              key: "cellType",
+              width: 120,
+              render: (v) => (
+                <Tag color={/haz/i.test(v || "") ? "volcano" : "geekblue"}>{v || "Residual"}</Tag>
+              ),
+            },
+            {
+              title: "Status",
+              dataIndex: "status",
+              key: "status",
+              width: 110,
+              render: (v) => <Tag color="green">{v || "Active Cell"}</Tag>,
+            },
+            {
+              title: "Capacity",
+              key: "capacity",
+              width: 110,
+              align: "right",
+              render: (_, r) =>
+                r.capacity != null
+                  ? `${Number(r.capacity).toLocaleString(undefined, { maximumFractionDigits: 2 })} ${r.unit}`
+                  : "—",
+            },
+            {
+              title: "Used Volume",
+              key: "used",
+              width: 110,
+              align: "right",
+              render: (_, r) =>
+                r.used != null
+                  ? `${Number(r.used).toLocaleString(undefined, { maximumFractionDigits: 2 })} ${r.unit}`
+                  : "—",
+            },
+            {
+              title: "Remaining",
+              key: "remaining",
+              width: 120,
+              align: "right",
+              render: (_, r) =>
+                r.remaining != null ? (
+                  <Text strong style={{ color: "#52c41a" }}>
+                    {`${Number(r.remaining).toLocaleString(undefined, { maximumFractionDigits: 2 })} ${r.unit}`}
+                  </Text>
+                ) : (
+                  "—"
+                ),
+            },
+          ]}
+        />
       </Modal>
 
       {/* ── Review Submission Modal ── */}
@@ -3019,6 +3289,20 @@ export default function SLFPortalModals({
                                 <Text type="secondary" style={{ fontSize: 10 }}>Hauler Name</Text>
                                 <Input size="small" value={h.haulerName || "—"} readOnly style={{ background: "#fafafa", cursor: "default" }} />
                               </Col>
+                              {/* #6: Hauler Clients shown immediately after Hauler Name. */}
+                              <Col xs={24} sm={12}>
+                                <Text type="secondary" style={{ fontSize: 10 }}>Hauler Clients</Text>
+                                <Input
+                                  size="small"
+                                  value={
+                                    (h.privateSectorClients || []).length > 0
+                                      ? (h.privateSectorClients || []).map((c) => (typeof c === "object" ? c.clientName : c)).join(", ")
+                                      : "—"
+                                  }
+                                  readOnly
+                                  style={{ background: "#fafafa", cursor: "default" }}
+                                />
+                              </Col>
                               <Col xs={24} sm={12}>
                                 <Text type="secondary" style={{ fontSize: 10 }}>Number of Trucks</Text>
                                 <Input size="small" value={h.numberOfTrucks ?? "—"} readOnly style={{ background: "#fafafa", cursor: "default" }} />
@@ -3029,12 +3313,6 @@ export default function SLFPortalModals({
                                   <Input size="small" value={`${v.plateNumber || "N/A"} — ${v.vehicleType || "N/A"} (${v.capacity ?? "—"} ${v.capacityUnit || "m³"})`} readOnly style={{ background: "#fafafa", cursor: "default" }} />
                                 </Col>
                               ))}
-                              {(h.privateSectorClients || []).length > 0 && (
-                                <Col xs={24}>
-                                  <Text type="secondary" style={{ fontSize: 10 }}>Private Sector Clients</Text>
-                                  <Input size="small" value={(h.privateSectorClients || []).map((c) => (typeof c === "object" ? c.clientName : c)).join(", ")} readOnly style={{ background: "#fafafa", cursor: "default" }} />
-                                </Col>
-                              )}
                             </Row>
                           </div>
                         ))}
@@ -4035,9 +4313,10 @@ export default function SLFPortalModals({
                 },
                 {
                   col: "Truck Capacity",
-                  // Required: a submission cannot be finalised without it, so an
-                  // upload missing it would only fail later at submit time.
-                  desc: "Truck capacity in m³ or tons — must be greater than 0",
+                  // Required: every uploaded disposal row must carry a Truck
+                  // Capacity greater than 0. Missing/zero/negative rows are rejected
+                  // by the parser and again server-side.
+                  desc: "Truck capacity in the declared baseline unit — REQUIRED, must be greater than 0",
                   required: true,
                 },
                 {
