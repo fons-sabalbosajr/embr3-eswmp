@@ -36,6 +36,19 @@ body {
   line-height: 1.35;
 }
 
+/* #3: compact Trucks table — smaller BODY font + tighter padding, while headers
+   stay readable. Scoped so AntD's cell styles don't override an inline fontSize. */
+.trucks-compact-table .ant-table-tbody > tr > td {
+  font-size: 11px;
+  padding: 4px 8px;
+  line-height: 1.35;
+}
+.trucks-compact-table .ant-table-thead > tr > th {
+  font-size: 12px;
+  padding: 6px 8px;
+  font-weight: 600;
+}
+
 .portal-user-wrap-table .ant-table-cell,
 .portal-user-wrap-table .ant-descriptions-item-content,
 .portal-user-wrap-table .ant-descriptions-item-label {

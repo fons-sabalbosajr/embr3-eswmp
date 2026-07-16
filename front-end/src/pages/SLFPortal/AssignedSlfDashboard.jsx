@@ -1,4 +1,4 @@
-import { Card, Badge, Button, Row, Col, Space, Spin, Tag, Progress, Typography } from "antd";
+import { Card, Badge, Button, Row, Col, Space, Spin, Tag, Progress, Tooltip, Typography } from "antd";
 import {
   BankOutlined,
   BarChartOutlined,
@@ -43,11 +43,14 @@ export default function AssignedSlfDashboard({
   haulers,
   isMobile,
   hasReviewMissing,
+  submitBlockers = [],
   loading,
   slfCardExpanded,
   handleReviewOpen,
   handleOpenWasteReceived,
 }) {
+  // #5: Review & Submit is disabled until every submission requirement is met.
+  const submitDisabled = submitBlockers.length > 0;
   return (
             <Card
               className="slf-section slf-facility-card"
@@ -118,29 +121,60 @@ export default function AssignedSlfDashboard({
                 </div>
               }
               extra={
-                <Badge
-                  dot={hasReviewMissing}
-                  offset={[-2, 4]}
-                  style={{ backgroundColor: "#ff4d4f" }}
+                <Tooltip
+                  // #5: a disabled AntD Button swallows pointer events, so the
+                  // Tooltip must sit on a NON-disabled wrapper (the span) or the
+                  // "what's missing" checklist never shows on hover.
+                  title={
+                    submitDisabled ? (
+                      <div style={{ fontSize: 12 }}>
+                        <div style={{ fontWeight: 600, marginBottom: 4 }}>
+                          Complete these before submitting:
+                        </div>
+                        <ul style={{ margin: 0, paddingLeft: 16 }}>
+                          {submitBlockers.map((reason, i) => (
+                            <li key={i}>{reason}</li>
+                          ))}
+                        </ul>
+                      </div>
+                    ) : (
+                      ""
+                    )
+                  }
                 >
-                  <Button
-                    type="primary"
-                    icon={<SendOutlined />}
-                    onClick={handleReviewOpen}
-                    loading={loading}
-                    className="slf-primary-btn"
-                    size={isMobile ? "middle" : "large"}
+                  <span
                     style={{
-                      background: "#fff",
-                      color: "#1a3353",
-                      fontWeight: 600,
-                      border: "none",
-                      boxShadow: "0 2px 8px rgba(0,0,0,0.15)",
+                      display: "inline-block",
+                      cursor: submitDisabled ? "not-allowed" : "default",
                     }}
                   >
-                    {isMobile ? "Submit" : "Review & Submit"}
-                  </Button>
-                </Badge>
+                    <Badge
+                      dot={hasReviewMissing || submitDisabled}
+                      offset={[-2, 4]}
+                      style={{ backgroundColor: "#ff4d4f" }}
+                    >
+                      <Button
+                        type="primary"
+                        icon={<SendOutlined />}
+                        onClick={handleReviewOpen}
+                        loading={loading}
+                        disabled={submitDisabled}
+                        className="slf-primary-btn"
+                        size={isMobile ? "middle" : "large"}
+                        style={{
+                          background: submitDisabled ? undefined : "#fff",
+                          color: submitDisabled ? undefined : "#1a3353",
+                          fontWeight: 600,
+                          border: "none",
+                          boxShadow: submitDisabled ? "none" : "0 2px 8px rgba(0,0,0,0.15)",
+                          pointerEvents: submitDisabled ? "none" : undefined,
+                        }}
+                      >
+                        {isMobile ? "Submit" : "Review & Submit"}
+                      </Button>
+                    </Badge>
+                  </span>
+                </Tooltip>
               }
             >
               {slfInfoLoading ? (

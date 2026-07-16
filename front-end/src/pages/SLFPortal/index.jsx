@@ -130,6 +130,9 @@ import {
 import {
   validateWasteGeneration,
   formatWasteGenIssues,
+  validateTransportUnits,
+  validateTruckCapacityElevation,
+  TRUCK_CAPACITY_ELEVATION_FACTOR,
 } from "./wasteGenValidation";
 import { groupSubmissions, formatStatusSummary } from "./submissionGrouping";
 import {
@@ -308,6 +311,11 @@ export default function SLFPortal() {
   const [portalNotifications, setPortalNotifications] = useState([]);
   const [portalUnreadCount, setPortalUnreadCount] = useState(0);
   const [notificationPanelOpen, setNotificationPanelOpen] = useState(false);
+  // "Previous Notifications" full-history modal + the single notification opened
+  // for its complete message. Reuses the already-fetched portalNotifications list
+  // (no extra fetch, no second store).
+  const [previousNotifOpen, setPreviousNotifOpen] = useState(false);
+  const [notifDetail, setNotifDetail] = useState(null);
   const [portalSettings, setPortalSettings] = useState(null);
   const [portalAnnouncement, setPortalAnnouncement] = useState(null);
   const [announcementDismissed, setAnnouncementDismissed] = useState(false);
@@ -1017,12 +1025,32 @@ export default function SLFPortal() {
       const userAllowed =
         allowedCells.length === 0 || allowedCells.includes(cellValue);
       const baseLabel = resolveCellName(slfInfo, index);
+      // Display capacity/used/remaining in the facility's baseline unit for the
+      // open-cell picker table (kept alongside the m³ figures used for the isFull
+      // gate above so both stay unit-consistent).
+      const pickerUnit = baselineUnit || capUnit || "m³";
+      const capDisplay = convertVolume(slfInfo?.cellCapacities?.[index], capUnit, pickerUnit);
+      const usedDisplay = convertVolume(slfInfo?.cellFillValues?.[index], fillUnit, pickerUnit);
+      const remainingDisplay =
+        capDisplay != null && usedDisplay != null
+          ? Math.max(0, capDisplay - usedDisplay)
+          : capDisplay != null
+            ? capDisplay
+            : null;
       return isOpen && submissionAllowed && userAllowed && !isFull
         ? {
             label: `${baseLabel}${slfInfo?.cellTypes?.[index] ? ` - ${slfInfo.cellTypes[index]}` : ""}`,
             value: cellValue,
             cellType: slfInfo?.cellTypes?.[index] || "Residual",
             cellIndex: index,
+            // Extra fields consumed by the selectable open-cell table (#1 UX).
+            cellName: baseLabel,
+            facility: activeSlfName || slfInfo?.slfName || slfInfo?.lgu || "",
+            status: normalizeCellStatus(rawStatus),
+            capacity: capDisplay,
+            used: usedDisplay,
+            remaining: remainingDisplay,
+            unit: pickerUnit,
           }
         : null;
     }).filter(Boolean);
@@ -1067,7 +1095,9 @@ export default function SLFPortal() {
   const [cellOrganizerPage, setCellOrganizerPage] = useState(1);
   const [cellOrganizerPageSize, setCellOrganizerPageSize] = useState(5);
   // Collapsible state for the Cell Infra Overview card inside the organizer.
-  const [cellInfraCollapsed, setCellInfraCollapsed] = useState(false);
+  // Collapsed by default — the organizer opens focused on the placement list,
+  // not the (secondary) infra chart.
+  const [cellInfraCollapsed, setCellInfraCollapsed] = useState(true);
 
   // NB: "does this submission still have unplaced waste?" is now answered SERVER-side
   // (portalAuth#summarizeCellAssignment → `unplacedCount`), because the history list
@@ -1117,21 +1147,44 @@ export default function SLFPortal() {
     [],
   );
 
+  // Declared (registered) capacity for a plate, read from the accredited haulers.
+  // Drives the strict +10% truck-capacity elevation cap. Searches the named hauler
+  // first, then any hauler carrying that plate (plates are unique per SLF). Returns
+  // null when unknown, so an unregistered plate is not blocked by this rule.
+  const getDeclaredVehicleCapacity = useCallback(
+    (haulerName, plateNumber) => {
+      const plate = String(plateNumber || "").trim().toLowerCase();
+      if (!plate) return null;
+      const list = Array.isArray(haulers) ? haulers : [];
+      const findPlate = (h) =>
+        (h?.vehicles || []).find(
+          (v) => String(v?.plateNumber || "").trim().toLowerCase() === plate,
+        );
+      const named = list.find((h) => h?.haulerName === haulerName);
+      const match = (named && findPlate(named)) || list.map(findPlate).find(Boolean);
+      const cap = Number(match?.capacity);
+      return Number.isFinite(cap) && cap > 0 ? cap : null;
+    },
+    [haulers],
+  );
+
   const unplacedSubmissions = useMemo(() => {
     if (activeCellOptions.length === 0) return [];
-    // Include ANY submission that still has waste not placed into a cell —
-    // including APPROVED (acknowledged) submissions the admin validated without
-    // assigning cells. Only reverted/rejected entries are excluded (they are
-    // locked and re-encoded through the edit flow instead).
+    // Include ANY submission that still needs organizing — either waste not placed
+    // into a cell OR a historical truck missing its Truck Capacity (now completed
+    // here rather than required at entry, per #6). This includes APPROVED
+    // (acknowledged) submissions the admin validated without assigning cells. Only
+    // reverted/rejected entries are excluded (they are locked and re-encoded through
+    // the edit flow instead).
     //
-    // `unplacedCount` is computed SERVER-side (portalAuth#summarizeCellAssignment),
-    // so the browser no longer walks every truck and vehicle of every submission to
-    // work this out — the list payload doesn't even carry trucks any more.
+    // Both `unplacedCount` and `missingCapacityCount` are computed SERVER-side
+    // (portalAuth#summarizeCellAssignment), so the browser no longer walks every
+    // truck and vehicle of every submission — the list payload doesn't carry trucks.
     return (submissions || []).filter(
       (sub) =>
         sub.status !== "reverted" &&
         sub.status !== "rejected" &&
-        Number(sub.unplacedCount || 0) > 0,
+        (Number(sub.unplacedCount || 0) > 0 || Number(sub.missingCapacityCount || 0) > 0),
     );
   }, [submissions, activeCellOptions.length]);
 
@@ -1205,6 +1258,24 @@ export default function SLFPortal() {
     );
   };
 
+  // Complete a missing historical Truck Capacity for ONE placement, addressed by
+  // its canonical truckIndex/vehicleIndex. Stored in the declared baseline unit.
+  const updateOrganizerCapacity = (subId, truckIndex, vehicleIndex, capacityValue) => {
+    setCellOrganizerData((prev) =>
+      prev.map((sub) => {
+        if (sub._id !== subId) return sub;
+        return {
+          ...sub,
+          placements: (sub.placements || []).map((p) =>
+            p.truckIndex === truckIndex && p.vehicleIndex === vehicleIndex
+              ? { ...p, capacity: capacityValue, capacityUnit: baselineUnit || p.capacityUnit || "m³" }
+              : p,
+          ),
+        };
+      }),
+    );
+  };
+
   // Apply the bulk cell to all currently checked rows.
   const applyBulkCellToSelected = () => {
     if (!cellOrganizerBulkCell || cellOrganizerSelected.length === 0) return;
@@ -1225,23 +1296,36 @@ export default function SLFPortal() {
   const saveCellOrganizer = async () => {
     setCellOrganizerSaving(true);
     try {
-      // Only submissions with at least one newly-assigned placement are sent, and
-      // only the placements that were actually assigned. Previously every truck of
-      // every submission was re-sent — including ones already placed — which meant a
-      // request per submission carrying its full placement list.
+      // Only placements the user actually completed are sent: a newly-assigned
+      // cell, a newly-filled Truck Capacity, or both. Untouched rows stay
+      // incomplete (and keep blocking new submissions until organized). A
+      // capacity-only row carries no cell fields, so the server never clears an
+      // existing cell.
+      const isPos = (v) => Number.isFinite(Number(v)) && Number(v) > 0;
       const pending = cellOrganizerData
         .map((sub) => ({
           _id: sub._id,
           assignments: (sub.placements || [])
-            .filter((p) => p.cellName) // untouched rows stay unassigned
-            .map((p) => ({
-              truckIndex: p.truckIndex,
-              // null vehicleIndex = truck-level placement (the backend distinguishes)
-              ...(Number.isInteger(p.vehicleIndex) ? { vehicleIndex: p.vehicleIndex } : {}),
-              cellIndex: p.cellIndex,
-              cellName: p.cellName,
-              cellType: p.cellType,
-            })),
+            .map((p) => {
+              const hasCell = !!p.cellName;
+              const providesCapacity = p.needsCapacity && isPos(p.capacity);
+              if (!hasCell && !providesCapacity) return null; // untouched / still incomplete
+              return {
+                truckIndex: p.truckIndex,
+                // null vehicleIndex = truck-level placement (the backend distinguishes)
+                ...(Number.isInteger(p.vehicleIndex) ? { vehicleIndex: p.vehicleIndex } : {}),
+                ...(hasCell
+                  ? { cellIndex: p.cellIndex, cellName: p.cellName, cellType: p.cellType }
+                  : {}),
+                ...(providesCapacity
+                  ? {
+                      truckCapacity: Number(p.capacity),
+                      truckCapacityUnit: baselineUnit || p.capacityUnit || "m³",
+                    }
+                  : {}),
+              };
+            })
+            .filter(Boolean),
         }))
         .filter((s) => s.assignments.length > 0);
 
@@ -1250,7 +1334,7 @@ export default function SLFPortal() {
         showError({
           type: "error",
           title: "Nothing to Save",
-          message: "Assign a cell to at least one entry before saving.",
+          message: "Assign a cell or enter a Truck Capacity for at least one entry before saving.",
         });
         return;
       }
@@ -1304,7 +1388,7 @@ export default function SLFPortal() {
     Swal.fire({
       icon: "info",
       title: "Organize Your Cell Placements",
-      html: `You have <b>${unplacedSubmissions.length}</b> past submission(s) with waste that hasn't been placed into a disposal cell yet. Organize them now so your records stay accurate.`,
+      html: `You have <b>${unplacedSubmissions.length}</b> past submission(s) that still need organizing — waste to place into a cell and/or a missing Truck Capacity to complete. New submissions are blocked until these are done.`,
       showCancelButton: true,
       confirmButtonText: "Organize Now",
       cancelButtonText: "Later",
@@ -1682,14 +1766,22 @@ export default function SLFPortal() {
     return () => {
       if (pollingRef.current) clearInterval(pollingRef.current);
     };
-  }, [activeMenu, activeSlfId, activeSlfName, portalUser, fetchSubmissions]);
+    // Depend on portalUser.email (a stable primitive), NOT the whole portalUser
+    // object. portalUser changes reference several times on mount (localStorage
+    // load → /me refresh, doubled by StrictMode); depending on the object made
+    // this effect tear down and re-run each time, firing redundant force-refresh
+    // my-submissions fetches and reconnecting the socket + resetting the poll —
+    // which flickered and reloaded the overview KPIs/charts on every mount.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeMenu, activeSlfId, activeSlfName, portalUser?.email, fetchSubmissions]);
 
   // When coming back online while on history tab, refresh immediately
   useEffect(() => {
     if (isOnline && (activeMenu === "history" || activeMenu === "overview") && portalUser) {
       fetchSubmissions(true);
     }
-  }, [isOnline, activeMenu, portalUser, fetchSubmissions]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOnline, activeMenu, portalUser?.email, fetchSubmissions]);
 
   // Reflect admin-side SLF Data Table edits in real time. When the server emits
   // a facility/submissions/baseline data-refresh, re-pull the facility info and
@@ -1834,6 +1926,20 @@ export default function SLFPortal() {
         vehErr.actualVolume = `Waste volume exceeds the allowed truck capacity (max ${Number(
           cap.maxAllowed.toFixed(2),
         )} ${(capacityUnit || "m³").replace("m3", "m³")} at ${capacityAllowancePct}% allowance).`;
+      }
+      // Strict +10% elevation cap: the ENTERED capacity may not exceed the
+      // declared/registered capacity for this plate by more than 10%. No override.
+      const declaredCap = getDeclaredVehicleCapacity(truckDraft.hauler, v.plateNumber);
+      if (
+        declaredCap != null &&
+        v.capacity != null &&
+        v.capacity !== "" &&
+        Number(v.capacity) >
+          declaredCap * TRUCK_CAPACITY_ELEVATION_FACTOR + 1e-9
+      ) {
+        vehErr.capacity = `Truck Capacity exceeds the allowed maximum ${Number(
+          (declaredCap * TRUCK_CAPACITY_ELEVATION_FACTOR).toFixed(2),
+        )} (declared ${declaredCap} + 10%).`;
       }
       if (Object.keys(vehErr).length) vehicleErrors[idx] = vehErr;
     });
@@ -2408,10 +2514,15 @@ export default function SLFPortal() {
 
   const handleSaveTruck = () => {
     if (!validateTruck()) return;
+    // Every transport-entry unit is forced to the SLF's declared baseline unit so
+    // an entry can never carry a mismatched unit (see validateTransportUnits).
+    const entryUnit = baselineUnit || "m³";
     // Flatten first vehicle into top-level fields for backward compat
-    const vehicles = (truckDraft.vehicles || []).map(
-      ({ key, ...rest }) => rest,
-    );
+    const vehicles = (truckDraft.vehicles || []).map(({ key, ...rest }) => ({
+      ...rest,
+      capacityUnit: entryUnit,
+      actualVolumeUnit: entryUnit,
+    }));
     const first = vehicles[0] || {};
     // Derive entry-level totals from the per-vehicle waste placements so that
     // downstream summaries (which read truck-level fields) stay correct.
@@ -2436,10 +2547,10 @@ export default function SLFPortal() {
       ...truckDraft,
       plateNumber: first.plateNumber || truckDraft.plateNumber || "",
       truckCapacity: first.capacity ?? truckDraft.truckCapacity,
-      truckCapacityUnit: first.capacityUnit || truckDraft.truckCapacityUnit,
+      truckCapacityUnit: entryUnit,
       // Entry-level rollups derived from vehicles
       actualVolume: filledVehicles.length ? totalVolume : truckDraft.actualVolume,
-      actualVolumeUnit: first.actualVolumeUnit || baselineUnit || "m³",
+      actualVolumeUnit: entryUnit,
       wasteType: anyHaz ? "Treated Hazardous Waste" : representativeWasteType,
       hazWasteCode: unionHazCodes,
       cellName: first.cellName || "",
@@ -3388,6 +3499,10 @@ export default function SLFPortal() {
     if (uploadType === "truck") {
       const newTrucks = uploadPreviewData.map((d) => ({
         key: d.key,
+        // Marks the row as upload-sourced so validation REQUIRES a Truck Capacity
+        // for it (manually-entered rows keep capacity optional). Transient — the
+        // DataSLF schema has no such field, so it is dropped on save.
+        entrySource: "upload",
         disposalTicketNo: d.disposalTicketNo || "",
         hauler: d.hauler || "",
         plateNumber: d.plateNumber || "",
@@ -4024,6 +4139,45 @@ export default function SLFPortal() {
     );
   }, [submissions]);
 
+  // #5: single source of truth for what still blocks a submission. Drives the
+  // disabled state + tooltip on "Review & Submit" (frontend), and mirrors the
+  // rules the server re-enforces (validateWasteGeneration + transport checks) plus
+  // the workflow gates handleConfirmSubmit applies. Human-readable so the tooltip
+  // tells the user exactly what to fix.
+  const submitBlockers = useMemo(() => {
+    const list = [];
+    if (missingBasicInfo) list.push("Complete the Waste Generator's Company Information.");
+    if (missingBaselineInfo) list.push("Complete the Baseline Data (Total Volume Accepted).");
+    if (!watchedDisposalDate) list.push("Select the Date of Disposal.");
+    if ((trucks || []).length === 0) list.push("Add at least one transport entry.");
+    else if (wasteGenValidationIssues.length > 0) {
+      list.push("Complete every required Waste Generation Information field (incl. a disposal cell for each entry).");
+    }
+    if (missingHazardousCodeTrucks.length > 0) {
+      list.push("Encode the Hazardous Waste Code for treated hazardous entries.");
+    }
+    if (haulerVehiclesMissingCapacity.length > 0) {
+      list.push("Add Vehicle Capacity for every accredited-hauler vehicle.");
+    }
+    if (unresolvedRevert) {
+      list.push("Correct and resubmit your reverted submission first.");
+    }
+    if (ORGANIZE_CELLS_ENABLED && unplacedSubmissions.length > 0) {
+      list.push("Organize past submissions in Organize Cells — assign cells and complete any missing truck capacity.");
+    }
+    return list;
+  }, [
+    missingBasicInfo,
+    missingBaselineInfo,
+    watchedDisposalDate,
+    trucks,
+    wasteGenValidationIssues.length,
+    missingHazardousCodeTrucks.length,
+    haulerVehiclesMissingCapacity.length,
+    unresolvedRevert,
+    unplacedSubmissions.length,
+  ]);
+
   // Task 2: project this submission's per-cell waste against the cell's current
   // fill/capacity (from the facility Cell Infra). Full = projected >= capacity
   // (blocks); near-full = projected >= 80% but < 100% (warns, non-blocking).
@@ -4103,6 +4257,35 @@ export default function SLFPortal() {
       });
       return;
     }
+    // #6: Hard-block new submissions while any PAST submission still needs
+    // organizing — waste not placed into a cell, or a historical truck missing its
+    // Truck Capacity. Organizing was previously only a soft prompt; the business
+    // rule now requires prior approved waste to be fully organized first. Offer to
+    // open the organizer straight away.
+    if (ORGANIZE_CELLS_ENABLED && unplacedSubmissions.length > 0) {
+      const unplacedTotal = unplacedSubmissions.reduce(
+        (n, s) => n + Number(s.unplacedCount || 0),
+        0,
+      );
+      const capacityTotal = unplacedSubmissions.reduce(
+        (n, s) => n + Number(s.missingCapacityCount || 0),
+        0,
+      );
+      const needs = [];
+      if (unplacedTotal > 0) needs.push(`waste not yet placed into a cell`);
+      if (capacityTotal > 0) needs.push(`missing Truck Capacity`);
+      const result = await Swal.fire({
+        icon: "warning",
+        title: "Organize Past Submissions First",
+        html: `You have <b>${unplacedSubmissions.length}</b> past submission(s) that still need attention (${needs.join(" and ")}). Please complete these in <b>Organize Cells</b> before submitting a new transaction.`,
+        showCancelButton: true,
+        confirmButtonText: "Organize Now",
+        cancelButtonText: "Later",
+        confirmButtonColor: "#722ed1",
+      });
+      if (result.isConfirmed) openCellOrganizer();
+      return;
+    }
     // Accredited-hauler vehicles must all declare a capacity before anything can be
     // submitted — the over-capacity check has nothing to measure against otherwise.
     if (haulerVehiclesMissingCapacity.length) {
@@ -4139,6 +4322,24 @@ export default function SLFPortal() {
       return;
     }
     setWasteGenIssues([]);
+
+    // Declared baseline unit + strict +10% truck-capacity elevation. Both hard-
+    // block a FINAL submission (no override); the backend re-checks the same rules
+    // authoritatively against the SLF's registered hauler capacities.
+    const transportRuleIssues = [
+      ...validateTransportUnits(trucks, baselineUnit),
+      ...validateTruckCapacityElevation(trucks, getDeclaredVehicleCapacity),
+    ];
+    if (transportRuleIssues.length) {
+      setActiveTab("disposal");
+      setWasteGenIssues(transportRuleIssues);
+      showError({
+        type: "error",
+        title: "Transport Entry Not Allowed",
+        message: `Fix these before submitting: ${formatWasteGenIssues(transportRuleIssues).join(" ")}`,
+      });
+      return;
+    }
 
     // Block submission when cell placement is missing or a truck exceeds its
     // allowed capacity threshold. Show a clear, actionable message.
@@ -5126,7 +5327,7 @@ export default function SLFPortal() {
       >
         <Space size={6}>
           <BellOutlined style={{ color: "#1677ff" }} />
-          <Text strong>Previous Notifications</Text>
+          <Text strong>Recent Notifications</Text>
           {portalNotificationCounts.total > 0 && (
             <Badge count={portalNotificationCounts.total} size="small" />
           )}
@@ -5149,7 +5350,7 @@ export default function SLFPortal() {
       ) : (
         <List
           size="small"
-          dataSource={portalNotifications}
+          dataSource={portalNotifications.slice(0, 6)}
           style={{ maxHeight: 420, overflowY: "auto" }}
           renderItem={(notification) => {
             const meta = getPortalNotificationMeta(notification);
@@ -5215,7 +5416,237 @@ export default function SLFPortal() {
           }}
         />
       )}
+      {portalNotifications.length > 0 && (
+        <Button
+          type="link"
+          block
+          icon={<HistoryOutlined />}
+          style={{ marginTop: 4 }}
+          onClick={() => {
+            setNotificationPanelOpen(false);
+            setPreviousNotifOpen(true);
+          }}
+        >
+          View all previous notifications ({portalNotifications.length})
+        </Button>
+      )}
     </div>
+  );
+
+  // ── Previous Notifications (full history) ──
+  // Table view of every notification already loaded in portalNotifications — the
+  // popover only shows the most recent few. Reuses getPortalNotificationMeta and
+  // openPortalNotification; no new data source.
+  const previousNotificationsModal = (
+    <Modal
+      open={previousNotifOpen}
+      onCancel={() => setPreviousNotifOpen(false)}
+      width={860}
+      title={
+        <Space>
+          <HistoryOutlined style={{ color: "#1a3353" }} />
+          <span>Previous Notifications</span>
+          {portalNotifications.length > 0 && (
+            <Tag>{portalNotifications.length} total</Tag>
+          )}
+        </Space>
+      }
+      footer={
+        <Space>
+          {portalNotificationCounts.total > 0 && (
+            <Button onClick={() => markPortalNotificationsRead("all")}>
+              Mark all read
+            </Button>
+          )}
+          <Button type="primary" onClick={() => setPreviousNotifOpen(false)}>
+            Close
+          </Button>
+        </Space>
+      }
+      styles={{ body: { maxHeight: "70vh", overflowY: "auto" } }}
+    >
+      <Table
+        size="small"
+        rowKey={(n) => n._id}
+        dataSource={portalNotifications}
+        className="portal-user-wrap-table"
+        pagination={{
+          defaultPageSize: 10,
+          showSizeChanger: true,
+          pageSizeOptions: [10, 20, 50, 100],
+          showTotal: (total) => `${total} notification(s)`,
+        }}
+        columns={[
+          {
+            title: "Date / Time",
+            dataIndex: "createdAt",
+            key: "createdAt",
+            width: 160,
+            sorter: (a, b) => new Date(a.createdAt) - new Date(b.createdAt),
+            defaultSortOrder: "descend",
+            render: (v) =>
+              v
+                ? dayjs(v).format("MMM D, YYYY h:mm A")
+                : "—",
+          },
+          {
+            title: "Type",
+            key: "type",
+            width: 170,
+            filters: [
+              "Admin Message",
+              "Support Ticket",
+              "Submission Update",
+              "Submission Status",
+              "Request Update",
+              "Admin Update",
+            ].map((label) => ({ text: label, value: label })),
+            onFilter: (value, record) =>
+              getPortalNotificationMeta(record).label === value,
+            render: (_, record) => {
+              const meta = getPortalNotificationMeta(record);
+              return (
+                <Tag color={meta.color} icon={meta.icon}>
+                  {meta.label}
+                </Tag>
+              );
+            },
+          },
+          {
+            title: "Title / Message",
+            key: "message",
+            render: (_, record) => {
+              const meta = getPortalNotificationMeta(record);
+              return (
+                <div style={{ whiteSpace: "normal", wordBreak: "break-word" }}>
+                  <Text strong style={{ fontSize: 13 }}>
+                    {record.title || meta.label}
+                  </Text>
+                  <div>
+                    <Text
+                      type="secondary"
+                      style={{
+                        fontSize: 12,
+                        whiteSpace: "normal",
+                        overflowWrap: "anywhere",
+                      }}
+                    >
+                      {record.message || "—"}
+                    </Text>
+                  </div>
+                </div>
+              );
+            },
+          },
+          {
+            title: "Status",
+            dataIndex: "read",
+            key: "read",
+            width: 100,
+            align: "center",
+            filters: [
+              { text: "Unread", value: false },
+              { text: "Read", value: true },
+            ],
+            onFilter: (value, record) => !!record.read === value,
+            render: (read) =>
+              read ? (
+                <Tag color="default">Read</Tag>
+              ) : (
+                <Tag color="blue">Unread</Tag>
+              ),
+          },
+          {
+            title: "Action",
+            key: "action",
+            width: 90,
+            align: "center",
+            render: (_, record) => (
+              <Button
+                type="link"
+                size="small"
+                icon={<EyeOutlined />}
+                onClick={() => setNotifDetail(record)}
+              >
+                View
+              </Button>
+            ),
+          },
+        ]}
+      />
+    </Modal>
+  );
+
+  // Full message + jump-to-context for a single notification opened from the
+  // Previous Notifications table.
+  const notificationDetailModal = (
+    <Modal
+      open={!!notifDetail}
+      onCancel={() => setNotifDetail(null)}
+      width={520}
+      title={
+        notifDetail ? (
+          <Space>
+            {getPortalNotificationMeta(notifDetail).icon}
+            <span>
+              {notifDetail.title ||
+                getPortalNotificationMeta(notifDetail).label}
+            </span>
+          </Space>
+        ) : (
+          "Notification"
+        )
+      }
+      footer={
+        notifDetail ? (
+          <Space>
+            {getPortalNotificationMeta(notifDetail).action !== "none" && (
+              <Button
+                type="primary"
+                onClick={() => {
+                  const target = notifDetail;
+                  setNotifDetail(null);
+                  setPreviousNotifOpen(false);
+                  openPortalNotification(target);
+                }}
+              >
+                Go to details
+              </Button>
+            )}
+            <Button onClick={() => setNotifDetail(null)}>Close</Button>
+          </Space>
+        ) : null
+      }
+    >
+      {notifDetail && (
+        <Descriptions size="small" column={1} bordered>
+          <Descriptions.Item label="Type">
+            <Tag color={getPortalNotificationMeta(notifDetail).color}>
+              {getPortalNotificationMeta(notifDetail).label}
+            </Tag>
+          </Descriptions.Item>
+          <Descriptions.Item label="Date / Time">
+            {notifDetail.createdAt
+              ? dayjs(notifDetail.createdAt).format("MMM D, YYYY h:mm A")
+              : "—"}
+          </Descriptions.Item>
+          <Descriptions.Item label="Status">
+            {notifDetail.read ? "Read" : "Unread"}
+          </Descriptions.Item>
+          <Descriptions.Item label="Message">
+            <div
+              style={{
+                whiteSpace: "pre-wrap",
+                overflowWrap: "anywhere",
+                wordBreak: "break-word",
+              }}
+            >
+              {notifDetail.message || "—"}
+            </div>
+          </Descriptions.Item>
+        </Descriptions>
+      )}
+    </Modal>
   );
 
   const menuItems = [
@@ -5459,7 +5890,7 @@ export default function SLFPortal() {
                   )}
                 </Space>
                 <Button size="small" type="primary" onClick={() => setActiveTab("baseline")}>
-                  Update Accredited Haulers
+                  Request Now to update
                 </Button>
               </Space>
             }
@@ -5531,6 +5962,7 @@ export default function SLFPortal() {
               haulers={haulers}
               isMobile={isMobile}
               hasReviewMissing={hasReviewMissing}
+              submitBlockers={submitBlockers}
               loading={loading}
               slfCardExpanded={slfCardExpanded}
               handleReviewOpen={handleReviewOpen}
@@ -6314,6 +6746,9 @@ export default function SLFPortal() {
                           </Col>
                         </Row>
 
+                        {/* #7: the Data-Entry Notes moved to the right-side panel,
+                            directly below the Encoding Guide. */}
+
                         {/* ── Transport & Disposal Information ── */}
                         <div
                           style={{
@@ -7073,6 +7508,43 @@ export default function SLFPortal() {
                 ]}
               />
             </Card>
+
+            {/* #7: Data Entry Notes — moved here, directly below the Encoding Guide.
+                Kept compact so the sticky right panel stays readable without
+                overflow. Text updated to reflect current workflow (vehicle capacity
+                required, Organize Cells now mandatory before new submissions). */}
+            <Alert
+              type="info"
+              showIcon
+              style={{ marginTop: 12, borderRadius: 8 }}
+              message={<Text strong style={{ fontSize: 12 }}>Data Entry Notes</Text>}
+              description={
+                <ul style={{ margin: "4px 0 0", paddingLeft: 16, lineHeight: 1.6, fontSize: 12 }}>
+                  <li>
+                    All transport entries use your declared baseline unit{" "}
+                    <b>{(baselineUnit || "m³").replace("m3", "m³")}</b>. Unit selectors are
+                    locked to it and mixed units are rejected on submit.
+                  </li>
+                  <li>
+                    <b>Vehicle Capacity is required</b> for every accredited-hauler vehicle —
+                    the over-capacity check has nothing to measure against otherwise.
+                  </li>
+                  <li>
+                    <b>Truck Capacity</b> is <b>required for uploaded rows</b> and optional when you
+                    add an entry manually (any missing historical value is completed in Organize
+                    Cells). When entered it must be greater than 0.
+                  </li>
+                  <li>
+                    A truck's entered capacity may not exceed its registered capacity by more
+                    than <b>10%</b>; an over-elevated value blocks submission.
+                  </li>
+                  <li>
+                    Past approved submissions with unassigned waste or missing truck capacity
+                    must be completed in <b>Organize Cells</b> before you can submit new entries.
+                  </li>
+                </ul>
+              }
+            />
           </Col>
         </Row>
       </div>
@@ -7124,7 +7596,7 @@ export default function SLFPortal() {
           collapsible
           collapsed={collapsed}
           onCollapse={setCollapsed}
-          width={220}
+          width={230}
           collapsedWidth={64}
           className="portal-sider"
           style={{
@@ -7584,19 +8056,35 @@ export default function SLFPortal() {
               <Empty description="All your submissions are already organized into cells." />
             ) : (
               <Space direction="vertical" size={10} style={{ width: "100%" }}>
-                <Alert
-                  type="info"
-                  showIcon
-                  message="How to organize your past submissions into cells"
-                  description={
-                    <ol style={{ margin: "4px 0 0", paddingLeft: 18, lineHeight: 1.6 }}>
-                      <li><b>Expand a submission card</b> below to see the trucks/vehicles that still need a disposal cell.</li>
-                      <li><b>Pick a cell</b> for each row using the cell selector on the right — only cells that are <i>Open for Disposal</i> (active and not full) can be chosen.</li>
-                      <li>To place many rows at once, <b>tick the checkboxes</b>, choose a cell in the purple bulk-assign bar, and press <b>Apply</b>.</li>
-                      <li>Rows placed into a cell turn green. When everything is placed, click <b>Save Placement</b> to update your records and the cell fill levels.</li>
-                    </ol>
-                  }
-                  style={{ borderRadius: 8 }}
+                {/* Instructions collapsed by default so the organizer opens on the
+                    placement work, not a wall of steps. Expand to review the how-to. */}
+                <Collapse
+                  size="small"
+                  defaultActiveKey={[]}
+                  style={{ borderRadius: 8, background: "#e6f4ff", borderColor: "#91caff" }}
+                  items={[
+                    {
+                      key: "how-to",
+                      label: (
+                        <Space size={6}>
+                          <InfoCircleOutlined style={{ color: "#1677ff" }} />
+                          <Text strong style={{ fontSize: 13 }}>
+                            How to organize your past submissions into cells
+                          </Text>
+                        </Space>
+                      ),
+                      children: (
+                        <ol style={{ margin: 0, paddingLeft: 18, lineHeight: 1.6 }}>
+                          <li><b>Expand a submission card</b> below to see the trucks/vehicles that still need a disposal cell.</li>
+                          <li><b>Pick a cell</b> for each row using the cell selector on the right — only cells that are <i>Open for Disposal</i> (active and not full) can be chosen.</li>
+                          <li>To place many rows at once, <b>tick the checkboxes</b>, choose a cell in the purple bulk-assign bar, and press <b>Apply</b>.</li>
+                          <li>If a row is missing its <b>Truck Capacity</b>, enter it (in your declared baseline unit) — historical entries need this completed here rather than at submission time.</li>
+                          <li>Rows fully completed turn green. When everything is placed and every capacity is filled, click <b>Save Placement</b> to update your records and the cell fill levels.</li>
+                          <li><b>Organizing is required</b> — new submissions are blocked until all past waste is placed into cells and any missing truck capacities are completed.</li>
+                        </ol>
+                      ),
+                    },
+                  ]}
                 />
 
               {/* ── Cell Status Summary ──
@@ -7998,9 +8486,18 @@ export default function SLFPortal() {
                     volume: p.actualVolume,
                     volumeUnit: p.actualVolumeUnit || baselineUnit || "m³",
                     cellName: p.cellName,
+                    needsCell: p.needsCell !== false,
+                    needsCapacity: !!p.needsCapacity,
+                    capacity: p.capacity,
                   }));
 
-                  const placedCount = rows.filter((r) => r.cellName).length;
+                  // A row is complete when it has a cell (if it needed one) AND a
+                  // positive Truck Capacity (if it was missing). Both must be done
+                  // before the submission drops off the block list (#6).
+                  const isRowComplete = (r) =>
+                    (!r.needsCell || !!r.cellName) &&
+                    (!r.needsCapacity || Number(r.capacity) > 0);
+                  const placedCount = rows.filter(isRowComplete).length;
                   const allPlaced = placedCount === rows.length;
                   const subSelectedCount = rows.filter((r) =>
                     cellOrganizerSelected.includes(r.rowKey),
@@ -8138,6 +8635,41 @@ export default function SLFPortal() {
                               );
                             },
                           },
+                          {
+                            // Historical Truck Capacity completion (#6). Only rows
+                            // that are actually missing a capacity render an input;
+                            // rows that already have one show it read-only.
+                            title: (
+                              <span>
+                                Truck Capacity{" "}
+                                <Text type="secondary" style={{ fontSize: 10, fontWeight: 400 }}>
+                                  ({String(baselineUnit || "m³").replace("m3", "m³")})
+                                </Text>
+                              </span>
+                            ),
+                            width: 140,
+                            render: (_, r) =>
+                              r.needsCapacity ? (
+                                <InputNumber
+                                  size="small"
+                                  style={{ width: "100%" }}
+                                  min={0}
+                                  step={0.1}
+                                  placeholder="Required"
+                                  status={Number(r.capacity) > 0 ? "" : "warning"}
+                                  value={Number(r.capacity) > 0 ? r.capacity : undefined}
+                                  onChange={(val) =>
+                                    updateOrganizerCapacity(sub._id, r.truckIndex, r.vehicleIndex, val)
+                                  }
+                                />
+                              ) : (
+                                <Text style={{ fontSize: 12 }}>
+                                  {Number(r.capacity) > 0
+                                    ? `${Number(r.capacity).toLocaleString()} ${String(baselineUnit || "m³").replace("m3", "m³")}`
+                                    : "—"}
+                                </Text>
+                              ),
+                          },
                         ]}
                       />
                     ),
@@ -8167,6 +8699,9 @@ export default function SLFPortal() {
             )}
           </Modal>
         )}
+
+        {previousNotificationsModal}
+        {notificationDetailModal}
 
         <SLFPortalModals
           entryForm={entryForm}
@@ -8313,6 +8848,8 @@ export default function SLFPortal() {
           wasteReceivedLoading={wasteReceivedLoading}
           activeCellEntries={activeCellEntries}
           activeCellOptions={activeCellOptions}
+          slfInfoLoading={slfInfoLoading}
+          slfCellCount={slfCellCount}
           baselineCellOptions={baselineCellOptions}
           closedCellEntries={closedCellEntries}
           haulers={haulers}

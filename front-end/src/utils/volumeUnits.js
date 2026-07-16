@@ -116,3 +116,32 @@ export function formatVolume(value, unit, { maximumFractionDigits = 2 } = {}) {
   if (value === null || value === undefined || !Number.isFinite(Number(value))) return "—";
   return `${Number(value).toLocaleString(undefined, { maximumFractionDigits })} ${normalizeUnit(unit) || ""}`.trim();
 }
+
+// THE single volume-vs-capacity comparison — reuse everywhere a truck/vehicle's
+// actual volume is judged against its capacity, so colours and thresholds never
+// disagree. Units are normalized (volume → capacity's unit) before comparing;
+// mismatched/missing units or capacity yield `comparable: false` so the caller can
+// fall back to a neutral colour instead of a misleading one.
+//
+// Thresholds (per spec):
+//   • < 90%           → green
+//   • 90% ‥ 100%      → orange (inclusive of 100)
+//   • > 100%          → red
+export const CAPACITY_STATUS_COLORS = {
+  ok: "#52c41a",
+  warn: "#fa8c16",
+  over: "#ff4d4f",
+  unknown: undefined,
+};
+export function volumeCapacityStatus({ actualVolume, actualVolumeUnit, capacity, capacityUnit }) {
+  const cap = Number(capacity);
+  const toUnit = normalizeUnit(capacityUnit) || normalizeUnit(actualVolumeUnit);
+  const fromUnit = normalizeUnit(actualVolumeUnit) || toUnit;
+  const vol = convertVolume(actualVolume, fromUnit, toUnit);
+  if (!Number.isFinite(cap) || cap <= 0 || vol === null || !Number.isFinite(vol)) {
+    return { comparable: false, percent: null, level: "unknown", color: CAPACITY_STATUS_COLORS.unknown };
+  }
+  const percent = (vol / cap) * 100;
+  const level = percent > 100 ? "over" : percent >= 90 ? "warn" : "ok";
+  return { comparable: true, percent, level, color: CAPACITY_STATUS_COLORS[level] };
+}

@@ -2436,34 +2436,7 @@ export default function DeveloperSettings({onSettingsSaved, isDark, isDeveloper 
             children: (
               <>
                 {/* System Info (read-only) */}
-                <Card
-                  style={{ marginTop: 0, borderRadius: 10 }}
-                  title={
-                    <Space>
-                      <ToolOutlined style={{ color: "#4096ff" }} />
-                      <Text strong>System Info</Text>
-                    </Space>
-                  }
-                >
-                  <Descriptions column={{ xs: 1, sm: 2 }} size="small">
-                    <Descriptions.Item label="Version">
-                      <Tag color="blue">1.0.0</Tag>
-                    </Descriptions.Item>
-                    <Descriptions.Item label="Environment">
-                      <Tag color="green">Production</Tag>
-                    </Descriptions.Item>
-                    <Descriptions.Item label="Last Updated">
-                      {settings?.updatedAt
-                        ? new Date(settings.updatedAt).toLocaleString()
-                        : "\u2014"}
-                    </Descriptions.Item>
-                    <Descriptions.Item label="Settings ID">
-                      <Text copyable type="secondary" style={{ fontSize: 12 }}>
-                        {settings?._id || "\u2014"}
-                      </Text>
-                    </Descriptions.Item>
-                  </Descriptions>
-                </Card>
+              
 
                 {/* App Logs */}
                 <Card
@@ -2530,7 +2503,7 @@ export default function DeveloperSettings({onSettingsSaved, isDark, isDeveloper 
                         key: "createdAt",
                         width: 130,
                         render: (v) => (
-                          <Text style={{ fontSize: 10, whiteSpace: "nowrap" }}>
+                          <Text style={{ fontSize: 11, whiteSpace: "nowrap" }}>
                             {dayjs(v).format("MMM DD, HH:mm:ss")}
                           </Text>
                         ),
@@ -2542,7 +2515,7 @@ export default function DeveloperSettings({onSettingsSaved, isDark, isDeveloper 
                         width: 65,
                         render: (v) => {
                           const colors = { info: "blue", warn: "orange", error: "red" };
-                          return <Tag color={colors[v] || "default"} style={{ fontSize: 10, padding: "0 4px", lineHeight: "18px" }}>{v?.toUpperCase()}</Tag>;
+                          return <Tag color={colors[v] || "default"} style={{ fontSize: 11, padding: "0 4px", lineHeight: "18px" }}>{v?.toUpperCase()}</Tag>;
                         },
                       },
                       {
@@ -2550,7 +2523,7 @@ export default function DeveloperSettings({onSettingsSaved, isDark, isDeveloper 
                         dataIndex: "action",
                         key: "action",
                         width: 180,
-                        render: (v) => <Tag style={{ fontSize: 10, padding: "0 4px", lineHeight: "18px" }}>{v}</Tag>,
+                        render: (v) => <Tag style={{ fontSize: 11, padding: "0 4px", lineHeight: "18px" }}>{v}</Tag>,
                       },
                       {
                         title: "Message",
@@ -2565,19 +2538,19 @@ export default function DeveloperSettings({onSettingsSaved, isDark, isDeveloper 
                         key: "user",
                         width: 220,
                         ellipsis: true,
-                        render: (v) => <Text style={{ fontSize: 10 }}>{v || "—"}</Text>,
+                        render: (v) => <Text style={{ fontSize: 11 }}>{v || "—"}</Text>,
                       },
                       {
                         title: "IP",
                         dataIndex: "ip",
                         key: "ip",
                         width: 150,
-                        render: (v) => <Text style={{ fontSize: 10 }}>{v || "—"}</Text>,
+                        render: (v) => <Text style={{ fontSize: 11 }}>{v || "—"}</Text>,
                       },
                       {
                         title: "Location",
                         key: "location",
-                        width: 200,
+                        width: 250,
                         render: (_, log) => {
                           const geo = log.geo || {};
                           const label = geo.label || "—";
@@ -2593,7 +2566,7 @@ export default function DeveloperSettings({onSettingsSaved, isDark, isDeveloper 
                                   : label
                               }
                             >
-                              <Tag color={color} icon={icon} style={{ fontSize: 10, maxWidth: 190, overflow: "hidden", textOverflow: "ellipsis" }}>
+                              <Tag color={color} icon={icon} style={{ fontSize: 11, maxWidth: 280, overflow: "hidden", whiteSpace: "nowrap" }}>
                                 {label}
                               </Tag>
                             </Tooltip>

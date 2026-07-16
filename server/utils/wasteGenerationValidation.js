@@ -56,9 +56,10 @@ const issue = (truckIndex, field, message, vehicleIndex = null) => ({
  * Validate the Waste Generation Information of one submission entry.
  * @returns {Array<{tab,truckIndex,vehicleIndex,field,message}>} empty when valid.
  */
-function validateWasteGeneration(trucks) {
+function validateWasteGeneration(trucks, options = {}) {
   const list = Array.isArray(trucks) ? trucks : [];
   const issues = [];
+  const forceRequireCapacity = options.requireTruckCapacity === true;
 
   if (list.length === 0) {
     issues.push(issue(null, "trucks", "At least one truck entry is required."));
@@ -75,17 +76,28 @@ function validateWasteGeneration(trucks) {
     if (isBlank(truck?.plateNumber)) {
       issues.push(issue(t, "plateNumber", "Plate Number is required."));
     }
-    // Truck Capacity — previously optional; now required for final submission.
-    if (!isPositiveNumber(truck?.truckCapacity)) {
-      issues.push(
-        issue(
-          t,
-          "truckCapacity",
-          isBlank(truck?.truckCapacity)
-            ? "Truck Capacity is required."
-            : "Truck Capacity must be a number greater than 0.",
-        ),
-      );
+    // Truck Capacity rules:
+    //   • MANUALLY-entered rows: optional at entry (missing historical capacity is
+    //     completed later via Organize Cells). A present value must still be > 0.
+    //   • UPLOADED rows (truck.entrySource === "upload") — or when the caller forces
+    //     it via options.requireTruckCapacity: REQUIRED and > 0. Missing/null/zero/
+    //     negative/invalid is rejected here (and by the upload parser).
+    const isUploadedRow =
+      String(truck?.entrySource || "").trim().toLowerCase() === "upload";
+    if (forceRequireCapacity || isUploadedRow) {
+      if (!isPositiveNumber(truck?.truckCapacity)) {
+        issues.push(
+          issue(
+            t,
+            "truckCapacity",
+            isBlank(truck?.truckCapacity)
+              ? "Truck Capacity is required."
+              : "Truck Capacity must be a number greater than 0.",
+          ),
+        );
+      }
+    } else if (!isBlank(truck?.truckCapacity) && !isPositiveNumber(truck?.truckCapacity)) {
+      issues.push(issue(t, "truckCapacity", "Truck Capacity must be a number greater than 0."));
     }
 
     const vehicles = Array.isArray(truck?.vehicles) ? truck.vehicles : [];
@@ -130,9 +142,78 @@ function validateWasteGeneration(trucks) {
   return issues;
 }
 
+// ── Declared baseline unit + truck-capacity elevation rules ──
+// Mirrors front-end/src/pages/SLFPortal/wasteGenValidation.js. Authoritative copy.
+
+// A truck's entered capacity may exceed its declared/registered capacity by at
+// most 10% (measurement/loading tolerance).
+const TRUCK_CAPACITY_ELEVATION_FACTOR = 1.1;
+
+const normUnit = (u) => String(u || "").trim().replace("m3", "m³");
+
+// Every transport-entry unit must match the SLF's declared baseline unit. Mixed
+// units silently distort every downstream total, so they are rejected.
+function validateTransportUnits(trucks, baselineUnit) {
+  const unit = normUnit(baselineUnit);
+  if (!unit) return [];
+  const list = Array.isArray(trucks) ? trucks : [];
+  const issues = [];
+  list.forEach((truck, t) => {
+    const check = (value, field, vi = null) => {
+      const u = normUnit(value);
+      if (u && u !== unit) {
+        issues.push(issue(t, field, `Unit must be ${unit} (your declared baseline unit).`, vi));
+      }
+    };
+    check(truck && truck.truckCapacityUnit, "truckCapacityUnit");
+    check(truck && truck.actualVolumeUnit, "actualVolumeUnit");
+    (Array.isArray(truck && truck.vehicles) ? truck.vehicles : []).forEach((v, vi) => {
+      check(v && v.capacityUnit, "capacityUnit", vi);
+      check(v && v.actualVolumeUnit, "actualVolumeUnit", vi);
+    });
+  });
+  return issues;
+}
+
+// The entered truck/vehicle capacity may not exceed the declared capacity for
+// that plate by more than 10%. `getDeclaredCapacity(hauler, plate)` returns the
+// declared capacity, or a falsy value when unknown (unknown plates are skipped).
+function validateTruckCapacityElevation(trucks, getDeclaredCapacity) {
+  const list = Array.isArray(trucks) ? trucks : [];
+  const issues = [];
+  const flag = (t, vi, entered, declared) => {
+    if (!isPositiveNumber(declared) || !isPositiveNumber(entered)) return;
+    const max = Number(declared) * TRUCK_CAPACITY_ELEVATION_FACTOR;
+    if (Number(entered) > max + 1e-9) {
+      issues.push(
+        issue(
+          t,
+          "truckCapacity",
+          `Truck Capacity ${entered} exceeds the maximum allowed ${Number(max.toFixed(2))} (declared ${declared} + 10%).`,
+          vi,
+        ),
+      );
+    }
+  };
+  list.forEach((truck, t) => {
+    const vehicles = Array.isArray(truck && truck.vehicles) ? truck.vehicles : [];
+    if (vehicles.length > 0) {
+      vehicles.forEach((v, vi) => {
+        flag(t, vi, v && v.capacity, getDeclaredCapacity(truck && truck.hauler, v && v.plateNumber));
+      });
+    } else {
+      flag(t, null, truck && truck.truckCapacity, getDeclaredCapacity(truck && truck.hauler, truck && truck.plateNumber));
+    }
+  });
+  return issues;
+}
+
 module.exports = {
   WASTE_GENERATION_TAB: TAB,
+  TRUCK_CAPACITY_ELEVATION_FACTOR,
   isBlank,
   isPositiveNumber,
   validateWasteGeneration,
+  validateTransportUnits,
+  validateTruckCapacityElevation,
 };

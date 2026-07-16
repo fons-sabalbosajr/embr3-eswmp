@@ -44,11 +44,15 @@ export default function SummaryDisposalCalendar({
       }
       eventContent={(eventInfo) => {
         const item = eventInfo.event.extendedProps || {};
+        // #4: when the day has validation issues, show a warning marker; the event
+        // itself is already recolored (red/amber) by the caller.
+        const issues = Array.isArray(item.issueReasons) ? item.issueReasons : [];
         return (
-          <div style={{ lineHeight: 1.25, whiteSpace: "normal" }}>
+          <div style={{ lineHeight: 1.25, whiteSpace: "normal" }} title={issues.join(" • ")}>
             <div style={{ fontWeight: 700 }}>{eventInfo.event.title}</div>
             <div style={{ fontSize: 10, opacity: 0.9 }}>
               {item.count} submission{item.count !== 1 ? "s" : ""}
+              {issues.length > 0 ? ` ⚠ ${issues.length}` : ""}
             </div>
           </div>
         );

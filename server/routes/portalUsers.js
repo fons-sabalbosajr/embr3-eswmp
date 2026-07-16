@@ -6,6 +6,10 @@ const Notification = require("../models/Notification");
 const DataSLF = require("../models/DataSLF");
 const Transaction = require("../models/Transaction");
 const { authMiddleware, adminOnly } = require("../middleware/auth");
+const {
+  excludeSystemPortalAccounts,
+  wantsIncludeSystem,
+} = require("../utils/systemPortalAccounts");
 const { writeLog } = require("../utils/logger");
 const { notifyPortal, refreshAdmin } = require("../utils/socketEmit");
 const {
@@ -201,7 +205,11 @@ router.get("/", async (req, res) => {
       .select("-password")
       .populate("approvedBy", "firstName lastName email")
       .sort({ createdAt: -1 });
-    res.json(users);
+    // Drop system/sample accounts (e.g. the ESWM Portal User) so the list only
+    // ever represents legitimate portal accounts. Developer views can opt back in
+    // with ?includeSystem=true (or ?includeDummy=true). This is the source-level
+    // fix — the accounts are not real operators, so no UI should have to hide them.
+    res.json(excludeSystemPortalAccounts(users, wantsIncludeSystem(req)));
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });
   }

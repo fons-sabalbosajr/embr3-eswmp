@@ -97,6 +97,7 @@ const DeveloperSettings = lazy(() => import("./admin/DeveloperSettings"));
 const DataReferences = lazy(() => import("./admin/DataReferences"));
 const SLFMonitoring = lazy(() => import("./admin/SLFMonitoring"));
 const SLFWasteGenerators = lazy(() => import("./admin/SLFWasteGenerators"));
+const DisposalActivityCalendar = lazy(() => import("./admin/DisposalActivityCalendar"));
 const OrgChartSettings = lazy(() => import("./admin/OrgChartSettings"));
 const TenYearSWMPlan = lazy(() => import("./admin/TenYearSWMPlan"));
 const FundedMRF = lazy(() => import("./admin/FundedMRF"));
@@ -7507,37 +7508,26 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
       "Cat 4": "> 150 TPD",
     };
 
-    const SLF_CARD_H = 250;
+    // #2/#3: shorter stacked cards → a shorter SLF Location Map card, whose height
+    // stays exactly the 3 stacked left cards + their 2 gutters (SLF_CARD_H * 3 + 32),
+    // so the map aligns with the left column and vertical spacing stays minimal.
+    const SLF_CARD_H = 300;
+    const SLF_MAP_H = SLF_CARD_H * 3 + 32;
 
     tabItems.push({
       key: "slf-monitoring",
       label: (
         <span>
-          <BankOutlined /> General Dashboard
+          <BankOutlined /> Sanitary Landfill
         </span>
       ),
       children: (
-        <Tabs
-          defaultActiveKey="slf-facilities"
-          size="small"
-          // Unmount the pane you are not looking at. These panes carry the SLF
-          // gauge grids and Recharts instances; without this, antd keeps every
-          // pane you have ever visited mounted, so their charts, ResizeObservers
-          // and derived cell arrays all stay live at once.
-          destroyOnHidden
-          items={[
-            {
-              key: "slf-facilities",
-              label: (
-                <span>
-                  <BankOutlined /> SLF Monitoring General Dashboard
-                </span>
-              ),
-              children: (
-                <>
+        // #2: single-tab wrapper removed — only "SLF Monitoring General Dashboard"
+        // existed, so its content is rendered directly (no nested Tabs).
+        <>
                   {/* Row 1: Total SLF | Total Cells | LGUs Served | Private Sectors Served */}
                   <Row gutter={[16, 16]} style={{ marginBottom: 16 }}>
-                    <Col xs={12} sm={12} md={6}>
+                    <Col xs={12} sm={8} lg={4}>
                       <Card
                         hoverable
                         style={{ borderRadius: 10, height: 110, borderLeft: "4px solid #2f54eb", cursor: "pointer" }}
@@ -7556,7 +7546,7 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                         </Text>
                       </Card>
                     </Col>
-                    <Col xs={12} sm={12} md={6}>
+                    <Col xs={12} sm={8} lg={4}>
                       <Card
                         hoverable
                         style={{ borderRadius: 10, height: 110, borderLeft: "4px solid #13c2c2", cursor: "pointer" }}
@@ -7572,78 +7562,42 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                         <Text type="secondary" style={{ fontSize: 11 }}>across {slfFacStats.totalRecords} facilities</Text>
                       </Card>
                     </Col>
-                    <Col xs={12} sm={12} md={6}>
+                    {/* Combined: LGUs Served + Private Sectors Served — one tile,
+                        tabbed modal (see combo: "served"). */}
+                    <Col xs={24} sm={24} lg={8}>
                       <Card
                         hoverable
                         style={{ borderRadius: 10, height: 110, borderLeft: "4px solid #fa8c16", cursor: "pointer" }}
                         loading={loading}
                         styles={{ body: { padding: "10px 14px" } }}
-                        onClick={() => setSlfDashModal({ type: "lgu" })}
+                        onClick={() => setSlfDashModal({ combo: "served" })}
                       >
-                        <Statistic
-                          title="LGUs Served"
-                          value={slfOps.totalLGUsServed || 0}
-                          prefix={<TeamOutlined style={{ color: "#fa8c16" }} />}
-                        />
-                        <Text type="secondary" style={{ fontSize: 11 }}>from {slfFacStats.totalRecords} SLFs</Text>
+                        <Row gutter={16} align="middle">
+                          <Col span={12}>
+                            <Statistic
+                              title="LGUs Served"
+                              value={slfOps.totalLGUsServed || 0}
+                              prefix={<TeamOutlined style={{ color: "#fa8c16" }} />}
+                            />
+                          </Col>
+                          <Col span={12}>
+                            <Statistic
+                              title="Private Sectors Served"
+                              value={slfPrivateCount}
+                              prefix={<BankOutlined style={{ color: "#722ed1" }} />}
+                            />
+                          </Col>
+                        </Row>
+                        <Text type="secondary" style={{ fontSize: 11 }}>
+                          Combined — click for LGUs &amp; Private Sectors tabs
+                        </Text>
                       </Card>
                     </Col>
-                    <Col xs={12} sm={12} md={6}>
-                      <Card
-                        hoverable
-                        style={{ borderRadius: 10, height: 110, borderLeft: "4px solid #722ed1", cursor: "pointer" }}
-                        loading={loading}
-                        styles={{ body: { padding: "10px 14px" } }}
-                        onClick={() => setSlfDashModal({ type: "private" })}
-                      >
-                        <Statistic
-                          title="Private Sectors Served"
-                          value={slfPrivateCount}
-                          prefix={<BankOutlined style={{ color: "#722ed1" }} />}
-                        />
-                        <Text type="secondary" style={{ fontSize: 11 }}>{slfPrivateCount}/{slfFacStats.totalRecords} private-owned</Text>
-                      </Card>
-                    </Col>
-                  </Row>
-
-                  {/* Row 2: Total Capacity | Waste Received | Leachate Management | Gas Management */}
-                  <Row gutter={[16, 16]} style={{ marginBottom: 16 }}>
-                    <Col xs={12} sm={12} md={6}>
-                      <Card
-                        hoverable
-                        style={{ borderRadius: 10, height: 110, borderLeft: "4px solid #eb2f96", cursor: "pointer" }}
-                        loading={loading}
-                        styles={{ body: { padding: "10px 14px" } }}
-                        onClick={() => setSlfDashModal({ type: "capacity" })}
-                      >
-                        <Statistic
-                          title="Total Capacity"
-                          value={slfOps.totalCapacity || 0}
-                          prefix={<BarChartOutlined style={{ color: "#eb2f96" }} />}
-                          formatter={(v) => Number(v).toLocaleString()}
-                        />
-                        <Text type="secondary" style={{ fontSize: 11 }}>combined volume</Text>
-                      </Card>
-                    </Col>
-                    <Col xs={12} sm={12} md={6}>
-                      <Card
-                        hoverable
-                        style={{ borderRadius: 10, height: 110, borderLeft: "4px solid #ff4d4f", cursor: "pointer" }}
-                        loading={loading}
-                        styles={{ body: { padding: "10px 14px" } }}
-                        onClick={() => setSlfDashModal({ type: "waste" })}
-                      >
-                        <Statistic
-                          title="Waste Received"
-                          value={slfOps.totalWasteReceived || 0}
-                          suffix="tons"
-                          prefix={<BarChartOutlined style={{ color: "#ff4d4f" }} />}
-                          formatter={(v) => Number(v).toLocaleString()}
-                        />
-                        <Text type="secondary" style={{ fontSize: 11 }}>total across SLFs</Text>
-                      </Card>
-                    </Col>
-                    <Col xs={12} sm={12} md={6}>
+                    {/* #3: Leachate + Gas merged into the same top row so all summary
+                        tiles sit on ONE horizontal row on desktop (they wrap on
+                        smaller screens). Total Capacity + Waste Received tiles remain
+                        folded into the Total Cells modal. */}
+                    <Col xs={12} sm={12} lg={4}>
                       <Card
                         hoverable
                         onClick={() => setSlfDashModal({ type: "leachate" })}
@@ -7659,7 +7613,7 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                         <Text type="secondary" style={{ fontSize: 11 }}>Click to view Leachate Treatment Plant</Text>
                       </Card>
                     </Col>
-                    <Col xs={12} sm={12} md={6}>
+                    <Col xs={12} sm={12} lg={4}>
                       <Card
                         hoverable
                         onClick={() => setSlfDashModal({ type: "gas" })}
@@ -7693,7 +7647,7 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                             style={{ borderRadius: 10, height: SLF_CARD_H }}
                             loading={loading}
                             styles={{
-                              body: { overflow: "auto", height: SLF_CARD_H - 57 },
+                              body: { overflow: "auto", height: SLF_CARD_H},
                             }}
                           >
                             <div
@@ -7755,7 +7709,7 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                             style={{ borderRadius: 10, height: SLF_CARD_H }}
                             loading={loading}
                             styles={{
-                              body: { overflow: "auto", height: SLF_CARD_H - 57 },
+                              body: { overflow: "auto", height: SLF_CARD_H},
                             }}
                           >
                             <div
@@ -7806,62 +7760,57 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                           </Card>
                         </Col>
 
-                        {/* Trash Slide Prevention Measures */}
-                        <Col xs={24} sm={12}>
+                        {/* Consolidated Prevention Measures (Trash Slide + Fire).
+                            One card + one tabbed modal (combo: "prevention"). Values
+                            come from actual SLF Data Table records (trashSlideMeasures
+                            / firePrevMeasures per facility). */}
+                        <Col xs={24}>
                           <Card
-                            title={<><WarningOutlined /> Trash Slide Prevention</>}
+                            title={<><SafetyCertificateOutlined /> Prevention Measures</>}
                             hoverable
-                            onClick={() => setSlfDashModal({ type: "trashSlide" })}
-                            style={{ borderRadius: 10, height: SLF_CARD_H, cursor: "pointer", borderTop: "3px solid #fa8c16" }}
+                            onClick={() => setSlfDashModal({ combo: "prevention" })}
+                            style={{ borderRadius: 10, height: SLF_CARD_H, cursor: "pointer", borderTop: "3px solid #fa541c" }}
                             loading={loading}
-                            styles={{ body: { overflow: "auto", height: SLF_CARD_H - 57, padding: "12px 16px" } }}
+                            styles={{ body: { overflow: "auto", height: SLF_CARD_H + 57, padding: "12px 16px" } }}
                           >
-                            <Row gutter={[8, 8]}>
-                              <Col span={12}>
-                                <div style={{ textAlign: "center", padding: "6px 4px", background: isDark ? "rgba(250,140,22,0.15)" : "#fff7e6", borderRadius: 6, border: "1px solid #ffd591" }}>
-                                  <Text type="secondary" style={{ fontSize: 10, display: "block" }}>Total Measures</Text>
-                                  <Text strong style={{ fontSize: 22, color: "#fa8c16" }}>{(slfOps.totalTrashSlideMeasures || 0).toLocaleString()}</Text>
+                            <Row gutter={[10, 10]}>
+                              <Col xs={24} sm={12}>
+                                <div style={{ padding: "8px 10px", background: isDark ? "rgba(250,140,22,0.12)" : "#fff7e6", borderRadius: 8, border: "1px solid #ffd591" }}>
+                                  <Text strong style={{ fontSize: 12, display: "block", marginBottom: 6 }}>
+                                    <WarningOutlined style={{ color: "#fa8c16", marginRight: 4 }} /> Trash Slide Prevention
+                                  </Text>
+                                  <Row gutter={8}>
+                                    <Col span={12}>
+                                      <Text type="secondary" style={{ fontSize: 10, display: "block" }}>Total Measures</Text>
+                                      <Text strong style={{ fontSize: 20, color: "#fa8c16" }}>{(slfOps.totalTrashSlideMeasures || 0).toLocaleString()}</Text>
+                                    </Col>
+                                    <Col span={12}>
+                                      <Text type="secondary" style={{ fontSize: 10, display: "block" }}>Facilities</Text>
+                                      <Text strong style={{ fontSize: 20, color: "#d46b08" }}>{(slfOps.trashSlideFacilities || 0).toLocaleString()}</Text>
+                                    </Col>
+                                  </Row>
                                 </div>
                               </Col>
-                              <Col span={12}>
-                                <div style={{ textAlign: "center", padding: "6px 4px", background: isDark ? "rgba(250,140,22,0.1)" : "#fffbe6", borderRadius: 6, border: "1px solid #ffe58f" }}>
-                                  <Text type="secondary" style={{ fontSize: 10, display: "block" }}>Facilities w/ Measures</Text>
-                                  <Text strong style={{ fontSize: 22, color: "#d46b08" }}>{(slfOps.trashSlideFacilities || 0).toLocaleString()}</Text>
+                              <Col xs={24} sm={12}>
+                                <div style={{ padding: "8px 10px", background: isDark ? "rgba(255,77,79,0.12)" : "#fff1f0", borderRadius: 8, border: "1px solid #ffa39e" }}>
+                                  <Text strong style={{ fontSize: 12, display: "block", marginBottom: 6 }}>
+                                    <FireOutlined style={{ color: "#ff4d4f", marginRight: 4 }} /> Fire Prevention
+                                  </Text>
+                                  <Row gutter={8}>
+                                    <Col span={12}>
+                                      <Text type="secondary" style={{ fontSize: 10, display: "block" }}>Total Measures</Text>
+                                      <Text strong style={{ fontSize: 20, color: "#ff4d4f" }}>{(slfOps.totalFirePrevMeasures || 0).toLocaleString()}</Text>
+                                    </Col>
+                                    <Col span={12}>
+                                      <Text type="secondary" style={{ fontSize: 10, display: "block" }}>Facilities</Text>
+                                      <Text strong style={{ fontSize: 20, color: "#cf1322" }}>{(slfOps.firePreventionFacilities || 0).toLocaleString()}</Text>
+                                    </Col>
+                                  </Row>
                                 </div>
                               </Col>
                             </Row>
                             <div style={{ marginTop: 10, textAlign: "center" }}>
-                              <Text type="secondary" style={{ fontSize: 11 }}>Click to view details per SLF</Text>
-                            </div>
-                          </Card>
-                        </Col>
-
-                        {/* Fire Prevention Measures */}
-                        <Col xs={24} sm={12}>
-                          <Card
-                            title={<><FireOutlined /> Fire Prevention Measures</>}
-                            hoverable
-                            onClick={() => setSlfDashModal({ type: "firePrev" })}
-                            style={{ borderRadius: 10, height: SLF_CARD_H, cursor: "pointer", borderTop: "3px solid #ff4d4f" }}
-                            loading={loading}
-                            styles={{ body: { overflow: "auto", height: SLF_CARD_H - 57, padding: "12px 16px" } }}
-                          >
-                            <Row gutter={[8, 8]}>
-                              <Col span={12}>
-                                <div style={{ textAlign: "center", padding: "6px 4px", background: isDark ? "rgba(255,77,79,0.15)" : "#fff1f0", borderRadius: 6, border: "1px solid #ffa39e" }}>
-                                  <Text type="secondary" style={{ fontSize: 10, display: "block" }}>Total Measures</Text>
-                                  <Text strong style={{ fontSize: 22, color: "#ff4d4f" }}>{(slfOps.totalFirePrevMeasures || 0).toLocaleString()}</Text>
-                                </div>
-                              </Col>
-                              <Col span={12}>
-                                <div style={{ textAlign: "center", padding: "6px 4px", background: isDark ? "rgba(255,77,79,0.1)" : "#fff2f0", borderRadius: 6, border: "1px solid #ffccc7" }}>
-                                  <Text type="secondary" style={{ fontSize: 10, display: "block" }}>Facilities w/ Measures</Text>
-                                  <Text strong style={{ fontSize: 22, color: "#cf1322" }}>{(slfOps.firePreventionFacilities || 0).toLocaleString()}</Text>
-                                </div>
-                              </Col>
-                            </Row>
-                            <div style={{ marginTop: 10, textAlign: "center" }}>
-                              <Text type="secondary" style={{ fontSize: 11 }}>Click to view details per SLF</Text>
+                              <Text type="secondary" style={{ fontSize: 11 }}>Click to view Trash Slide &amp; Fire Prevention details per SLF</Text>
                             </div>
                           </Card>
                         </Col>
@@ -7874,7 +7823,7 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                         style={{
                           position: "sticky",
                           top: 80,
-                          height: SLF_CARD_H * 3 + 32,
+                          height: SLF_CARD_H
                         }}
                       >
                         <Card
@@ -7892,7 +7841,7 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                               )}
                             </>
                           }
-                          style={{ borderRadius: 10, height: "100%" }}
+                          style={{ borderRadius: 10, height: 200 * 3 + 32, overflow: "hidden" }}
                           loading={loading}
                           extra={
                             <Space size={4}>
@@ -8312,6 +8261,13 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                     </Col>
                   </Row>
 
+                  {/* ── Daily Disposal Activity Calendar — full-width, flush below the map/cards cluster ── */}
+                  <div style={{ marginTop: 16, marginBottom: 0 }}>
+                    <Suspense fallback={<div style={{ padding: 24, textAlign: "center" }}><Spin /></div>}>
+                      <DisposalActivityCalendar isDark={isDark} />
+                    </Suspense>
+                  </div>
+
                   {/* ── SLF Dashboard Drill-Down Modals ── */}
                   {slfDashModal && (() => {
                     const mgmtData = (slfFacStats.managementData || []);
@@ -8513,6 +8469,89 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                         ],
                       },
                     };
+                    // ── Combined tabbed modals ──
+                    // LGUs + Private Sectors Served, and Trash Slide + Fire
+                    // Prevention, share one modal with a tab per sub-metric. Each
+                    // tab reuses the same per-type config (filter/flatten/columns),
+                    // so there is no duplicated data logic.
+                    if (slfDashModal.combo) {
+                      const comboMeta = {
+                        served: {
+                          title: <Space><TeamOutlined style={{ color: "#fa8c16" }} /> LGUs &amp; Private Sectors Served</Space>,
+                          tabs: [
+                            { key: "lgu", label: <span><TeamOutlined /> LGUs Served</span> },
+                            { key: "private", label: <span><BankOutlined /> Private Sectors Served</span> },
+                          ],
+                        },
+                        prevention: {
+                          title: <Space><SafetyCertificateOutlined style={{ color: "#fa541c" }} /> Prevention Measures</Space>,
+                          tabs: [
+                            { key: "trashSlide", label: <span><WarningOutlined /> Trash Slide</span> },
+                            { key: "firePrev", label: <span><FireOutlined /> Fire Prevention</span> },
+                          ],
+                        },
+                      }[slfDashModal.combo];
+                      if (!comboMeta) return null;
+                      return (
+                        <Modal
+                          open
+                          title={comboMeta.title}
+                          onCancel={() => setSlfDashModal(null)}
+                          footer={
+                            <div style={{ display: "flex", justifyContent: "space-between" }}>
+                              <Button onClick={() => setSlfDashModal(null)}>Close</Button>
+                              <Button type="primary" icon={<TableOutlined />} onClick={() => { setSlfDashModal(null); setActiveMenu("slf-monitoring"); }}>
+                                View in SLF Monitoring
+                              </Button>
+                            </div>
+                          }
+                          width={1050}
+                          destroyOnHidden
+                          styles={{ body: { maxHeight: "72vh", overflowY: "auto" } }}
+                        >
+                          <Tabs
+                            defaultActiveKey={comboMeta.tabs[0].key}
+                            items={comboMeta.tabs.map((t) => {
+                              const c = modalConfig[t.key];
+                              const rows = mgmtData.filter(c.filter);
+                              const data = rows.flatMap(c.flatten);
+                              const total = rows.reduce((sum, row) => sum + metricValue(t.key, row), 0);
+                              return {
+                                key: t.key,
+                                label: t.label,
+                                children: (
+                                  <>
+                                    <Row gutter={[12, 12]} style={{ marginBottom: 12 }}>
+                                      <Col xs={12} md={8}>
+                                        <Card size="small" style={{ borderRadius: 8 }}>
+                                          <Statistic title={c.metricLabel} value={total} formatter={(v) => Number(v || 0).toLocaleString()} valueStyle={{ color: metricColor[t.key] }} />
+                                        </Card>
+                                      </Col>
+                                      <Col xs={12} md={8}>
+                                        <Card size="small" style={{ borderRadius: 8 }}>
+                                          <Statistic title="Reporting SLFs" value={rows.length} />
+                                        </Card>
+                                      </Col>
+                                      <Col xs={24} md={8}>
+                                        <Card size="small" style={{ borderRadius: 8 }}>
+                                          <Statistic title="Record Rows" value={data.length} />
+                                        </Card>
+                                      </Col>
+                                    </Row>
+                                    {data.length ? (
+                                      <Table dataSource={data} columns={c.columns} size="small" pagination={PAG} scroll={{ x: "max-content" }} bordered />
+                                    ) : (
+                                      <Empty description="No records available for this category." />
+                                    )}
+                                  </>
+                                ),
+                              };
+                            })}
+                          />
+                        </Modal>
+                      );
+                    }
+
                     const cfg = modalConfig[slfDashModal.type];
                     const sourceRows = cfg ? mgmtData.filter(cfg.filter) : [];
                     const flatData = cfg ? sourceRows.flatMap(cfg.flatten) : [];
@@ -8645,42 +8684,15 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                         {flatData.length === 0 ? (
                           <Empty description="No data available for this category." />
                         ) : (
-                          <Tabs
-                            defaultActiveKey="dashboard"
-                            items={[
+                          (() => {
+                            const dashItems = [
                               {
                                 key: "dashboard",
                                 label: <span><PieChartOutlined /> Dashboard</span>,
                                 children: slfDashModal.type === "cells" ? (
                                   <>
-                                    <Row gutter={[12, 12]} style={{ marginBottom: 16 }}>
-                                      <Col xs={24} md={8}>
-                                        <Card size="small" style={{ borderRadius: 8, border: `1px solid ${color}33`, background: `${color}0d` }}>
-                                          <GaugeMeter
-                                            percent={cellsOverallPercent}
-                                            color={color}
-                                            label="Overall Cell Utilization"
-                                            valueText={cellsOverall.cap > 0 ? `${cellsOverall.fill.toLocaleString()} / ${cellsOverall.cap.toLocaleString()} m³` : undefined}
-                                          />
-                                        </Card>
-                                      </Col>
-                                      <Col xs={12} md={8}>
-                                        <Card size="small" style={{ borderRadius: 8, marginBottom: 12 }}>
-                                          <Statistic title="Total Cells" value={cellsOverall.cells} valueStyle={{ color, fontSize: 22 }} />
-                                        </Card>
-                                        <Card size="small" style={{ borderRadius: 8 }}>
-                                          <Statistic title="Operational Cells" value={cellsOverall.op} valueStyle={{ fontSize: 22 }} />
-                                        </Card>
-                                      </Col>
-                                      <Col xs={12} md={8}>
-                                        <Card size="small" style={{ borderRadius: 8, marginBottom: 12 }}>
-                                          <Statistic title="Facilities w/ Cells" value={cellGaugeFacilities.length} valueStyle={{ fontSize: 22 }} />
-                                        </Card>
-                                        <Card size="small" style={{ borderRadius: 8 }}>
-                                          <Statistic title="With Capacity Data" value={cellGaugeFacilities.filter((f) => f.percent != null).length} valueStyle={{ fontSize: 22 }} />
-                                        </Card>
-                                      </Col>
-                                    </Row>
+                                    {/* #1: summary tiles removed — the modal now shows
+                                        the facility/cell gauges directly. */}
                                     <Card
                                       size="small"
                                       title={
@@ -8708,14 +8720,25 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                                           <Row gutter={[12, 12]}>
                                             {drillFacility.cells.map((c) => (
                                               <Col xs={12} sm={8} md={6} key={c.index}>
-                                                <Card size="small" style={{ borderRadius: 8, height: "100%", borderTop: `3px solid ${color}` }}>
+                                                {/* #1: gauge auto-colored by Cell TYPE
+                                                    (stroke) and Cell STATUS (fill style
+                                                    + opacity), matching Cell Infra
+                                                    Overview's CellGauge. */}
+                                                <Card size="small" style={{ borderRadius: 8, height: "100%", borderTop: `3px solid ${c.typeConfig.color}` }}>
                                                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6, gap: 6 }}>
                                                     <Text strong style={{ fontSize: 12 }}>{c.name}</Text>
-                                                    <Tag color={/oper|active/i.test(c.status) ? "green" : c.status === "—" ? "default" : "orange"} style={{ margin: 0, fontSize: 10 }}>{c.status}</Tag>
+                                                    <Badge status={c.statusConfig.badge} text={<span style={{ fontSize: 10 }}>{c.status}</span>} />
                                                   </div>
-                                                  <GaugeMeter percent={c.percent} size={96} thickness={9} color={color} />
+                                                  <GaugeMeter
+                                                    percent={c.percent}
+                                                    size={96}
+                                                    thickness={6}
+                                                    color={c.typeConfig.color}
+                                                    fillStyle={c.statusConfig.fill}
+                                                    fillOpacity={c.statusConfig.opacity}
+                                                  />
                                                   <div style={{ fontSize: 11, marginTop: 6 }}>
-                                                    <div><Text type="secondary">Type: </Text>{c.type}</div>
+                                                    <div><Text type="secondary">Type: </Text><Tag color={c.typeConfig.tag} style={{ margin: 0, fontSize: 10 }}>{c.type}</Tag></div>
                                                     <div>
                                                       <Text type="secondary">Capacity: </Text>
                                                       {c.capacity != null ? `${c.capacity.toLocaleString()} ${c.unit}` : <Text type="secondary">No capacity data available</Text>}
@@ -8736,7 +8759,8 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                                           {cellGaugeFacilities.slice(0, 12).map((f) => (
                                             <Col xs={12} sm={8} md={6} key={f.key}>
                                               <Card size="small" hoverable onClick={() => setSlfCellDrill(f.key)} style={{ borderRadius: 8, textAlign: "center", height: "100%", cursor: "pointer" }}>
-                                                <GaugeMeter percent={f.percent} size={112} color={color} />
+                                                {/* #1: thinner arc (values/colors unchanged) */}
+                                                <GaugeMeter percent={f.percent} size={112} thickness={6} color={color} />
                                                 <div style={{ fontSize: 12, fontWeight: 600, marginTop: 4 }}>{f.name}</div>
                                                 <Text type="secondary" style={{ fontSize: 11 }}>{f.province}</Text>
                                                 <div style={{ marginTop: 4 }}>
@@ -8939,308 +8963,42 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                                   </>
                                 ),
                               },
-                              {
-                                key: "records",
-                                label: <span><TableOutlined /> Records</span>,
-                                children: (
-                                  <Table
-                                    dataSource={flatData}
-                                    columns={cfg.columns}
-                                    size="small"
-                                    pagination={PAG}
-                                    scroll={{ x: "max-content" }}
-                                    bordered
-                                  />
-                                ),
-                              },
-                            ]}
-                          />
+                              // #1: the Cell Infrastructure — All Facilities modal
+                              // drops the Records tab (its Dashboard now carries the
+                              // full per-cell breakdown, matching Cell Infra Overview).
+                              // Other metric modals keep their Records table.
+                              slfDashModal.type === "cells"
+                                ? null
+                                : {
+                                    key: "records",
+                                    label: <span><TableOutlined /> Records</span>,
+                                    children: (
+                                      <Table
+                                        dataSource={flatData}
+                                        columns={cfg.columns}
+                                        size="small"
+                                        pagination={PAG}
+                                        scroll={{ x: "max-content" }}
+                                        bordered
+                                      />
+                                    ),
+                                  },
+                            ].filter(Boolean);
+                            // #1/#2: a single-pane modal (e.g. Cell Infrastructure —
+                            // All Facilities, whose Records tab was removed) renders its
+                            // content DIRECTLY, with no unnecessary Tabs wrapper.
+                            return dashItems.length === 1 ? (
+                              dashItems[0].children
+                            ) : (
+                              <Tabs defaultActiveKey="dashboard" items={dashItems} />
+                            );
+                          })()
                         )}
                       </Modal>
                     );
                   })()}
-                </>
-              ),
-            },
-            {
-              key: "waste-generators",
-              label: (
-                <span>
-                  <DatabaseOutlined /> Waste Generators
-                </span>
-              ),
-              children: (
-                <>
-                  <Row gutter={[16, 16]} style={{ marginBottom: 16 }}>
-                    <Col xs={12} sm={12} md={6}>
-                      <Card
-                        hoverable
-                        style={{ borderRadius: 10, height: 110 }}
-                        loading={loading}
-                      >
-                        <Statistic
-                          title="Total Submissions"
-                          value={stats?.submissions || 0}
-                          prefix={<FileTextOutlined style={{ color: "#2f54eb" }} />}
-                        />
-                      </Card>
-                    </Col>
-                    <Col xs={12} sm={12} md={6}>
-                      <Card
-                        hoverable
-                        style={{ borderRadius: 10, height: 110 }}
-                        loading={loading}
-                      >
-                        <Statistic
-                          title="Generators"
-                          value={stats?.generators || 0}
-                          prefix={<BankOutlined style={{ color: "#722ed1" }} />}
-                        />
-                      </Card>
-                    </Col>
-                    <Col xs={12} sm={12} md={6}>
-                      <Card
-                        hoverable
-                        style={{ borderRadius: 10, height: 110 }}
-                        loading={loading}
-                      >
-                        <Statistic
-                          title="Total Trucks"
-                          value={stats?.totalTrucks || 0}
-                          prefix={<CarOutlined style={{ color: "#fa8c16" }} />}
-                        />
-                      </Card>
-                    </Col>
-                    <Col xs={12} sm={12} md={6}>
-                      <Card
-                        hoverable
-                        style={{ borderRadius: 10, height: 110 }}
-                        loading={loading}
-                      >
-                        <Tooltip title="Click to view Waste Generators page">
-                          <div
-                            style={{ cursor: "pointer" }}
-                            onClick={() => setActiveMenu("slf-waste-generators")}
-                          >
-                            <Statistic
-                              title="View All Records"
-                              value={stats?.submissions || 0}
-                              prefix={<FileTextOutlined style={{ color: "#fa8c16" }} />}
-                            />
-                          </div>
-                        </Tooltip>
-                      </Card>
-                    </Col>
-                  </Row>
 
-                  <Row gutter={[16, 16]} style={{ marginBottom: 16 }}>
-                    <Col xs={24} lg={12}>
-                      <Card title={<><BarChartOutlined /> Monthly Submissions</>} size="small" style={{ borderRadius: 10 }} loading={loading}>
-                        <div style={{ height: 260 }}>
-                          <ResponsiveContainer width="100%" height="100%">
-                            <LineChart data={monthlyChartData} margin={{ top: 10, right: 12, left: -12, bottom: 8 }}>
-                              <CartesianGrid strokeDasharray="3 3" stroke={isDark ? "#303030" : "#f0f0f0"} />
-                              <XAxis dataKey="name" tick={{ fontSize: 11 }} />
-                              <YAxis allowDecimals={false} tick={{ fontSize: 11 }} />
-                              <RechartsTooltip />
-                              <Line type="monotone" dataKey="submissions" stroke="#2f54eb" strokeWidth={2.5} dot={{ r: 3 }} name="Submissions" isAnimationActive={false} />
-                            </LineChart>
-                          </ResponsiveContainer>
-                        </div>
-                      </Card>
-                    </Col>
-                    <Col xs={24} lg={12}>
-                      <Card title={<><BarChartOutlined /> Waste Volume by Type</>} size="small" style={{ borderRadius: 10 }} loading={loading}>
-                        <div style={{ height: 260 }}>
-                          <ResponsiveContainer width="100%" height="100%">
-                            <BarChart data={wasteTypeChartData} margin={{ top: 10, right: 12, left: -12, bottom: 8 }}>
-                              <CartesianGrid strokeDasharray="3 3" stroke={isDark ? "#303030" : "#f0f0f0"} />
-                              <XAxis dataKey="name" tick={{ fontSize: 11 }} />
-                              <YAxis tick={{ fontSize: 11 }} />
-                              <RechartsTooltip />
-                              <Bar dataKey="volume" name="Volume" radius={[4, 4, 0, 0]} isAnimationActive={false}>
-                                {wasteTypeChartData.map((_, index) => (
-                                  <Cell key={index} fill={chartPalette[index % chartPalette.length]} />
-                                ))}
-                              </Bar>
-                            </BarChart>
-                          </ResponsiveContainer>
-                        </div>
-                      </Card>
-                    </Col>
-                    <Col xs={24} lg={12}>
-                      <Card title={<><PieChartOutlined /> Submission Status Share</>} size="small" style={{ borderRadius: 10 }} loading={loading}>
-                        <div style={{ height: 240 }}>
-                          <ResponsiveContainer width="100%" height="100%">
-                            <RePieChart>
-                              <Pie data={statusChartData} dataKey="value" nameKey="name" innerRadius={54} outerRadius={84} paddingAngle={2} label isAnimationActive={false}>
-                                {statusChartData.map((_, index) => (
-                                  <Cell key={index} fill={chartPalette[index % chartPalette.length]} />
-                                ))}
-                              </Pie>
-                              <RechartsTooltip />
-                            </RePieChart>
-                          </ResponsiveContainer>
-                        </div>
-                      </Card>
-                    </Col>
-                    <Col xs={24} lg={12}>
-                      <Card title={<><ApartmentOutlined /> Generator Type Mix</>} size="small" style={{ borderRadius: 10 }} loading={loading}>
-                        <div style={{ height: 240 }}>
-                          <ResponsiveContainer width="100%" height="100%">
-                            <BarChart data={companyTypeChartData} layout="vertical" margin={{ top: 10, right: 20, left: 20, bottom: 8 }}>
-                              <CartesianGrid strokeDasharray="3 3" stroke={isDark ? "#303030" : "#f0f0f0"} />
-                              <XAxis type="number" allowDecimals={false} tick={{ fontSize: 11 }} />
-                              <YAxis type="category" dataKey="name" tick={{ fontSize: 11 }} width={80} />
-                              <RechartsTooltip />
-                              <Bar dataKey="value" name="Records" radius={[0, 4, 4, 0]} isAnimationActive={false}>
-                                {companyTypeChartData.map((_, index) => (
-                                  <Cell key={index} fill={chartPalette[(index + 2) % chartPalette.length]} />
-                                ))}
-                              </Bar>
-                            </BarChart>
-                          </ResponsiveContainer>
-                        </div>
-                      </Card>
-                    </Col>
-                  </Row>
-
-                  <Row gutter={[16, 16]}>
-                    <Col xs={24} lg={8}>
-                      <Card
-                        title={
-                          <>
-                            <PieChartOutlined /> By Status
-                          </>
-                        }
-                        size="small"
-                        style={{ borderRadius: 10 }}
-                        loading={loading}
-                      >
-                        {Object.entries(stats?.byStatus || {}).map(([status, count]) => (
-                          <div key={status} style={{ marginBottom: 8 }}>
-                            <div
-                              style={{
-                                display: "flex",
-                                justifyContent: "space-between",
-                                marginBottom: 2,
-                              }}
-                            >
-                              <Text>{status?.charAt(0).toUpperCase() + status?.slice(1)}</Text>
-                              <Text strong>{count}</Text>
-                            </div>
-                            <Progress
-                              percent={
-                                stats?.submissions > 0
-                                  ? Math.round((count / stats.submissions) * 100)
-                                  : 0
-                              }
-                              showInfo={false}
-                              strokeColor={
-                                status === "acknowledged"
-                                  ? "#52c41a"
-                                  : status === "rejected"
-                                    ? "#ff4d4f"
-                                    : "#faad14"
-                              }
-                              size="small"
-                            />
-                          </div>
-                        ))}
-                      </Card>
-                    </Col>
-                    <Col xs={24} lg={8}>
-                      <Card
-                        title={
-                          <>
-                            <ApartmentOutlined /> By Company Type
-                          </>
-                        }
-                        size="small"
-                        style={{ borderRadius: 10 }}
-                        loading={loading}
-                      >
-                        {Object.entries(stats?.byCompanyType || {}).map(
-                          ([type, count]) => (
-                            <div key={type} style={{ marginBottom: 8 }}>
-                              <div
-                                style={{
-                                  display: "flex",
-                                  justifyContent: "space-between",
-                                  marginBottom: 2,
-                                }}
-                              >
-                                <Text>{type || "Unspecified"}</Text>
-                                <Text strong>{count}</Text>
-                              </div>
-                              <Progress
-                                percent={
-                                  stats?.submissions > 0
-                                    ? Math.round((count / stats.submissions) * 100)
-                                    : 0
-                                }
-                                showInfo={false}
-                                strokeColor="#1890ff"
-                                size="small"
-                              />
-                            </div>
-                          ),
-                        )}
-                      </Card>
-                    </Col>
-                    <Col xs={24} lg={8}>
-                      <Card
-                        title={
-                          <>
-                            <BarChartOutlined /> Waste by Type
-                          </>
-                        }
-                        size="small"
-                        style={{ borderRadius: 10 }}
-                        loading={loading}
-                      >
-                        {(stats?.wasteByType || []).map((w) => (
-                          <div key={w._id} style={{ marginBottom: 8 }}>
-                            <div
-                              style={{
-                                display: "flex",
-                                justifyContent: "space-between",
-                                marginBottom: 2,
-                              }}
-                            >
-                              <Text>{w._id || "Unspecified"}</Text>
-                              <Text strong>
-                                {Number(w.totalVolume).toLocaleString()} ({w.count})
-                              </Text>
-                            </div>
-                            <Progress
-                              percent={Math.min(
-                                Math.round(
-                                  (w.totalVolume /
-                                    Math.max(
-                                      ...(stats?.wasteByType || []).map(
-                                        (x) => x.totalVolume,
-                                      ),
-                                      1,
-                                    )) *
-                                    100,
-                                ),
-                                100,
-                              )}
-                              showInfo={false}
-                              strokeColor="#722ed1"
-                              size="small"
-                            />
-                          </div>
-                        ))}
-                      </Card>
-                    </Col>
-                  </Row>
                 </>
-              ),
-            },
-          ]}
-        />
       ),
     });
   }

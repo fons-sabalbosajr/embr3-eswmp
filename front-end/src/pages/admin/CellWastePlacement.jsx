@@ -381,12 +381,21 @@ export default function CellWastePlacement({ canEdit = true }) {
     if (!selected) return;
     setSaving(true);
     try {
-      const assignments = (selected.trucks || []).map((truck, truckIndex) => ({
-        truckIndex,
-        cellIndex: truck.cellIndex ?? null,
-        cellName: truck.cellName || (truck.cellIndex != null ? `Cell ${Number(truck.cellIndex) + 1}` : ""),
-        cellType: truck.cellType || "",
-      }));
+      const assignments = (selected.trucks || []).map((truck, truckIndex) => {
+        // Persist the CURRENT cell name (from the facility's cellRows), not the copy
+        // frozen on the truck at a previous assignment — otherwise an admin rename
+        // would leave a stale name stored here. Reads re-resolve canonically anyway,
+        // but keeping the stored copy current avoids drift between Admin and Portal.
+        const ci = truck.cellIndex;
+        const match = ci != null ? cellRows.find((c) => c.index === Number(ci)) : null;
+        return {
+          truckIndex,
+          cellIndex: ci ?? null,
+          cellName:
+            match?.label || truck.cellName || (ci != null ? `Cell ${Number(ci) + 1}` : ""),
+          cellType: match?.type || truck.cellType || "",
+        };
+      });
       const { data } = await api.patch(`/data-slf/${selected._id}/cell-assignments`, { assignments });
       const updated = data.data || selected;
       setPageRecords((prev) => prev.map((record) => (record._id === selected._id ? updated : record)));

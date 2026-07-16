@@ -50,14 +50,16 @@ const PORTAL_SUBMISSION_LIST_FIELDS = [
   "submittedBy createdAt updatedAt isDummy hiddenFromPortal",
   "truckCount totalVolumeM3 totalVolumeTons residualVolumeM3 residualVolumeTons",
   "hazardousVolumeM3 hazardousVolumeTons",
-  "trucks.cellIndex trucks.cellName trucks.cellType trucks.wasteType trucks.actualVolume",
-  "trucks.vehicles.cellIndex trucks.vehicles.cellName trucks.vehicles.cellType trucks.vehicles.actualVolume",
+  "trucks.cellIndex trucks.cellName trucks.cellType trucks.wasteType trucks.actualVolume trucks.truckCapacity",
+  "trucks.vehicles.cellIndex trucks.vehicles.cellName trucks.vehicles.cellType trucks.vehicles.actualVolume trucks.vehicles.capacity",
 ].join(" ");
 
 // Only the facility identity the history rows display. `cellNames` is included so
 // a cell's CURRENT name can be resolved from its cellIndex rather than the stale
 // name copied onto the truck at submit time.
-const PORTAL_SLF_REF_FIELDS = "_id lgu slfName province cellNames";
+// cellStatuses is included so a cellIndex pointing at a DELETED ("Not Existed")
+// cell can be detected and treated as unassigned (see isValidCellRef).
+const PORTAL_SLF_REF_FIELDS = "_id lgu slfName province cellNames cellStatuses";
 
 // Resolve the CURRENT display name of a cell from its canonical index, exactly as
 // the admin side does (see routes/dataSLF.js#resolveCellName). NB: Number(null) is
@@ -73,24 +75,56 @@ function resolvePortalCellName(facilityCellNames, cellIndex, storedName) {
   return storedName ? String(storedName).trim() : "";
 }
 
+// A waste record counts as ASSIGNED only when it carries a VALID cell IDENTIFIER
+// (cellIndex) — the schema's required key — that references an existing, non-deleted
+// cell. A stored cellName WITHOUT a valid cellIndex is a display-name-only record
+// and is treated as UNASSIGNED, so it surfaces in Organize Cells for the user to
+// pick a real open cell (this is the Eco Protect-class bug: approved submissions
+// whose waste had only a name copy were wrongly counted as placed).
+//   • missing / null / "" / non-integer / negative  → invalid
+//   • index >= the facility's cell count            → deleted/unavailable
+//   • the referenced cell's status is "Not Existed" → deleted
+// When the facility's cell arrays are unavailable (not populated), only the
+// shape checks apply, so a populated cellIndex is not falsely rejected.
+function isValidCellRef(cellIndex, facilityCellNames, facilityCellStatuses) {
+  if (cellIndex === null || cellIndex === undefined || cellIndex === "") return false;
+  const idx = Number(cellIndex);
+  if (!Number.isInteger(idx) || idx < 0) return false;
+  const count = Math.max(
+    Array.isArray(facilityCellNames) ? facilityCellNames.length : 0,
+    Array.isArray(facilityCellStatuses) ? facilityCellStatuses.length : 0,
+  );
+  if (count > 0 && idx >= count) return false; // points past the last cell → deleted
+  const status = facilityCellStatuses?.[idx];
+  if (status && /not\s*exist/i.test(String(status))) return false; // deleted cell
+  return true;
+}
+
 // Summarize which cells a submission's waste was placed into, and how many
 // placements are still UNASSIGNED. Computed here so the browser never has to walk
 // every truck/vehicle of every submission just to render a column — and so the
 // name always reflects an admin rename rather than the copy frozen at submit time.
 function summarizeCellAssignment(entry) {
   const facilityCellNames = entry?.slfGenerator?.cellNames;
+  const facilityCellStatuses = entry?.slfGenerator?.cellStatuses;
   const byName = new Map();
   let unplaced = 0;
+  // Approved historical submissions may pre-date the rule that Truck Capacity is
+  // completed via Organize Cells. Count each entry (with waste) still missing a
+  // positive capacity so the Portal can require it before new submissions (#6).
+  let missingCapacity = 0;
 
   const record = (cellIndex, cellName, cellType, volume) => {
-    const name = resolvePortalCellName(facilityCellNames, cellIndex, cellName);
-    if (!name) {
-      // Only waste that actually EXISTS can be "unplaced" — a zero-volume truck
-      // has nothing to assign. This mirrors the rule the Portal's cell organizer
-      // has always used, so the organizer keeps offering exactly the same set.
+    // Assigned ONLY when a valid cell IDENTIFIER exists — a name-only record is
+    // unassigned (schema requires the id). Only waste that actually EXISTS can be
+    // "unplaced" — a zero-volume truck has nothing to assign.
+    if (!isValidCellRef(cellIndex, facilityCellNames, facilityCellStatuses)) {
       if (Number(volume || 0) > 0) unplaced += 1;
       return;
     }
+    const name =
+      resolvePortalCellName(facilityCellNames, cellIndex, cellName) ||
+      `Cell ${Number(cellIndex) + 1}`;
     const existing = byName.get(name);
     if (existing) {
       existing.count += 1;
@@ -98,11 +132,13 @@ function summarizeCellAssignment(entry) {
     }
     byName.set(name, {
       cellName: name,
-      cellIndex: Number.isInteger(Number(cellIndex)) ? Number(cellIndex) : null,
+      cellIndex: Number(cellIndex),
       cellType: cellType || "",
       count: 1,
     });
   };
+
+  const isPositive = (v) => Number.isFinite(Number(v)) && Number(v) > 0;
 
   for (const truck of Array.isArray(entry?.trucks) ? entry.trucks : []) {
     const vehicles = (Array.isArray(truck?.vehicles) ? truck.vehicles : []).filter(
@@ -110,13 +146,24 @@ function summarizeCellAssignment(entry) {
     );
     if (vehicles.length) {
       // Placement lives on each vehicle when the truck carries them.
-      for (const v of vehicles) record(v?.cellIndex, v?.cellName, v?.cellType, v?.actualVolume);
+      for (const v of vehicles) {
+        record(v?.cellIndex, v?.cellName, v?.cellType, v?.actualVolume);
+        // Effective capacity is the vehicle's own, falling back to the truck's.
+        if (!isPositive(v?.capacity) && !isPositive(truck?.truckCapacity)) missingCapacity += 1;
+      }
     } else {
       record(truck?.cellIndex, truck?.cellName, truck?.cellType, truck?.actualVolume);
+      if (Number(truck?.actualVolume || 0) > 0 && !isPositive(truck?.truckCapacity)) {
+        missingCapacity += 1;
+      }
     }
   }
 
-  return { cellsAssigned: [...byName.values()], unplacedCount: unplaced };
+  return {
+    cellsAssigned: [...byName.values()],
+    unplacedCount: unplaced,
+    missingCapacityCount: missingCapacity,
+  };
 }
 
 // Used by the CREDENTIAL flows, which act on the caller's own account only.
@@ -675,9 +722,9 @@ router.get("/my-submissions", async (req, res) => {
     // Derive the cell-placement summary, then DROP trucks — the list renders none
     // of it, and it was the bulk of the payload.
     const rows = submissions.map((entry) => {
-      const { cellsAssigned, unplacedCount } = summarizeCellAssignment(entry);
+      const { cellsAssigned, unplacedCount, missingCapacityCount } = summarizeCellAssignment(entry);
       const { trucks, ...rest } = entry;
-      return { ...rest, cellsAssigned, unplacedCount };
+      return { ...rest, cellsAssigned, unplacedCount, missingCapacityCount };
     });
 
     res.json(rows);
@@ -747,9 +794,18 @@ router.post("/my-submissions/batch", async (req, res) => {
       return res.json(submissions.map((s) => ({ ...s, ...summarizeCellAssignment(s) })));
     }
 
-    // Flatten to the UNASSIGNED placements only, preserving the canonical
-    // truckIndex / vehicleIndex so a save still targets the exact slot.
+    // Flatten to the INCOMPLETE placements only — those that still need a cell OR
+    // are missing a positive Truck Capacity (#6). The canonical truckIndex /
+    // vehicleIndex is preserved so a save still targets the exact slot. Each row
+    // carries `needsCell` / `needsCapacity` so the organizer knows which inputs to
+    // ask for. A placement that already has both a cell and a capacity is complete
+    // and is not offered.
+    const isPositive = (v) => Number.isFinite(Number(v)) && Number(v) > 0;
     const rows = submissions.map((sub) => {
+      // Same validity rule as summarizeCellAssignment: a placement needs a cell
+      // unless it already has a VALID cell identifier (not just a name copy).
+      const facilityCellNames = sub.slfGenerator?.cellNames;
+      const facilityCellStatuses = sub.slfGenerator?.cellStatuses;
       const placements = [];
       (sub.trucks || []).forEach((truck, truckIndex) => {
         const vehicles = (truck.vehicles || []).filter(
@@ -758,7 +814,10 @@ router.post("/my-submissions/batch", async (req, res) => {
         if (vehicles.length) {
           (truck.vehicles || []).forEach((v, vehicleIndex) => {
             if (Number(v?.actualVolume || 0) <= 0) return; // nothing to place
-            if (v?.cellName) return; // already assigned
+            const effectiveCapacity = v.capacity ?? truck.truckCapacity ?? null;
+            const needsCell = !isValidCellRef(v?.cellIndex, facilityCellNames, facilityCellStatuses);
+            const needsCapacity = !isPositive(effectiveCapacity);
+            if (!needsCell && !needsCapacity) return; // already complete
             placements.push({
               truckIndex,
               vehicleIndex,
@@ -767,18 +826,22 @@ router.post("/my-submissions/batch", async (req, res) => {
               wasteType: v.wasteType || truck.wasteType || "",
               actualVolume: v.actualVolume,
               actualVolumeUnit: v.actualVolumeUnit || truck.actualVolumeUnit || "",
-              capacity: v.capacity ?? truck.truckCapacity ?? null,
+              capacity: effectiveCapacity,
               capacityUnit: v.capacityUnit || truck.truckCapacityUnit || "",
-              cellName: "",
-              cellIndex: null,
-              cellType: "",
+              cellName: v.cellName || "",
+              cellIndex: Number.isInteger(Number(v.cellIndex)) ? Number(v.cellIndex) : null,
+              cellType: v.cellType || "",
+              needsCell,
+              needsCapacity,
             });
           });
           return;
         }
         // Truck-level placement (no per-vehicle split).
         if (Number(truck?.actualVolume || 0) <= 0) return;
-        if (truck?.cellName) return;
+        const needsCell = !isValidCellRef(truck?.cellIndex, facilityCellNames, facilityCellStatuses);
+        const needsCapacity = !isPositive(truck?.truckCapacity);
+        if (!needsCell && !needsCapacity) return; // already complete
         placements.push({
           truckIndex,
           vehicleIndex: null,
@@ -789,9 +852,11 @@ router.post("/my-submissions/batch", async (req, res) => {
           actualVolumeUnit: truck.actualVolumeUnit || "",
           capacity: truck.truckCapacity ?? null,
           capacityUnit: truck.truckCapacityUnit || "",
-          cellName: "",
-          cellIndex: null,
-          cellType: "",
+          cellName: truck.cellName || "",
+          cellIndex: Number.isInteger(Number(truck.cellIndex)) ? Number(truck.cellIndex) : null,
+          cellType: truck.cellType || "",
+          needsCell,
+          needsCapacity,
         });
       });
       return {
@@ -840,8 +905,8 @@ router.get("/my-submissions/:id", async (req, res) => {
       return res.status(403).json({ message: "You can only view your own submissions." });
     }
 
-    const { cellsAssigned, unplacedCount } = summarizeCellAssignment(submission);
-    res.json({ ...submission, cellsAssigned, unplacedCount });
+    const { cellsAssigned, unplacedCount, missingCapacityCount } = summarizeCellAssignment(submission);
+    res.json({ ...submission, cellsAssigned, unplacedCount, missingCapacityCount });
   } catch (error) {
     return sendPortalContextError(res, error);
   }

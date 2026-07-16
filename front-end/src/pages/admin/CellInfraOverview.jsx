@@ -44,6 +44,8 @@ import api from "../../api";
 
 const { Text } = Typography;
 
+const ACCENT = "#2f54eb";
+
 const UNIT_OPTIONS = [
   { label: "m³", value: "m³" },
   { label: "tons", value: "tons" },
@@ -403,7 +405,7 @@ export default function CellInfraOverview({
 
   const columns = [
     {
-      title: "SLF",
+      title: "Sanitary Land Fill Information",
       dataIndex: "slfName",
       key: "slf",
       fixed: "left",
@@ -440,10 +442,10 @@ export default function CellInfraOverview({
       ),
     },
     {
-      title: "Submissions",
+      title: "Total Submissions",
       dataIndex: "submissions",
       key: "submissions",
-      width: 90,
+      width: 120,
       align: "center",
       sorter: (a, b) => (a.submissions || 0) - (b.submissions || 0),
       render: (v) => <Tag color="blue">{Number(v || 0).toLocaleString()}</Tag>,
@@ -539,7 +541,9 @@ export default function CellInfraOverview({
         items={[
           {
             key: "cell-infra",
-            label: <Text strong>Cell Infra Overview</Text>,
+            label: <Text strong style={{ fontSize: 14, color: ACCENT }}>
+                Cell Infrastructure Overview
+              </Text>,
             children: expanded ? (
               isLoading ? (
                 <Table
@@ -560,7 +564,7 @@ export default function CellInfraOverview({
                   columns={columns}
                   dataSource={overviewRows}
                   scroll={{ x: 1140 }}
-                  pagination={withSizeChanger({ pageSize: 10, size: "small", showTotal: (t) => `${t} SLF` })}
+                  pagination={withSizeChanger({ pageSize: 20, size: "small", showTotal: (t) => `${t} SLF` })}
                 />
               ) : (
                 <Empty description="No SLF cell infrastructure to show yet" />

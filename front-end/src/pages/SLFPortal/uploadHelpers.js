@@ -65,11 +65,10 @@ export const UPLOAD_REQUIRED_FIELDS = {
       label: "Plate No.",
       matches: (key) => key.includes("plate"),
     },
+    // Truck Capacity is REQUIRED for every uploaded disposal row — the column must
+    // be present and each value must be a number > 0 (enforced per-row in
+    // getUploadRowErrors below, and again server-side in validateWasteGeneration).
     {
-      // Truck Capacity is REQUIRED for a final submission (see wasteGenValidation),
-      // so a disposal upload missing it can never be submitted. Reject it at upload
-      // time — both the column and every row's value — instead of letting the user
-      // import rows that will be blocked later.
       field: "truckCapacity",
       label: "Truck Capacity",
       matches: (key) =>
@@ -141,8 +140,8 @@ export const getUploadRowErrors = (row, type) => {
     if (actualVolume == null || Number.isNaN(actualVolume) || actualVolume <= 0) {
       errors.push("Actual Volume must be greater than 0");
     }
-    // Required now — a blank capacity is caught by the required-field check above,
-    // so this only has to reject a present-but-invalid value.
+    // Required — the missing/blank case is flagged by the required-column check;
+    // this rejects a present-but-invalid value (null/zero/negative/NaN).
     if (!isEmptyUploadValue(row.truckCapacity) && (truckCapacity == null || Number.isNaN(truckCapacity) || truckCapacity <= 0)) {
       errors.push("Truck Capacity must be greater than 0");
     }

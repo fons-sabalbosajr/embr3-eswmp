@@ -35,6 +35,7 @@ import {
   CarOutlined,
   EnvironmentOutlined,
   CalendarOutlined,
+  ClockCircleOutlined,
   DatabaseOutlined,
   TeamOutlined,
   IdcardOutlined,
@@ -66,6 +67,42 @@ import {
   normalizeSubmissionRecord,
 } from "./shared/submissionRecords";
 import { rowMatchesSearch } from "./shared/tableFilters";
+import { volumeCapacityStatus } from "../../utils/volumeUnits";
+
+// Normalize a hauler-clients value from any of the shapes the backend may return
+// (string, string[], client-object[], privateSectorClients, haulerClients, nested
+// hauler) into a clean array of readable names — never "[object Object]".
+const normalizeClientList = (value) => {
+  const pick = (c) => {
+    if (c == null) return "";
+    if (typeof c === "string") return c.trim();
+    if (typeof c === "object")
+      return String(c.clientName || c.name || c.company || c.companyName || c.client || "").trim();
+    return String(c).trim();
+  };
+  const arr = Array.isArray(value) ? value : value != null && value !== "" ? [value] : [];
+  return arr.map(pick).filter(Boolean);
+};
+
+// Resolve a truck's hauler clients from the truck itself or the matching accredited
+// hauler on the parent submission — covering every likely relationship shape.
+const resolveTruckClients = (truck, accreditedHaulers = []) => {
+  const direct = normalizeClientList(
+    truck?.privateSectorClients ??
+      truck?.haulerClients ??
+      truck?.clients ??
+      truck?.selectedClients ??
+      truck?.hauler?.privateSectorClients ??
+      truck?.hauler?.clients,
+  );
+  if (direct.length) return direct;
+  const name = String(truck?.hauler || "").trim().toLowerCase();
+  if (!name) return [];
+  const match = (accreditedHaulers || []).find(
+    (h) => String(h?.haulerName || "").trim().toLowerCase() === name,
+  );
+  return normalizeClientList(match?.privateSectorClients ?? match?.clients);
+};
 
 const { Title, Text } = Typography;
 const { Option } = Select;
@@ -79,6 +116,7 @@ const WRAP_CELL_STYLE = {
   whiteSpace: "normal",
   overflowWrap: "anywhere",
   wordBreak: "break-word",
+  fontSize: 12,
 };
 const wrapColumn = (column) => ({
   ...column,
@@ -160,14 +198,21 @@ export default function SubmissionSettings({
     let m3 = 0;
     let tons = 0;
     const statusCounts = {};
+    const unitCounts = { "m³": 0, tons: 0 };
     entries.forEach((e) => {
       (e.cellNames || []).forEach((c) => c && cellSet.add(c));
       m3 += Number(e.totalVolumeM3 || 0);
       tons += Number(e.totalVolumeTons || 0);
+      const u = String(e.baselineUnit || "").trim().replace("m3", "m³");
+      if (u === "tons") unitCounts.tons += 1;
+      else if (u === "m³") unitCounts["m³"] += 1;
       const s = e.status || "pending";
       statusCounts[s] = (statusCounts[s] || 0) + 1;
     });
-    return { totalEntries: entries.length, cells: [...cellSet], m3, tons, statusCounts };
+    // #7: display in the single declared baseline unit (most common among the
+    // grouped entries), never "m³ / t" side-by-side. m³/tons are kept in lockstep.
+    const unit = unitCounts.tons > unitCounts["m³"] ? "tons" : "m³";
+    return { totalEntries: entries.length, cells: [...cellSet], m3, tons, unit, statusCounts };
   }, [groupedEntriesRecord]);
   const [editRecord, setEditRecord] = useState(null);
   const [editLoading, setEditLoading] = useState(false);
@@ -1334,38 +1379,47 @@ export default function SubmissionSettings({
       ),
       dataIndex: "lguCompanyName",
       key: "lguCompanyName",
-      width: 210,
-      render: (text) => <Text style={WRAP_CELL_STYLE}>{text || "—"}</Text>,
-    },
-    {
-      title: "Type",
-      dataIndex: "companyType",
-      key: "companyType",
-      width: 80,
-      render: (v) => (
-        <Tag color={v === "LGU" ? "blue" : "purple"} bordered={false}>
-          {v}
-        </Tag>
+      width: 220,
+      render: (text, r) => (
+        <Space direction="vertical" size={2}>
+          <Text style={WRAP_CELL_STYLE}>{text || "—"}</Text>
+          {r.companyType && (
+            <Tag
+              color={r.companyType === "LGU" ? "blue" : "purple"}
+              bordered={false}
+              style={{ margin: 0, fontSize: 10 }}
+            >
+              {r.companyType}
+            </Tag>
+          )}
+        </Space>
       ),
     },
     {
       title: (
         <span>
-          <CalendarOutlined /> Disposal Date
+          <CalendarOutlined /> Disposal / Submitted
         </span>
       ),
-      dataIndex: "dateOfDisposal",
-      key: "dateOfDisposal",
-      width: 130,
-      render: (val) => (val ? dayjs(val).format("MM/DD/YYYY") : "—"),
-    },
-    {
-      title: "Date & Time Submitted",
-      dataIndex: "createdAt",
-      key: "createdAt",
-      width: 150,
+      key: "disposalSubmitted",
+      width: 180,
       sorter: (a, b) => new Date(a.createdAt || 0) - new Date(b.createdAt || 0),
-      render: (val) => (val ? dayjs(val).format("MM/DD/YYYY hh:mm A") : "—"),
+      render: (_, r) => (
+        <Space direction="vertical" size={2}>
+          <Tooltip title="Disposal Date">
+            <span style={{ fontSize: 12 }}>
+              <CalendarOutlined style={{ color: "#1677ff", marginRight: 4 }} />
+              {r.dateOfDisposal ? dayjs(r.dateOfDisposal).format("MM/DD/YYYY") : "—"}
+            </span>
+          </Tooltip>
+          <Tooltip title="Date &amp; Time Submitted">
+            <span style={{ fontSize: 11, color: "#888" }}>
+              <ClockCircleOutlined style={{ marginRight: 4 }} />
+              {r.createdAt ? dayjs(r.createdAt).format("MM/DD/YYYY hh:mm A") : "—"}
+            </span>
+          </Tooltip>
+        </Space>
+      ),
     },
     {
       title: (
@@ -1638,34 +1692,12 @@ export default function SubmissionSettings({
     <div>
       <Card style={{ marginTop: 0, borderRadius: 10 }}>
         <Space style={{ marginBottom: 16, flexWrap: "wrap" }}>
-          <Button
-            icon={<DownloadOutlined />}
-            onClick={() => {
-              const rows = filteredTableRows.map((d) => ({
-                "ID No.": d.idNo,
-                "LGU/Company": d.lguCompanyName,
-                "Company Type": d.companyType,
-                "Date of Disposal": d.dateOfDisposal
-                  ? dayjs(d.dateOfDisposal).format("YYYY-MM-DD")
-                  : "",
-                Status: d.status,
-                Trucks: d.truckCount ?? d.trucks?.length ?? 0,
-                "Submitted By": d.submittedBy || "",
-                "Submitted At": d.createdAt
-                  ? dayjs(d.createdAt).format("YYYY-MM-DD HH:mm")
-                  : "",
-              }));
-              exportToExcel(rows, "Submissions");
-            }}
-          >
-            Export Excel
-          </Button>
           <Input
             placeholder="Search by ID, company, or email..."
             prefix={<SearchOutlined />}
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            style={{ width: "100%", maxWidth: 300 }}
+            style={{ width: "100%", maxWidth: 400 }}
             allowClear
           />
           <Select
@@ -1722,6 +1754,7 @@ export default function SubmissionSettings({
             <Button
               icon={<MergeCellsOutlined />}
               onClick={() => setMergeSlfOpen(true)}
+              type="primary"
             >
               Merge SLF
             </Button>
@@ -1730,8 +1763,30 @@ export default function SubmissionSettings({
             icon={<ReloadOutlined />}
             onClick={() => fetchData({ force: true })}
             loading={loading}
+            type="primary"
+          />
+           <Button
+            icon={<DownloadOutlined />}
+            type="primary"
+            onClick={() => {
+              const rows = filteredTableRows.map((d) => ({
+                "ID No.": d.idNo,
+                "LGU/Company": d.lguCompanyName,
+                "Company Type": d.companyType,
+                "Date of Disposal": d.dateOfDisposal
+                  ? dayjs(d.dateOfDisposal).format("YYYY-MM-DD")
+                  : "",
+                Status: d.status,
+                Trucks: d.truckCount ?? d.trucks?.length ?? 0,
+                "Submitted By": d.submittedBy || "",
+                "Submitted At": d.createdAt
+                  ? dayjs(d.createdAt).format("YYYY-MM-DD HH:mm")
+                  : "",
+              }));
+              exportToExcel(rows, "Submissions");
+            }}
           >
-            Refresh
+            Export Excel
           </Button>
           {selectedRowKeys.length > 0 && (
             <>
@@ -1742,15 +1797,16 @@ export default function SubmissionSettings({
                 loading={bulkAcknowledgeLoading}
                 onClick={handleBulkAcknowledge}
               >
-                Acknowledge Selected ({selectedEntryIds.length})
+                Acknowledge ({selectedEntryIds.length})
               </Button>
               {canEdit && (
                 <Button
                   icon={<UndoOutlined />}
-                  style={{ color: "#fa541c", borderColor: "#fa541c" }}
                   onClick={handleBulkRevert}
+                  type="primary"
+                  danger
                 >
-                  Revert Selected
+                  Revert
                 </Button>
               )}
               {canDelete && (
@@ -1758,8 +1814,9 @@ export default function SubmissionSettings({
                   danger
                   icon={<DeleteOutlined />}
                   onClick={handleBulkDelete}
+                  type="primary"
                 >
-                  Delete Selected
+                  Delete
                 </Button>
               )}
             </>
@@ -1882,12 +1939,12 @@ export default function SubmissionSettings({
                 <Card size="small" styles={{ body: { padding: "10px 12px" } }}>
                   <Text type="secondary" style={{ fontSize: 11 }}>Total Waste Volume</Text>
                   <div style={{ fontSize: 16, fontWeight: 700, color: "#722ed1" }}>
-                    {groupedSummary.m3 > 0 || groupedSummary.tons > 0
-                      ? [
-                          groupedSummary.m3 > 0 ? `${Math.round(groupedSummary.m3).toLocaleString()} m³` : null,
-                          groupedSummary.tons > 0 ? `${Math.round(groupedSummary.tons).toLocaleString()} t` : null,
-                        ].filter(Boolean).join(" / ")
-                      : "—"}
+                    {(() => {
+                      const value = groupedSummary.unit === "tons" ? groupedSummary.tons : groupedSummary.m3;
+                      return value > 0
+                        ? `${Math.round(value).toLocaleString()} ${groupedSummary.unit}`
+                        : "—";
+                    })()}
                   </div>
                 </Card>
               </Col>
@@ -2673,70 +2730,16 @@ export default function SubmissionSettings({
                                 </Col>
                               </Row>
 
-                              {/* Active Cell Entries */}
-                              <div style={{ marginBottom: 14 }}>
-                                <div
-                                  style={{
-                                    display: "flex",
-                                    alignItems: "center",
-                                    gap: 6,
-                                    marginBottom: 6,
-                                  }}
-                                >
-                                  <div
-                                    style={{
-                                      width: 3,
-                                      height: 13,
-                                      background: "#52c41a",
-                                      borderRadius: 2,
-                                    }}
-                                  />
-                                  <Text
-                                    strong
-                                    style={{ fontSize: 12, color: "#52c41a" }}
-                                  >
-                                    Active Cell
-                                    {hasAC
-                                      ? ` Entries (${r.activeCellEntries.length})`
-                                      : " — Legacy"}
-                                  </Text>
-                                </div>
-                                {hasAC ? (
-                                  <Table
-                                    dataSource={r.activeCellEntries}
-                                    rowKey={(_, i) => i}
-                                    size="small"
-                                    pagination={false}
-                                    columns={cellTableCols}
-                                    style={{ fontSize: 11 }}
-                                  />
-                                ) : (
+                              {/* #4: Active Cell + Closed Cell (Legacy) tables moved
+                                  into collapsible panels, COLLAPSED by default. Data is
+                                  already on `r` (no refetch on toggle); each panel keeps
+                                  its own open/closed state independently. */}
+                              {(() => {
+                                const legacyBlock = (rows) => (
                                   <Row gutter={8}>
-                                    {[
-                                      [
-                                        "Residual",
-                                        r.activeCellResidualVolume,
-                                        r.activeCellResidualUnit,
-                                      ],
-                                      [
-                                        "Inert",
-                                        r.activeCellInertVolume,
-                                        r.activeCellInertUnit,
-                                      ],
-                                      [
-                                        "Hazardous",
-                                        r.activeCellHazardousVolume,
-                                        r.activeCellHazardousUnit,
-                                      ],
-                                    ].map(([label, val, unit]) => (
+                                    {rows.map(([label, val, unit]) => (
                                       <Col key={label} xs={12}>
-                                        <Text
-                                          type="secondary"
-                                          style={{
-                                            fontSize: 11,
-                                            display: "block",
-                                          }}
-                                        >
+                                        <Text type="secondary" style={{ fontSize: 11, display: "block" }}>
                                           {label}
                                         </Text>
                                         <Text strong style={{ fontSize: 13 }}>
@@ -2747,85 +2750,70 @@ export default function SubmissionSettings({
                                       </Col>
                                     ))}
                                   </Row>
-                                )}
-                              </div>
-
-                              {/* Closed Cell Entries */}
-                              <div style={{ marginBottom: 14 }}>
-                                <div
-                                  style={{
-                                    display: "flex",
-                                    alignItems: "center",
-                                    gap: 6,
-                                    marginBottom: 6,
-                                  }}
-                                >
-                                  <div
-                                    style={{
-                                      width: 3,
-                                      height: 13,
-                                      background: "#fa8c16",
-                                      borderRadius: 2,
-                                    }}
-                                  />
-                                  <Text
-                                    strong
-                                    style={{ fontSize: 12, color: "#fa8c16" }}
-                                  >
-                                    Closed Cell
-                                    {hasCC
-                                      ? ` Entries (${r.closedCellEntries.length})`
-                                      : " — Legacy"}
-                                  </Text>
-                                </div>
-                                {hasCC ? (
-                                  <Table
-                                    dataSource={r.closedCellEntries}
-                                    rowKey={(_, i) => i}
+                                );
+                                return (
+                                  <Collapse
                                     size="small"
-                                    pagination={false}
-                                    columns={cellTableCols}
-                                    style={{ fontSize: 11 }}
+                                    bordered={false}
+                                    defaultActiveKey={[]}
+                                    style={{ marginBottom: 14, background: "transparent" }}
+                                    items={[
+                                      {
+                                        key: "active-cell",
+                                        label: (
+                                          <Text strong style={{ fontSize: 12, color: "#52c41a" }}>
+                                            Active Cell
+                                            {hasAC ? ` Entries (${r.activeCellEntries.length})` : " — Legacy"}
+                                          </Text>
+                                        ),
+                                        children: hasAC ? (
+                                          <Table
+                                            dataSource={r.activeCellEntries}
+                                            rowKey={(e, i) => e?._id || `active-${i}`}
+                                            size="small"
+                                            pagination={false}
+                                            columns={cellTableCols}
+                                            scroll={{ x: "max-content" }}
+                                            style={{ fontSize: 11 }}
+                                          />
+                                        ) : (
+                                          legacyBlock([
+                                            ["Residual", r.activeCellResidualVolume, r.activeCellResidualUnit],
+                                            ["Inert", r.activeCellInertVolume, r.activeCellInertUnit],
+                                            ["Hazardous", r.activeCellHazardousVolume, r.activeCellHazardousUnit],
+                                          ])
+                                        ),
+                                      },
+                                      {
+                                        key: "closed-cell",
+                                        label: (
+                                          <Text strong style={{ fontSize: 12, color: "#fa8c16" }}>
+                                            Closed Cell
+                                            {hasCC ? ` Entries (${r.closedCellEntries.length})` : " — Legacy"}
+                                          </Text>
+                                        ),
+                                        children: hasCC ? (
+                                          <Table
+                                            dataSource={r.closedCellEntries}
+                                            rowKey={(e, i) => e?._id || `closed-${i}`}
+                                            size="small"
+                                            pagination={false}
+                                            columns={cellTableCols}
+                                            scroll={{ x: "max-content" }}
+                                            style={{ fontSize: 11 }}
+                                          />
+                                        ) : (
+                                          legacyBlock([
+                                            ["Residual", r.closedCellResidualVolume, r.closedCellResidualUnit],
+                                            ["Inert", r.closedCellInertVolume, r.closedCellInertUnit],
+                                            ["Hazardous", r.closedCellHazardousVolume, r.closedCellHazardousUnit],
+                                          ])
+                                        ),
+                                      },
+                                    ]}
                                   />
-                                ) : (
-                                  <Row gutter={8}>
-                                    {[
-                                      [
-                                        "Residual",
-                                        r.closedCellResidualVolume,
-                                        r.closedCellResidualUnit,
-                                      ],
-                                      [
-                                        "Inert",
-                                        r.closedCellInertVolume,
-                                        r.closedCellInertUnit,
-                                      ],
-                                      [
-                                        "Hazardous",
-                                        r.closedCellHazardousVolume,
-                                        r.closedCellHazardousUnit,
-                                      ],
-                                    ].map(([label, val, unit]) => (
-                                      <Col key={label} xs={12}>
-                                        <Text
-                                          type="secondary"
-                                          style={{
-                                            fontSize: 11,
-                                            display: "block",
-                                          }}
-                                        >
-                                          {label}
-                                        </Text>
-                                        <Text strong style={{ fontSize: 13 }}>
-                                          {val != null
-                                            ? `${val.toLocaleString()} ${(unit || "m³").replace("m3", "m³")}`
-                                            : "—"}
-                                        </Text>
-                                      </Col>
-                                    ))}
-                                  </Row>
-                                )}
-                              </div>
+                                );
+                              })()}
 
                               {/* Haulers */}
                               {r.accreditedHaulers?.length > 0 && (
@@ -2855,11 +2843,15 @@ export default function SubmissionSettings({
                                   </div>
                                   <Table
                                     dataSource={r.accreditedHaulers}
-                                    rowKey={(_, i) => i}
+                                    // #4: stable key from the hauler id where available.
+                                    rowKey={(h, i) => h?._id || `${h?.haulerName || "hauler"}-${i}`}
                                     size="small"
                                     pagination={false}
                                     style={{ fontSize: 11 }}
-                                    className="hauler-wrap-table"
+                                    // #4: fixed widths + ellipsis keep the table (and its
+                                    // nested vehicle table) inside the modal; horizontal
+                                    // scroll only kicks in on very narrow widths.
+                                    scroll={{ x: 720 }}
                                     expandable={{
                                       expandedRowRender: (h) => {
                                         const vehicles =
@@ -2881,11 +2873,11 @@ export default function SubmissionSettings({
                                         return vehicles.length > 0 ? (
                                           <Table
                                             dataSource={vehicles}
-                                            rowKey={(_, vi) => vi}
+                                            rowKey={(v, vi) => v?._id || `${v?.plateNumber || "veh"}-${vi}`}
                                             size="small"
                                             pagination={false}
                                             style={{ fontSize: 11 }}
-                                            className="hauler-wrap-table"
+                                            scroll={{ x: 430 }}
                                             columns={[
                                               {
                                                 title: "#",
@@ -2897,17 +2889,22 @@ export default function SubmissionSettings({
                                                 title: "Plate Number",
                                                 dataIndex: "plateNumber",
                                                 key: "plate",
+                                                width: 130,
+                                                ellipsis: true,
                                                 render: (v) => v || "—",
                                               },
                                               {
                                                 title: "Vehicle Type",
                                                 dataIndex: "vehicleType",
                                                 key: "type",
+                                                width: 140,
+                                                ellipsis: true,
                                                 render: (v) => v || "—",
                                               },
                                               {
                                                 title: "Capacity",
                                                 key: "cap",
+                                                width: 120,
                                                 render: (_, v) =>
                                                   v.capacity != null
                                                     ? `${v.capacity} ${(v.capacityUnit || "m³").replace("m3", "m³")}`
@@ -2928,40 +2925,44 @@ export default function SubmissionSettings({
                                         title: "Hauler Name",
                                         dataIndex: "haulerName",
                                         key: "haulerName",
-                                        render: (v) => <Text strong>{v}</Text>,
+                                        width: 200,
+                                        ellipsis: { showTitle: false },
+                                        render: (v) => (
+                                          <Tooltip title={v}>
+                                            <Text strong>{v || "—"}</Text>
+                                          </Tooltip>
+                                        ),
+                                      },
+                                      {
+                                        // #6: Hauler Clients immediately after Hauler Name.
+                                        title: "Hauler Clients",
+                                        dataIndex: "privateSectorClients",
+                                        key: "privateSectorClients",
+                                        width: 220,
+                                        ellipsis: { showTitle: false },
+                                        render: (v) => {
+                                          const list = normalizeClientList(v);
+                                          if (!list.length) return <Text type="secondary">—</Text>;
+                                          const text = list.join(", ");
+                                          return <Tooltip title={text}>{text}</Tooltip>;
+                                        },
                                       },
                                       {
                                         title: "No. of Trucks",
                                         dataIndex: "numberOfTrucks",
                                         key: "numberOfTrucks",
                                         width: 110,
+                                        align: "center",
                                         render: (v) => v ?? "—",
                                       },
                                       {
                                         title: "Office Address",
                                         dataIndex: "officeAddress",
                                         key: "officeAddress",
-                                        render: (v) => v || "—",
-                                      },
-                                      {
-                                        title: "Private Sector Clients",
-                                        dataIndex: "privateSectorClients",
-                                        key: "privateSectorClients",
-                                        render: (v) => {
-                                          const arr = Array.isArray(v)
-                                            ? v
-                                            : v
-                                              ? [v]
-                                              : [];
-                                          if (arr.length === 0) return "—";
-                                          return arr
-                                            .map((c) =>
-                                              typeof c === "string"
-                                                ? c
-                                                : c.clientName || "—",
-                                            )
-                                            .join(", ");
-                                        },
+                                        ellipsis: { showTitle: false },
+                                        render: (v) => (
+                                          <Tooltip title={v}>{v || "—"}</Tooltip>
+                                        ),
                                       },
                                     ]}
                                   />
@@ -3261,11 +3262,21 @@ export default function SubmissionSettings({
                           r.trucks?.length > 0 ? (
                             <Table
                               dataSource={r.trucks}
-                              rowKey={(_, i) => i}
+                              // #3: stable key from an existing id where available.
+                              rowKey={(t, i) =>
+                                t?._id ||
+                                `${t?.disposalTicketNo || ""}-${t?.plateNumber || ""}-${i}`
+                              }
                               size="small"
-                              pagination={false}
-                              scroll={{ x: 700 }}
-                              style={{ fontSize: 11 }}
+                              className="trucks-compact-table"
+                              pagination={{
+                                defaultPageSize: 5,
+                                pageSizeOptions: ["5", "10", "20", "50"],
+                                showSizeChanger: true,
+                                size: "small",
+                                showTotal: (total) => `${total} truck${total === 1 ? "" : "s"}`,
+                              }}
+                              scroll={{ x: 820, y: 320 }}
                               columns={[
                                 {
                                   title: "#",
@@ -3279,23 +3290,51 @@ export default function SubmissionSettings({
                                   title: "Ticket No.",
                                   dataIndex: "disposalTicketNo",
                                   key: "ticket",
+                                  width: 110,
                                   render: (v) => v || "—",
                                 },
                                 {
                                   title: "Hauler",
                                   dataIndex: "hauler",
                                   key: "hauler",
+                                  width: 150,
+                                  ellipsis: true,
                                   render: (v) => <Text strong>{v || "—"}</Text>,
+                                },
+                                {
+                                  // #3: Clients immediately after Hauler.
+                                  title: "Clients",
+                                  key: "clients",
+                                  width: 180,
+                                  render: (_, t) => {
+                                    const clients = resolveTruckClients(t, r.accreditedHaulers);
+                                    if (!clients.length) return <Text type="secondary">—</Text>;
+                                    const text = clients.join(", ");
+                                    return (
+                                      <Tooltip title={text}>
+                                        <Space size={[2, 2]} wrap style={{ maxWidth: 170 }}>
+                                          {clients.slice(0, 2).map((c, ci) => (
+                                            <Tag key={ci} color="purple" bordered={false} style={{ margin: 0, maxWidth: 160, overflow: "hidden", textOverflow: "ellipsis" }}>
+                                              {c}
+                                            </Tag>
+                                          ))}
+                                          {clients.length > 2 && <Tag bordered={false} style={{ margin: 0 }}>+{clients.length - 2}</Tag>}
+                                        </Space>
+                                      </Tooltip>
+                                    );
+                                  },
                                 },
                                 {
                                   title: "Plate No.",
                                   dataIndex: "plateNumber",
                                   key: "plate",
+                                  width: 110,
                                   render: (v) => v || "—",
                                 },
                                 {
                                   title: "Capacity",
                                   key: "cap",
+                                  width: 110,
                                   render: (_, t) =>
                                     t.truckCapacity
                                       ? `${t.truckCapacity} ${(t.truckCapacityUnit || "m³").replace("m3", "m³")}`
@@ -3304,15 +3343,40 @@ export default function SubmissionSettings({
                                 {
                                   title: "Volume",
                                   key: "vol",
-                                  render: (_, t) =>
-                                    t.actualVolume != null ? (
-                                      <Text strong style={{ color: "#52c41a" }}>
-                                        {t.actualVolume}{" "}
-                                        {t.actualVolumeUnit || "tons"}
+                                  width: 120,
+                                  // #3: colour reflects actual volume vs capacity
+                                  // (units normalized first via the shared utility).
+                                  render: (_, t) => {
+                                    if (t.actualVolume == null) return "—";
+                                    const unit = (t.actualVolumeUnit || t.truckCapacityUnit || "m³").replace("m3", "m³");
+                                    const status = volumeCapacityStatus({
+                                      actualVolume: t.actualVolume,
+                                      actualVolumeUnit: t.actualVolumeUnit || t.truckCapacityUnit,
+                                      capacity: t.truckCapacity,
+                                      capacityUnit: t.truckCapacityUnit || t.actualVolumeUnit,
+                                    });
+                                    const valueEl = (
+                                      <Text strong style={{ color: status.color }}>
+                                        {t.actualVolume} {unit}
                                       </Text>
-                                    ) : (
-                                      "—"
-                                    ),
+                                    );
+                                    if (!status.comparable) return valueEl;
+                                    return (
+                                      <Tooltip
+                                        title={
+                                          <span style={{ fontSize: 12 }}>
+                                            Capacity: {t.truckCapacity} {(t.truckCapacityUnit || unit).replace("m3", "m³")}
+                                            <br />
+                                            Actual volume: {t.actualVolume} {unit}
+                                            <br />
+                                            Utilization: {status.percent.toFixed(1)}%
+                                          </span>
+                                        }
+                                      >
+                                        {valueEl}
+                                      </Tooltip>
+                                    );
+                                  },
                                 },
                                 {
                                   title: "Waste Type",
