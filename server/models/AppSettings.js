@@ -5,7 +5,9 @@ const portalAnnouncementSchema = new mongoose.Schema(
     enabled: { type: Boolean, default: false },
     type: { type: String, enum: ["info", "warning", "success", "error"], default: "info" },
     title: { type: String, default: "" },
+    summary: { type: String, default: "" },
     message: { type: String, default: "" },
+    priority: { type: String, enum: ["low", "normal", "high", "urgent"], default: "normal" },
     startAt: { type: Date, default: null },
     endAt: { type: Date, default: null },
     showOnLogin: { type: Boolean, default: true },
@@ -14,8 +16,115 @@ const portalAnnouncementSchema = new mongoose.Schema(
     emailSubject: { type: String, default: "" },
     emailMessage: { type: String, default: "" },
     emailLastSentAt: { type: Date, default: null },
+    // Author captured once on create (preserved across edits). Display only.
+    createdBy: { type: String, default: "" },
   },
   { timestamps: true }
+);
+
+// Automation Agent — configuration-only structure for a FUTURE system-steward /
+// application-monitoring agent (#5). Persisting these values must never start an
+// agent, poller, job, queue, or external call. The shape is deliberately extensible
+// so later work can add event ingestion, alert rules, execution history,
+// recommendations, remediation approvals and audit logs without a breaking change.
+const automationAgentSchema = new mongoose.Schema(
+  {
+    enabled: { type: Boolean, default: false },
+    // Identity
+    name: { type: String, default: "" },
+    description: { type: String, default: "" },
+    role: { type: String, default: "System Steward and Application Monitoring Agent" },
+    environmentScope: { type: String, default: "" },
+    // Monitoring scope — every category inactive by default.
+    monitoring: {
+      frontendErrors: { type: Boolean, default: false },
+      backendErrors: { type: Boolean, default: false },
+      apiFailures: { type: Boolean, default: false },
+      databaseHealth: { type: Boolean, default: false },
+      resourceUsage: { type: Boolean, default: false },
+      authIssues: { type: Boolean, default: false },
+      fileUploadFailures: { type: Boolean, default: false },
+      scheduledJobs: { type: Boolean, default: false },
+      integrationFailures: { type: Boolean, default: false },
+      securityAlerts: { type: Boolean, default: false },
+    },
+    // Future scheduling — stored only; no real polling is created.
+    frequency: {
+      type: String,
+      enum: ["manual", "5m", "15m", "30m", "hourly"],
+      default: "manual",
+    },
+    severity: {
+      informational: { type: Boolean, default: true },
+      warning: { type: Boolean, default: true },
+      critical: { type: Boolean, default: true },
+    },
+    // Placeholder notification channels — no external delivery is implemented.
+    notifications: {
+      inApp: { type: Boolean, default: false },
+      email: { type: Boolean, default: false },
+      systemLogs: { type: Boolean, default: false },
+      webhook: { type: Boolean, default: false },
+      webhookUrl: { type: String, default: "" },
+    },
+    // Provider configuration — supports Anthropic (Claude) or Google Gemini.
+    // The API key is NEVER stored in plain text: the operational source of truth
+    // is the matching server env var (ANTHROPIC_API_KEY / GEMINI_API_KEY), and any
+    // UI-entered key is kept here only as an AES-256-GCM-encrypted fallback
+    // (apiKeyEnc) tagged with the provider it belongs to (apiKeyProvider), plus a
+    // non-reversible hint for the UI. A stored key is only ever used for its own
+    // provider, so switching providers never leaks a key to the wrong vendor.
+    provider: {
+      provider: { type: String, enum: ["anthropic", "gemini"], default: "anthropic" },
+      model: { type: String, default: "" }, // falls back to the provider's env model
+      apiKey: { type: String, default: "" }, // legacy; migrated to apiKeyEnc then cleared
+      apiKeyEnc: { type: String, default: "" }, // "v1:iv:tag:cipher" (see utils/secretBox)
+      apiKeyHint: { type: String, default: "" }, // e.g. "••••••••AB12" — display only
+      apiKeyProvider: { type: String, default: "" }, // which provider the stored key is for
+      endpoint: { type: String, default: "" }, // display only (official API is fixed)
+      temperature: { type: Number, default: 0.2 },
+      maxTokens: { type: Number, default: 1024 },
+      requestTimeoutMs: { type: Number, default: 30000 },
+    },
+    // Operational agent config. Read-only allowlist of function ids the agent may
+    // run; empty defaults to all read-only functions. `loggingLevel` gates how
+    // much of each query is persisted in the usage log.
+    systemInstruction: {
+      type: String,
+      default:
+        "You are a read-only operations assistant for an Ecological Solid Waste " +
+        "Management Pipeline (ESWMP) system. You summarize and explain the " +
+        "structured data provided to you. You never modify records, never invent " +
+        "data not present in the context, and you clearly flag uncertainty.",
+    },
+    allowedFunctions: { type: [String], default: [] },
+    loggingLevel: {
+      type: String,
+      enum: ["none", "metadata", "full"],
+      default: "metadata",
+    },
+    // Cost/rate ceilings. null → fall back to the AUTOMATION_AGENT_* env values.
+    dailyRequestLimit: { type: Number, default: null },
+    perUserRequestLimit: { type: Number, default: null },
+    // Connection health (updated by the Test Connection + query flows).
+    lastSuccessfulConnectionAt: { type: Date, default: null },
+    lastError: { type: String, default: "" },
+    lastErrorAt: { type: Date, default: null },
+  },
+  { _id: false }
+);
+
+// SLF Portal sensitive-value masking — one audit entry per developer change.
+const slfMaskAuditSchema = new mongoose.Schema(
+  {
+    changedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User", default: null },
+    changedByEmail: { type: String, default: "" },
+    changedByRole: { type: String, default: "" },
+    previousValue: { type: Boolean, default: false },
+    newValue: { type: Boolean, default: false },
+    at: { type: Date, default: Date.now },
+  },
+  { _id: false }
 );
 
 const appSettingsSchema = new mongoose.Schema(
@@ -98,6 +207,14 @@ const appSettingsSchema = new mongoose.Schema(
     devPortalPinFailedAttempts: { type: Number, default: 0 },
     devPortalPinLockedUntil: { type: Date, default: null },
 
+    // SLF Portal sensitive-value masking (developer-controlled global privacy
+    // toggle, sits under Dev Portal Credential). Enabled → sensitive SLF Portal
+    // values render as "*****". Only the developer role may change it; every
+    // change is audited (who, previous → new, when).
+    maskSensitiveSlfValues: { type: Boolean, default: false },
+    maskSensitiveSlfValuesUpdatedAt: { type: Date, default: null },
+    maskSensitiveSlfAudit: { type: [slfMaskAuditSchema], default: [] },
+
     // Security
     sessionTimeout: { type: Number, default: 7 },        // days
     maxLoginAttempts: { type: Number, default: 5 },
@@ -132,6 +249,9 @@ const appSettingsSchema = new mongoose.Schema(
       }, { _id: false }),
       default: {},
     },
+
+    // Automation Agent configuration (config-only; see schema note above).
+    automationAgent: { type: automationAgentSchema, default: () => ({}) },
 
     // Organizational Chart
     orgChart: {

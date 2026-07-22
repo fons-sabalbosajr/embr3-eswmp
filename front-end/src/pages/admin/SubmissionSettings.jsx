@@ -139,6 +139,7 @@ export default function SubmissionSettings({
   canRepairIds = false,
   isDeveloper = false,
   isDark,
+  submissionsContext = null,
 }) {
   const [data, setData] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -168,6 +169,23 @@ export default function SubmissionSettings({
   const latestRequestKeyRef = useRef("");
   const [statusFilter, setStatusFilter] = useState("all");
   const [cellPlacementFilter, setCellPlacementFilter] = useState("all");
+  // Apply an incoming Portal Submissions shortcut context (from the Disposal
+  // Activity modal): pre-filter by SLF name + status. Validates params, tolerates
+  // missing optional fields, and only re-applies when the context actually changes.
+  const appliedCtxRef = useRef(null);
+  useEffect(() => {
+    if (!submissionsContext) return;
+    const sig = JSON.stringify(submissionsContext);
+    if (appliedCtxRef.current === sig) return;
+    appliedCtxRef.current = sig;
+    const { slfName, status } = submissionsContext;
+    if (slfName) setSearch(String(slfName));
+    const valid = ["pending", "acknowledged", "rejected", "reverted", "editApproved"];
+    if (status && valid.includes(status)) setStatusFilter(status);
+    setSelectedRowKeys([]);
+    setPagination((prev) => ({ ...prev, current: 1 }));
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [submissionsContext]);
   const [mergeSlfOpen, setMergeSlfOpen] = useState(false);
   // ID-fix preview modal (dry-run before applying Fix XX / Fix PVT-LGU).
   const [idFixPreview, setIdFixPreview] = useState({
@@ -1994,16 +2012,35 @@ export default function SubmissionSettings({
                 {
                   title: "ID No.",
                   key: "idNo",
-                  render: (_, entry, index) => (
-                    <Space direction="vertical" size={0}>
-                      <Text strong style={{ fontSize: 12 }}>
-                        {entry.idNo || entry.submissionId || `Submission ${index + 1}`}
-                      </Text>
-                      <Text type="secondary" style={{ fontSize: 10 }}>
-                        {dayjs(entry.createdAt || entry.dateOfDisposal).format("MM/DD/YYYY hh:mm A")}
-                      </Text>
-                    </Space>
-                  ),
+                  render: (_, entry, index) => {
+                    // #6B: a resubmitted record (carries prior idNo in previousIdNos)
+                    // is badged and shows its original reference for traceability.
+                    const isResub =
+                      entry.isResubmission ||
+                      (Array.isArray(entry.previousIdNos) && entry.previousIdNos.length > 0);
+                    const origRef = Array.isArray(entry.previousIdNos) && entry.previousIdNos.length
+                      ? entry.previousIdNos[entry.previousIdNos.length - 1]
+                      : null;
+                    return (
+                      <Space direction="vertical" size={0}>
+                        <Space size={4} wrap>
+                          <Text strong style={{ fontSize: 12 }}>
+                            {entry.idNo || entry.submissionId || `Submission ${index + 1}`}
+                          </Text>
+                          {isResub && (
+                            <Tooltip title={origRef ? `Resubmitted — was ${origRef}` : "Resubmitted after revert"}>
+                              <Tag color="gold" style={{ fontSize: 9, margin: 0, lineHeight: "16px" }}>
+                                <ReloadOutlined /> Resubmission
+                              </Tag>
+                            </Tooltip>
+                          )}
+                        </Space>
+                        <Text type="secondary" style={{ fontSize: 10 }}>
+                          {dayjs(entry.createdAt || entry.dateOfDisposal).format("MM/DD/YYYY hh:mm A")}
+                        </Text>
+                      </Space>
+                    );
+                  },
                 },
                 {
                   title: "Trucks",

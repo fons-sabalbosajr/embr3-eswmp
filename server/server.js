@@ -25,6 +25,8 @@ const lguInitiatedMRFRoutes = require("./routes/lguInitiatedMRF");
 const trashTrapRoutes = require("./routes/trashTraps");
 const swmEquipmentRoutes = require("./routes/swmEquipment");
 const slfFacilityRoutes = require("./routes/slfFacilities");
+const slfClientRoutes = require("./routes/slfClients");
+const region3LguRoutes = require("./routes/region3Lgu");
 const dataReferenceRoutes = require("./routes/dataReferences");
 const openDumpsiteRoutes = require("./routes/openDumpsites");
 const residualContainmentRoutes = require("./routes/residualContainment");
@@ -40,6 +42,7 @@ const supportTicketRoutes = require("./routes/supportTickets");
 const haulerDeleteRequestRoutes = require("./routes/haulerDeleteRequests");
 const uploadRoutes = require("./routes/upload");
 const messageRoutes = require("./routes/messages");
+const automationAgentRoutes = require("./routes/automationAgent");
 
 const app = express();
 const server = http.createServer(app);
@@ -138,12 +141,53 @@ app.use(helmet({
 // IPv6 via ipKeyGenerator) so a request with an undefined req.ip can't crash
 // the limiter (express-rate-limit ERR_ERL_UNDEFINED_IP_ADDRESS).
 const { ipKeyGenerator } = rateLimit;
+const IS_PROD = process.env.NODE_ENV === "production";
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 50,
+  // Separate dev/prod ceilings. Production stays strict against credential
+  // brute-forcing; development is generous so repeated testing — including the
+  // developer sign-in, which first fails /portal-auth/login before falling back
+  // to /dev-portal/override (two auth hits per attempt) — doesn't trip HTTP 429.
+  // Override with AUTH_RATE_MAX.
+  max: Number(process.env.AUTH_RATE_MAX ?? (IS_PROD ? 50 : 500)),
+  // Only FAILED attempts count toward the brute-force budget; a successful login
+  // no longer consumes the allowance, so normal use can't lock out a real user.
+  skipSuccessfulRequests: true,
   standardHeaders: true,
   legacyHeaders: false,
-  message: { message: "Too many attempts, please try again later." },
+  message: { message: "Too many login attempts. Please wait a few minutes and try again." },
+  keyGenerator: (req) =>
+    ipKeyGenerator(req.ip || req.socket?.remoteAddress || "unknown"),
+});
+
+// Portal READ traffic (/me, /my-submissions, /my-submissions/batch, notifications,
+// facility info…) is high-frequency by design: the Portal refreshes on socket
+// events, polls the history tab, and re-pulls after every cell save. Throttling all
+// of that with the strict `authLimiter` (50/15min, meant for credential brute-force
+// on login/signup/reset) made normal use trip HTTP 429. This generous limiter is
+// applied to the whole portal-auth router; the sensitive credential endpoints inside
+// it re-apply `authLimiter` on top, so brute-force protection is preserved without
+// starving legitimate reads. Configurable via PORTAL_READ_RATE_MAX.
+const portalReadLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: Number(process.env.PORTAL_READ_RATE_MAX ?? 1000),
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { message: "Too many requests, please slow down and try again shortly." },
+  keyGenerator: (req) =>
+    ipKeyGenerator(req.ip || req.socket?.remoteAddress || "unknown"),
+});
+
+// Automation Agent burst limiter — each request can trigger a paid Anthropic
+// call, so cap request bursts per IP on top of the per-user/global DAILY limits
+// enforced in the route from the usage log. Configurable via
+// AUTOMATION_AGENT_RATE_MAX (requests / 15 min / IP).
+const automationAgentLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: Number(process.env.AUTOMATION_AGENT_RATE_MAX ?? (IS_PROD ? 60 : 300)),
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { message: "Too many AI requests, please slow down and try again shortly." },
   keyGenerator: (req) =>
     ipKeyGenerator(req.ip || req.socket?.remoteAddress || "unknown"),
 });
@@ -187,12 +231,6 @@ io.on("connection", (socket) => {
 
 // Make io accessible to routes via req.app
 app.set("io", io);
-
-// Strip internal error details from 5xx responses in production. Many route
-// handlers return `{ message, error: err.message }` for debugging; that leaks
-// internal messages (stack fragments, driver errors) to clients when live.
-// Sanitizing centrally here covers every handler without editing each one, and
-// only touches 5xx — 4xx validation bodies keep their `error` field for the UI.
 app.use((_req, res, next) => {
   if (process.env.NODE_ENV !== "production") return next();
   const originalJson = res.json.bind(res);
@@ -206,10 +244,6 @@ app.use((_req, res, next) => {
   next();
 });
 
-// Attach the caller's verified identity to req for logging and non-spoofable
-// audit actors. The email is resolved from the JWT's `id` against the DB (admin
-// User first, then portal UserPortal), so it cannot be forged via request
-// headers/body the way client-supplied X-User-* / performedBy values can.
 app.use((req, _res, next) => {
   const auth = req.headers.authorization;
   if (auth?.startsWith("Bearer ")) {
@@ -254,8 +288,6 @@ async function connectToMongo() {
     } catch (err) {
       console.error("Scheduled submission worker failed to start:", err.message);
     }
-    // Auto-backfill transaction history for existing submissions.
-    // Shared with POST /api/transactions/seed via utils/backfillTransactions.
     try {
       const { backfillTransactions } = require("./utils/backfillTransactions");
       const seeded = await backfillTransactions();
@@ -265,17 +297,11 @@ async function connectToMongo() {
     } catch (err) {
       console.error("Transaction backfill error:", err.message);
     }
-
-    // One-time, idempotent cleanup: merge the duplicate Bataan SLF (Integrated
-    // Waste Management → BESLF) and archive the leftover facility record.
     try {
       await require("./utils/mergeBataanSlf").mergeBataanSlf();
     } catch (err) {
       console.error("Bataan SLF merge error:", err.message);
     }
-
-    // One-time, idempotent fix: ensure dummy SLF facilities have cell
-    // infrastructure so dummy portal accounts can select a cell in the baseline.
     try {
       await require("./utils/dummyCells").backfillDummyCells();
     } catch (err) {
@@ -304,6 +330,10 @@ app.use("/api/auth", authLimiter, authRoutes);
 app.use("/api/slf-generators", slfGeneratorRoutes);
 app.use("/api/data-slf", dataSLFRoutes);
 app.use("/api/settings", settingsRoutes);
+// Automation Agent — settings/test (developer) + query (admin/developer). The
+// burst limiter guards the whole router; DAILY per-user/global limits are
+// enforced inside the route from the usage log.
+app.use("/api", automationAgentLimiter, automationAgentRoutes);
 app.use("/api/users", usersRoutes);
 app.use("/api/logs", logsRoutes);
 app.use("/api/transactions", transactionsRoutes);
@@ -313,6 +343,8 @@ app.use("/api/lgu-initiated-mrf", lguInitiatedMRFRoutes);
 app.use("/api/trash-traps", trashTrapRoutes);
 app.use("/api/swm-equipment", swmEquipmentRoutes);
 app.use("/api/slf-facilities", slfFacilityRoutes);
+app.use("/api/slf-clients", slfClientRoutes);
+app.use("/api/region3-lgu", region3LguRoutes);
 app.use("/api/data-references", dataReferenceRoutes);
 app.use("/api/open-dumpsites", openDumpsiteRoutes);
 app.use("/api/residual-containment", residualContainmentRoutes);
@@ -320,9 +352,30 @@ app.use("/api/project-desc-scoping", projectDescScopingRoutes);
 app.use("/api/transfer-stations", transferStationRoutes);
 app.use("/api/lgu-assist-diversion", lguAssistDiversionRoutes);
 app.use("/api/technical-assistance", technicalAssistanceRoutes);
-app.use("/api/portal-auth", authLimiter, portalAuthRoutes);
-// TODO(cleanup): remove once no stored records/links reference the "porta-auth" typo.
-app.use("/api/porta-auth", authLimiter, portalAuthRoutes); // Backward compatibility for previously stored typo URLs
+// Brute-force protection stays on the credential-changing endpoints only; the rest
+// of the portal-auth router (high-frequency reads) uses the generous limiter. A
+// path prefix list keeps this in one place instead of decorating every route.
+const SENSITIVE_PORTAL_AUTH_PREFIXES = [
+  "/login",
+  "/signup",
+  "/forgot-password",
+  "/verify-reset-code",
+  "/reset-password",
+  "/credentials/request-code",
+  "/credentials/update",
+  "/submit-verification",
+];
+function sensitivePortalAuthLimiter(req, res, next) {
+  // req.path is relative to the mount path ("/login", "/me", …) inside app.use.
+  const path = req.path || "";
+  const isSensitive = SENSITIVE_PORTAL_AUTH_PREFIXES.some(
+    (p) => path === p || path.startsWith(`${p}/`),
+  );
+  return isSensitive ? authLimiter(req, res, next) : next();
+}
+
+app.use("/api/portal-auth", sensitivePortalAuthLimiter, portalReadLimiter, portalAuthRoutes);
+app.use("/api/porta-auth", sensitivePortalAuthLimiter, portalReadLimiter, portalAuthRoutes); // Backward compatibility for previously stored typo URLs
 app.use("/api/portal-users", portalUsersRoutes);
 app.use("/api/data-history", dataHistoryRoutes);
 app.use("/api/notifications", notificationRoutes);
@@ -333,14 +386,13 @@ app.use("/api/messages", messageRoutes);
 app.use("/api/dummy-data", require("./routes/dummyData"));
 app.use("/api/slf-data-files", require("./routes/slfDataFiles"));
 app.use("/api/portal-queue", require("./routes/portalQueue"));
+app.use("/api/portal-messages", require("./routes/portalMessages"));
 app.use("/api/dev-portal", require("./routes/devPortal"));
 // Developer-only raw submission maintenance + volume analysis. The router itself
 // applies authMiddleware + developerOnly to every route.
 app.use("/api/raw-submissions", require("./routes/rawSubmissions"));
 
-// Global error handler — keeps unhandled errors from leaking stack traces /
-// internals to clients (Express's default handler exposes them when NODE_ENV
-// is not "production"). Logs the full error server-side; returns a safe body.
+
 app.use((err, req, res, _next) => {
   console.error(`Unhandled error on ${req.method} ${req.originalUrl}:`, err);
   if (res.headersSent) return;
@@ -364,8 +416,6 @@ function getLocalIP() {
   return "127.0.0.1";
 }
 
-// Validate Google Drive configuration at startup so misconfiguration surfaces
-// as a readable log line instead of a runtime failure during the first upload.
 try {
   const { getDriveConfigStatus } = require("./utils/googleDrive");
   const driveStatus = getDriveConfigStatus();

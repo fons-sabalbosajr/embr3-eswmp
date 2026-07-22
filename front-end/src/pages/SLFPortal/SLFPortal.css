@@ -509,6 +509,9 @@
   padding: 20px 24px;
   background: #1a3353;
   margin-top: 40px;
+  /* Item #1: stay in normal flow after the growing content; never shrink so the
+     footer keeps its height and sits flush at the bottom on short pages. */
+  flex-shrink: 0;
 }
 
 .slf-footer-text {

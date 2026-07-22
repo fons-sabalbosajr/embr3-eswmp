@@ -228,7 +228,14 @@ export default function Reports({ canEdit = true, canDelete = true }) {
     fetchTransactions();
     const socket = getSocket();
     if (!socket) return undefined;
-    const handler = () => fetchTransactions(true);
+    // Transactions are the audit trail of submissions — only refetch when a
+    // submission-related write happened, not on every unrelated data-refresh
+    // (notifications, tickets, slf-clients, …) which used to force a full refetch.
+    const handler = ({ target } = {}) => {
+      if (!target || ["submissions", "baselines", "slf-waste-generators"].includes(target)) {
+        fetchTransactions(true);
+      }
+    };
     socket.on("data-refresh", handler);
     return () => {
       socket.off("data-refresh", handler);

@@ -1026,25 +1026,25 @@ export default function AssignedSlfDashboard({
                                     {
                                       label: "Active Cell (Residual)",
                                       value: activeCellRes,
-                                      unit: baselineUnit || "m³",
+                                      unit: baselineUnit || baselineUnit,
                                       color: "#52c41a",
                                     },
                                     {
                                       label: "Active Cell (Inert)",
                                       value: activeCellInert,
-                                      unit: baselineUnit || "m³",
+                                      unit: baselineUnit || baselineUnit,
                                       color: "#1890ff",
                                     },
                                     {
                                       label: "Closed Cell (Residual)",
                                       value: closedCellRes,
-                                      unit: baselineUnit || "m³",
+                                      unit: baselineUnit || baselineUnit,
                                       color: "#fa8c16",
                                     },
                                     {
                                       label: "Closed Cell (Inert)",
                                       value: closedCellInert,
-                                      unit: baselineUnit || "m³",
+                                      unit: baselineUnit || baselineUnit,
                                       color: "#8c8c8c",
                                     },
                                   ]

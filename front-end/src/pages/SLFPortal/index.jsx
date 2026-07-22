@@ -75,6 +75,7 @@ import {
   QuestionCircleOutlined,
   CustomerServiceOutlined,
   UploadOutlined,
+  DownloadOutlined,
   FileExcelOutlined,
   AuditOutlined,
   ClockCircleOutlined,
@@ -108,10 +109,12 @@ import SLFPortalModals from "./SLFPortalModals";
 import DraftsScheduledPanel from "./DraftsScheduledPanel";
 import RequestsPanel from "./RequestsPanel";
 import HistoryPanel from "./HistoryPanel";
+import { SensitiveMaskProvider, MASK_PLACEHOLDER } from "../../utils/sensitiveMask";
 import OverviewPanel from "./OverviewPanel";
 import AssignedSlfDashboard from "./AssignedSlfDashboard";
 import RequiredDot from "./RequiredDot";
 import BasicInfoTab from "./BasicInfoTab";
+import BulkOrganizeCells from "./BulkOrganizeCells";
 import {
   EMPTY_TRUCK,
   EMPTY_HAULER,
@@ -134,7 +137,12 @@ import {
   validateTruckCapacityElevation,
   TRUCK_CAPACITY_ELEVATION_FACTOR,
 } from "./wasteGenValidation";
-import { groupSubmissions, formatStatusSummary } from "./submissionGrouping";
+import { formatStatusSummary } from "./submissionGrouping";
+import {
+  getUnplacedSubmissions,
+  summarizeOrganizeTotals,
+  formatOrganizeWarningHtml,
+} from "./organizeCellsValidation";
 import {
   normalizeUnit,
   hasBaselinePayload,
@@ -162,7 +170,8 @@ import {
   getUploadMissingColumns,
   getUploadRowErrors,
 } from "./uploadHelpers";
-import { convertVolume, resolveCellUnit } from "../../utils/volumeUnits";
+import { convertVolume, resolveCellUnit, resolveFacilityUnit } from "../../utils/volumeUnits";
+import { isHazardousWasteType } from "../../utils/wasteCategories";
 // Canonical cell helpers — shared with the admin side so the Portal and the admin
 // never disagree about which cells exist or what they are called.
 import {
@@ -171,6 +180,8 @@ import {
   getCellStatusConfig,
   getCellTypeConfig,
   getCapacityStatus,
+  getCellAcceptance,
+  cellDisabledLabel,
 } from "../../utils/cellVisuals";
 
 const { Text } = Typography;
@@ -221,6 +232,8 @@ export default function SLFPortal() {
   const [slfInfoLoading, setSlfInfoLoading] = useState(false);
   const [baselineLoading, setBaselineLoading] = useState(false);
   const [slfInfoRefresh, setSlfInfoRefresh] = useState(0);
+  // Item #4: admin → portal-user messages shown after login.
+  const [portalMessages, setPortalMessages] = useState([]);
   const [slfCardExpanded, setSlfCardExpanded] = useState(false);
   const [selectedSlfIdx, setSelectedSlfIdx] = useState(0); // for multi-SLF users
   const [fieldLabels, setFieldLabels] = useState({});
@@ -296,7 +309,11 @@ export default function SLFPortal() {
   const [municipalities, setMunicipalities] = useState([]);
   const [barangays, setBarangays] = useState([]);
   // Global baseline unit of measurement
-  const [baselineUnit, setBaselineUnit] = useState("m³");
+  // The unit stored on the loaded baseline/record (historical). Starts EMPTY (not a
+  // hard-coded unit) so display falls back to the centralized current SLF unit
+  // (`slfUnit`) until a real per-record unit is loaded — a separate default here
+  // was the classic stale-unit source flagged in Item #3.
+  const [baselineUnit, setBaselineUnit] = useState("");
   const [acceptsHazardousWaste, setAcceptsHazardousWaste] = useState(false);
   const [supportForm] = Form.useForm();
   // Support ticket states
@@ -322,6 +339,10 @@ export default function SLFPortal() {
   const [updateTourOpen, setUpdateTourOpen] = useState(false);
   const [updateTourCurrent, setUpdateTourCurrent] = useState(0);
   const announcementBannerRef = useRef(null);
+  // Idempotency key for the current submit attempt — reused across recoverable
+  // retries (so a lost-response retry returns the saved record instead of
+  // duplicating) and cleared only after a confirmed success.
+  const submitKeyRef = useRef(null);
   const slfSelectorRef = useRef(null);
   const dataEntryTabsRef = useRef(null);
   const baselinePanelRef = useRef(null);
@@ -981,6 +1002,13 @@ export default function SLFPortal() {
   // and Data Entry showed NO cells at all. Widen to the same Math.max the admin's
   // canonical deriveCells() uses, so the Portal and the admin always agree on how
   // many cells exist.
+  // Item #3: THE single source of truth for the assigned SLF's unit of measurement.
+  // Derived from the facility config (slfInfo) via the shared resolver, so every
+  // portal menu/modal reads the same value and it updates automatically when the
+  // admin changes the SLF unit (slfInfo re-fetches on the "facility" data-refresh).
+  // Never hard-code tons/m³ for the current unit — use this instead.
+  const slfUnit = resolveFacilityUnit(slfInfo);
+
   const slfCellCount = Number(
     Math.max(
       Number(slfInfo?.numberOfCell || 0),
@@ -992,7 +1020,26 @@ export default function SLFPortal() {
     ),
   );
 
-  const activeCellOptions = (() => {
+  // Baseline Data active cells are the AUTHORITATIVE name source. Map the portal
+  // user's encoded active-cell names to their stable cellIndex, so Organize Cells
+  // and every cell selector display the CURRENT baseline cell name (e.g.
+  // "Cell 1 Residual") instead of a generic positional "Cell N" fallback. Matching
+  // is by stable cellIndex only — never by array position — so a cell with no
+  // reliable reference safely falls back to resolveCellName.
+  const baselineCellNameByIndex = {};
+  (Array.isArray(activeCellEntries) ? activeCellEntries : []).forEach((e) => {
+    if (e && typeof e.cellIndex === "number" && String(e.cellName || "").trim()) {
+      baselineCellNameByIndex[e.cellIndex] = String(e.cellName).trim();
+    }
+  });
+  const cellLabelFor = (index) => baselineCellNameByIndex[index] || resolveCellName(slfInfo, index);
+
+  // Every EXISTING cell as a placement option. Available cells are selectable;
+  // unavailable ones (full / completed / out-of-service / closed / restricted)
+  // are kept for context but flagged `disabled` with a reason label. The single
+  // availability rule lives in cellVisuals#getCellAcceptance so the selectors,
+  // validation, and admin displays never disagree.
+  const cellPlacementOptions = (() => {
     // Per-user cell access restriction (admin Manage Access). Empty => no restriction.
     const allowedCells = Array.isArray(portalUser?.portalAccess?.allowedCells)
       ? portalUser.portalAccess.allowedCells
@@ -1003,32 +1050,38 @@ export default function SLFPortal() {
       const rawStatus = slfInfo?.cellStatuses?.[index];
       if (isNonExistentCell(rawStatus)) return null; // cell does not exist
       const status = normalizeCellStatus(rawStatus);
-      const isOpen = isActiveCellStatus(status);
 
       // Capacity and fill carry their OWN declared units and may disagree
-      // (e.g. capacity in tons, fill in m³). Comparing them raw made a cell look
-      // full when it wasn't — and a "full" cell is filtered out of this list, so
-      // the unit bug presented as a MISSING cell. Normalize both to m³ first.
+      // (e.g. capacity in tons, fill in m³). Normalize both to m³ before the
+      // availability check so a unit mismatch never mis-classifies a cell.
       const capUnit = resolveCellUnit(slfInfo, index, "capacity");
       const fillUnit = resolveCellUnit(slfInfo, index, "fill");
-      const capacity = convertVolume(slfInfo?.cellCapacities?.[index], capUnit, "m³") ?? 0;
-      const fill = convertVolume(slfInfo?.cellFillValues?.[index], fillUnit, "m³") ?? 0;
-      const isFull = capacity > 0 && fill >= capacity;
+      const capacityM3 = convertVolume(slfInfo?.cellCapacities?.[index], capUnit, "m³") ?? 0;
+      const fillM3 = convertVolume(slfInfo?.cellFillValues?.[index], fillUnit, "m³") ?? 0;
 
-      // Admin per-cell submission toggle (undefined => allowed when active).
-      const submissionAllowed =
-        slfInfo?.cellSubmissionAllowed?.[index] !== false;
-      // The stored VALUE stays "Cell N" (the canonical index-derived key that
-      // existing placements and per-user allowedCells are keyed on); only the
-      // LABEL follows the admin's current cell name.
+      const acceptance = getCellAcceptance({
+        status,
+        capacity: capacityM3,
+        fill: fillM3,
+        exists: true,
+      });
+
+      // Admin per-cell submission toggle + per-user access are additional gates
+      // beyond capacity/status.
+      const submissionAllowed = slfInfo?.cellSubmissionAllowed?.[index] !== false;
       const cellValue = `Cell ${index + 1}`;
-      const userAllowed =
-        allowedCells.length === 0 || allowedCells.includes(cellValue);
-      const baseLabel = resolveCellName(slfInfo, index);
-      // Display capacity/used/remaining in the facility's baseline unit for the
-      // open-cell picker table (kept alongside the m³ figures used for the isFull
-      // gate above so both stay unit-consistent).
-      const pickerUnit = baselineUnit || capUnit || "m³";
+      const userAllowed = allowedCells.length === 0 || allowedCells.includes(cellValue);
+      const available = acceptance.ok && submissionAllowed && userAllowed;
+      const disabledReason = !acceptance.ok
+        ? acceptance.reason
+        : !submissionAllowed
+          ? "Closed for submissions"
+          : !userAllowed
+            ? "Not assigned to you"
+            : "";
+
+      const baseLabel = cellLabelFor(index);
+      const pickerUnit = baselineUnit || capUnit || slfUnit;
       const capDisplay = convertVolume(slfInfo?.cellCapacities?.[index], capUnit, pickerUnit);
       const usedDisplay = convertVolume(slfInfo?.cellFillValues?.[index], fillUnit, pickerUnit);
       const remainingDisplay =
@@ -1037,24 +1090,34 @@ export default function SLFPortal() {
           : capDisplay != null
             ? capDisplay
             : null;
-      return isOpen && submissionAllowed && userAllowed && !isFull
-        ? {
-            label: `${baseLabel}${slfInfo?.cellTypes?.[index] ? ` - ${slfInfo.cellTypes[index]}` : ""}`,
-            value: cellValue,
-            cellType: slfInfo?.cellTypes?.[index] || "Residual",
-            cellIndex: index,
-            // Extra fields consumed by the selectable open-cell table (#1 UX).
-            cellName: baseLabel,
-            facility: activeSlfName || slfInfo?.slfName || slfInfo?.lgu || "",
-            status: normalizeCellStatus(rawStatus),
-            capacity: capDisplay,
-            used: usedDisplay,
-            remaining: remainingDisplay,
-            unit: pickerUnit,
-          }
-        : null;
+      const typeLabel = slfInfo?.cellTypes?.[index] ? ` - ${slfInfo.cellTypes[index]}` : "";
+      return {
+        label: available
+          ? `${baseLabel}${typeLabel}`
+          : cellDisabledLabel(baseLabel, { reason: disabledReason }),
+        value: cellValue,
+        cellType: slfInfo?.cellTypes?.[index] || "Residual",
+        cellIndex: index,
+        cellName: baseLabel,
+        facility: activeSlfName || slfInfo?.slfName || slfInfo?.lgu || "",
+        status,
+        capacity: capDisplay,
+        used: usedDisplay,
+        remaining: remainingDisplay,
+        // Remaining in m³, for the "proposed <= remaining" numeric-integrity check.
+        remainingM3: acceptance.remaining,
+        utilization: acceptance.utilization,
+        unit: pickerUnit,
+        available,
+        disabled: !available,
+        disabledReason,
+      };
     }).filter(Boolean);
   })();
+
+  // Selectable subset — available cells only. Kept as the SAME shape/name so all
+  // existing consumers (validation, counts, cell picker) are unaffected.
+  const activeCellOptions = cellPlacementOptions.filter((o) => o.available);
 
   // All cells from the facility's cell infrastructure (regardless of the
   // disposal-submission restriction) — used to anchor baseline Cell Entry names
@@ -1065,7 +1128,7 @@ export default function SLFPortal() {
       if (isNonExistentCell(rawStatus)) return null;
       const status = normalizeCellStatus(rawStatus);
       const type = slfInfo?.cellTypes?.[index] || "Residual";
-      const baseLabel = resolveCellName(slfInfo, index);
+      const baseLabel = cellLabelFor(index);
       return {
         label: `${baseLabel} - ${type}${status ? ` (${status})` : ""}`,
         value: `Cell ${index + 1}`,
@@ -1094,6 +1157,13 @@ export default function SLFPortal() {
   // Pagination for the Organize Cell Placement modal (bulk submissions).
   const [cellOrganizerPage, setCellOrganizerPage] = useState(1);
   const [cellOrganizerPageSize, setCellOrganizerPageSize] = useState(5);
+  // Re-entry guard so rapid re-opens (auto-prompt + menu click, or repeated modal
+  // toggling) can't fire overlapping /my-submissions/batch requests. State updates
+  // are async, so a ref is used to short-circuit synchronously.
+  const cellOrganizerLoadingRef = useRef(false);
+  // Bulk (file-upload) cell organization — an additional workflow layered on top of
+  // the manual organizer. Reuses the already-loaded cellOrganizerData.
+  const [bulkOrganizeOpen, setBulkOrganizeOpen] = useState(false);
   // Collapsible state for the Cell Infra Overview card inside the organizer.
   // Collapsed by default — the organizer opens focused on the placement list,
   // not the (secondary) infra chart.
@@ -1123,8 +1193,8 @@ export default function SLFPortal() {
       }
       const volInCapUnit = convertVolume(
         vol,
-        actualVolumeUnit || capacityUnit || "m³",
-        capacityUnit || "m³",
+        actualVolumeUnit || capacityUnit || slfUnit,
+        capacityUnit || slfUnit,
       );
       const maxAllowed = cap + (cap * capacityAllowancePct) / 100;
       // Small epsilon so exact matches (e.g. 11 vs 11) are never flagged.
@@ -1142,7 +1212,7 @@ export default function SLFPortal() {
     (truck, vehicle) => ({
       capacity: vehicle?.capacity ?? truck?.truckCapacity ?? null,
       capacityUnit:
-        vehicle?.capacityUnit || truck?.truckCapacityUnit || "m³",
+        vehicle?.capacityUnit || truck?.truckCapacityUnit || slfUnit,
     }),
     [],
   );
@@ -1170,26 +1240,24 @@ export default function SLFPortal() {
 
   const unplacedSubmissions = useMemo(() => {
     if (activeCellOptions.length === 0) return [];
-    // Include ANY submission that still needs organizing — either waste not placed
-    // into a cell OR a historical truck missing its Truck Capacity (now completed
-    // here rather than required at entry, per #6). This includes APPROVED
-    // (acknowledged) submissions the admin validated without assigning cells. Only
-    // reverted/rejected entries are excluded (they are locked and re-encoded through
-    // the edit flow instead).
-    //
-    // Both `unplacedCount` and `missingCapacityCount` are computed SERVER-side
-    // (portalAuth#summarizeCellAssignment), so the browser no longer walks every
-    // truck and vehicle of every submission — the list payload doesn't carry trucks.
-    return (submissions || []).filter(
-      (sub) =>
-        sub.status !== "reverted" &&
-        sub.status !== "rejected" &&
-        (Number(sub.unplacedCount || 0) > 0 || Number(sub.missingCapacityCount || 0) > 0),
-    );
+    // Centralized rule (organizeCellsValidation#submissionNeedsOrganize): include
+    // ANY submission — approved/acknowledged/pending — that still has waste not
+    // placed into a cell OR a historical truck missing its Truck Capacity. Only
+    // reverted/rejected entries are excluded (they are locked and re-encoded
+    // through the edit flow instead). Both counts are computed SERVER-side.
+    return getUnplacedSubmissions(submissions);
   }, [submissions, activeCellOptions.length]);
 
   const openCellOrganizer = async () => {
     if (!ORGANIZE_CELLS_ENABLED) return;
+    // Prevent overlapping loads: the organizer can be opened from the auto-prompt
+    // AND a menu click near-simultaneously. Without this guard each open fired its
+    // own /my-submissions/batch, contributing to the request storm.
+    if (cellOrganizerLoadingRef.current) {
+      setCellOrganizerOpen(true);
+      return;
+    }
+    cellOrganizerLoadingRef.current = true;
 
     // Open the modal FIRST, with a loading state. Previously this awaited the fetch
     // before calling setCellOrganizerOpen(true), so clicking the menu left the app
@@ -1224,11 +1292,18 @@ export default function SLFPortal() {
       }));
       setCellOrganizerData(working);
     } catch (err) {
+      // A 429 here means the limiter is throttling — surface a calm "try again
+      // shortly" message and DO NOT auto-retry, so the modal never spins up another
+      // request loop against the limiter.
+      const status = err?.response?.status;
       setCellOrganizerError(
-        err.response?.data?.message ||
-          "We couldn't load the submissions to organize. Please try again.",
+        status === 429
+          ? "The server is busy right now. Please wait a few seconds and try again."
+          : err.response?.data?.message ||
+              "We couldn't load the submissions to organize. Please try again.",
       );
     } finally {
+      cellOrganizerLoadingRef.current = false;
       setCellOrganizerLoading(false);
     }
   };
@@ -1268,7 +1343,7 @@ export default function SLFPortal() {
           ...sub,
           placements: (sub.placements || []).map((p) =>
             p.truckIndex === truckIndex && p.vehicleIndex === vehicleIndex
-              ? { ...p, capacity: capacityValue, capacityUnit: baselineUnit || p.capacityUnit || "m³" }
+              ? { ...p, capacity: capacityValue, capacityUnit: baselineUnit || p.capacityUnit || slfUnit }
               : p,
           ),
         };
@@ -1320,7 +1395,7 @@ export default function SLFPortal() {
                 ...(providesCapacity
                   ? {
                       truckCapacity: Number(p.capacity),
-                      truckCapacityUnit: baselineUnit || p.capacityUnit || "m³",
+                      truckCapacityUnit: baselineUnit || p.capacityUnit || slfUnit,
                     }
                   : {}),
               };
@@ -1386,9 +1461,13 @@ export default function SLFPortal() {
     if (unplacedSubmissions.length === 0) return;
     setCellOrganizerPrompted(true);
     Swal.fire({
-      icon: "info",
+      icon: "warning",
       title: "Organize Your Cell Placements",
-      html: `You have <b>${unplacedSubmissions.length}</b> past submission(s) that still need organizing — waste to place into a cell and/or a missing Truck Capacity to complete. New submissions are blocked until these are done.`,
+      html:
+        `You have <b>${unplacedSubmissions.length}</b> past submission(s) that still need organizing. ` +
+        `<b>New transport entries and submissions are blocked</b> until these are completed:` +
+        formatOrganizeWarningHtml(unplacedSubmissions, baselineUnit || slfUnit),
+      width: 620,
       showCancelButton: true,
       confirmButtonText: "Organize Now",
       cancelButtonText: "Later",
@@ -1482,7 +1561,7 @@ export default function SLFPortal() {
       .then(({ data }) => {
         if (hasBaselinePayload(data)) {
           const unit =
-            data.baselineUnit || data.totalVolumeAcceptedUnit || "m³";
+            data.baselineUnit || data.totalVolumeAcceptedUnit || slfUnit;
           setBaselineUnit(unit);
           setAcceptsHazardousWaste(data.acceptsHazardousWaste || false);
           baselineForm.setFieldsValue({
@@ -1783,6 +1862,86 @@ export default function SLFPortal() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOnline, activeMenu, portalUser?.email, fetchSubmissions]);
 
+  // Item #4: admin → portal-user messages. Fetch the user's active (undismissed)
+  // messages once after login, then receive new ones in real time over the portal
+  // socket room (no polling). Only ever the intended user's own messages.
+  useEffect(() => {
+    if (!portalUser?.email || isDeveloperContext) return undefined;
+    let cancelled = false;
+    api
+      .get("/portal-messages/mine")
+      .then(({ data }) => {
+        if (cancelled) return;
+        const list = Array.isArray(data) ? data : [];
+        setPortalMessages(list);
+      })
+      .catch(() => {});
+    const sock = connectSocket("portal", portalUser.email);
+    const onMessage = (payload) => {
+      if (!payload || !payload._id) return;
+      // De-dupe by id so a refresh + real-time echo of the same message never
+      // queues twice.
+      setPortalMessages((prev) => (prev.some((m) => m._id === payload._id) ? prev : [...prev, payload]));
+    };
+    sock.on("portal-message", onMessage);
+    return () => {
+      cancelled = true;
+      sock.off("portal-message", onMessage);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [portalUser?.email, isDeveloperContext]);
+
+  // Dismiss (mark read for the session) or "Do Not Show Again" (permanent) — both
+  // owner-guarded server-side. Removes it from the visible list either way.
+  const dismissPortalMessage = async (id, permanent) => {
+    try {
+      await api.patch(`/portal-messages/${id}/${permanent ? "dismiss" : "read"}`);
+    } catch {
+      /* best-effort — still hide locally so the user isn't stuck */
+    }
+    setPortalMessages((prev) => prev.filter((m) => m._id !== id));
+  };
+
+  // Item #4: display unread admin messages with SweetAlert2, ONE at a time (queued,
+  // never overlapping). A ref guard prevents the same message reopening across
+  // rerenders; content is HTML-escaped before rendering. Dismiss / Do Not Show
+  // Again persist through the existing message-status API (dismissPortalMessage),
+  // which removes the message from the queue → the effect shows the next one.
+  const msgShowingRef = useRef(false);
+  useEffect(() => {
+    if (isDeveloperContext || msgShowingRef.current) return;
+    const msg = portalMessages[0];
+    if (!msg) return;
+    msgShowingRef.current = true;
+    const esc = (s) =>
+      String(s ?? "").replace(/[&<>"']/g, (c) => (
+        { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]
+      ));
+    const when = msg.createdAt ? dayjs(msg.createdAt).format("MMM D, YYYY h:mm A") : "";
+    Swal.fire({
+      icon: "info",
+      title: esc(msg.title || "Message from EMB Region III"),
+      html:
+        `<div style="text-align:left">` +
+        `<div style="white-space:pre-wrap;word-break:break-word">${esc(msg.message)}</div>` +
+        `<div style="margin-top:12px;font-size:12px;color:#888">` +
+        `${esc(msg.senderName || "EMB Region III")}${when ? ` &middot; ${esc(when)}` : ""}</div>` +
+        `</div>`,
+      showDenyButton: true,
+      confirmButtonText: "Dismiss",
+      denyButtonText: "Do Not Show Again",
+      confirmButtonColor: "#1a3353",
+      denyButtonColor: "#8c8c8c",
+      allowOutsideClick: false,
+      focusConfirm: true,
+    }).then(async (result) => {
+      // Deny = permanent ("Do Not Show Again"); Confirm/Dismiss = read for now.
+      await dismissPortalMessage(msg._id, result.isDenied === true);
+      msgShowingRef.current = false;
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [portalMessages, isDeveloperContext]);
+
   // Reflect admin-side SLF Data Table edits in real time. When the server emits
   // a facility/submissions/baseline data-refresh, re-pull the facility info and
   // submission history so the portal always mirrors the latest admin changes.
@@ -1791,6 +1950,17 @@ export default function SLFPortal() {
     const sock = connectSocket("portal", portalUser.email);
     const onFacilityRefresh = (payload) => {
       const target = payload?.target;
+      // Developer toggled the SLF sensitive-value masking flag (or another app
+      // setting changed) — re-pull settings live so the portal re-masks/unmasks
+      // without a page reload. Bypass the cache so the fresh flag wins.
+      if (target === "app-settings") {
+        invalidateCache(PORTAL_SETTINGS_CACHE_KEY);
+        api
+          .get("/settings/app")
+          .then(({ data }) => setPortalSettings(data))
+          .catch(() => {});
+        return;
+      }
       if (!target || ["facility", "submissions", "baselines"].includes(target)) {
         setSlfInfoRefresh((n) => n + 1);
         invalidateCache(`${PORTAL_SUBMISSIONS_CACHE_KEY}-${portalUser?.email || ""}`);
@@ -1925,7 +2095,7 @@ export default function SLFPortal() {
       if (cap.exceeded) {
         vehErr.actualVolume = `Waste volume exceeds the allowed truck capacity (max ${Number(
           cap.maxAllowed.toFixed(2),
-        )} ${(capacityUnit || "m³").replace("m3", "m³")} at ${capacityAllowancePct}% allowance).`;
+        )} ${(capacityUnit || slfUnit).replace("m3", "m³")} at ${capacityAllowancePct}% allowance).`;
       }
       // Strict +10% elevation cap: the ENTERED capacity may not exceed the
       // declared/registered capacity for this plate by more than 10%. No override.
@@ -1965,7 +2135,44 @@ export default function SLFPortal() {
     return Object.keys(errs).length === 0;
   };
 
+  // Centralized block guard (organizeCellsValidation): when past submissions
+  // still need organizing, surface the detailed warning and offer the organizer.
+  // Returns true when the action must be blocked. Used by the Add Transport Entry
+  // guard and the pre-submit gate so the rule and message live in one place.
+  const blockedByUnorganized = (actionLabel = "submit new entries") => {
+    if (!ORGANIZE_CELLS_ENABLED || unplacedSubmissions.length === 0) return false;
+    Swal.fire({
+      icon: "warning",
+      title: "Organize Past Submissions First",
+      html:
+        `You must complete your past submissions in <b>Organize Cells</b> before you can ${actionLabel}:` +
+        formatOrganizeWarningHtml(unplacedSubmissions, baselineUnit || slfUnit),
+      width: 620,
+      showCancelButton: true,
+      confirmButtonText: "Organize Now",
+      cancelButtonText: "Later",
+      confirmButtonColor: "#722ed1",
+    }).then((result) => {
+      if (result.isConfirmed) openCellOrganizer();
+    });
+    return true;
+  };
+
   const handleAddTruck = () => {
+    // Block creating a NEW transport entry while past submissions remain
+    // unorganized (editing an existing draft row is still allowed).
+    if (!editingTruckKey && blockedByUnorganized("add new transport entries")) {
+      return;
+    }
+    // Block creating a NEW entry when no cell can accept waste.
+    if (!editingTruckKey && allCellsUnavailable) {
+      showError({
+        type: "error",
+        title: "No Available SLF Cell",
+        message: NO_AVAILABLE_CELL_MESSAGE,
+      });
+      return;
+    }
     if (!validateTruck()) return;
     if (editingTruckKey) {
       setTrucks((prev) =>
@@ -2085,7 +2292,7 @@ export default function SLFPortal() {
             plateNumber: record.plateNumber || "",
             vehicleType: record.vehicleType || "",
             capacity: record.capacity,
-            capacityUnit: record.capacityUnit || "m³",
+            capacityUnit: record.capacityUnit || slfUnit,
           },
         ];
       }
@@ -2183,7 +2390,7 @@ export default function SLFPortal() {
     const finalDraft = normalizeHaulerRecord(
       { ...haulerDraft, officeAddress: resolvedAddress },
       0,
-      baselineUnit || "m³",
+      baselineUnit || slfUnit,
     );
     if (editingHaulerKey) {
       setHaulers((prev) =>
@@ -2191,14 +2398,14 @@ export default function SLFPortal() {
           prev.map((h) =>
             h.key === editingHaulerKey ? { ...h, ...finalDraft } : h,
           ),
-          baselineUnit || "m³",
+          baselineUnit || slfUnit,
         ),
       );
     } else {
       setHaulers((prev) =>
         mergeHaulersByName(
           [...prev, { key: Date.now(), ...finalDraft }],
-          baselineUnit || "m³",
+          baselineUnit || slfUnit,
         ),
       );
     }
@@ -2255,7 +2462,7 @@ export default function SLFPortal() {
         hauler: record.hauler || "",
         plateNumber: record.plateNumber || "",
         truckCapacity: record.truckCapacity,
-        truckCapacityUnit: record.truckCapacityUnit || baselineUnit || "m³",
+        truckCapacityUnit: record.truckCapacityUnit || baselineUnit || slfUnit,
         vehicles:
           record.vehicles?.length > 0
             ? record.vehicles.map((v, i) => migrateVehicle(v, i, i === 0))
@@ -2266,7 +2473,7 @@ export default function SLFPortal() {
                       plateNumber: record.plateNumber,
                       capacity: record.truckCapacity,
                       capacityUnit:
-                        record.truckCapacityUnit || baselineUnit || "m³",
+                        record.truckCapacityUnit || baselineUnit || slfUnit,
                     },
                     0,
                     true,
@@ -2276,11 +2483,11 @@ export default function SLFPortal() {
                   {
                     ...EMPTY_VEHICLE,
                     key: Date.now(),
-                    capacityUnit: baselineUnit || "m³",
+                    capacityUnit: baselineUnit || slfUnit,
                   },
                 ],
         actualVolume: record.actualVolume,
-        actualVolumeUnit: record.actualVolumeUnit || baselineUnit || "m³",
+        actualVolumeUnit: record.actualVolumeUnit || baselineUnit || slfUnit,
         wasteType: record.wasteType,
         hazWasteCode: record.hazWasteCode,
         cellName: record.cellName || "",
@@ -2298,13 +2505,13 @@ export default function SLFPortal() {
       setEditingTruckKey(null);
       const draft = {
         ...EMPTY_TRUCK,
-        truckCapacityUnit: baselineUnit || "m³",
-        actualVolumeUnit: baselineUnit || "m³",
+        truckCapacityUnit: baselineUnit || slfUnit,
+        actualVolumeUnit: baselineUnit || slfUnit,
         vehicles: [
           {
             ...EMPTY_VEHICLE,
             key: Date.now(),
-            capacityUnit: baselineUnit || "m³",
+            capacityUnit: baselineUnit || slfUnit,
           },
         ],
       };
@@ -2384,7 +2591,7 @@ export default function SLFPortal() {
   // number under the wrong unit; the volume is converted so the figure the user sees
   // — and re-saves — is truthful in the declared unit.
   const openCellEntryForEdit = (row, { setDraft, setEditingKey, setOpen }) => {
-    const declared = normalizeUnit(baselineUnit || "m³");
+    const declared = normalizeUnit(baselineUnit || slfUnit);
     const stored = normalizeUnit(row.unit || declared);
     const converted =
       stored === declared ? row.volume : convertVolume(row.volume, stored, declared);
@@ -2418,7 +2625,7 @@ export default function SLFPortal() {
             ? {
                 ...activeCellDraft,
                 unit: normalizeUnit(
-                  activeCellDraft.unit || baselineUnit || "m³",
+                  activeCellDraft.unit || baselineUnit || slfUnit,
                 ),
                 key: editingActiveCellKey,
               }
@@ -2430,7 +2637,7 @@ export default function SLFPortal() {
         ...prev,
         {
           ...activeCellDraft,
-          unit: normalizeUnit(activeCellDraft.unit || baselineUnit || "m³"),
+          unit: normalizeUnit(activeCellDraft.unit || baselineUnit || slfUnit),
           key: Date.now(),
         },
       ]);
@@ -2454,7 +2661,7 @@ export default function SLFPortal() {
             ? {
                 ...closedCellDraft,
                 unit: normalizeUnit(
-                  closedCellDraft.unit || baselineUnit || "m³",
+                  closedCellDraft.unit || baselineUnit || slfUnit,
                 ),
                 key: editingClosedCellKey,
               }
@@ -2466,7 +2673,7 @@ export default function SLFPortal() {
         ...prev,
         {
           ...closedCellDraft,
-          unit: normalizeUnit(closedCellDraft.unit || baselineUnit || "m³"),
+          unit: normalizeUnit(closedCellDraft.unit || baselineUnit || slfUnit),
           key: Date.now(),
         },
       ]);
@@ -2476,7 +2683,15 @@ export default function SLFPortal() {
 
   // ── Hauler Client helpers ──
   const handleSaveClient = () => {
-    if (!clientDraft.clientName || !clientDraft.clientType) return;
+    if (!clientDraft.clientName || !clientDraft.clientType) {
+      Swal.fire("Missing details", "Client name and type are required.", "warning");
+      return;
+    }
+    // Province is required so the client can be classified within/outside Region 3.
+    if (!clientDraft.province) {
+      Swal.fire("Province required", "Select the client's province so it can be classified for Region 3.", "warning");
+      return;
+    }
     // Resolve PSGC codes to human-readable names for LGU type
     const regionName =
       (regions || []).find((r) => String(r.code) === clientDraft.region)
@@ -2512,11 +2727,44 @@ export default function SLFPortal() {
     setClientModalOpen(false);
   };
 
+  // ── Export Hauler Data (client-side, scoped to THIS portal user's loaded
+  //    baseline) → one flat row per hauler-client relationship. CSV with UTF-8
+  //    BOM (preserves PH characters) and formula-injection-safe cells. ──
+  const HAULER_EXPORT_HEADERS = ["Hauler Name", "Hauler Office Address", "Client Ref", "Client Name", "Client Type", "Region", "Province", "City/Municipality"];
+  const csvCell = (v) => {
+    let s = v == null ? "" : String(v);
+    if (/^[=+\-@\t\r]/.test(s)) s = `'${s}`; // neutralize spreadsheet formulas
+    if (/[",\n\r]/.test(s)) s = `"${s.replace(/"/g, '""')}"`;
+    return s;
+  };
+  const downloadCsv = (rows, name) => {
+    const csv = rows.map((r) => r.map(csvCell).join(",")).join("\r\n");
+    const blob = new Blob([`﻿${csv}`], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = name; a.click();
+    URL.revokeObjectURL(url);
+  };
+  const exportHaulerData = () => {
+    const rows = [HAULER_EXPORT_HEADERS];
+    (haulers || []).forEach((h) => {
+      const clients = h.privateSectorClients || [];
+      if (!clients.length) { rows.push([h.haulerName || "", h.officeAddress || "", "", "", "", "", "", ""]); return; }
+      clients.forEach((c) => rows.push([
+        h.haulerName || "", h.officeAddress || "", c.key || "", c.clientName || "", c.clientType || "",
+        c.regionName || c.region || "", c.provinceName || c.province || "", c.municipalityName || c.municipality || "",
+      ]));
+    });
+    const who = String(portalUser?.companyName || portalUser?.email || "portal").replace(/[^a-z0-9]+/gi, "_");
+    downloadCsv(rows, `hauler-data_${who}_${new Date().toISOString().slice(0, 10)}.csv`);
+  };
+  const downloadHaulerTemplate = () => downloadCsv([HAULER_EXPORT_HEADERS], "hauler-data_template.csv");
+
   const handleSaveTruck = () => {
     if (!validateTruck()) return;
     // Every transport-entry unit is forced to the SLF's declared baseline unit so
     // an entry can never carry a mismatched unit (see validateTransportUnits).
-    const entryUnit = baselineUnit || "m³";
+    const entryUnit = baselineUnit || slfUnit;
     // Flatten first vehicle into top-level fields for backward compat
     const vehicles = (truckDraft.vehicles || []).map(({ key, ...rest }) => ({
       ...rest,
@@ -2806,28 +3054,31 @@ export default function SLFPortal() {
           companyProvince: companyValues.companyProvince,
           companyMunicipality: companyValues.companyMunicipality,
           companyBarangay: companyValues.companyBarangay,
-          baselineUnit,
+          // Persist the assigned SLF's current unit when the baseline has no
+          // explicit unit yet — never an empty/stale unit (Item #3: store the unit
+          // on every record so historical values stay accurate).
+          baselineUnit: baselineUnit || slfUnit,
           totalVolumeAccepted: baselineValues.totalVolumeAccepted,
-          totalVolumeAcceptedUnit: baselineUnit,
+          totalVolumeAcceptedUnit: baselineUnit || slfUnit,
           activeCellResidualVolume,
-          activeCellResidualUnit: baselineUnit,
+          activeCellResidualUnit: baselineUnit || slfUnit,
           activeCellInertVolume,
-          activeCellInertUnit: baselineUnit,
+          activeCellInertUnit: baselineUnit || slfUnit,
           activeCellHazardousVolume,
-          activeCellHazardousUnit: baselineUnit,
+          activeCellHazardousUnit: baselineUnit || slfUnit,
           closedCellResidualVolume,
-          closedCellResidualUnit: baselineUnit,
+          closedCellResidualUnit: baselineUnit || slfUnit,
           closedCellInertVolume,
-          closedCellInertUnit: baselineUnit,
+          closedCellInertUnit: baselineUnit || slfUnit,
           closedCellHazardousVolume,
-          closedCellHazardousUnit: baselineUnit,
+          closedCellHazardousUnit: baselineUnit || slfUnit,
           activeCellEntries: activeCellEntries.map(({ key, ...rest }) => ({
             ...rest,
-            unit: rest.unit || baselineUnit,
+            unit: rest.unit || baselineUnit || slfUnit,
           })),
           closedCellEntries: closedCellEntries.map(({ key, ...rest }) => ({
             ...rest,
-            unit: rest.unit || baselineUnit,
+            unit: rest.unit || baselineUnit || slfUnit,
           })),
           accreditedHaulers: mergeHaulersByName(haulers, baselineUnit).map(
             ({ key, vehicles, privateSectorClients, ...rest }) => ({
@@ -3292,7 +3543,7 @@ export default function SLFPortal() {
                 normalized.capacity = parseUploadNumber(value);
               else if (k.includes("capacity") && k.includes("unit"))
                 normalized.capacityUnit = normalizeUnit(
-                  value || baselineUnit || "m³",
+                  value || baselineUnit || slfUnit,
                 );
               else if (isClientsHeader(k))
                 normalized.privateSectorClients = cleanUploadText(value)
@@ -3507,18 +3758,18 @@ export default function SLFPortal() {
         hauler: d.hauler || "",
         plateNumber: d.plateNumber || "",
         truckCapacity: parseUploadNumber(d.truckCapacity),
-        truckCapacityUnit: baselineUnit || "m³",
+        truckCapacityUnit: baselineUnit || slfUnit,
         vehicles: d.plateNumber
           ? [
               {
                 plateNumber: d.plateNumber,
                 capacity: parseUploadNumber(d.truckCapacity),
-                capacityUnit: baselineUnit || "m³",
+                capacityUnit: baselineUnit || slfUnit,
               },
             ]
           : [],
         actualVolume: parseUploadNumber(d.actualVolume),
-        actualVolumeUnit: baselineUnit || "m³",
+        actualVolumeUnit: baselineUnit || slfUnit,
         wasteType: d.wasteType || "Residual",
         hazWasteCode: d.hazWasteCode || [],
       }));
@@ -3535,14 +3786,14 @@ export default function SLFPortal() {
                 plateNumber: d.plateNumber || "",
                 vehicleType: d.vehicleType || "",
                 capacity: parseUploadNumber(d.capacity),
-                capacityUnit: d.capacityUnit || baselineUnit || "m³",
+                capacityUnit: d.capacityUnit || baselineUnit || slfUnit,
               },
             ]
           : [],
         privateSectorClients: d.privateSectorClients || [],
       }));
       setHaulers((prev) =>
-        mergeHaulersByName([...prev, ...newHaulers], baselineUnit || "m³"),
+        mergeHaulersByName([...prev, ...newHaulers], baselineUnit || slfUnit),
       );
     }
     setUploadModalOpen(false);
@@ -3805,7 +4056,7 @@ export default function SLFPortal() {
         })),
           accreditedHaulers: mergeHaulersByName(haulers, baselineUnit).map(
             (hauler, index) =>
-              cleanHaulerForSubmit(hauler, index, baselineUnit || "m³"),
+              cleanHaulerForSubmit(hauler, index, baselineUnit || slfUnit),
           ),
         acceptsHazardousWaste,
         trucks: trucks.map(cleanTruckForSubmit),
@@ -3967,13 +4218,13 @@ export default function SLFPortal() {
     }
 
     // ── Unit-conflict check ──
-    const currentUnit = normalizeUnit(baselineUnit || "m³");
+    const currentUnit = normalizeUnit(baselineUnit || slfUnit);
     const conflictingTrucks = trucks.filter((truck) => {
-      const truckUnit = normalizeUnit(truck.actualVolumeUnit || baselineUnit || "m³");
+      const truckUnit = normalizeUnit(truck.actualVolumeUnit || baselineUnit || slfUnit);
       return truckUnit !== currentUnit;
     });
     if (conflictingTrucks.length > 0) {
-      const unitSet = [...new Set(conflictingTrucks.map((t) => normalizeUnit(t.actualVolumeUnit || baselineUnit || "m³")))];
+      const unitSet = [...new Set(conflictingTrucks.map((t) => normalizeUnit(t.actualVolumeUnit || baselineUnit || slfUnit)))];
       const { isConfirmed } = await Swal.fire({
         icon: "warning",
         title: "Unit of Measurement Mismatch",
@@ -4144,14 +4395,38 @@ export default function SLFPortal() {
   // rules the server re-enforces (validateWasteGeneration + transport checks) plus
   // the workflow gates handleConfirmSubmit applies. Human-readable so the tooltip
   // tells the user exactly what to fix.
+  // The facility has cells configured but NONE can currently accept waste (all
+  // full / completed / out-of-service / closed / restricted). New disposal entries
+  // are blocked until an operational cell is available.
+  const allCellsUnavailable = useMemo(
+    () => slfCellCount > 0 && activeCellOptions.length === 0,
+    [slfCellCount, activeCellOptions.length],
+  );
+  const NO_AVAILABLE_CELL_MESSAGE =
+    "No operational SLF cell is currently available for waste placement. Cells that are full, completed, used, or out of service cannot accept new disposal entries. Update the facility's cell records or coordinate with the administrator before submitting new entries.";
+
+  // Item #2: the assigned SLF is tagged non-operational (its cell is subject to
+  // EMB Region III verification). Official submissions are disabled; any attempt
+  // is saved as a Draft (enforced server-side, not just by the disabled button).
+  const slfNonOperational = useMemo(
+    () => /non/i.test(String(slfInfo?.statusOfSLF || "")),
+    [slfInfo?.statusOfSLF],
+  );
+  const NON_OPERATIONAL_MESSAGE =
+    "Your assigned SLF is currently tagged as non-operational and its cell is subject to EMB Region III verification. New submissions cannot be officially submitted while this restriction is active — any submission attempt is saved as a Draft. For assistance, contact EMB Region III at emb_region3@emb.gov.ph.";
+
   const submitBlockers = useMemo(() => {
     const list = [];
+    if (slfNonOperational) list.push(NON_OPERATIONAL_MESSAGE);
     if (missingBasicInfo) list.push("Complete the Waste Generator's Company Information.");
     if (missingBaselineInfo) list.push("Complete the Baseline Data (Total Volume Accepted).");
     if (!watchedDisposalDate) list.push("Select the Date of Disposal.");
     if ((trucks || []).length === 0) list.push("Add at least one transport entry.");
     else if (wasteGenValidationIssues.length > 0) {
       list.push("Complete every required Waste Generation Information field (incl. a disposal cell for each entry).");
+    }
+    if (allCellsUnavailable) {
+      list.push(NO_AVAILABLE_CELL_MESSAGE);
     }
     if (missingHazardousCodeTrucks.length > 0) {
       list.push("Encode the Hazardous Waste Code for treated hazardous entries.");
@@ -4167,16 +4442,51 @@ export default function SLFPortal() {
     }
     return list;
   }, [
+    slfNonOperational,
     missingBasicInfo,
     missingBaselineInfo,
     watchedDisposalDate,
     trucks,
     wasteGenValidationIssues.length,
+    allCellsUnavailable,
     missingHazardousCodeTrucks.length,
     haulerVehiclesMissingCapacity.length,
     unresolvedRevert,
     unplacedSubmissions.length,
   ]);
+
+  // Item #2: prominent one-time notice after login when the assigned SLF is
+  // non-operational. Shown once per SLF (not on every render/refresh) with the
+  // restriction details and the official EMB Region III contact.
+  const nonOpNoticeRef = useRef(null);
+  useEffect(() => {
+    if (!slfNonOperational || !activeSlfId) return;
+    if (isDeveloperContext) return; // developers inspect read-only; no user-facing block
+    if (nonOpNoticeRef.current === String(activeSlfId)) return;
+    nonOpNoticeRef.current = String(activeSlfId);
+    Modal.warning({
+      title: "Assigned SLF Is Non-Operational",
+      width: 560,
+      okText: "I Understand",
+      content: (
+        <div style={{ fontSize: 13.5, lineHeight: 1.7 }}>
+          <p style={{ marginTop: 4 }}>
+            Your assigned SLF{activeSlfName ? ` (${activeSlfName})` : ""} is currently
+            tagged as <strong>non-operational</strong>.
+          </p>
+          <ul style={{ paddingLeft: 18, marginBottom: 10 }}>
+            <li>The SLF cell is subject to <strong>EMB Region III verification</strong>.</li>
+            <li>New submissions <strong>cannot be officially submitted</strong> while this restriction is active.</li>
+            <li>Any submission you attempt will be <strong>saved as a Draft</strong> instead of an official record.</li>
+          </ul>
+          <p style={{ marginBottom: 0 }}>
+            For assistance, contact <strong>EMB Region III</strong> at{" "}
+            <a href="mailto:emb_region3@emb.gov.ph">emb_region3@emb.gov.ph</a>.
+          </p>
+        </div>
+      ),
+    });
+  }, [slfNonOperational, activeSlfId, activeSlfName, isDeveloperContext]);
 
   // Task 2: project this submission's per-cell waste against the cell's current
   // fill/capacity (from the facility Cell Infra). Full = projected >= capacity
@@ -4197,7 +4507,7 @@ export default function SLFPortal() {
         const vol = Number(row.actualVolume || 0);
         if (idx == null || !(vol > 0)) return;
         const capUnit = normalizeUnit(
-          slfInfo?.cellCapacityUnits?.[idx] || slfInfo?.cellFillUnits?.[idx] || "m³",
+          slfInfo?.cellCapacityUnits?.[idx] || slfInfo?.cellFillUnits?.[idx] || slfUnit,
         );
         const converted = convertVolume(vol, row.actualVolumeUnit || capUnit, capUnit);
         perCell.set(idx, (perCell.get(idx) || 0) + converted);
@@ -4207,7 +4517,7 @@ export default function SLFPortal() {
       const capacity = Number(slfInfo?.cellCapacities?.[idx] || 0);
       if (!(capacity > 0)) return;
       const capUnit = normalizeUnit(
-        slfInfo?.cellCapacityUnits?.[idx] || slfInfo?.cellFillUnits?.[idx] || "m³",
+        slfInfo?.cellCapacityUnits?.[idx] || slfInfo?.cellFillUnits?.[idx] || slfUnit,
       );
       const currentFill = convertVolume(
         Number(slfInfo?.cellFillValues?.[idx] || 0),
@@ -4247,6 +4557,15 @@ export default function SLFPortal() {
       });
       return;
     }
+    // Hard-block when every cell is full / completed / out-of-service / closed.
+    if (allCellsUnavailable) {
+      showError({
+        type: "error",
+        title: "No Available SLF Cell",
+        message: NO_AVAILABLE_CELL_MESSAGE,
+      });
+      return;
+    }
     // Task 1: block new submissions while a reverted submission stays unresolved
     // for 24h+. The user must correct/resubmit it first.
     if (unresolvedRevert) {
@@ -4263,21 +4582,13 @@ export default function SLFPortal() {
     // rule now requires prior approved waste to be fully organized first. Offer to
     // open the organizer straight away.
     if (ORGANIZE_CELLS_ENABLED && unplacedSubmissions.length > 0) {
-      const unplacedTotal = unplacedSubmissions.reduce(
-        (n, s) => n + Number(s.unplacedCount || 0),
-        0,
-      );
-      const capacityTotal = unplacedSubmissions.reduce(
-        (n, s) => n + Number(s.missingCapacityCount || 0),
-        0,
-      );
-      const needs = [];
-      if (unplacedTotal > 0) needs.push(`waste not yet placed into a cell`);
-      if (capacityTotal > 0) needs.push(`missing Truck Capacity`);
       const result = await Swal.fire({
         icon: "warning",
         title: "Organize Past Submissions First",
-        html: `You have <b>${unplacedSubmissions.length}</b> past submission(s) that still need attention (${needs.join(" and ")}). Please complete these in <b>Organize Cells</b> before submitting a new transaction.`,
+        html:
+          `You have <b>${unplacedSubmissions.length}</b> past submission(s) that must be completed in <b>Organize Cells</b> before submitting a new transaction:` +
+          formatOrganizeWarningHtml(unplacedSubmissions, baselineUnit || slfUnit),
+        width: 620,
         showCancelButton: true,
         confirmButtonText: "Organize Now",
         cancelButtonText: "Later",
@@ -4411,8 +4722,15 @@ export default function SLFPortal() {
         error: false,
       });
     }
+    // Generate the idempotency key once per logical submission; a retry after a
+    // recoverable failure reuses it so the backend never double-persists.
+    if (!submitKeyRef.current) {
+      submitKeyRef.current =
+        (window.crypto?.randomUUID?.() || `sub-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    }
+    const idempotencyConfig = { headers: { "X-Idempotency-Key": submitKeyRef.current } };
     try {
-      await api.post(
+      const resp = await api.post(
         "/data-slf",
         {
           entries: [entry],
@@ -4420,6 +4738,7 @@ export default function SLFPortal() {
         },
         showProgress
           ? {
+              ...idempotencyConfig,
               onUploadProgress: (e) => {
                 if (!e.total) return;
                 // Upload accounts for ~90%; the last 10% is server processing.
@@ -4434,21 +4753,33 @@ export default function SLFPortal() {
                 }));
               },
             }
-          : undefined,
+          : idempotencyConfig,
       );
       if (showProgress) {
-        setSubmitProgress((p) => ({ ...p, percent: 100, text: "Submitted!" }));
-        // Briefly show 100% before closing.
-        await new Promise((r) => setTimeout(r, 400));
         setSubmitProgress((p) => ({ ...p, open: false }));
       }
+      submitKeyRef.current = null; // confirmed persisted — retire the key
       setReviewModalOpen(false);
-      Swal.fire({
-        icon: "success",
-        title: "Submitted Successfully!",
-        html: "Your disposal data has been recorded.",
-        confirmButtonColor: "#1a3353",
-      });
+      // Item #2: the backend saved this as a DRAFT (HTTP 202) because the assigned
+      // SLF is tagged non-operational and pending EMB Region III verification — it
+      // is NOT an official submission. Explain clearly instead of "Submitted".
+      if (resp?.data?.savedAsDraft) {
+        Swal.fire({
+          icon: "info",
+          title: "Saved as Draft — Not Officially Submitted",
+          html:
+            resp.data.message ||
+            "Your assigned SLF is currently tagged as non-operational and its cell is subject to EMB Region III verification. New submissions cannot be officially submitted while this restriction is active, so your entry was saved as a Draft. You can find it under Drafts once the restriction is lifted.",
+          confirmButtonColor: "#1a3353",
+        });
+      } else {
+        Swal.fire({
+          icon: "success",
+          title: "Submitted Successfully!",
+          html: "Your disposal data has been recorded.",
+          confirmButtonColor: "#1a3353",
+        });
+      }
       setSubmitted(true);
       setTrucks([]);
       setTruckDraft({ ...EMPTY_TRUCK });
@@ -4481,6 +4812,23 @@ export default function SLFPortal() {
           type: "error",
           title: "Request Timed Out",
           message: "The server took too long to respond. Please try again.",
+        });
+      } else if (err.response?.data?.code === "UNRESOLVED_REVERT") {
+        // #2: backend rule block (also enforced server-side to prevent API bypass) —
+        // show a clear modal with a direct action to the correction flow.
+        const ctxId = err.response?.data?.ruleContext?.idNo;
+        Swal.fire({
+          icon: "warning",
+          title: "Resolve Reverted Submission First",
+          text:
+            err.response?.data?.message ||
+            `Please correct and resubmit your reverted submission${ctxId ? ` (${ctxId})` : ""} before submitting a new transaction.`,
+          showCancelButton: true,
+          confirmButtonText: "Review Submission History",
+          cancelButtonText: "Close",
+          confirmButtonColor: "#1a3353",
+        }).then((r) => {
+          if (r.isConfirmed) setActiveMenu("history");
         });
       } else {
         showError({
@@ -4625,12 +4973,12 @@ export default function SLFPortal() {
               .filter((v) => v.capacity != null)
               .map(
                 (v) =>
-                  `${v.capacity} ${(v.capacityUnit || "m³").replace("m3", "m³")}`,
+                  `${v.capacity} ${(v.capacityUnit || slfUnit).replace("m3", "m³")}`,
               )
               .join(", ") || "—"
           );
         const cap = vehs[0]?.capacity ?? t.truckCapacity;
-        const unit = vehs[0]?.capacityUnit || t.truckCapacityUnit || "m³";
+        const unit = vehs[0]?.capacityUnit || t.truckCapacityUnit || slfUnit;
         return cap != null ? `${cap} ${unit.replace("m3", "m³")}` : "—";
       },
     },
@@ -4639,7 +4987,7 @@ export default function SLFPortal() {
       key: "vol",
       render: (_, t) =>
         t.actualVolume != null
-          ? `${t.actualVolume} ${t.actualVolumeUnit || "tons"}`
+          ? `${t.actualVolume} ${t.actualVolumeUnit || slfUnit}`
           : "—",
     },
     {
@@ -4724,7 +5072,7 @@ export default function SLFPortal() {
           <div key={i} style={{ fontSize: 12, lineHeight: "18px" }}>
             {v.vehicleType || "—"} · {v.plateNumber || "—"}
             {v.capacity != null
-              ? ` · ${v.capacity} ${(v.capacityUnit || "m³").replace("m3", "m³")}`
+              ? ` · ${v.capacity} ${(v.capacityUnit || slfUnit).replace("m3", "m³")}`
               : ""}
           </div>
         ));
@@ -4838,10 +5186,12 @@ export default function SLFPortal() {
     }
   };
 
-  // History table columns
-  // Submission History rows, with same-batch submissions collapsed into a single
-  // parent. Derived from the list the table already has — no extra request.
-  const groupedSubmissions = useMemo(() => groupSubmissions(submissions), [submissions]);
+  // History table columns. Grouping + filtering now live in HistoryPanel (it owns
+  // the filtered total, page size and reverted-first ordering).
+  // Global SLF sensitive-value masking (developer-controlled). When on, the
+  // history table masks contact/account identifiers (address); the resolver in
+  // OverviewPanel / detail modal masks volumes + capacity via the context.
+  const maskSensitive = !!portalSettings?.maskSensitiveSlfValues;
 
   const historyColumns = [
     { title: "#", key: "index", width: 50, render: (_, __, i) => i + 1 },
@@ -4886,7 +5236,9 @@ export default function SLFPortal() {
             {r.lguCompanyName}
           </Text>
           {r.address && (
-            <div style={{ fontSize: 12, color: "#888" }}>{r.address}</div>
+            <div style={{ fontSize: 12, color: "#888" }}>
+              {maskSensitive ? MASK_PLACEHOLDER : r.address}
+            </div>
           )}
         </div>
       ),
@@ -5824,7 +6176,7 @@ export default function SLFPortal() {
     <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "4px 8px", border: "1px solid #91caff", borderRadius: 8, background: "#e6f4ff", maxWidth: "100%" }}>
       <DatabaseOutlined style={{ color: "#1677ff" }} />
       {!isMobile && <Text strong style={{ fontSize: 12, color: "#003eb3", whiteSpace: "nowrap" }}>Unit of Measurement</Text>}
-      <Select size="small" value={baselineUnit || "m³"} onChange={handleBaselineUnitChange} disabled={baselineSaved} placeholder="Unit" style={{ width: isMobile ? 104 : 150 }}>
+      <Select size="small" value={baselineUnit || slfUnit} onChange={handleBaselineUnitChange} disabled={baselineSaved} placeholder="Unit" style={{ width: isMobile ? 104 : 150 }}>
         <Option value="m³">m³</Option>
         <Option value="tons">tons</Option>
       </Select>
@@ -5954,7 +6306,7 @@ export default function SLFPortal() {
               activeSlfName={activeSlfName}
               slfInfo={slfInfo}
               slfInfoLoading={slfInfoLoading}
-              baselineUnit={baselineUnit}
+              baselineUnit={baselineUnit || slfUnit}
               baselineSaved={baselineSaved}
               baselineForm={baselineForm}
               activeCellEntries={activeCellEntries}
@@ -6158,7 +6510,7 @@ export default function SLFPortal() {
                               </Text>
                             </div>
                             <Select
-                              value={baselineUnit || "m³"}
+                              value={baselineUnit || slfUnit}
                               onChange={handleBaselineUnitChange}
                               disabled={baselineSaved}
                               placeholder="Select unit of measurement"
@@ -6226,7 +6578,7 @@ export default function SLFPortal() {
                                       step={0.01}
                                       precision={2}
                                       addonAfter={
-                                        baselineUnit === "m³" ? "m³" : "tons"
+                                        (baselineUnit || slfUnit) === "m³" ? "m³" : "tons"
                                       }
                                       formatter={(v) =>
                                         v
@@ -6274,7 +6626,7 @@ export default function SLFPortal() {
                                         Total:{" "}
                                         {formatEntryVolumeSummary(
                                           activeCellEntries,
-                                          baselineUnit || "m³",
+                                          baselineUnit || slfUnit,
                                         )}
                                       </Text>
                                     )}
@@ -6291,7 +6643,7 @@ export default function SLFPortal() {
                                         cellName: "",
                                         wasteType: "Residual",
                                         volume: null,
-                                        unit: baselineUnit || "m³",
+                                        unit: baselineUnit || slfUnit,
                                       });
                                       setActiveCellModalOpen(true);
                                     }}
@@ -6384,7 +6736,7 @@ export default function SLFPortal() {
                                             style={{ color: "#52c41a" }}
                                           >
                                             {r.volume != null
-                                              ? `${r.volume.toLocaleString()} ${normalizeUnit(r.unit || baselineUnit || "m³")}`
+                                              ? `${r.volume.toLocaleString()} ${normalizeUnit(r.unit || baselineUnit || slfUnit)}`
                                               : "—"}
                                           </Text>
                                         ),
@@ -6449,7 +6801,7 @@ export default function SLFPortal() {
                                         Total:{" "}
                                         {formatEntryVolumeSummary(
                                           closedCellEntries,
-                                          baselineUnit || "m³",
+                                          baselineUnit || slfUnit,
                                         )}
                                       </Text>
                                     )}
@@ -6466,7 +6818,7 @@ export default function SLFPortal() {
                                         cellName: "",
                                         wasteType: "Residual",
                                         volume: null,
-                                        unit: baselineUnit || "m³",
+                                        unit: baselineUnit || slfUnit,
                                       });
                                       setClosedCellModalOpen(true);
                                     }}
@@ -6559,7 +6911,7 @@ export default function SLFPortal() {
                                             style={{ color: "#722ed1" }}
                                           >
                                             {r.volume != null
-                                              ? `${r.volume.toLocaleString()} ${normalizeUnit(r.unit || baselineUnit || "m³")}`
+                                              ? `${r.volume.toLocaleString()} ${normalizeUnit(r.unit || baselineUnit || slfUnit)}`
                                               : "—"}
                                           </Text>
                                         ),
@@ -6645,6 +6997,20 @@ export default function SLFPortal() {
                                         disabled={baselineSaved}
                                       >
                                         Upload Excel/CSV
+                                      </Button>
+                                      <Button
+                                        icon={<DownloadOutlined />}
+                                        onClick={exportHaulerData}
+                                        disabled={!haulers.length}
+                                      >
+                                        Export Hauler Data
+                                      </Button>
+                                      <Button
+                                        type="primary"
+                                        
+                                        onClick={downloadHaulerTemplate}
+                                      >
+                                        Download Sample Template
                                       </Button>
                                     </div>
                                     <Table
@@ -6822,7 +7188,7 @@ export default function SLFPortal() {
                                     )
                                     .toLocaleString()}
                                 </strong>{" "}
-                                {trucks[0]?.actualVolumeUnit || "tons"}
+                                {trucks[0]?.actualVolumeUnit || slfUnit}
                               </Text>
                             )}
                             <Space style={{ marginLeft: "auto" }} wrap>
@@ -6974,15 +7340,13 @@ export default function SLFPortal() {
                                           .filter((v) => v.capacity != null)
                                           .map(
                                             (v) =>
-                                              `${v.capacity} ${(v.capacityUnit || "m³").replace("m3", "m³")}`,
+                                              `${v.capacity} ${(v.capacityUnit || slfUnit).replace("m3", "m³")}`,
                                           )
                                           .join(", ")
                                       : t.truckCapacity != null
-                                        ? `${t.truckCapacity} ${(t.truckCapacityUnit || "m³").replace("m3", "m³")}`
+                                        ? `${t.truckCapacity} ${(t.truckCapacityUnit || slfUnit).replace("m3", "m³")}`
                                         : "—";
-                                  const isHaz = t.wasteType
-                                    ?.toLowerCase()
-                                    .includes("hazardous");
+                                  const isHaz = isHazardousWasteType(t.wasteType);
                                   const allClients = vehs.flatMap(
                                     (v) => v.selectedClients || [],
                                   );
@@ -7102,7 +7466,7 @@ export default function SLFPortal() {
                                             }}
                                           >
                                             {t.actualVolume}{" "}
-                                            {t.actualVolumeUnit || "tons"}
+                                            {t.actualVolumeUnit || slfUnit}
                                           </Tag>
                                         )}
                                       </div>
@@ -7291,7 +7655,7 @@ export default function SLFPortal() {
                                                 }}
                                               >
                                                 {t.actualVolume != null
-                                                  ? `${t.actualVolume} ${t.actualVolumeUnit || "tons"}`
+                                                  ? `${t.actualVolume} ${t.actualVolumeUnit || slfUnit}`
                                                   : "—"}
                                               </div>
                                             </div>
@@ -7438,13 +7802,49 @@ export default function SLFPortal() {
             </Card>
           </Col>
           <Col xs={24} xl={5}>
+            {/* #11: Incomplete hauler-client warning — derived from the already-
+                loaded baseline haulers (no extra fetch), recalculated whenever the
+                clients change. Non-blocking; distinct from validation errors. */}
+            {(() => {
+              let count = 0;
+              (haulers || []).forEach((h) => {
+                const haulerOk = !!String(h.haulerName || "").trim();
+                (h.privateSectorClients || []).forEach((c) => {
+                  const miss = !String(c.clientName || "").trim()
+                    || !String(c.clientType || "").trim()
+                    || !String(c.provinceName || c.province || "").trim()
+                    || !String(c.municipalityName || c.municipality || "").trim()
+                    || !haulerOk;
+                  if (miss) count += 1;
+                });
+              });
+              if (!count) return null;
+              return (
+                <Alert
+                  type="warning"
+                  showIcon
+                  style={{ marginBottom: 12, borderRadius: 8 }}
+                  message={<Text strong style={{ fontSize: 12 }}>{count} incomplete hauler-client record{count === 1 ? "" : "s"}</Text>}
+                  description={
+                    <div style={{ fontSize: 12 }}>
+                      Complete the client location and classification details to ensure accurate regional reporting and submission validation.
+                      <div style={{ marginTop: 8 }}>
+                        <Button size="small" type="primary" onClick={() => setActiveTab("baseline")}>
+                          Complete in Baseline Data
+                        </Button>
+                      </div>
+                    </div>
+                  }
+                />
+              );
+            })()}
             <Card
               className="slf-section"
               title={
                 <Space>
                   <QuestionCircleOutlined style={{ color: "#1a3353" }} />
                   <Text strong style={{ color: "#1a3353" }}>
-                    Encoding Guide
+                    Data Entry Guide
                   </Text>
                 </Space>
               }
@@ -7490,17 +7890,35 @@ export default function SLFPortal() {
                     ),
                   },
                   {
+                    key: "submission-rules",
+                    label: (
+                      <Text strong style={{ fontSize: 12 }}>
+                        Submission Rules
+                      </Text>
+                    ),
+                    children: renderGuideItems(
+                      [
+                        `All transport entries use your declared baseline unit ${(baselineUnit || slfUnit).replace("m3", "m³")}; mixed units are rejected on submit.`,
+                        "Vehicle Capacity is required for every accredited-hauler vehicle (the over-capacity check needs it).",
+                        "Truck Capacity is required for uploaded rows; when entered it must be greater than 0.",
+                        "A truck's capacity may not exceed its registered capacity by more than 10%.",
+                        "Complete past submissions with unassigned waste in Organize Cells before submitting new entries.",
+                      ],
+                      "#eb2f96",
+                    ),
+                  },
+                  {
                     key: "notes",
                     label: (
                       <Text strong style={{ fontSize: 12 }}>
-                        Other Notes
+                        Reminders
                       </Text>
                     ),
                     children: renderGuideItems(
                       [
                         "Baseline data locks after submission unless an admin approves an update request.",
-                        "Use My Requests to track update and edit requests.",
-                        "Use Submission History to review submitted entries and status changes.",
+                        "Add hauler + client details (name, type, province, city) before the first submission.",
+                        "Use My Requests to track update and edit requests; Submission History for status.",
                       ],
                       "#fa8c16",
                     ),
@@ -7508,43 +7926,6 @@ export default function SLFPortal() {
                 ]}
               />
             </Card>
-
-            {/* #7: Data Entry Notes — moved here, directly below the Encoding Guide.
-                Kept compact so the sticky right panel stays readable without
-                overflow. Text updated to reflect current workflow (vehicle capacity
-                required, Organize Cells now mandatory before new submissions). */}
-            <Alert
-              type="info"
-              showIcon
-              style={{ marginTop: 12, borderRadius: 8 }}
-              message={<Text strong style={{ fontSize: 12 }}>Data Entry Notes</Text>}
-              description={
-                <ul style={{ margin: "4px 0 0", paddingLeft: 16, lineHeight: 1.6, fontSize: 12 }}>
-                  <li>
-                    All transport entries use your declared baseline unit{" "}
-                    <b>{(baselineUnit || "m³").replace("m3", "m³")}</b>. Unit selectors are
-                    locked to it and mixed units are rejected on submit.
-                  </li>
-                  <li>
-                    <b>Vehicle Capacity is required</b> for every accredited-hauler vehicle —
-                    the over-capacity check has nothing to measure against otherwise.
-                  </li>
-                  <li>
-                    <b>Truck Capacity</b> is <b>required for uploaded rows</b> and optional when you
-                    add an entry manually (any missing historical value is completed in Organize
-                    Cells). When entered it must be greater than 0.
-                  </li>
-                  <li>
-                    A truck's entered capacity may not exceed its registered capacity by more
-                    than <b>10%</b>; an over-elevated value blocks submission.
-                  </li>
-                  <li>
-                    Past approved submissions with unassigned waste or missing truck capacity
-                    must be completed in <b>Organize Cells</b> before you can submit new entries.
-                  </li>
-                </ul>
-              }
-            />
           </Col>
         </Row>
       </div>
@@ -7588,6 +7969,7 @@ export default function SLFPortal() {
   };
 
   return (
+    <SensitiveMaskProvider masked={!!portalSettings?.maskSensitiveSlfValues}>
     <Layout style={{ minHeight: "100vh" }}>
       {errorCard}
       {/* Desktop Sider */}
@@ -7637,6 +8019,12 @@ export default function SLFPortal() {
         style={{
           marginLeft: isMobile ? 0 : collapsed ? 64 : 220,
           transition: "margin-left 0.2s",
+          // Item #1: full-height flex column so the footer sticks to the bottom of
+          // the viewport on short pages, while long pages scroll normally. No
+          // hard-coded header/footer height math.
+          minHeight: "100vh",
+          display: "flex",
+          flexDirection: "column",
         }}
       >
         {/* Header */}
@@ -7752,7 +8140,9 @@ export default function SLFPortal() {
           style={{
             padding: isMobile ? "12px 6px" : "24px 24px",
             background: "#f0f2f5",
-            minHeight: "calc(100vh - 56px - 52px)",
+            // Grow to fill remaining space so a short page still pushes the footer
+            // to the bottom; content taller than the viewport scrolls normally.
+            flex: "1 0 auto",
           }}
         >
           {/* Developer Portal Mode — an unmissable, persistent banner. A developer
@@ -7956,15 +8346,25 @@ export default function SLFPortal() {
               slfInfoLoading={slfInfoLoading}
               haulers={haulers}
               activeSlfName={activeSlfName}
+              onCreateSubmission={() => setActiveMenu("data-entry")}
+              onViewSubmissions={() => setActiveMenu("history")}
+              onOrganizeCells={openCellOrganizer}
+              onBulkOrganize={async () => {
+                // Ensure the unplaced placements are loaded before opening the bulk
+                // modal (it reuses cellOrganizerData); open the organizer silently
+                // if empty, then surface the bulk uploader.
+                if (cellOrganizerData.length === 0) await openCellOrganizer();
+                setBulkOrganizeOpen(true);
+              }}
             />
           )}
           {activeMenu === "data-entry" && renderDataEntry()}
           {activeMenu === "history" && (
             <HistoryPanel
-              groupedSubmissions={groupedSubmissions}
+              submissions={submissions}
               historyColumns={historyColumns}
               loadingSubmissions={loadingSubmissions}
-              onRefresh={() => fetchSubmissions()}
+              onRefresh={() => fetchSubmissions(false, true)}
             />
           )}
           {activeMenu === "requests" && (
@@ -8004,6 +8404,15 @@ export default function SLFPortal() {
                 <span>Organize Cell Placement</span>
                 {cellOrganizerData.length > 0 && (
                   <Tag color="purple">{cellOrganizerData.length} submission(s)</Tag>
+                )}
+                {cellOrganizerData.length > 0 && (
+                  <Button
+                    size="small"
+                    icon={<ThunderboltOutlined />}
+                    onClick={() => setBulkOrganizeOpen(true)}
+                  >
+                    Bulk Upload
+                  </Button>
                 )}
               </Space>
             }
@@ -8484,7 +8893,7 @@ export default function SLFPortal() {
                     plate: p.plateNumber || p.hauler || "-",
                     wasteType: p.wasteType || "Residual",
                     volume: p.actualVolume,
-                    volumeUnit: p.actualVolumeUnit || baselineUnit || "m³",
+                    volumeUnit: p.actualVolumeUnit || baselineUnit || slfUnit,
                     cellName: p.cellName,
                     needsCell: p.needsCell !== false,
                     needsCapacity: !!p.needsCapacity,
@@ -8613,7 +9022,7 @@ export default function SLFPortal() {
                           {
                             title: "Disposal Cell",
                             render: (_, r) => {
-                              const isHaz = /haz|inert/i.test(r.wasteType);
+                              const isHaz = isHazardousWasteType(r.wasteType);
                               const opts = activeCellOptions.filter((o) =>
                                 isHaz
                                   ? String(o.cellType || "").toLowerCase().includes("haz")
@@ -8643,7 +9052,7 @@ export default function SLFPortal() {
                               <span>
                                 Truck Capacity{" "}
                                 <Text type="secondary" style={{ fontSize: 10, fontWeight: 400 }}>
-                                  ({String(baselineUnit || "m³").replace("m3", "m³")})
+                                  ({String(baselineUnit || slfUnit).replace("m3", "m³")})
                                 </Text>
                               </span>
                             ),
@@ -8665,7 +9074,7 @@ export default function SLFPortal() {
                               ) : (
                                 <Text style={{ fontSize: 12 }}>
                                   {Number(r.capacity) > 0
-                                    ? `${Number(r.capacity).toLocaleString()} ${String(baselineUnit || "m³").replace("m3", "m³")}`
+                                    ? `${Number(r.capacity).toLocaleString()} ${String(baselineUnit || slfUnit).replace("m3", "m³")}`
                                     : "—"}
                                 </Text>
                               ),
@@ -8698,6 +9107,31 @@ export default function SLFPortal() {
               </Space>
             )}
           </Modal>
+        )}
+
+        {ORGANIZE_CELLS_ENABLED && (
+          <BulkOrganizeCells
+            open={bulkOrganizeOpen}
+            onClose={() => setBulkOrganizeOpen(false)}
+            data={cellOrganizerData}
+            cellOptions={activeCellOptions}
+            portalUser={portalUser}
+            onApplied={(res) => {
+              setBulkOrganizeOpen(false);
+              setCellOrganizerOpen(false);
+              setCellOrganizerData([]);
+              setCellOrganizerSelected([]);
+              setCellOrganizerExpanded([]);
+              fetchSubmissions(true);
+              setSlfInfoRefresh((n) => n + 1);
+              Swal.fire({
+                icon: "success",
+                title: "Bulk Placement Applied",
+                text: res?.message || "Your submissions have been organized into the selected cells.",
+                confirmButtonColor: "#1a3353",
+              });
+            }}
+          />
         )}
 
         {previousNotificationsModal}
@@ -8848,13 +9282,14 @@ export default function SLFPortal() {
           wasteReceivedLoading={wasteReceivedLoading}
           activeCellEntries={activeCellEntries}
           activeCellOptions={activeCellOptions}
+          cellPlacementOptions={cellPlacementOptions}
           slfInfoLoading={slfInfoLoading}
           slfCellCount={slfCellCount}
           baselineCellOptions={baselineCellOptions}
           closedCellEntries={closedCellEntries}
           haulers={haulers}
           trucks={trucks}
-          baselineUnit={baselineUnit}
+          baselineUnit={baselineUnit || slfUnit}
           baselineSaved={baselineSaved}
           submissions={submissions}
           portalUser={portalUser}
@@ -9001,7 +9436,10 @@ export default function SLFPortal() {
             </Text>
           )}
         </Modal>
+        {/* Item #4: EMB Region III messages are shown via a queued SweetAlert2
+            (see the msgShowingRef effect above) — no inline modal needed. */}
       </Layout>
     </Layout>
+    </SensitiveMaskProvider>
   );
 }

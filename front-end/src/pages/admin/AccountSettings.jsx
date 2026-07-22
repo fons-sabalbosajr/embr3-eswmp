@@ -57,6 +57,8 @@ const PERMISSION_GROUPS = [
     { key: "submissions", label: "SLF Submissions" },
     { key: "cellWastePlacement", label: "Cell Waste Placement" },
     { key: "slfMonitoring", label: "SLF Monitoring" },
+    { key: "slfClients", label: "SLF Clients" },
+    { key: "region3Lgu", label: "Region 3 LGU Data" },
     { key: "messaging", label: "Messaging" },
     { key: "reports", label: "Reports" },
   ]},

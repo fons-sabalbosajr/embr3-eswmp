@@ -19,10 +19,11 @@ import { EMPTY_VEHICLE } from "./constants";
 import api from "../../api";
 import secureStorage from "../../utils/secureStorage";
 import { convertVolume } from "../../utils/volumeUnits";
+import { useSensitiveMask, MASK_PLACEHOLDER } from "../../utils/sensitiveMask";
 
 const { Text } = Typography;
 const { TextArea } = Input;
-const normalizeUnitLabel = (unit) => String(unit || "m³").replace("m3", "m³");
+const normalizeUnitLabel = (unit) => String(unit || "tons").replace("m3", "m³");
 
 // Switching a cell entry's unit must CONVERT the volume, not merely relabel it.
 // Relabelling turned "100" encoded as m³ into "100 tons" — a 5× overstatement that
@@ -31,7 +32,7 @@ const normalizeUnitLabel = (unit) => String(unit || "m³").replace("m3", "m³");
 // Uses the one shared conversion module (utils/volumeUnits), so this can never
 // drift from the factor the rest of the app — admin included — uses.
 function convertCellDraftUnit(draft, nextUnit, declaredUnit) {
-  const from = normalizeUnitLabel(draft.unit || declaredUnit || "m³");
+  const from = normalizeUnitLabel(draft.unit || declaredUnit || "tons");
   const to = normalizeUnitLabel(nextUnit);
   if (from === to) return { ...draft, unit: to };
 
@@ -50,8 +51,8 @@ function convertCellDraftUnit(draft, nextUnit, declaredUnit) {
 // what the value comes to in that declared unit — the declared unit is the source
 // of truth every capacity/utilization figure is computed in.
 function CellEntryUnitHint({ draftUnit, declaredUnit }) {
-  const declared = normalizeUnitLabel(declaredUnit || "m³");
-  const current = normalizeUnitLabel(draftUnit || declaredUnit || "m³");
+  const declared = normalizeUnitLabel(declaredUnit || "tons");
+  const current = normalizeUnitLabel(draftUnit || declaredUnit || "tons");
   if (current === declared) {
     return (
       <span style={{ fontSize: 11 }}>
@@ -361,6 +362,7 @@ export default function SLFPortalModals({
   wasteReceivedLoading,
   activeCellEntries,
   activeCellOptions = [],
+  cellPlacementOptions = [],
   slfInfoLoading = false,
   slfCellCount = 0,
   baselineCellOptions = [],
@@ -417,6 +419,8 @@ export default function SLFPortalModals({
   resubmitComment, setResubmitComment,
   editingRevertedId, setEditingRevertedId,
 }) {
+  // Global SLF sensitive-value masking (read displays only — never input fields).
+  const { masked: maskSensitiveValues } = useSensitiveMask();
   const [credentialForm] = Form.useForm();
   const [credentialCodeRequested, setCredentialCodeRequested] = useState(false);
   const [credentialLoading, setCredentialLoading] = useState(false);
@@ -586,13 +590,17 @@ export default function SLFPortalModals({
     }
   };
   const formatClientVolume = (row = {}) => {
+    // Read-display of a client's disposed volume — mask when the global SLF
+    // sensitive-value privacy toggle is on. (Data-entry inputs below stay
+    // unmasked so a user always sees the value they are typing.)
+    if (maskSensitiveValues) return MASK_PLACEHOLDER;
     const parts = [];
     const m3 = Number(row.totalM3 ?? row.m3 ?? 0);
     const tons = Number(row.totalTons ?? row.tons ?? 0);
     if (m3 > 0) parts.push(`${m3.toLocaleString()} m³`);
     if (tons > 0) parts.push(`${tons.toLocaleString()} tons`);
     if (parts.length) return parts.join(" / ");
-    if (Number(row.totalVolume || 0) > 0) return `${Number(row.totalVolume || 0).toLocaleString()} ${row.unit || baselineUnit || "m³"}`;
+    if (Number(row.totalVolume || 0) > 0) return `${Number(row.totalVolume || 0).toLocaleString()} ${row.unit || baselineUnit || baselineUnit}`;
     return "—";
   };
   const getClientCategory = (row = {}) => {
@@ -943,7 +951,7 @@ export default function SLFPortalModals({
                         <Col xs={12} sm={3}>
                           <Form.Item label="Unit" style={{ marginBottom: 8 }}>
                             <Select
-                              value={v.capacityUnit || baselineUnit || "m³"}
+                              value={v.capacityUnit || baselineUnit || baselineUnit}
                               placeholder="Select unit"
                               onChange={(val) =>
                                 updateVehicle(i, "capacityUnit", val)
@@ -1244,7 +1252,7 @@ export default function SLFPortalModals({
                       {
                         ...EMPTY_VEHICLE,
                         key: Date.now(),
-                        capacityUnit: baselineUnit || "m³",
+                        capacityUnit: baselineUnit || baselineUnit,
                       },
                     ]);
                   }}
@@ -1322,13 +1330,21 @@ export default function SLFPortalModals({
             const vehIsHaz = String(veh.wasteType || "")
               .toLowerCase()
               .includes("hazard");
+            const byWasteType = (o) =>
+              vehIsHaz
+                ? String(o.cellType || "").toLowerCase().includes("haz")
+                : !String(o.cellType || "").toLowerCase().includes("haz");
+            // Selectable (available) cells for this waste type — drives the
+            // empty-state logic and validation counts.
             const vehCellOptions = veh.wasteType
-              ? activeCellOptions.filter((o) =>
-                  vehIsHaz
-                    ? String(o.cellType || "").toLowerCase().includes("haz")
-                    : !String(o.cellType || "").toLowerCase().includes("haz"),
-                )
+              ? activeCellOptions.filter(byWasteType)
               : activeCellOptions;
+            // Display list including UNAVAILABLE cells (rendered disabled with a
+            // reason) for context. Falls back to available-only when the full list
+            // is not supplied.
+            const vehCellDisplayOptions = (
+              cellPlacementOptions.length ? cellPlacementOptions : activeCellOptions
+            ).filter((o) => (veh.wasteType ? byWasteType(o) : true));
             // #1: distinct, diagnostic empty state. Never shown while the facility's
             // cell data is still loading — only once we KNOW no cell qualifies, and
             // then it says WHY (no cells / none open / none for this waste type).
@@ -1415,7 +1431,7 @@ export default function SLFPortalModals({
                           if (match) {
                             updated[vi].capacity = match.capacity || null;
                             updated[vi].capacityUnit =
-                              match.capacityUnit || baselineUnit || "m³";
+                              match.capacityUnit || baselineUnit || baselineUnit;
                           }
                           updateTruckDraft("vehicles", updated);
                         }}
@@ -1472,7 +1488,7 @@ export default function SLFPortalModals({
                     >
                       {/* Locked to the declared baseline unit so no transport
                           entry can carry a mismatched unit. */}
-                      <Select value={baselineUnit || "m³"} disabled>
+                      <Select value={baselineUnit || baselineUnit} disabled>
                         <Option value="m³">m³</Option>
                         <Option value="tons">tons</Option>
                       </Select>
@@ -1549,7 +1565,7 @@ export default function SLFPortalModals({
                       tooltip="Locked to your declared baseline unit"
                     >
                       {/* Locked to the declared baseline unit (see capacity unit). */}
-                      <Select value={baselineUnit || "m³"} disabled>
+                      <Select value={baselineUnit || baselineUnit} disabled>
                         <Option value="tons">tons</Option>
                         <Option value="m³">m³</Option>
                       </Select>
@@ -1618,9 +1634,17 @@ export default function SLFPortalModals({
                           )
                         }
                       >
-                        {vehCellOptions.map((o) => (
-                          <Option key={o.value} value={o.value}>
-                            {o.label}
+                        {vehCellDisplayOptions.map((o) => (
+                          <Option
+                            key={o.value}
+                            value={o.value}
+                            disabled={o.disabled === true}
+                          >
+                            {o.disabled ? (
+                              <span style={{ color: "#bfbfbf" }}>{o.label}</span>
+                            ) : (
+                              o.label
+                            )}
                           </Option>
                         ))}
                       </Select>
@@ -1768,7 +1792,7 @@ export default function SLFPortalModals({
                 {
                   ...EMPTY_VEHICLE,
                   key: Date.now(),
-                  capacityUnit: baselineUnit || "m³",
+                  capacityUnit: baselineUnit || baselineUnit,
                   selectedClients: [],
                 },
               ];
@@ -1822,7 +1846,7 @@ export default function SLFPortalModals({
               );
             }
             const totalsByUnit = vehicles.reduce((acc, v) => {
-              const unit = (v.actualVolumeUnit || baselineUnit || "m³").replace(
+              const unit = (v.actualVolumeUnit || baselineUnit || baselineUnit).replace(
                 "m3",
                 "m³",
               );
@@ -1864,7 +1888,7 @@ export default function SLFPortalModals({
                       </Tag>
                       <Text style={{ fontSize: 12 }}>
                         {v.actualVolume != null
-                          ? `${Number(v.actualVolume).toLocaleString()} ${(v.actualVolumeUnit || baselineUnit || "m³").replace("m3", "m³")}`
+                          ? `${Number(v.actualVolume).toLocaleString()} ${(v.actualVolumeUnit || baselineUnit || baselineUnit).replace("m3", "m³")}`
                           : "No volume"}
                       </Text>
                       {v.wasteType && (
@@ -2341,45 +2365,45 @@ export default function SLFPortalModals({
                             {fieldRow(
                               "Total Volume Accepted",
                               d.totalVolumeAccepted != null
-                                ? `${d.totalVolumeAccepted.toLocaleString()} ${(d.totalVolumeAcceptedUnit || "m³").replace("m3", "m³")}`
+                                ? `${d.totalVolumeAccepted.toLocaleString()} ${(d.totalVolumeAcceptedUnit || baselineUnit).replace("m3", "m³")}`
                                 : null,
                             )}
                             {fieldRow(
                               "Active Cell — Residual",
                               d.activeCellResidualVolume != null
-                                ? `${d.activeCellResidualVolume.toLocaleString()} ${(d.activeCellResidualUnit || "m³").replace("m3", "m³")}`
+                                ? `${d.activeCellResidualVolume.toLocaleString()} ${(d.activeCellResidualUnit || baselineUnit).replace("m3", "m³")}`
                                 : null,
                             )}
                             {fieldRow(
                               "Active Cell — Inert",
                               d.activeCellInertVolume != null
-                                ? `${d.activeCellInertVolume.toLocaleString()} ${(d.activeCellInertUnit || "m³").replace("m3", "m³")}`
+                                ? `${d.activeCellInertVolume.toLocaleString()} ${(d.activeCellInertUnit || baselineUnit).replace("m3", "m³")}`
                                 : null,
                             )}
                             {d.acceptsHazardousWaste &&
                               fieldRow(
                                 "Active Cell — Hazardous",
                                 d.activeCellHazardousVolume != null
-                                  ? `${d.activeCellHazardousVolume.toLocaleString()} ${(d.activeCellHazardousUnit || "m³").replace("m3", "m³")}`
+                                  ? `${d.activeCellHazardousVolume.toLocaleString()} ${(d.activeCellHazardousUnit || baselineUnit).replace("m3", "m³")}`
                                   : null,
                               )}
                             {fieldRow(
                               "Closed Cell — Residual",
                               d.closedCellResidualVolume != null
-                                ? `${d.closedCellResidualVolume.toLocaleString()} ${(d.closedCellResidualUnit || "m³").replace("m3", "m³")}`
+                                ? `${d.closedCellResidualVolume.toLocaleString()} ${(d.closedCellResidualUnit || baselineUnit).replace("m3", "m³")}`
                                 : null,
                             )}
                             {fieldRow(
                               "Closed Cell — Inert",
                               d.closedCellInertVolume != null
-                                ? `${d.closedCellInertVolume.toLocaleString()} ${(d.closedCellInertUnit || "m³").replace("m3", "m³")}`
+                                ? `${d.closedCellInertVolume.toLocaleString()} ${(d.closedCellInertUnit || baselineUnit).replace("m3", "m³")}`
                                 : null,
                             )}
                             {d.acceptsHazardousWaste &&
                               fieldRow(
                                 "Closed Cell — Hazardous",
                                 d.closedCellHazardousVolume != null
-                                  ? `${d.closedCellHazardousVolume.toLocaleString()} ${(d.closedCellHazardousUnit || "m³").replace("m3", "m³")}`
+                                  ? `${d.closedCellHazardousVolume.toLocaleString()} ${(d.closedCellHazardousUnit || baselineUnit).replace("m3", "m³")}`
                                   : null,
                               )}
                           </Row>
@@ -2419,7 +2443,7 @@ export default function SLFPortalModals({
                                 {fieldRow(
                                   "Current Cell Volume",
                                   d.currentCellVolume != null
-                                    ? `${d.currentCellVolume.toLocaleString()} ${(d.currentCellVolumeUnit || "m³").replace("m3", "m³")}`
+                                    ? `${d.currentCellVolume.toLocaleString()} ${(d.currentCellVolumeUnit || baselineUnit).replace("m3", "m³")}`
                                     : null,
                                 )}
                                 {fieldRow(
@@ -2519,7 +2543,7 @@ export default function SLFPortalModals({
                                       <div>
                                         <Text style={{ fontSize: 13 }}>
                                           {baselineVol > 0
-                                            ? `${baselineVol.toLocaleString()} ${(d.totalVolumeAcceptedUnit || "m³").replace("m3", "m³")}`
+                                            ? `${baselineVol.toLocaleString()} ${(d.totalVolumeAcceptedUnit || baselineUnit).replace("m3", "m³")}`
                                             : "0"}
                                         </Text>
                                       </div>
@@ -2675,7 +2699,7 @@ export default function SLFPortalModals({
                                                 title: "Capacity",
                                                 render: (_, v) =>
                                                   v.capacity != null
-                                                    ? `${v.capacity} ${(v.capacityUnit || "m³").replace("m3", "m³")}`
+                                                    ? `${v.capacity} ${(v.capacityUnit || baselineUnit).replace("m3", "m³")}`
                                                     : "—",
                                               },
                                             ]}
@@ -2784,7 +2808,7 @@ export default function SLFPortalModals({
                                   key: "cap",
                                   render: (_, t) =>
                                     t.truckCapacity
-                                      ? `${t.truckCapacity} ${(t.truckCapacityUnit || "m³").replace("m3", "m³")}`
+                                      ? `${t.truckCapacity} ${(t.truckCapacityUnit || baselineUnit).replace("m3", "m³")}`
                                       : "—",
                                 },
                                 {
@@ -2794,7 +2818,7 @@ export default function SLFPortalModals({
                                     t.actualVolume != null ? (
                                       <Text strong style={{ color: "#52c41a" }}>
                                         {t.actualVolume}{" "}
-                                        {t.actualVolumeUnit || "tons"}
+                                        {t.actualVolumeUnit || baselineUnit}
                                       </Text>
                                     ) : (
                                       "—"
@@ -3215,7 +3239,7 @@ export default function SLFPortalModals({
                       <Input
                         value={
                           baselineForm.getFieldValue("totalVolumeAccepted") != null
-                            ? `${Number(baselineForm.getFieldValue("totalVolumeAccepted")).toLocaleString()} ${(baselineForm.getFieldValue("totalVolumeAcceptedUnit") || "m³").replace("m3", "m³")}`
+                            ? `${Number(baselineForm.getFieldValue("totalVolumeAccepted")).toLocaleString()} ${(baselineForm.getFieldValue("totalVolumeAcceptedUnit") || baselineUnit).replace("m3", "m³")}`
                             : "—"
                         }
                         readOnly
@@ -3238,7 +3262,7 @@ export default function SLFPortalModals({
                           </Col>
                           <Col xs={24} sm={8}>
                             <Text type="secondary" style={{ fontSize: 10 }}>Volume</Text>
-                            <Input size="small" value={e.volume != null ? `${e.volume} ${normalizeUnitLabel(e.unit || baselineUnit || "m³")}` : "—"} readOnly style={{ background: "#fafafa", cursor: "default" }} />
+                            <Input size="small" value={e.volume != null ? `${e.volume} ${normalizeUnitLabel(e.unit || baselineUnit || baselineUnit)}` : "—"} readOnly style={{ background: "#fafafa", cursor: "default" }} />
                           </Col>
                         </Row>
                       ))}
@@ -3259,7 +3283,7 @@ export default function SLFPortalModals({
                           </Col>
                           <Col xs={24} sm={8}>
                             <Text type="secondary" style={{ fontSize: 10 }}>Volume</Text>
-                            <Input size="small" value={e.volume != null ? `${e.volume} ${normalizeUnitLabel(e.unit || baselineUnit || "m³")}` : "—"} readOnly style={{ background: "#fafafa", cursor: "default" }} />
+                            <Input size="small" value={e.volume != null ? `${e.volume} ${normalizeUnitLabel(e.unit || baselineUnit || baselineUnit)}` : "—"} readOnly style={{ background: "#fafafa", cursor: "default" }} />
                           </Col>
                         </Row>
                       ))}
@@ -3310,7 +3334,7 @@ export default function SLFPortalModals({
                               {(h.vehicles || []).map((v, vi) => (
                                 <Col xs={24} key={vi}>
                                   <Text type="secondary" style={{ fontSize: 10 }}>Vehicle {vi + 1}</Text>
-                                  <Input size="small" value={`${v.plateNumber || "N/A"} — ${v.vehicleType || "N/A"} (${v.capacity ?? "—"} ${v.capacityUnit || "m³"})`} readOnly style={{ background: "#fafafa", cursor: "default" }} />
+                                  <Input size="small" value={`${v.plateNumber || "N/A"} — ${v.vehicleType || "N/A"} (${v.capacity ?? "—"} ${v.capacityUnit || baselineUnit})`} readOnly style={{ background: "#fafafa", cursor: "default" }} />
                                 </Col>
                               ))}
                             </Row>
@@ -3336,8 +3360,8 @@ export default function SLFPortalModals({
                       ? vehs.map((v) => v.plateNumber).filter(Boolean).join(", ") || t.plateNumber || "—"
                       : vehs[0]?.plateNumber || t.plateNumber || "—";
                     const capStr = vehs.length > 1
-                      ? vehs.filter((v) => v.capacity != null).map((v) => `${v.capacity} ${(v.capacityUnit || "m³").replace("m3", "m³")}`).join(", ") || "—"
-                      : (() => { const cap = vehs[0]?.capacity ?? t.truckCapacity; const unit = (vehs[0]?.capacityUnit || t.truckCapacityUnit || "m³").replace("m3", "m³"); return cap != null ? `${cap} ${unit}` : "—"; })();
+                      ? vehs.filter((v) => v.capacity != null).map((v) => `${v.capacity} ${(v.capacityUnit || baselineUnit).replace("m3", "m³")}`).join(", ") || "—"
+                      : (() => { const cap = vehs[0]?.capacity ?? t.truckCapacity; const unit = (vehs[0]?.capacityUnit || t.truckCapacityUnit || baselineUnit).replace("m3", "m³"); return cap != null ? `${cap} ${unit}` : "—"; })();
                     return (
                       <div key={t.key ?? ti} style={{ background: "#f9f9f9", borderRadius: 8, padding: "10px 12px", marginBottom: 10 }}>
                         <Text strong style={{ fontSize: 12, color: "#1a3353", display: "block", marginBottom: 8 }}>
@@ -3349,7 +3373,7 @@ export default function SLFPortalModals({
                             { label: "Hauler", value: t.hauler || "—" },
                             { label: "Plate No.", value: plateStr },
                             { label: "Capacity", value: capStr },
-                            { label: "Actual Volume", value: t.actualVolume != null ? `${t.actualVolume} ${(t.actualVolumeUnit || "m³").replace("m3", "m³")}` : "—" },
+                            { label: "Actual Volume", value: t.actualVolume != null ? `${t.actualVolume} ${(t.actualVolumeUnit || baselineUnit).replace("m3", "m³")}` : "—" },
                             { label: "Waste Type", value: t.wasteType || "—" },
                             ...(t.hazWasteCode?.length ? [{ label: "Haz. Code", value: Array.isArray(t.hazWasteCode) ? t.hazWasteCode.join(", ") : t.hazWasteCode }] : []),
                           ].map(({ label, value }) => (
@@ -4605,7 +4629,7 @@ export default function SLFPortalModals({
                 }
               />
               <Select
-                value={normalizeUnitLabel(activeCellDraft.unit || baselineUnit || "m³")}
+                value={normalizeUnitLabel(activeCellDraft.unit || baselineUnit || baselineUnit)}
                 // Switching the unit CONVERTS the value instead of just relabelling
                 // it. Previously "100" encoded as m³ became "100 tons" on switch —
                 // a 5× overstatement — because only the label changed.
@@ -4708,7 +4732,7 @@ export default function SLFPortalModals({
                 }
               />
               <Select
-                value={normalizeUnitLabel(closedCellDraft.unit || baselineUnit || "m³")}
+                value={normalizeUnitLabel(closedCellDraft.unit || baselineUnit || baselineUnit)}
                 // Converts the value on unit change — see the active-cell modal.
                 onChange={(unit) =>
                   setClosedCellDraft((d) => convertCellDraftUnit(d, unit, baselineUnit))
@@ -4762,7 +4786,9 @@ export default function SLFPortalModals({
               ]}
             />
           </Form.Item>
-          {clientDraft.clientType === "LGU" && (
+          {/* Location applies to BOTH LGU and Private clients — the saved Province
+              is what classifies the client within / outside Region 3. */}
+          {clientDraft.clientType && (
             <>
               <Form.Item label="Region">
                 <Select
@@ -4795,7 +4821,7 @@ export default function SLFPortalModals({
                   }}
                 />
               </Form.Item>
-              <Form.Item label="Province">
+              <Form.Item label="Province" required>
                 <Select
                   placeholder="Select province"
                   value={clientDraft.province || undefined}

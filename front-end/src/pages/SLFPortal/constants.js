@@ -105,6 +105,13 @@ export function withRetry(fn, { retries = 3, baseDelay = 1000, signal } = {}) {
         .catch((err) => {
           if (err?.name === "AbortError" || err?.code === "ERR_CANCELED")
             return reject(err);
+          // Never retry client errors (4xx). Retrying a 429 (Too Many Requests)
+          // only feeds the rate limiter and turns a single throttle into a storm;
+          // other 4xx (400/401/403/404) are deterministic and won't succeed on a
+          // repeat. Only transient failures (network errors, 5xx) are retried.
+          const status = err?.response?.status;
+          if (typeof status === "number" && status >= 400 && status < 500)
+            return reject(err);
           if (n >= retries || !navigator.onLine) return reject(err);
           setTimeout(() => attempt(n + 1), baseDelay * 2 ** n);
         });

@@ -252,3 +252,167 @@ export const CAPACITY_STATUS_OPTIONS = [
   CAPACITY_STATUS.full,
   CAPACITY_STATUS.overcapacity,
 ].map((s) => ({ label: s.label, value: s.key }));
+
+// ── SLF identity palette ─────────────────────────────────────────────────────
+// A fixed, visually-distinct set of colours assigned deterministically to each
+// SLF so the same facility keeps the same colour everywhere (gauges, charts,
+// legends) instead of random inline colours. Reuse getSlfColor() — never
+// hand-pick a per-SLF colour at the call site.
+export const SLF_COLOR_PALETTE = [
+  "#1677ff", // blue
+  "#52c41a", // green
+  "#722ed1", // purple
+  "#fa8c16", // orange
+  "#13c2c2", // cyan
+  "#eb2f96", // magenta
+  "#2f54eb", // geekblue
+  "#a0d911", // lime
+  "#fa541c", // volcano
+  "#08979c", // teal
+  "#9254de", // light purple
+  "#d48806", // gold-dark
+  "#c41d7f", // deep magenta
+  "#096dd9", // deep blue
+  "#389e0d", // deep green
+];
+
+// Deterministic string hash → stable palette slot across reloads.
+function hashSlfKey(key) {
+  const s = String(key || "");
+  let h = 0;
+  for (let i = 0; i < s.length; i += 1) {
+    h = (h * 31 + s.charCodeAt(i)) | 0;
+  }
+  return Math.abs(h);
+}
+
+// Resolve an SLF's assigned palette colour.
+//   key   — a stable identifier for the SLF (id, name, lgu…).
+//   index — optional position in a known list; when provided it guarantees
+//           distinct colours across that list (preferred for gauge groups).
+export function getSlfColor(key, index = null) {
+  const id = String(key ?? "").trim().toLowerCase();
+  if (Number.isInteger(index) && index >= 0) {
+    return SLF_COLOR_PALETTE[index % SLF_COLOR_PALETTE.length];
+  }
+  if (!id) return "#8c8c8c";
+  return SLF_COLOR_PALETTE[hashSlfKey(id) % SLF_COLOR_PALETTE.length];
+}
+
+// ── Cell capacity gauge colour bands ─────────────────────────────────────────
+// Drives the STROKE colour of an SLF cell capacity gauge. Below the warning
+// band the cell shows its SLF's assigned colour; it then escalates as it fills.
+// This is intentionally separate from getCapacityStatus (75/90/100 analysis
+// scale) — change the gauge bands HERE only.
+export const SLF_CAPACITY_BANDS = {
+  warning: 70, //  70 – 79.99 %
+  alarming: 80, //  80 – 94.99 %
+  critical: 95, //  95 %+
+};
+
+export const SLF_CAPACITY_COLORS = {
+  warning: "#faad14", // gold
+  alarming: "#fa8c16", // orange
+  critical: "#ff4d4f", // red
+  missing: "#bfbfbf", // gray — missing / nonexistent cell
+};
+
+// Resolve the gauge stroke colour for a cell's utilization.
+//   baseColor — the SLF's assigned colour, used below the warning band.
+//   exists    — false ⇒ gray (nonexistent / missing cell).
+// Null / NaN utilization also degrades to gray rather than a fabricated colour.
+export function getSlfCapacityColor(
+  utilizationPercentage,
+  { baseColor = "#1677ff", exists = true } = {},
+) {
+  if (!exists) return SLF_CAPACITY_COLORS.missing;
+  const pct = Number(utilizationPercentage);
+  if (utilizationPercentage == null || !Number.isFinite(pct)) {
+    return SLF_CAPACITY_COLORS.missing;
+  }
+  if (pct >= SLF_CAPACITY_BANDS.critical) return SLF_CAPACITY_COLORS.critical;
+  if (pct >= SLF_CAPACITY_BANDS.alarming) return SLF_CAPACITY_COLORS.alarming;
+  if (pct >= SLF_CAPACITY_BANDS.warning) return SLF_CAPACITY_COLORS.warning;
+  return baseColor;
+}
+
+// ── Cell availability for NEW waste placement ────────────────────────────────
+// THE single rule for "can this cell accept new waste?", shared by the portal
+// cell selectors, submission validation, edit workflow and admin capacity views
+// (the backend mirrors it in server/utils/cellAvailability.js). A cell can accept
+// new waste only when it exists, is operational, is under 100% utilization, has
+// positive remaining capacity, and — when a proposed volume is supplied — that
+// volume fits in the remaining capacity.
+//
+// Status matching is tolerant: canonical config first (getCellStatusConfig),
+// then a keyword fallback that survives differences in case / spacing / hyphens
+// / underscores and equivalent labels ("Out of Service", "Inactive", "Used").
+const NON_OPERATIONAL_RE =
+  /(used|complete|closed|inactive|out.?of.?service|decommission|reserved|construction|not.?exist|full)/i;
+
+export function isOperationalCellStatus(status) {
+  const cfg = getCellStatusConfig(status);
+  if (cfg.key === "active") return true;
+  if (cfg.disabled) return false; // known non-operational config
+  // Unknown/legacy status: block only if it clearly reads non-operational.
+  return !NON_OPERATIONAL_RE.test(String(status || ""));
+}
+
+const CELL_ACCEPT_EPS = 1e-9;
+
+// Evaluate a cell's acceptance. `capacity`/`fill` should already be in the SAME
+// unit (callers normalize first). `proposedVolume` (same unit) is optional.
+// Returns { ok, code, reason, remaining, utilization } — never throws.
+export function getCellAcceptance({
+  status,
+  capacity,
+  fill,
+  exists = true,
+  proposedVolume = null,
+} = {}) {
+  const cap = Number(capacity);
+  const hasCap = Number.isFinite(cap) && cap > 0;
+  const used = Number.isFinite(Number(fill)) ? Number(fill) : 0;
+  const remaining = hasCap ? Math.max(0, cap - used) : null;
+  const utilization = hasCap ? Math.round((used / cap) * 10000) / 100 : null;
+  const cfg = getCellStatusConfig(status);
+  const base = { remaining, utilization, statusLabel: cfg.label };
+  const s = String(status || "").toLowerCase();
+
+  if (exists === false || cfg.key === "not-existing") {
+    return { ...base, ok: false, code: "missing", reason: "Nonexistent" };
+  }
+  if (!isOperationalCellStatus(status)) {
+    const code = /used|complete/.test(s)
+      ? "completed"
+      : /out.?of.?service|decommission/.test(s)
+        ? "outofservice"
+        : cfg.key === "completed"
+          ? "completed"
+          : "nonoperational";
+    return { ...base, ok: false, code, reason: cfg.label || "Not operational" };
+  }
+  if (hasCap && utilization >= 100) {
+    return { ...base, ok: false, code: "full", reason: `Full (${Math.round(utilization)}%)` };
+  }
+  if (hasCap && remaining <= 0) {
+    return { ...base, ok: false, code: "full", reason: "No remaining capacity" };
+  }
+  if (proposedVolume != null && hasCap) {
+    const pv = Number(proposedVolume);
+    if (Number.isFinite(pv) && pv > remaining + CELL_ACCEPT_EPS) {
+      return { ...base, ok: false, code: "insufficient", reason: "Insufficient remaining capacity" };
+    }
+  }
+  return { ...base, ok: true, code: "available", reason: "" };
+}
+
+export function canCellAcceptWaste(input) {
+  return getCellAcceptance(input).ok;
+}
+
+// Build a disabled-state selector label, e.g. "Cell A — Full (100%)".
+export function cellDisabledLabel(name, acceptance) {
+  const reason = acceptance?.reason || "Unavailable";
+  return `${name} — ${reason}`;
+}

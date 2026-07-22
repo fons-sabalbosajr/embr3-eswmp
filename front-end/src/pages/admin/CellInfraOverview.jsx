@@ -37,6 +37,7 @@ import {
   getCellStatusConfig,
   isNonExistentCell,
   getCapacityStatus,
+  getSlfCapacityColor,
   CELL_TYPE_OPTIONS,
   CELL_STATUS_OPTIONS,
 } from "../../utils/cellVisuals";
@@ -157,7 +158,7 @@ function CellHoverDetails({ cell, row }) {
     </div>
   );
   return (
-    <div style={{ minWidth: 270, maxWidth: 550 }}>
+    <div style={{ minWidth: 250, maxWidth: "min(90vw, 520px)", maxHeight: "min(60vh, 420px)", overflowY: "auto", overflowWrap: "anywhere" }}>
       <Space size={6} style={{ marginBottom: 6 }} wrap>
         <Tag color={typeConfig.tag} style={{ marginInlineEnd: 0 }}>{typeConfig.label}</Tag>
         <Badge status={statusConfig.badge} text={<span style={{ fontSize: 12 }}>{statusConfig.label}</span>} />
@@ -190,7 +191,13 @@ function CellHoverDetails({ cell, row }) {
 
 function CellGauge({ cell, row }) {
   const { typeConfig, statusConfig } = cell;
-  const color = typeConfig.color;
+  // Status/capacity-based gauge colour (centralized helper): the cell keeps its
+  // assigned type colour while available, escalates to warning/alarming/critical
+  // as it fills, and renders gray when the cell is nonexistent / has no data.
+  const color = getSlfCapacityColor(cell.percent, {
+    baseColor: typeConfig.color,
+    exists: statusConfig.key !== "not-existing",
+  });
   return (
     <Popover
       placement="top"

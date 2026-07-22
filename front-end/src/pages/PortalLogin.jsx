@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Form, Input, Button, Card, Typography, Divider, Alert, Space, Tag, Collapse, Modal, Select } from "antd";
 import {
   UserOutlined,
@@ -14,7 +14,7 @@ import { Link, useNavigate } from "react-router-dom";
 import { useErrorCard } from "../utils/ErrorHandler";
 import api from "../api";
 import secureStorage from "../utils/secureStorage";
-import embLogo from "../assets/emblogo.svg";
+import AuthBrandLogos from "../components/AuthBrandLogos";
 import bgEmb from "../assets/bgemb.webp";
 import "./Auth.css";
 
@@ -98,7 +98,26 @@ export default function PortalLogin() {
       .catch(() => {});
   }, []);
 
+  // Show a clear "session expired" message when the API client redirected here
+  // after an invalid/expired token (set in api.js), instead of a generic error.
+  useEffect(() => {
+    try {
+      if (sessionStorage.getItem("session_expired") === "1") {
+        sessionStorage.removeItem("session_expired");
+        showError({ type: "warning", title: "Session Expired", message: "Your session has expired. Please sign in again to continue." });
+      }
+    } catch { /* ignore */ }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Hard guard against duplicate auth requests: a fast double-click, an Enter-key
+  // repeat, or a Strict-Mode re-invocation must never fire a second in-flight
+  // login (each extra request counts against the auth rate limiter → 429).
+  const loginInFlight = useRef(false);
+
   const onFinish = async (values) => {
+    if (loginInFlight.current) return;
+    loginInFlight.current = true;
     setLoading(true);
     try {
       const { data } = await api.post("/portal-auth/login", values);
@@ -137,10 +156,13 @@ export default function PortalLogin() {
       }
       if (!navigator.onLine) {
         showError({ type: "offline", title: "You're Offline", message: "It seems you are not connected to the internet. Please check your connection and try again." });
+      } else if (status === 429) {
+        showError({ type: "warning", title: "Too Many Attempts", message: err.response?.data?.message || "Too many login attempts. Please wait a few minutes and try again." });
       } else {
         showError({ type: "error", title: "Login Failed", message: err.response?.data?.message || "Something went wrong" });
       }
     } finally {
+      loginInFlight.current = false;
       setLoading(false);
     }
   };
@@ -302,9 +324,7 @@ export default function PortalLogin() {
 
       <div className="auth-center">
         <div className="auth-brand-header">
-          <div className="auth-brand-logo-circle">
-            <img src={embLogo} alt="EMBR3 Logo" />
-          </div>
+          <AuthBrandLogos />
           <Title level={2} className="auth-brand-title">SLF Portal</Title>
           <Text className="auth-brand-subtitle">Sanitary Landfill Generators Portal</Text>
           <div className="auth-features">
@@ -394,10 +414,10 @@ export default function PortalLogin() {
 
             <Form name="portal-login" size="large" onFinish={onFinish} layout="vertical" requiredMark={false} className="auth-form">
               <Form.Item name="email" label="Email" rules={[{ required: true, message: "Please enter your email" }]}>
-                <Input prefix={<UserOutlined style={{ color: "#1a3353" }} />} placeholder="you@example.com" disabled={portalMaintenanceActive} />
+                <Input prefix={<UserOutlined style={{ color: "#1a3353" }} />} placeholder="email address" disabled={portalMaintenanceActive} />
               </Form.Item>
               <Form.Item name="password" label="Password" rules={[{ required: true, message: "Please enter your password" }]}>
-                <Input.Password prefix={<LockOutlined style={{ color: "#1a3353" }} />} placeholder="Password" disabled={portalMaintenanceActive} />
+                <Input.Password prefix={<LockOutlined style={{ color: "#1a3353" }} />} placeholder="password" disabled={portalMaintenanceActive} />
               </Form.Item>
               <Form.Item style={{ marginBottom: 16, marginTop: 8 }}>
                 <Button className="auth-btn-primary" type="primary" htmlType="submit" loading={loading} block disabled={portalMaintenanceActive}>Sign In</Button>
@@ -505,7 +525,7 @@ export default function PortalLogin() {
               { type: "email", message: "Enter a valid email" },
             ]}
           >
-            <Input prefix={<UserOutlined />} placeholder="you@example.com" />
+            <Input prefix={<UserOutlined />} placeholder="email address" />
           </Form.Item>
           <Form.Item
             name="username"
@@ -555,6 +575,7 @@ export default function PortalLogin() {
               ]
         }
         destroyOnHidden
+        width={900}
       >
         <Alert
           type="warning"
@@ -577,10 +598,14 @@ export default function PortalLogin() {
                 value={devSelectedUser}
                 onChange={setDevSelectedUser}
                 optionFilterProp="label"
-                options={devPortalUsers.map((u) => ({
-                  value: u._id,
-                  label: `${u.firstName || ""} ${u.lastName || ""} — ${u.email}${u.isDummy ? " (SAMPLE)" : ""}`.trim(),
-                }))}
+                options={devPortalUsers.map((u) => {
+                  const slf = Array.isArray(u.assignedSlfName) ? u.assignedSlfName.filter(Boolean).join(", ") : u.assignedSlfName;
+                  const name = `${u.firstName || ""} ${u.lastName || ""}`.trim() || u.companyName || u.email;
+                  return {
+                    value: u._id,
+                    label: `${slf ? `${slf} — ` : ""}${name} · ${u.email}`.trim(),
+                  };
+                })}
                 style={{ width: "100%" }}
               />
             </Form.Item>

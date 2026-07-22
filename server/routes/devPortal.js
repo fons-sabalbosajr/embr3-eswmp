@@ -211,10 +211,21 @@ router.get("/portal-users", async (req, res) => {
   try {
     const dev = await requireDevStage(req, res, "devImpersonate");
     if (!dev) return;
-    const users = await UserPortal.find({})
+    // Only ACTUAL, active portal users — exclude dummy/seed/test accounts,
+    // blocked/disabled accounts, and any not-yet-approved (pending/rejected)
+    // accounts. Enforced here (backend) so direct API access can't bypass it.
+    const users = await UserPortal.find({
+      status: "approved",
+      isDummy: { $ne: true },
+      blocked: { $ne: true },
+    })
       .select("firstName lastName email companyName assignedSlfName status isDummy")
-      .sort({ createdAt: -1 })
       .lean();
+    // Sort by primary landfill name, then account name — clearer than createdAt.
+    const label = (u) =>
+      (Array.isArray(u.assignedSlfName) ? u.assignedSlfName[0] : u.assignedSlfName) ||
+      u.companyName || `${u.firstName || ""} ${u.lastName || ""}`.trim() || u.email || "";
+    users.sort((a, b) => label(a).localeCompare(label(b)));
     res.json(users);
   } catch (e) {
     res.status(500).json({ message: "Server error", error: e.message });

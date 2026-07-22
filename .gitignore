@@ -11,3 +11,26 @@ nul
 
 # Misc
 *.local
+
+# Environment & secrets (defense-in-depth; server/ and front-end/ also ignore .env)
+.env
+.env.*
+!.env.example
+
+# Credentials / keys — never commit
+*.pem
+*.key
+credentials.json
+service-account.json
+secrets/
+
+# Dependencies & build output
+node_modules/
+dist/
+
+# Internal ops runbook — kept locally, not published in the repo
+docs/DEPLOYMENT_GUIDE.md
+
+# Internal operational/credential runbooks — kept locally, not published
+docs/GOOGLE_DRIVE_CREDENTIAL_UPDATE.md
+docs/JWT_SECRET_ROTATION.md

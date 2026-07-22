@@ -30,4 +30,16 @@ function refreshPortal(req, email, target) {
   emitToRoom(req, `portal-${email}`, "data-refresh", { target });
 }
 
-module.exports = { emitToRoom, notifyAdmin, notifyPortal, refreshAdmin, refreshPortal };
+// Broadcast to EVERY connected client (admin + all portal sessions). Used for
+// global settings changes — e.g. the SLF sensitive-value masking toggle — that
+// must reach all open portals at once, not one email room.
+function broadcastRefresh(req, target) {
+  try {
+    const io = req.app.get("io");
+    if (io) io.emit("data-refresh", { target });
+  } catch {
+    /* silent */
+  }
+}
+
+module.exports = { emitToRoom, notifyAdmin, notifyPortal, refreshAdmin, refreshPortal, broadcastRefresh };

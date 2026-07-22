@@ -1,5 +1,6 @@
 const mongoose = require("mongoose");
 const { dateFieldYearVisibilityPlugin } = require("../utils/yearVisibility");
+const { isHazardousWasteType } = require("../utils/wasteCategories");
 
 const clientSchema = new mongoose.Schema(
   {
@@ -83,6 +84,10 @@ const dataSLFSchema = new mongoose.Schema(
     },
     slfName: { type: String, trim: true },
     submissionId: { type: String, trim: true },
+    // Client-supplied idempotency key for a submit request — lets a retried /
+    // double-clicked / connection-lost submission return the already-saved records
+    // instead of creating duplicates. Shared across all docs from one request.
+    idempotencyKey: { type: String, trim: true, default: undefined },
     idNo: { type: String, trim: true },
     // Marks submissions made by dummy/test portal accounts (or against dummy
     // facilities) so they can be excluded from production admin views/reports.
@@ -212,20 +217,54 @@ function computeSlfMetrics(doc = {}) {
     hazardousVolumeM3: 0,
     hazardousVolumeTons: 0,
   };
-  for (const truck of trucks) {
-    const amount = Number(truck?.actualVolume || 0);
-    if (!amount || Number.isNaN(amount)) continue;
-    const unit = normalizeVolumeUnit(truck?.actualVolumeUnit || doc.baselineUnit || "m³");
+  // Waste type + volume live on each VEHICLE when a truck carries them (the portal
+  // form stores per-vehicle wasteType/actualVolume), and only fall back to the
+  // truck level for single-entry rows. Reading only the truck level made every
+  // multi-vehicle truck — and any truck whose hazardous classification lives on
+  // its vehicles — count as 0 hazardous. Mirror summarizeCellAssignment: prefer
+  // the vehicles array, fall back to the truck.
+  //
+  // Every metric is stored in BOTH m³ AND tons, kept in lockstep via TON_PER_M3.
+  // A facility that reports in tons used to leave the m³ fields at 0 (and vice
+  // versa); the admin summary/breakdown/charts then displayed a single unit and
+  // silently dropped every facility reporting in the other unit — which is why a
+  // tons-based Hazardous Waste load (e.g. Floridablanca) summed to 0 m³. Populating
+  // both units makes the "lockstep" assumption the display already relies on true,
+  // so totals reconcile regardless of which unit a facility declared.
+  const tally = (wasteType, volume, unitRaw) => {
+    const amount = Number(volume || 0);
+    if (!amount || Number.isNaN(amount)) return;
+    const unit = normalizeVolumeUnit(unitRaw || doc.baselineUnit || "m³");
     const isTons = unit === "tons";
-    const isHazardous = /hazard/i.test(String(truck?.wasteType || ""));
-    if (isTons) {
-      metrics.totalVolumeTons += amount;
-      if (isHazardous) metrics.hazardousVolumeTons += amount;
-      else metrics.residualVolumeTons += amount;
+    // Canonical classification shared with the portal + admin (handles legacy
+    // variants like "Hazardous", "HW", "hazardous_waste", "Treated Hazardous Waste").
+    const isHazardous = isHazardousWasteType(wasteType);
+    const m3 = isTons ? amount / TON_PER_M3 : amount;
+    const tons = isTons ? amount : amount * TON_PER_M3;
+    metrics.totalVolumeM3 += m3;
+    metrics.totalVolumeTons += tons;
+    if (isHazardous) {
+      metrics.hazardousVolumeM3 += m3;
+      metrics.hazardousVolumeTons += tons;
     } else {
-      metrics.totalVolumeM3 += amount;
-      if (isHazardous) metrics.hazardousVolumeM3 += amount;
-      else metrics.residualVolumeM3 += amount;
+      metrics.residualVolumeM3 += m3;
+      metrics.residualVolumeTons += tons;
+    }
+  };
+  for (const truck of trucks) {
+    const vehicles = (Array.isArray(truck?.vehicles) ? truck.vehicles : []).filter(
+      (v) => Number(v?.actualVolume || 0) > 0,
+    );
+    if (vehicles.length) {
+      for (const v of vehicles) {
+        tally(
+          v?.wasteType ?? truck?.wasteType,
+          v?.actualVolume,
+          v?.actualVolumeUnit || truck?.actualVolumeUnit,
+        );
+      }
+    } else {
+      tally(truck?.wasteType, truck?.actualVolume, truck?.actualVolumeUnit);
     }
   }
   const disposal = doc.dateOfDisposal ? new Date(doc.dateOfDisposal) : null;
@@ -389,6 +428,8 @@ dataSLFSchema.index({ idNo: 1 });
 dataSLFSchema.index({ deletedAt: 1, submissionId: 1 });
 dataSLFSchema.index({ deletedAt: 1, lguCompanyName: 1 });
 dataSLFSchema.index({ submissionId: 1 });
+// Idempotency-key lookup on submit retries (sparse — only set on keyed requests).
+dataSLFSchema.index({ idempotencyKey: 1 }, { sparse: true });
 dataSLFSchema.index({ submittedBy: 1, createdAt: -1 });
 
 // Indexes for summary aggregations + grouped/paginated list queries

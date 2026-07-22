@@ -27,7 +27,7 @@ router.post("/", async (req, res) => {
 // Get all SLF
 router.get("/", async (req, res) => {
   try {
-    const entries = await SLFGenerator.find().sort({ createdAt: -1 });
+    const entries = await SLFGenerator.find().sort({ createdAt: -1 }).lean();
     res.json(entries);
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });

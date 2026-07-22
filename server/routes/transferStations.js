@@ -11,7 +11,7 @@ router.use(authMiddleware, adminOnly);
 // Get all records
 router.get("/", async (req, res) => {
   try {
-    const records = await TransferStation.find().sort({ province: 1, municipality: 1 });
+    const records = await TransferStation.find().sort({ province: 1, municipality: 1 }).lean();
     res.json(records);
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });

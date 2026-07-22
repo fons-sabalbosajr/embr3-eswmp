@@ -30,6 +30,7 @@ import {
   MailOutlined,
   LockOutlined,
   ToolOutlined,
+  RobotOutlined,
   GlobalOutlined,
   BgColorsOutlined,
   SaveOutlined,
@@ -81,6 +82,9 @@ import ResponsiveTable from "./shared/ResponsiveTable";
 import DummyDataConfig from "./DummyDataConfig";
 import SLFDataTableFiles from "./SLFDataTableFiles";
 import SubmissionRawData from "./SubmissionRawData";
+import AutomationAgentSettings from "./AutomationAgentSettings";
+import AnnouncementManager from "./AnnouncementManager";
+import Region3LguData from "./Region3LguData";
 
 const { Title, Text } = Typography;
 const { Option } = Select;
@@ -105,7 +109,7 @@ const TAB_GROUPS = [
     key: "grp-submissions",
     label: "Submissions & Data",
     icon: <DatabaseOutlined />,
-    tabs: ["volume-analysis", "submission-raw-data"],
+    tabs: ["volume-analysis", "submission-raw-data", "region3-lgu"],
   },
   {
     key: "grp-maintenance",
@@ -129,7 +133,7 @@ const TAB_GROUPS = [
     key: "grp-system",
     label: "System & Logs",
     icon: <ToolOutlined />,
-    tabs: ["system"],
+    tabs: ["system", "automation-agent"],
   },
 ];
 
@@ -165,12 +169,7 @@ export default function DeveloperSettings({onSettingsSaved, isDark, isDeveloper 
   const [settings, setSettings] = useState(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
-  const [announcementEmailSending, setAnnouncementEmailSending] = useState(false);
-  const [announcements, setAnnouncements] = useState([]);
-  const [announcementModal, setAnnouncementModal] = useState({ open: false, record: null });
-  const [announcementSaving, setAnnouncementSaving] = useState(false);
   const [form] = Form.useForm();
-  const [announcementForm] = Form.useForm();
   const [emailForm] = Form.useForm();
 
   // SMTP / Email config state
@@ -194,6 +193,10 @@ export default function DeveloperSettings({onSettingsSaved, isDark, isDeveloper 
   const [devPinForm] = Form.useForm();
   const [devPinSaving, setDevPinSaving] = useState(false);
   const [devPinRegenerating, setDevPinRegenerating] = useState(false);
+
+  // SLF Portal sensitive-value masking (developer-only global privacy toggle)
+  const [slfMask, setSlfMask] = useState({ maskSensitiveSlfValues: false, updatedAt: null, audit: [] });
+  const [slfMaskSaving, setSlfMaskSaving] = useState(false);
 
   // Test-upload modal
   const [testUploadModal, setTestUploadModal] = useState({ open: false });
@@ -290,6 +293,7 @@ export default function DeveloperSettings({onSettingsSaved, isDark, isDeveloper 
       .then(({ data }) => setDriveConfig(data))
       .catch(() => setDriveConfig(null));
     loadDevPortalStatus();
+    loadSlfMask();
     const logInterval = setInterval(() => fetchLogs({ showLoading: false }), 8000);
     return () => clearInterval(logInterval);
   }, []);
@@ -298,7 +302,6 @@ export default function DeveloperSettings({onSettingsSaved, isDark, isDeveloper 
     try {
       const { data } = await api.get("/settings/app");
       setSettings(data);
-      setAnnouncements(data.portalAnnouncements || []);
       form.setFieldsValue({
         ...data,
         portalAnnouncementType: data.portalAnnouncementType || "info",
@@ -348,14 +351,6 @@ export default function DeveloperSettings({onSettingsSaved, isDark, isDeveloper 
     }
   };
 
-  const fetchAnnouncements = async () => {
-    try {
-      const { data } = await api.get("/settings/app/portal-announcements");
-      setAnnouncements(data || []);
-    } catch {
-      /* silent */
-    }
-  };
 
   const fetchLogs = async (options = {}) => {
     const showLoading = options.showLoading !== false;
@@ -768,6 +763,40 @@ export default function DeveloperSettings({onSettingsSaved, isDark, isDeveloper 
     }
   };
 
+  const loadSlfMask = async () => {
+    try {
+      const { data } = await api.get("/settings/slf-masking");
+      setSlfMask({
+        maskSensitiveSlfValues: !!data.maskSensitiveSlfValues,
+        updatedAt: data.updatedAt || null,
+        audit: Array.isArray(data.audit) ? data.audit : [],
+      });
+    } catch {
+      /* leave defaults */
+    }
+  };
+
+  const handleToggleSlfMask = async (checked) => {
+    setSlfMaskSaving(true);
+    try {
+      await api.put("/settings/slf-masking", { maskSensitiveSlfValues: checked });
+      await loadSlfMask();
+      Swal.fire({
+        icon: "success",
+        title: checked ? "Sensitive values masked" : "Sensitive values visible",
+        text: checked
+          ? "SLF Portal sensitive values now render as ***** for all portal users."
+          : "Authorized SLF Portal users can now see real values.",
+        timer: 1600,
+        showConfirmButton: false,
+      });
+    } catch (err) {
+      Swal.fire("Error", err.response?.data?.message || "Could not update masking.", "error");
+    } finally {
+      setSlfMaskSaving(false);
+    }
+  };
+
   const handleSetDevPin = async (values) => {
     setDevPinSaving(true);
     try {
@@ -951,85 +980,6 @@ export default function DeveloperSettings({onSettingsSaved, isDark, isDeveloper 
     }
   };
 
-  const openAnnouncementModal = (record = null) => {
-    setAnnouncementModal({ open: true, record });
-    announcementForm.setFieldsValue({
-      enabled: record?.enabled || false,
-      type: record?.type || "info",
-      title: record?.title || "",
-      message: record?.message || "",
-      startAt: record?.startAt ? dayjs(record.startAt) : null,
-      endAt: record?.endAt ? dayjs(record.endAt) : null,
-      showOnLogin: record?.showOnLogin !== false,
-      showInPortal: record?.showInPortal !== false,
-      dismissible: record?.dismissible !== false,
-    });
-  };
-
-  const saveAnnouncement = async () => {
-    setAnnouncementSaving(true);
-    try {
-      const values = await announcementForm.validateFields();
-      const payload = {
-        ...values,
-        startAt: values.startAt?.toISOString?.() || null,
-        endAt: values.endAt?.toISOString?.() || null,
-      };
-      const id = announcementModal.record?._id;
-      const { data } = id
-        ? await api.put(`/settings/app/portal-announcements/${id}`, payload)
-        : await api.post("/settings/app/portal-announcements", payload);
-      setSettings(data.settings || settings);
-      if (onSettingsSaved && data.settings) onSettingsSaved(data.settings);
-      await fetchAnnouncements();
-      setAnnouncementModal({ open: false, record: null });
-      Swal.fire({ icon: "success", title: id ? "Announcement Updated" : "Announcement Created", timer: 1100, showConfirmButton: false });
-    } catch (err) {
-      if (err?.errorFields) return;
-      Swal.fire("Error", err.response?.data?.message || "Could not save announcement", "error");
-    } finally {
-      setAnnouncementSaving(false);
-    }
-  };
-
-  const deleteAnnouncement = async (record) => {
-    try {
-      await api.delete(`/settings/app/portal-announcements/${record._id}`);
-      await fetchSettings();
-      Swal.fire({ icon: "success", title: "Announcement Deleted", timer: 1000, showConfirmButton: false });
-    } catch (err) {
-      Swal.fire("Error", err.response?.data?.message || "Could not delete announcement", "error");
-    }
-  };
-
-  const sendAnnouncementEmail = async (record) => {
-    setAnnouncementEmailSending(true);
-    try {
-      const { data } = await api.post("/settings/app/portal-announcement/email", {
-        announcementId: record._id,
-        title: record.title,
-        message: record.message,
-        subject: record.title,
-        emailMessage: record.message,
-      });
-      await fetchSettings();
-      Swal.fire({
-        icon: data.failed ? "warning" : "success",
-        title: "Announcement Email Sent",
-        text: `${data.sent || 0} sent${data.failed ? `, ${data.failed} failed` : ""}.`,
-        timer: 2200,
-        showConfirmButton: false,
-      });
-    } catch (err) {
-      Swal.fire(
-        "Error",
-        err.response?.data?.message || "Could not send announcement email",
-        "error",
-      );
-    } finally {
-      setAnnouncementEmailSending(false);
-    }
-  };
 
   // Panes that fetch lazily on first visit — unchanged behaviour, just moved off
   // the old flat <Tabs onChange> now that the leaf tabs live one level down.
@@ -1904,96 +1854,89 @@ export default function DeveloperSettings({onSettingsSaved, isDark, isDeveloper 
           {
             key: "announcements",
             label: <span><NotificationOutlined /> Announcements</span>,
-            children: (
-              <Card
-                style={{ borderRadius: 10 }}
-                title={<Space><NotificationOutlined style={{ color: "#52c41a" }} /><Text strong>Announcement Manager</Text></Space>}
-                extra={<Button type="primary" icon={<PlusOutlined />} onClick={() => openAnnouncementModal()}>New Announcement</Button>}
-              >
-                <Alert
-                  type="info"
-                  showIcon
-                  style={{ marginBottom: 16, borderRadius: 8 }}
-                  message="Manage posted announcements for SLF portal users."
-                  description="Only one announcement can be published at a time. Published announcements appear on the selected portal surfaces."
-                />
-                <ResponsiveTable
-                  dataSource={announcements}
-                  rowKey="_id"
-                  size="small"
-                  pagination={{ pageSize: 8, showSizeChanger: true, pageSizeOptions: ["8", "15", "30"], showTotal: (total, range) => `${range[0]}-${range[1]} of ${total}` }}
-                  locale={{ emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No announcements yet" /> }}
-                  columns={[
-                    {
-                      title: "Announcement",
-                      key: "announcement",
-                      width: 360,
-                      render: (_, record) => (
-                        <Space direction="vertical" size={2}>
-                          <Space wrap>
-                            <Text strong>{record.title || "Untitled"}</Text>
-                            {record.enabled && <Tag color="green">Published</Tag>}
-                            <Tag color={record.type === "error" ? "red" : record.type === "warning" ? "orange" : record.type === "success" ? "green" : "blue"}>{record.type || "info"}</Tag>
-                          </Space>
-                          <Text type="secondary" style={{ fontSize: 12, whiteSpace: "normal", overflowWrap: "anywhere" }}>{record.message || "No message"}</Text>
-                        </Space>
-                      ),
-                    },
-                    {
-                      title: "Placement",
-                      key: "placement",
-                      width: 170,
-                      render: (_, record) => (
-                        <Space size={[4, 4]} wrap>
-                          {record.showOnLogin !== false && <Tag color="blue">Login</Tag>}
-                          {record.showInPortal !== false && <Tag color="cyan">Portal</Tag>}
-                          {record.dismissible !== false && <Tag>Dismissible</Tag>}
-                        </Space>
-                      ),
-                    },
-                    {
-                      title: "Validity",
-                      key: "validity",
-                      width: 220,
-                      render: (_, record) => (
-                        <Space direction="vertical" size={0}>
-                          <Text style={{ fontSize: 12 }}>From: {record.startAt ? dayjs(record.startAt).format("MM/DD/YYYY h:mm A") : "Always"}</Text>
-                          <Text style={{ fontSize: 12 }}>Until: {record.endAt ? dayjs(record.endAt).format("MM/DD/YYYY h:mm A") : "No end"}</Text>
-                        </Space>
-                      ),
-                    },
-                    {
-                      title: "Actions",
-                      key: "actions",
-                      width: 190,
-                      fixed: "right",
-                      render: (_, record) => (
-                        <Space size={4}>
-                          <Tooltip title="Edit">
-                            <Button size="small" icon={<EditOutlined />} onClick={() => openAnnouncementModal(record)} />
-                          </Tooltip>
-                          <Popconfirm title="Email announcement?" description="This will email all approved SLF portal users." okText="Send" onConfirm={() => sendAnnouncementEmail(record)}>
-                            <Tooltip title="Send to Portal Users">
-                              <Button size="small" type="primary" icon={<SendOutlined />} loading={announcementEmailSending} />
-                            </Tooltip>
-                          </Popconfirm>
-                          <Popconfirm title="Delete announcement?" okText="Delete" okButtonProps={{ danger: true }} onConfirm={() => deleteAnnouncement(record)}>
-                            <Tooltip title="Delete">
-                              <Button size="small" danger icon={<DeleteOutlined />} />
-                            </Tooltip>
-                          </Popconfirm>
-                        </Space>
-                      ),
-                    },
-                  ]}
-                />
-              </Card>
-            ),
+            children: <AnnouncementManager onChanged={fetchSettings} />,
           },
           {
             key: "dev-portal-credential",
             label: <span><SafetyCertificateOutlined /> Dev Portal Credential</span>,
             children: (
+              <>
+              <Card
+                style={{ marginTop: 0, marginBottom: 16, borderRadius: 10 }}
+                title={
+                  <Space>
+                    <EyeInvisibleOutlined style={{ color: "#722ed1" }} />
+                    <Text strong>SLF Portal Sensitive-Value Masking</Text>
+                    <Tag color={slfMask.maskSensitiveSlfValues ? "volcano" : "green"}>
+                      {slfMask.maskSensitiveSlfValues ? "Masked (*****)" : "Visible"}
+                    </Tag>
+                  </Space>
+                }
+              >
+                <Alert
+                  type="info"
+                  showIcon
+                  style={{ marginBottom: 16 }}
+                  message="Global privacy toggle for the SLF Portal"
+                  description={
+                    <span>
+                      When enabled, sensitive SLF Portal values (waste volumes &amp; tonnage,
+                      cell capacity &amp; fill, contact / account identifiers, and any financial
+                      figures) render as <b>*****</b> everywhere in the portal — cards, tables,
+                      tooltips, charts, calendar, print and export. Labels, units, statuses and
+                      workflow dates are never masked. The stored data is unchanged; only the
+                      display is masked. Only developers can change this, and every change is
+                      audited below. The change applies live to all open portals.
+                    </span>
+                  }
+                />
+                <Space align="center" size={16} wrap>
+                  <Switch
+                    checked={slfMask.maskSensitiveSlfValues}
+                    loading={slfMaskSaving}
+                    onChange={handleToggleSlfMask}
+                    checkedChildren="Masked"
+                    unCheckedChildren="Visible"
+                  />
+                  <Text type="secondary">
+                    {slfMask.maskSensitiveSlfValues
+                      ? "Sensitive values are hidden as ***** for portal users."
+                      : "Authorized portal users can see real sensitive values."}
+                  </Text>
+                  {slfMask.updatedAt && (
+                    <Text type="secondary" style={{ fontSize: 12 }}>
+                      Last changed {new Date(slfMask.updatedAt).toLocaleString()}
+                    </Text>
+                  )}
+                </Space>
+                {slfMask.audit?.length > 0 && (
+                  <>
+                    <Divider style={{ margin: "16px 0 8px" }} />
+                    <Text strong style={{ fontSize: 12 }}>Change history</Text>
+                    <Table
+                      size="small"
+                      style={{ marginTop: 8 }}
+                      dataSource={slfMask.audit.map((a, i) => ({ key: i, ...a }))}
+                      pagination={{ pageSize: 5, hideOnSinglePage: true }}
+                      columns={[
+                        { title: "When", dataIndex: "at", key: "at", render: (v) => (v ? new Date(v).toLocaleString() : "—") },
+                        { title: "Changed by", dataIndex: "changedByEmail", key: "changedByEmail", render: (v, r) => `${v || "—"}${r.changedByRole ? ` (${r.changedByRole})` : ""}` },
+                        {
+                          title: "Change",
+                          key: "change",
+                          render: (_, r) => (
+                            <Space size={4}>
+                              <Tag color={r.previousValue ? "volcano" : "green"}>{r.previousValue ? "Masked" : "Visible"}</Tag>
+                              →
+                              <Tag color={r.newValue ? "volcano" : "green"}>{r.newValue ? "Masked" : "Visible"}</Tag>
+                            </Space>
+                          ),
+                        },
+                      ]}
+                    />
+                  </>
+                )}
+              </Card>
               <Card
                 style={{ marginTop: 0, borderRadius: 10 }}
                 title={
@@ -2132,6 +2075,7 @@ export default function DeveloperSettings({onSettingsSaved, isDark, isDeveloper 
                   </Space>
                 </Form>
               </Card>
+              </>
             ),
           },
           {
@@ -2578,7 +2522,16 @@ export default function DeveloperSettings({onSettingsSaved, isDark, isDeveloper 
                 </Card>
               </>
             ),
-          },          {
+          },
+          {
+            // Automation Agent — config-only section under System & Logs (#5).
+            key: "automation-agent",
+            label: <span><RobotOutlined /> Automation Agent</span>,
+            children: (
+              <AutomationAgentSettings initial={settings?.automationAgent} isDark={isDark} />
+            ),
+          },
+          {
             key: "deleted-submissions",
             label: <span><DeleteOutlined /> Deleted Submissions</span>,
             children: (
@@ -2839,6 +2792,11 @@ export default function DeveloperSettings({onSettingsSaved, isDark, isDeveloper 
                   key: "submission-raw-data",
                   label: <span><DatabaseOutlined /> Submission RAW Data</span>,
                   children: <SubmissionRawData isDark={isDark} />,
+                },
+                {
+                  key: "region3-lgu",
+                  label: <span><EnvironmentOutlined /> Region 3 LGU Data</span>,
+                  children: <Region3LguData isDark={isDark} />,
                 },
               ]
             : []),
@@ -3125,67 +3083,6 @@ export default function DeveloperSettings({onSettingsSaved, isDark, isDeveloper 
           </Form.Item>
           <Form.Item name="message" label="Message" rules={[{ required: true, message: "Message is required" }]}>
             <TextArea rows={7} />
-          </Form.Item>
-        </Form>
-      </Modal>
-      <Modal
-        title={announcementModal.record ? "Edit Announcement" : "Create Announcement"}
-        open={announcementModal.open}
-        onCancel={() => setAnnouncementModal({ open: false, record: null })}
-        onOk={saveAnnouncement}
-        confirmLoading={announcementSaving}
-        okText={announcementModal.record ? "Save Changes" : "Create"}
-        width={760}
-        destroyOnHidden
-      >
-        <Form form={announcementForm} layout="vertical">
-          <Row gutter={[16, 0]}>
-            <Col xs={24} md={8}>
-              <Form.Item name="enabled" label="Publish" valuePropName="checked">
-                <Switch checkedChildren="Published" unCheckedChildren="Draft" />
-              </Form.Item>
-            </Col>
-            <Col xs={24} md={8}>
-              <Form.Item name="type" label="Format" rules={[{ required: true, message: "Select format" }]}>
-                <Select options={[
-                  { label: "Information", value: "info" },
-                  { label: "Warning", value: "warning" },
-                  { label: "Success", value: "success" },
-                  { label: "Critical", value: "error" },
-                ]} />
-              </Form.Item>
-            </Col>
-            <Col xs={24} md={8}>
-              <Form.Item name="dismissible" label="Allow dismiss" valuePropName="checked">
-                <Switch checkedChildren="Yes" unCheckedChildren="No" />
-              </Form.Item>
-            </Col>
-            <Col xs={24} md={12}>
-              <Form.Item name="showOnLogin" label="Show on Login Page" valuePropName="checked">
-                <Switch checkedChildren="Show" unCheckedChildren="Hide" />
-              </Form.Item>
-            </Col>
-            <Col xs={24} md={12}>
-              <Form.Item name="showInPortal" label="Show Inside SLF Portal" valuePropName="checked">
-                <Switch checkedChildren="Show" unCheckedChildren="Hide" />
-              </Form.Item>
-            </Col>
-            <Col xs={24} md={12}>
-              <Form.Item name="startAt" label="Valid From">
-                <DatePicker showTime style={{ width: "100%" }} />
-              </Form.Item>
-            </Col>
-            <Col xs={24} md={12}>
-              <Form.Item name="endAt" label="Valid Until">
-                <DatePicker showTime style={{ width: "100%" }} />
-              </Form.Item>
-            </Col>
-          </Row>
-          <Form.Item name="title" label="Announcement Title" rules={[{ required: true, message: "Enter a title" }]}>
-            <Input placeholder="Important SLF Portal Notice" />
-          </Form.Item>
-          <Form.Item name="message" label="Announcement Message" rules={[{ required: true, message: "Enter a message" }]}>
-            <TextArea rows={5} placeholder="Write the announcement shown on the login page and portal dashboard..." />
           </Form.Item>
         </Form>
       </Modal>

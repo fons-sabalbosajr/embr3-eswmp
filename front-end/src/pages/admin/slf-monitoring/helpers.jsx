@@ -229,23 +229,51 @@ const isDriveUrl = (url) =>
     String(url || ""),
   );
 
-// Resolve a stored media URL into something directly usable by <img>/<a>.
+// Resolve a stored media URL into an IMAGE source usable by <img>/<Image>.
 // Google Drive "webViewLink" values are viewer pages and cannot be used as an
-// image source — convert them to a direct thumbnail/view URL instead.
+// image source. Google also deprecated the `uc?export=view` endpoint (it now
+// serves a scan-warning interstitial for many files, which is what left gallery
+// previews broken); the `thumbnail` endpoint renders reliably as an <img> at any
+// size, so it is used for both grid thumbnails (w800) and the full preview
+// (w1600).
 const resolveMediaUrl = (url, { thumbnail = false } = {}) => {
   const s = String(url || "");
   if (!s) return "";
   if (isDriveUrl(s)) {
     const id = extractDriveId(s);
     if (id) {
-      // Grid thumbnails are downscaled (w800) so many photos don't decode to
-      // hundreds of MB in memory; full resolution is still used for preview/open.
       return thumbnail
         ? `https://drive.google.com/thumbnail?id=${id}&sz=w800`
-        : `https://drive.google.com/uc?export=view&id=${id}`;
+        : `https://drive.google.com/thumbnail?id=${id}&sz=w1600`;
     }
   }
   return s;
+};
+
+// Resolve a URL that reliably OPENS a stored file in a new tab regardless of
+// type (image / video / pdf / doc). Drive files open in their native viewer
+// page — which handles every file type — instead of the broken direct-download
+// endpoint. Use this for every "View" / "Open in new tab" action.
+const resolveMediaOpenUrl = (url) => {
+  const s = String(url || "");
+  if (!s) return "";
+  if (isDriveUrl(s)) {
+    const id = extractDriveId(s);
+    if (id) return `https://drive.google.com/file/d/${id}/view`;
+  }
+  return s;
+};
+
+// Coarse media-type detection from a URL/extension, for choosing how to render
+// a stored file (inline image vs. video vs. pdf vs. generic download).
+const getMediaKind = (url) => {
+  const s = String(url || "").split("?")[0].split("#")[0].toLowerCase();
+  if (/\.(jpe?g|png|gif|webp|bmp|svg|avif|heic)$/.test(s)) return "image";
+  if (/\.(mp4|webm|ogg|mov|m4v|avi|mkv)$/.test(s)) return "video";
+  if (/\.pdf$/.test(s)) return "pdf";
+  if (/\.(docx?|xlsx?|pptx?|csv|txt)$/.test(s)) return "document";
+  // Drive URLs and other extension-less links: treat as generic (openable).
+  return "file";
 };
 
 const normalizeStoredFileUrl = (value) => {
@@ -290,5 +318,7 @@ export {
   extractDriveId,
   isDriveUrl,
   resolveMediaUrl,
+  resolveMediaOpenUrl,
+  getMediaKind,
   normalizeStoredFileUrl,
 };

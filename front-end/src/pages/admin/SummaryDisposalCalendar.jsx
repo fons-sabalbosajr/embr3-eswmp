@@ -43,17 +43,25 @@ export default function SummaryDisposalCalendar({
         dayjs(arg.date).isSame(calendarDate, "day") ? ["fc-selected-day"] : []
       }
       eventContent={(eventInfo) => {
+        // #1c: render only ACTIVE data indicators — the submission count is the
+        // primary marker; the volume line is shown only when a positive volume was
+        // recorded (never a "0 m³" placeholder), and the warning marker only when the
+        // day actually has validation issues. A day with no records has no event at
+        // all, so no empty/inactive cell content is rendered.
         const item = eventInfo.event.extendedProps || {};
-        // #4: when the day has validation issues, show a warning marker; the event
-        // itself is already recolored (red/amber) by the caller.
+        const count = Number(item.count || 0);
+        if (!count) return null;
         const issues = Array.isArray(item.issueReasons) ? item.issueReasons : [];
+        const hasVolume = Number(item.m3 || 0) > 0 || Number(item.tons || 0) > 0;
         return (
           <div style={{ lineHeight: 1.25, whiteSpace: "normal" }} title={issues.join(" • ")}>
-            <div style={{ fontWeight: 700 }}>{eventInfo.event.title}</div>
-            <div style={{ fontSize: 10, opacity: 0.9 }}>
-              {item.count} submission{item.count !== 1 ? "s" : ""}
+            <div style={{ fontWeight: 700 }}>
+              {count} submission{count !== 1 ? "s" : ""}
               {issues.length > 0 ? ` ⚠ ${issues.length}` : ""}
             </div>
+            {hasVolume && (
+              <div style={{ fontSize: 10, opacity: 0.9 }}>{eventInfo.event.title}</div>
+            )}
           </div>
         );
       }}

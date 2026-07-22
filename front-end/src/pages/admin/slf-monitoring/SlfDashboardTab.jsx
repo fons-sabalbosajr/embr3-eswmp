@@ -63,6 +63,7 @@ import {
   normalizeUnit,
 } from "./helpers.jsx";
 import ResponsiveTable from "../shared/ResponsiveTable";
+import { formatCompact as formatCompactShared } from "../../../utils/formatNumber";
 
 const { Text } = Typography;
 
@@ -931,13 +932,12 @@ const R3_PROVINCES = [
   "Aurora",
 ];
 
-const formatCompact = (value, digits = 1) => {
-  const number = Number(value || 0);
-  if (Math.abs(number) >= 1000000)
-    return `${(number / 1000000).toFixed(digits)}M`;
-  if (Math.abs(number) >= 1000) return `${(number / 1000).toFixed(digits)}k`;
-  return number.toLocaleString();
-};
+// Item #1: delegate to THE single shared compact formatter (K/M, max 2 decimals,
+// trailing zeros stripped, uppercase K). Kept as a thin wrapper so every existing
+// consumer of this export (SLF Monitoring, Portal Generators, …) gets the correct
+// format without changing their call sites. `invalid: "0"` preserves the previous
+// behaviour of showing 0 (not "—") for missing metric values on these cards.
+const formatCompact = (value, digits = 2) => formatCompactShared(value, { decimals: digits, invalid: "0" });
 
 const sumBy = (items, getter) =>
   items.reduce((sum, item) => sum + Number(getter(item) || 0), 0);
@@ -1153,7 +1153,16 @@ const findBestCellIndex = (rows, wasteType, preferredIndex = null) => {
 };
 
 const addVolumeToCell = (row, volume, source, wasteType, unit) => {
-  const converted = convertVolume(volume, unit, row.unit);
+  const n = Number(volume);
+  if (!Number.isFinite(n) || n <= 0) return;
+  const u = normalizeUnit(unit);
+  // Item #3: record every DISTINCT source unit this cell received so mixed-unit
+  // data can be flagged instead of silently combined. Conversion uses the app's
+  // one approved factor; an UNCONVERTIBLE record (unknown unit) is flagged, never
+  // dropped without a trace or added as NaN.
+  if (u) row.unitsSeen.add(u);
+  const converted = convertVolume(n, u || row.unit, row.unit);
+  if (converted === null) { row.hasUnconvertible = true; return; }
   if (converted <= 0) return;
   row[source] += converted;
   row.total += converted;
@@ -1200,6 +1209,10 @@ const buildFacilityCellUsage = (record, baseline, submissions = []) => {
       submissions: 0,
       total: 0,
       byWasteType: {},
+      // Item #3: mixed-unit detection per cell.
+      unitsSeen: new Set(),
+      hasUnconvertible: false,
+      mixedUnits: false,
     };
   });
 
@@ -1271,6 +1284,16 @@ const buildFacilityCellUsage = (record, baseline, submissions = []) => {
     });
   });
 
+  // Item #3: finalize mixed-unit detection. A cell mixing tons + m³ is flagged so
+  // the UI can WARN admins rather than presenting a silently-combined total. The
+  // Set is replaced by a plain boolean so the row stays serializable/renderable.
+  rows.forEach((row) => {
+    row.mixedUnits = row.unitsSeen.size > 1;
+    row.unitsSeen = [...row.unitsSeen];
+  });
+  const anyMixedUnits = rows.some((row) => row.mixedUnits);
+  const anyUnconvertible = rows.some((row) => row.hasUnconvertible);
+
   const totalBaseline = rows.reduce((sum, row) => sum + row.baseline, 0);
   const totalSubmissions = rows.reduce((sum, row) => sum + row.submissions, 0);
   const total = rows.reduce((sum, row) => sum + row.total, 0);
@@ -1281,6 +1304,8 @@ const buildFacilityCellUsage = (record, baseline, submissions = []) => {
     total,
     unit: targetUnit,
     submissionCount: matchingSubmissions.length,
+    anyMixedUnits,
+    anyUnconvertible,
   };
 };
 
