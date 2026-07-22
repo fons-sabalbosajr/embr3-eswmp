@@ -470,7 +470,102 @@
   letter-spacing: 0.01em;
 }
 
+.add-margin{
+  margin-top: 10px;
+}
+
 .lp-hero-cta { display: flex; gap: 12px; flex-wrap: wrap; }
+
+/* Hero eyebrow — official platform tag */
+.lp-hero-eyebrow {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  padding: 6px 15px 6px 12px;
+  background: var(--lp-glass);
+  backdrop-filter: blur(8px);
+  border: 1px solid var(--lp-border);
+  border-radius: 100px;
+  font-size: 0.76rem;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  margin-bottom: 18px;
+}
+
+.landing-light .lp-hero-eyebrow { color: var(--lp-primary); }
+.landing-dark .lp-hero-eyebrow { color: var(--lp-accent-light); }
+
+.lp-hero-eyebrow-seal {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--lp-accent);
+  box-shadow: 0 0 0 3px rgba(57, 172, 96, 0.2);
+  flex: 0 0 auto;
+}
+
+/* Hero lead — bridges headline and description for a clearer hierarchy */
+.lp-hero-lead {
+  font-size: 1.2rem;
+  font-weight: 600;
+  color: var(--lp-text);
+  max-width: 520px;
+  margin-bottom: 12px;
+  line-height: 1.5;
+  letter-spacing: -0.01em;
+}
+
+/* Hero authority / trust row */
+.lp-hero-trust {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 20px;
+  margin-top: 26px;
+  padding-top: 22px;
+  border-top: 1px solid var(--lp-border);
+  list-style: none;
+}
+
+.lp-hero-trust li {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.82rem;
+  font-weight: 500;
+  color: var(--lp-text-secondary);
+}
+
+.lp-hero-trust li strong {
+  font-size: 1.05rem;
+  font-weight: 800;
+  color: var(--lp-primary);
+}
+
+.landing-dark .lp-hero-trust li strong { color: var(--lp-accent-light); }
+
+.lp-hero-trust-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--lp-accent);
+  flex: 0 0 auto;
+}
+
+/* Official divider between the paired EMB + Bagong Pilipinas nav marks */
+.lp-nav-logo-divider {
+  width: 1px;
+  height: 24px;
+  background: var(--lp-border);
+  margin: 0 2px;
+  flex: 0 0 auto;
+}
+
+@media (max-width: 640px) {
+  .lp-hero-lead { font-size: 1.05rem; }
+  .lp-hero-trust { gap: 8px 14px; margin-top: 20px; padding-top: 18px; }
+  .lp-hero-trust li { font-size: 0.78rem; }
+}
 
 /* Hero card — glass */
 .lp-hero-card {
@@ -2411,4 +2506,124 @@
   .lp-hero-text h1 { font-size: 1.5rem; }
   .lp-hero-mock-stat-card { flex-direction: column; gap: 4px; align-items: flex-start; }
   .lp-hero-mock-stat-icon { width: 22px; height: 22px; font-size: 0.8rem; }
+}
+
+/* ── Item #3: Landing Contact / Get-Started CTA modals ── */
+.lp-modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 2000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  background: rgba(8, 11, 18, 0.55);
+  backdrop-filter: blur(4px);
+  animation: lpModalFade 0.2s ease-out;
+}
+
+.lp-modal {
+  position: relative;
+  width: 100%;
+  max-width: 520px;
+  max-height: 90vh;
+  overflow-y: auto;
+  background: var(--lp-bg);
+  color: var(--lp-text);
+  border: 1px solid var(--lp-border);
+  border-radius: var(--lp-radius-lg, 16px);
+  box-shadow: var(--lp-shadow-lg);
+  padding: 28px 26px 22px;
+  animation: lpModalRise 0.24s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.lp-modal-close {
+  position: absolute;
+  top: 12px;
+  right: 14px;
+  border: none;
+  background: transparent;
+  color: var(--lp-text-secondary);
+  font-size: 26px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: 8px;
+}
+.lp-modal-close:hover { background: var(--lp-bg-alt); color: var(--lp-text); }
+
+.lp-modal-title {
+  font-size: 1.35rem;
+  font-weight: 800;
+  letter-spacing: -0.01em;
+  margin: 0 0 10px;
+}
+
+.lp-modal-lead {
+  font-size: 0.92rem;
+  color: var(--lp-text-secondary);
+  line-height: 1.6;
+  margin: 0 0 18px;
+}
+
+.lp-modal-contact { list-style: none; margin: 0 0 16px; padding: 0; }
+.lp-modal-contact li {
+  display: flex;
+  gap: 12px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--lp-border);
+  font-size: 0.9rem;
+  align-items: baseline;
+}
+.lp-modal-contact li:last-child { border-bottom: none; }
+.lp-modal-contact li > span:first-child {
+  flex: 0 0 68px;
+  color: var(--lp-text-muted);
+  font-weight: 600;
+  text-transform: uppercase;
+  font-size: 0.72rem;
+  letter-spacing: 0.04em;
+}
+.lp-modal-contact a { color: var(--lp-primary); font-weight: 600; }
+.landing-dark .lp-modal-contact a { color: var(--lp-accent-light); }
+
+.lp-modal-cta-grid { display: grid; gap: 10px; margin-bottom: 16px; }
+.lp-modal-cta-item {
+  text-align: left;
+  border: 1px solid var(--lp-border);
+  background: var(--lp-bg-alt);
+  border-radius: 12px;
+  padding: 12px 14px;
+  cursor: pointer;
+  transition: border-color 0.18s ease, transform 0.18s ease;
+}
+.lp-modal-cta-item:hover { border-color: var(--lp-primary); transform: translateY(-1px); }
+.lp-modal-cta-item strong { display: block; font-size: 0.95rem; margin-bottom: 2px; }
+.lp-modal-cta-item span { font-size: 0.82rem; color: var(--lp-text-secondary); }
+
+.lp-modal-existing {
+  font-size: 0.86rem;
+  color: var(--lp-text-secondary);
+  padding: 12px 0 4px;
+  border-top: 1px solid var(--lp-border);
+}
+.lp-modal-link {
+  border: none;
+  background: transparent;
+  color: var(--lp-primary);
+  font-weight: 700;
+  cursor: pointer;
+  padding: 0;
+  font-size: 0.86rem;
+}
+.landing-dark .lp-modal-link { color: var(--lp-accent-light); }
+
+.lp-modal-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 14px; }
+
+@keyframes lpModalFade { from { opacity: 0; } to { opacity: 1; } }
+@keyframes lpModalRise { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: translateY(0); } }
+
+@media (max-width: 520px) {
+  .lp-modal { padding: 22px 18px 18px; }
+  .lp-modal-contact li { flex-direction: column; gap: 2px; }
 }

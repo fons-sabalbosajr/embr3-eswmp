@@ -57,7 +57,7 @@ function convertVolumeSafe({ value, fromUnit, toUnit }) {
 }
 
 // The unit an SLF facility DECLARES, read from the fields "Set Field Units" writes.
-function resolveFacilityUnit(facility, fallback = M3) {
+function resolveFacilityUnit(facility, fallback = TONS) {
   const candidates = [
     facility?.wasteReceivedUnit,
     facility?.volumeCapacityUnit,
@@ -71,7 +71,8 @@ function resolveFacilityUnit(facility, fallback = M3) {
     const u = normalizeUnit(c);
     if (u) return u;
   }
-  return normalizeUnit(fallback) || M3;
+  // Default unit is TONS; m³ only when a facility is explicitly configured for it.
+  return normalizeUnit(fallback) || TONS;
 }
 
 function resolveCellUnit(facility, index, kind = "capacity") {

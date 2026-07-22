@@ -11,7 +11,14 @@ const Notification = require("../models/Notification");
 const UserPortal = require("../models/UserPortal");
 const { notifyAdmin, notifyPortal, refreshAdmin } = require("../utils/socketEmit");
 const { isBataanSlfName } = require("../utils/mergeBataanSlf");
-const { authMiddleware, requireAnyAuth, developerOnly } = require("../middleware/auth");
+const {
+  isOperationalStatus,
+  cellExists,
+  evaluateFacilityCellAcceptance,
+  toBaseM3,
+} = require("../utils/cellAvailability");
+const { authMiddleware, requireAnyAuth, adminOnly, developerOnly } = require("../middleware/auth");
+const { todayRange } = require("../utils/appTime");
 const { NON_DUMMY_CLAUSE } = require("../utils/dummyFilter");
 const {
   validateWasteGeneration,
@@ -25,6 +32,10 @@ const {
   normalizeUnit: strictNormalizeUnit,
   convertVolume: convertVolumeStrict,
 } = require("../utils/volumeUnits");
+const {
+  normalizeWasteType: normalizeWasteCategory,
+  isHazardousWasteType,
+} = require("../utils/wasteCategories");
 const jwt = require("jsonwebtoken");
 
 // Optional auth: decode the JWT when present so role-aware behaviour (e.g.
@@ -210,6 +221,40 @@ function matchesSlfIdentity(item, requestedName) {
 // (for BESLF) merged legacy aliases. Used by the baseline update/approve/reject
 // routes so merged/legacy data never breaks a baseline update. Optionally restrict
 // to records that actually carry baseline data.
+// A submission is a "resubmission" once it has been resubmitted after a revert —
+// the resubmit flow records the prior idNo in `previousIdNos` (preserving the
+// original reference/version relationship). One predicate so every list consumer
+// flags and orders resubmissions identically, and never double-counts (each doc is
+// still a single row; versioning is intentional per the data model).
+const isResubmissionEntry = (e) =>
+  Array.isArray(e?.previousIdNos) && e.previousIdNos.length > 0;
+
+// SLF operational classifier — mirrors the frontend classifySlfStatus so the
+// server and client never disagree. A facility is non-operational only when its
+// statusOfSLF explicitly contains "non" (e.g. "Non-Operational"). Empty/unknown
+// status is NOT treated as non-operational (never block on missing data).
+const isSlfNonOperational = (statusOfSLF) => /non/i.test(String(statusOfSLF || ""));
+
+// #3: two-tier submission priority (lower = higher). 0 = unacknowledged (any
+// submission or resubmission not yet acknowledged), 1 = acknowledged. Shared by
+// the non-paginated list so every consumer orders submissions the same way the
+// server-paginated Submissions tab does.
+const submissionRank = (e) => (String(e?.status || "") === "acknowledged" ? 1 : 0);
+const resubmissionFirst = (a, b) => {
+  const ra = submissionRank(a);
+  const rb = submissionRank(b);
+  if (ra !== rb) return ra - rb;
+  // Within a tier, latest relevant date first: resubmittedAt (updatedAt) for
+  // resubmissions, submittedAt (createdAt) otherwise. Missing/invalid dates fall
+  // back safely to 0 (treated as oldest) so they never jump the order or throw.
+  const dateOf = (e) => {
+    const raw = isResubmissionEntry(e) ? (e.updatedAt || e.createdAt) : (e.createdAt || e.updatedAt);
+    const t = new Date(raw || 0).getTime();
+    return Number.isFinite(t) ? t : 0;
+  };
+  return dateOf(b) - dateOf(a);
+};
+
 async function resolveSlfRecordIds(slfName, { requireBaselineData = false, slfGenerator = null } = {}) {
   const variants = getNameVariants(slfName);
   if (variants.length === 0 && !slfGenerator) return [];
@@ -544,17 +589,11 @@ function normalizeVolumeUnit(unit, fallback = "m³") {
 // The truck-level wasteType field is a strict enum. Portal disposal dropdowns
 // always send a valid value, but Excel-imported rows carry free text. Map common
 // variants to the enum and fall back to "Residual" for anything unrecognized so
-// the save never fails with an enum ValidationError.
-const TRUCK_WASTE_TYPE_ENUM = ["Residual", "Hazardous Waste", "Treated Hazardous Waste"];
+// the save never fails with an enum ValidationError. Delegates to the shared
+// canonical definition (server/utils/wasteCategories) so the portal, backend and
+// admin classify a load identically.
 function normalizeTruckWasteType(value) {
-  const raw = String(value ?? "").trim();
-  if (!raw) return undefined; // schema allows undefined; empty string would fail enum
-  if (TRUCK_WASTE_TYPE_ENUM.includes(raw)) return raw;
-  const low = raw.toLowerCase();
-  if (low.includes("treated")) return "Treated Hazardous Waste";
-  if (low.includes("haz") || low.includes("inert")) return "Hazardous Waste";
-  if (low.includes("residual")) return "Residual";
-  return "Residual";
+  return normalizeWasteCategory(value);
 }
 
 // Validate + normalize a numeric volume/capacity. Pushes a readable message to
@@ -595,6 +634,13 @@ function sanitizeTrucksForSave(trucks, fallbackUnit, errors) {
       cleaned.vehicles = cleaned.vehicles.map((vehicle, vi) => {
         if (!vehicle || typeof vehicle !== "object") return vehicle;
         const cv = { ...vehicle };
+        // Per-vehicle wasteType is where the portal actually stores each load's
+        // classification. Normalize it to the canonical category (same as the truck
+        // level) so hazardous loads carried on a vehicle are never miscounted as
+        // residual by the metrics/summary aggregations.
+        if (cv.wasteType !== undefined) {
+          cv.wasteType = normalizeTruckWasteType(cv.wasteType);
+        }
         if (cv.capacityUnit) cv.capacityUnit = normalizeVolumeUnit(cv.capacityUnit, fallbackUnit);
         if (cv.actualVolumeUnit) cv.actualVolumeUnit = normalizeVolumeUnit(cv.actualVolumeUnit, fallbackUnit);
         const vv = coerceVolume(cv.actualVolume, `Truck ${ti + 1} vehicle ${vi + 1} volume`, errors);
@@ -757,16 +803,18 @@ async function findMatchingBaselineOnlyIds({ slfName, slfGenerator, lguCompanyNa
 async function ensurePortalAccountCanSubmit(email) {
   const normalizedEmail = String(email || "").trim().toLowerCase();
   if (!normalizedEmail) return null;
-  const portalUser = await UserPortal.findOne({ email: normalizedEmail }).select("verificationRequired verificationSubmitted status isDummy");
+  const portalUser = await UserPortal.findOne({ email: normalizedEmail }).select("verificationRequired verificationSubmitted status isDummy assignedSlf");
   if (!portalUser) return null;
   if (portalUser.status !== "approved") {
     const error = new Error("Your portal account is not approved for submissions.");
     error.statusCode = 403;
+    error.code = "ACCOUNT_NOT_APPROVED";
     throw error;
   }
   if (portalUser.verificationRequired) {
     const error = new Error("Your account is on hold for verification. Please complete the verification process before using the portal.");
     error.statusCode = 403;
+    error.code = "ACCOUNT_VERIFICATION_REQUIRED";
     throw error;
   }
   return portalUser;
@@ -809,11 +857,22 @@ async function assertNoUnresolvedRevert(email) {
       `You have a reverted submission${stale.idNo ? ` (${stale.idNo})` : ""} that has been unresolved for over 24 hours. Please correct and resubmit the reverted submission before submitting a new one.`,
     );
     error.statusCode = 409;
+    // Machine-readable reason so the Portal can show the right rule modal + action
+    // (Edit and Resubmit), instead of parsing the human message (#2).
+    error.code = "UNRESOLVED_REVERT";
+    error.ruleContext = { idNo: stale.idNo || null };
     throw error;
   }
 }
 
-async function submitEntries({ entries, submittedBy, req } = {}) {
+async function submitEntries({ entries, submittedBy, req, idempotencyKey = null } = {}) {
+  // Idempotency: if this exact request was already processed, return the saved
+  // records instead of creating duplicates (protects against retries / lost
+  // responses / double-clicks). Keyed by a client-supplied X-Idempotency-Key.
+  if (idempotencyKey) {
+    const prior = await DataSLF.find({ idempotencyKey, deletedAt: null }).lean();
+    if (prior.length) return { saved: prior, submissionId: prior[0].submissionId, idempotent: true };
+  }
   const portalAccount = await ensurePortalAccountCanSubmit(submittedBy);
   await assertNoUnresolvedRevert(submittedBy);
   const submitterIsDummy = Boolean(portalAccount?.isDummy);
@@ -937,6 +996,7 @@ async function submitEntries({ entries, submittedBy, req } = {}) {
 
   const genCache = new Map();
   const facilityDummyCache = new Map();
+  const facilityCellCache = new Map(); // genId -> facility cell arrays (lean)
   const saved = [];
   for (const item of sanitizedItems) {
     let genId = item.slfGenerator || null;
@@ -982,6 +1042,90 @@ async function submitEntries({ entries, submittedBy, req } = {}) {
       throw error;
     }
 
+    // ── Ownership enforcement ──
+    // A portal user may submit ONLY against a facility they are assigned to. This
+    // is enforced on the backend so a crafted request cannot place waste into (or
+    // read the cells of) another portal user's landfill. Skipped only when the
+    // account has no assignment recorded (nothing to compare against) or is a
+    // dummy account (which has its own dummy-facility isolation above).
+    if (!submitterIsDummy && genId && Array.isArray(portalAccount?.assignedSlf) && portalAccount.assignedSlf.length) {
+      const assignedIds = portalAccount.assignedSlf.map((id) => String(id));
+      if (!assignedIds.includes(String(genId))) {
+        writeLog("warn", "submit.ownership_rejected", {
+          message: `Portal user attempted to submit against a facility they are not assigned to`,
+          user: submittedBy || item.submittedBy || "",
+          ip: req?.ip,
+          meta: { operation: "submit", slfGenerator: String(genId), submissionId },
+        });
+        const error = new Error("You can only submit waste volumes for the SLF facility assigned to your account.");
+        error.statusCode = 403;
+        throw error;
+      }
+    }
+
+    // ── Authoritative cell-availability revalidation (concurrency-safe gate) ──
+    // Re-load the facility's CURRENT cell state and reject any placement into a
+    // nonexistent, non-operational, full, or over-capacity cell. This runs on the
+    // freshest data so a cell that filled up (or was closed) after the portal
+    // built its form cannot be written to. Mirrors the front-end availability rule.
+    if (genId) {
+      const key = String(genId);
+      let facCells = facilityCellCache.get(key);
+      if (facCells === undefined) {
+        facCells = await SlfFacility.findById(genId)
+          .select(
+            "numberOfCell cellStatuses cellNames cellCapacities cellFillValues cellCapacityUnits cellFillUnits volumeCapacityUnit wasteReceivedUnit",
+          )
+          .lean();
+        facilityCellCache.set(key, facCells || null);
+      }
+      if (facCells) {
+        const cellIssues = [];
+        (Array.isArray(item.trucks) ? item.trucks : []).forEach((truck, ti) => {
+          const rows =
+            Array.isArray(truck?.vehicles) && truck.vehicles.length
+              ? truck.vehicles
+              : [truck];
+          rows.forEach((row) => {
+            const ci =
+              row?.cellIndex ?? (row === truck ? truck?.cellIndex : undefined);
+            const vol = Number(row?.actualVolume || 0);
+            if (ci === null || ci === undefined || ci === "" || !(vol > 0)) return;
+            const acc = evaluateFacilityCellAcceptance(
+              facCells,
+              ci,
+              vol,
+              row?.actualVolumeUnit || item?.baselineUnit || "m³",
+            );
+            if (!acc.ok) {
+              const name = facCells?.cellNames?.[Number(ci)] || `Cell ${Number(ci) + 1}`;
+              cellIssues.push(`Truck ${ti + 1} · ${name}: ${acc.reason}`);
+            }
+          });
+        });
+        if (cellIssues.length) {
+          writeLog("warn", "cell_availability_rejected", {
+            message: cellIssues.join(" | "),
+            user: submittedBy || item.submittedBy || "",
+            ip: req?.ip,
+            meta: {
+              operation: "submit",
+              slfGenerator: key,
+              submissionId,
+              issues: cellIssues,
+            },
+          });
+          const error = new Error(
+            `The selected cell no longer has enough available capacity. ${cellIssues.join(
+              " | ",
+            )} Refresh the cell list and select another operational cell.`,
+          );
+          error.statusCode = 409;
+          throw error;
+        }
+      }
+    }
+
     const doc = new DataSLF({
       ...item,
       slfGenerator: genId,
@@ -989,6 +1133,7 @@ async function submitEntries({ entries, submittedBy, req } = {}) {
       submittedBy: submittedBy || item.submittedBy || "",
       isDummy: submitterIsDummy || facilityIsDummy,
       dummyPortalUserId: submitterIsDummy ? portalAccount?._id : undefined,
+      ...(idempotencyKey ? { idempotencyKey } : {}),
     });
     await doc.save();
     saved.push(doc);
@@ -1077,12 +1222,63 @@ router.post("/", async (req, res) => {
 
     const { entries, submittedBy } = req.body || {};
     const items = Array.isArray(entries) ? entries : [req.body];
-    const { saved } = await submitEntries({ entries: items, submittedBy, req });
-    res.status(201).json({ message: "Data submitted successfully", data: saved });
+    const idempotencyKey = String(req.headers["x-idempotency-key"] || "").trim() || null;
+
+    // Item #2: block OFFICIAL submission when the target SLF is tagged
+    // non-operational (its cell is subject to EMB Region III verification). The
+    // entries are saved as DRAFTS instead of becoming official records, so the
+    // restriction cannot be bypassed by calling the API directly (never rely on a
+    // disabled button alone). The Portal surfaces the reason from the code below.
+    const targetSlfId = items.find((e) => e && e.slfGenerator)?.slfGenerator;
+    if (targetSlfId && mongoose.Types.ObjectId.isValid(String(targetSlfId))) {
+      const facility = await SlfFacility.findById(targetSlfId).select("statusOfSLF slfName");
+      if (facility && isSlfNonOperational(facility.statusOfSLF)) {
+        const PortalSubmissionQueue = require("../models/PortalSubmissionQueue");
+        const email = String(submittedBy || "").trim().toLowerCase();
+        const pu = email ? await UserPortal.findOne({ email }).select("_id") : null;
+        const drafts = await PortalSubmissionQueue.insertMany(
+          items.map((entry) => ({
+            portalUser: pu?._id,
+            portalUserEmail: email,
+            slfGenerator: entry?.slfGenerator || targetSlfId,
+            slfName: entry?.slfName || facility.slfName || "",
+            type: "draft",
+            status: "draft",
+            payload: entry && typeof entry === "object" ? entry : {},
+            createdBy: email || "portal",
+          })),
+          { ordered: false },
+        );
+        writeLog("warn", "submission.blocked.non-operational", {
+          message: `Submission for non-operational SLF "${facility.slfName || targetSlfId}" saved as draft (not officially submitted).`,
+          user: email || "portal",
+          ip: req.ip,
+          meta: { slfId: String(targetSlfId), draftCount: drafts.length },
+        });
+        return res.status(202).json({
+          savedAsDraft: true,
+          code: "SLF_NON_OPERATIONAL",
+          message:
+            "Your assigned SLF is currently tagged as non-operational and its cell is subject to EMB Region III verification. New submissions cannot be officially submitted while this restriction is active, so your entry was saved as a Draft.",
+          data: drafts,
+        });
+      }
+    }
+
+    const { saved, idempotent } = await submitEntries({ entries: items, submittedBy, req, idempotencyKey });
+    res.status(idempotent ? 200 : 201).json({
+      message: idempotent ? "Submission already processed" : "Data submitted successfully",
+      data: saved,
+      idempotent: !!idempotent,
+    });
   } catch (error) {
     if (error.statusCode) {
       return res.status(error.statusCode).json({
         message: error.message,
+        // Machine-readable rule code + context so the Portal can render a consistent
+        // rule modal with the correct next-step action (#2).
+        ...(error.code ? { code: error.code } : {}),
+        ...(error.ruleContext ? { ruleContext: error.ruleContext } : {}),
         // Field-specific Waste Generation feedback (tab / truckIndex / field), so
         // the Portal can point at the exact input instead of failing silently.
         ...(error.validationIssues ? { validationIssues: error.validationIssues } : {}),
@@ -1865,6 +2061,81 @@ router.patch("/:id/reject-edit", async (req, res) => {
   }
 });
 
+// ── SLF Location Map — submission status for a given official day ──
+// ONE compact record per SLF that has a submission whose DISPOSAL DATE falls on
+// the selected Manila day (defaults to today via ?date=YYYY-MM-DD) — the SAME
+// date field + timezone the Disposal Calendar groups by, so the two never
+// disagree. Per-SLF status is classified with the shared priority rule
+// (acknowledged → pending → reverted → rejected). The frontend treats SLFs
+// absent from this list as "No Submission", and a failed request as "Unknown".
+router.get("/today-status", adminOnly, async (req, res) => {
+  try {
+    const { dayRangeFor } = require("../utils/appTime");
+    const { normalizeStatus, classifyMapStatus } = require("../utils/submissionStatus");
+    // No future dates (unless a future reporting workflow requires them).
+    const requested = String(req.query.date || "").trim();
+    const now = todayRange();
+    const sel = requested ? dayRangeFor(requested) : now;
+    const { start, end } = sel.start > now.start ? now : sel;
+    const rows = await DataSLF.aggregate([
+      { $match: {
+        deletedAt: null,
+        isDummy: { $ne: true },
+        // Match by dateOfDisposal (the calendar's date field), not createdAt.
+        dateOfDisposal: { $gte: start, $lt: end },
+      } },
+      { $group: {
+        _id: "$slfGenerator",
+        slfName: { $first: "$slfName" },
+        statuses: { $push: "$status" },
+        // Statuses of RESUBMISSION entries only (those carrying prior idNos). Push
+        // null for non-resubmissions and filter it out in JS BEFORE normalizeStatus
+        // — never $$REMOVE (version-fragile in $push) and never a bare "" (which
+        // normalizeStatus maps to "pending", which would misclassify every initial
+        // pending as a resubmission and hide the yellow Pending icon).
+        resubStatuses: { $push: { $cond: [
+          { $gt: [ { $size: { $ifNull: ["$previousIdNos", []] } }, 0 ] },
+          "$status",
+          null,
+        ] } },
+        submissionCount: { $sum: 1 },
+        totalVolume: { $sum: { $ifNull: ["$totalVolumeM3", 0] } },
+        latestSubmissionAt: { $max: "$dateOfDisposal" },
+        latestStatusUpdatedAt: { $max: "$updatedAt" },
+      } },
+    ]);
+    // Map status is one of: acknowledged | pending | no-submission. Only SLFs
+    // with a valid pending/acknowledged submission are returned as positive;
+    // reverted/rejected-only groups classify to "no-submission" (omitted so the
+    // frontend renders them the same as SLFs absent from the list).
+    const statuses = rows
+      .filter((r) => r._id)
+      .map((r) => {
+        const mapStatus = classifyMapStatus((r.statuses || []).map(normalizeStatus));
+        // A pending group whose pending entries are resubmissions (previously
+        // reverted) surfaces as a distinct "pending-resubmission" state so the
+        // map can flag it separately from a pending initial submission.
+        const resubMapStatus = classifyMapStatus((r.resubStatuses || []).filter(Boolean).map(normalizeStatus));
+        const submissionStatus =
+          mapStatus === "pending" && resubMapStatus === "pending"
+            ? "pending-resubmission"
+            : mapStatus;
+        return {
+          slfId: String(r._id),
+          slfName: r.slfName || "",
+          submissionStatus,
+          latestSubmissionAt: r.latestSubmissionAt,
+          submissionCount: r.submissionCount,
+          totalVolume: Math.round((r.totalVolume || 0) * 100) / 100,
+        };
+      })
+      .filter((s) => s.submissionStatus !== "no-submission");
+    res.json({ generatedAt: new Date(), dayStart: start, dayEnd: end, statuses });
+  } catch (error) {
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+});
+
 // Dashboard stats
 router.get("/stats", async (req, res) => {
   try {
@@ -1885,10 +2156,55 @@ router.get("/stats", async (req, res) => {
         DataSLF.aggregate([
           { $match: match },
           { $unwind: "$trucks" },
+          // Waste type + volume live on each VEHICLE when a truck carries them (the
+          // portal stores per-vehicle wasteType/actualVolume) and only fall back to
+          // the truck level for single-entry rows. Grouping by the truck level alone
+          // made every multi-vehicle hazardous load count as its truck's (often
+          // empty) type — so Hazardous Waste went missing from this breakdown.
+          // Mirror computeSlfMetrics: prefer vehicles with volume, else the truck.
+          {
+            $project: {
+              entries: {
+                $let: {
+                  vars: {
+                    vs: {
+                      $filter: {
+                        input: { $ifNull: ["$trucks.vehicles", []] },
+                        as: "v",
+                        cond: { $gt: [{ $ifNull: ["$$v.actualVolume", 0] }, 0] },
+                      },
+                    },
+                  },
+                  in: {
+                    $cond: [
+                      { $gt: [{ $size: "$$vs" }, 0] },
+                      {
+                        $map: {
+                          input: "$$vs",
+                          as: "v",
+                          in: {
+                            wasteType: { $ifNull: ["$$v.wasteType", "$trucks.wasteType"] },
+                            volume: { $ifNull: ["$$v.actualVolume", 0] },
+                          },
+                        },
+                      },
+                      [
+                        {
+                          wasteType: "$trucks.wasteType",
+                          volume: { $ifNull: ["$trucks.actualVolume", 0] },
+                        },
+                      ],
+                    ],
+                  },
+                },
+              },
+            },
+          },
+          { $unwind: "$entries" },
           {
             $group: {
-              _id: "$trucks.wasteType",
-              totalVolume: { $sum: { $ifNull: ["$trucks.actualVolume", 0] } },
+              _id: "$entries.wasteType",
+              totalVolume: { $sum: "$entries.volume" },
               count: { $sum: 1 },
             },
           },
@@ -2070,6 +2386,7 @@ router.get("/summary-by-slf", async (req, res) => {
           submittedBy: 1,
           status: 1,
           dateOfDisposal: 1,
+          baselineUnit: 1,
           truckCount: { $ifNull: ["$truckCount", { $size: { $ifNull: ["$trucks", []] } }] },
           totalM3: { $ifNull: ["$totalVolumeM3", 0] },
           totalTons: { $ifNull: ["$totalVolumeTons", 0] },
@@ -2083,6 +2400,7 @@ router.get("/summary-by-slf", async (req, res) => {
         $group: {
           _id: { $ifNull: ["$slfName", "Unassigned SLF"] },
           slfGenerator: { $first: "$slfGenerator" },
+          baselineUnit: { $first: "$baselineUnit" },
           submissions: { $sum: 1 },
           trucks: { $sum: "$truckCount" },
           generators: { $addToSet: "$lguCompanyName" },
@@ -2108,6 +2426,7 @@ router.get("/summary-by-slf", async (req, res) => {
         key: row._id,
         slfName: row._id,
         slfGenerator: row.slfGenerator || null,
+        baselineUnit: row.baselineUnit || "m³",
         submissions: row.submissions,
         trucks: row.trucks,
         generatorCount: (row.generators || []).filter(Boolean).length,
@@ -2154,6 +2473,25 @@ router.get("/", optionalAuth, async (req, res) => {
 
     if (listMode && status && status !== "all") {
       filter.status = status;
+    }
+    // Opt-in status exclusion (e.g. the SLF Disposal Calendar excludes reverted
+    // records so a pulled-back submission never appears as active disposal
+    // activity). Applied at the QUERY layer so every consumer of this endpoint —
+    // not just one client — gets consistent filtering, and reverted records drop
+    // out immediately on the next fetch/refresh. Records remain fully available
+    // in the unfiltered admin views. Accepts a comma-separated list; the stored
+    // status enum is authoritative, so unknown values are simply ignored by Mongo.
+    const excludeStatusesRaw = String(req.query.excludeStatuses || "").trim();
+    if (listMode && excludeStatusesRaw) {
+      const excluded = excludeStatusesRaw
+        .split(",")
+        .map((s) => s.trim().toLowerCase())
+        .filter(Boolean);
+      if (excluded.length) {
+        // If a specific status was already requested it wins; otherwise exclude
+        // the listed statuses.
+        if (!filter.status) filter.status = { $nin: excluded };
+      }
     }
     if (listMode && withTruckVolume) {
       filter["trucks.actualVolume"] = { $gt: 0 };
@@ -2320,6 +2658,21 @@ router.get("/", optionalAuth, async (req, res) => {
             _etotal: { $cond: [{ $gt: ["$_tcount", 0] }, "$_tcount", { $ifNull: ["$truckCount", 0] }] },
             _known: { $cond: [{ $gt: ["$_tcount", 0] }, 1, 0] },
             _rowKey: rowKeyExpr,
+            // #3: two-tier submission priority (lower = higher priority):
+            //   0 = unacknowledged — every submission AND resubmission not yet
+            //       acknowledged (pending / reverted / rejected). These need admin
+            //       attention and appear first, intermixed by latest date below.
+            //   1 = acknowledged — appears after all unacknowledged records.
+            _rank: { $cond: [{ $eq: ["$status", "acknowledged"] }, 1, 0] },
+            // Most-recent relevant timestamp: resubmission/update date for
+            // resubmissions, created date otherwise (updatedAt as fallback).
+            _sortDate: {
+              $cond: [
+                { $gt: [{ $size: { $ifNull: ["$previousIdNos", []] } }, 0] },
+                { $ifNull: ["$updatedAt", "$createdAt"] },
+                { $ifNull: ["$createdAt", "$updatedAt"] },
+              ],
+            },
           },
         },
         {
@@ -2334,6 +2687,9 @@ router.get("/", optionalAuth, async (req, res) => {
             gPlaced: { $sum: "$_placed" },
             gTotal: { $sum: "$_etotal" },
             gKnown: { $max: "$_known" },
+            // A group takes the HIGHEST priority (lowest rank) of its entries.
+            gRank: { $min: "$_rank" },
+            gSort: { $max: "$_sortDate" },
           },
         },
       ];
@@ -2355,7 +2711,11 @@ router.get("/", optionalAuth, async (req, res) => {
         });
         pipeline.push({ $match: { _cat: placementFilter } });
       }
-      pipeline.push({ $sort: { sortDate: -1 } });
+      // #3: unacknowledged submissions and resubmissions first, then acknowledged.
+      // Within each tier, the most-recent relevant timestamp first (gSort = max of
+      // resubmittedAt/updatedAt for resubmissions, submittedAt/createdAt otherwise).
+      // Applied at the DB level so the order holds across the whole paginated set.
+      pipeline.push({ $sort: { gRank: 1, gSort: -1, sortDate: -1 } });
       pipeline.push({
         $facet: {
           page: [{ $skip: skip }, { $limit: limit }],
@@ -2398,6 +2758,7 @@ router.get("/", optionalAuth, async (req, res) => {
 
       const enrich = (entry) => ({
         ...entry,
+        isResubmission: isResubmissionEntry(entry),
         truckCount: entry.truckCount ?? (Array.isArray(entry.trucks) ? entry.trucks.length : 0),
         cellPlacement: computeCellPlacementSummary(entry),
         cellNames: collectCellNames(entry),
@@ -2469,6 +2830,7 @@ router.get("/", optionalAuth, async (req, res) => {
       res.json({
         data: entries.map((entry) => ({
           ...entry,
+          isResubmission: isResubmissionEntry(entry),
           truckCount: entry.truckCount ?? (Array.isArray(entry.trucks) ? entry.trucks.length : 0),
           cellPlacement: computeCellPlacementSummary(entry),
           cellNames: collectCellNames(entry),
@@ -2481,17 +2843,29 @@ router.get("/", optionalAuth, async (req, res) => {
       });
       return;
     }
-    res.json(
-      listMode && !includeTrucks
-        ? entries.map((entry) => ({
-            ...entry,
-            cellPlacement: computeCellPlacementSummary(entry),
-            cellNames: collectCellNames(entry),
-            remarks: computeSubmissionRemarks(entry, allowancePct),
-            trucks: [],
-          }))
-        : entries
-    );
+    if (listMode) {
+      // #6B: flag resubmissions and surface them first (never excluded by status
+      // filters or grouping; original reference preserved via previousIdNos). The
+      // Submissions tab consumes this non-paginated list and groups client-side, so
+      // ordering here drives the table's resubmission-priority ordering.
+      const decorated = entries
+        .map((entry) => ({
+          ...entry,
+          isResubmission: isResubmissionEntry(entry),
+          ...(includeTrucks
+            ? {}
+            : {
+                cellPlacement: computeCellPlacementSummary(entry),
+                cellNames: collectCellNames(entry),
+                remarks: computeSubmissionRemarks(entry, allowancePct),
+                trucks: [],
+              }),
+        }))
+        .sort(resubmissionFirst);
+      res.json(decorated);
+      return;
+    }
+    res.json(entries);
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });
   }
@@ -2669,11 +3043,15 @@ router.patch("/:id/portal-cell-assignments", async (req, res) => {
       return res.status(400).json({ message: "No cell placement was provided." });
     }
 
-    // Validate selected cells against the SLF facility (cell must exist / be
-    // within the facility's configured cell count when the facility is known).
+    // Validate selected cells against the SLF facility: the cell must exist and
+    // be operational. Mirrors the front-end availability rule (cellAvailability)
+    // so a stale/altered client cannot organize waste into a nonexistent, deleted
+    // or non-operational (used/completed/closed/out-of-service) cell.
     let facility = null;
     if (entry.slfGenerator) {
-      facility = await SlfFacility.findById(entry.slfGenerator).select("numberOfCell cellStatuses lgu").lean();
+      facility = await SlfFacility.findById(entry.slfGenerator)
+        .select("numberOfCell cellStatuses cellNames lgu")
+        .lean();
     }
     const cellCount = Number(facility?.numberOfCell || facility?.cellStatuses?.length || 0);
     const validationErrors = [];
@@ -2684,6 +3062,12 @@ router.patch("/:id/portal-cell-assignments", async (req, res) => {
         validationErrors.push(`Row ${i + 1}: invalid cell selection.`);
       } else if (cellCount > 0 && ci >= cellCount) {
         validationErrors.push(`Row ${i + 1}: selected cell does not belong to this SLF facility.`);
+      } else if (facility && !cellExists(ci, facility)) {
+        validationErrors.push(`Row ${i + 1}: selected cell no longer exists in the facility.`);
+      } else if (facility && !isOperationalStatus(facility?.cellStatuses?.[ci])) {
+        validationErrors.push(
+          `Row ${i + 1}: cell is not operational (${facility?.cellStatuses?.[ci] || "unknown"}).`,
+        );
       }
     });
     if (validationErrors.length) {
@@ -2794,6 +3178,299 @@ router.patch("/:id/portal-cell-assignments", async (req, res) => {
 
     refreshAdmin(req, "submissions");
     res.json({ message: "Cell placement saved", data: entry });
+  } catch (error) {
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+});
+
+// ── Portal: BULK cell organization (file-based / multi-select) ──────────────
+//
+// A portal user organizes MANY placements across MANY of their own submissions in
+// one request. Drives both the CSV/XLSX import flow and the multi-select flow.
+//
+// Two modes on the SAME endpoint so validation is identical for preview and apply:
+//   • dryRun:true  → validate every row, write nothing, return per-row results.
+//   • dryRun:false → all-or-nothing apply inside a single pass; if ANY row is
+//                    invalid nothing is written (unless allowPartial:true), so a
+//                    bad file can never partially corrupt placements.
+//
+// Ownership is enforced per submission (submittedBy must match the caller), cells
+// are re-validated against the LIVE facility state (exists / operational / not
+// full), and the COMBINED volume assigned to each cell in this batch is checked
+// against that cell's remaining capacity. Idempotency: a completed batchId is
+// remembered via its audit Transaction, so a retry does not double-apply.
+const BULK_MAX_ROWS = 1000;
+
+router.post("/portal-cell-assignments/bulk", async (req, res) => {
+  try {
+    const { submittedBy, assignments, batchId } = req.body || {};
+    const dryRun = req.body?.dryRun === true;
+    const allowPartial = req.body?.allowPartial === true;
+
+    if (!submittedBy || typeof submittedBy !== "string") {
+      return res.status(400).json({ message: "Missing portal user identity (submittedBy)." });
+    }
+    const rows = Array.isArray(assignments) ? assignments : [];
+    if (!rows.length) return res.status(400).json({ message: "No assignments were provided." });
+    if (rows.length > BULK_MAX_ROWS) {
+      return res.status(400).json({ message: `Too many rows (max ${BULK_MAX_ROWS}).` });
+    }
+
+    const callerEmail = String(submittedBy).trim().toLowerCase();
+
+    // Idempotency: if this batchId already applied, return its recorded result
+    // instead of re-applying (guards against retries / double-submits).
+    if (!dryRun && batchId) {
+      const prior = await Transaction.findOne({
+        type: "cell_assignment_bulk",
+        "meta.batchId": String(batchId),
+      }).lean();
+      if (prior) {
+        return res.json({
+          message: "This bulk assignment was already applied.",
+          alreadyApplied: true,
+          batchId: String(batchId),
+          applied: prior.meta?.applied || 0,
+        });
+      }
+    }
+
+    // Resolve every referenced submission once (by _id or submissionId/idNo),
+    // scoped to the caller so another user's submission can never be touched.
+    const ids = [...new Set(rows.map((r) => String(r._id || "")).filter((v) => mongoose.Types.ObjectId.isValid(v)))];
+    const refs = [...new Set(rows.map((r) => String(r.submissionId || r.idNo || "").trim()).filter(Boolean))];
+    const orClauses = [];
+    if (ids.length) orClauses.push({ _id: { $in: ids } });
+    if (refs.length) orClauses.push({ submissionId: { $in: refs } }, { idNo: { $in: refs } });
+    const docs = orClauses.length
+      ? await DataSLF.find({ deletedAt: null, submittedBy: new RegExp(`^${escapeRegExp(callerEmail)}$`, "i"), $or: orClauses })
+      : [];
+
+    const docByKey = new Map();
+    docs.forEach((d) => {
+      docByKey.set(String(d._id), d);
+      if (d.submissionId) docByKey.set(`ref:${String(d.submissionId).trim().toLowerCase()}`, d);
+      if (d.idNo) docByKey.set(`ref:${String(d.idNo).trim().toLowerCase()}`, d);
+    });
+    const resolveDoc = (r) => {
+      if (r._id && docByKey.has(String(r._id))) return docByKey.get(String(r._id));
+      const ref = String(r.submissionId || r.idNo || "").trim().toLowerCase();
+      if (ref && docByKey.has(`ref:${ref}`)) return docByKey.get(`ref:${ref}`);
+      return null;
+    };
+
+    // Facility cache (live cell state) — one read per facility for the whole batch.
+    const facilityCache = new Map();
+    const getFacility = async (genId) => {
+      if (!genId) return null;
+      const key = String(genId);
+      if (facilityCache.has(key)) return facilityCache.get(key);
+      const fac = await SlfFacility.findById(genId)
+        .select("numberOfCell cellStatuses cellNames cellTypes cellCapacities cellFillValues cellCapacityUnits cellFillUnits volumeCapacityUnit wasteReceivedUnit")
+        .lean();
+      facilityCache.set(key, fac || null);
+      return fac || null;
+    };
+
+    // Per-cell running total of volume assigned in THIS batch, so the combined
+    // load is validated against remaining capacity (not each row in isolation).
+    const cellPlanned = new Map(); // `${genId}:${cellIndex}` -> m³ already planned
+
+    const placementVolumeM3 = (truck, vehicleIndex, baselineUnit) => {
+      const src =
+        Number.isInteger(vehicleIndex) && Array.isArray(truck?.vehicles) && truck.vehicles[vehicleIndex]
+          ? truck.vehicles[vehicleIndex]
+          : truck;
+      const vol = Number(src?.actualVolume || 0);
+      const unit = src?.actualVolumeUnit || truck?.actualVolumeUnit || baselineUnit || "m³";
+      return toBaseM3(vol, unit);
+    };
+
+    const seenRowKeys = new Set();
+    const results = [];
+    // Track which docs receive at least one valid placement (for apply).
+    const pendingByDoc = new Map(); // docId -> [{ truckIndex, vehicleIndex, cellIndex, cellName, cellType }]
+
+    for (let i = 0; i < rows.length; i += 1) {
+      const r = rows[i] || {};
+      const rowKey = `${r._id || r.submissionId || r.idNo || i}|${r.truckIndex}|${r.vehicleIndex ?? "t"}`;
+      const base = {
+        row: i + 1,
+        submissionId: r.submissionId || r.idNo || "",
+        truckIndex: r.truckIndex,
+        vehicleIndex: r.vehicleIndex ?? null,
+        targetCell: r.cellName || (r.cellIndex != null ? `Cell ${Number(r.cellIndex) + 1}` : ""),
+      };
+
+      // Duplicate row (same placement twice in the file).
+      if (seenRowKeys.has(rowKey)) {
+        results.push({ ...base, status: "invalid", code: "duplicate", message: "Duplicate placement in the file." });
+        continue;
+      }
+      seenRowKeys.add(rowKey);
+
+      const doc = resolveDoc(r);
+      if (!doc) {
+        results.push({ ...base, status: "invalid", code: "not_found", message: "Submission not found or not yours." });
+        continue;
+      }
+      if (["reverted", "revert_requested", "rejected"].includes(String(doc.status))) {
+        results.push({ ...base, status: "invalid", code: "locked", message: `Submission is ${doc.status} and cannot be organized.` });
+        continue;
+      }
+
+      const truckIndex = Number(r.truckIndex);
+      if (!Number.isInteger(truckIndex) || truckIndex < 0 || truckIndex >= (doc.trucks || []).length) {
+        results.push({ ...base, status: "invalid", code: "bad_truck", message: "Invalid truck reference." });
+        continue;
+      }
+      const truck = doc.trucks[truckIndex];
+      const vehicleIndex =
+        r.vehicleIndex === null || r.vehicleIndex === undefined || r.vehicleIndex === "" ? null : Number(r.vehicleIndex);
+      if (vehicleIndex !== null && (!Number.isInteger(vehicleIndex) || vehicleIndex < 0 || vehicleIndex >= (truck.vehicles || []).length)) {
+        results.push({ ...base, status: "invalid", code: "bad_vehicle", message: "Invalid vehicle reference." });
+        continue;
+      }
+
+      const cellIndex =
+        r.cellIndex === null || r.cellIndex === undefined || r.cellIndex === "" ? null : Number(r.cellIndex);
+      if (cellIndex === null || !Number.isInteger(cellIndex) || cellIndex < 0) {
+        results.push({ ...base, status: "invalid", code: "no_cell", message: "Missing or invalid target cell." });
+        continue;
+      }
+
+      const facility = await getFacility(doc.slfGenerator);
+      const vol = placementVolumeM3(truck, vehicleIndex, doc.baselineUnit);
+      const cellKey = `${String(doc.slfGenerator)}:${cellIndex}`;
+      const planned = cellPlanned.get(cellKey) || 0;
+      // Validate the cell against LIVE state + already-planned volume in this batch.
+      let acc = { ok: true, code: "available", reason: "", remaining: null, utilization: null };
+      if (facility) {
+        acc = evaluateFacilityCellAcceptance(facility, cellIndex, planned + vol, doc.baselineUnit || "m³");
+      }
+      const cellName = r.cellName || facility?.cellNames?.[cellIndex] || `Cell ${cellIndex + 1}`;
+      const cellType = r.cellType || facility?.cellTypes?.[cellIndex] || truck?.wasteType || "";
+
+      if (!acc.ok) {
+        const codeMap = { full: "capacity", insufficient: "capacity", nonoperational: "unavailable", missing: "unavailable" };
+        results.push({
+          ...base,
+          targetCell: cellName,
+          status: "invalid",
+          code: codeMap[acc.code] || "unavailable",
+          message: acc.reason,
+          remaining: acc.remaining,
+          utilization: acc.utilization,
+        });
+        continue;
+      }
+
+      // Valid — reserve the volume and stage the write.
+      cellPlanned.set(cellKey, planned + vol);
+      const already = (truck.vehicles?.[vehicleIndex]?.cellName || truck.cellName) ? true : false;
+      if (!pendingByDoc.has(String(doc._id))) pendingByDoc.set(String(doc._id), { doc, list: [] });
+      pendingByDoc.get(String(doc._id)).list.push({ truckIndex, vehicleIndex, cellIndex, cellName, cellType });
+      results.push({
+        ...base,
+        targetCell: cellName,
+        status: already ? "warning" : "valid",
+        code: already ? "reassigned" : "ok",
+        message: already ? "Reassigning an already-placed transaction." : "",
+        remaining: acc.remaining,
+        utilization: acc.utilization,
+        volumeM3: Math.round(vol * 100) / 100,
+      });
+    }
+
+    const invalidCount = results.filter((r) => r.status === "invalid").length;
+    const validCount = results.filter((r) => r.status === "valid" || r.status === "warning").length;
+    const summary = { total: results.length, valid: validCount, invalid: invalidCount, warning: results.filter((r) => r.status === "warning").length };
+
+    if (dryRun) {
+      return res.json({ preview: true, summary, rows: results });
+    }
+
+    // All-or-nothing unless partial is explicitly requested.
+    if (invalidCount > 0 && !allowPartial) {
+      return res.status(400).json({
+        message: `${invalidCount} row(s) failed validation. No changes were applied.`,
+        summary,
+        rows: results,
+      });
+    }
+
+    // Apply staged placements per document. cellName/cellType/cellIndex written to
+    // the vehicle (and mirrored to the truck for vehicle 0) exactly like the single
+    // endpoint, so downstream metrics/utilization recompute consistently.
+    let appliedRows = 0;
+    const touchedDocs = [];
+    for (const { doc, list } of pendingByDoc.values()) {
+      list.forEach(({ truckIndex, vehicleIndex, cellIndex, cellName, cellType }) => {
+        const truck = doc.trucks[truckIndex];
+        if (!truck) return;
+        if (Number.isInteger(vehicleIndex) && Array.isArray(truck.vehicles) && truck.vehicles[vehicleIndex]) {
+          truck.vehicles[vehicleIndex].cellIndex = cellIndex;
+          truck.vehicles[vehicleIndex].cellName = cellName;
+          truck.vehicles[vehicleIndex].cellType = cellType;
+          if (vehicleIndex === 0) {
+            truck.cellIndex = cellIndex;
+            truck.cellName = cellName;
+            truck.cellType = cellType;
+          }
+        } else {
+          truck.cellIndex = cellIndex;
+          truck.cellName = cellName;
+          truck.cellType = cellType;
+          if (Array.isArray(truck.vehicles)) {
+            truck.vehicles.forEach((veh) => {
+              veh.cellIndex = cellIndex;
+              veh.cellName = cellName;
+              veh.cellType = cellType;
+            });
+          }
+        }
+        appliedRows += 1;
+      });
+      doc.markModified("trucks");
+      await doc.save();
+      touchedDocs.push(doc);
+    }
+
+    // Audit: one per-submission transaction + one batch record carrying the
+    // idempotency key and the before/after context.
+    try {
+      const txns = touchedDocs.map((doc) => ({
+        submissionId: doc.submissionId || doc.idNo,
+        dataEntry: doc._id,
+        companyName: doc.lguCompanyName,
+        companyType: doc.companyType,
+        submittedBy: doc.submittedBy || "",
+        type: "cell_assignment",
+        description: `Portal user bulk-organized waste placement for ${doc.idNo || doc.lguCompanyName}`,
+        performedBy: submittedBy,
+        meta: { idNo: doc.idNo, portal: true, bulk: true, batchId: batchId ? String(batchId) : undefined },
+      }));
+      txns.push({
+        submissionId: `BULK-${batchId || Date.now()}`,
+        companyName: "Bulk Cell Organization",
+        submittedBy,
+        type: "cell_assignment_bulk",
+        description: `Portal user bulk-assigned ${appliedRows} placement(s) across ${touchedDocs.length} submission(s)`,
+        performedBy: submittedBy,
+        meta: { batchId: batchId ? String(batchId) : undefined, applied: appliedRows, submissions: touchedDocs.length, source: req.body?.source || "bulk" },
+      });
+      if (txns.length) await Transaction.insertMany(txns, { ordered: false });
+    } catch { /* silent */ }
+
+    writeLog("info", "organize_cells_bulk", {
+      message: `Portal user bulk-organized ${appliedRows} placement(s) across ${touchedDocs.length} submission(s)`,
+      user: submittedBy,
+      ip: req.ip,
+      meta: { batchId: batchId ? String(batchId) : undefined, applied: appliedRows, invalid: invalidCount, partial: allowPartial },
+    });
+
+    refreshAdmin(req, "submissions");
+    res.json({ message: `Applied ${appliedRows} placement(s).`, applied: appliedRows, summary, rows: results, batchId: batchId ? String(batchId) : undefined });
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });
   }
@@ -4354,7 +5031,11 @@ router.get("/waste-received-summary/:slfName", async (req, res) => {
         ...(facilityIds.length ? [{ slfGenerator: { $in: facilityIds } }] : []),
       ],
       deletedAt: null,
-      status: { $ne: "rejected" },
+      // Waste Received counts only VALID submitted data: exclude rejected and
+      // (still-invalid) reverted / revert-requested records. A resubmission updates
+      // the same record in place (status → pending), so a corrected entry is counted
+      // once and its earlier reverted state is never double-counted.
+      status: { $nin: ["rejected", "reverted", "revert_requested"] },
       // Keep dummy and actual data strictly separated: a dummy facility's
       // dashboard shows only dummy submissions, and vice-versa.
       isDummy: facilityIsDummy ? true : { $ne: true },

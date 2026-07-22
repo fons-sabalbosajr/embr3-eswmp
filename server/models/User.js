@@ -18,6 +18,8 @@ const userSchema = new mongoose.Schema(
         submissions: { view: true, edit: true, delete: true },
         sanitaryLandfills: { view: true, edit: true, delete: true },
         slfMonitoring: { view: true, edit: true, delete: true },
+        slfClients: { view: true, edit: true, delete: true },
+        region3Lgu: { view: true, edit: true, delete: true },
         messaging: { view: true, edit: true, delete: true },
         reports: { view: true, edit: true, delete: true },
         tenYearSwm: { view: true, edit: true, delete: true },

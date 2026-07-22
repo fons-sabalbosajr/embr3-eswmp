@@ -109,6 +109,9 @@ function summarizeCellAssignment(entry) {
   const facilityCellStatuses = entry?.slfGenerator?.cellStatuses;
   const byName = new Map();
   let unplaced = 0;
+  // Total unplaced waste volume (kept in the entry's stored unit) so the Portal
+  // can name the exact volume still needing a cell in its blocking warning.
+  let unplacedVolume = 0;
   // Approved historical submissions may pre-date the rule that Truck Capacity is
   // completed via Organize Cells. Count each entry (with waste) still missing a
   // positive capacity so the Portal can require it before new submissions (#6).
@@ -119,7 +122,10 @@ function summarizeCellAssignment(entry) {
     // unassigned (schema requires the id). Only waste that actually EXISTS can be
     // "unplaced" — a zero-volume truck has nothing to assign.
     if (!isValidCellRef(cellIndex, facilityCellNames, facilityCellStatuses)) {
-      if (Number(volume || 0) > 0) unplaced += 1;
+      if (Number(volume || 0) > 0) {
+        unplaced += 1;
+        unplacedVolume += Number(volume || 0);
+      }
       return;
     }
     const name =
@@ -162,6 +168,7 @@ function summarizeCellAssignment(entry) {
   return {
     cellsAssigned: [...byName.values()],
     unplacedCount: unplaced,
+    unplacedVolume: Number(unplacedVolume.toFixed(2)),
     missingCapacityCount: missingCapacity,
   };
 }

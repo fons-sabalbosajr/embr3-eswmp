@@ -15,6 +15,9 @@ export default function Landing() {
   });
   const [menuOpen, setMenuOpen] = useState(false);
   const [scrolled, setScrolled] = useState(false);
+  // Item #3: public CTAs open modals instead of navigating straight to login/admin.
+  const [contactOpen, setContactOpen] = useState(false);
+  const [ctaOpen, setCtaOpen] = useState(false);
   const landingRef = useRef(null);
 
   // Apply theme
@@ -82,8 +85,9 @@ export default function Landing() {
         <div className="lp-container lp-nav-inner">
           <a href="#" className="lp-nav-brand" onClick={(e) => { e.preventDefault(); window.scrollTo({ top: 0, behavior: "smooth" }); }}>
             <div className="lp-nav-logos">
-              <img src={emblogo} alt="EMBR3 Logo" className="lp-nav-logo" />
               <img src={bplogo} alt="Bagong Pilipinas" className="lp-nav-logo" />
+              <span className="lp-nav-logo-divider" aria-hidden="true" />
+              <img src={emblogo} alt="Environmental Management Bureau Region III" className="lp-nav-logo" />
             </div>
             <span className="lp-nav-title">EMBR3 <span className="lp-accent">ESWMP</span></span>
           </a>
@@ -106,8 +110,8 @@ export default function Landing() {
               <li><a href="#contact" onClick={(e) => { e.preventDefault(); scrollTo("contact"); }}>Contact</a></li>
             </ul>
             <div className="lp-mobile-menu-actions">
-              <button className="lp-btn lp-btn-primary lp-btn-sm lp-mobile-cta" onClick={() => { setMenuOpen(false); navigate("/slfportal/login"); }}>Access SLF Portal</button>
-              <button className="lp-btn lp-btn-outline lp-btn-sm lp-mobile-cta" onClick={() => { setMenuOpen(false); navigate("/admin"); }}>Admin Dashboard</button>
+              <button className="lp-btn lp-btn-primary lp-btn-sm lp-mobile-cta" onClick={() => { setMenuOpen(false); setCtaOpen(true); }}>Access SLF Portal</button>
+              <button className="lp-btn lp-btn-outline lp-btn-sm lp-mobile-cta" onClick={() => { setMenuOpen(false); setContactOpen(true); }}>Contact Us</button>
             </div>
             <div className="lp-mobile-menu-footer">
               <span>&copy; 2026 EMBR3 &mdash; Environmental Management Bureau Region III</span>
@@ -122,7 +126,7 @@ export default function Landing() {
                 <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3a7 7 0 0 0 9.79 9.79z"/></svg>
               )}
             </button>
-            <button className="lp-btn lp-btn-primary lp-btn-sm lp-nav-get-started" onClick={() => scrollTo("contact")}>Get Started</button>
+            <button className="lp-btn lp-btn-primary lp-btn-sm lp-nav-get-started" onClick={() => setCtaOpen(true)}>Get Started</button>
             <button className={`lp-hamburger${menuOpen ? " open" : ""}`} onClick={() => setMenuOpen(!menuOpen)} aria-label="Menu">
               <span className="lp-hamburger-line" />
               <span className="lp-hamburger-line" />
@@ -144,19 +148,30 @@ export default function Landing() {
         </div>
         <div className="lp-container lp-hero-content">
           <div className="lp-hero-text animate-fade-up">
-            <span className="lp-hero-badge">Environmental Management Bureau — Region III</span>
+            <span className="lp-hero-eyebrow">
+              <span className="lp-hero-eyebrow-seal" aria-hidden="true" />
+              DENR · EMB Region III
+            </span>
             <h1>Ecological Solid Waste<br /><span className="lp-gradient-text">Management Pipeline</span></h1>
+            <p className="lp-hero-lead">
+              One secure system for solid-waste data, compliance, and environmental
+              reporting across Central Luzon.
+            </p>
             <p className="lp-hero-desc">
-              A unified digital platform for streamlining solid waste management data collection,
-              compliance monitoring, and environmental reporting across Region III.
+              Streamline submissions from LGUs and SLF facilities, monitor compliance in
+              real time, and generate official environmental reports — all in one place.
             </p>
             <div className="lp-hero-cta">
-              <button className="lp-btn lp-btn-primary lp-btn-lg" onClick={() => navigate("/slfportal/login")}>
+              <button className="lp-btn lp-btn-primary lp-btn-lg add-margin" onClick={() => setCtaOpen(true)}>
                 <span>Access SLF Portal</span>
                 <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
               </button>
-              <button className="lp-btn lp-btn-outline lp-btn-lg" onClick={() => navigate("/admin")}>Admin Dashboard</button>
+              <button className="lp-btn lp-btn-outline lp-btn-lg add-margin" onClick={() => setContactOpen(true)}>Contact Us</button>
             </div>
+            {/* <ul className="lp-hero-trust" aria-label="Platform highlights">
+              <li><strong>7</strong>&nbsp;Provinces covered</li>
+              <li><span className="lp-hero-trust-dot" aria-hidden="true" />Real-time compliance monitoring</li>
+              </ul> */}
           </div>
           <div className="lp-hero-visual animate-fade-up delay-200">
             <div className="lp-devices-wrapper">
@@ -165,7 +180,7 @@ export default function Landing() {
                 <div className="lp-laptop-screen">
                   <div className="lp-browser-bar">
                     <div className="lp-browser-dots"><div className="lp-browser-dot" /><div className="lp-browser-dot" /><div className="lp-browser-dot" /></div>
-                    <div className="lp-browser-url">embr3-onlinesystems.cloud/eswm-pipeline/admin</div>
+                    <div className="lp-browser-url">ESWMP Dashboard - Sample Preview</div>
                   </div>
                   <div className="lp-hero-mock-dashboard">
                     {/* Sidebar */}
@@ -284,22 +299,22 @@ export default function Landing() {
                           </thead>
                           <tbody>
                             <tr>
-                              <td>City of San Fernando</td>
+                              <td>Company ABC</td>
+                              <td>Sample Submission</td>
+                              <td><span className="lp-mock-tag lp-mock-tag-pending">Pending Acknowledgment</span></td>
+                              <td>Sample date</td>
+                            </tr>
+                            <tr>
+                              <td>SLF ABC</td>
+                              <td>Disposal Submission</td>
+                              <td><span className="lp-mock-tag lp-mock-tag-ok">Operational</span></td>
+                              <td>Sample date</td>
+                            </tr>
+                            <tr>
+                              <td>Municipality ABC</td>
                               <td>10-Yr SWM Plan</td>
                               <td><span className="lp-mock-tag lp-mock-tag-ok">Compliant</span></td>
-                              <td>Mar 28, 2026</td>
-                            </tr>
-                            <tr>
-                              <td>Municipality of Guagua</td>
-                              <td>Funded MRF</td>
-                              <td><span className="lp-mock-tag lp-mock-tag-pending">Pending</span></td>
-                              <td>Mar 25, 2026</td>
-                            </tr>
-                            <tr>
-                              <td>Province of Bulacan</td>
-                              <td>SLF Facility</td>
-                              <td><span className="lp-mock-tag lp-mock-tag-ok">Compliant</span></td>
-                              <td>Mar 22, 2026</td>
+                              <td>Sample date</td>
                             </tr>
                           </tbody>
                         </table>
@@ -332,8 +347,8 @@ export default function Landing() {
                       </div>
                     </div>
                     <div className="lp-phone-app-card">
-                      <div className="lp-phone-app-card-title">Sample SLF Facility</div>
-                      <div className="lp-phone-app-card-sub">Pampanga • Operational</div>
+                      <div className="lp-phone-app-card-title">SLF ABC (Sample)</div>
+                      <div className="lp-phone-app-card-sub">Municipality ABC • Operational</div>
                       <div className="lp-phone-app-progress">
                         <div className="lp-phone-app-progress-bar">
                           <div className="lp-phone-app-progress-fill" />
@@ -440,7 +455,7 @@ export default function Landing() {
 
                 {/* Floating data cards */}
                 <div className="lp-map-stat lp-map-stat-1">
-                  <span className="lp-map-stat-num">7</span>
+                  <span className="lp-map-stat-num">5</span>
                   <span className="lp-map-stat-lbl">Provinces Covered</span>
                 </div>
                 <div className="lp-map-stat lp-map-stat-2">
@@ -536,7 +551,7 @@ export default function Landing() {
               <div className="lp-showcase-frame">
                 <div className="lp-browser-bar">
                   <div className="lp-browser-dots"><div className="lp-browser-dot" /><div className="lp-browser-dot" /><div className="lp-browser-dot" /></div>
-                  <div className="lp-browser-url">embr3-onlinesystems.cloud/eswm-pipeline/admin</div>
+                  <div className="lp-browser-url">ESWMP Dashboard - Sample Preview</div>
                 </div>
                 <div className="lp-mock-dashboard">
                   <div className="lp-mock-sidebar">
@@ -603,7 +618,7 @@ export default function Landing() {
                   </li>
                 ))}
               </ul>
-              <button className="lp-btn lp-btn-primary lp-btn-sm" onClick={() => navigate("/slfportal/login")} style={{ marginTop: 14 }}>
+              <button className="lp-btn lp-btn-primary lp-btn-sm" onClick={() => setCtaOpen(true)} style={{ marginTop: 14 }}>
                 <span>Go to SLF Portal</span>
                 <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
               </button>
@@ -612,7 +627,7 @@ export default function Landing() {
               <div className="lp-showcase-frame">
                 <div className="lp-browser-bar">
                   <div className="lp-browser-dots"><div className="lp-browser-dot" /><div className="lp-browser-dot" /><div className="lp-browser-dot" /></div>
-                  <div className="lp-browser-url">embr3-onlinesystems.cloud/eswm-pipeline/slfportal</div>
+                  <div className="lp-browser-url">ESWMP SLF Portal - Sample Preview</div>
                 </div>
                 <div className="lp-mock-portal">
                   <div className="lp-mock-portal-sidebar">
@@ -673,11 +688,11 @@ export default function Landing() {
           <h2>Ready to Streamline Your<br /><span className="lp-gradient-text">Waste Management Data?</span></h2>
           <p>Join the digital transformation of ecological solid waste management in Region III. Access the platform today.</p>
           <div className="lp-cta-buttons">
-            <button className="lp-btn lp-btn-primary lp-btn-lg" onClick={() => navigate("/slfportal/login")}>
+            <button className="lp-btn lp-btn-primary lp-btn-lg" onClick={() => setCtaOpen(true)}>
               <span>Access SLF Portal</span>
               <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
             </button>
-            <button className="lp-btn lp-btn-outline lp-btn-lg" onClick={() => scrollTo("contact")}>Contact Us</button>
+            <button className="lp-btn lp-btn-outline lp-btn-lg" onClick={() => setContactOpen(true)}>Contact Us</button>
           </div>
         </div>
       </section>
@@ -728,20 +743,85 @@ export default function Landing() {
         <div className="lp-container lp-footer-inner">
           <div className="lp-footer-brand">
             <div className="lp-footer-logos">
-              <img src={emblogo} alt="EMBR3 Logo" className="lp-footer-logo" />
               <img src={bplogo} alt="Bagong Pilipinas" className="lp-footer-logo" />
+              <img src={emblogo} alt="EMBR3 Logo" className="lp-footer-logo" />
             </div>
             <span className="lp-footer-title">EMBR3 <span className="lp-accent">ESWMP</span></span>
           </div>
           <p className="lp-footer-copy">&copy; 2026 Environmental Management Bureau Region III. All rights reserved.</p>
           <div className="lp-footer-links">
-            <a href="#" onClick={(e) => { e.preventDefault(); navigate("/slfportal/login"); }}>SLF Portal</a>
-            <a href="#" onClick={(e) => { e.preventDefault(); navigate("/admin"); }}>Admin</a>
+            <a href="#" onClick={(e) => { e.preventDefault(); setCtaOpen(true); }}>SLF Portal</a>
+            <a href="#" onClick={(e) => { e.preventDefault(); setContactOpen(true); }}>Contact</a>
             <a href="mailto:eswmr3@emb.gov.ph">Contact</a>
             <a href="https://r3.emb.gov.ph/" target="_blank" rel="noopener noreferrer">EMB R3</a>
           </div>
         </div>
       </footer>
+
+      {/* Item #3: Contact Us modal — verified EMB Region III details (no invented info) */}
+      {contactOpen && (
+        <div className="lp-modal-overlay" onClick={() => setContactOpen(false)}>
+          <div className="lp-modal" role="dialog" aria-modal="true" aria-labelledby="lp-contact-title" onClick={(e) => e.stopPropagation()}>
+            <button className="lp-modal-close" aria-label="Close" onClick={() => setContactOpen(false)}>&times;</button>
+            <h3 id="lp-contact-title" className="lp-modal-title">Contact EMB Region III</h3>
+            <p className="lp-modal-lead">
+              The ESWM Pipeline is the Environmental Management Bureau — Region III digital platform for
+              solid-waste data, compliance monitoring, and environmental reporting across Central Luzon.
+              For access requests or questions, reach us through the official channels below.
+            </p>
+            <ul className="lp-modal-contact">
+              <li><span>Email</span><a href="mailto:eswmr3@emb.gov.ph">eswmr3@emb.gov.ph</a></li>
+              <li><span>Phone</span><a href="tel:+630459633623">(045) 963 3623 local 116</a></li>
+              <li><span>Website</span><a href="https://r3.emb.gov.ph/" target="_blank" rel="noopener noreferrer">r3.emb.gov.ph</a></li>
+              <li><span>Office</span><span>Masinop corner Matalino Street, Diosdado Macapagal Government Center, Maimpis, San Fernando City, Pampanga</span></li>
+            </ul>
+            <div className="lp-modal-actions">
+              <button className="lp-btn lp-btn-primary lp-btn-sm" onClick={() => setContactOpen(false)}>Close</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Item #3: Get Started CTA modal — actions only, no direct Admin access */}
+      {ctaOpen && (
+        <div className="lp-modal-overlay" onClick={() => setCtaOpen(false)}>
+          <div className="lp-modal" role="dialog" aria-modal="true" aria-labelledby="lp-cta-title" onClick={(e) => e.stopPropagation()}>
+            <button className="lp-modal-close" aria-label="Close" onClick={() => setCtaOpen(false)}>&times;</button>
+            <h3 id="lp-cta-title" className="lp-modal-title">Get Started with ESWMP</h3>
+            <p className="lp-modal-lead">
+              Choose what you would like to do. Portal access for Sanitary Landfill facilities is granted by
+              EMB Region III.
+            </p>
+            <div className="lp-modal-cta-grid">
+              <button className="lp-modal-cta-item" onClick={() => { setCtaOpen(false); setContactOpen(true); }}>
+                <strong>Request SLF Portal access</strong>
+                <span>New facility? Contact EMB Region III to request an account.</span>
+              </button>
+              <button className="lp-modal-cta-item" onClick={() => { setCtaOpen(false); setContactOpen(true); }}>
+                <strong>Registration &amp; account activation</strong>
+                <span>Questions about signing up or activating your account.</span>
+              </button>
+              <button className="lp-modal-cta-item" onClick={() => { setCtaOpen(false); scrollTo("features"); }}>
+                <strong>Learn about the reporting process</strong>
+                <span>See what the platform does and how submissions work.</span>
+              </button>
+              <button className="lp-modal-cta-item" onClick={() => { setCtaOpen(false); setContactOpen(true); }}>
+                <strong>Contact EMB Region III</strong>
+                <span>Official email, phone, and office details.</span>
+              </button>
+            </div>
+            {/* <div className="lp-modal-existing">
+              Already have an SLF Portal account?{" "}
+              <button className="lp-modal-link" onClick={() => { setCtaOpen(false); navigate("/slfportal/login"); }}>
+                Sign in to the SLF Portal
+              </button>
+            </div> */}
+            <div className="lp-modal-actions">
+              <button className="lp-btn lp-btn-outline lp-btn-sm" onClick={() => setCtaOpen(false)}>Close</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

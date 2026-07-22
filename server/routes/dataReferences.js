@@ -10,10 +10,9 @@ router.use(authMiddleware, adminOnly);
 // Get all active references (for frontend dropdowns)
 router.get("/", async (req, res) => {
   try {
-    const refs = await DataReference.find({ isActive: true }).sort({
-      module: 1,
-      label: 1,
-    });
+    const refs = await DataReference.find({ isActive: true })
+      .sort({ module: 1, label: 1 })
+      .lean();
     res.json(refs);
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });
@@ -23,7 +22,7 @@ router.get("/", async (req, res) => {
 // Get all references including inactive (admin)
 router.get("/all", async (req, res) => {
   try {
-    const refs = await DataReference.find().sort({ module: 1, label: 1 });
+    const refs = await DataReference.find().sort({ module: 1, label: 1 }).lean();
     res.json(refs);
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });

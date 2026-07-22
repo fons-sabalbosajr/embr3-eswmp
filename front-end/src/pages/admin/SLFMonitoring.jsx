@@ -1,10 +1,4 @@
-import {
-  useState,
-  useEffect,
-  useCallback,
-  useMemo,
-  useRef,
-} from "react";
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import {
   Card,
   List,
@@ -88,6 +82,7 @@ import {
   ContainerOutlined,
   CalculatorOutlined,
   CopyOutlined,
+  PlayCircleOutlined,
 } from "@ant-design/icons";
 import Swal from "sweetalert2";
 import api from "../../api";
@@ -99,7 +94,11 @@ import { getSocket } from "../../utils/socket";
 import { useDataRef } from "../../utils/dataRef";
 import excludeDummy from "../../utils/excludeDummy";
 import dayjs from "dayjs";
-import { buildFilters, matchesFilter, rowMatchesSearch } from "./shared/tableFilters";
+import {
+  buildFilters,
+  matchesFilter,
+  rowMatchesSearch,
+} from "./shared/tableFilters";
 import {
   PieChart,
   Pie,
@@ -157,28 +156,75 @@ import SlfDashboardTab, {
   findBaselineForFacility,
   enrichFacilityWithBaseline,
   R3_PROVINCES,
-} from './slf-monitoring/SlfDashboardTab';
-import WasteBaselineInfo from './slf-monitoring/WasteBaselineInfo';
-import PortalGenerators from './slf-monitoring/PortalGenerators';
-import { resolveCellName } from '../../utils/cellVisuals';
+} from "./slf-monitoring/SlfDashboardTab";
+import WasteBaselineInfo from "./slf-monitoring/WasteBaselineInfo";
+import PortalGenerators from "./slf-monitoring/PortalGenerators";
 import {
-  ACCENT, CHART_COLORS,
-  managementStatusSummary, asStringArray, formatStringArray,
-  normalizeUnit, normalizeCellStatus, isActiveCellStatus, isCompletedCellStatus,
+  resolveCellName,
+  getCellTypeConfig,
+  getSlfCapacityColor,
+  isNonExistentCell,
+} from "../../utils/cellVisuals";
+import {
+  ACCENT,
+  CHART_COLORS,
+  managementStatusSummary,
+  asStringArray,
+  formatStringArray,
+  normalizeUnit,
+  normalizeCellStatus,
+  isActiveCellStatus,
+  isCompletedCellStatus,
   ACTIVE_VOLUME_STATUSES,
   TON_PER_M3,
-  UNIT_OPTIONS, CELL_STATUS_OPTIONS, CELL_STATUS_COLORS,
-  PERMIT_STATUS_OPTIONS, DP_TYPE_OPTIONS, WWTF_TYPE_OPTIONS,
-  RECEIVING_FACILITY_TYPE_OPTIONS, GALLERY_COMPONENT_OPTIONS,
-  getUploadHeaders, formatFileSize, getUploadFileSize, validateSlfUpload, renderSlfUploadItem,
+  UNIT_OPTIONS,
+  CELL_STATUS_OPTIONS,
+  CELL_STATUS_COLORS,
+  PERMIT_STATUS_OPTIONS,
+  DP_TYPE_OPTIONS,
+  WWTF_TYPE_OPTIONS,
+  RECEIVING_FACILITY_TYPE_OPTIONS,
+  GALLERY_COMPONENT_OPTIONS,
+  getUploadHeaders,
+  formatFileSize,
+  getUploadFileSize,
+  validateSlfUpload,
+  renderSlfUploadItem,
   slfUploadProps,
-  convertVolume, getWasteKind, isHazardousCellType,
-  extractDriveId, isDriveUrl, resolveMediaUrl, normalizeStoredFileUrl,
-} from './slf-monitoring/helpers.jsx';
+  convertVolume,
+  getWasteKind,
+  isHazardousCellType,
+  resolveMediaUrl,
+  resolveMediaOpenUrl,
+  getMediaKind,
+  normalizeStoredFileUrl,
+} from "./slf-monitoring/helpers.jsx";
 
 // Stable empty array — returning a fresh [] from a memo would give it a new
 // identity every render and re-run every downstream memo that depends on it.
 const EMPTY_ROWS = [];
+
+// One-time injected stylesheet for the Facility Details left-tabs, so active vs
+// inactive tabs read with clear hierarchy (inactive de-emphasized but readable,
+// active bold + tinted, visible hover + focus) regardless of each label's own
+// accent colour. Opacity/weight/background are used because they are not
+// overridden by the inline label text colours.
+function ensureSlfDetailTabStyles() {
+  if (typeof document === "undefined") return;
+  if (document.getElementById("slf-detail-tabs-styles")) return;
+  const style = document.createElement("style");
+  style.id = "slf-detail-tabs-styles";
+  style.textContent = `
+    .slf-detail-tabs .ant-tabs-tab { border-radius: 6px; margin: 2px 6px !important; padding: 6px 12px !important; transition: background .15s, opacity .15s; }
+    .slf-detail-tabs .ant-tabs-tab .ant-tabs-tab-btn { opacity: .68; font-weight: 500; }
+    .slf-detail-tabs .ant-tabs-tab:hover { background: rgba(22,119,255,.10); }
+    .slf-detail-tabs .ant-tabs-tab:hover .ant-tabs-tab-btn { opacity: 1; }
+    .slf-detail-tabs .ant-tabs-tab-active { background: rgba(22,119,255,.16); }
+    .slf-detail-tabs .ant-tabs-tab-active .ant-tabs-tab-btn { opacity: 1; font-weight: 700; }
+    .slf-detail-tabs .ant-tabs-tab:focus-visible { outline: 2px solid #1677ff; outline-offset: 1px; }
+  `;
+  document.head.appendChild(style);
+}
 
 export default function SLFMonitoring({
   canEdit = true,
@@ -186,6 +232,7 @@ export default function SLFMonitoring({
   isDark,
   driveDisabled = false,
 }) {
+  ensureSlfDetailTabStyles();
   const { getValues } = useDataRef();
   const provinceOptions = getValues("province").map((p) => ({
     label: p,
@@ -250,6 +297,9 @@ export default function SLFMonitoring({
   const [records, setRecords] = useState([]);
   const [generators, setGenerators] = useState([]);
   const [loading, setLoading] = useState(true); // start true so spinner shows on first mount
+  // Dedicated state for the Refresh button so it spins ONLY for a user-triggered
+  // refresh — not for unrelated background loads that also toggle `loading`.
+  const [refreshing, setRefreshing] = useState(false);
   const [loadingGen, setLoadingGen] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
   const [detailModal, setDetailModal] = useState(null);
@@ -259,7 +309,8 @@ export default function SLFMonitoring({
   const [detailHistoryLoading, setDetailHistoryLoading] = useState(false);
   const [baselineData, setBaselineData] = useState(null);
   const [loadingBaseline, setLoadingBaseline] = useState(false);
-  const [detailSubmissionsLoading, setDetailSubmissionsLoading] = useState(false);
+  const [detailSubmissionsLoading, setDetailSubmissionsLoading] =
+    useState(false);
   const [detailDashboardError, setDetailDashboardError] = useState(null);
   // FULL submissions (with trucks[]/vehicles[]) for the ONE facility whose detail
   // modal is open. Kept out of the page-wide `slfSubmissions` so the heavy payload
@@ -278,6 +329,9 @@ export default function SLFMonitoring({
   const [filterCategory, setFilterCategory] = useState(null);
   const [filterMonth, setFilterMonth] = useState(null);
   const [quickFilter, setQuickFilter] = useState(null);
+  // #5: filter bar is now toggled from the header toolbar (collapsed by default so
+  // the table gets more vertical space); the active-filter count stays on the button.
+  const [filtersOpen, setFiltersOpen] = useState(false);
   const [slfInsightModal, setSlfInsightModal] = useState(null);
   const [slfLguModal, setSlfLguModal] = useState(false);
   const [slfWasteModal, setSlfWasteModal] = useState(false);
@@ -288,7 +342,7 @@ export default function SLFMonitoring({
   const [convM3ToTons, setConvM3ToTons] = useState(null);
   const [convModalOpen, setConvModalOpen] = useState(false);
   const [unitToolOpen, setUnitToolOpen] = useState(false);
-  const [unitToolValue, setUnitToolValue] = useState("m³");
+  const [unitToolValue, setUnitToolValue] = useState("tons");
   const [saving, setSaving] = useState(false);
   const [capacityAlertModal, setCapacityAlertModal] = useState(null);
   const [capacityAlertSending, setCapacityAlertSending] = useState(false);
@@ -318,15 +372,12 @@ export default function SLFMonitoring({
     await fetchWithCache(
       FAST_CACHE_KEY,
       async () => {
-        const [
-          { data: facilities },
-          { data: baselines },
-          summaryRes,
-        ] = await Promise.all([
-          api.get("/slf-facilities"),
-          api.get("/data-slf/baselines"),
-          api.get("/data-slf/summary-by-slf").catch(() => ({ data: [] })),
-        ]);
+        const [{ data: facilities }, { data: baselines }, summaryRes] =
+          await Promise.all([
+            api.get("/slf-facilities"),
+            api.get("/data-slf/baselines"),
+            api.get("/data-slf/summary-by-slf").catch(() => ({ data: [] })),
+          ]);
         // Defensive: exclude dummy/test facilities from the monitoring dashboard
         // (backend already excludes them from /slf-facilities by default).
         facilitiesCache = excludeDummy(facilities || []);
@@ -335,12 +386,14 @@ export default function SLFMonitoring({
         // tiles immediately, so they no longer wait for the heavy submissions
         // list (phase 2 still refines exact cell-fill %).
         const wasteByName = new Map();
-        (Array.isArray(summaryRes.data) ? summaryRes.data : []).forEach((row) => {
-          const total = Number(row.totalM3 || 0) + Number(row.totalTons || 0);
-          if (row.slfName && total > 0) {
-            wasteByName.set(String(row.slfName).trim().toLowerCase(), total);
-          }
-        });
+        (Array.isArray(summaryRes.data) ? summaryRes.data : []).forEach(
+          (row) => {
+            const total = Number(row.totalM3 || 0) + Number(row.totalTons || 0);
+            if (row.slfName && total > 0) {
+              wasteByName.set(String(row.slfName).trim().toLowerCase(), total);
+            }
+          },
+        );
         return {
           records: facilitiesCache.map((record) => {
             const enriched = enrichFacilityWithBaseline(
@@ -350,8 +403,16 @@ export default function SLFMonitoring({
             );
             if (!(enriched.actualResidualWasteReceived > 0)) {
               const seed =
-                wasteByName.get(String(record.lgu || "").trim().toLowerCase()) ||
-                wasteByName.get(String(record.slfName || "").trim().toLowerCase());
+                wasteByName.get(
+                  String(record.lgu || "")
+                    .trim()
+                    .toLowerCase(),
+                ) ||
+                wasteByName.get(
+                  String(record.slfName || "")
+                    .trim()
+                    .toLowerCase(),
+                );
               if (seed > 0) enriched.actualResidualWasteReceived = seed;
             }
             return enriched;
@@ -367,7 +428,8 @@ export default function SLFMonitoring({
           setRecords(rows.map((r) => ({ ...r, ...computeFields(r) })));
         },
         onError: () => {
-          if (aliveRef.current) Swal.fire("Error", "Failed to load SLF facilities", "error");
+          if (aliveRef.current)
+            Swal.fire("Error", "Failed to load SLF facilities", "error");
         },
         onStart: () => setLoading(true),
         onEnd: () => setLoading(false),
@@ -393,12 +455,16 @@ export default function SLFMonitoring({
           const res = await Promise.all(calls);
           const submissions = res[0].data;
           let idx = 1;
-          if (!facilitiesCache) facilitiesCache = excludeDummy(res[idx++]?.data || []);
-          if (!baselineMapCache) baselineMapCache = buildBaselineMap(res[idx]?.data || []);
+          if (!facilitiesCache)
+            facilitiesCache = excludeDummy(res[idx++]?.data || []);
+          if (!baselineMapCache)
+            baselineMapCache = buildBaselineMap(res[idx]?.data || []);
           const normalizedSubmissions = normalizeSlfSubmissions(
-            Array.isArray(submissions) ? submissions : submissions?.data || []
+            Array.isArray(submissions) ? submissions : submissions?.data || [],
           );
-          const submissionIndex = buildSubmissionFacilityIndex(normalizedSubmissions);
+          const submissionIndex = buildSubmissionFacilityIndex(
+            normalizedSubmissions,
+          );
           return {
             records: facilitiesCache.map((record) =>
               enrichFacilityWithBaseline(
@@ -421,7 +487,9 @@ export default function SLFMonitoring({
             // from being seated into a component that no longer exists.
             if (!aliveRef.current) return;
             const rows = Array.isArray(data) ? data : data?.records || [];
-            setSlfSubmissions(Array.isArray(data) ? [] : data?.submissions || []);
+            setSlfSubmissions(
+              Array.isArray(data) ? [] : data?.submissions || [],
+            );
             // Silently replace records with fully-enriched version (no spinner)
             setRecords(rows.map((r) => ({ ...r, ...computeFields(r) })));
           },
@@ -443,6 +511,21 @@ export default function SLFMonitoring({
       setLoadingGen(false);
     }
   }, []);
+
+  // User-triggered refresh: owns its own spinner, always awaits the refetch,
+  // catches failures and resets in finally (so it can never hang), and ignores
+  // re-clicks while already refreshing.
+  const handleRefresh = useCallback(async () => {
+    if (refreshing) return;
+    setRefreshing(true);
+    try {
+      await fetchRecords(true);
+    } catch {
+      /* fetchRecords surfaces its own error; nothing else to do here */
+    } finally {
+      if (aliveRef.current) setRefreshing(false);
+    }
+  }, [refreshing, fetchRecords]);
 
   useEffect(() => {
     fetchRecords();
@@ -520,12 +603,20 @@ export default function SLFMonitoring({
       // of it. The cache collapses that to one request per TTL.
       fetchWithCache(
         `${CACHE_KEY}-baselines`,
-        () => api.get("/data-slf/baselines", { signal: controller.signal }).then(({ data }) => data || []),
+        () =>
+          api
+            .get("/data-slf/baselines", { signal: controller.signal })
+            .then(({ data }) => data || []),
         {
           ttl: CACHE_TTL,
           onData: (data) => {
             if (cancelled) return;
-            setBaselineData(findBaselineForFacility(detailModal, buildBaselineMap(data || [])));
+            setBaselineData(
+              findBaselineForFacility(
+                detailModal,
+                buildBaselineMap(data || []),
+              ),
+            );
           },
           onError: () => {
             if (cancelled) return;
@@ -552,9 +643,17 @@ export default function SLFMonitoring({
         .then(({ data }) => {
           if (cancelled) return;
           const rows = Array.isArray(data) ? data : data?.data || [];
-          setDetailProgress({ stage: "Normalizing records", done: 0, total: rows.length });
+          setDetailProgress({
+            stage: "Normalizing records",
+            done: 0,
+            total: rows.length,
+          });
           const full = rows.map(normalizeSubmissionRecord);
-          setDetailProgress({ stage: "Preparing results", done: rows.length, total: rows.length });
+          setDetailProgress({
+            stage: "Preparing results",
+            done: rows.length,
+            total: rows.length,
+          });
           // Held SEPARATELY from the page-wide lean `slfSubmissions`, and released
           // when the modal closes (see the cleanup below).
           //
@@ -568,7 +667,12 @@ export default function SLFMonitoring({
         })
         .catch((err) => {
           // An aborted request is an expected outcome of navigating away, not a failure.
-          if (cancelled || err?.name === "CanceledError" || err?.code === "ERR_CANCELED") return;
+          if (
+            cancelled ||
+            err?.name === "CanceledError" ||
+            err?.code === "ERR_CANCELED"
+          )
+            return;
           setDetailDashboardError("Failed to load submission data.");
         })
         .finally(() => {
@@ -614,7 +718,9 @@ export default function SLFMonitoring({
     const controller = new AbortController();
     let cancelled = false;
     api
-      .get(`/slf-facilities/history/${encodeURIComponent(lgu)}`, { signal: controller.signal })
+      .get(`/slf-facilities/history/${encodeURIComponent(lgu)}`, {
+        signal: controller.signal,
+      })
       .then(({ data }) => {
         if (cancelled) return;
         const enriched = data.map((r) => ({ ...r, ...computeFields(r) }));
@@ -622,7 +728,12 @@ export default function SLFMonitoring({
         setDetailYear(detailModal.dataYear || new Date().getFullYear());
       })
       .catch((err) => {
-        if (cancelled || err?.name === "CanceledError" || err?.code === "ERR_CANCELED") return;
+        if (
+          cancelled ||
+          err?.name === "CanceledError" ||
+          err?.code === "ERR_CANCELED"
+        )
+          return;
         setDetailYearRecords([]);
         setDetailYear(detailModal.dataYear || new Date().getFullYear());
       })
@@ -641,7 +752,9 @@ export default function SLFMonitoring({
   // arrived, else falls back to the lean page-wide list.
   const facilitySubmissions = useMemo(() => {
     if (!detailModal) return EMPTY_ROWS;
-    const source = detailSubmissions.length ? detailSubmissions : slfSubmissions;
+    const source = detailSubmissions.length
+      ? detailSubmissions
+      : slfSubmissions;
     return source.filter(
       (sub) =>
         ACTIVE_VOLUME_STATUSES.has(sub.status || "pending") &&
@@ -781,7 +894,10 @@ export default function SLFMonitoring({
     const monthly = Array.from(monthMap.entries())
       .filter(([m]) => m !== "Unknown")
       .sort(([a], [b]) => a.localeCompare(b))
-      .map(([m, v]) => ({ month: dayjs(`${m}-01`).format("MMM YY"), volume: Math.round(v) }));
+      .map(([m, v]) => ({
+        month: dayjs(`${m}-01`).format("MMM YY"),
+        volume: Math.round(v),
+      }));
 
     const topGenerators = Array.from(generators.entries())
       .sort((a, b) => b[1] - a[1])
@@ -820,7 +936,9 @@ export default function SLFMonitoring({
   const openDailySubmissionsModal = (cellRow) => {
     if (!detailViewRecord) return;
     const targetIndex =
-      cellRow?.index != null ? cellRow.index : parseCellIndex(cellRow?.cellName);
+      cellRow?.index != null
+        ? cellRow.index
+        : parseCellIndex(cellRow?.cellName);
     const fallbackIndex = targetIndex != null ? targetIndex : 0;
     const rows = facilitySubmissions
       .flatMap((submission) =>
@@ -928,8 +1046,11 @@ export default function SLFMonitoring({
       privateCompaniesServed: record.privateCompaniesServed || [],
       volumeCapacityUnit: record.volumeCapacityUnit || "m³",
       receivingVolumeCapacityUnit: record.receivingVolumeCapacityUnit || "m³",
-      wastewaterTreatmentFacilityType: asStringArray(record.wastewaterTreatmentFacilityType),
-      wastewaterTreatmentFacilityRemarks: record.wastewaterTreatmentFacilityRemarks || "",
+      wastewaterTreatmentFacilityType: asStringArray(
+        record.wastewaterTreatmentFacilityType,
+      ),
+      wastewaterTreatmentFacilityRemarks:
+        record.wastewaterTreatmentFacilityRemarks || "",
       receivingFacilities,
       leachatePondDetails: (record.leachatePondDetails || []).map((p) => ({
         ...p,
@@ -1014,9 +1135,10 @@ export default function SLFMonitoring({
     setEditYearRecords([]);
     form.resetFields();
     form.setFieldsValue({
-      volumeCapacityUnit: "m³",
-      wasteReceivedUnit: "m³",
-      estimatedVolumeWasteUnit: "m³",
+      // New SLF records default to tons (admin can switch to m³ via Set Field Units).
+      volumeCapacityUnit: "tons",
+      wasteReceivedUnit: "tons",
+      estimatedVolumeWasteUnit: "tons",
       lguServedList: [],
       privateCompaniesServed: [],
       cellNotes: [],
@@ -1084,10 +1206,10 @@ export default function SLFMonitoring({
         latitude: current.latitude,
         longitude: current.longitude,
         eccNo: current.eccNo,
-        volumeCapacityUnit: "m³",
-        receivingVolumeCapacityUnit: "m³",
-        wasteReceivedUnit: "m³",
-        estimatedVolumeWasteUnit: "m³",
+        volumeCapacityUnit: "tons",
+        receivingVolumeCapacityUnit: "tons",
+        wasteReceivedUnit: "tons",
+        estimatedVolumeWasteUnit: "tons",
         lguServedList: [],
         privateCompaniesServed: [],
         cellNotes: [],
@@ -1111,8 +1233,11 @@ export default function SLFMonitoring({
   };
 
   const getActiveCellOptions = () => {
-    const count = Number(form.getFieldValue("numberOfCell") || editing?.numberOfCell || 0);
-    const statuses = form.getFieldValue("cellStatuses") || editing?.cellStatuses || [];
+    const count = Number(
+      form.getFieldValue("numberOfCell") || editing?.numberOfCell || 0,
+    );
+    const statuses =
+      form.getFieldValue("cellStatuses") || editing?.cellStatuses || [];
     const types = form.getFieldValue("cellTypes") || editing?.cellTypes || [];
     const names = form.getFieldValue("cellNames") || editing?.cellNames || [];
     return Array.from({ length: count }, (_, index) => {
@@ -1132,17 +1257,31 @@ export default function SLFMonitoring({
   const getEditingSubmissions = () => {
     const record = editing || {};
     return (slfSubmissions || [])
-      .filter((submission) => submissionMatchesFacility(record, submission) && hasTruckVolume(submission))
+      .filter(
+        (submission) =>
+          submissionMatchesFacility(record, submission) &&
+          hasTruckVolume(submission),
+      )
       .sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0));
   };
 
   const openCellAssignmentModal = () => {
     const submissions = getEditingSubmissions();
-    setCellAssignmentModal({ submissions, selectedId: submissions[0]?._id || null });
+    setCellAssignmentModal({
+      submissions,
+      selectedId: submissions[0]?._id || null,
+    });
   };
 
-  const updateCellAssignmentLocal = (submissionId, truckIndex, cellIndex, vehicleIndex = null) => {
-    const cell = getActiveCellOptions().find((item) => item.index === cellIndex);
+  const updateCellAssignmentLocal = (
+    submissionId,
+    truckIndex,
+    cellIndex,
+    vehicleIndex = null,
+  ) => {
+    const cell = getActiveCellOptions().find(
+      (item) => item.index === cellIndex,
+    );
     const cellPatch = {
       cellIndex,
       cellName: cell?.name || "",
@@ -1200,17 +1339,28 @@ export default function SLFMonitoring({
           });
         }
       });
-      const { data } = await api.patch(`/data-slf/${submission._id}/cell-assignments`, { assignments });
+      const { data } = await api.patch(
+        `/data-slf/${submission._id}/cell-assignments`,
+        { assignments },
+      );
       const updated = data.data || submission;
-      setSlfSubmissions((prev) => prev.map((item) => item._id === updated._id ? updated : item));
+      setSlfSubmissions((prev) =>
+        prev.map((item) => (item._id === updated._id ? updated : item)),
+      );
       setCellAssignmentModal((prev) => ({
         ...prev,
-        submissions: (prev?.submissions || []).map((item) => item._id === updated._id ? updated : item),
+        submissions: (prev?.submissions || []).map((item) =>
+          item._id === updated._id ? updated : item,
+        ),
       }));
       await fetchRecords(true);
       Swal.fire("Saved", "Submission waste placement was updated.", "success");
     } catch (error) {
-      Swal.fire("Error", error.response?.data?.message || "Failed to update cell assignments", "error");
+      Swal.fire(
+        "Error",
+        error.response?.data?.message || "Failed to update cell assignments",
+        "error",
+      );
     } finally {
       setCellAssignmentSaving(false);
     }
@@ -1234,19 +1384,23 @@ export default function SLFMonitoring({
         (fl || [])
           .filter((f) => f.status !== "error" && f.status !== "uploading")
           .map((f) =>
-            typeof f === "string" ? f : f.response?.url || f.url || f.name || "",
+            typeof f === "string"
+              ? f
+              : f.response?.url || f.url || f.name || "",
           )
           .filter(Boolean);
       const existingRecord = editing || {};
       const fieldValue = (key, fallback) =>
-        values[key] !== undefined ? values[key] : existingRecord[key] ?? fallback;
+        values[key] !== undefined
+          ? values[key]
+          : (existingRecord[key] ?? fallback);
       const fileFieldValue = (key) =>
         values[key] !== undefined
           ? fromFileList(values[key])
           : existingRecord[key] || [];
       const dateFieldValue = (key) =>
         values[key] !== undefined
-          ? values[key]?.toISOString?.() ?? null
+          ? (values[key]?.toISOString?.() ?? null)
           : existingRecord[key] || null;
       const existingLeachateDetails = existingRecord.leachatePondDetails || [];
       const existingGasVentDetails = existingRecord.gasVentDetails || [];
@@ -1288,19 +1442,27 @@ export default function SLFMonitoring({
         "hasWastewaterTreatmentFacility",
         false,
       );
-      const leachatePondDetails = fieldValue("leachatePondDetails", []).map((p, index) => ({
-        ...p,
-        wastewaterTreatmentFacilityType: asStringArray(p.wastewaterTreatmentFacilityType),
-        attachments: p.attachments !== undefined
-          ? fromFileList(p.attachments)
-          : existingLeachateDetails[index]?.attachments || [],
-      }));
-      const gasVentDetails = fieldValue("gasVentDetails", []).map((v, index) => ({
-        ...v,
-        attachments: v.attachments !== undefined
-          ? fromFileList(v.attachments)
-          : existingGasVentDetails[index]?.attachments || [],
-      }));
+      const leachatePondDetails = fieldValue("leachatePondDetails", []).map(
+        (p, index) => ({
+          ...p,
+          wastewaterTreatmentFacilityType: asStringArray(
+            p.wastewaterTreatmentFacilityType,
+          ),
+          attachments:
+            p.attachments !== undefined
+              ? fromFileList(p.attachments)
+              : existingLeachateDetails[index]?.attachments || [],
+        }),
+      );
+      const gasVentDetails = fieldValue("gasVentDetails", []).map(
+        (v, index) => ({
+          ...v,
+          attachments:
+            v.attachments !== undefined
+              ? fromFileList(v.attachments)
+              : existingGasVentDetails[index]?.attachments || [],
+        }),
+      );
       const lguServedList = fieldValue("lguServedList", []);
       const privateCompaniesServed = fieldValue("privateCompaniesServed", []);
       const ownership = fieldValue("ownership", "");
@@ -1310,12 +1472,17 @@ export default function SLFMonitoring({
       // via the unit-change handlers).
       const baselineCellUnit =
         normalizeUnit(
-          fieldValue("wasteReceivedUnit") || fieldValue("volumeCapacityUnit") || "m³",
+          fieldValue("wasteReceivedUnit") ||
+            fieldValue("volumeCapacityUnit") ||
+            "m³",
         ) || "m³";
       const cellCountForUnits =
         Number(fieldValue("numberOfCell", 0)) ||
         (fieldValue("cellCapacities", []) || []).length;
-      const uniformCellUnits = Array.from({ length: cellCountForUnits }, () => baselineCellUnit);
+      const uniformCellUnits = Array.from(
+        { length: cellCountForUnits },
+        () => baselineCellUnit,
+      );
       const payload = {
         ...values,
         dataYear: editYear,
@@ -1325,7 +1492,9 @@ export default function SLFMonitoring({
           : lguServedList.length,
         lguServedList,
         privateCompaniesServed,
-        cellNames: fieldValue("cellNames", []).map((n) => String(n || "").trim()),
+        cellNames: fieldValue("cellNames", []).map((n) =>
+          String(n || "").trim(),
+        ),
         cellStatuses: fieldValue("cellStatuses", []).map(normalizeCellStatus),
         cellCapacities: fieldValue("cellCapacities", []),
         cellCapacityUnits: uniformCellUnits,
@@ -1420,8 +1589,11 @@ export default function SLFMonitoring({
           return [...prev, updatedRecord];
         });
         setEditing(updatedRecord);
-        setDetailModal((prev) => (prev?._id === data._id ? updatedRecord : prev));
-        invalidateCache(`${CACHE_KEY}-fast`); invalidateCache(`${CACHE_KEY}-full`);
+        setDetailModal((prev) =>
+          prev?._id === data._id ? updatedRecord : prev,
+        );
+        invalidateCache(`${CACHE_KEY}-fast`);
+        invalidateCache(`${CACHE_KEY}-full`);
         secureStorage.invalidateDashboard();
         Swal.fire(
           "Saved",
@@ -1435,7 +1607,8 @@ export default function SLFMonitoring({
         setRecords((prev) => [...prev, createdRecord]);
         setEditYearRecords((prev) => [...prev, createdRecord]);
         setEditing(createdRecord);
-        invalidateCache(`${CACHE_KEY}-fast`); invalidateCache(`${CACHE_KEY}-full`);
+        invalidateCache(`${CACHE_KEY}-fast`);
+        invalidateCache(`${CACHE_KEY}-full`);
         secureStorage.invalidateDashboard();
         Swal.fire(
           "Saved",
@@ -1448,7 +1621,8 @@ export default function SLFMonitoring({
       if (err.errorFields?.length) {
         Swal.fire(
           "Missing or Invalid Fields",
-          err.errorFields[0]?.errors?.[0] || "Please check the highlighted fields before saving.",
+          err.errorFields[0]?.errors?.[0] ||
+            "Please check the highlighted fields before saving.",
           "warning",
         );
       } else if (err.response) {
@@ -1500,7 +1674,9 @@ export default function SLFMonitoring({
 
   const handleCellCapacityUnitChange = (index, value) => {
     const unit = normalizeUnit(value);
-    const nextCapacityUnits = [...(form.getFieldValue("cellCapacityUnits") || [])];
+    const nextCapacityUnits = [
+      ...(form.getFieldValue("cellCapacityUnits") || []),
+    ];
     const nextFillUnits = [...(form.getFieldValue("cellFillUnits") || [])];
     nextCapacityUnits[index] = unit;
     nextFillUnits[index] = unit;
@@ -1648,7 +1824,8 @@ export default function SLFMonitoring({
     try {
       await api.delete(`/slf-facilities/${record._id}`);
       setRecords((prev) => prev.filter((r) => r._id !== record._id));
-      invalidateCache(`${CACHE_KEY}-fast`); invalidateCache(`${CACHE_KEY}-full`);
+      invalidateCache(`${CACHE_KEY}-fast`);
+      invalidateCache(`${CACHE_KEY}-full`);
       secureStorage.invalidateDashboard();
       Swal.fire({
         icon: "success",
@@ -1675,10 +1852,12 @@ export default function SLFMonitoring({
     if (searchText) data = data.filter((r) => rowMatchesSearch(r, searchText));
     if (filterProvince)
       data = data.filter((r) => matchesFilter(r.province, filterProvince));
-    if (filterStatus) data = data.filter((r) => matchesFilter(r.statusOfSLF, filterStatus));
+    if (filterStatus)
+      data = data.filter((r) => matchesFilter(r.statusOfSLF, filterStatus));
     if (filterCategory)
       data = data.filter((r) => matchesFilter(r.category, filterCategory));
-    if (filterMonth) data = data.filter((r) => matchesFilter(r.targetMonth, filterMonth));
+    if (filterMonth)
+      data = data.filter((r) => matchesFilter(r.targetMonth, filterMonth));
 
     if (quickFilter === "operational") {
       data = data.filter(
@@ -1712,10 +1891,11 @@ export default function SLFMonitoring({
     // Deduplicate by LGU — keep only the latest dataYear record per facility
     const map = new Map();
     for (const r of data) {
-      const key = [r.province, r.lgu, r.barangay]
-        .filter(Boolean)
-        .join("|")
-        .toLowerCase() || r._id;
+      const key =
+        [r.province, r.lgu, r.barangay]
+          .filter(Boolean)
+          .join("|")
+          .toLowerCase() || r._id;
       const existing = map.get(key);
       if (!existing || (r.dataYear || 0) > (existing.dataYear || 0)) {
         map.set(key, r);
@@ -1739,6 +1919,15 @@ export default function SLFMonitoring({
     filterCategory ||
     filterMonth ||
     quickFilter;
+  // Count of active dropdown/quick filters (search shown separately) — badged on
+  // the header Filters button so the indicator stays visible when collapsed (#5).
+  const activeFilterCount = [
+    filterProvince,
+    filterStatus,
+    filterCategory,
+    filterMonth,
+    quickFilter,
+  ].filter(Boolean).length;
   const clearFilters = () => {
     setSearchText("");
     setFilterProvince(null);
@@ -1750,12 +1939,26 @@ export default function SLFMonitoring({
   // Summary tiles — single memoized pass over `filtered` (was ~25 separate
   // filter/reduce loops on every render → main tile-summary bottleneck).
   const tileStats = useMemo(() => {
-    let opCount = 0, nonOpCount = 0, totalCapacity = 0, totalLGUs = 0,
-      totalCells = 0, totalLeachate = 0, totalGasVents = 0, totalWaste = 0,
-      privateSectorCount = 0, cellsWithData = 0, lgusWithData = 0,
-      capacityWithData = 0, wasteWithData = 0, leachateWithData = 0,
-      gasVentsWithData = 0, privateClientsTotal = 0, receivingCapacityTotal = 0,
-      region3LguServed = 0, hasTons = false, hasM3 = false;
+    let opCount = 0,
+      nonOpCount = 0,
+      totalCapacity = 0,
+      totalLGUs = 0,
+      totalCells = 0,
+      totalLeachate = 0,
+      totalGasVents = 0,
+      totalWaste = 0,
+      privateSectorCount = 0,
+      cellsWithData = 0,
+      lgusWithData = 0,
+      capacityWithData = 0,
+      wasteWithData = 0,
+      leachateWithData = 0,
+      gasVentsWithData = 0,
+      privateClientsTotal = 0,
+      receivingCapacityTotal = 0,
+      region3LguServed = 0,
+      hasTons = false,
+      hasM3 = false;
     const cellStatusSummary = {};
     const leachateStatusSummary = {};
     const gasStatusSummary = {};
@@ -1771,7 +1974,9 @@ export default function SLFMonitoring({
       totalGasVents += r.numberOfGasVents || 0;
       totalWaste += r.actualResidualWasteReceived || 0;
       const isPrivate = /private/i.test(r.ownership);
-      if (isPrivate) { privateSectorCount++; }
+      if (isPrivate) {
+        privateSectorCount++;
+      }
       if (r.numberOfCell > 0) cellsWithData++;
       if (r.noOfLGUServed > 0) lgusWithData++;
       if (r.volumeCapacity > 0) capacityWithData++;
@@ -1780,7 +1985,8 @@ export default function SLFMonitoring({
       if (r.numberOfGasVents > 0) gasVentsWithData++;
       privateClientsTotal += (r.privateCompaniesServed || []).length;
       receivingCapacityTotal += r.receivingVolumeCapacity || 0;
-      if (R3_PROVINCES.includes(r.province)) region3LguServed += r.noOfLGUServed || 0;
+      if (R3_PROVINCES.includes(r.province))
+        region3LguServed += r.noOfLGUServed || 0;
       const u = normalizeUnit(r.wasteReceivedUnit);
       if (u === "tons") hasTons = true;
       if (u === "m³") hasM3 = true;
@@ -1793,7 +1999,8 @@ export default function SLFMonitoring({
           cellStatusSummary[k] = (cellStatusSummary[k] || 0) + 1;
         });
       } else if (cellCount > 0) {
-        cellStatusSummary.Recorded = (cellStatusSummary.Recorded || 0) + cellCount;
+        cellStatusSummary.Recorded =
+          (cellStatusSummary.Recorded || 0) + cellCount;
       }
       const ponds = r.leachatePondDetails || [];
       if (ponds.length > 0) {
@@ -1802,7 +2009,8 @@ export default function SLFMonitoring({
           leachateStatusSummary[k] = (leachateStatusSummary[k] || 0) + 1;
         });
       } else if (Number(r.noOfLeachatePond || 0) > 0) {
-        leachateStatusSummary.Recorded = (leachateStatusSummary.Recorded || 0) + Number(r.noOfLeachatePond);
+        leachateStatusSummary.Recorded =
+          (leachateStatusSummary.Recorded || 0) + Number(r.noOfLeachatePond);
       }
       const vents = r.gasVentDetails || [];
       if (vents.length > 0) {
@@ -1811,29 +2019,69 @@ export default function SLFMonitoring({
           gasStatusSummary[k] = (gasStatusSummary[k] || 0) + 1;
         });
       } else if (Number(r.numberOfGasVents || 0) > 0) {
-        gasStatusSummary.Recorded = (gasStatusSummary.Recorded || 0) + Number(r.numberOfGasVents);
+        gasStatusSummary.Recorded =
+          (gasStatusSummary.Recorded || 0) + Number(r.numberOfGasVents);
       }
     }
     return {
       totalRecords: filtered.length,
-      opCount, nonOpCount, totalCapacity, totalLGUs, totalCells, totalLeachate,
-      totalGasVents, totalWaste, privateSectorCount, cellsWithData, lgusWithData,
-      capacityWithData, wasteWithData, leachateWithData, gasVentsWithData,
-      privateWithData: privateSectorCount, privateClientsTotal,
-      receivingCapacityTotal, region3LguServed,
+      opCount,
+      nonOpCount,
+      totalCapacity,
+      totalLGUs,
+      totalCells,
+      totalLeachate,
+      totalGasVents,
+      totalWaste,
+      privateSectorCount,
+      cellsWithData,
+      lgusWithData,
+      capacityWithData,
+      wasteWithData,
+      leachateWithData,
+      gasVentsWithData,
+      privateWithData: privateSectorCount,
+      privateClientsTotal,
+      receivingCapacityTotal,
+      region3LguServed,
       outsideRegionLguServed: Math.max(0, totalLGUs - region3LguServed),
-      capacityUsePercent: totalCapacity > 0 ? Math.min(100, (totalWaste / totalCapacity) * 100) : 0,
+      capacityUsePercent:
+        totalCapacity > 0
+          ? Math.min(100, (totalWaste / totalCapacity) * 100)
+          : 0,
       wasteUnitLabel: hasTons && !hasM3 ? "tons" : "m³",
-      cellStatusSummary, leachateStatusSummary, gasStatusSummary,
+      cellStatusSummary,
+      leachateStatusSummary,
+      gasStatusSummary,
     };
   }, [filtered]);
   const {
-    totalRecords, opCount, nonOpCount, totalCapacity, totalLGUs, totalCells,
-    totalLeachate, totalGasVents, totalWaste, wasteUnitLabel, privateSectorCount,
-    cellsWithData, lgusWithData, capacityWithData, wasteWithData, leachateWithData,
-    gasVentsWithData, privateWithData, privateClientsTotal, receivingCapacityTotal,
-    region3LguServed, outsideRegionLguServed, capacityUsePercent,
-    cellStatusSummary, leachateStatusSummary, gasStatusSummary,
+    totalRecords,
+    opCount,
+    nonOpCount,
+    totalCapacity,
+    totalLGUs,
+    totalCells,
+    totalLeachate,
+    totalGasVents,
+    totalWaste,
+    wasteUnitLabel,
+    privateSectorCount,
+    cellsWithData,
+    lgusWithData,
+    capacityWithData,
+    wasteWithData,
+    leachateWithData,
+    gasVentsWithData,
+    privateWithData,
+    privateClientsTotal,
+    receivingCapacityTotal,
+    region3LguServed,
+    outsideRegionLguServed,
+    capacityUsePercent,
+    cellStatusSummary,
+    leachateStatusSummary,
+    gasStatusSummary,
   } = tileStats;
 
   const insightConfig = useMemo(() => {
@@ -2263,7 +2511,7 @@ export default function SLFMonitoring({
     {
       title: "LGU",
       key: "lgu",
-      width: 150,
+      width: 200,
       filters: buildFilters(records, "province"),
       onFilter: (v, r) => matchesFilter(r.province, v),
       sorter: (a, b) => (a.lgu || "").localeCompare(b.lgu || ""),
@@ -2309,7 +2557,8 @@ export default function SLFMonitoring({
             >
               <Tag
                 color="blue"
-                variant="filled" style={{
+                variant="filled"
+                style={{
                   marginInlineEnd: 0,
                   maxWidth: "100%",
                   whiteSpace: "normal",
@@ -2354,7 +2603,8 @@ export default function SLFMonitoring({
     {
       title: "Capacity per day",
       key: "capacityPerDay",
-      width: 110,
+      width: 100,
+      align: "center",
       sorter: (a, b) =>
         (a.receivingVolumeCapacity ?? a.volumeCapacity ?? 0) -
         (b.receivingVolumeCapacity ?? b.volumeCapacity ?? 0),
@@ -2383,21 +2633,105 @@ export default function SLFMonitoring({
     {
       title: "LGUs Served",
       dataIndex: "noOfLGUServed",
-      width: 100,
+      width: 80,
+      align: "center",
       sorter: (a, b) => (a.noOfLGUServed || 0) - (b.noOfLGUServed || 0),
     },
     {
       title: "Cells",
       dataIndex: "numberOfCell",
-      width: 80,
+      key: "cells",
+      width: 140,
+      sorter: (a, b) => (a.numberOfCell || 0) - (b.numberOfCell || 0),
+      render: (_, r) => {
+        const total =
+          Number(r.numberOfCell || 0) ||
+          (Array.isArray(r.cellTypes) ? r.cellTypes.length : 0);
+        const types = Array.isArray(r.cellTypes) ? r.cellTypes : [];
+        // Data genuinely unavailable → dash (not zero).
+        if (!(Number(r.numberOfCell) > 0) && types.length === 0) {
+          return <Text type="secondary">—</Text>;
+        }
+        let hazardous = 0;
+        for (let i = 0; i < total; i += 1) {
+          if (isHazardousCellType(types[i] || "Residual")) hazardous += 1;
+        }
+        const residual = Math.max(total - hazardous, 0);
+        return (
+          <Tooltip
+            title={`${residual} residual cell(s), ${hazardous} hazardous cell(s)`}
+          >
+            {/* Item #7: label left, value tag right — aligned uniformly so the
+                numeric tags line up regardless of label length. */}
+            <div
+              style={{
+                display: "flex",
+                flexDirection: "column",
+                gap: 3,
+                minWidth: 116,
+              }}
+            >
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  gap: 8,
+                }}
+              >
+                <span
+                  style={{ fontSize: 12, whiteSpace: "nowrap" }}
+                  aria-label={`Residual cells: ${residual}`}
+                >
+                  <ContainerOutlined
+                    style={{ color: "#2f54eb", marginRight: 4 }}
+                  />
+                  Residual
+                </span>
+                <Tag
+                  color={residual ? "blue" : "default"}
+                  style={{ margin: 0 }}
+                >
+                  {residual}
+                </Tag>
+              </div>
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  gap: 8,
+                }}
+              >
+                <span
+                  style={{ fontSize: 12, whiteSpace: "nowrap" }}
+                  aria-label={`Hazardous cells: ${hazardous}`}
+                >
+                  <WarningOutlined
+                    style={{ color: "#cf1322", marginRight: 4 }}
+                  />
+                  Hazardous
+                </span>
+                <Tag
+                  color={hazardous ? "red" : "default"}
+                  style={{ margin: 0 }}
+                >
+                  {hazardous}
+                </Tag>
+              </div>
+            </div>
+          </Tooltip>
+        );
+      },
     },
     {
       title: "Leachate & Gas Management",
       key: "managementSummary",
-      width: 170,
+      width: 130,
       render: (_, r) => {
         const leachateCount =
-          Number(r.noOfLeachatePond || 0) || (r.leachatePondDetails || []).length;
+          Number(r.noOfLeachatePond || 0) ||
+          (r.leachatePondDetails || []).length;
         const gasCount =
           Number(r.numberOfGasVents || 0) || (r.gasVentDetails || []).length;
         const tooltip = [
@@ -2409,17 +2743,70 @@ export default function SLFMonitoring({
             : "No gas management details recorded",
         ].join("\n\n");
         return (
-          <Tooltip title={<pre style={{ margin: 0, whiteSpace: "pre-wrap" }}>{tooltip}</pre>}>
-            <Space direction="vertical" size={2}>
-              <Text style={{ fontSize: 12 }}>
-                <AlertOutlined style={{ color: "#fa8c16", marginRight: 4 }} />
-                Leachate <Tag color={leachateCount ? "orange" : "default"}>{leachateCount || 0}</Tag>
-              </Text>
-              <Text style={{ fontSize: 12 }}>
-                <ExperimentOutlined style={{ color: "#13c2c2", marginRight: 4 }} />
-                Gas <Tag color={gasCount ? "cyan" : "default"}>{gasCount || 0}</Tag>
-              </Text>
-            </Space>
+          <Tooltip
+            title={
+              <div
+                style={{
+                  maxWidth: 280,
+                  whiteSpace: "pre-wrap",
+                  overflowWrap: "anywhere",
+                  fontSize: 12,
+                }}
+              >
+                {tooltip}
+              </div>
+            }
+          >
+            {/* Item #7: label left, count right — aligned to match the Cells column. */}
+            <div
+              style={{
+                display: "flex",
+                flexDirection: "column",
+                gap: 3,
+                minWidth: 108,
+              }}
+            >
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  gap: 8,
+                }}
+              >
+                <span style={{ fontSize: 12, whiteSpace: "nowrap" }}>
+                  <AlertOutlined style={{ color: "#fa8c16", marginRight: 4 }} />
+                  Leachate
+                </span>
+                <Tag
+                  color={leachateCount ? "orange" : "default"}
+                  style={{ margin: 0 }}
+                >
+                  {leachateCount || 0}
+                </Tag>
+              </div>
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  gap: 8,
+                }}
+              >
+                <span style={{ fontSize: 12, whiteSpace: "nowrap" }}>
+                  <ExperimentOutlined
+                    style={{ color: "#13c2c2", marginRight: 4 }}
+                  />
+                  Gas
+                </span>
+                <Tag
+                  color={gasCount ? "cyan" : "default"}
+                  style={{ margin: 0 }}
+                >
+                  {gasCount || 0}
+                </Tag>
+              </div>
+            </div>
           </Tooltip>
         );
       },
@@ -2432,9 +2819,15 @@ export default function SLFMonitoring({
         (a.actualResidualWasteReceived || 0) -
         (b.actualResidualWasteReceived || 0),
       render: (v, record) =>
-        v != null
-          ? `${Number(v).toLocaleString()} ${normalizeUnit(record.wasteReceivedUnit || "m³")}`
-          : "—",
+        v != null ? (
+          <Tooltip
+            title={`${Number(v).toLocaleString()} ${normalizeUnit(record.wasteReceivedUnit || "m³")}`}
+          >
+            {`${formatCompact(v)} ${normalizeUnit(record.wasteReceivedUnit || "m³")}`}
+          </Tooltip>
+        ) : (
+          "—"
+        ),
     },
     {
       title: "Target Month",
@@ -2447,10 +2840,21 @@ export default function SLFMonitoring({
       onFilter: (v, r) => matchesFilter(r.targetMonth, v),
       render: (v) =>
         v ? (
-          <div style={{ whiteSpace: "normal", wordBreak: "break-word", lineHeight: 1.25 }}>
-            <Tag variant="filled"
+          <div
+            style={{
+              whiteSpace: "normal",
+              wordBreak: "break-word",
+              lineHeight: 1.25,
+            }}
+          >
+            <Tag
+              variant="filled"
               color="cyan"
-              style={{ whiteSpace: "normal", wordBreak: "break-word", lineHeight: 1.3 }}
+              style={{
+                whiteSpace: "normal",
+                wordBreak: "break-word",
+                lineHeight: 1.3,
+              }}
             >
               {v.replace(/^\d+\./, "")}
             </Tag>
@@ -2462,7 +2866,7 @@ export default function SLFMonitoring({
     {
       title: "Personnel",
       key: "personnel",
-      width: 170,
+      width: 160,
       ellipsis: false,
       render: (_, r) => (
         <Tooltip
@@ -2506,7 +2910,7 @@ export default function SLFMonitoring({
           <Tooltip title="View">
             <Button
               size="small"
-              type="text"
+              type="primary"
               icon={<EyeOutlined />}
               onClick={() => setDetailModal(r)}
             />
@@ -2515,7 +2919,7 @@ export default function SLFMonitoring({
             <Tooltip title="Edit">
               <Button
                 size="small"
-                type="text"
+                type="primary"
                 icon={<EditOutlined />}
                 onClick={() => openEdit(r)}
               />
@@ -2525,7 +2929,7 @@ export default function SLFMonitoring({
             <Tooltip title="Delete">
               <Button
                 size="small"
-                type="text"
+                type="primary"
                 danger
                 icon={<DeleteOutlined />}
                 onClick={() => reviewAndDeleteRecord(r)}
@@ -2773,225 +3177,178 @@ export default function SLFMonitoring({
       >
         <div>
           <Title level={3} style={{ margin: 0 }}>
-            SLF Data Table
+            Sanitary Landfill Facility Database
           </Title>
           <Text type="secondary">
             Sanitary landfill facility records and portal-submitted waste
             generator data.
           </Text>
         </div>
-        <Space wrap>
+        {/* #5: page-header toolbar — Filters, Add Record, Export, Refresh moved to
+            the upper-right; the active-record/filter indicator stays visible. Wraps
+            below the title on smaller screens. */}
+        <Space wrap size={8} style={{ justifyContent: "flex-end" }}>
           <Tag variant="filled" color={hasFilters ? "blue" : "default"}>
             {filtered.length} / {records.length} records
           </Tag>
-          {hasFilters && (
+          <Input
+            placeholder="Search..."
+            prefix={<SearchOutlined />}
+            value={searchText}
+            onChange={(e) => setSearchText(e.target.value)}
+            style={{ width: 180 }}
+            size="small"
+            allowClear
+          />
+          <Badge count={activeFilterCount} size="small" offset={[-2, 2]}>
             <Button
               size="small"
-              type="link"
-              icon={<ClearOutlined />}
-              onClick={clearFilters}
+              type={filtersOpen || hasFilters ? "primary" : "default"}
+              ghost={filtersOpen || hasFilters}
+              icon={<FilterOutlined />}
+              onClick={() => setFiltersOpen((v) => !v)}
             >
-              Clear filters
+              Filters
+            </Button>
+          </Badge>
+          {canEdit && (
+            <Button
+              size="small"
+              type="primary"
+              icon={<PlusOutlined />}
+              onClick={openAdd}
+              style={{ background: ACCENT, borderColor: ACCENT }}
+            >
+              Add Record
             </Button>
           )}
+          <Button
+            size="small"
+            icon={<DownloadOutlined />}
+            onClick={handleExport}
+          >
+            Export
+          </Button>
+          <Tooltip title="Refresh data">
+            <Button
+              size="small"
+              icon={<ReloadOutlined />}
+              onClick={handleRefresh}
+              loading={refreshing}
+            />
+          </Tooltip>
         </Space>
       </div>
 
-      <Tabs
-        defaultActiveKey="facilities"
-        destroyOnHidden
-        items={[
-          {
-            key: "facilities",
-            label: (
-              <>
-                <BankOutlined /> Sanitary Landfill Facility
-              </>
-            ),
-            children: (
-              <>
-                <div
-                  style={{
-                    display: "flex",
-                    justifyContent: "space-between",
-                    alignItems: "center",
-                    marginBottom: 16,
-                    flexWrap: "wrap",
-                    gap: 12,
-                  }}
-                >
-                  <Title level={4} style={{ margin: 0 }}>
-                    <BankOutlined /> Sanitary Landfill Facility
-                  </Title>
-                  <Space wrap>
-                    <Input
-                      placeholder="Search..."
-                      prefix={<SearchOutlined />}
-                      value={searchText}
-                      onChange={(e) => setSearchText(e.target.value)}
-                      style={{ width: "100%", maxWidth: 200 }}
-                      allowClear
-                    />
-                    {canEdit && (
-                      <Button
-                        type="primary"
-                        icon={<PlusOutlined />}
-                        onClick={openAdd}
-                        style={{ background: ACCENT, borderColor: ACCENT }}
-                      >
-                        Add Record
-                      </Button>
-                    )}
-                    <Button icon={<DownloadOutlined />} onClick={handleExport}>
-                      Export
-                    </Button>
-                    <Tooltip title="Refresh data">
-                      <Button
-                        icon={<ReloadOutlined />}
-                        onClick={() => fetchRecords(true)}
-                        loading={loading}
-                      />
-                    </Tooltip>
-                  </Space>
-                </div>
-
-                {/* Filter Bar */}
-                <Card
-                  size="small"
-                  style={{ borderRadius: 10, marginBottom: 12 }}
-                  bodyStyle={{ padding: "10px 16px" }}
-                >
-                  <Row gutter={[10, 10]} align="middle">
-                    <Col>
-                      <FilterOutlined
-                        style={{ color: ACCENT, marginRight: 6 }}
-                      />
-                      <Text type="secondary" style={{ fontSize: 12 }}>
-                        Filters:
-                      </Text>
-                    </Col>
-                    <Col flex="auto">
-                      <Space wrap size={8}>
-                        <Select
-                          placeholder="Province"
-                          value={filterProvince}
-                          onChange={setFilterProvince}
-                          allowClear
-                          style={{
-                            width: "100%",
-                            minWidth: 120,
-                            maxWidth: 160,
-                          }}
-                          size="small"
-                          options={provinceOptions}
-                          suffixIcon={<EnvironmentOutlined />}
-                        />
-                        <Select
-                          placeholder="Status"
-                          value={filterStatus}
-                          onChange={setFilterStatus}
-                          allowClear
-                          style={{
-                            width: "100%",
-                            minWidth: 110,
-                            maxWidth: 160,
-                          }}
-                          size="small"
-                          options={buildFilters(records, "statusOfSLF")}
-                          suffixIcon={<SafetyCertificateOutlined />}
-                        />
-                        <Select
-                          placeholder="Category"
-                          value={filterCategory}
-                          onChange={setFilterCategory}
-                          allowClear
-                          style={{
-                            width: "100%",
-                            minWidth: 110,
-                            maxWidth: 150,
-                          }}
-                          size="small"
-                          options={buildFilters(records, "category")}
-                        />
-                        <Select
-                          placeholder="Target Month"
-                          value={filterMonth}
-                          onChange={setFilterMonth}
-                          allowClear
-                          style={{
-                            width: "100%",
-                            minWidth: 110,
-                            maxWidth: 150,
-                          }}
-                          size="small"
-                          options={monthOptions}
-                          suffixIcon={<CalendarOutlined />}
-                        />
-                        {hasFilters && (
-                          <Tooltip title="Clear all filters">
-                            <Button
-                              size="small"
-                              type="link"
-                              danger
-                              icon={<ClearOutlined />}
-                              onClick={clearFilters}
-                            >
-                              Clear
-                            </Button>
-                          </Tooltip>
-                        )}
-                      </Space>
-                    </Col>
-                    <Col>
-                      <Tag variant="filled"
-                        color={hasFilters ? "blue" : "default"}
-                      >
-                        {filtered.length} / {records.length} records
-                      </Tag>
-                    </Col>
-                  </Row>
-                </Card>
-
-                {/* Table */}
-                <Card size="small" style={{ borderRadius: 10 }}>
-                  <ResponsiveTable
-                    className="slf-table"
-                    dataSource={filtered}
-                    columns={columns}
-                    rowKey="_id"
-                    loading={loading && records.length === 0}
-                    size="small"
-                    pagination={{
-                      pageSize: 50,
-                      showSizeChanger: true,
-                      showTotal: (t) => `${t} records`,
+      {/* Single-page SLF Data Table (tab-pane wrapper removed — only one pane
+          existed, so its content is rendered directly). */}
+      <div className="slf-data-table-page">
+        {filtersOpen && (
+          <Card
+            size="small"
+            style={{ borderRadius: 10, marginBottom: 12 }}
+            bodyStyle={{ padding: "10px 16px" }}
+          >
+            <Row gutter={[10, 10]} align="middle">
+              <Col>
+                <FilterOutlined style={{ color: ACCENT, marginRight: 6 }} />
+                <Text type="secondary" style={{ fontSize: 12 }}>
+                  Filters:
+                </Text>
+              </Col>
+              <Col flex="auto">
+                <Space wrap size={8}>
+                  <Select
+                    placeholder="Province"
+                    value={filterProvince}
+                    onChange={setFilterProvince}
+                    allowClear
+                    style={{
+                      width: "100%",
+                      minWidth: 120,
+                      maxWidth: 160,
                     }}
+                    size="small"
+                    options={provinceOptions}
+                    suffixIcon={<EnvironmentOutlined />}
                   />
-                </Card>
-              </>
-            ),
-          },
-          // {
-          //   key: "portal",
-          //   label: (
-          //     <>
-          //       <LinkOutlined /> Waste Generators
-          //     </>
-          //   ),
-          //   children: (
-          //     <PortalGenerators
-          //       generators={generators}
-          //       loadingGen={loadingGen}
-          //       fetchGenerators={fetchGenerators}
-          //       slfRecords={records}
-          //       canEdit={canEdit}
-          //       canDelete={canDelete}
-          //       isDark={isDark}
-          //     />
-          //   ),
-          // },
-        ]}
-      />
+                  <Select
+                    placeholder="Status"
+                    value={filterStatus}
+                    onChange={setFilterStatus}
+                    allowClear
+                    style={{
+                      width: "100%",
+                      minWidth: 110,
+                      maxWidth: 160,
+                    }}
+                    size="small"
+                    options={buildFilters(records, "statusOfSLF")}
+                    suffixIcon={<SafetyCertificateOutlined />}
+                  />
+                  <Select
+                    placeholder="Category"
+                    value={filterCategory}
+                    onChange={setFilterCategory}
+                    allowClear
+                    style={{
+                      width: "100%",
+                      minWidth: 110,
+                      maxWidth: 150,
+                    }}
+                    size="small"
+                    options={buildFilters(records, "category")}
+                  />
+                  <Select
+                    placeholder="Target Month"
+                    value={filterMonth}
+                    onChange={setFilterMonth}
+                    allowClear
+                    style={{
+                      width: "100%",
+                      minWidth: 110,
+                      maxWidth: 150,
+                    }}
+                    size="small"
+                    options={monthOptions}
+                    suffixIcon={<CalendarOutlined />}
+                  />
+                  {hasFilters && (
+                    <Tooltip title="Clear all filters">
+                      <Button
+                        size="small"
+                        type="link"
+                        danger
+                        icon={<ClearOutlined />}
+                        onClick={clearFilters}
+                      >
+                        Clear
+                      </Button>
+                    </Tooltip>
+                  )}
+                </Space>
+              </Col>
+            </Row>
+          </Card>
+        )}
+
+        {/* Table */}
+        <Card size="small" style={{ borderRadius: 10 }}>
+          <ResponsiveTable
+            className="slf-table"
+            dataSource={filtered}
+            columns={columns}
+            rowKey="_id"
+            loading={loading && records.length === 0}
+            size="small"
+            pagination={{
+              pageSize: 50,
+              showSizeChanger: true,
+              showTotal: (t) => `${t} records`,
+            }}
+          />
+        </Card>
+      </div>
 
       {/* Add/Edit Modal */}
       <Modal
@@ -3081,1716 +3438,2058 @@ export default function SLFMonitoring({
         keyboard={!saving}
         destroyOnHidden
       >
-        <Spin
-          spinning={saving}
-          tip="Saving SLF data records..."
-          size="large"
-        >
+        <Spin spinning={saving} tip="Saving SLF data records..." size="large">
           <Form form={form} layout="vertical" size="small">
-          <Tabs
-            defaultActiveKey="location"
-            tabPosition="left"
-            size="small"
-            style={{ minHeight: 400 }}
-            tabBarStyle={{
-              background: isDark ? "rgba(22,119,255,0.08)" : "#f0f5ff",
-              borderRight: `1px solid ${isDark ? "#1d3a6b" : "#d6e4ff"}`,
-              borderRadius: "8px 0 0 8px",
-              padding: "8px 0",
-            }}
-            items={[
-              {
-                key: "location",
-                label: (
-                  <span style={{ color: "#1677ff" }}>
-                    <EnvironmentOutlined /> Location
-                  </span>
-                ),
-                children: (
-                  <Row gutter={[12, 0]}>
-                    {/* Province and Barangay side by side */}
-                    <Col span={12}>
-                      <Form.Item
-                        name="province"
-                        label="Province"
-                        rules={[{ required: true }]}
-                      >
-                        <Select
-                          options={provinceOptions}
-                          placeholder="Select Province"
-                        />
-                      </Form.Item>
-                    </Col>
-                    <Col span={12}>
-                      <Form.Item name="barangay" label="Barangay">
-                        <Input placeholder="Enter barangay name" />
-                      </Form.Item>
-                    </Col>
-                    {/* LGU full-width textarea */}
-                    <Col span={24}>
-                      <Form.Item
-                        name="lgu"
-                        label="LGU Name"
-                        rules={[{ required: true }]}
-                      >
-                        <Input.TextArea
-                          rows={2}
-                          placeholder="Enter full LGU name"
-                          autoSize={{ minRows: 2, maxRows: 3 }}
-                          style={{ resize: "none" }}
-                        />
-                      </Form.Item>
-                    </Col>
-                    {/* Manila Bay Area | Congressional District | Ownership */}
-                    <Col span={8}>
-                      <Form.Item name="manilaBayArea" label="Manila Bay Area">
-                        <Select
-                          options={mbaOptions}
-                          allowClear
-                          placeholder="Select"
-                        />
-                      </Form.Item>
-                    </Col>
-                    <Col span={8}>
-                      <Form.Item
-                        name="congressionalDistrict"
-                        label="Congressional District"
-                      >
-                        <Select
-                          allowClear
-                          showSearch
-                          placeholder="Select District"
-                          options={districtOptions}
-                        />
-                      </Form.Item>
-                    </Col>
-                    <Col span={8}>
-                      <Form.Item name="ownership" label="Ownership">
-                        <Select
-                          allowClear
-                          placeholder="Select Ownership"
-                          options={(() => {
-                            const defaults = ["Public", "Private"];
-                            const existing = ownershipOptions.map(
-                              (o) => o.value,
-                            );
-                            const merged = [
-                              ...defaults,
-                              ...existing.filter((v) => !defaults.includes(v)),
-                            ];
-                            return merged.map((v) => ({ label: v, value: v }));
-                          })()}
-                        />
-                      </Form.Item>
-                    </Col>
-                    {/* Coordinates */}
-                    <Col span={12}>
-                      <Form.Item name="latitude" label="Latitude">
-                        <InputNumber
-                          style={{ width: "100%" }}
-                          step={0.001} precision={3}
-                        />
-                      </Form.Item>
-                    </Col>
-                    <Col span={12}>
-                      <Form.Item name="longitude" label="Longitude">
-                        <InputNumber
-                          style={{ width: "100%" }}
-                          step={0.001} precision={3}
-                        />
-                      </Form.Item>
-                    </Col>
-                    <Col span={24}>
-                      <Button
-                        size="small"
-                        icon={<EnvironmentOutlined />}
-                        onClick={openMapPreview}
-                      >
-                        View in Maps
-                      </Button>
-                    </Col>
-                  </Row>
-                ),
-              },
-              {
-                key: "facility",
-                label: (
-                  <span style={{ color: "#fa8c16" }}>
-                    <BankOutlined /> Facility Details
-                  </span>
-                ),
-                children: (
-                  <>
-                    <Row gutter={12}>
-                      <Col span={6}>
+            <Tabs
+              defaultActiveKey="location"
+              tabPosition="left"
+              size="small"
+              style={{ minHeight: 400 }}
+              tabBarStyle={{
+                background: isDark ? "rgba(22,119,255,0.08)" : "#f0f5ff",
+                borderRight: `1px solid ${isDark ? "#1d3a6b" : "#d6e4ff"}`,
+                borderRadius: "8px 0 0 8px",
+                padding: "8px 0",
+              }}
+              items={[
+                {
+                  key: "location",
+                  label: (
+                    <span style={{ color: "#1677ff" }}>
+                      <EnvironmentOutlined /> Location
+                    </span>
+                  ),
+                  children: (
+                    <Row gutter={[12, 0]}>
+                      {/* Province and Barangay side by side */}
+                      <Col span={12}>
                         <Form.Item
-                          name="yearStartedOperation"
-                          label="Year Started"
+                          name="province"
+                          label="Province"
+                          rules={[{ required: true }]}
                         >
-                          <InputNumber style={{ width: "100%" }} />
+                          <Select
+                            options={provinceOptions}
+                            placeholder="Select Province"
+                          />
                         </Form.Item>
                       </Col>
-                      <Col span={6}>
-                        <Form.Item name="category" label="SLF Category">
+                      <Col span={12}>
+                        <Form.Item name="barangay" label="Barangay">
+                          <Input placeholder="Enter barangay name" />
+                        </Form.Item>
+                      </Col>
+                      {/* LGU full-width textarea */}
+                      <Col span={24}>
+                        <Form.Item
+                          name="lgu"
+                          label="LGU Name"
+                          rules={[{ required: true }]}
+                        >
+                          <Input.TextArea
+                            rows={2}
+                            placeholder="Enter full LGU name"
+                            autoSize={{ minRows: 2, maxRows: 3 }}
+                            style={{ resize: "none" }}
+                          />
+                        </Form.Item>
+                      </Col>
+                      {/* Manila Bay Area | Congressional District | Ownership */}
+                      <Col span={8}>
+                        <Form.Item name="manilaBayArea" label="Manila Bay Area">
+                          <Select
+                            options={mbaOptions}
+                            allowClear
+                            placeholder="Select"
+                          />
+                        </Form.Item>
+                      </Col>
+                      <Col span={8}>
+                        <Form.Item
+                          name="congressionalDistrict"
+                          label="Congressional District"
+                        >
                           <Select
                             allowClear
                             showSearch
-                            placeholder="Select Category"
-                            options={categoryOptions}
+                            placeholder="Select District"
+                            options={districtOptions}
                           />
                         </Form.Item>
                       </Col>
-                      <Col span={6}>
-                        <Form.Item
-                          label="Capacity per day"
-                          style={{ marginBottom: 0 }}
-                        >
-                          <Space.Compact style={{ width: "100%" }}>
-                            <Form.Item name="receivingVolumeCapacity" noStyle>
-                              <InputNumber
-                                style={{ width: "calc(100% - 80px)" }}
-                                min={0}
-                                placeholder="Receiving capacity"
-                              />
-                            </Form.Item>
-                            <Form.Item
-                              name="receivingVolumeCapacityUnit"
-                              noStyle
-                            >
-                              <Select
-                                style={{ width: 80 }}
-                                options={UNIT_OPTIONS}
-                                defaultValue="m³"
-                              />
-                            </Form.Item>
-                          </Space.Compact>
-                        </Form.Item>
-                      </Col>
-                      <Col span={6}>
-                        <Form.Item noStyle dependencies={["ownership"]}>
-                          {() => {
-                            const own = form.getFieldValue("ownership") || "";
-                            const isPrivate = /private/i.test(own);
-                            return isPrivate ? (
-                              <Form.Item
-                                name="privateCompaniesServed"
-                                label="Private Companies Served"
-                              >
-                                <Select
-                                  mode="tags"
-                                  placeholder="Type & press Enter to add companies"
-                                  style={{ width: "100%" }}
-                                  tokenSeparators={[","]}
-                                />
-                              </Form.Item>
-                            ) : (
-                              <Form.Item
-                                name="lguServedList"
-                                label="LGUs Served"
-                              >
-                                <Select
-                                  mode="tags"
-                                  placeholder="Type & press Enter to add LGUs"
-                                  style={{ width: "100%" }}
-                                  tokenSeparators={[","]}
-                                />
-                              </Form.Item>
-                            );
-                          }}
-                        </Form.Item>
-                      </Col>
-                      <Col span={6}>
-                        <Form.Item name="statusOfSLF" label="Status">
+                      <Col span={8}>
+                        <Form.Item name="ownership" label="Ownership">
                           <Select
-                            options={slfStatusOptions}
                             allowClear
-                            placeholder="Select Status"
+                            placeholder="Select Ownership"
+                            options={(() => {
+                              const defaults = ["Public", "Private"];
+                              const existing = ownershipOptions.map(
+                                (o) => o.value,
+                              );
+                              const merged = [
+                                ...defaults,
+                                ...existing.filter(
+                                  (v) => !defaults.includes(v),
+                                ),
+                              ];
+                              return merged.map((v) => ({
+                                label: v,
+                                value: v,
+                              }));
+                            })()}
                           />
                         </Form.Item>
+                      </Col>
+                      {/* Coordinates */}
+                      <Col span={12}>
+                        <Form.Item name="latitude" label="Latitude">
+                          <InputNumber
+                            style={{ width: "100%" }}
+                            step={0.001}
+                            precision={3}
+                          />
+                        </Form.Item>
+                      </Col>
+                      <Col span={12}>
+                        <Form.Item name="longitude" label="Longitude">
+                          <InputNumber
+                            style={{ width: "100%" }}
+                            step={0.001}
+                            precision={3}
+                          />
+                        </Form.Item>
+                      </Col>
+                      <Col span={24}>
+                        <Button
+                          size="small"
+                          icon={<EnvironmentOutlined />}
+                          onClick={openMapPreview}
+                        >
+                          View in Maps
+                        </Button>
                       </Col>
                     </Row>
-                    <Divider
-                      orientation="left"
-                      style={{ fontSize: 13, color: "#fa8c16", marginTop: 18 }}
-                    >
-                      <BankOutlined style={{ marginRight: 6 }} />
-                      Receiving Facility Table
-                    </Divider>
-                    <Form.List name="receivingFacilities">
-                      {(fields, { add, remove }) => (
-                        <>
-                          <Table
-                            size="small"
-                            pagination={false}
-                            dataSource={fields}
-                            rowKey="key"
-                            locale={{
-                              emptyText: "No receiving facilities added yet",
-                            }}
-                            scroll={{ x: 880 }}
-                            style={{ marginBottom: 8 }}
-                            columns={[
-                              {
-                                title: "No.",
-                                width: 64,
-                                align: "center",
-                                render: (_, __, index) => index + 1,
-                              },
-                              {
-                                title: "MRF Type",
-                                width: 260,
-                                render: (_, field) => (
-                                  <Form.Item
-                                    name={[field.name, "mrfTypes"]}
-                                    style={{ margin: 0 }}
-                                  >
-                                    <Select
-                                      mode="multiple"
-                                      size="small"
-                                      placeholder="Select type"
-                                      options={RECEIVING_FACILITY_TYPE_OPTIONS}
-                                    />
-                                  </Form.Item>
-                                ),
-                              },
-                              {
-                                title: "MRF Name",
-                                width: 220,
-                                render: (_, field) => (
-                                  <Form.Item
-                                    name={[field.name, "mrfName"]}
-                                    style={{ margin: 0 }}
-                                  >
-                                    <Input
-                                      size="small"
-                                      placeholder="Facility name"
-                                    />
-                                  </Form.Item>
-                                ),
-                              },
-                              {
-                                title: "Status",
-                                width: 150,
-                                render: (_, field) => (
-                                  <Form.Item
-                                    name={[field.name, "status"]}
-                                    style={{ margin: 0 }}
-                                  >
-                                    <Select
-                                      size="small"
-                                      allowClear
-                                      placeholder="Status"
-                                      options={[
-                                        { label: "Active", value: "Active" },
-                                        {
-                                          label: "Inactive",
-                                          value: "Inactive",
-                                        },
-                                        {
-                                          label: "Proposed",
-                                          value: "Proposed",
-                                        },
-                                        {
-                                          label: "Under Construction",
-                                          value: "Under Construction",
-                                        },
-                                      ]}
-                                    />
-                                  </Form.Item>
-                                ),
-                              },
-                              {
-                                title: "Description",
-                                width: 260,
-                                render: (_, field) => (
-                                  <Form.Item
-                                    name={[field.name, "description"]}
-                                    style={{ margin: 0 }}
-                                  >
-                                    <Input.TextArea
-                                      rows={1}
-                                      placeholder="Description"
-                                      autoSize={{ minRows: 1, maxRows: 3 }}
-                                    />
-                                  </Form.Item>
-                                ),
-                              },
-                              {
-                                title: "",
-                                width: 56,
-                                align: "center",
-                                render: (_, field) => (
-                                  <Button
-                                    size="small"
-                                    type="text"
-                                    danger
-                                    icon={<DeleteOutlined />}
-                                    onClick={() => remove(field.name)}
-                                  />
-                                ),
-                              },
-                            ]}
-                          />
-                          <Button
-                            type="dashed"
-                            onClick={() =>
-                              add({ mrfTypes: [], status: "Active" })
-                            }
-                            block
-                            icon={<PlusOutlined />}
-                          >
-                            Add Receiving Facility
-                          </Button>
-                        </>
-                      )}
-                    </Form.List>
-                  </>
-                ),
-              },
-              {
-                key: "leachate-gas",
-                label: (
-                  <span style={{ color: "#1677ff" }}>
-                    <AlertOutlined /> Leachate &amp; Gas Management
-                  </span>
-                ),
-                children: (
-                  <>
-                    {/* Counts summary — auto-synced from form list entries */}
-                    <Form.Item
-                      noStyle
-                      dependencies={["leachatePondDetails", "gasVentDetails"]}
-                    >
-                      {() => {
-                        const ponds =
-                          form.getFieldValue("leachatePondDetails") || [];
-                        const vents =
-                          form.getFieldValue("gasVentDetails") || [];
-                        const savedPondCount =
-                          editing?.noOfLeachatePond ?? null;
-                        const savedVentCount =
-                          editing?.numberOfGasVents ?? null;
-                        const pondStatusMap = ponds.reduce((acc, p) => {
-                          const s = p?.status || "Active";
-                          acc[s] = (acc[s] || 0) + 1;
-                          return acc;
-                        }, {});
-                        const ventStatusMap = vents.reduce((acc, v) => {
-                          const s = v?.status || "Active";
-                          acc[s] = (acc[s] || 0) + 1;
-                          return acc;
-                        }, {});
-                        const statusColor = {
-                          Active: "#52c41a",
-                          Inactive: "#8c8c8c",
-                          "Under Maintenance": "#fa8c16",
-                          Decommissioned: "#ff4d4f",
-                        };
-                        return (
-                          <Row gutter={12} style={{ marginBottom: 16 }}>
-                            <Col span={12}>
-                              <Card
-                                size="small"
-                                style={{
-                                  borderRadius: 8,
-                                  border: `1px solid ${isDark ? "#1d3a6b" : "#bae0ff"}`,
-                                  background: isDark
-                                    ? "rgba(23,119,255,0.06)"
-                                    : "#e6f4ff",
-                                }}
-                                title={
-                                  <Space size={6}>
-                                    <AlertOutlined
-                                      style={{ color: "#1677ff" }}
-                                    />
-                                    <Text
-                                      strong
-                                      style={{
-                                        fontSize: 12,
-                                        color: isDark ? "#69b1ff" : "#0958d9",
-                                      }}
-                                    >
-                                      Leachate Treatment Plant
-                                    </Text>
-                                    <Tag
-                                      color="blue"
-                                      style={{ fontSize: 11, borderRadius: 10 }}
-                                    >
-                                      {ponds.length} in list
-                                    </Tag>
-                                    {savedPondCount !== null &&
-                                      savedPondCount !== ponds.length && (
-                                        <Tag
-                                          color="orange"
-                                          style={{
-                                            fontSize: 11,
-                                            borderRadius: 10,
-                                          }}
-                                        >
-                                          {savedPondCount} saved
-                                        </Tag>
-                                      )}
-                                    {savedPondCount !== null &&
-                                      savedPondCount === ponds.length && (
-                                        <Tag
-                                          color="green"
-                                          style={{
-                                            fontSize: 11,
-                                            borderRadius: 10,
-                                          }}
-                                        >
-                                          matches saved
-                                        </Tag>
-                                      )}
-                                  </Space>
-                                }
-                              >
-                                {ponds.length === 0 ? (
-                                  <Text
-                                    type="secondary"
-                                    style={{ fontSize: 11 }}
-                                  >
-                                    No Leachate Treatment Plant added yet.
-                                  </Text>
-                                ) : (
-                                  <table
-                                    style={{
-                                      width: "100%",
-                                      borderCollapse: "collapse",
-                                      fontSize: 11,
-                                    }}
-                                  >
-                                    <thead>
-                                      <tr
-                                        style={{
-                                          background: isDark
-                                            ? "rgba(255,255,255,0.04)"
-                                            : "#f0f5ff",
-                                        }}
-                                      >
-                                        <th
-                                          style={{
-                                            padding: "4px 8px",
-                                            textAlign: "left",
-                                            fontWeight: 600,
-                                            borderBottom: "1px solid #d9d9d9",
-                                          }}
-                                        >
-                                          No.
-                                        </th>
-                                        <th
-                                          style={{
-                                            padding: "4px 8px",
-                                            textAlign: "left",
-                                            fontWeight: 600,
-                                            borderBottom: "1px solid #d9d9d9",
-                                          }}
-                                        >
-                                          Status
-                                        </th>
-                                        <th
-                                          style={{
-                                            padding: "4px 8px",
-                                            textAlign: "left",
-                                            fontWeight: 600,
-                                            borderBottom: "1px solid #d9d9d9",
-                                          }}
-                                        >
-                                          Notes
-                                        </th>
-                                      </tr>
-                                    </thead>
-                                    <tbody>
-                                      {ponds.map((p, idx) => (
-                                        <tr
-                                          key={idx}
-                                          style={{
-                                            borderBottom: "1px solid #f0f0f0",
-                                          }}
-                                        >
-                                          <td style={{ padding: "3px 8px" }}>
-                                            Pond {p?.pondNo || idx + 1}
-                                          </td>
-                                          <td style={{ padding: "3px 8px" }}>
-                                            <Tag
-                                              color={
-                                                statusColor[p?.status]
-                                                  ? undefined
-                                                  : "default"
-                                              }
-                                              style={{
-                                                fontSize: 10,
-                                                color: statusColor[p?.status],
-                                                borderColor:
-                                                  statusColor[p?.status],
-                                                background: "transparent",
-                                              }}
-                                            >
-                                              {p?.status || "Active"}
-                                            </Tag>
-                                          </td>
-                                          <td
-                                            style={{
-                                              padding: "3px 8px",
-                                              color: "#8c8c8c",
-                                              maxWidth: 120,
-                                              overflow: "hidden",
-                                              textOverflow: "ellipsis",
-                                              whiteSpace: "nowrap",
-                                            }}
-                                          >
-                                            {p?.description || "—"}
-                                          </td>
-                                        </tr>
-                                      ))}
-                                    </tbody>
-                                  </table>
-                                )}
-                                {Object.keys(pondStatusMap).length > 0 && (
-                                  <div
-                                    style={{
-                                      marginTop: 6,
-                                      display: "flex",
-                                      gap: 6,
-                                      flexWrap: "wrap",
-                                    }}
-                                  >
-                                    {Object.entries(pondStatusMap).map(
-                                      ([s, c]) => (
-                                        <Tag
-                                          key={s}
-                                          style={{
-                                            fontSize: 10,
-                                            color: statusColor[s],
-                                            borderColor: statusColor[s],
-                                            background: "transparent",
-                                          }}
-                                        >
-                                          {c} {s}
-                                        </Tag>
-                                      ),
-                                    )}
-                                  </div>
-                                )}
-                              </Card>
-                            </Col>
-                            <Col span={12}>
-                              <Card
-                                size="small"
-                                style={{
-                                  borderRadius: 8,
-                                  border: `1px solid ${isDark ? "#1a3d20" : "#b7eb8f"}`,
-                                  background: isDark
-                                    ? "rgba(82,196,26,0.06)"
-                                    : "#f6ffed",
-                                }}
-                                title={
-                                  <Space size={6}>
-                                    <ExperimentOutlined
-                                      style={{ color: "#52c41a" }}
-                                    />
-                                    <Text
-                                      strong
-                                      style={{
-                                        fontSize: 12,
-                                        color: isDark ? "#95de64" : "#389e0d",
-                                      }}
-                                    >
-                                      Gas Management
-                                    </Text>
-                                    <Tag
-                                      color="green"
-                                      style={{ fontSize: 11, borderRadius: 10 }}
-                                    >
-                                      {vents.length} in list
-                                    </Tag>
-                                    {savedVentCount !== null &&
-                                      savedVentCount !== vents.length && (
-                                        <Tag
-                                          color="orange"
-                                          style={{
-                                            fontSize: 11,
-                                            borderRadius: 10,
-                                          }}
-                                        >
-                                          {savedVentCount} saved
-                                        </Tag>
-                                      )}
-                                    {savedVentCount !== null &&
-                                      savedVentCount === vents.length && (
-                                        <Tag
-                                          color="green"
-                                          style={{
-                                            fontSize: 11,
-                                            borderRadius: 10,
-                                          }}
-                                        >
-                                          matches saved
-                                        </Tag>
-                                      )}
-                                  </Space>
-                                }
-                              >
-                                {vents.length === 0 ? (
-                                  <Text
-                                    type="secondary"
-                                    style={{ fontSize: 11 }}
-                                  >
-                                    No gas management records added yet.
-                                  </Text>
-                                ) : (
-                                  <table
-                                    style={{
-                                      width: "100%",
-                                      borderCollapse: "collapse",
-                                      fontSize: 11,
-                                    }}
-                                  >
-                                    <thead>
-                                      <tr
-                                        style={{
-                                          background: isDark
-                                            ? "rgba(255,255,255,0.04)"
-                                            : "#f6ffed",
-                                        }}
-                                      >
-                                        <th
-                                          style={{
-                                            padding: "4px 8px",
-                                            textAlign: "left",
-                                            fontWeight: 600,
-                                            borderBottom: "1px solid #d9d9d9",
-                                          }}
-                                        >
-                                          No.
-                                        </th>
-                                        <th
-                                          style={{
-                                            padding: "4px 8px",
-                                            textAlign: "left",
-                                            fontWeight: 600,
-                                            borderBottom: "1px solid #d9d9d9",
-                                          }}
-                                        >
-                                          Type
-                                        </th>
-                                        <th
-                                          style={{
-                                            padding: "4px 8px",
-                                            textAlign: "left",
-                                            fontWeight: 600,
-                                            borderBottom: "1px solid #d9d9d9",
-                                          }}
-                                        >
-                                          Status
-                                        </th>
-                                      </tr>
-                                    </thead>
-                                    <tbody>
-                                      {vents.map((v, idx) => (
-                                        <tr
-                                          key={idx}
-                                          style={{
-                                            borderBottom: "1px solid #f0f0f0",
-                                          }}
-                                        >
-                                          <td style={{ padding: "3px 8px" }}>
-                                            Vent {v?.ventNo || idx + 1}
-                                          </td>
-                                          <td style={{ padding: "3px 8px" }}>
-                                            {v?.ventType || "—"}
-                                          </td>
-                                          <td style={{ padding: "3px 8px" }}>
-                                            <Tag
-                                              color={
-                                                statusColor[v?.status]
-                                                  ? undefined
-                                                  : "default"
-                                              }
-                                              style={{
-                                                fontSize: 10,
-                                                color: statusColor[v?.status],
-                                                borderColor:
-                                                  statusColor[v?.status],
-                                                background: "transparent",
-                                              }}
-                                            >
-                                              {v?.status || "Active"}
-                                            </Tag>
-                                          </td>
-                                        </tr>
-                                      ))}
-                                    </tbody>
-                                  </table>
-                                )}
-                                {Object.keys(ventStatusMap).length > 0 && (
-                                  <div
-                                    style={{
-                                      marginTop: 6,
-                                      display: "flex",
-                                      gap: 6,
-                                      flexWrap: "wrap",
-                                    }}
-                                  >
-                                    {Object.entries(ventStatusMap).map(
-                                      ([s, c]) => (
-                                        <Tag
-                                          key={s}
-                                          style={{
-                                            fontSize: 10,
-                                            color: statusColor[s],
-                                            borderColor: statusColor[s],
-                                            background: "transparent",
-                                          }}
-                                        >
-                                          {c} {s}
-                                        </Tag>
-                                      ),
-                                    )}
-                                  </div>
-                                )}
-                              </Card>
-                            </Col>
-                          </Row>
-                        );
-                      }}
-                    </Form.Item>
-                    <Card
-                      size="small"
-                      style={{ borderRadius: 8, marginBottom: 16 }}
-                    >
-                      <Row gutter={[12, 12]} align="middle">
-                        <Col xs={24} md={8}>
+                  ),
+                },
+                {
+                  key: "facility",
+                  label: (
+                    <span style={{ color: "#fa8c16" }}>
+                      <BankOutlined /> Facility Details
+                    </span>
+                  ),
+                  children: (
+                    <>
+                      <Row gutter={12}>
+                        <Col span={6}>
                           <Form.Item
-                            name="hasWastewaterTreatmentFacility"
-                            valuePropName="checked"
+                            name="yearStartedOperation"
+                            label="Year Started"
+                          >
+                            <InputNumber style={{ width: "100%" }} />
+                          </Form.Item>
+                        </Col>
+                        <Col span={6}>
+                          <Form.Item name="category" label="SLF Category">
+                            <Select
+                              allowClear
+                              showSearch
+                              placeholder="Select Category"
+                              options={categoryOptions}
+                            />
+                          </Form.Item>
+                        </Col>
+                        <Col span={6}>
+                          <Form.Item
+                            label="Capacity per day"
                             style={{ marginBottom: 0 }}
                           >
-                            <Checkbox>Wastewater Treatment Facility</Checkbox>
-                          </Form.Item>
-                        </Col>
-                        <Col xs={24} md={8}>
-                          <Form.Item
-                            noStyle
-                            dependencies={["hasWastewaterTreatmentFacility"]}
-                          >
-                            {() => (
+                            <Space.Compact style={{ width: "100%" }}>
+                              <Form.Item name="receivingVolumeCapacity" noStyle>
+                                <InputNumber
+                                  style={{ width: "calc(100% - 80px)" }}
+                                  min={0}
+                                  placeholder="Receiving capacity"
+                                />
+                              </Form.Item>
                               <Form.Item
-                                name="wastewaterTreatmentFacilityType"
-                                label="Treatment Type"
-                                style={{ marginBottom: 0 }}
+                                name="receivingVolumeCapacityUnit"
+                                noStyle
                               >
                                 <Select
-                                  mode="multiple"
-                                  allowClear
-                                  placeholder="Select treatment type(s)"
-                                  disabled={
-                                    !form.getFieldValue(
-                                      "hasWastewaterTreatmentFacility",
-                                    )
-                                  }
-                                  options={WWTF_TYPE_OPTIONS}
+                                  style={{ width: 80 }}
+                                  options={UNIT_OPTIONS}
+                                  defaultValue="m³"
                                 />
                               </Form.Item>
-                            )}
+                            </Space.Compact>
                           </Form.Item>
                         </Col>
-                        <Col xs={24} md={8}>
-                          <Form.Item
-                            noStyle
-                            dependencies={["hasWastewaterTreatmentFacility"]}
-                          >
-                            {() => (
-                              <Form.Item
-                                name="wastewaterTreatmentFacilityRemarks"
-                                label="Remarks"
-                                style={{ marginBottom: 0 }}
-                              >
-                                <Input.TextArea
-                                  rows={2}
-                                  placeholder="Add WWTF remarks"
-                                  disabled={
-                                    !form.getFieldValue(
-                                      "hasWastewaterTreatmentFacility",
-                                    )
-                                  }
-                                />
-                              </Form.Item>
-                            )}
+                        <Col span={6}>
+                          <Form.Item noStyle dependencies={["ownership"]}>
+                            {() => {
+                              const own = form.getFieldValue("ownership") || "";
+                              const isPrivate = /private/i.test(own);
+                              return isPrivate ? (
+                                <Form.Item
+                                  name="privateCompaniesServed"
+                                  label="Private Companies Served"
+                                >
+                                  <Select
+                                    mode="tags"
+                                    placeholder="Type & press Enter to add companies"
+                                    style={{ width: "100%" }}
+                                    tokenSeparators={[","]}
+                                  />
+                                </Form.Item>
+                              ) : (
+                                <Form.Item
+                                  name="lguServedList"
+                                  label="LGUs Served"
+                                >
+                                  <Select
+                                    mode="tags"
+                                    placeholder="Type & press Enter to add LGUs"
+                                    style={{ width: "100%" }}
+                                    tokenSeparators={[","]}
+                                  />
+                                </Form.Item>
+                              );
+                            }}
+                          </Form.Item>
+                        </Col>
+                        <Col span={6}>
+                          <Form.Item name="statusOfSLF" label="Status">
+                            <Select
+                              options={slfStatusOptions}
+                              allowClear
+                              placeholder="Select Status"
+                            />
                           </Form.Item>
                         </Col>
                       </Row>
-                    </Card>
-
-                    <Divider
-                      orientation="left"
-                      style={{ fontSize: 13, color: "#1677ff", marginTop: 0 }}
-                    >
-                      <AlertOutlined style={{ marginRight: 6 }} />
-                      Leachate Treatment Plant
-                    </Divider>
-                    <Form.List name="leachatePondDetails">
-                      {(fields, { add, remove }) => (
-                        <>
-                          <Table
-                            size="small"
-                            pagination={false}
-                            dataSource={fields}
-                            rowKey="key"
-                            locale={{
-                              emptyText:
-                                "No Leachate Treatment Plant added yet",
-                            }}
-                            scroll={{ x: 760 }}
-                            style={{ marginBottom: 8 }}
-                            columns={[
-                              {
-                                title: "Pond No.",
-                                width: 100,
-                                render: (_, field) => (
-                                  <Form.Item
-                                    name={[field.name, "pondNo"]}
-                                    style={{ margin: 0 }}
-                                  >
-                                    <InputNumber
-                                      size="small"
-                                      style={{ width: "100%" }}
-                                      min={1}
-                                      precision={0}
-                                    />
-                                  </Form.Item>
-                                ),
-                              },
-                              {
-                                title: "Status",
-                                width: 180,
-                                render: (_, field) => (
-                                  <Form.Item
-                                    name={[field.name, "status"]}
-                                    style={{ margin: 0 }}
-                                  >
-                                    <Select
-                                      size="small"
-                                      placeholder="Select status"
-                                      options={[
-                                        { label: "Active", value: "Active" },
-                                        {
-                                          label: "Inactive",
-                                          value: "Inactive",
-                                        },
-                                        {
-                                          label: "Under Maintenance",
-                                          value: "Under Maintenance",
-                                        },
-                                        {
-                                          label: "Decommissioned",
-                                          value: "Decommissioned",
-                                        },
-                                      ]}
-                                    />
-                                  </Form.Item>
-                                ),
-                              },
-                              {
-                                title: "Description / Condition Notes",
-                                width: 320,
-                                render: (_, field) => (
-                                  <Form.Item
-                                    name={[field.name, "description"]}
-                                    style={{ margin: 0 }}
-                                  >
-                                    <Input.TextArea
-                                      rows={1}
-                                      placeholder="Pond dimensions, lining type, current condition..."
-                                      autoSize={{ minRows: 1, maxRows: 3 }}
-                                    />
-                                  </Form.Item>
-                                ),
-                              },
-                              {
-                                title: "",
-                                width: 56,
-                                align: "center",
-                                render: (_, field) => (
-                                  <Button
-                                    size="small"
-                                    type="text"
-                                    danger
-                                    icon={<DeleteOutlined />}
-                                    onClick={() => remove(field.name)}
-                                  />
-                                ),
-                              },
-                            ]}
-                          />
-                          <Button
-                            type="dashed"
-                            onClick={() =>
-                              add({
-                                pondNo: fields.length + 1,
-                                status: "Active",
-                              })
-                            }
-                            block
-                            icon={<PlusOutlined />}
-                            style={{ marginBottom: 4 }}
-                          >
-                            Add Leachate Treatment Plant
-                          </Button>
-                        </>
-                      )}
-                    </Form.List>
-
-                    <Divider
-                      orientation="left"
-                      style={{ fontSize: 13, color: "#52c41a", marginTop: 16 }}
-                    >
-                      <ExperimentOutlined style={{ marginRight: 6 }} />
-                      Gas Management
-                    </Divider>
-                    <Form.List name="gasVentDetails">
-                      {(fields, { add, remove }) => (
-                        <>
-                          <Table
-                            size="small"
-                            pagination={false}
-                            dataSource={fields}
-                            rowKey="key"
-                            locale={{
-                              emptyText: "No gas management records added yet",
-                            }}
-                            scroll={{ x: 770 }}
-                            style={{ marginBottom: 8 }}
-                            columns={[
-                              {
-                                title: "Vent No.",
-                                width: 100,
-                                render: (_, field) => (
-                                  <Form.Item
-                                    name={[field.name, "ventNo"]}
-                                    style={{ margin: 0 }}
-                                  >
-                                    <InputNumber
-                                      size="small"
-                                      style={{ width: "100%" }}
-                                      min={1}
-                                      precision={0}
-                                    />
-                                  </Form.Item>
-                                ),
-                              },
-                              {
-                                title: "Type",
-                                width: 170,
-                                render: (_, field) => (
-                                  <Form.Item
-                                    name={[field.name, "ventType"]}
-                                    style={{ margin: 0 }}
-                                  >
-                                    <Select
-                                      size="small"
-                                      placeholder="Select type"
-                                      allowClear
-                                      options={[
-                                        { label: "Passive", value: "Passive" },
-                                        { label: "Flare", value: "Flare" },
-                                        {
-                                          label: "LFG Recovery",
-                                          value: "LFG Recovery",
-                                        },
-                                        { label: "Other", value: "Other" },
-                                      ]}
-                                    />
-                                  </Form.Item>
-                                ),
-                              },
-                              {
-                                title: "Status",
-                                width: 180,
-                                render: (_, field) => (
-                                  <Form.Item
-                                    name={[field.name, "status"]}
-                                    style={{ margin: 0 }}
-                                  >
-                                    <Select
-                                      size="small"
-                                      placeholder="Select status"
-                                      options={[
-                                        { label: "Active", value: "Active" },
-                                        {
-                                          label: "Inactive",
-                                          value: "Inactive",
-                                        },
-                                        {
-                                          label: "Under Maintenance",
-                                          value: "Under Maintenance",
-                                        },
-                                        {
-                                          label: "Decommissioned",
-                                          value: "Decommissioned",
-                                        },
-                                      ]}
-                                    />
-                                  </Form.Item>
-                                ),
-                              },
-                              {
-                                title: "Description / Notes",
-                                width: 320,
-                                render: (_, field) => (
-                                  <Form.Item
-                                    name={[field.name, "description"]}
-                                    style={{ margin: 0 }}
-                                  >
-                                    <Input.TextArea
-                                      rows={1}
-                                      placeholder="Pipe diameter, depth, condition..."
-                                      autoSize={{ minRows: 1, maxRows: 3 }}
-                                    />
-                                  </Form.Item>
-                                ),
-                              },
-                              {
-                                title: "",
-                                width: 56,
-                                align: "center",
-                                render: (_, field) => (
-                                  <Button
-                                    size="small"
-                                    type="text"
-                                    danger
-                                    icon={<DeleteOutlined />}
-                                    onClick={() => remove(field.name)}
-                                  />
-                                ),
-                              },
-                            ]}
-                          />
-                          <Button
-                            type="dashed"
-                            onClick={() =>
-                              add({
-                                ventNo: fields.length + 1,
-                                status: "Active",
-                              })
-                            }
-                            block
-                            icon={<PlusOutlined />}
-                            style={{ marginBottom: 4 }}
-                          >
-                            Add Gas Management Record
-                          </Button>
-                        </>
-                      )}
-                    </Form.List>
-                  </>
-                ),
-              },
-              {
-                key: "cell-infra",
-                label: (
-                  <span style={{ color: "#13c2c2" }}>
-                    <BarChartOutlined /> Cell Infrastructure
-                  </span>
-                ),
-                children: (
-                  <>
-                    <Row gutter={12}>
-                      <Col span={8}>
-                        <Form.Item name="numberOfCell" label="No. of Cells">
-                          <Select
-                            placeholder="Select"
-                            allowClear
-                            options={[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map(
-                              (n) => ({ label: `${n}`, value: n }),
-                            )}
-                            onChange={(val) => {
-                              const cur =
-                                form.getFieldValue("cellCapacities") || [];
-                              const curUnits =
-                                form.getFieldValue("cellCapacityUnits") || [];
-                              const curSt =
-                                form.getFieldValue("cellStatuses") || [];
-                              const curTy =
-                                form.getFieldValue("cellTypes") || [];
-                              const curSubAllowed =
-                                form.getFieldValue("cellSubmissionAllowed") || [];
-                              const curNotes =
-                                form.getFieldValue("cellNotes") || [];
-                              const curFill =
-                                form.getFieldValue("cellFillValues") || [];
-                              const curFillUnits =
-                                form.getFieldValue("cellFillUnits") || [];
-                              const next = Array.from(
-                                { length: val || 0 },
-                                (_, i) => cur[i] ?? null,
-                              );
-                              const nextUnits = Array.from(
-                                { length: val || 0 },
-                                (_, i) => curUnits[i] || "m³",
-                              );
-                              const nextSt = Array.from(
-                                { length: val || 0 },
-                                (_, i) => normalizeCellStatus(curSt[i]),
-                              );
-                              const nextTy = Array.from(
-                                { length: val || 0 },
-                                (_, i) => curTy[i] || "Residual",
-                              );
-                              const nextSubAllowed = Array.from(
-                                { length: val || 0 },
-                                (_, i) => (curSubAllowed[i] === undefined ? true : curSubAllowed[i]),
-                              );
-                              const nextNotes = Array.from(
-                                { length: val || 0 },
-                                (_, i) => curNotes[i] || "",
-                              );
-                              const nextFill = Array.from(
-                                { length: val || 0 },
-                                (_, i) => curFill[i] ?? null,
-                              );
-                              const nextFillUnits = Array.from(
-                                { length: val || 0 },
-                                (_, i) => curFillUnits[i] || nextUnits[i] || "m³",
-                              );
-                              form.setFieldsValue({
-                                cellCapacities: next,
-                                cellCapacityUnits: nextUnits,
-                                cellStatuses: nextSt,
-                                cellTypes: nextTy,
-                                cellSubmissionAllowed: nextSubAllowed,
-                                cellNotes: nextNotes,
-                                cellFillValues: nextFill,
-                                cellFillUnits: nextFillUnits,
-                              });
-                            }}
-                          />
-                        </Form.Item>
-                      </Col>
-                    </Row>
-
-                    <Form.Item
-                      noStyle
-                      dependencies={[
-                        "numberOfCell",
-                        "cellNames",
-                        "cellCapacities",
-                        "cellStatuses",
-                        "cellTypes",
-                        "cellSubmissionAllowed",
-                        "cellNotes",
-                        "cellFillValues",
-                        "cellCapacityUnits",
-                        "cellFillUnits",
-                      ]}
-                    >
-                      {() => {
-                        const cellCount =
-                          form.getFieldValue("numberOfCell") || 0;
-                        if (cellCount < 1) return null;
-                        // #5/#7: cells use the facility's single declared baseline
-                        // unit (shown as a locked addon), not a per-cell picker.
-                        const cellBaselineUnit =
-                          normalizeUnit(
-                            form.getFieldValue("wasteReceivedUnit") ||
-                              form.getFieldValue("volumeCapacityUnit") ||
-                              "m³",
-                          ) || "m³";
-                        return (
+                      <Divider
+                        orientation="left"
+                        style={{
+                          fontSize: 13,
+                          color: "#fa8c16",
+                          marginTop: 18,
+                        }}
+                      >
+                        <BankOutlined style={{ marginRight: 6 }} />
+                        Receiving Facility Table
+                      </Divider>
+                      <Form.List name="receivingFacilities">
+                        {(fields, { add, remove }) => (
                           <>
-                            <Divider
-                              plain
-                              orientation="left"
-                              style={{ fontSize: 12, margin: "8px 0 12px" }}
-                            >
-                              Cell Capacities, Status &amp; Type{" "}
-                              <Text type="secondary" style={{ fontSize: 11, fontWeight: 400 }}>
-                                (units in {cellBaselineUnit})
-                              </Text>
-                            </Divider>
-                            <Row gutter={[12, 12]}>
-                              {Array.from({ length: cellCount }, (_, i) => {
-                                const cellStatus = normalizeCellStatus(
-                                  form.getFieldValue(["cellStatuses", i]),
-                                );
-                                const needsNote =
-                                  cellStatus === "Under Construction" ||
-                                  cellStatus === "Reserved Area" ||
-                                  cellStatus === "Not Existed";
-                                const sc =
-                                  CELL_STATUS_COLORS[cellStatus] ||
-                                  CELL_STATUS_COLORS["Active Cell"];
-                                return (
-                                  <Col xs={24} md={12} key={i}>
-                                    <Collapse
+                            <Table
+                              size="small"
+                              pagination={false}
+                              dataSource={fields}
+                              rowKey="key"
+                              locale={{
+                                emptyText: "No receiving facilities added yet",
+                              }}
+                              scroll={{ x: 880 }}
+                              style={{ marginBottom: 8 }}
+                              columns={[
+                                {
+                                  title: "No.",
+                                  width: 64,
+                                  align: "center",
+                                  render: (_, __, index) => index + 1,
+                                },
+                                {
+                                  title: "MRF Type",
+                                  width: 260,
+                                  render: (_, field) => (
+                                    <Form.Item
+                                      name={[field.name, "mrfTypes"]}
+                                      style={{ margin: 0 }}
+                                    >
+                                      <Select
+                                        mode="multiple"
+                                        size="small"
+                                        placeholder="Select type"
+                                        options={
+                                          RECEIVING_FACILITY_TYPE_OPTIONS
+                                        }
+                                      />
+                                    </Form.Item>
+                                  ),
+                                },
+                                {
+                                  title: "MRF Name",
+                                  width: 220,
+                                  render: (_, field) => (
+                                    <Form.Item
+                                      name={[field.name, "mrfName"]}
+                                      style={{ margin: 0 }}
+                                    >
+                                      <Input
+                                        size="small"
+                                        placeholder="Facility name"
+                                      />
+                                    </Form.Item>
+                                  ),
+                                },
+                                {
+                                  title: "Status",
+                                  width: 150,
+                                  render: (_, field) => (
+                                    <Form.Item
+                                      name={[field.name, "status"]}
+                                      style={{ margin: 0 }}
+                                    >
+                                      <Select
+                                        size="small"
+                                        allowClear
+                                        placeholder="Status"
+                                        options={[
+                                          { label: "Active", value: "Active" },
+                                          {
+                                            label: "Inactive",
+                                            value: "Inactive",
+                                          },
+                                          {
+                                            label: "Proposed",
+                                            value: "Proposed",
+                                          },
+                                          {
+                                            label: "Under Construction",
+                                            value: "Under Construction",
+                                          },
+                                        ]}
+                                      />
+                                    </Form.Item>
+                                  ),
+                                },
+                                {
+                                  title: "Description",
+                                  width: 260,
+                                  render: (_, field) => (
+                                    <Form.Item
+                                      name={[field.name, "description"]}
+                                      style={{ margin: 0 }}
+                                    >
+                                      <Input.TextArea
+                                        rows={1}
+                                        placeholder="Description"
+                                        autoSize={{ minRows: 1, maxRows: 3 }}
+                                      />
+                                    </Form.Item>
+                                  ),
+                                },
+                                {
+                                  title: "",
+                                  width: 56,
+                                  align: "center",
+                                  render: (_, field) => (
+                                    <Button
                                       size="small"
-                                      variant="filled" defaultActiveKey={[]}
-                                      destroyOnHidden
-                                      expandIconPosition="end"
+                                      type="text"
+                                      danger
+                                      icon={<DeleteOutlined />}
+                                      onClick={() => remove(field.name)}
+                                    />
+                                  ),
+                                },
+                              ]}
+                            />
+                            <Button
+                              type="dashed"
+                              onClick={() =>
+                                add({ mrfTypes: [], status: "Active" })
+                              }
+                              block
+                              icon={<PlusOutlined />}
+                            >
+                              Add Receiving Facility
+                            </Button>
+                          </>
+                        )}
+                      </Form.List>
+                    </>
+                  ),
+                },
+                {
+                  key: "leachate-gas",
+                  label: (
+                    <span style={{ color: "#1677ff" }}>
+                      <AlertOutlined /> Leachate &amp; Gas Management
+                    </span>
+                  ),
+                  children: (
+                    <>
+                      {/* Counts summary — auto-synced from form list entries */}
+                      <Form.Item
+                        noStyle
+                        dependencies={["leachatePondDetails", "gasVentDetails"]}
+                      >
+                        {() => {
+                          const ponds =
+                            form.getFieldValue("leachatePondDetails") || [];
+                          const vents =
+                            form.getFieldValue("gasVentDetails") || [];
+                          const savedPondCount =
+                            editing?.noOfLeachatePond ?? null;
+                          const savedVentCount =
+                            editing?.numberOfGasVents ?? null;
+                          const pondStatusMap = ponds.reduce((acc, p) => {
+                            const s = p?.status || "Active";
+                            acc[s] = (acc[s] || 0) + 1;
+                            return acc;
+                          }, {});
+                          const ventStatusMap = vents.reduce((acc, v) => {
+                            const s = v?.status || "Active";
+                            acc[s] = (acc[s] || 0) + 1;
+                            return acc;
+                          }, {});
+                          const statusColor = {
+                            Active: "#52c41a",
+                            Inactive: "#8c8c8c",
+                            "Under Maintenance": "#fa8c16",
+                            Decommissioned: "#ff4d4f",
+                          };
+                          return (
+                            <Row gutter={12} style={{ marginBottom: 16 }}>
+                              <Col span={12}>
+                                <Card
+                                  size="small"
+                                  style={{
+                                    borderRadius: 8,
+                                    border: `1px solid ${isDark ? "#1d3a6b" : "#bae0ff"}`,
+                                    background: isDark
+                                      ? "rgba(23,119,255,0.06)"
+                                      : "#e6f4ff",
+                                  }}
+                                  title={
+                                    <Space size={6}>
+                                      <AlertOutlined
+                                        style={{ color: "#1677ff" }}
+                                      />
+                                      <Text
+                                        strong
+                                        style={{
+                                          fontSize: 12,
+                                          color: isDark ? "#69b1ff" : "#0958d9",
+                                        }}
+                                      >
+                                        Leachate Treatment Plant
+                                      </Text>
+                                      <Tag
+                                        color="blue"
+                                        style={{
+                                          fontSize: 11,
+                                          borderRadius: 10,
+                                        }}
+                                      >
+                                        {ponds.length} in list
+                                      </Tag>
+                                      {savedPondCount !== null &&
+                                        savedPondCount !== ponds.length && (
+                                          <Tag
+                                            color="orange"
+                                            style={{
+                                              fontSize: 11,
+                                              borderRadius: 10,
+                                            }}
+                                          >
+                                            {savedPondCount} saved
+                                          </Tag>
+                                        )}
+                                      {savedPondCount !== null &&
+                                        savedPondCount === ponds.length && (
+                                          <Tag
+                                            color="green"
+                                            style={{
+                                              fontSize: 11,
+                                              borderRadius: 10,
+                                            }}
+                                          >
+                                            matches saved
+                                          </Tag>
+                                        )}
+                                    </Space>
+                                  }
+                                >
+                                  {ponds.length === 0 ? (
+                                    <Text
+                                      type="secondary"
+                                      style={{ fontSize: 11 }}
+                                    >
+                                      No Leachate Treatment Plant added yet.
+                                    </Text>
+                                  ) : (
+                                    <table
                                       style={{
-                                        borderRadius: 8,
-                                        borderLeft: `4px solid ${sc.border}`,
-                                        background: isDark ? sc.dark : sc.bg,
+                                        width: "100%",
+                                        borderCollapse: "collapse",
+                                        fontSize: 11,
                                       }}
-                                      styles={{
-                                        header: { padding: "8px 10px" },
-                                        body: { padding: "10px 12px" },
-                                      }}
-                                      items={[
-                                        {
-                                          key: `cell-${i}`,
-                                          label: (
-                                            <Space size={6} wrap>
-                                              <div
-                                                style={{
-                                                  width: 10,
-                                                  height: 10,
-                                                  borderRadius: "50%",
-                                                  background: sc.border,
-                                                  flexShrink: 0,
-                                                }}
-                                              />
-                                              <Text
-                                                strong
-                                                style={{ fontSize: 12 }}
-                                              >
-                                                {String(
-                                                  form.getFieldValue([
-                                                    "cellNames",
-                                                    i,
-                                                  ]) || "",
-                                                ).trim() || `Cell ${i + 1}`}
-                                              </Text>
+                                    >
+                                      <thead>
+                                        <tr
+                                          style={{
+                                            background: isDark
+                                              ? "rgba(255,255,255,0.04)"
+                                              : "#f0f5ff",
+                                          }}
+                                        >
+                                          <th
+                                            style={{
+                                              padding: "4px 8px",
+                                              textAlign: "left",
+                                              fontWeight: 600,
+                                              borderBottom: "1px solid #d9d9d9",
+                                            }}
+                                          >
+                                            No.
+                                          </th>
+                                          <th
+                                            style={{
+                                              padding: "4px 8px",
+                                              textAlign: "left",
+                                              fontWeight: 600,
+                                              borderBottom: "1px solid #d9d9d9",
+                                            }}
+                                          >
+                                            Status
+                                          </th>
+                                          <th
+                                            style={{
+                                              padding: "4px 8px",
+                                              textAlign: "left",
+                                              fontWeight: 600,
+                                              borderBottom: "1px solid #d9d9d9",
+                                            }}
+                                          >
+                                            Notes
+                                          </th>
+                                        </tr>
+                                      </thead>
+                                      <tbody>
+                                        {ponds.map((p, idx) => (
+                                          <tr
+                                            key={idx}
+                                            style={{
+                                              borderBottom: "1px solid #f0f0f0",
+                                            }}
+                                          >
+                                            <td style={{ padding: "3px 8px" }}>
+                                              Pond {p?.pondNo || idx + 1}
+                                            </td>
+                                            <td style={{ padding: "3px 8px" }}>
                                               <Tag
-                                                color={sc.tag}
+                                                color={
+                                                  statusColor[p?.status]
+                                                    ? undefined
+                                                    : "default"
+                                                }
                                                 style={{
                                                   fontSize: 10,
-                                                  margin: 0,
+                                                  color: statusColor[p?.status],
+                                                  borderColor:
+                                                    statusColor[p?.status],
+                                                  background: "transparent",
                                                 }}
                                               >
-                                                {cellStatus}
+                                                {p?.status || "Active"}
                                               </Tag>
-                                            </Space>
-                                          ),
-                                          children: (
-                                            <>
-                                      {/* #5: related fields grouped into rows to cut
+                                            </td>
+                                            <td
+                                              style={{
+                                                padding: "3px 8px",
+                                                color: "#8c8c8c",
+                                                maxWidth: 120,
+                                                overflow: "hidden",
+                                                textOverflow: "ellipsis",
+                                                whiteSpace: "nowrap",
+                                              }}
+                                            >
+                                              {p?.description || "—"}
+                                            </td>
+                                          </tr>
+                                        ))}
+                                      </tbody>
+                                    </table>
+                                  )}
+                                  {Object.keys(pondStatusMap).length > 0 && (
+                                    <div
+                                      style={{
+                                        marginTop: 6,
+                                        display: "flex",
+                                        gap: 6,
+                                        flexWrap: "wrap",
+                                      }}
+                                    >
+                                      {Object.entries(pondStatusMap).map(
+                                        ([s, c]) => (
+                                          <Tag
+                                            key={s}
+                                            style={{
+                                              fontSize: 10,
+                                              color: statusColor[s],
+                                              borderColor: statusColor[s],
+                                              background: "transparent",
+                                            }}
+                                          >
+                                            {c} {s}
+                                          </Tag>
+                                        ),
+                                      )}
+                                    </div>
+                                  )}
+                                </Card>
+                              </Col>
+                              <Col span={12}>
+                                <Card
+                                  size="small"
+                                  style={{
+                                    borderRadius: 8,
+                                    border: `1px solid ${isDark ? "#1a3d20" : "#b7eb8f"}`,
+                                    background: isDark
+                                      ? "rgba(82,196,26,0.06)"
+                                      : "#f6ffed",
+                                  }}
+                                  title={
+                                    <Space size={6}>
+                                      <ExperimentOutlined
+                                        style={{ color: "#52c41a" }}
+                                      />
+                                      <Text
+                                        strong
+                                        style={{
+                                          fontSize: 12,
+                                          color: isDark ? "#95de64" : "#389e0d",
+                                        }}
+                                      >
+                                        Gas Management
+                                      </Text>
+                                      <Tag
+                                        color="green"
+                                        style={{
+                                          fontSize: 11,
+                                          borderRadius: 10,
+                                        }}
+                                      >
+                                        {vents.length} in list
+                                      </Tag>
+                                      {savedVentCount !== null &&
+                                        savedVentCount !== vents.length && (
+                                          <Tag
+                                            color="orange"
+                                            style={{
+                                              fontSize: 11,
+                                              borderRadius: 10,
+                                            }}
+                                          >
+                                            {savedVentCount} saved
+                                          </Tag>
+                                        )}
+                                      {savedVentCount !== null &&
+                                        savedVentCount === vents.length && (
+                                          <Tag
+                                            color="green"
+                                            style={{
+                                              fontSize: 11,
+                                              borderRadius: 10,
+                                            }}
+                                          >
+                                            matches saved
+                                          </Tag>
+                                        )}
+                                    </Space>
+                                  }
+                                >
+                                  {vents.length === 0 ? (
+                                    <Text
+                                      type="secondary"
+                                      style={{ fontSize: 11 }}
+                                    >
+                                      No gas management records added yet.
+                                    </Text>
+                                  ) : (
+                                    <table
+                                      style={{
+                                        width: "100%",
+                                        borderCollapse: "collapse",
+                                        fontSize: 11,
+                                      }}
+                                    >
+                                      <thead>
+                                        <tr
+                                          style={{
+                                            background: isDark
+                                              ? "rgba(255,255,255,0.04)"
+                                              : "#f6ffed",
+                                          }}
+                                        >
+                                          <th
+                                            style={{
+                                              padding: "4px 8px",
+                                              textAlign: "left",
+                                              fontWeight: 600,
+                                              borderBottom: "1px solid #d9d9d9",
+                                            }}
+                                          >
+                                            No.
+                                          </th>
+                                          <th
+                                            style={{
+                                              padding: "4px 8px",
+                                              textAlign: "left",
+                                              fontWeight: 600,
+                                              borderBottom: "1px solid #d9d9d9",
+                                            }}
+                                          >
+                                            Type
+                                          </th>
+                                          <th
+                                            style={{
+                                              padding: "4px 8px",
+                                              textAlign: "left",
+                                              fontWeight: 600,
+                                              borderBottom: "1px solid #d9d9d9",
+                                            }}
+                                          >
+                                            Status
+                                          </th>
+                                        </tr>
+                                      </thead>
+                                      <tbody>
+                                        {vents.map((v, idx) => (
+                                          <tr
+                                            key={idx}
+                                            style={{
+                                              borderBottom: "1px solid #f0f0f0",
+                                            }}
+                                          >
+                                            <td style={{ padding: "3px 8px" }}>
+                                              Vent {v?.ventNo || idx + 1}
+                                            </td>
+                                            <td style={{ padding: "3px 8px" }}>
+                                              {v?.ventType || "—"}
+                                            </td>
+                                            <td style={{ padding: "3px 8px" }}>
+                                              <Tag
+                                                color={
+                                                  statusColor[v?.status]
+                                                    ? undefined
+                                                    : "default"
+                                                }
+                                                style={{
+                                                  fontSize: 10,
+                                                  color: statusColor[v?.status],
+                                                  borderColor:
+                                                    statusColor[v?.status],
+                                                  background: "transparent",
+                                                }}
+                                              >
+                                                {v?.status || "Active"}
+                                              </Tag>
+                                            </td>
+                                          </tr>
+                                        ))}
+                                      </tbody>
+                                    </table>
+                                  )}
+                                  {Object.keys(ventStatusMap).length > 0 && (
+                                    <div
+                                      style={{
+                                        marginTop: 6,
+                                        display: "flex",
+                                        gap: 6,
+                                        flexWrap: "wrap",
+                                      }}
+                                    >
+                                      {Object.entries(ventStatusMap).map(
+                                        ([s, c]) => (
+                                          <Tag
+                                            key={s}
+                                            style={{
+                                              fontSize: 10,
+                                              color: statusColor[s],
+                                              borderColor: statusColor[s],
+                                              background: "transparent",
+                                            }}
+                                          >
+                                            {c} {s}
+                                          </Tag>
+                                        ),
+                                      )}
+                                    </div>
+                                  )}
+                                </Card>
+                              </Col>
+                            </Row>
+                          );
+                        }}
+                      </Form.Item>
+                      <Card
+                        size="small"
+                        style={{ borderRadius: 8, marginBottom: 16 }}
+                      >
+                        <Row gutter={[12, 12]} align="middle">
+                          <Col xs={24} md={8}>
+                            <Form.Item
+                              name="hasWastewaterTreatmentFacility"
+                              valuePropName="checked"
+                              style={{ marginBottom: 0 }}
+                            >
+                              <Checkbox>Wastewater Treatment Facility</Checkbox>
+                            </Form.Item>
+                          </Col>
+                          <Col xs={24} md={8}>
+                            <Form.Item
+                              noStyle
+                              dependencies={["hasWastewaterTreatmentFacility"]}
+                            >
+                              {() => (
+                                <Form.Item
+                                  name="wastewaterTreatmentFacilityType"
+                                  label="Treatment Type"
+                                  style={{ marginBottom: 0 }}
+                                >
+                                  <Select
+                                    mode="multiple"
+                                    allowClear
+                                    placeholder="Select treatment type(s)"
+                                    disabled={
+                                      !form.getFieldValue(
+                                        "hasWastewaterTreatmentFacility",
+                                      )
+                                    }
+                                    options={WWTF_TYPE_OPTIONS}
+                                  />
+                                </Form.Item>
+                              )}
+                            </Form.Item>
+                          </Col>
+                          <Col xs={24} md={8}>
+                            <Form.Item
+                              noStyle
+                              dependencies={["hasWastewaterTreatmentFacility"]}
+                            >
+                              {() => (
+                                <Form.Item
+                                  name="wastewaterTreatmentFacilityRemarks"
+                                  label="Remarks"
+                                  style={{ marginBottom: 0 }}
+                                >
+                                  <Input.TextArea
+                                    rows={2}
+                                    placeholder="Add WWTF remarks"
+                                    disabled={
+                                      !form.getFieldValue(
+                                        "hasWastewaterTreatmentFacility",
+                                      )
+                                    }
+                                  />
+                                </Form.Item>
+                              )}
+                            </Form.Item>
+                          </Col>
+                        </Row>
+                      </Card>
+
+                      <Divider
+                        orientation="left"
+                        style={{ fontSize: 13, color: "#1677ff", marginTop: 0 }}
+                      >
+                        <AlertOutlined style={{ marginRight: 6 }} />
+                        Leachate Treatment Plant
+                      </Divider>
+                      <Form.List name="leachatePondDetails">
+                        {(fields, { add, remove }) => (
+                          <>
+                            <Table
+                              size="small"
+                              pagination={false}
+                              dataSource={fields}
+                              rowKey="key"
+                              locale={{
+                                emptyText:
+                                  "No Leachate Treatment Plant added yet",
+                              }}
+                              scroll={{ x: 760 }}
+                              style={{ marginBottom: 8 }}
+                              columns={[
+                                {
+                                  title: "Pond No.",
+                                  width: 100,
+                                  render: (_, field) => (
+                                    <Form.Item
+                                      name={[field.name, "pondNo"]}
+                                      style={{ margin: 0 }}
+                                    >
+                                      <InputNumber
+                                        size="small"
+                                        style={{ width: "100%" }}
+                                        min={1}
+                                        precision={0}
+                                      />
+                                    </Form.Item>
+                                  ),
+                                },
+                                {
+                                  title: "Status",
+                                  width: 180,
+                                  render: (_, field) => (
+                                    <Form.Item
+                                      name={[field.name, "status"]}
+                                      style={{ margin: 0 }}
+                                    >
+                                      <Select
+                                        size="small"
+                                        placeholder="Select status"
+                                        options={[
+                                          { label: "Active", value: "Active" },
+                                          {
+                                            label: "Inactive",
+                                            value: "Inactive",
+                                          },
+                                          {
+                                            label: "Under Maintenance",
+                                            value: "Under Maintenance",
+                                          },
+                                          {
+                                            label: "Decommissioned",
+                                            value: "Decommissioned",
+                                          },
+                                        ]}
+                                      />
+                                    </Form.Item>
+                                  ),
+                                },
+                                {
+                                  title: "Description / Condition Notes",
+                                  width: 320,
+                                  render: (_, field) => (
+                                    <Form.Item
+                                      name={[field.name, "description"]}
+                                      style={{ margin: 0 }}
+                                    >
+                                      <Input.TextArea
+                                        rows={1}
+                                        placeholder="Pond dimensions, lining type, current condition..."
+                                        autoSize={{ minRows: 1, maxRows: 3 }}
+                                      />
+                                    </Form.Item>
+                                  ),
+                                },
+                                {
+                                  title: "",
+                                  width: 56,
+                                  align: "center",
+                                  render: (_, field) => (
+                                    <Button
+                                      size="small"
+                                      type="text"
+                                      danger
+                                      icon={<DeleteOutlined />}
+                                      onClick={() => remove(field.name)}
+                                    />
+                                  ),
+                                },
+                              ]}
+                            />
+                            <Button
+                              type="dashed"
+                              onClick={() =>
+                                add({
+                                  pondNo: fields.length + 1,
+                                  status: "Active",
+                                })
+                              }
+                              block
+                              icon={<PlusOutlined />}
+                              style={{ marginBottom: 4 }}
+                            >
+                              Add Leachate Treatment Plant
+                            </Button>
+                          </>
+                        )}
+                      </Form.List>
+
+                      <Divider
+                        orientation="left"
+                        style={{
+                          fontSize: 13,
+                          color: "#52c41a",
+                          marginTop: 16,
+                        }}
+                      >
+                        <ExperimentOutlined style={{ marginRight: 6 }} />
+                        Gas Management
+                      </Divider>
+                      <Form.List name="gasVentDetails">
+                        {(fields, { add, remove }) => (
+                          <>
+                            <Table
+                              size="small"
+                              pagination={false}
+                              dataSource={fields}
+                              rowKey="key"
+                              locale={{
+                                emptyText:
+                                  "No gas management records added yet",
+                              }}
+                              scroll={{ x: 770 }}
+                              style={{ marginBottom: 8 }}
+                              columns={[
+                                {
+                                  title: "Vent No.",
+                                  width: 100,
+                                  render: (_, field) => (
+                                    <Form.Item
+                                      name={[field.name, "ventNo"]}
+                                      style={{ margin: 0 }}
+                                    >
+                                      <InputNumber
+                                        size="small"
+                                        style={{ width: "100%" }}
+                                        min={1}
+                                        precision={0}
+                                      />
+                                    </Form.Item>
+                                  ),
+                                },
+                                {
+                                  title: "Type",
+                                  width: 170,
+                                  render: (_, field) => (
+                                    <Form.Item
+                                      name={[field.name, "ventType"]}
+                                      style={{ margin: 0 }}
+                                    >
+                                      <Select
+                                        size="small"
+                                        placeholder="Select type"
+                                        allowClear
+                                        options={[
+                                          {
+                                            label: "Passive",
+                                            value: "Passive",
+                                          },
+                                          { label: "Flare", value: "Flare" },
+                                          {
+                                            label: "LFG Recovery",
+                                            value: "LFG Recovery",
+                                          },
+                                          { label: "Other", value: "Other" },
+                                        ]}
+                                      />
+                                    </Form.Item>
+                                  ),
+                                },
+                                {
+                                  title: "Status",
+                                  width: 180,
+                                  render: (_, field) => (
+                                    <Form.Item
+                                      name={[field.name, "status"]}
+                                      style={{ margin: 0 }}
+                                    >
+                                      <Select
+                                        size="small"
+                                        placeholder="Select status"
+                                        options={[
+                                          { label: "Active", value: "Active" },
+                                          {
+                                            label: "Inactive",
+                                            value: "Inactive",
+                                          },
+                                          {
+                                            label: "Under Maintenance",
+                                            value: "Under Maintenance",
+                                          },
+                                          {
+                                            label: "Decommissioned",
+                                            value: "Decommissioned",
+                                          },
+                                        ]}
+                                      />
+                                    </Form.Item>
+                                  ),
+                                },
+                                {
+                                  title: "Description / Notes",
+                                  width: 320,
+                                  render: (_, field) => (
+                                    <Form.Item
+                                      name={[field.name, "description"]}
+                                      style={{ margin: 0 }}
+                                    >
+                                      <Input.TextArea
+                                        rows={1}
+                                        placeholder="Pipe diameter, depth, condition..."
+                                        autoSize={{ minRows: 1, maxRows: 3 }}
+                                      />
+                                    </Form.Item>
+                                  ),
+                                },
+                                {
+                                  title: "",
+                                  width: 56,
+                                  align: "center",
+                                  render: (_, field) => (
+                                    <Button
+                                      size="small"
+                                      type="text"
+                                      danger
+                                      icon={<DeleteOutlined />}
+                                      onClick={() => remove(field.name)}
+                                    />
+                                  ),
+                                },
+                              ]}
+                            />
+                            <Button
+                              type="dashed"
+                              onClick={() =>
+                                add({
+                                  ventNo: fields.length + 1,
+                                  status: "Active",
+                                })
+                              }
+                              block
+                              icon={<PlusOutlined />}
+                              style={{ marginBottom: 4 }}
+                            >
+                              Add Gas Management Record
+                            </Button>
+                          </>
+                        )}
+                      </Form.List>
+                    </>
+                  ),
+                },
+                {
+                  key: "cell-infra",
+                  label: (
+                    <span style={{ color: "#13c2c2" }}>
+                      <BarChartOutlined /> Cell Infrastructure
+                    </span>
+                  ),
+                  children: (
+                    <>
+                      <Row gutter={12}>
+                        <Col span={8}>
+                          <Form.Item name="numberOfCell" label="No. of Cells">
+                            <Select
+                              placeholder="Select"
+                              allowClear
+                              options={[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map(
+                                (n) => ({ label: `${n}`, value: n }),
+                              )}
+                              onChange={(val) => {
+                                const cur =
+                                  form.getFieldValue("cellCapacities") || [];
+                                const curUnits =
+                                  form.getFieldValue("cellCapacityUnits") || [];
+                                const curSt =
+                                  form.getFieldValue("cellStatuses") || [];
+                                const curTy =
+                                  form.getFieldValue("cellTypes") || [];
+                                const curSubAllowed =
+                                  form.getFieldValue("cellSubmissionAllowed") ||
+                                  [];
+                                const curNotes =
+                                  form.getFieldValue("cellNotes") || [];
+                                const curFill =
+                                  form.getFieldValue("cellFillValues") || [];
+                                const curFillUnits =
+                                  form.getFieldValue("cellFillUnits") || [];
+                                const next = Array.from(
+                                  { length: val || 0 },
+                                  (_, i) => cur[i] ?? null,
+                                );
+                                const nextUnits = Array.from(
+                                  { length: val || 0 },
+                                  (_, i) => curUnits[i] || "m³",
+                                );
+                                const nextSt = Array.from(
+                                  { length: val || 0 },
+                                  (_, i) => normalizeCellStatus(curSt[i]),
+                                );
+                                const nextTy = Array.from(
+                                  { length: val || 0 },
+                                  (_, i) => curTy[i] || "Residual",
+                                );
+                                const nextSubAllowed = Array.from(
+                                  { length: val || 0 },
+                                  (_, i) =>
+                                    curSubAllowed[i] === undefined
+                                      ? true
+                                      : curSubAllowed[i],
+                                );
+                                const nextNotes = Array.from(
+                                  { length: val || 0 },
+                                  (_, i) => curNotes[i] || "",
+                                );
+                                const nextFill = Array.from(
+                                  { length: val || 0 },
+                                  (_, i) => curFill[i] ?? null,
+                                );
+                                const nextFillUnits = Array.from(
+                                  { length: val || 0 },
+                                  (_, i) =>
+                                    curFillUnits[i] || nextUnits[i] || "m³",
+                                );
+                                form.setFieldsValue({
+                                  cellCapacities: next,
+                                  cellCapacityUnits: nextUnits,
+                                  cellStatuses: nextSt,
+                                  cellTypes: nextTy,
+                                  cellSubmissionAllowed: nextSubAllowed,
+                                  cellNotes: nextNotes,
+                                  cellFillValues: nextFill,
+                                  cellFillUnits: nextFillUnits,
+                                });
+                              }}
+                            />
+                          </Form.Item>
+                        </Col>
+                      </Row>
+
+                      <Form.Item
+                        noStyle
+                        dependencies={[
+                          "numberOfCell",
+                          "cellNames",
+                          "cellCapacities",
+                          "cellStatuses",
+                          "cellTypes",
+                          "cellSubmissionAllowed",
+                          "cellNotes",
+                          "cellFillValues",
+                          "cellCapacityUnits",
+                          "cellFillUnits",
+                        ]}
+                      >
+                        {() => {
+                          const cellCount =
+                            form.getFieldValue("numberOfCell") || 0;
+                          if (cellCount < 1) return null;
+                          // #5/#7: cells use the facility's single declared baseline
+                          // unit (shown as a locked addon), not a per-cell picker.
+                          const cellBaselineUnit =
+                            normalizeUnit(
+                              form.getFieldValue("wasteReceivedUnit") ||
+                                form.getFieldValue("volumeCapacityUnit") ||
+                                "m³",
+                            ) || "m³";
+                          return (
+                            <>
+                              <Divider
+                                plain
+                                orientation="left"
+                                style={{ fontSize: 12, margin: "8px 0 12px" }}
+                              >
+                                Cell Capacities, Status &amp; Type{" "}
+                                <Text
+                                  type="secondary"
+                                  style={{ fontSize: 11, fontWeight: 400 }}
+                                >
+                                  (units in {cellBaselineUnit})
+                                </Text>
+                              </Divider>
+                              <Row gutter={[12, 12]}>
+                                {Array.from({ length: cellCount }, (_, i) => {
+                                  const cellStatus = normalizeCellStatus(
+                                    form.getFieldValue(["cellStatuses", i]),
+                                  );
+                                  const needsNote =
+                                    cellStatus === "Under Construction" ||
+                                    cellStatus === "Reserved Area" ||
+                                    cellStatus === "Not Existed";
+                                  const sc =
+                                    CELL_STATUS_COLORS[cellStatus] ||
+                                    CELL_STATUS_COLORS["Active Cell"];
+                                  return (
+                                    // 3 cards per row on large desktop, 2 on medium,
+                                    // 1 on small — consistent height + spacing.
+                                    <Col xs={24} sm={24} md={12} lg={8} key={i}>
+                                      <Collapse
+                                        size="small"
+                                        variant="filled"
+                                        defaultActiveKey={[]}
+                                        destroyOnHidden
+                                        expandIconPosition="end"
+                                        style={{
+                                          borderRadius: 8,
+                                          borderLeft: `4px solid ${sc.border}`,
+                                          background: isDark ? sc.dark : sc.bg,
+                                          height: "100%",
+                                        }}
+                                        styles={{
+                                          header: { padding: "8px 10px" },
+                                          body: { padding: "10px 12px" },
+                                        }}
+                                        items={[
+                                          {
+                                            key: `cell-${i}`,
+                                            label: (
+                                              <Space size={6} wrap>
+                                                <div
+                                                  style={{
+                                                    width: 10,
+                                                    height: 10,
+                                                    borderRadius: "50%",
+                                                    background: sc.border,
+                                                    flexShrink: 0,
+                                                  }}
+                                                />
+                                                <Text
+                                                  strong
+                                                  style={{ fontSize: 12 }}
+                                                >
+                                                  {String(
+                                                    form.getFieldValue([
+                                                      "cellNames",
+                                                      i,
+                                                    ]) || "",
+                                                  ).trim() || `Cell ${i + 1}`}
+                                                </Text>
+                                                <Tag
+                                                  color={sc.tag}
+                                                  style={{
+                                                    fontSize: 10,
+                                                    margin: 0,
+                                                  }}
+                                                >
+                                                  {cellStatus}
+                                                </Tag>
+                                              </Space>
+                                            ),
+                                            children: (
+                                              <>
+                                                {/* #5: related fields grouped into rows to cut
                                           wasted vertical space; units locked to the
                                           facility baseline unit (addon), no per-cell
                                           picker. */}
-                                      <Form.Item
-                                        label="Cell Name"
-                                        name={["cellNames", i]}
-                                        style={{ marginBottom: 8 }}
-                                        tooltip={`Optional custom name for this cell. Leave blank to use the default "Cell ${i + 1}". Renaming updates how this cell appears in the SLF Portal, baseline, breakdown, and reports.`}
-                                      >
-                                        <Input
-                                          placeholder={`Cell ${i + 1}`}
-                                          maxLength={60}
-                                          allowClear
-                                        />
-                                      </Form.Item>
-                                      <Row gutter={8}>
-                                        <Col span={12}>
-                                          <Form.Item
-                                            label="Capacity"
-                                            name={["cellCapacities", i]}
-                                            style={{ marginBottom: 8 }}
-                                          >
-                                            <InputNumber
-                                              style={{ width: "100%" }}
-                                              min={0}
-                                              step={0.01}
-                                              placeholder="Capacity"
-                                              addonAfter={cellBaselineUnit}
-                                            />
-                                          </Form.Item>
-                                        </Col>
-                                        <Col span={12}>
-                                          <Form.Item
-                                            label="Waste in Cell"
-                                            name={["cellFillValues", i]}
-                                            style={{ marginBottom: 8 }}
-                                          >
-                                            <InputNumber
-                                              style={{ width: "100%" }}
-                                              min={0}
-                                              step={0.01}
-                                              placeholder="Deposited"
-                                              addonAfter={cellBaselineUnit}
-                                              onChange={(value) =>
-                                                handleCellFillValueChange(i, value)
-                                              }
-                                            />
-                                          </Form.Item>
-                                        </Col>
-                                      </Row>
-                                      <Row gutter={8}>
-                                        <Col span={12}>
-                                          <Form.Item
-                                            name={["cellStatuses", i]}
-                                            label="Status"
-                                            initialValue="Active Cell"
-                                            style={{ marginBottom: 8 }}
-                                          >
-                                            <Select options={CELL_STATUS_OPTIONS} />
-                                          </Form.Item>
-                                        </Col>
-                                        <Col span={12}>
-                                          <Form.Item
-                                            name={["cellTypes", i]}
-                                            label="Type"
-                                            initialValue="Residual"
-                                            style={{ marginBottom: 8 }}
-                                          >
-                                            <Select
-                                              options={[
-                                                { label: "Residual Cell", value: "Residual" },
-                                                { label: "Treated Haz Waste Cell", value: "Treated Haz Waste" },
-                                              ]}
-                                            />
-                                          </Form.Item>
-                                        </Col>
-                                      </Row>
-                                      <Row gutter={8} align="bottom">
-                                        <Col span={12}>
-                                          <Form.Item
-                                            label="Cell ON/OFF"
-                                            style={{ marginBottom: 0 }}
-                                          >
-                                            <Switch
-                                              checked={isActiveCellStatus(cellStatus)}
-                                              checkedChildren="ON"
-                                              unCheckedChildren="OFF"
-                                              onChange={(checked) => {
-                                                const current =
-                                                  form.getFieldValue("cellStatuses") || [];
-                                                current[i] = checked
-                                                  ? "Active Cell"
-                                                  : "Used/Completed";
-                                                form.setFieldsValue({
-                                                  cellStatuses: [...current],
-                                                });
-                                              }}
-                                            />
-                                          </Form.Item>
-                                        </Col>
-                                        <Col span={12}>
-                                          <Form.Item
-                                            name={["cellSubmissionAllowed", i]}
-                                            label={
-                                              <Tooltip title="When ON, SLF/portal users can select this cell when disposing their volume-waste submissions in the Add Transport Entry form. Only Active/Open cells appear in the portal.">
-                                                <span>
-                                                  Allow Portal Submissions{" "}
-                                                  <InfoCircleOutlined style={{ color: "#13c2c2" }} />
-                                                </span>
-                                              </Tooltip>
-                                            }
-                                            valuePropName="checked"
-                                            initialValue={true}
-                                            style={{ marginBottom: 0 }}
-                                          >
-                                            <Switch
-                                              checkedChildren="Open"
-                                              unCheckedChildren="Off"
-                                              disabled={!isActiveCellStatus(cellStatus)}
-                                            />
-                                          </Form.Item>
-                                        </Col>
-                                      </Row>
-                                      {needsNote && (
-                                        <Form.Item
-                                          name={["cellNotes", i]}
-                                          label="Notes"
-                                          style={{ marginBottom: 0, marginTop: 8 }}
-                                        >
-                                          <Input.TextArea
-                                            rows={2}
-                                            placeholder={
-                                              cellStatus === "Under Construction"
-                                                ? "Target completion date, contractor, current progress..."
-                                                : "Planned use, estimated activation date, reserved for..."
-                                            }
-                                            style={{ resize: "none" }}
-                                          />
-                                        </Form.Item>
-                                      )}
-                                            </>
-                                          ),
-                                        },
-                                      ]}
-                                    />
-                                  </Col>
-                                );
-                              })}
-                            </Row>
-                          </>
-                        );
-                      }}
-                    </Form.Item>
-                    <Form.Item
-                      noStyle
-                      dependencies={[
-                        "numberOfCell",
-                        "cellCapacities",
-                        "cellCapacityUnits",
-                        "cellStatuses",
-                        "cellTypes",
-                        "cellSubmissionAllowed",
-                        "cellNotes",
-                        "cellFillValues",
-                        "cellFillUnits",
-                        "volumeCapacity",
-                        "actualResidualWasteReceived",
-                        "wasteReceivedUnit",
-                      ]}
-                    >
-                      {() => {
-                        const cellCount =
-                          form.getFieldValue("numberOfCell") || 0;
-                        const caps = form.getFieldValue("cellCapacities") || [];
-                        const capUnits =
-                          form.getFieldValue("cellCapacityUnits") || [];
-                        const statuses =
-                          form.getFieldValue("cellStatuses") || [];
-                        const types = form.getFieldValue("cellTypes") || [];
-                        const cellNotes = form.getFieldValue("cellNotes") || [];
-                        const fills =
-                          form.getFieldValue("cellFillValues") || [];
-                        const fillUnits =
-                          form.getFieldValue("cellFillUnits") || [];
-                        const cellDisplayUnit = normalizeUnit(
-                          form.getFieldValue("wasteReceivedUnit") ||
-                            form.getFieldValue("volumeCapacityUnit") ||
-                            capUnits.find(Boolean) ||
-                            fillUnits.find(Boolean) ||
+                                                <Form.Item
+                                                  label="Cell Name"
+                                                  name={["cellNames", i]}
+                                                  style={{ marginBottom: 8 }}
+                                                  tooltip={`Optional custom name for this cell. Leave blank to use the default "Cell ${i + 1}". Renaming updates how this cell appears in the SLF Portal, baseline, breakdown, and reports.`}
+                                                >
+                                                  <Input
+                                                    placeholder={`Cell ${i + 1}`}
+                                                    maxLength={60}
+                                                    allowClear
+                                                  />
+                                                </Form.Item>
+                                                <Row gutter={8}>
+                                                  <Col span={12}>
+                                                    <Form.Item
+                                                      label="Capacity"
+                                                      name={[
+                                                        "cellCapacities",
+                                                        i,
+                                                      ]}
+                                                      style={{
+                                                        marginBottom: 8,
+                                                      }}
+                                                    >
+                                                      <InputNumber
+                                                        style={{
+                                                          width: "100%",
+                                                        }}
+                                                        min={0}
+                                                        step={0.01}
+                                                        placeholder="Capacity"
+                                                        addonAfter={
+                                                          cellBaselineUnit
+                                                        }
+                                                      />
+                                                    </Form.Item>
+                                                  </Col>
+                                                  <Col span={12}>
+                                                    <Form.Item
+                                                      label="Waste in Cell"
+                                                      name={[
+                                                        "cellFillValues",
+                                                        i,
+                                                      ]}
+                                                      style={{
+                                                        marginBottom: 8,
+                                                      }}
+                                                    >
+                                                      <InputNumber
+                                                        style={{
+                                                          width: "100%",
+                                                        }}
+                                                        min={0}
+                                                        step={0.01}
+                                                        placeholder="Deposited"
+                                                        addonAfter={
+                                                          cellBaselineUnit
+                                                        }
+                                                        onChange={(value) =>
+                                                          handleCellFillValueChange(
+                                                            i,
+                                                            value,
+                                                          )
+                                                        }
+                                                      />
+                                                    </Form.Item>
+                                                  </Col>
+                                                </Row>
+                                                <Row gutter={8}>
+                                                  <Col span={12}>
+                                                    <Form.Item
+                                                      name={["cellStatuses", i]}
+                                                      label="Status"
+                                                      initialValue="Active Cell"
+                                                      style={{
+                                                        marginBottom: 8,
+                                                      }}
+                                                    >
+                                                      <Select
+                                                        options={
+                                                          CELL_STATUS_OPTIONS
+                                                        }
+                                                      />
+                                                    </Form.Item>
+                                                  </Col>
+                                                  <Col span={12}>
+                                                    <Form.Item
+                                                      name={["cellTypes", i]}
+                                                      label="Type"
+                                                      initialValue="Residual"
+                                                      style={{
+                                                        marginBottom: 8,
+                                                      }}
+                                                    >
+                                                      <Select
+                                                        options={[
+                                                          {
+                                                            label:
+                                                              "Residual Cell",
+                                                            value: "Residual",
+                                                          },
+                                                          {
+                                                            label:
+                                                              "Treated Haz Waste Cell",
+                                                            value:
+                                                              "Treated Haz Waste",
+                                                          },
+                                                        ]}
+                                                      />
+                                                    </Form.Item>
+                                                  </Col>
+                                                </Row>
+                                                <Row gutter={8} align="bottom">
+                                                  <Col span={12}>
+                                                    <Form.Item
+                                                      label="Cell ON/OFF"
+                                                      style={{
+                                                        marginBottom: 0,
+                                                      }}
+                                                    >
+                                                      <Switch
+                                                        checked={isActiveCellStatus(
+                                                          cellStatus,
+                                                        )}
+                                                        checkedChildren="ON"
+                                                        unCheckedChildren="OFF"
+                                                        onChange={(checked) => {
+                                                          const current =
+                                                            form.getFieldValue(
+                                                              "cellStatuses",
+                                                            ) || [];
+                                                          current[i] = checked
+                                                            ? "Active Cell"
+                                                            : "Used/Completed";
+                                                          form.setFieldsValue({
+                                                            cellStatuses: [
+                                                              ...current,
+                                                            ],
+                                                          });
+                                                        }}
+                                                      />
+                                                    </Form.Item>
+                                                  </Col>
+                                                  <Col span={12}>
+                                                    <Form.Item
+                                                      name={[
+                                                        "cellSubmissionAllowed",
+                                                        i,
+                                                      ]}
+                                                      label={
+                                                        <Tooltip title="When ON, SLF/portal users can select this cell when disposing their volume-waste submissions in the Add Transport Entry form. Only Active/Open cells appear in the portal.">
+                                                          <span>
+                                                            Allow Portal
+                                                            Submissions{" "}
+                                                            <InfoCircleOutlined
+                                                              style={{
+                                                                color:
+                                                                  "#13c2c2",
+                                                              }}
+                                                            />
+                                                          </span>
+                                                        </Tooltip>
+                                                      }
+                                                      valuePropName="checked"
+                                                      initialValue={true}
+                                                      style={{
+                                                        marginBottom: 0,
+                                                      }}
+                                                    >
+                                                      <Switch
+                                                        checkedChildren="Open"
+                                                        unCheckedChildren="Off"
+                                                        disabled={
+                                                          !isActiveCellStatus(
+                                                            cellStatus,
+                                                          )
+                                                        }
+                                                      />
+                                                    </Form.Item>
+                                                  </Col>
+                                                </Row>
+                                                {needsNote && (
+                                                  <Form.Item
+                                                    name={["cellNotes", i]}
+                                                    label="Notes"
+                                                    style={{
+                                                      marginBottom: 0,
+                                                      marginTop: 8,
+                                                    }}
+                                                  >
+                                                    <Input.TextArea
+                                                      rows={2}
+                                                      placeholder={
+                                                        cellStatus ===
+                                                        "Under Construction"
+                                                          ? "Target completion date, contractor, current progress..."
+                                                          : "Planned use, estimated activation date, reserved for..."
+                                                      }
+                                                      style={{ resize: "none" }}
+                                                    />
+                                                  </Form.Item>
+                                                )}
+                                              </>
+                                            ),
+                                          },
+                                        ]}
+                                      />
+                                    </Col>
+                                  );
+                                })}
+                              </Row>
+                            </>
+                          );
+                        }}
+                      </Form.Item>
+                      <Form.Item
+                        noStyle
+                        dependencies={[
+                          "numberOfCell",
+                          "cellCapacities",
+                          "cellCapacityUnits",
+                          "cellStatuses",
+                          "cellTypes",
+                          "cellSubmissionAllowed",
+                          "cellNotes",
+                          "cellFillValues",
+                          "cellFillUnits",
+                          "volumeCapacity",
+                          "actualResidualWasteReceived",
+                          "wasteReceivedUnit",
+                        ]}
+                      >
+                        {() => {
+                          const cellCount =
+                            form.getFieldValue("numberOfCell") || 0;
+                          const caps =
+                            form.getFieldValue("cellCapacities") || [];
+                          const capUnits =
+                            form.getFieldValue("cellCapacityUnits") || [];
+                          const statuses =
+                            form.getFieldValue("cellStatuses") || [];
+                          const types = form.getFieldValue("cellTypes") || [];
+                          const cellNotes =
+                            form.getFieldValue("cellNotes") || [];
+                          const fills =
+                            form.getFieldValue("cellFillValues") || [];
+                          const fillUnits =
+                            form.getFieldValue("cellFillUnits") || [];
+                          const cellDisplayUnit = normalizeUnit(
                             form.getFieldValue("wasteReceivedUnit") ||
-                            "m³",
-                        );
-                        const cellCapacityTotal = Array.from(
-                          { length: cellCount },
-                          (_, index) =>
-                            convertVolume(
-                              caps[index] || 0,
-                              capUnits[index] || cellDisplayUnit,
+                              form.getFieldValue("volumeCapacityUnit") ||
+                              capUnits.find(Boolean) ||
+                              fillUnits.find(Boolean) ||
+                              form.getFieldValue("wasteReceivedUnit") ||
+                              "m³",
+                          );
+                          const cellCapacityTotal = Array.from(
+                            { length: cellCount },
+                            (_, index) =>
+                              convertVolume(
+                                caps[index] || 0,
+                                capUnits[index] || cellDisplayUnit,
+                                cellDisplayUnit,
+                              ),
+                          ).reduce((sum, value) => sum + value, 0);
+                          const cellFillTotal = Array.from(
+                            { length: cellCount },
+                            (_, index) => {
+                              const fill = fills[index];
+                              if (fill == null) return 0;
+                              return convertVolume(
+                                fill,
+                                fillUnits[index] || cellDisplayUnit,
+                                cellDisplayUnit,
+                              );
+                            },
+                          ).reduce((sum, value) => sum + value, 0);
+                          const fallbackCapacity = convertVolume(
+                            form.getFieldValue("volumeCapacity") || 0,
+                            form.getFieldValue("volumeCapacityUnit") ||
                               cellDisplayUnit,
-                            ),
-                        ).reduce((sum, value) => sum + value, 0);
-                        const cellFillTotal = Array.from(
-                          { length: cellCount },
-                          (_, index) => {
-                            const fill = fills[index];
-                            if (fill == null) return 0;
-                            return convertVolume(
-                              fill,
-                              fillUnits[index] || cellDisplayUnit,
+                            cellDisplayUnit,
+                          );
+                          const fallbackWaste = convertVolume(
+                            form.getFieldValue("actualResidualWasteReceived") ||
+                              0,
+                            form.getFieldValue("wasteReceivedUnit") ||
                               cellDisplayUnit,
+                            cellDisplayUnit,
+                          );
+                          const totalCap =
+                            cellCapacityTotal || fallbackCapacity;
+                          const wasteRaw = cellFillTotal || fallbackWaste;
+                          const wasteUnit = cellDisplayUnit;
+                          const pct =
+                            totalCap > 0
+                              ? Math.min(
+                                  Math.round((wasteRaw / totalCap) * 100),
+                                  100,
+                                )
+                              : 0;
+                          if (cellCount < 1)
+                            return (
+                              <Empty description="Select number of cells to see infrastructure preview" />
                             );
-                          },
-                        ).reduce((sum, value) => sum + value, 0);
-                        const fallbackCapacity = convertVolume(
-                          form.getFieldValue("volumeCapacity") || 0,
-                          form.getFieldValue("volumeCapacityUnit") || cellDisplayUnit,
-                          cellDisplayUnit,
-                        );
-                        const fallbackWaste = convertVolume(
-                          form.getFieldValue("actualResidualWasteReceived") || 0,
-                          form.getFieldValue("wasteReceivedUnit") || cellDisplayUnit,
-                          cellDisplayUnit,
-                        );
-                        const totalCap = cellCapacityTotal || fallbackCapacity;
-                        const wasteRaw = cellFillTotal || fallbackWaste;
-                        const wasteUnit = cellDisplayUnit;
-                        const pct =
-                          totalCap > 0
-                            ? Math.min(
-                                Math.round((wasteRaw / totalCap) * 100),
-                                100,
-                              )
-                            : 0;
-                        if (cellCount < 1)
-                          return (
-                            <Empty description="Select number of cells to see infrastructure preview" />
+
+                          const STATUS_STROKE = {
+                            "Active Cell": (p) =>
+                              p >= 90
+                                ? "#ff4d4f"
+                                : p >= 70
+                                  ? "#faad14"
+                                  : "#52c41a",
+                            "Used/Completed": () => "#8c8c8c",
+                            "Under Construction": () => "#fa8c16",
+                            "Reserved Area": () => "#722ed1",
+                            "Not Existed": () => "#bfbfbf",
+                          };
+                          const STATUS_TAG = Object.fromEntries(
+                            Object.entries(CELL_STATUS_COLORS).map(
+                              ([key, value]) => [key, value.tag],
+                            ),
                           );
 
-                        const STATUS_STROKE = {
-                          "Active Cell": (p) =>
-                            p >= 90
-                              ? "#ff4d4f"
-                              : p >= 70
-                                ? "#faad14"
-                                : "#52c41a",
-                          "Used/Completed": () => "#8c8c8c",
-                          "Under Construction": () => "#fa8c16",
-                          "Reserved Area": () => "#722ed1",
-                          "Not Existed": () => "#bfbfbf",
-                        };
-                        const STATUS_TAG = Object.fromEntries(
-                          Object.entries(CELL_STATUS_COLORS).map(
-                            ([key, value]) => [key, value.tag],
-                          ),
-                        );
-
-                        // Use per-cell fill values; fall back to overall pct if no fill entered for the cell
-                        const cellDonutData = Array.from(
-                          { length: cellCount },
-                          (_, i) => {
-                            const cap = caps[i] || 0;
-                            const capUnit = normalizeUnit(capUnits[i] || "m³");
-                            const st = normalizeCellStatus(statuses[i]);
-                            const ty = types[i] || "Residual";
-                            const note = cellNotes[i] || "";
-                            const isInactive = !isActiveCellStatus(st);
-                            const fillRaw = fills[i] != null ? fills[i] : null;
-                            const fillUnit = normalizeUnit(
-                              fillUnits[i] || capUnit,
-                            );
-                            const fillInCapacityUnit =
-                              fillRaw != null
-                                ? convertVolume(fillRaw, fillUnit, capUnit)
-                                : null;
-                            let displayPct = 0;
-                            let usedInCapacityUnit = 0;
-                            if (!isInactive) {
-                              if (fillInCapacityUnit != null && cap > 0) {
-                                usedInCapacityUnit = fillInCapacityUnit;
-                                displayPct = Math.min(
-                                  Math.round((fillInCapacityUnit / cap) * 100),
-                                  100,
-                                );
-                              } else if (cap > 0) {
-                                displayPct = pct;
-                                usedInCapacityUnit = (pct / 100) * cap;
+                          // Use per-cell fill values; fall back to overall pct if no fill entered for the cell
+                          const cellDonutData = Array.from(
+                            { length: cellCount },
+                            (_, i) => {
+                              const cap = caps[i] || 0;
+                              const capUnit = normalizeUnit(
+                                capUnits[i] || "m³",
+                              );
+                              const st = normalizeCellStatus(statuses[i]);
+                              const ty = types[i] || "Residual";
+                              const note = cellNotes[i] || "";
+                              const isInactive = !isActiveCellStatus(st);
+                              const fillRaw =
+                                fills[i] != null ? fills[i] : null;
+                              const fillUnit = normalizeUnit(
+                                fillUnits[i] || capUnit,
+                              );
+                              const fillInCapacityUnit =
+                                fillRaw != null
+                                  ? convertVolume(fillRaw, fillUnit, capUnit)
+                                  : null;
+                              let displayPct = 0;
+                              let usedInCapacityUnit = 0;
+                              if (!isInactive) {
+                                if (fillInCapacityUnit != null && cap > 0) {
+                                  usedInCapacityUnit = fillInCapacityUnit;
+                                  displayPct = Math.min(
+                                    Math.round(
+                                      (fillInCapacityUnit / cap) * 100,
+                                    ),
+                                    100,
+                                  );
+                                } else if (cap > 0) {
+                                  displayPct = pct;
+                                  usedInCapacityUnit = (pct / 100) * cap;
+                                }
                               }
-                            }
-                            return {
-                              index: i,
-                              capacity: cap,
-                              capacityUnit: capUnit,
-                              fillUnit,
-                              status: st,
-                              cellType: ty,
-                              note,
-                              pct: displayPct,
-                              used: Math.min(usedInCapacityUnit, cap),
-                              remaining: Math.max(
-                                0,
-                                cap - Math.min(usedInCapacityUnit, cap),
-                              ),
-                              hasCellFill: fillRaw != null,
-                            };
-                          },
-                        );
+                              return {
+                                index: i,
+                                capacity: cap,
+                                capacityUnit: capUnit,
+                                fillUnit,
+                                status: st,
+                                cellType: ty,
+                                note,
+                                pct: displayPct,
+                                used: Math.min(usedInCapacityUnit, cap),
+                                remaining: Math.max(
+                                  0,
+                                  cap - Math.min(usedInCapacityUnit, cap),
+                                ),
+                                hasCellFill: fillRaw != null,
+                              };
+                            },
+                          );
 
-                        return (
-                          <Card
-                            size="small"
-                            style={{
-                              borderRadius: 10,
-                              marginTop: 8,
-                              background: isDark ? "#1f1f1f" : "#fafafa",
-                            }}
-                          >
-                            {/* Overall facility gauge + per-cell gauges */}
-                            <Row gutter={16} align="middle">
-                              <Col
-                                xs={24}
-                                md={6}
-                                style={{ textAlign: "center" }}
-                              >
-                                <Progress
-                                  type="dashboard"
-                                  percent={pct}
-                                  size={110}
-                                  strokeLinecap="butt"
-                                  strokeColor={
-                                    pct >= 90
-                                      ? "#ff4d4f"
-                                      : pct >= 70
-                                        ? "#faad14"
-                                        : "#52c41a"
-                                  }
-                                  format={() => (
-                                    <div style={{ lineHeight: 1.3 }}>
-                                      <div
-                                        style={{
-                                          fontSize: 18,
-                                          fontWeight: 700,
-                                          color:
-                                            pct >= 90
-                                              ? "#ff4d4f"
-                                              : pct >= 70
-                                                ? "#faad14"
-                                                : "#52c41a",
-                                        }}
-                                      >
-                                        {pct}%
-                                      </div>
-                                      <div
-                                        style={{
-                                          fontSize: 10,
-                                          color: "#8c8c8c",
-                                        }}
-                                      >
-                                        overall
-                                      </div>
-                                    </div>
-                                  )}
-                                />
-                                <div
-                                  style={{
-                                    fontSize: 11,
-                                    color: "#8c8c8c",
-                                    marginTop: 4,
-                                  }}
+                          return (
+                            <Card
+                              size="small"
+                              style={{
+                                borderRadius: 10,
+                                marginTop: 8,
+                                background: isDark ? "#1f1f1f" : "#fafafa",
+                              }}
+                            >
+                              {/* Overall facility gauge + per-cell gauges */}
+                              <Row gutter={16} align="middle">
+                                <Col
+                                  xs={24}
+                                  md={6}
+                                  style={{ textAlign: "center" }}
                                 >
-                                  {wasteRaw > 0
-                                    ? wasteRaw.toLocaleString()
-                                    : "0"}{" "}
-                                  {cellDisplayUnit} /{" "}
-                                  {totalCap > 0
-                                    ? totalCap.toLocaleString()
-                                    : "—"}{" "}
-                                  {cellDisplayUnit}
-                                  {cellDisplayUnit === "tons" && wasteRaw > 0 && (
-                                    <div
-                                      style={{ fontSize: 10, color: "#8c8c8c" }}
-                                    >
-                                      approx.{" "}
-                                      {convertVolume(wasteRaw, wasteUnit, "m³").toLocaleString(undefined, {
-                                        maximumFractionDigits: 0,
-                                      })}{" "}
-                                      m³ (at 0.20 t/m³)
-                                    </div>
-                                  )}
-                                </div>
-                              </Col>
-                              <Col xs={24} md={18}>
-                                {(() => {
-                                  const residualGauges = cellDonutData.filter(
-                                    (c) => c.cellType !== "Treated Haz Waste",
+                                  <Progress
+                                    type="dashboard"
+                                    percent={pct}
+                                    size={110}
+                                    strokeLinecap="butt"
+                                    strokeColor={
+                                      pct >= 90
+                                        ? "#ff4d4f"
+                                        : pct >= 70
+                                          ? "#faad14"
+                                          : "#52c41a"
+                                    }
+                                    format={() => (
+                                      <div style={{ lineHeight: 1.3 }}>
+                                        <div
+                                          style={{
+                                            fontSize: 18,
+                                            fontWeight: 700,
+                                            color:
+                                              pct >= 90
+                                                ? "#ff4d4f"
+                                                : pct >= 70
+                                                  ? "#faad14"
+                                                  : "#52c41a",
+                                          }}
+                                        >
+                                          {pct}%
+                                        </div>
+                                        <div
+                                          style={{
+                                            fontSize: 10,
+                                            color: "#8c8c8c",
+                                          }}
+                                        >
+                                          overall
+                                        </div>
+                                      </div>
+                                    )}
+                                  />
+                                  <div
+                                    style={{
+                                      fontSize: 11,
+                                      color: "#8c8c8c",
+                                      marginTop: 4,
+                                    }}
+                                  >
+                                    {wasteRaw > 0
+                                      ? wasteRaw.toLocaleString()
+                                      : "0"}{" "}
+                                    {cellDisplayUnit} /{" "}
+                                    {totalCap > 0
+                                      ? totalCap.toLocaleString()
+                                      : "—"}{" "}
+                                    {cellDisplayUnit}
+                                    {cellDisplayUnit === "tons" &&
+                                      wasteRaw > 0 && (
+                                        <div
+                                          style={{
+                                            fontSize: 10,
+                                            color: "#8c8c8c",
+                                          }}
+                                        >
+                                          approx.{" "}
+                                          {convertVolume(
+                                            wasteRaw,
+                                            wasteUnit,
+                                            "m³",
+                                          ).toLocaleString(undefined, {
+                                            maximumFractionDigits: 0,
+                                          })}{" "}
+                                          m³ (at 0.20 t/m³)
+                                        </div>
+                                      )}
+                                  </div>
+                                </Col>
+                                <Col xs={24} md={18}>
+                                  {(() => {
+                                    const residualGauges = cellDonutData.filter(
+                                      (c) => c.cellType !== "Treated Haz Waste",
+                                    );
+                                    const hazGauges = cellDonutData.filter(
+                                      (c) => c.cellType === "Treated Haz Waste",
+                                    );
+                                    const renderGaugeGroup = (cells) => (
+                                      <Row gutter={[8, 8]} justify="start">
+                                        {cells.map((cell) => {
+                                          const isInactive =
+                                            !isActiveCellStatus(cell.status);
+                                          const isHaz =
+                                            cell.cellType ===
+                                            "Treated Haz Waste";
+                                          const strokeFn =
+                                            STATUS_STROKE[cell.status] ||
+                                            STATUS_STROKE["Active Cell"];
+                                          const strokeColor = isInactive
+                                            ? strokeFn(0)
+                                            : isHaz
+                                              ? "#f5222d"
+                                              : strokeFn(cell.pct);
+                                          const tagColor =
+                                            STATUS_TAG[cell.status] ||
+                                            "default";
+                                          return (
+                                            <Col
+                                              xs={12}
+                                              sm={8}
+                                              md={6}
+                                              key={cell.index}
+                                              style={{ textAlign: "center" }}
+                                            >
+                                              <Progress
+                                                type="dashboard"
+                                                percent={
+                                                  isInactive ? 0 : cell.pct
+                                                }
+                                                size={65}
+                                                strokeLinecap="butt"
+                                                strokeColor={strokeColor}
+                                                trailColor={
+                                                  isCompletedCellStatus(
+                                                    cell.status,
+                                                  )
+                                                    ? "#bfbfbf"
+                                                    : undefined
+                                                }
+                                                format={() => (
+                                                  <div
+                                                    style={{ lineHeight: 1.2 }}
+                                                  >
+                                                    <div
+                                                      style={{
+                                                        fontSize: 11,
+                                                        fontWeight: 700,
+                                                        color: strokeColor,
+                                                      }}
+                                                    >
+                                                      {isCompletedCellStatus(
+                                                        cell.status,
+                                                      )
+                                                        ? "Done"
+                                                        : isInactive
+                                                          ? "—"
+                                                          : `${cell.pct}%`}
+                                                    </div>
+                                                  </div>
+                                                )}
+                                              />
+                                              <div
+                                                style={{
+                                                  fontSize: 11,
+                                                  fontWeight: 600,
+                                                  marginTop: 2,
+                                                }}
+                                              >
+                                                Cell {cell.index + 1}
+                                              </div>
+                                              <Tag
+                                                color={tagColor}
+                                                style={{
+                                                  fontSize: 9,
+                                                  marginTop: 2,
+                                                  marginBottom: 2,
+                                                }}
+                                              >
+                                                {cell.status}
+                                              </Tag>
+                                              <Tag
+                                                color={isHaz ? "red" : "blue"}
+                                                style={{
+                                                  fontSize: 9,
+                                                  marginBottom: 2,
+                                                }}
+                                              >
+                                                {isHaz ? "Haz" : "Res"}
+                                              </Tag>
+                                              <div
+                                                style={{
+                                                  fontSize: 10,
+                                                  color: "#8c8c8c",
+                                                }}
+                                              >
+                                                {cell.capacity > 0
+                                                  ? `${cell.capacity.toLocaleString()} ${cell.capacityUnit}`
+                                                  : "—"}
+                                              </div>
+                                              {cell.hasCellFill &&
+                                                cell.used > 0 && (
+                                                  <div
+                                                    style={{
+                                                      fontSize: 9,
+                                                      color: "#1677ff",
+                                                    }}
+                                                  >
+                                                    {cell.used.toLocaleString()}{" "}
+                                                    {cell.capacityUnit} filled
+                                                  </div>
+                                                )}
+                                              {cell.note && (
+                                                <Tooltip title={cell.note}>
+                                                  <div
+                                                    style={{
+                                                      fontSize: 9,
+                                                      color: "#595959",
+                                                      fontStyle: "italic",
+                                                      marginTop: 2,
+                                                      maxWidth: 80,
+                                                      overflow: "hidden",
+                                                      textOverflow: "ellipsis",
+                                                      whiteSpace: "nowrap",
+                                                    }}
+                                                  >
+                                                    {cell.note}
+                                                  </div>
+                                                </Tooltip>
+                                              )}
+                                            </Col>
+                                          );
+                                        })}
+                                      </Row>
+                                    );
+                                    return (
+                                      <>
+                                        {residualGauges.length > 0 && (
+                                          <>
+                                            {hazGauges.length > 0 && (
+                                              <div
+                                                style={{
+                                                  fontSize: 10,
+                                                  fontWeight: 600,
+                                                  color: "#1677ff",
+                                                  marginBottom: 4,
+                                                }}
+                                              >
+                                                Residual Cells
+                                              </div>
+                                            )}
+                                            {renderGaugeGroup(residualGauges)}
+                                          </>
+                                        )}
+                                        {hazGauges.length > 0 && (
+                                          <>
+                                            <div
+                                              style={{
+                                                fontSize: 10,
+                                                fontWeight: 600,
+                                                color: "#f5222d",
+                                                marginTop:
+                                                  residualGauges.length > 0
+                                                    ? 8
+                                                    : 0,
+                                                marginBottom: 4,
+                                              }}
+                                            >
+                                              Treated Haz Waste Cells
+                                            </div>
+                                            {renderGaugeGroup(hazGauges)}
+                                          </>
+                                        )}
+                                      </>
+                                    );
+                                  })()}
+                                </Col>
+                              </Row>
+
+                              {/* Per-cell donut breakdown — grouped by cell type */}
+                              {cellCount >= 2 &&
+                                cellDonutData.some((c) => c.capacity > 0) &&
+                                (() => {
+                                  const residualDonuts = cellDonutData.filter(
+                                    (c) =>
+                                      c.capacity > 0 &&
+                                      c.cellType !== "Treated Haz Waste",
                                   );
-                                  const hazGauges = cellDonutData.filter(
-                                    (c) => c.cellType === "Treated Haz Waste",
+                                  const hazDonuts = cellDonutData.filter(
+                                    (c) =>
+                                      c.capacity > 0 &&
+                                      c.cellType === "Treated Haz Waste",
                                   );
-                                  const renderGaugeGroup = (cells) => (
-                                    <Row gutter={[8, 8]} justify="start">
+                                  const renderDonutGroup = (cells) => (
+                                    <Row gutter={[4, 4]} justify="center">
                                       {cells.map((cell) => {
                                         const isInactive = !isActiveCellStatus(
                                           cell.status,
                                         );
                                         const isHaz =
                                           cell.cellType === "Treated Haz Waste";
-                                        const strokeFn =
-                                          STATUS_STROKE[cell.status] ||
-                                          STATUS_STROKE["Active Cell"];
-                                        const strokeColor = isInactive
-                                          ? strokeFn(0)
+                                        const chartData = isInactive
+                                          ? [
+                                              {
+                                                name: cell.status,
+                                                value: cell.capacity,
+                                              },
+                                            ]
+                                          : cell.used > 0
+                                            ? [
+                                                {
+                                                  name: "Used",
+                                                  value: cell.used,
+                                                },
+                                                {
+                                                  name: "Remaining",
+                                                  value: cell.remaining,
+                                                },
+                                              ]
+                                            : [
+                                                {
+                                                  name: "Empty",
+                                                  value: cell.capacity,
+                                                },
+                                              ];
+                                        const inactiveColor =
+                                          isCompletedCellStatus(cell.status)
+                                            ? "#d9d9d9"
+                                            : cell.status ===
+                                                "Under Construction"
+                                              ? "#fa8c16"
+                                              : cell.status === "Reserved Area"
+                                                ? "#722ed1"
+                                                : "#bfbfbf";
+                                        const colors = isInactive
+                                          ? [inactiveColor]
                                           : isHaz
-                                            ? "#f5222d"
-                                            : strokeFn(cell.pct);
-                                        const tagColor =
-                                          STATUS_TAG[cell.status] || "default";
+                                            ? ["#f5222d", "#d9d9d9"]
+                                            : ["#ff4d4f", "#52c41a"];
                                         return (
                                           <Col
                                             xs={12}
@@ -4799,111 +5498,44 @@ export default function SLFMonitoring({
                                             key={cell.index}
                                             style={{ textAlign: "center" }}
                                           >
-                                            <Progress
-                                              type="dashboard"
-                                              percent={
-                                                isInactive ? 0 : cell.pct
-                                              }
-                                              size={65}
-                                              strokeLinecap="butt"
-                                              strokeColor={strokeColor}
-                                              trailColor={
-                                                isCompletedCellStatus(
-                                                  cell.status,
-                                                )
-                                                  ? "#bfbfbf"
-                                                  : undefined
-                                              }
-                                              format={() => (
-                                                <div
-                                                  style={{ lineHeight: 1.2 }}
-                                                >
-                                                  <div
-                                                    style={{
-                                                      fontSize: 11,
-                                                      fontWeight: 700,
-                                                      color: strokeColor,
-                                                    }}
-                                                  >
-                                                    {isCompletedCellStatus(
-                                                      cell.status,
-                                                    )
-                                                      ? "Done"
-                                                      : isInactive
-                                                        ? "—"
-                                                        : `${cell.pct}%`}
-                                                  </div>
-                                                </div>
-                                              )}
-                                            />
-                                            <div
+                                            <Text
                                               style={{
                                                 fontSize: 11,
                                                 fontWeight: 600,
-                                                marginTop: 2,
                                               }}
                                             >
                                               Cell {cell.index + 1}
-                                            </div>
-                                            <Tag
-                                              color={tagColor}
-                                              style={{
-                                                fontSize: 9,
-                                                marginTop: 2,
-                                                marginBottom: 2,
-                                              }}
-                                            >
-                                              {cell.status}
-                                            </Tag>
-                                            <Tag
-                                              color={isHaz ? "red" : "blue"}
-                                              style={{
-                                                fontSize: 9,
-                                                marginBottom: 2,
-                                              }}
-                                            >
-                                              {isHaz ? "Haz" : "Res"}
-                                            </Tag>
-                                            <div
-                                              style={{
-                                                fontSize: 10,
-                                                color: "#8c8c8c",
-                                              }}
-                                            >
-                                              {cell.capacity > 0
-                                                ? `${cell.capacity.toLocaleString()} ${cell.capacityUnit}`
-                                                : "—"}
-                                            </div>
-                                            {cell.hasCellFill &&
-                                              cell.used > 0 && (
-                                                <div
-                                                  style={{
-                                                    fontSize: 9,
-                                                    color: "#1677ff",
-                                                  }}
-                                                >
-                                                  {cell.used.toLocaleString()}{" "}
-                                                  {cell.capacityUnit} filled
-                                                </div>
-                                              )}
-                                            {cell.note && (
-                                              <Tooltip title={cell.note}>
-                                                <div
-                                                  style={{
-                                                    fontSize: 9,
-                                                    color: "#595959",
-                                                    fontStyle: "italic",
-                                                    marginTop: 2,
-                                                    maxWidth: 80,
-                                                    overflow: "hidden",
-                                                    textOverflow: "ellipsis",
-                                                    whiteSpace: "nowrap",
-                                                  }}
-                                                >
-                                                  {cell.note}
-                                                </div>
-                                              </Tooltip>
-                                            )}
+                                            </Text>
+                                            <PieChart width={110} height={88}>
+                                              <Pie
+                                                data={chartData}
+                                                cx={55}
+                                                cy={44}
+                                                innerRadius={20}
+                                                outerRadius={36}
+                                                paddingAngle={
+                                                  chartData.length > 1 ? 2 : 0
+                                                }
+                                                dataKey="value"
+                                                isAnimationActive={false}
+                                                animationBegin={80}
+                                                animationDuration={650}
+                                              >
+                                                {chartData.map((_, j) => (
+                                                  <RCell
+                                                    key={j}
+                                                    fill={
+                                                      colors[j % colors.length]
+                                                    }
+                                                  />
+                                                ))}
+                                              </Pie>
+                                              <RTooltip
+                                                formatter={(v) =>
+                                                  `${Number(v).toLocaleString()} ${cell.capacityUnit}`
+                                                }
+                                              />
+                                            </PieChart>
                                           </Col>
                                         );
                                       })}
@@ -4911,161 +5543,7 @@ export default function SLFMonitoring({
                                   );
                                   return (
                                     <>
-                                      {residualGauges.length > 0 && (
-                                        <>
-                                          {hazGauges.length > 0 && (
-                                            <div
-                                              style={{
-                                                fontSize: 10,
-                                                fontWeight: 600,
-                                                color: "#1677ff",
-                                                marginBottom: 4,
-                                              }}
-                                            >
-                                              Residual Cells
-                                            </div>
-                                          )}
-                                          {renderGaugeGroup(residualGauges)}
-                                        </>
-                                      )}
-                                      {hazGauges.length > 0 && (
-                                        <>
-                                          <div
-                                            style={{
-                                              fontSize: 10,
-                                              fontWeight: 600,
-                                              color: "#f5222d",
-                                              marginTop:
-                                                residualGauges.length > 0
-                                                  ? 8
-                                                  : 0,
-                                              marginBottom: 4,
-                                            }}
-                                          >
-                                            Treated Haz Waste Cells
-                                          </div>
-                                          {renderGaugeGroup(hazGauges)}
-                                        </>
-                                      )}
-                                    </>
-                                  );
-                                })()}
-                              </Col>
-                            </Row>
-
-                            {/* Per-cell donut breakdown — grouped by cell type */}
-                            {cellCount >= 2 &&
-                              cellDonutData.some((c) => c.capacity > 0) &&
-                              (() => {
-                                const residualDonuts = cellDonutData.filter(
-                                  (c) =>
-                                    c.capacity > 0 &&
-                                    c.cellType !== "Treated Haz Waste",
-                                );
-                                const hazDonuts = cellDonutData.filter(
-                                  (c) =>
-                                    c.capacity > 0 &&
-                                    c.cellType === "Treated Haz Waste",
-                                );
-                                const renderDonutGroup = (cells) => (
-                                  <Row gutter={[4, 4]} justify="center">
-                                    {cells.map((cell) => {
-                                      const isInactive = !isActiveCellStatus(
-                                        cell.status,
-                                      );
-                                      const isHaz =
-                                        cell.cellType === "Treated Haz Waste";
-                                      const chartData = isInactive
-                                        ? [
-                                            {
-                                              name: cell.status,
-                                              value: cell.capacity,
-                                            },
-                                          ]
-                                        : cell.used > 0
-                                          ? [
-                                              {
-                                                name: "Used",
-                                                value: cell.used,
-                                              },
-                                              {
-                                                name: "Remaining",
-                                                value: cell.remaining,
-                                              },
-                                            ]
-                                          : [
-                                              {
-                                                name: "Empty",
-                                                value: cell.capacity,
-                                              },
-                                            ];
-                                      const inactiveColor =
-                                        isCompletedCellStatus(cell.status)
-                                          ? "#d9d9d9"
-                                          : cell.status === "Under Construction"
-                                            ? "#fa8c16"
-                                            : cell.status === "Reserved Area"
-                                              ? "#722ed1"
-                                              : "#bfbfbf";
-                                      const colors = isInactive
-                                        ? [inactiveColor]
-                                        : isHaz
-                                          ? ["#f5222d", "#d9d9d9"]
-                                          : ["#ff4d4f", "#52c41a"];
-                                      return (
-                                        <Col
-                                          xs={12}
-                                          sm={8}
-                                          md={6}
-                                          key={cell.index}
-                                          style={{ textAlign: "center" }}
-                                        >
-                                          <Text
-                                            style={{
-                                              fontSize: 11,
-                                              fontWeight: 600,
-                                            }}
-                                          >
-                                            Cell {cell.index + 1}
-                                          </Text>
-                                          <PieChart width={110} height={88}>
-                                            <Pie
-                                              data={chartData}
-                                              cx={55}
-                                              cy={44}
-                                              innerRadius={20}
-                                              outerRadius={36}
-                                              paddingAngle={
-                                                chartData.length > 1 ? 2 : 0
-                                              }
-                                              dataKey="value"
-                                              isAnimationActive={false}
-                                              animationBegin={80}
-                                              animationDuration={650}
-                                            >
-                                              {chartData.map((_, j) => (
-                                                <RCell
-                                                  key={j}
-                                                  fill={
-                                                    colors[j % colors.length]
-                                                  }
-                                                />
-                                              ))}
-                                            </Pie>
-                                            <RTooltip
-                                              formatter={(v) =>
-                                                `${Number(v).toLocaleString()} ${cell.capacityUnit}`
-                                              }
-                                            />
-                                          </PieChart>
-                                        </Col>
-                                      );
-                                    })}
-                                  </Row>
-                                );
-                                return (
-                                  <>
-                                    {/* <Divider
+                                      {/* <Divider
                                       plain
                                       style={{
                                         fontSize: 11,
@@ -5110,878 +5588,950 @@ export default function SLFMonitoring({
                                         {renderDonutGroup(hazDonuts)}
                                       </>
                                     )} */}
-                                  </>
-                                );
-                              })()}
-                          </Card>
-                        );
-                      }}
-                    </Form.Item>
-                  </>
-                ),
-              },
-              {
-                key: "permits",
-                label: (
-                  <span style={{ color: "#faad14" }}>
-                    <SafetyCertificateOutlined /> Permits
-                  </span>
-                ),
-                children: (
-                  <>
-                    <Row gutter={[12, 0]}>
-                      <Col span={12}>
-                        <Form.Item name="eccNo" label="ECC No.">
-                          <Input placeholder="Environmental Compliance Certificate number" />
-                        </Form.Item>
-                      </Col>
-                      <Col span={12}>
-                        <Form.Item
-                          name="hazwasteGenerationId"
-                          label="Hazwaste Gen. ID"
-                        >
-                          <Input placeholder="Hazardous Waste Generation ID" />
-                        </Form.Item>
-                      </Col>
-                    </Row>
-                    <Divider
-                      orientation="left"
-                      plain
-                      style={{ margin: "4px 0 12px", fontSize: 12 }}
-                    >
-                      <SafetyCertificateOutlined
-                        style={{ color: "#1677ff", marginRight: 6 }}
-                      />
-                      Discharge Permits
-                    </Divider>
-                    <Form.List name="dischargePermits">
-                      {(fields, { add, remove }) => (
-                        <>
-                          <Table
-                            size="small"
-                            pagination={false}
-                            dataSource={fields}
-                            rowKey="key"
-                            locale={{
-                              emptyText: "No discharge permits added yet",
-                            }}
-                            columns={[
-                              {
-                                title: "Permit No.",
-                                render: (_, field) => (
-                                  <Form.Item
-                                    name={[field.name, "permitNo"]}
-                                    style={{ margin: 0 }}
-                                  >
-                                    <Input
-                                      size="small"
-                                      placeholder="Permit number"
-                                    />
-                                  </Form.Item>
-                                ),
-                              },
-                              {
-                                title: "DP Type",
-                                width: 150,
-                                render: (_, field) => (
-                                  <Form.Item
-                                    name={[field.name, "permitType"]}
-                                    style={{ margin: 0 }}
-                                  >
-                                    <Select
-                                      size="small"
-                                      allowClear
-                                      placeholder="Type"
-                                      options={DP_TYPE_OPTIONS}
-                                    />
-                                  </Form.Item>
-                                ),
-                              },
-                              {
-                                title: "Validity",
-                                width: 170,
-                                render: (_, field) => (
-                                  <Form.Item
-                                    name={[field.name, "validity"]}
-                                    style={{ margin: 0 }}
-                                  >
-                                    <DatePicker
-                                      size="small"
-                                      format="MM/DD/YYYY"
-                                      style={{ width: "100%" }}
-                                    />
-                                  </Form.Item>
-                                ),
-                              },
-                              {
-                                title: "Status",
-                                width: 140,
-                                render: (_, field) => (
-                                  <Form.Item
-                                    name={[field.name, "status"]}
-                                    style={{ margin: 0 }}
-                                  >
-                                    <Select
-                                      size="small"
-                                      allowClear
-                                      placeholder="Status"
-                                      options={PERMIT_STATUS_OPTIONS}
-                                    />
-                                  </Form.Item>
-                                ),
-                              },
-                              {
-                                title: "",
-                                width: 48,
-                                render: (_, field) => (
-                                  <Button
-                                    size="small"
-                                    type="text"
-                                    danger
-                                    icon={<DeleteOutlined />}
-                                    onClick={() => remove(field.name)}
-                                  />
-                                ),
-                              },
-                            ]}
-                          />
-                          <Button
-                            type="dashed"
-                            onClick={() => add({})}
-                            block
-                            icon={<PlusOutlined />}
-                            size="small"
-                            style={{ marginTop: 8 }}
+                                    </>
+                                  );
+                                })()}
+                            </Card>
+                          );
+                        }}
+                      </Form.Item>
+                    </>
+                  ),
+                },
+                {
+                  key: "permits",
+                  label: (
+                    <span style={{ color: "#faad14" }}>
+                      <SafetyCertificateOutlined /> Permits
+                    </span>
+                  ),
+                  children: (
+                    <>
+                      <Row gutter={[12, 0]}>
+                        <Col span={12}>
+                          <Form.Item name="eccNo" label="ECC No.">
+                            <Input placeholder="Environmental Compliance Certificate number" />
+                          </Form.Item>
+                        </Col>
+                        <Col span={12}>
+                          <Form.Item
+                            name="hazwasteGenerationId"
+                            label="Hazwaste Gen. ID"
                           >
-                            Add Discharge Permit
-                          </Button>
-                        </>
-                      )}
-                    </Form.List>
-                    <Divider
-                      orientation="left"
-                      plain
-                      style={{ margin: "16px 0 12px", fontSize: 12 }}
-                    >
-                      <SafetyCertificateOutlined
-                        style={{ color: "#52c41a", marginRight: 6 }}
-                      />
-                      Permits to Operate
-                    </Divider>
-                    <Form.List name="permitToOperatePermits">
-                      {(fields, { add, remove }) => (
-                        <>
-                          <Table
-                            size="small"
-                            pagination={false}
-                            dataSource={fields}
-                            rowKey="key"
-                            locale={{
-                              emptyText: "No permits to operate added yet",
-                            }}
-                            columns={[
-                              {
-                                title: "Permit No.",
-                                render: (_, field) => (
-                                  <Form.Item
-                                    name={[field.name, "permitNo"]}
-                                    style={{ margin: 0 }}
-                                  >
-                                    <Input
-                                      size="small"
-                                      placeholder="Permit number"
-                                    />
-                                  </Form.Item>
-                                ),
-                              },
-                              {
-                                title: "Validity",
-                                width: 170,
-                                render: (_, field) => (
-                                  <Form.Item
-                                    name={[field.name, "validity"]}
-                                    style={{ margin: 0 }}
-                                  >
-                                    <DatePicker
-                                      size="small"
-                                      format="MM/DD/YYYY"
-                                      style={{ width: "100%" }}
-                                    />
-                                  </Form.Item>
-                                ),
-                              },
-                              {
-                                title: "Status",
-                                width: 140,
-                                render: (_, field) => (
-                                  <Form.Item
-                                    name={[field.name, "status"]}
-                                    style={{ margin: 0 }}
-                                  >
-                                    <Select
-                                      size="small"
-                                      allowClear
-                                      placeholder="Status"
-                                      options={PERMIT_STATUS_OPTIONS}
-                                    />
-                                  </Form.Item>
-                                ),
-                              },
-                              {
-                                title: "",
-                                width: 48,
-                                render: (_, field) => (
-                                  <Button
-                                    size="small"
-                                    type="text"
-                                    danger
-                                    icon={<DeleteOutlined />}
-                                    onClick={() => remove(field.name)}
-                                  />
-                                ),
-                              },
-                            ]}
-                          />
-                          <Button
-                            type="dashed"
-                            onClick={() => add({})}
-                            block
-                            icon={<PlusOutlined />}
-                            size="small"
-                            style={{ marginTop: 8 }}
-                          >
-                            Add Permit to Operate
-                          </Button>
-                        </>
-                      )}
-                    </Form.List>
-                  </>
-                ),
-              },
-              {
-                key: "personnel-monitoring",
-                label: (
-                  <span style={{ color: "#52c41a" }}>
-                    <TeamOutlined /> Personnel &amp; Monitoring
-                  </span>
-                ),
-                children: (
-                  <>
-                    <Row gutter={12}>
-                      <Col span={8}>
-                        <Form.Item name="targetMonth" label="Target Month">
-                          <Select
-                            options={monthOptions}
-                            placeholder="Select"
-                            allowClear
-                          />
-                        </Form.Item>
-                      </Col>
-                      <Col span={8}>
-                        <Form.Item name="enmo" label="ENMO">
-                          <Select
-                            options={enmoOptions}
-                            allowClear
-                            showSearch
-                            placeholder="Select ENMO"
-                          />
-                        </Form.Item>
-                      </Col>
-                      <Col span={8}>
-                        <Form.Item name="focalPerson" label="ESWM Focal Person">
-                          <Select
-                            options={focalOptions}
-                            allowClear
-                            showSearch
-                            placeholder="Select ESWM focal person"
-                          />
-                        </Form.Item>
-                      </Col>
-                      <Col span={8}>
-                        <Form.Item name="iisNumber" label="IIS Number">
-                          <Input />
-                        </Form.Item>
-                      </Col>
-                    </Row>
-                    <Divider
-                      plain
-                      orientation="left"
-                      style={{ fontSize: 12, margin: "4px 0 12px" }}
-                    >
-                      <CalendarOutlined /> Monitoring Dates
-                    </Divider>
-                    <Row gutter={12}>
-                      <Col span={8}>
-                        <Form.Item name="dateOfMonitoring" label="Monitoring">
-                          <DatePicker
-                            format="MM/DD/YYYY"
-                            style={{ width: "100%" }}
-                          />
-                        </Form.Item>
-                      </Col>
-                      <Col span={8}>
-                        <Form.Item
-                          name="dateReportPrepared"
-                          label="Report Prepared"
-                        >
-                          <DatePicker
-                            format="MM/DD/YYYY"
-                            style={{ width: "100%" }}
-                          />
-                        </Form.Item>
-                      </Col>
-                      <Col span={8}>
-                        <Form.Item
-                          name="dateReportReviewedStaff"
-                          label="Reviewed By Staff"
-                        >
-                          <DatePicker
-                            format="MM/DD/YYYY"
-                            style={{ width: "100%" }}
-                          />
-                        </Form.Item>
-                      </Col>
-                      <Col span={8}>
-                        <Form.Item
-                          name="dateReportReviewedFocal"
-                          label="Reviewed By ESWM Focal Person"
-                        >
-                          <DatePicker
-                            format="MM/DD/YYYY"
-                            style={{ width: "100%" }}
-                          />
-                        </Form.Item>
-                      </Col>
-                      <Col span={8}>
-                        <Form.Item name="dateReportApproved" label="Approved">
-                          <DatePicker
-                            format="MM/DD/YYYY"
-                            style={{ width: "100%" }}
-                          />
-                        </Form.Item>
-                      </Col>
-                    </Row>
-                  </>
-                ),
-              },
-              {
-                key: "compliance",
-                label: (
-                  <span style={{ color: "#eb2f96" }}>
-                    <FileTextOutlined /> Compliance
-                  </span>
-                ),
-                children: (
-                  <Row gutter={12}>
-                    <Col span={12}>
-                      <Form.Item
-                        name="findings"
-                        label="Other Findings and Observations"
+                            <Input placeholder="Hazardous Waste Generation ID" />
+                          </Form.Item>
+                        </Col>
+                      </Row>
+                      <Divider
+                        orientation="left"
+                        plain
+                        style={{ margin: "4px 0 12px", fontSize: 12 }}
                       >
-                        <Input.TextArea rows={3} />
-                      </Form.Item>
-                    </Col>
-                    <Col span={12}>
-                      <Form.Item
-                        name="remarksAndRecommendation"
-                        label="Remarks and Recommendation"
-                      >
-                        <Input.TextArea rows={3} />
-                      </Form.Item>
-                    </Col>
-                    <Col span={24}>
-                      <Form.Item
-                        name="technicalConferenceConducted"
-                        valuePropName="checked"
-                        style={{ marginBottom: 8 }}
-                      >
-                        <Checkbox>Technical Conference conducted</Checkbox>
-                      </Form.Item>
-                    </Col>
-                    <Col span={12}>
-                      <Form.Item
-                        name="commitmentFiles"
-                        label="Commitment File"
-                        valuePropName="fileList"
-                        getValueFromEvent={(e) =>
-                          Array.isArray(e) ? e : e?.fileList
-                        }
-                      >
-                        <Upload
-                          {...slfUploadProps}
-                          action={driveDisabled ? undefined : "/eswm-pipeline/api/upload"}
-                          disabled={driveDisabled}
-                          headers={getUploadHeaders()}
-                          multiple
-                          accept=".pdf,.doc,.docx,.xls,.xlsx,image/*"
-                        >
-                          <Button icon={<UploadOutlined />}>
-                            Upload Commitment File (max 200 MB)
-                          </Button>
-                        </Upload>
-                      </Form.Item>
-                    </Col>
-                    <Col span={12}>
-                      <Form.Item
-                        name="progressReportFiles"
-                        label="Progress Report"
-                        valuePropName="fileList"
-                        getValueFromEvent={(e) =>
-                          Array.isArray(e) ? e : e?.fileList
-                        }
-                      >
-                        <Upload
-                          {...slfUploadProps}
-                          action={driveDisabled ? undefined : "/eswm-pipeline/api/upload"}
-                          disabled={driveDisabled}
-                          headers={getUploadHeaders()}
-                          multiple
-                          accept=".pdf,.doc,.docx,.xls,.xlsx,image/*"
-                        >
-                          <Button icon={<UploadOutlined />}>
-                            Upload Progress Report (max 200 MB)
-                          </Button>
-                        </Upload>
-                      </Form.Item>
-                    </Col>
-                  </Row>
-                ),
-              },
-              {
-                key: "preventive",
-                label: (
-                  <span style={{ color: "#fa8c16" }}>
-                    <WarningOutlined /> Preventive Measures
-                  </span>
-                ),
-                children: (
-                  <>
-                    <Divider orientation="left" plain>
-                      Preventive Measure Files
-                    </Divider>
-                    <Form.Item
-                      name="preventiveMeasureFiles"
-                      valuePropName="fileList"
-                      getValueFromEvent={(e) =>
-                        Array.isArray(e) ? e : e?.fileList
-                      }
-                    >
-                      <Upload
-                        {...slfUploadProps}
-                        action={driveDisabled ? undefined : "/eswm-pipeline/api/upload"}
-                          disabled={driveDisabled}
-                        headers={getUploadHeaders()}
-                        multiple
-                        accept=".pdf,.doc,.docx,.xls,.xlsx,image/*"
-                      >
-                        <Button icon={<UploadOutlined />}>
-                          Upload Preventive Measure Files (max 200 MB)
-                        </Button>
-                      </Upload>
-                    </Form.Item>
-                    <Divider orientation="left" plain style={{ marginTop: 16 }}>
-                      Safe Closure and Rehabilitation Plan (SCRP)
-                    </Divider>
-                    <Form.List name="scrpDetails">
-                      {(fields, { add, remove }) => (
-                        <>
-                          <Table
-                            size="small"
-                            pagination={false}
-                            dataSource={fields}
-                            rowKey="key"
-                            locale={{ emptyText: "No SCRP entries yet" }}
-                            columns={[
-                              {
-                                title: "Plan / Activity",
-                                render: (_, field) => (
-                                  <Form.Item
-                                    name={[field.name, "planTitle"]}
-                                    style={{ margin: 0 }}
-                                  >
-                                    <Input
-                                      size="small"
-                                      placeholder="SCRP plan or activity"
-                                    />
-                                  </Form.Item>
-                                ),
-                              },
-                              {
-                                title: "Status",
-                                width: 160,
-                                render: (_, field) => (
-                                  <Form.Item
-                                    name={[field.name, "status"]}
-                                    style={{ margin: 0 }}
-                                  >
-                                    <Select
-                                      size="small"
-                                      allowClear
-                                      options={[
-                                        "Prepared",
-                                        "For Revision",
-                                        "Submitted",
-                                        "Approved",
-                                        "Implemented",
-                                      ].map((value) => ({
-                                        label: value,
-                                        value,
-                                      }))}
-                                    />
-                                  </Form.Item>
-                                ),
-                              },
-                              {
-                                title: "Remarks",
-                                render: (_, field) => (
-                                  <Form.Item
-                                    name={[field.name, "remarks"]}
-                                    style={{ margin: 0 }}
-                                  >
-                                    <Input size="small" placeholder="Remarks" />
-                                  </Form.Item>
-                                ),
-                              },
-                              {
-                                title: "Upload",
-                                width: 230,
-                                render: (_, field) => (
-                                  <Form.Item
-                                    name={[field.name, "attachments"]}
-                                    valuePropName="fileList"
-                                    getValueFromEvent={(e) =>
-                                      Array.isArray(e) ? e : e?.fileList
-                                    }
-                                    style={{ margin: 0 }}
-                                  >
-                                    <Upload
-                                      {...slfUploadProps}
-                                      action={driveDisabled ? undefined : "/eswm-pipeline/api/upload"}
-                          disabled={driveDisabled}
-                                      headers={getUploadHeaders()}
-                                      multiple
-                                      accept=".pdf,.doc,.docx,.xls,.xlsx,image/*"
+                        <SafetyCertificateOutlined
+                          style={{ color: "#1677ff", marginRight: 6 }}
+                        />
+                        Discharge Permits
+                      </Divider>
+                      <Form.List name="dischargePermits">
+                        {(fields, { add, remove }) => (
+                          <>
+                            <Table
+                              size="small"
+                              pagination={false}
+                              dataSource={fields}
+                              rowKey="key"
+                              locale={{
+                                emptyText: "No discharge permits added yet",
+                              }}
+                              columns={[
+                                {
+                                  title: "Permit No.",
+                                  render: (_, field) => (
+                                    <Form.Item
+                                      name={[field.name, "permitNo"]}
+                                      style={{ margin: 0 }}
                                     >
-                                      <Button
+                                      <Input
                                         size="small"
-                                        icon={<UploadOutlined />}
+                                        placeholder="Permit number"
+                                      />
+                                    </Form.Item>
+                                  ),
+                                },
+                                {
+                                  title: "DP Type",
+                                  width: 150,
+                                  render: (_, field) => (
+                                    <Form.Item
+                                      name={[field.name, "permitType"]}
+                                      style={{ margin: 0 }}
+                                    >
+                                      <Select
+                                        size="small"
+                                        allowClear
+                                        placeholder="Type"
+                                        options={DP_TYPE_OPTIONS}
+                                      />
+                                    </Form.Item>
+                                  ),
+                                },
+                                {
+                                  title: "Validity",
+                                  width: 170,
+                                  render: (_, field) => (
+                                    <Form.Item
+                                      name={[field.name, "validity"]}
+                                      style={{ margin: 0 }}
+                                    >
+                                      <DatePicker
+                                        size="small"
+                                        format="MM/DD/YYYY"
+                                        style={{ width: "100%" }}
+                                      />
+                                    </Form.Item>
+                                  ),
+                                },
+                                {
+                                  title: "Status",
+                                  width: 140,
+                                  render: (_, field) => (
+                                    <Form.Item
+                                      name={[field.name, "status"]}
+                                      style={{ margin: 0 }}
+                                    >
+                                      <Select
+                                        size="small"
+                                        allowClear
+                                        placeholder="Status"
+                                        options={PERMIT_STATUS_OPTIONS}
+                                      />
+                                    </Form.Item>
+                                  ),
+                                },
+                                {
+                                  title: "",
+                                  width: 48,
+                                  render: (_, field) => (
+                                    <Button
+                                      size="small"
+                                      type="text"
+                                      danger
+                                      icon={<DeleteOutlined />}
+                                      onClick={() => remove(field.name)}
+                                    />
+                                  ),
+                                },
+                              ]}
+                            />
+                            <Button
+                              type="dashed"
+                              onClick={() => add({})}
+                              block
+                              icon={<PlusOutlined />}
+                              size="small"
+                              style={{ marginTop: 8 }}
+                            >
+                              Add Discharge Permit
+                            </Button>
+                          </>
+                        )}
+                      </Form.List>
+                      <Divider
+                        orientation="left"
+                        plain
+                        style={{ margin: "16px 0 12px", fontSize: 12 }}
+                      >
+                        <SafetyCertificateOutlined
+                          style={{ color: "#52c41a", marginRight: 6 }}
+                        />
+                        Permits to Operate
+                      </Divider>
+                      <Form.List name="permitToOperatePermits">
+                        {(fields, { add, remove }) => (
+                          <>
+                            <Table
+                              size="small"
+                              pagination={false}
+                              dataSource={fields}
+                              rowKey="key"
+                              locale={{
+                                emptyText: "No permits to operate added yet",
+                              }}
+                              columns={[
+                                {
+                                  title: "Permit No.",
+                                  render: (_, field) => (
+                                    <Form.Item
+                                      name={[field.name, "permitNo"]}
+                                      style={{ margin: 0 }}
+                                    >
+                                      <Input
+                                        size="small"
+                                        placeholder="Permit number"
+                                      />
+                                    </Form.Item>
+                                  ),
+                                },
+                                {
+                                  title: "Validity",
+                                  width: 170,
+                                  render: (_, field) => (
+                                    <Form.Item
+                                      name={[field.name, "validity"]}
+                                      style={{ margin: 0 }}
+                                    >
+                                      <DatePicker
+                                        size="small"
+                                        format="MM/DD/YYYY"
+                                        style={{ width: "100%" }}
+                                      />
+                                    </Form.Item>
+                                  ),
+                                },
+                                {
+                                  title: "Status",
+                                  width: 140,
+                                  render: (_, field) => (
+                                    <Form.Item
+                                      name={[field.name, "status"]}
+                                      style={{ margin: 0 }}
+                                    >
+                                      <Select
+                                        size="small"
+                                        allowClear
+                                        placeholder="Status"
+                                        options={PERMIT_STATUS_OPTIONS}
+                                      />
+                                    </Form.Item>
+                                  ),
+                                },
+                                {
+                                  title: "",
+                                  width: 48,
+                                  render: (_, field) => (
+                                    <Button
+                                      size="small"
+                                      type="text"
+                                      danger
+                                      icon={<DeleteOutlined />}
+                                      onClick={() => remove(field.name)}
+                                    />
+                                  ),
+                                },
+                              ]}
+                            />
+                            <Button
+                              type="dashed"
+                              onClick={() => add({})}
+                              block
+                              icon={<PlusOutlined />}
+                              size="small"
+                              style={{ marginTop: 8 }}
+                            >
+                              Add Permit to Operate
+                            </Button>
+                          </>
+                        )}
+                      </Form.List>
+                    </>
+                  ),
+                },
+                {
+                  key: "personnel-monitoring",
+                  label: (
+                    <span style={{ color: "#52c41a" }}>
+                      <TeamOutlined /> Personnel &amp; Monitoring
+                    </span>
+                  ),
+                  children: (
+                    <>
+                      <Row gutter={12}>
+                        <Col span={8}>
+                          <Form.Item name="targetMonth" label="Target Month">
+                            <Select
+                              options={monthOptions}
+                              placeholder="Select"
+                              allowClear
+                            />
+                          </Form.Item>
+                        </Col>
+                        <Col span={8}>
+                          <Form.Item name="enmo" label="ENMO">
+                            <Select
+                              options={enmoOptions}
+                              allowClear
+                              showSearch
+                              placeholder="Select ENMO"
+                            />
+                          </Form.Item>
+                        </Col>
+                        <Col span={8}>
+                          <Form.Item
+                            name="focalPerson"
+                            label="ESWM Focal Person"
+                          >
+                            <Select
+                              options={focalOptions}
+                              allowClear
+                              showSearch
+                              placeholder="Select ESWM focal person"
+                            />
+                          </Form.Item>
+                        </Col>
+                        <Col span={8}>
+                          <Form.Item name="iisNumber" label="IIS Number">
+                            <Input />
+                          </Form.Item>
+                        </Col>
+                      </Row>
+                      <Divider
+                        plain
+                        orientation="left"
+                        style={{ fontSize: 12, margin: "4px 0 12px" }}
+                      >
+                        <CalendarOutlined /> Monitoring Dates
+                      </Divider>
+                      <Row gutter={12}>
+                        <Col span={8}>
+                          <Form.Item name="dateOfMonitoring" label="Monitoring">
+                            <DatePicker
+                              format="MM/DD/YYYY"
+                              style={{ width: "100%" }}
+                            />
+                          </Form.Item>
+                        </Col>
+                        <Col span={8}>
+                          <Form.Item
+                            name="dateReportPrepared"
+                            label="Report Prepared"
+                          >
+                            <DatePicker
+                              format="MM/DD/YYYY"
+                              style={{ width: "100%" }}
+                            />
+                          </Form.Item>
+                        </Col>
+                        <Col span={8}>
+                          <Form.Item
+                            name="dateReportReviewedStaff"
+                            label="Reviewed By Staff"
+                          >
+                            <DatePicker
+                              format="MM/DD/YYYY"
+                              style={{ width: "100%" }}
+                            />
+                          </Form.Item>
+                        </Col>
+                        <Col span={8}>
+                          <Form.Item
+                            name="dateReportReviewedFocal"
+                            label="Reviewed By ESWM Focal Person"
+                          >
+                            <DatePicker
+                              format="MM/DD/YYYY"
+                              style={{ width: "100%" }}
+                            />
+                          </Form.Item>
+                        </Col>
+                        <Col span={8}>
+                          <Form.Item name="dateReportApproved" label="Approved">
+                            <DatePicker
+                              format="MM/DD/YYYY"
+                              style={{ width: "100%" }}
+                            />
+                          </Form.Item>
+                        </Col>
+                      </Row>
+                    </>
+                  ),
+                },
+                {
+                  key: "compliance",
+                  label: (
+                    <span style={{ color: "#eb2f96" }}>
+                      <FileTextOutlined /> Compliance
+                    </span>
+                  ),
+                  children: (
+                    <Row gutter={12}>
+                      <Col span={12}>
+                        <Form.Item
+                          name="findings"
+                          label="Other Findings and Observations"
+                        >
+                          <Input.TextArea rows={3} />
+                        </Form.Item>
+                      </Col>
+                      <Col span={12}>
+                        <Form.Item
+                          name="remarksAndRecommendation"
+                          label="Remarks and Recommendation"
+                        >
+                          <Input.TextArea rows={3} />
+                        </Form.Item>
+                      </Col>
+                      <Col span={24}>
+                        <Form.Item
+                          name="technicalConferenceConducted"
+                          valuePropName="checked"
+                          style={{ marginBottom: 8 }}
+                        >
+                          <Checkbox>Technical Conference conducted</Checkbox>
+                        </Form.Item>
+                      </Col>
+                      <Col span={12}>
+                        <Form.Item
+                          name="commitmentFiles"
+                          label="Commitment File"
+                          valuePropName="fileList"
+                          getValueFromEvent={(e) =>
+                            Array.isArray(e) ? e : e?.fileList
+                          }
+                        >
+                          <Upload
+                            {...slfUploadProps}
+                            action={
+                              driveDisabled
+                                ? undefined
+                                : "/eswm-pipeline/api/upload"
+                            }
+                            disabled={driveDisabled}
+                            headers={getUploadHeaders()}
+                            multiple
+                            accept=".pdf,.doc,.docx,.xls,.xlsx,image/*"
+                          >
+                            <Button icon={<UploadOutlined />}>
+                              Upload Commitment File (max 200 MB)
+                            </Button>
+                          </Upload>
+                        </Form.Item>
+                      </Col>
+                      <Col span={12}>
+                        <Form.Item
+                          name="progressReportFiles"
+                          label="Progress Report"
+                          valuePropName="fileList"
+                          getValueFromEvent={(e) =>
+                            Array.isArray(e) ? e : e?.fileList
+                          }
+                        >
+                          <Upload
+                            {...slfUploadProps}
+                            action={
+                              driveDisabled
+                                ? undefined
+                                : "/eswm-pipeline/api/upload"
+                            }
+                            disabled={driveDisabled}
+                            headers={getUploadHeaders()}
+                            multiple
+                            accept=".pdf,.doc,.docx,.xls,.xlsx,image/*"
+                          >
+                            <Button icon={<UploadOutlined />}>
+                              Upload Progress Report (max 200 MB)
+                            </Button>
+                          </Upload>
+                        </Form.Item>
+                      </Col>
+                    </Row>
+                  ),
+                },
+                {
+                  key: "preventive",
+                  label: (
+                    <span style={{ color: "#fa8c16" }}>
+                      <WarningOutlined /> Preventive Measures
+                    </span>
+                  ),
+                  children: (
+                    <>
+                      <Divider orientation="left" plain>
+                        Preventive Measure Files
+                      </Divider>
+                      <Form.Item
+                        name="preventiveMeasureFiles"
+                        valuePropName="fileList"
+                        getValueFromEvent={(e) =>
+                          Array.isArray(e) ? e : e?.fileList
+                        }
+                      >
+                        <Upload
+                          {...slfUploadProps}
+                          action={
+                            driveDisabled
+                              ? undefined
+                              : "/eswm-pipeline/api/upload"
+                          }
+                          disabled={driveDisabled}
+                          headers={getUploadHeaders()}
+                          multiple
+                          accept=".pdf,.doc,.docx,.xls,.xlsx,image/*"
+                        >
+                          <Button icon={<UploadOutlined />}>
+                            Upload Preventive Measure Files (max 200 MB)
+                          </Button>
+                        </Upload>
+                      </Form.Item>
+                      <Divider
+                        orientation="left"
+                        plain
+                        style={{ marginTop: 16 }}
+                      >
+                        Safe Closure and Rehabilitation Plan (SCRP)
+                      </Divider>
+                      <Form.List name="scrpDetails">
+                        {(fields, { add, remove }) => (
+                          <>
+                            <Table
+                              size="small"
+                              pagination={false}
+                              dataSource={fields}
+                              rowKey="key"
+                              locale={{ emptyText: "No SCRP entries yet" }}
+                              columns={[
+                                {
+                                  title: "Plan / Activity",
+                                  render: (_, field) => (
+                                    <Form.Item
+                                      name={[field.name, "planTitle"]}
+                                      style={{ margin: 0 }}
+                                    >
+                                      <Input
+                                        size="small"
+                                        placeholder="SCRP plan or activity"
+                                      />
+                                    </Form.Item>
+                                  ),
+                                },
+                                {
+                                  title: "Status",
+                                  width: 160,
+                                  render: (_, field) => (
+                                    <Form.Item
+                                      name={[field.name, "status"]}
+                                      style={{ margin: 0 }}
+                                    >
+                                      <Select
+                                        size="small"
+                                        allowClear
+                                        options={[
+                                          "Prepared",
+                                          "For Revision",
+                                          "Submitted",
+                                          "Approved",
+                                          "Implemented",
+                                        ].map((value) => ({
+                                          label: value,
+                                          value,
+                                        }))}
+                                      />
+                                    </Form.Item>
+                                  ),
+                                },
+                                {
+                                  title: "Remarks",
+                                  render: (_, field) => (
+                                    <Form.Item
+                                      name={[field.name, "remarks"]}
+                                      style={{ margin: 0 }}
+                                    >
+                                      <Input
+                                        size="small"
+                                        placeholder="Remarks"
+                                      />
+                                    </Form.Item>
+                                  ),
+                                },
+                                {
+                                  title: "Upload",
+                                  width: 230,
+                                  render: (_, field) => (
+                                    <Form.Item
+                                      name={[field.name, "attachments"]}
+                                      valuePropName="fileList"
+                                      getValueFromEvent={(e) =>
+                                        Array.isArray(e) ? e : e?.fileList
+                                      }
+                                      style={{ margin: 0 }}
+                                    >
+                                      <Upload
+                                        {...slfUploadProps}
+                                        action={
+                                          driveDisabled
+                                            ? undefined
+                                            : "/eswm-pipeline/api/upload"
+                                        }
+                                        disabled={driveDisabled}
+                                        headers={getUploadHeaders()}
+                                        multiple
+                                        accept=".pdf,.doc,.docx,.xls,.xlsx,image/*"
                                       >
-                                        Upload (max 200 MB)
-                                      </Button>
-                                    </Upload>
-                                  </Form.Item>
-                                ),
-                              },
-                              {
-                                title: "",
-                                width: 48,
-                                render: (_, field) => (
+                                        <Button
+                                          size="small"
+                                          icon={<UploadOutlined />}
+                                        >
+                                          Upload (max 200 MB)
+                                        </Button>
+                                      </Upload>
+                                    </Form.Item>
+                                  ),
+                                },
+                                {
+                                  title: "",
+                                  width: 48,
+                                  render: (_, field) => (
+                                    <Button
+                                      size="small"
+                                      type="text"
+                                      danger
+                                      icon={<DeleteOutlined />}
+                                      onClick={() => remove(field.name)}
+                                    />
+                                  ),
+                                },
+                              ]}
+                            />
+                            <Button
+                              type="dashed"
+                              onClick={() => add({})}
+                              block
+                              icon={<PlusOutlined />}
+                              size="small"
+                              style={{ marginTop: 8 }}
+                            >
+                              Add SCRP Entry
+                            </Button>
+                          </>
+                        )}
+                      </Form.List>
+                    </>
+                  ),
+                },
+                {
+                  key: "gallery",
+                  label: (
+                    <span style={{ color: "#1677ff" }}>
+                      <FileImageOutlined /> Gallery
+                    </span>
+                  ),
+                  children: (
+                    <>
+                      <Divider orientation="left" plain>
+                        SLF Component Gallery
+                      </Divider>
+                      <Form.List name="galleryItems">
+                        {(fields, { add, remove }) => (
+                          <>
+                            {fields.map(({ key, name, ...rest }, idx) => (
+                              <Card
+                                key={key}
+                                size="small"
+                                title={
+                                  <Space size={6}>
+                                    <FileImageOutlined
+                                      style={{ color: "#1677ff" }}
+                                    />
+                                    <Text strong style={{ fontSize: 12 }}>
+                                      Gallery Item {idx + 1}
+                                    </Text>
+                                  </Space>
+                                }
+                                style={{ marginBottom: 10, borderRadius: 8 }}
+                                extra={
                                   <Button
                                     size="small"
                                     type="text"
                                     danger
                                     icon={<DeleteOutlined />}
-                                    onClick={() => remove(field.name)}
-                                  />
-                                ),
-                              },
-                            ]}
-                          />
-                          <Button
-                            type="dashed"
-                            onClick={() => add({})}
-                            block
-                            icon={<PlusOutlined />}
-                            size="small"
-                            style={{ marginTop: 8 }}
-                          >
-                            Add SCRP Entry
-                          </Button>
-                        </>
-                      )}
-                    </Form.List>
-                  </>
-                ),
-              },
-              {
-                key: "gallery",
-                label: (
-                  <span style={{ color: "#1677ff" }}>
-                    <FileImageOutlined /> Gallery
-                  </span>
-                ),
-                children: (
-                  <>
-                    <Divider orientation="left" plain>
-                      SLF Component Gallery
-                    </Divider>
-                    <Form.List name="galleryItems">
-                      {(fields, { add, remove }) => (
-                        <>
-                          {fields.map(({ key, name, ...rest }) => (
-                            <Card
-                              key={key}
-                              size="small"
-                              style={{ marginBottom: 10, borderRadius: 8 }}
-                              extra={
-                                <Button
-                                  size="small"
-                                  type="text"
-                                  danger
-                                  icon={<DeleteOutlined />}
-                                  onClick={() => remove(name)}
-                                />
-                              }
-                            >
-                              <Row gutter={[12, 0]}>
-                                <Col span={8}>
-                                  <Form.Item
-                                    {...rest}
-                                    name={[name, "component"]}
-                                    label="SLF Component"
+                                    onClick={() => remove(name)}
                                   >
-                                    <Select
-                                      allowClear
-                                      showSearch
-                                      placeholder="Select component"
-                                      options={GALLERY_COMPONENT_OPTIONS}
-                                    />
-                                  </Form.Item>
-                                </Col>
-                                <Col span={8}>
-                                  <Form.Item
-                                    {...rest}
-                                    name={[name, "folder"]}
-                                    label="Folder"
-                                  >
-                                    <Select
-                                      mode="tags"
-                                      maxTagCount={1}
-                                      placeholder="Create or select folder"
-                                      tokenSeparators={[","]}
-                                    />
-                                  </Form.Item>
-                                </Col>
-                                <Col span={8}>
-                                  <Form.Item
-                                    {...rest}
-                                    name={[name, "caption"]}
-                                    label="Caption"
-                                  >
-                                    <Input placeholder="Photo caption" />
-                                  </Form.Item>
-                                </Col>
-                                <Col span={24}>
-                                  <Form.Item
-                                    {...rest}
-                                    name={[name, "url"]}
-                                    label="Photo"
-                                    valuePropName="fileList"
-                                    getValueFromEvent={(e) =>
-                                      Array.isArray(e) ? e : e?.fileList
-                                    }
-                                  >
-                                    <Upload
-                                      {...slfUploadProps}
-                                      listType="picture-card"
-                                      maxCount={1}
-                                      accept="image/*"
-                                      action={driveDisabled ? undefined : "/eswm-pipeline/api/upload"}
-                          disabled={driveDisabled}
-                                      headers={getUploadHeaders()}
+                                    Remove
+                                  </Button>
+                                }
+                              >
+                                <Row gutter={[12, 0]}>
+                                  <Col xs={24} sm={12} md={8}>
+                                    <Form.Item
+                                      {...rest}
+                                      name={[name, "component"]}
+                                      label="SLF Component"
                                     >
-                                      <div>
-                                        <PlusOutlined />
-                                        <div
-                                          style={{ marginTop: 8, fontSize: 12 }}
-                                        >
-                                          Upload Photo
-                                          <br />
-                                          <Text type="secondary" style={{ fontSize: 11 }}>
-                                            Max 200 MB
-                                          </Text>
+                                      <Select
+                                        allowClear
+                                        showSearch
+                                        placeholder="Select component"
+                                        options={GALLERY_COMPONENT_OPTIONS}
+                                      />
+                                    </Form.Item>
+                                  </Col>
+                                  <Col xs={24} sm={12} md={8}>
+                                    <Form.Item
+                                      {...rest}
+                                      name={[name, "folder"]}
+                                      label="Folder"
+                                    >
+                                      <Select
+                                        mode="tags"
+                                        maxTagCount={1}
+                                        placeholder="Create or select folder"
+                                        tokenSeparators={[","]}
+                                      />
+                                    </Form.Item>
+                                  </Col>
+                                  <Col xs={24} sm={24} md={8}>
+                                    <Form.Item
+                                      {...rest}
+                                      name={[name, "caption"]}
+                                      label="Caption"
+                                    >
+                                      <Input placeholder="Photo caption" />
+                                    </Form.Item>
+                                  </Col>
+                                  <Col span={24}>
+                                    <Form.Item
+                                      {...rest}
+                                      name={[name, "url"]}
+                                      label="Photo"
+                                      valuePropName="fileList"
+                                      getValueFromEvent={(e) =>
+                                        Array.isArray(e) ? e : e?.fileList
+                                      }
+                                    >
+                                      <Upload
+                                        {...slfUploadProps}
+                                        listType="picture-card"
+                                        maxCount={1}
+                                        accept="image/*"
+                                        action={
+                                          driveDisabled
+                                            ? undefined
+                                            : "/eswm-pipeline/api/upload"
+                                        }
+                                        disabled={driveDisabled}
+                                        headers={getUploadHeaders()}
+                                      >
+                                        <div>
+                                          <PlusOutlined />
+                                          <div
+                                            style={{
+                                              marginTop: 8,
+                                              fontSize: 12,
+                                            }}
+                                          >
+                                            Upload Photo
+                                            <br />
+                                            <Text
+                                              type="secondary"
+                                              style={{ fontSize: 11 }}
+                                            >
+                                              Max 200 MB
+                                            </Text>
+                                          </div>
                                         </div>
-                                      </div>
-                                    </Upload>
-                                  </Form.Item>
-                                </Col>
-                              </Row>
-                            </Card>
-                          ))}
-                          <Button
-                            type="dashed"
-                            onClick={() => add({})}
-                            block
-                            icon={<PlusOutlined />}
-                          >
-                            Add Gallery Item
-                          </Button>
-                        </>
-                      )}
-                    </Form.List>
-                    <Divider orientation="left" plain style={{ marginTop: 16 }}>
-                      Legacy Photo Uploads
-                    </Divider>
-                    <Form.Item
-                      name="galleryPhotos"
-                      valuePropName="fileList"
-                      getValueFromEvent={(e) =>
-                        Array.isArray(e) ? e : e?.fileList
-                      }
-                    >
-                      <Upload
-                        {...slfUploadProps}
-                        listType="picture-card"
-                        accept="image/*"
-                        multiple
-                        action={driveDisabled ? undefined : "/eswm-pipeline/api/upload"}
-                          disabled={driveDisabled}
-                        headers={getUploadHeaders()}
-                      >
-                        <div>
-                          <PlusOutlined />
-                          <div style={{ marginTop: 8, fontSize: 12 }}>
-                            Upload Photo
-                            <br />
-                            <Text type="secondary" style={{ fontSize: 11 }}>
-                              Max 200 MB
-                            </Text>
-                          </div>
-                        </div>
-                      </Upload>
-                    </Form.Item>
-                  </>
-                ),
-              },
-              {
-                key: "documents",
-                label: (
-                  <span style={{ color: "#722ed1" }}>
-                    <FolderOutlined /> Documents
-                  </span>
-                ),
-                children: (
-                  <>
-                    <Divider orientation="left" plain>
-                      SLF Documents
-                    </Divider>
-                    <Form.List name="slfDocuments">
-                      {(fields, { add, remove }) => (
-                        <>
-                          {fields.map(({ key, name, ...rest }) => (
-                            <Card
-                              key={key}
-                              size="small"
-                              style={{ marginBottom: 10, borderRadius: 8 }}
-                              extra={
-                                <MinusCircleOutlined
-                                  style={{
-                                    color: "#ff4d4f",
-                                    cursor: "pointer",
-                                  }}
-                                  onClick={() => remove(name)}
-                                />
-                              }
+                                      </Upload>
+                                    </Form.Item>
+                                  </Col>
+                                </Row>
+                              </Card>
+                            ))}
+                            <Button
+                              type="dashed"
+                              onClick={() => add({})}
+                              block
+                              icon={<PlusOutlined />}
                             >
-                              <Row gutter={[12, 0]}>
-                                <Col xs={24} sm={10}>
-                                  <Form.Item
-                                    {...rest}
-                                    name={[name, "title"]}
-                                    label="Title"
-                                    rules={[
-                                      {
-                                        required: true,
-                                        message: "Title required",
-                                      },
-                                    ]}
-                                  >
-                                    <Input placeholder="Document title" />
-                                  </Form.Item>
-                                </Col>
-                                <Col xs={24} sm={14}>
-                                  <Form.Item
-                                    {...rest}
-                                    name={[name, "docType"]}
-                                    label="Document Type"
-                                  >
-                                    <Select
-                                      allowClear
-                                      placeholder="Select type"
-                                      options={[
-                                        { label: "ECC", value: "ECC" },
-                                        { label: "Permit", value: "Permit" },
-                                        {
-                                          label: "Monitoring Report",
-                                          value: "Monitoring Report",
-                                        },
-                                        {
-                                          label: "Compliance Certificate",
-                                          value: "Compliance Certificate",
-                                        },
-                                        {
-                                          label: "Site Plan",
-                                          value: "Site Plan",
-                                        },
-                                        { label: "Other", value: "Other" },
-                                      ]}
-                                    />
-                                  </Form.Item>
-                                </Col>
-                                <Col xs={24}>
-                                  <Form.Item
-                                    {...rest}
-                                    name={[name, "description"]}
-                                    label="Description"
-                                  >
-                                    <Input placeholder="Brief description of the document" />
-                                  </Form.Item>
-                                </Col>
-                                <Col xs={24}>
-                                  <Form.Item
-                                    {...rest}
-                                    name={[name, "url"]}
-                                    label="File"
-                                    valuePropName="fileList"
-                                    getValueFromEvent={(e) =>
-                                      Array.isArray(e) ? e : e?.fileList
-                                    }
-                                  >
-                                    <Upload
-                                      {...slfUploadProps}
-                                      maxCount={1}
-                                      accept=".pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx"
-                                      action={driveDisabled ? undefined : "/eswm-pipeline/api/upload"}
+                              Add Gallery Item
+                            </Button>
+                          </>
+                        )}
+                      </Form.List>
+                      <Divider
+                        orientation="left"
+                        plain
+                        style={{ marginTop: 16 }}
+                      >
+                        Legacy Photo Uploads
+                      </Divider>
+                      <Form.Item
+                        name="galleryPhotos"
+                        valuePropName="fileList"
+                        getValueFromEvent={(e) =>
+                          Array.isArray(e) ? e : e?.fileList
+                        }
+                      >
+                        <Upload
+                          {...slfUploadProps}
+                          listType="picture-card"
+                          accept="image/*"
+                          multiple
+                          action={
+                            driveDisabled
+                              ? undefined
+                              : "/eswm-pipeline/api/upload"
+                          }
                           disabled={driveDisabled}
-                                      headers={getUploadHeaders()}
+                          headers={getUploadHeaders()}
+                        >
+                          <div>
+                            <PlusOutlined />
+                            <div style={{ marginTop: 8, fontSize: 12 }}>
+                              Upload Photo
+                              <br />
+                              <Text type="secondary" style={{ fontSize: 11 }}>
+                                Max 200 MB
+                              </Text>
+                            </div>
+                          </div>
+                        </Upload>
+                      </Form.Item>
+                    </>
+                  ),
+                },
+                {
+                  key: "documents",
+                  label: (
+                    <span style={{ color: "#722ed1" }}>
+                      <FolderOutlined /> Documents
+                    </span>
+                  ),
+                  children: (
+                    <>
+                      <Divider orientation="left" plain>
+                        SLF Documents
+                      </Divider>
+                      <Form.List name="slfDocuments">
+                        {(fields, { add, remove }) => (
+                          <>
+                            {fields.map(({ key, name, ...rest }, idx) => (
+                              <Card
+                                key={key}
+                                size="small"
+                                title={
+                                  <Space size={6}>
+                                    <FilePdfOutlined
+                                      style={{ color: "#722ed1" }}
+                                    />
+                                    <Text strong style={{ fontSize: 12 }}>
+                                      Document {idx + 1}
+                                    </Text>
+                                  </Space>
+                                }
+                                style={{ marginBottom: 10, borderRadius: 8 }}
+                                extra={
+                                  <Button
+                                    size="small"
+                                    type="text"
+                                    danger
+                                    icon={<MinusCircleOutlined />}
+                                    onClick={() => remove(name)}
+                                  >
+                                    Remove
+                                  </Button>
+                                }
+                              >
+                                <Row gutter={[12, 0]}>
+                                  <Col xs={24} sm={10}>
+                                    <Form.Item
+                                      {...rest}
+                                      name={[name, "title"]}
+                                      label="Title"
+                                      rules={[
+                                        {
+                                          required: true,
+                                          message: "Title required",
+                                        },
+                                      ]}
                                     >
-                                      <Button icon={<FilePdfOutlined />}>
-                                        Upload Document (max 200 MB)
-                                      </Button>
-                                    </Upload>
-                                  </Form.Item>
-                                </Col>
-                              </Row>
-                            </Card>
-                          ))}
-                          <Button
-                            type="dashed"
-                            onClick={() =>
-                              add({ docType: "Monitoring Report" })
-                            }
-                            block
-                            icon={<PlusOutlined />}
-                          >
-                            Add Document
-                          </Button>
-                        </>
-                      )}
-                    </Form.List>
-                  </>
-                ),
-              },
-            ]}
-          />
+                                      <Input placeholder="Document title" />
+                                    </Form.Item>
+                                  </Col>
+                                  <Col xs={24} sm={14}>
+                                    <Form.Item
+                                      {...rest}
+                                      name={[name, "docType"]}
+                                      label="Document Type"
+                                    >
+                                      <Select
+                                        allowClear
+                                        placeholder="Select type"
+                                        options={[
+                                          { label: "ECC", value: "ECC" },
+                                          { label: "Permit", value: "Permit" },
+                                          {
+                                            label: "Monitoring Report",
+                                            value: "Monitoring Report",
+                                          },
+                                          {
+                                            label: "Compliance Certificate",
+                                            value: "Compliance Certificate",
+                                          },
+                                          {
+                                            label: "Site Plan",
+                                            value: "Site Plan",
+                                          },
+                                          { label: "Other", value: "Other" },
+                                        ]}
+                                      />
+                                    </Form.Item>
+                                  </Col>
+                                  <Col xs={24}>
+                                    <Form.Item
+                                      {...rest}
+                                      name={[name, "description"]}
+                                      label="Description"
+                                    >
+                                      <Input placeholder="Brief description of the document" />
+                                    </Form.Item>
+                                  </Col>
+                                  <Col xs={24}>
+                                    <Form.Item
+                                      {...rest}
+                                      name={[name, "url"]}
+                                      label="File"
+                                      valuePropName="fileList"
+                                      getValueFromEvent={(e) =>
+                                        Array.isArray(e) ? e : e?.fileList
+                                      }
+                                    >
+                                      <Upload
+                                        {...slfUploadProps}
+                                        maxCount={1}
+                                        accept=".pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx"
+                                        action={
+                                          driveDisabled
+                                            ? undefined
+                                            : "/eswm-pipeline/api/upload"
+                                        }
+                                        disabled={driveDisabled}
+                                        headers={getUploadHeaders()}
+                                      >
+                                        <Button icon={<FilePdfOutlined />}>
+                                          Upload Document (max 200 MB)
+                                        </Button>
+                                      </Upload>
+                                    </Form.Item>
+                                  </Col>
+                                </Row>
+                              </Card>
+                            ))}
+                            <Button
+                              type="dashed"
+                              onClick={() =>
+                                add({ docType: "Monitoring Report" })
+                              }
+                              block
+                              icon={<PlusOutlined />}
+                            >
+                              Add Document
+                            </Button>
+                          </>
+                        )}
+                      </Form.List>
+                    </>
+                  ),
+                },
+              ]}
+            />
           </Form>
         </Spin>
       </Modal>
@@ -6015,7 +6565,10 @@ export default function SLFMonitoring({
       >
         {mapPreview && (
           <div>
-            <Text type="secondary" style={{ display: "block", marginBottom: 8 }}>
+            <Text
+              type="secondary"
+              style={{ display: "block", marginBottom: 8 }}
+            >
               {mapPreview.latitude}, {mapPreview.longitude}
             </Text>
             <iframe
@@ -6230,12 +6783,12 @@ export default function SLFMonitoring({
                   readOnly
                   value={
                     convM3ToTons != null
-                      ? `${(
-                          convM3ToTons *
-                          (convDensity ?? 0.2)
-                        ).toLocaleString(undefined, {
-                          maximumFractionDigits: 3,
-                        })} tons`
+                      ? `${(convM3ToTons * (convDensity ?? 0.2)).toLocaleString(
+                          undefined,
+                          {
+                            maximumFractionDigits: 3,
+                          },
+                        )} tons`
                       : ""
                   }
                   placeholder="Result"
@@ -6250,8 +6803,7 @@ export default function SLFMonitoring({
                         onClick={() =>
                           copyText(
                             `${(
-                              convM3ToTons *
-                              (convDensity ?? 0.2)
+                              convM3ToTons * (convDensity ?? 0.2)
                             ).toLocaleString(undefined, {
                               maximumFractionDigits: 3,
                             })} tons`,
@@ -6339,6 +6891,7 @@ export default function SLFMonitoring({
           <>
             {detailViewRecord ? (
               <Tabs
+                className="slf-detail-tabs"
                 defaultActiveKey="slf-dashboard"
                 tabPosition="left"
                 destroyInactiveTabPane
@@ -6430,11 +6983,13 @@ export default function SLFMonitoring({
                             )}
                           </Descriptions.Item>
                           <Descriptions.Item label="Treatment Type">
-                            {formatStringArray(detailViewRecord.wastewaterTreatmentFacilityType) ||
-                              "—"}
+                            {formatStringArray(
+                              detailViewRecord.wastewaterTreatmentFacilityType,
+                            ) || "—"}
                           </Descriptions.Item>
                           <Descriptions.Item label="WWTF Remarks">
-                            {detailViewRecord.wastewaterTreatmentFacilityRemarks || "—"}
+                            {detailViewRecord.wastewaterTreatmentFacilityRemarks ||
+                              "—"}
                           </Descriptions.Item>
                         </Descriptions>
                         {(detailViewRecord.receivingFacilities || []).length >
@@ -6525,7 +7080,7 @@ export default function SLFMonitoring({
                   {
                     key: "2",
                     label: (
-                      <span style={{ color: "#fa8c16" }}>
+                      <span style={{ color: "#13b626" }}>
                         <BankOutlined /> Facility &amp; Operations
                       </span>
                     ),
@@ -6555,21 +7110,27 @@ export default function SLFMonitoring({
                           detailViewRecord.volumeCapacityUnit ||
                           "m³",
                       );
+                      // Leachate & Gas removed from the Facility & Operations UI
+                      // (each SLF cell carries its own capacity data instead).
                       const infraData = [
                         { name: "Cells", value: cells },
-                        { name: "Leachate Treatment Plant", value: leachate },
-                        { name: "Gas Management", value: gasVents },
                       ].filter((d) => d.value > 0);
                       const capacityData = (() => {
                         if (capacity > 0) {
                           return [
                             {
                               name: "Waste Received",
-                              value: Math.min(wasteReceivedInCapacityUnit, capacity),
+                              value: Math.min(
+                                wasteReceivedInCapacityUnit,
+                                capacity,
+                              ),
                             },
                             {
                               name: "Remaining Capacity",
-                              value: Math.max(0, capacity - wasteReceivedInCapacityUnit),
+                              value: Math.max(
+                                0,
+                                capacity - wasteReceivedInCapacityUnit,
+                              ),
                             },
                           ];
                         }
@@ -6655,7 +7216,9 @@ export default function SLFMonitoring({
                       const pctUsed =
                         capacity > 0
                           ? Math.min(
-                              Math.round((wasteReceivedInCapacityUnit / capacity) * 100),
+                              Math.round(
+                                (wasteReceivedInCapacityUnit / capacity) * 100,
+                              ),
                               100,
                             )
                           : 0;
@@ -6670,12 +7233,6 @@ export default function SLFMonitoring({
                           >
                             <Descriptions.Item label="Cells">
                               {cells || "—"}
-                            </Descriptions.Item>
-                            <Descriptions.Item label="Leachate Treatment Plant">
-                              {leachate || "—"}
-                            </Descriptions.Item>
-                            <Descriptions.Item label="Gas Management">
-                              {gasVents || "—"}
                             </Descriptions.Item>
                             <Descriptions.Item
                               label="Waste Received in Cell"
@@ -6705,25 +7262,26 @@ export default function SLFMonitoring({
                               const cellCapacityUnits =
                                 detailViewRecord.cellCapacityUnits || [];
                               const hasAnyBaselineData = Boolean(baselineData);
-                              const hasCellUsageRows =
-                                (detailViewRecord._cellUsageRows || []).some(
-                                  (row) =>
-                                    Number(row?.baseline || 0) > 0 ||
-                                    Number(row?.submissions || 0) > 0 ||
-                                    Number(row?.total || 0) > 0,
-                                );
+                              const hasCellUsageRows = (
+                                detailViewRecord._cellUsageRows || []
+                              ).some(
+                                (row) =>
+                                  Number(row?.baseline || 0) > 0 ||
+                                  Number(row?.submissions || 0) > 0 ||
+                                  Number(row?.total || 0) > 0,
+                              );
                               const hasCellBaseline =
                                 hasCellUsageRows ||
                                 (baselineData &&
                                   (activeCellEntries.some(
-                                  (entry) => Number(entry?.volume || 0) > 0,
-                                ) ||
-                                  closedCellEntries.some(
                                     (entry) => Number(entry?.volume || 0) > 0,
                                   ) ||
-                                  baselineData.activeCellResidualVolume > 0 ||
-                                  baselineData.activeCellInertVolume > 0 ||
-                                  baselineData.closedCellResidualVolume > 0 ||
+                                    closedCellEntries.some(
+                                      (entry) => Number(entry?.volume || 0) > 0,
+                                    ) ||
+                                    baselineData.activeCellResidualVolume > 0 ||
+                                    baselineData.activeCellInertVolume > 0 ||
+                                    baselineData.closedCellResidualVolume > 0 ||
                                     baselineData.closedCellInertVolume > 0));
                               return (
                                 <>
@@ -6735,209 +7293,7 @@ export default function SLFMonitoring({
                                     gutter={[16, 16]}
                                     style={{ marginBottom: 16 }}
                                   >
-                                    <Col xs={24} md={10}>
-                                      <Card
-                                        size="small"
-                                        title={
-                                          <>
-                                            <PieChartOutlined
-                                              style={{ color: "#2f54eb" }}
-                                            />{" "}
-                                            Capacity Utilization
-                                          </>
-                                        }
-                                        style={{ borderRadius: 10 }}
-                                      >
-                                        {capacityData.length > 0 ? (
-                                          <ResponsiveContainer
-                                            width="100%"
-                                            height={190}
-                                          >
-                                            <PieChart>
-                                              <Pie
-                                                data={capacityData}
-                                                cx="50%"
-                                                cy="50%"
-                                                innerRadius={48}
-                                                outerRadius={75}
-                                                paddingAngle={
-                                                  capacityData.length > 1
-                                                    ? 3
-                                                    : 0
-                                                }
-                                                dataKey="value"
-                                                isAnimationActive={false}
-                                                animationBegin={80}
-                                                animationDuration={650}
-                                              >
-                                                {capacityData.map(
-                                                  (entry, i) => (
-                                                    <RCell
-                                                      key={i}
-                                                      fill={
-                                                        entry.name.includes(
-                                                          "Waste",
-                                                        )
-                                                          ? "#52c41a"
-                                                          : entry.name.includes(
-                                                                "Remaining",
-                                                              )
-                                                            ? "#d9d9d9"
-                                                            : CHART_COLORS[
-                                                                i %
-                                                                  CHART_COLORS.length
-                                                              ]
-                                                      }
-                                                    />
-                                                  ),
-                                                )}
-                                              </Pie>
-                                              <RTooltip
-                                                formatter={(v) =>
-                                                  v.toLocaleString()
-                                                }
-                                              />
-                                              <Legend
-                                                wrapperStyle={{ fontSize: 11 }}
-                                              />
-                                            </PieChart>
-                                          </ResponsiveContainer>
-                                        ) : (
-                                          <div
-                                            style={{
-                                              textAlign: "center",
-                                              padding: "30px 0",
-                                              color: "#8c8c8c",
-                                              fontSize: 12,
-                                            }}
-                                          >
-                                            No capacity data available
-                                          </div>
-                                        )}
-                                        <Row
-                                          gutter={8}
-                                          style={{
-                                            marginTop: 8,
-                                            borderTop: "1px solid #f0f0f0",
-                                            paddingTop: 8,
-                                          }}
-                                        >
-                                          <Col span={12}>
-                                            <div
-                                              style={{
-                                                fontSize: 11,
-                                                color: "#8c8c8c",
-                                              }}
-                                            >
-                                              Waste Received
-                                            </div>
-                                            <div
-                                              style={{
-                                                fontSize: 14,
-                                                fontWeight: 600,
-                                              }}
-                                            >
-                                              {wasteReceived > 0
-                                                ? `${wasteReceived.toLocaleString()} ${normalizeUnit(detailViewRecord.wasteReceivedUnit || "tons")}`
-                                                : "0"}
-                                            </div>
-                                            {detailViewRecord._submissionWasteReceived >
-                                              0 && (
-                                              <div
-                                                style={{
-                                                  fontSize: 10,
-                                                  color: "#2f54eb",
-                                                }}
-                                              >
-                                                {Number(
-                                                  detailViewRecord._baselineWasteReceived ||
-                                                    0,
-                                                ).toLocaleString()}{" "}
-                                                baseline +{" "}
-                                                {Number(
-                                                  detailViewRecord._submissionWasteReceived,
-                                                ).toLocaleString()}{" "}
-                                                submissions
-                                              </div>
-                                            )}
-                                          </Col>
-                                          <Col span={12}>
-                                            <div
-                                              style={{
-                                                fontSize: 11,
-                                                color: "#8c8c8c",
-                                              }}
-                                            >
-                                              Total Capacity
-                                            </div>
-                                            <div
-                                              style={{
-                                                fontSize: 14,
-                                                fontWeight: 600,
-                                              }}
-                                            >
-                                              {capacity > 0
-                                                ? `${capacity.toLocaleString()} ${normalizeUnit(detailViewRecord.volumeCapacityUnit)}`
-                                                : "—"}
-                                            </div>
-                                          </Col>
-                                          <Col
-                                            span={12}
-                                            style={{ marginTop: 8 }}
-                                          >
-                                            <div
-                                              style={{
-                                                fontSize: 11,
-                                                color: "#8c8c8c",
-                                              }}
-                                            >
-                                              Remaining
-                                            </div>
-                                            <div
-                                              style={{
-                                                fontSize: 14,
-                                                fontWeight: 600,
-                                                color:
-                                                  capacity - wasteReceivedInCapacityUnit <= 0
-                                                    ? "#ff4d4f"
-                                                    : "#52c41a",
-                                              }}
-                                            >
-                                              {capacity > 0
-                                                    ? `${Math.max(0, capacity - wasteReceivedInCapacityUnit).toLocaleString(undefined, { maximumFractionDigits: 2 })} ${capacityUnit}`
-                                                : "—"}
-                                            </div>
-                                          </Col>
-                                          <Col
-                                            span={12}
-                                            style={{ marginTop: 8 }}
-                                          >
-                                            <div
-                                              style={{
-                                                fontSize: 11,
-                                                color: "#8c8c8c",
-                                              }}
-                                            >
-                                              Status
-                                            </div>
-                                            <Tag
-                                              color={
-                                                detailViewRecord.statusOfSLF
-                                                  ?.toLowerCase()
-                                                  .includes("non")
-                                                  ? "red"
-                                                  : "green"
-                                              }
-                                              style={{ margin: 0 }}
-                                            >
-                                              {detailViewRecord.statusOfSLF ||
-                                                "—"}
-                                            </Tag>
-                                          </Col>
-                                        </Row>
-                                      </Card>
-                                    </Col>
-                                    <Col xs={24} md={14}>
+                                    <Col xs={24}>
                                       <Card
                                         size="small"
                                         title={
@@ -6967,18 +7323,29 @@ export default function SLFMonitoring({
                                       >
                                         {(() => {
                                           const fillValues =
-                                            detailViewRecord.cellFillValues || [];
+                                            detailViewRecord.cellFillValues ||
+                                            [];
                                           const fillUnits =
-                                            detailViewRecord.cellFillUnits || [];
-                                          const alertCells = (cellCaps.length > 0
-                                            ? cellCaps
-                                            : Array.from({ length: cells }, () => 0)
+                                            detailViewRecord.cellFillUnits ||
+                                            [];
+                                          const alertCells = (
+                                            cellCaps.length > 0
+                                              ? cellCaps
+                                              : Array.from(
+                                                  { length: cells },
+                                                  () => 0,
+                                                )
                                           )
                                             .map((cap, index) => {
-                                              const status = normalizeCellStatus(
-                                                cellStatuses[index],
-                                              );
-                                              if (!isActiveCellStatus(status) || Number(cap || 0) <= 0) return null;
+                                              const status =
+                                                normalizeCellStatus(
+                                                  cellStatuses[index],
+                                                );
+                                              if (
+                                                !isActiveCellStatus(status) ||
+                                                Number(cap || 0) <= 0
+                                              )
+                                                return null;
                                               const capUnit = normalizeUnit(
                                                 cellCapacityUnits[index] ||
                                                   detailViewRecord.volumeCapacityUnit ||
@@ -6986,11 +7353,16 @@ export default function SLFMonitoring({
                                               );
                                               const used = convertVolume(
                                                 fillValues[index] || 0,
-                                                fillUnits[index] || detailViewRecord.wasteReceivedUnit || capUnit,
+                                                fillUnits[index] ||
+                                                  detailViewRecord.wasteReceivedUnit ||
+                                                  capUnit,
                                                 capUnit,
                                               );
                                               const pct = Math.min(
-                                                Math.round((used / Number(cap || 0)) * 100),
+                                                Math.round(
+                                                  (used / Number(cap || 0)) *
+                                                    100,
+                                                ),
                                                 100,
                                               );
                                               return {
@@ -7002,19 +7374,29 @@ export default function SLFMonitoring({
                                                 status,
                                               };
                                             })
-                                            .filter((cell) => cell && cell.pct >= 80);
+                                            .filter(
+                                              (cell) => cell && cell.pct >= 80,
+                                            );
                                           return alertCells.length > 0 ? (
                                             <Alert
                                               type="warning"
                                               showIcon
-                                              style={{ marginBottom: 12, borderRadius: 8 }}
+                                              style={{
+                                                marginBottom: 12,
+                                                borderRadius: 8,
+                                              }}
                                               message={
                                                 <Space wrap>
                                                   <Text strong>
-                                                    Active cell reached 80% capacity
+                                                    Active cell reached 80%
+                                                    capacity
                                                   </Text>
                                                   <Tag color="orange">
-                                                    {resolveCellName(detailViewRecord, alertCells[0].index)}: {alertCells[0].pct}% full
+                                                    {resolveCellName(
+                                                      detailViewRecord,
+                                                      alertCells[0].index,
+                                                    )}
+                                                    : {alertCells[0].pct}% full
                                                   </Tag>
                                                   <Button
                                                     size="small"
@@ -7023,7 +7405,8 @@ export default function SLFMonitoring({
                                                     onClick={() =>
                                                       setCapacityAlertModal({
                                                         open: true,
-                                                        record: detailViewRecord,
+                                                        record:
+                                                          detailViewRecord,
                                                         cell: alertCells[0],
                                                         message: `${detailViewRecord.lgu || "Assigned SLF"} Cell ${alertCells[0].index + 1} is ${alertCells[0].pct}% full (${alertCells[0].used.toLocaleString(undefined, { maximumFractionDigits: 2 })} / ${alertCells[0].capacity.toLocaleString()} ${alertCells[0].unit}). Please review disposal planning and remaining cell capacity.`,
                                                       })
@@ -7102,20 +7485,24 @@ export default function SLFMonitoring({
                                               fillValues[i] || 0,
                                             );
                                             const cellFillUnit = normalizeUnit(
-                                              detailViewRecord.cellFillUnits?.[i] ||
+                                              detailViewRecord.cellFillUnits?.[
+                                                i
+                                              ] ||
                                                 detailViewRecord.wasteReceivedUnit ||
                                                 capUnit,
                                             );
-                                            const usedForCapacity = convertVolume(
-                                              usedInCell,
-                                              cellFillUnit,
-                                              capUnit,
-                                            );
+                                            const usedForCapacity =
+                                              convertVolume(
+                                                usedInCell,
+                                                cellFillUnit,
+                                                capUnit,
+                                              );
                                             const cellFill =
                                               cap > 0
                                                 ? Math.min(
                                                     Math.round(
-                                                      (usedForCapacity / cap) * 100,
+                                                      (usedForCapacity / cap) *
+                                                        100,
                                                     ),
                                                     100,
                                                   )
@@ -7129,10 +7516,36 @@ export default function SLFMonitoring({
                                               isCompletedCellStatus(cellSt);
                                             const isHaz =
                                               cellTy === "Treated Haz Waste";
+                                            // Remaining capacity in the cell's own unit.
+                                            const remaining =
+                                              cap > 0
+                                                ? Math.max(
+                                                    0,
+                                                    cap - usedForCapacity,
+                                                  )
+                                                : null;
+                                            // Reusable capacity colour: each cell keeps its
+                                            // TYPE colour below the warning band, then escalates
+                                            // to warning/alarming/critical as it fills. Missing /
+                                            // nonexistent cells render gray.
+                                            const gaugeColor =
+                                              getSlfCapacityColor(
+                                                isClosed ? 100 : cellFill,
+                                                {
+                                                  baseColor:
+                                                    getCellTypeConfig(cellTy)
+                                                      .color,
+                                                  exists:
+                                                    cap > 0 &&
+                                                    !isNonExistentCell(cellSt),
+                                                },
+                                              );
                                             return (
                                               <Col
                                                 xs={12}
                                                 sm={8}
+                                                md={6}
+                                                lg={4}
                                                 key={i}
                                                 style={{ textAlign: "center" }}
                                               >
@@ -7142,17 +7555,7 @@ export default function SLFMonitoring({
                                                     isClosed ? 100 : cellFill
                                                   }
                                                   size={80}
-                                                  strokeColor={
-                                                    isClosed
-                                                      ? "#d9d9d9"
-                                                      : isHaz
-                                                        ? "#f5222d"
-                                                        : cellFill >= 90
-                                                          ? "#ff4d4f"
-                                                          : cellFill >= 70
-                                                            ? "#faad14"
-                                                            : "#52c41a"
-                                                  }
+                                                  strokeColor={gaugeColor}
                                                   format={() => (
                                                     <div
                                                       style={{
@@ -7163,15 +7566,7 @@ export default function SLFMonitoring({
                                                         style={{
                                                           fontSize: 14,
                                                           fontWeight: 700,
-                                                          color: isClosed
-                                                            ? "#8c8c8c"
-                                                            : isHaz
-                                                              ? "#f5222d"
-                                                              : cellFill >= 90
-                                                                ? "#ff4d4f"
-                                                                : cellFill >= 70
-                                                                  ? "#faad14"
-                                                                  : "#52c41a",
+                                                          color: gaugeColor,
                                                         }}
                                                       >
                                                         {isClosed
@@ -7188,7 +7583,10 @@ export default function SLFMonitoring({
                                                     fontWeight: 600,
                                                   }}
                                                 >
-                                                  {resolveCellName(detailViewRecord, i)}
+                                                  {resolveCellName(
+                                                    detailViewRecord,
+                                                    i,
+                                                  )}
                                                 </div>
                                                 <Tag
                                                   color={isHaz ? "red" : "blue"}
@@ -7215,6 +7613,26 @@ export default function SLFMonitoring({
                                                     ? `${cap.toLocaleString()} ${capUnit}`
                                                     : "—"}
                                                 </div>
+                                                {remaining != null &&
+                                                  !isClosed && (
+                                                    <div
+                                                      style={{
+                                                        fontSize: 10,
+                                                        color:
+                                                          remaining <= 0
+                                                            ? "#ff4d4f"
+                                                            : "#52c41a",
+                                                      }}
+                                                    >
+                                                      {remaining.toLocaleString(
+                                                        undefined,
+                                                        {
+                                                          maximumFractionDigits: 2,
+                                                        },
+                                                      )}{" "}
+                                                      {capUnit} left
+                                                    </div>
+                                                  )}
                                                 <div style={{ marginTop: 6 }}>
                                                   <Tag
                                                     color={
@@ -7345,17 +7763,19 @@ export default function SLFMonitoring({
                                               v || row.cellStatus,
                                             );
                                             return (
-                                            <Tag
-                                              color={
-                                                isActiveCellStatus(status)
-                                                  ? "green"
-                                                  : isCompletedCellStatus(status)
-                                                    ? "default"
-                                                    : "gold"
-                                              }
-                                            >
-                                              {status || "Active Cell"}
-                                            </Tag>
+                                              <Tag
+                                                color={
+                                                  isActiveCellStatus(status)
+                                                    ? "green"
+                                                    : isCompletedCellStatus(
+                                                          status,
+                                                        )
+                                                      ? "default"
+                                                      : "gold"
+                                                }
+                                              >
+                                                {status || "Active Cell"}
+                                              </Tag>
                                             );
                                           },
                                         },
@@ -7494,8 +7914,12 @@ export default function SLFMonitoring({
                                           <Button
                                             size="small"
                                             icon={<EyeOutlined />}
-                                            disabled={Number(row.submissions || 0) <= 0}
-                                            onClick={() => openDailySubmissionsModal(row)}
+                                            disabled={
+                                              Number(row.submissions || 0) <= 0
+                                            }
+                                            onClick={() =>
+                                              openDailySubmissionsModal(row)
+                                            }
                                           >
                                             View
                                           </Button>
@@ -7520,7 +7944,8 @@ export default function SLFMonitoring({
                                       return (
                                         <Collapse
                                           size="small"
-                                          variant="filled" destroyOnHidden
+                                          variant="filled"
+                                          destroyOnHidden
                                           style={{ marginBottom: 8 }}
                                           items={[
                                             {
@@ -7669,160 +8094,168 @@ export default function SLFMonitoring({
                             })()}
 
                           {/* Leachate Treatment Plant */}
-                          {false && ((detailViewRecord.leachatePondDetails || [])
-                            .length > 0 ||
-                            leachate > 0) && (
-                            <>
-                              <Divider plain orientation="left">
-                                <AlertOutlined style={{ color: "#1677ff" }} />{" "}
-                                Leachate Treatment Plant
-                              </Divider>
-                              {(detailViewRecord.leachatePondDetails || [])
-                                .length > 0 ? (
-                                <Table
-                                  dataSource={
-                                    detailViewRecord.leachatePondDetails
-                                  }
-                                  rowKey={(_, i) => i}
-                                  size="small"
-                                  pagination={false}
-                                  style={{ marginBottom: 16 }}
-                                  columns={[
-                                    {
-                                      title: "Pond No.",
-                                      dataIndex: "pondNo",
-                                      width: 80,
-                                      render: (v) => v ?? "—",
-                                    },
-                                    {
-                                      title: "Description",
-                                      dataIndex: "description",
-                                      render: (v) =>
-                                        v ? (
-                                          <Text
-                                            ellipsis={{ tooltip: v }}
-                                            style={{
-                                              maxWidth: 280,
-                                              display: "block",
-                                            }}
+                          {false &&
+                            ((detailViewRecord.leachatePondDetails || [])
+                              .length > 0 ||
+                              leachate > 0) && (
+                              <>
+                                <Divider plain orientation="left">
+                                  <AlertOutlined style={{ color: "#1677ff" }} />{" "}
+                                  Leachate Treatment Plant
+                                </Divider>
+                                {(detailViewRecord.leachatePondDetails || [])
+                                  .length > 0 ? (
+                                  <Table
+                                    dataSource={
+                                      detailViewRecord.leachatePondDetails
+                                    }
+                                    rowKey={(_, i) => i}
+                                    size="small"
+                                    pagination={false}
+                                    style={{ marginBottom: 16 }}
+                                    columns={[
+                                      {
+                                        title: "Pond No.",
+                                        dataIndex: "pondNo",
+                                        width: 80,
+                                        render: (v) => v ?? "—",
+                                      },
+                                      {
+                                        title: "Description",
+                                        dataIndex: "description",
+                                        render: (v) =>
+                                          v ? (
+                                            <Text
+                                              ellipsis={{ tooltip: v }}
+                                              style={{
+                                                maxWidth: 280,
+                                                display: "block",
+                                              }}
+                                            >
+                                              {v}
+                                            </Text>
+                                          ) : (
+                                            <Text type="secondary">—</Text>
+                                          ),
+                                      },
+                                      {
+                                        title: "Status",
+                                        dataIndex: "status",
+                                        width: 150,
+                                        render: (v) => (
+                                          <Tag
+                                            color={
+                                              v === "Active"
+                                                ? "blue"
+                                                : v === "Under Maintenance"
+                                                  ? "orange"
+                                                  : "default"
+                                            }
                                           >
-                                            {v}
-                                          </Text>
-                                        ) : (
-                                          <Text type="secondary">—</Text>
+                                            {v || "—"}
+                                          </Tag>
                                         ),
-                                    },
-                                    {
-                                      title: "Status",
-                                      dataIndex: "status",
-                                      width: 150,
-                                      render: (v) => (
-                                        <Tag
-                                          color={
-                                            v === "Active"
-                                              ? "blue"
-                                              : v === "Under Maintenance"
-                                                ? "orange"
-                                                : "default"
-                                          }
-                                        >
-                                          {v || "—"}
-                                        </Tag>
-                                      ),
-                                    },
-                                  ]}
-                                />
-                              ) : (
-                                <Alert
-                                  type="info"
-                                  showIcon
-                                  message={`${leachate} leachate pond(s) recorded (no detail entries yet)`}
-                                  style={{ marginBottom: 16, borderRadius: 8 }}
-                                />
-                              )}
-                            </>
-                          )}
+                                      },
+                                    ]}
+                                  />
+                                ) : (
+                                  <Alert
+                                    type="info"
+                                    showIcon
+                                    message={`${leachate} leachate pond(s) recorded (no detail entries yet)`}
+                                    style={{
+                                      marginBottom: 16,
+                                      borderRadius: 8,
+                                    }}
+                                  />
+                                )}
+                              </>
+                            )}
 
                           {/* Gas Management Details */}
-                          {false && ((detailViewRecord.gasVentDetails || []).length >
-                            0 ||
-                            gasVents > 0) && (
-                            <>
-                              <Divider plain orientation="left">
-                                <ExperimentOutlined
-                                  style={{ color: "#52c41a" }}
-                                />{" "}
-                                Gas Management Details
-                              </Divider>
-                              {(detailViewRecord.gasVentDetails || []).length >
-                              0 ? (
-                                <Table
-                                  dataSource={detailViewRecord.gasVentDetails}
-                                  rowKey={(_, i) => i}
-                                  size="small"
-                                  pagination={false}
-                                  style={{ marginBottom: 16 }}
-                                  columns={[
-                                    {
-                                      title: "Vent No.",
-                                      dataIndex: "ventNo",
-                                      width: 80,
-                                      render: (v) => v ?? "—",
-                                    },
-                                    {
-                                      title: "Type",
-                                      dataIndex: "ventType",
-                                      width: 130,
-                                      render: (v) => v || "—",
-                                    },
-                                    {
-                                      title: "Description",
-                                      dataIndex: "description",
-                                      render: (v) =>
-                                        v ? (
-                                          <Text
-                                            ellipsis={{ tooltip: v }}
-                                            style={{
-                                              maxWidth: 220,
-                                              display: "block",
-                                            }}
+                          {false &&
+                            ((detailViewRecord.gasVentDetails || []).length >
+                              0 ||
+                              gasVents > 0) && (
+                              <>
+                                <Divider plain orientation="left">
+                                  <ExperimentOutlined
+                                    style={{ color: "#52c41a" }}
+                                  />{" "}
+                                  Gas Management Details
+                                </Divider>
+                                {(detailViewRecord.gasVentDetails || [])
+                                  .length > 0 ? (
+                                  <Table
+                                    dataSource={detailViewRecord.gasVentDetails}
+                                    rowKey={(_, i) => i}
+                                    size="small"
+                                    pagination={false}
+                                    style={{ marginBottom: 16 }}
+                                    columns={[
+                                      {
+                                        title: "Vent No.",
+                                        dataIndex: "ventNo",
+                                        width: 80,
+                                        render: (v) => v ?? "—",
+                                      },
+                                      {
+                                        title: "Type",
+                                        dataIndex: "ventType",
+                                        width: 130,
+                                        render: (v) => v || "—",
+                                      },
+                                      {
+                                        title: "Description",
+                                        dataIndex: "description",
+                                        render: (v) =>
+                                          v ? (
+                                            <Text
+                                              ellipsis={{ tooltip: v }}
+                                              style={{
+                                                maxWidth: 220,
+                                                display: "block",
+                                              }}
+                                            >
+                                              {v}
+                                            </Text>
+                                          ) : (
+                                            <Text type="secondary">—</Text>
+                                          ),
+                                      },
+                                      {
+                                        title: "Status",
+                                        dataIndex: "status",
+                                        width: 150,
+                                        render: (v) => (
+                                          <Tag
+                                            color={
+                                              v === "Active"
+                                                ? "green"
+                                                : v === "Under Maintenance"
+                                                  ? "orange"
+                                                  : "default"
+                                            }
                                           >
-                                            {v}
-                                          </Text>
-                                        ) : (
-                                          <Text type="secondary">—</Text>
+                                            {v || "—"}
+                                          </Tag>
                                         ),
-                                    },
-                                    {
-                                      title: "Status",
-                                      dataIndex: "status",
-                                      width: 150,
-                                      render: (v) => (
-                                        <Tag
-                                          color={
-                                            v === "Active"
-                                              ? "green"
-                                              : v === "Under Maintenance"
-                                                ? "orange"
-                                                : "default"
-                                          }
-                                        >
-                                          {v || "—"}
-                                        </Tag>
-                                      ),
-                                    },
-                                  ]}
-                                />
-                              ) : (
-                                <Alert
-                                  type="info"
-                                  showIcon
-                                  message={`${gasVents} gas management record(s) recorded (no detail entries yet)`}
-                                  style={{ marginBottom: 16, borderRadius: 8 }}
-                                />
-                              )}
-                            </>
-                          )}
+                                      },
+                                    ]}
+                                  />
+                                ) : (
+                                  <Alert
+                                    type="info"
+                                    showIcon
+                                    message={`${gasVents} gas management record(s) recorded (no detail entries yet)`}
+                                    style={{
+                                      marginBottom: 16,
+                                      borderRadius: 8,
+                                    }}
+                                  />
+                                )}
+                              </>
+                            )}
 
                           {hasCharts && (
                             <>
@@ -7921,9 +8354,9 @@ export default function SLFMonitoring({
                                             dataKey="value"
                                             fill="#52c41a"
                                             radius={[4, 4, 0, 0]}
-                                           isAnimationActive={false}
+                                            isAnimationActive={false}
                                           >
-                                           {volumeData.map((_, i) => (
+                                            {volumeData.map((_, i) => (
                                               <RCell
                                                 key={i}
                                                 fill={
@@ -7939,106 +8372,6 @@ export default function SLFMonitoring({
                                     </Card>
                                   </Col>
                                 )}
-                                {/* Cell Volumes (from baseline) */}
-                                {cellVolumeData.length > 0 && (
-                                  <Col
-                                    xs={24}
-                                    md={cellVolumeData.length >= 2 ? 12 : 24}
-                                  >
-                                    <Card
-                                      size="small"
-                                      title="Cell Volumes (Baseline)"
-                                      style={{ borderRadius: 10 }}
-                                    >
-                                      <ResponsiveContainer
-                                        width="100%"
-                                        height={220}
-                                      >
-                                        <BarChart data={cellVolumeData}>
-                                          <CartesianGrid strokeDasharray="3 3" />
-                                          <XAxis
-                                            dataKey="name"
-                                            tick={{ fontSize: 11 }}
-                                          />
-                                          <YAxis />
-                                          <RTooltip
-                                            formatter={(v, _, entry) =>
-                                              `${v.toLocaleString()} ${entry.payload.unit || ""}`
-                                            }
-                                          />
-                                          <Bar
-                                            dataKey="value"
-                                            fill="#722ed1"
-                                            radius={[4, 4, 0, 0]}
-                                           isAnimationActive={false}
-                                          >
-                                           {cellVolumeData.map((_, i) => (
-                                              <RCell
-                                                key={i}
-                                                fill={
-                                                  CHART_COLORS[
-                                                    (i + 3) %
-                                                      CHART_COLORS.length
-                                                  ]
-                                                }
-                                              />
-                                            ))}
-                                          </Bar>
-                                        </BarChart>
-                                      </ResponsiveContainer>
-                                    </Card>
-                                  </Col>
-                                )}
-                                {/* Per-cell pie if 2+ cells */}
-                                {cells >= 2 && cellVolumeData.length >= 2 && (
-                                  <Col xs={24} md={12}>
-                                    <Card
-                                      size="small"
-                                      title="Cell Volume Distribution"
-                                      style={{ borderRadius: 10 }}
-                                    >
-                                      <ResponsiveContainer
-                                        width="100%"
-                                        height={220}
-                                      >
-                                        <PieChart>
-                                          <Pie
-                                            data={cellVolumeData}
-                                            cx="50%"
-                                            cy="50%"
-                                            outerRadius={80}
-                                            paddingAngle={3}
-                                            dataKey="value"
-                                            isAnimationActive={false}
-                                            animationBegin={80}
-                                            animationDuration={650}
-                                            label={({ name, value }) =>
-                                              `${name}: ${value.toLocaleString()}`
-                                            }
-                                          >
-                                            {cellVolumeData.map((_, i) => (
-                                              <RCell
-                                                key={i}
-                                                fill={
-                                                  CHART_COLORS[
-                                                    (i + 3) %
-                                                      CHART_COLORS.length
-                                                  ]
-                                                }
-                                              />
-                                            ))}
-                                          </Pie>
-                                          <RTooltip
-                                            formatter={(v, _, entry) =>
-                                              `${v.toLocaleString()} ${entry.payload.unit || ""}`
-                                            }
-                                          />
-                                          <Legend />
-                                        </PieChart>
-                                      </ResponsiveContainer>
-                                    </Card>
-                                  </Col>
-                                )}
                               </Row>
                             </>
                           )}
@@ -8047,400 +8380,304 @@ export default function SLFMonitoring({
                     })(),
                   },
                   {
-                    key: "leachate-details",
-                    label: (
-                      <span style={{ color: "#1677ff" }}>
-                        <AlertOutlined /> Leachate Treatment Plant
-                      </span>
-                    ),
-                    children:
-                      (detailViewRecord.leachatePondDetails || []).length >
-                      0 ? (
-                        <Table
-                          dataSource={detailViewRecord.leachatePondDetails}
-                          rowKey={(_, i) => i}
-                          size="small"
-                          pagination={false}
-                          columns={[
-                            {
-                              title: "Pond No.",
-                              dataIndex: "pondNo",
-                              width: 90,
-                              render: (v) => v ?? "—",
-                            },
-                            {
-                              title: "Description",
-                              dataIndex: "description",
-                              render: (v) =>
-                                v ? (
-                                  <Text
-                                    ellipsis={{ tooltip: v }}
-                                    style={{ maxWidth: 420, display: "block" }}
-                                  >
-                                    {v}
-                                  </Text>
-                                ) : (
-                                  <Text type="secondary">—</Text>
-                                ),
-                            },
-                            {
-                              title: "Status",
-                              dataIndex: "status",
-                              width: 160,
-                              render: (v) => (
-                                <Tag
-                                  color={
-                                    v === "Active"
-                                      ? "blue"
-                                      : v === "Under Maintenance"
-                                        ? "orange"
-                                        : "default"
-                                  }
-                                >
-                                  {v || "—"}
-                                </Tag>
-                              ),
-                            },
-                          ]}
-                        />
-                      ) : (
-                        <Empty
-                          image={Empty.PRESENTED_IMAGE_SIMPLE}
-                          description={
-                            Number(detailViewRecord.noOfLeachatePond || 0) > 0
-                              ? `${Number(detailViewRecord.noOfLeachatePond || 0)} leachate treatment plant(s) recorded, no detail entries yet`
-                              : "No leachate treatment plant recorded"
-                          }
-                        />
-                      ),
-                  },
-                  {
-                    key: "gas-management-details",
-                    label: (
-                      <span style={{ color: "#52c41a" }}>
-                        <ExperimentOutlined /> Gas Management Details
-                      </span>
-                    ),
-                    children:
-                      (detailViewRecord.gasVentDetails || []).length > 0 ? (
-                        <Table
-                          dataSource={detailViewRecord.gasVentDetails}
-                          rowKey={(_, i) => i}
-                          size="small"
-                          pagination={false}
-                          columns={[
-                            {
-                              title: "Record No.",
-                              dataIndex: "ventNo",
-                              width: 100,
-                              render: (v) => v ?? "—",
-                            },
-                            {
-                              title: "Type",
-                              dataIndex: "ventType",
-                              width: 140,
-                              render: (v) => v || "—",
-                            },
-                            {
-                              title: "Description",
-                              dataIndex: "description",
-                              render: (v) =>
-                                v ? (
-                                  <Text
-                                    ellipsis={{ tooltip: v }}
-                                    style={{ maxWidth: 360, display: "block" }}
-                                  >
-                                    {v}
-                                  </Text>
-                                ) : (
-                                  <Text type="secondary">—</Text>
-                                ),
-                            },
-                            {
-                              title: "Status",
-                              dataIndex: "status",
-                              width: 160,
-                              render: (v) => (
-                                <Tag
-                                  color={
-                                    v === "Active"
-                                      ? "green"
-                                      : v === "Under Maintenance"
-                                        ? "orange"
-                                        : "default"
-                                  }
-                                >
-                                  {v || "—"}
-                                </Tag>
-                              ),
-                            },
-                          ]}
-                        />
-                      ) : (
-                        <Empty
-                          image={Empty.PRESENTED_IMAGE_SIMPLE}
-                          description={
-                            Number(detailViewRecord.numberOfGasVents || 0) > 0
-                              ? `${Number(detailViewRecord.numberOfGasVents || 0)} gas management record(s) recorded, no detail entries yet`
-                              : "No gas management details recorded"
-                          }
-                        />
-                      ),
-                  },
-                  {
-                    key: "permits",
+                    key: "permits-compliance-personnel",
                     label: (
                       <span style={{ color: "#faad14" }}>
-                        <SafetyCertificateOutlined /> Permits
+                        <SafetyCertificateOutlined /> Monitoring
                       </span>
                     ),
                     children: (
-                      <>
-                        <Descriptions
-                          column={2}
-                          size="small"
-                          bordered
-                          style={{ marginBottom: 12 }}
-                        >
-                          <Descriptions.Item label="ECC No.">
-                            {detailViewRecord.eccNo || "—"}
-                          </Descriptions.Item>
-                          <Descriptions.Item label="Hazwaste Gen. ID">
-                            {detailViewRecord.hazwasteGenerationId || "—"}
-                          </Descriptions.Item>
-                          {detailViewRecord.slfGenerator && (
-                            <Descriptions.Item label="Portal Link" span={2}>
-                              <Tag color="blue" icon={<LinkOutlined />}>
-                                {typeof detailViewRecord.slfGenerator ===
-                                "object"
-                                  ? detailViewRecord.slfGenerator.slfName
-                                  : "Linked Generator"}
-                              </Tag>
-                            </Descriptions.Item>
-                          )}
-                        </Descriptions>
-                        <Divider plain orientation="left">
-                          Discharge Permits
-                        </Divider>
-                        <Table
-                          size="small"
-                          pagination={false}
-                          dataSource={
-                            detailViewRecord.dischargePermits?.length
-                              ? detailViewRecord.dischargePermits
-                              : detailViewRecord.dischargePermit
-                                ? [
+                      <Collapse
+                        // Monitoring section — Permits, Compliance and Personnel &
+                        // Monitoring as separate collapsible cards, COLLAPSED by
+                        // default (each expands independently).
+                        style={{ borderRadius: 8 }}
+                        items={[
+                          {
+                            key: "permits",
+                            label: (
+                              <span>
+                                <SafetyCertificateOutlined
+                                  style={{ color: "#faad14" }}
+                                />{" "}
+                                Permits
+                              </span>
+                            ),
+                            children: (
+                              <>
+                                <Descriptions
+                                  column={2}
+                                  size="small"
+                                  bordered
+                                  style={{ marginBottom: 12 }}
+                                >
+                                  <Descriptions.Item label="ECC No.">
+                                    {detailViewRecord.eccNo || "—"}
+                                  </Descriptions.Item>
+                                  <Descriptions.Item label="Hazwaste Gen. ID">
+                                    {detailViewRecord.hazwasteGenerationId ||
+                                      "—"}
+                                  </Descriptions.Item>
+                                  {detailViewRecord.slfGenerator && (
+                                    <Descriptions.Item
+                                      label="Portal Link"
+                                      span={2}
+                                    >
+                                      <Tag color="blue" icon={<LinkOutlined />}>
+                                        {typeof detailViewRecord.slfGenerator ===
+                                        "object"
+                                          ? detailViewRecord.slfGenerator
+                                              .slfName
+                                          : "Linked Generator"}
+                                      </Tag>
+                                    </Descriptions.Item>
+                                  )}
+                                </Descriptions>
+                                <Divider plain orientation="left">
+                                  Discharge Permits
+                                </Divider>
+                                <Table
+                                  size="small"
+                                  pagination={false}
+                                  dataSource={
+                                    detailViewRecord.dischargePermits?.length
+                                      ? detailViewRecord.dischargePermits
+                                      : detailViewRecord.dischargePermit
+                                        ? [
+                                            {
+                                              permitNo:
+                                                detailViewRecord.dischargePermit,
+                                              validity:
+                                                detailViewRecord.dischargePermitValidity,
+                                              status:
+                                                detailViewRecord.dischargePermitStatus,
+                                            },
+                                          ]
+                                        : []
+                                  }
+                                  rowKey={(_, i) => i}
+                                  locale={{
+                                    emptyText: "No discharge permits recorded",
+                                  }}
+                                  columns={[
                                     {
-                                      permitNo:
-                                        detailViewRecord.dischargePermit,
-                                      validity:
-                                        detailViewRecord.dischargePermitValidity,
-                                      status:
-                                        detailViewRecord.dischargePermitStatus,
+                                      title: "Permit No.",
+                                      dataIndex: "permitNo",
+                                      render: (v) => v || "—",
                                     },
-                                  ]
-                                : []
-                          }
-                          rowKey={(_, i) => i}
-                          locale={{
-                            emptyText: "No discharge permits recorded",
-                          }}
-                          columns={[
-                            {
-                              title: "Permit No.",
-                              dataIndex: "permitNo",
-                              render: (v) => v || "—",
-                            },
-                            {
-                              title: "DP Type",
-                              dataIndex: "permitType",
-                              width: 150,
-                              render: (v) => v || "—",
-                            },
-                            {
-                              title: "Validity",
-                              dataIndex: "validity",
-                              width: 160,
-                              render: (v) =>
-                                v ? dayjs(v).format("MM/DD/YYYY") : "—",
-                            },
-                            {
-                              title: "Status",
-                              dataIndex: "status",
-                              width: 130,
-                              render: (v) => (v ? <Tag>{v}</Tag> : "—"),
-                            },
-                          ]}
-                        />
-                        <Divider
-                          plain
-                          orientation="left"
-                          style={{ marginTop: 16 }}
-                        >
-                          Permits to Operate
-                        </Divider>
-                        <Table
-                          size="small"
-                          pagination={false}
-                          dataSource={
-                            detailViewRecord.permitToOperatePermits?.length
-                              ? detailViewRecord.permitToOperatePermits
-                              : detailViewRecord.permitToOperate
-                                ? [
                                     {
-                                      permitNo:
-                                        detailViewRecord.permitToOperate,
-                                      validity:
-                                        detailViewRecord.permitToOperateValidity,
-                                      status:
-                                        detailViewRecord.permitToOperateStatus,
+                                      title: "DP Type",
+                                      dataIndex: "permitType",
+                                      width: 150,
+                                      render: (v) => v || "—",
                                     },
-                                  ]
-                                : []
-                          }
-                          rowKey={(_, i) => i}
-                          locale={{
-                            emptyText: "No permits to operate recorded",
-                          }}
-                          columns={[
-                            {
-                              title: "Permit No.",
-                              dataIndex: "permitNo",
-                              render: (v) => v || "—",
-                            },
-                            {
-                              title: "Validity",
-                              dataIndex: "validity",
-                              width: 160,
-                              render: (v) =>
-                                v ? dayjs(v).format("MM/DD/YYYY") : "—",
-                            },
-                            {
-                              title: "Status",
-                              dataIndex: "status",
-                              width: 130,
-                              render: (v) => (v ? <Tag>{v}</Tag> : "—"),
-                            },
-                          ]}
-                        />
-                      </>
-                    ),
-                  },
-                  {
-                    key: "personnel-monitoring",
-                    label: (
-                      <span style={{ color: "#52c41a" }}>
-                        <TeamOutlined /> Personnel &amp; Monitoring
-                      </span>
-                    ),
-                    children: (
-                      <Descriptions column={2} size="small" bordered>
-                        <Descriptions.Item label="Target Month">
-                          {detailViewRecord.targetMonth || "—"}
-                        </Descriptions.Item>
-                        <Descriptions.Item label="ENMO">
-                          {detailViewRecord.enmo || "—"}
-                        </Descriptions.Item>
-                        <Descriptions.Item label="ESWM Focal Person">
-                          {detailViewRecord.focalPerson || "—"}
-                        </Descriptions.Item>
-                        <Descriptions.Item label="IIS Number">
-                          {detailViewRecord.iisNumber || "—"}
-                        </Descriptions.Item>
-                        <Descriptions.Item label="Date of Monitoring">
-                          {detailViewRecord.dateOfMonitoring
-                            ? dayjs(detailViewRecord.dateOfMonitoring).format(
-                                "MM/DD/YYYY",
-                              )
-                            : "—"}
-                        </Descriptions.Item>
-                        <Descriptions.Item label="Report Prepared">
-                          {detailViewRecord.dateReportPrepared
-                            ? dayjs(detailViewRecord.dateReportPrepared).format(
-                                "MM/DD/YYYY",
-                              )
-                            : "—"}
-                        </Descriptions.Item>
-                        <Descriptions.Item label="Reviewed By (Staff)">
-                          {detailViewRecord.dateReportReviewedStaff || "—"}
-                        </Descriptions.Item>
-                        <Descriptions.Item label="Reviewed By (Focal)">
-                          {detailViewRecord.dateReportReviewedFocal || "—"}
-                        </Descriptions.Item>
-                        <Descriptions.Item label="Approved">
-                          {detailViewRecord.dateReportApproved
-                            ? dayjs(detailViewRecord.dateReportApproved).format(
-                                "MM/DD/YYYY",
-                              )
-                            : "—"}
-                        </Descriptions.Item>
-                        <Descriptions.Item label="Days to Prepare">
-                          {detailViewRecord.totalDaysReportPrepared ?? "—"}
-                        </Descriptions.Item>
-                        <Descriptions.Item label="Days Staff Review">
-                          {detailViewRecord.totalDaysReviewedStaff ?? "—"}
-                        </Descriptions.Item>
-                        <Descriptions.Item label="Days Focal Review">
-                          {detailViewRecord.totalDaysReviewedFocal ?? "—"}
-                        </Descriptions.Item>
-                      </Descriptions>
-                    ),
-                  },
-                  {
-                    key: "4",
-                    label: (
-                      <span style={{ color: "#eb2f96" }}>
-                        <FileTextOutlined /> Compliance
-                      </span>
-                    ),
-                    children: (
-                      <Descriptions column={2} size="small" bordered>
-                        <Descriptions.Item
-                          label="Other Findings and Observations"
-                          span={2}
-                        >
-                          {detailViewRecord.findings || "—"}
-                        </Descriptions.Item>
-                        <Descriptions.Item
-                          label="Remarks and Recommendation"
-                          span={2}
-                        >
-                          {detailViewRecord.remarksAndRecommendation || "—"}
-                        </Descriptions.Item>
-                        <Descriptions.Item label="Technical Conference">
-                          {detailViewRecord.technicalConferenceConducted ? (
-                            <Tag color="success">Yes</Tag>
-                          ) : (
-                            <Tag>No</Tag>
-                          )}
-                        </Descriptions.Item>
-                        <Descriptions.Item label="Commitment File">
-                          {(detailViewRecord.commitmentFiles || []).length ? (
-                            <Tag color="blue">
-                              {detailViewRecord.commitmentFiles.length} file(s)
-                            </Tag>
-                          ) : (
-                            "—"
-                          )}
-                        </Descriptions.Item>
-                        <Descriptions.Item label="Progress Report" span={2}>
-                          {(detailViewRecord.progressReportFiles || [])
-                            .length ? (
-                            <Tag color="geekblue">
-                              {detailViewRecord.progressReportFiles.length}{" "}
-                              file(s)
-                            </Tag>
-                          ) : (
-                            "—"
-                          )}
-                        </Descriptions.Item>
-                      </Descriptions>
+                                    {
+                                      title: "Validity",
+                                      dataIndex: "validity",
+                                      width: 160,
+                                      render: (v) =>
+                                        v ? dayjs(v).format("MM/DD/YYYY") : "—",
+                                    },
+                                    {
+                                      title: "Status",
+                                      dataIndex: "status",
+                                      width: 130,
+                                      render: (v) => (v ? <Tag>{v}</Tag> : "—"),
+                                    },
+                                  ]}
+                                />
+                                <Divider
+                                  plain
+                                  orientation="left"
+                                  style={{ marginTop: 16 }}
+                                >
+                                  Permits to Operate
+                                </Divider>
+                                <Table
+                                  size="small"
+                                  pagination={false}
+                                  dataSource={
+                                    detailViewRecord.permitToOperatePermits
+                                      ?.length
+                                      ? detailViewRecord.permitToOperatePermits
+                                      : detailViewRecord.permitToOperate
+                                        ? [
+                                            {
+                                              permitNo:
+                                                detailViewRecord.permitToOperate,
+                                              validity:
+                                                detailViewRecord.permitToOperateValidity,
+                                              status:
+                                                detailViewRecord.permitToOperateStatus,
+                                            },
+                                          ]
+                                        : []
+                                  }
+                                  rowKey={(_, i) => i}
+                                  locale={{
+                                    emptyText: "No permits to operate recorded",
+                                  }}
+                                  columns={[
+                                    {
+                                      title: "Permit No.",
+                                      dataIndex: "permitNo",
+                                      render: (v) => v || "—",
+                                    },
+                                    {
+                                      title: "Validity",
+                                      dataIndex: "validity",
+                                      width: 160,
+                                      render: (v) =>
+                                        v ? dayjs(v).format("MM/DD/YYYY") : "—",
+                                    },
+                                    {
+                                      title: "Status",
+                                      dataIndex: "status",
+                                      width: 130,
+                                      render: (v) => (v ? <Tag>{v}</Tag> : "—"),
+                                    },
+                                  ]}
+                                />
+                              </>
+                            ),
+                          },
+                          {
+                            key: "personnel",
+                            label: (
+                              <span>
+                                <TeamOutlined style={{ color: "#52c41a" }} />{" "}
+                                Personnel &amp; Monitoring
+                              </span>
+                            ),
+                            children: (
+                              <Descriptions column={2} size="small" bordered>
+                                <Descriptions.Item label="Target Month">
+                                  {detailViewRecord.targetMonth || "—"}
+                                </Descriptions.Item>
+                                <Descriptions.Item label="ENMO">
+                                  {detailViewRecord.enmo || "—"}
+                                </Descriptions.Item>
+                                <Descriptions.Item label="ESWM Focal Person">
+                                  {detailViewRecord.focalPerson || "—"}
+                                </Descriptions.Item>
+                                <Descriptions.Item label="IIS Number">
+                                  {detailViewRecord.iisNumber || "—"}
+                                </Descriptions.Item>
+                                <Descriptions.Item label="Date of Monitoring">
+                                  {detailViewRecord.dateOfMonitoring
+                                    ? dayjs(
+                                        detailViewRecord.dateOfMonitoring,
+                                      ).format("MM/DD/YYYY")
+                                    : "—"}
+                                </Descriptions.Item>
+                                <Descriptions.Item label="Report Prepared">
+                                  {detailViewRecord.dateReportPrepared
+                                    ? dayjs(
+                                        detailViewRecord.dateReportPrepared,
+                                      ).format("MM/DD/YYYY")
+                                    : "—"}
+                                </Descriptions.Item>
+                                <Descriptions.Item label="Reviewed By (Staff)">
+                                  {detailViewRecord.dateReportReviewedStaff ||
+                                    "—"}
+                                </Descriptions.Item>
+                                <Descriptions.Item label="Reviewed By (Focal)">
+                                  {detailViewRecord.dateReportReviewedFocal ||
+                                    "—"}
+                                </Descriptions.Item>
+                                <Descriptions.Item label="Approved">
+                                  {detailViewRecord.dateReportApproved
+                                    ? dayjs(
+                                        detailViewRecord.dateReportApproved,
+                                      ).format("MM/DD/YYYY")
+                                    : "—"}
+                                </Descriptions.Item>
+                                <Descriptions.Item label="Days to Prepare">
+                                  {detailViewRecord.totalDaysReportPrepared ??
+                                    "—"}
+                                </Descriptions.Item>
+                                <Descriptions.Item label="Days Staff Review">
+                                  {detailViewRecord.totalDaysReviewedStaff ??
+                                    "—"}
+                                </Descriptions.Item>
+                                <Descriptions.Item label="Days Focal Review">
+                                  {detailViewRecord.totalDaysReviewedFocal ??
+                                    "—"}
+                                </Descriptions.Item>
+                              </Descriptions>
+                            ),
+                          },
+                          {
+                            key: "compliance",
+                            label: (
+                              <span>
+                                <FileTextOutlined
+                                  style={{ color: "#eb2f96" }}
+                                />{" "}
+                                Compliance
+                              </span>
+                            ),
+                            children: (
+                              <Descriptions column={2} size="small" bordered>
+                                <Descriptions.Item
+                                  label="Other Findings and Observations"
+                                  span={2}
+                                >
+                                  {detailViewRecord.findings || "—"}
+                                </Descriptions.Item>
+                                <Descriptions.Item
+                                  label="Remarks and Recommendation"
+                                  span={2}
+                                >
+                                  {detailViewRecord.remarksAndRecommendation ||
+                                    "—"}
+                                </Descriptions.Item>
+                                <Descriptions.Item label="Technical Conference">
+                                  {detailViewRecord.technicalConferenceConducted ? (
+                                    <Tag color="success">Yes</Tag>
+                                  ) : (
+                                    <Tag>No</Tag>
+                                  )}
+                                </Descriptions.Item>
+                                <Descriptions.Item label="Commitment File">
+                                  {(detailViewRecord.commitmentFiles || [])
+                                    .length ? (
+                                    <Tag color="blue">
+                                      {detailViewRecord.commitmentFiles.length}{" "}
+                                      file(s)
+                                    </Tag>
+                                  ) : (
+                                    "—"
+                                  )}
+                                </Descriptions.Item>
+                                <Descriptions.Item
+                                  label="Progress Report"
+                                  span={2}
+                                >
+                                  {(detailViewRecord.progressReportFiles || [])
+                                    .length ? (
+                                    <Tag color="geekblue">
+                                      {
+                                        detailViewRecord.progressReportFiles
+                                          .length
+                                      }{" "}
+                                      file(s)
+                                    </Tag>
+                                  ) : (
+                                    "—"
+                                  )}
+                                </Descriptions.Item>
+                              </Descriptions>
+                            ),
+                          },
+                        ]}
+                      />
                     ),
                   },
                   {
                     key: "5",
                     label: (
-                      <span style={{ color: "#fa8c16" }}>
+                      <span style={{ color: "#a00d59" }}>
                         <WarningOutlined /> Preventive Measures
                       </span>
                     ),
@@ -8458,14 +8695,14 @@ export default function SLFMonitoring({
                               const url = normalizeStoredFileUrl(entry);
                               const name =
                                 decodeURIComponent(
-                                  String(url || "").split("/").pop() || "",
+                                  String(url || "")
+                                    .split("/")
+                                    .pop() || "",
                                 ).split("?")[0] || `File ${i + 1}`;
                               return url ? (
                                 <a
                                   key={i}
-                                  href={
-                                    isDriveUrl(url) ? url : resolveMediaUrl(url)
-                                  }
+                                  href={resolveMediaOpenUrl(url)}
                                   target="_blank"
                                   rel="noopener noreferrer"
                                 >
@@ -8530,11 +8767,15 @@ export default function SLFMonitoring({
                                         return (
                                           <a
                                             key={ai}
-                                            href={isDriveUrl(url) ? url : resolveMediaUrl(url)}
+                                            href={resolveMediaOpenUrl(url)}
                                             target="_blank"
                                             rel="noopener noreferrer"
                                           >
-                                            <Tag color="purple" icon={<LinkOutlined />} style={{ cursor: "pointer" }}>
+                                            <Tag
+                                              color="purple"
+                                              icon={<LinkOutlined />}
+                                              style={{ cursor: "pointer" }}
+                                            >
                                               File {ai + 1}
                                             </Tag>
                                           </a>
@@ -8589,7 +8830,9 @@ export default function SLFMonitoring({
                       const fileName = (item) =>
                         item.caption ||
                         decodeURIComponent(
-                          String(item.url || "").split("/").pop() || "Photo",
+                          String(item.url || "")
+                            .split("/")
+                            .pop() || "Photo",
                         ).split("?")[0];
                       return (
                         <>
@@ -8604,15 +8847,24 @@ export default function SLFMonitoring({
                             }}
                           >
                             <Text type="secondary" style={{ fontSize: 12 }}>
-                              {photos.length} media file(s) — click any item to open in a new tab.
+                              {photos.length} media file(s) — click any item to
+                              open in a new tab.
                             </Text>
                             <Segmented
                               size="small"
                               value={galleryViewMode}
                               onChange={setGalleryViewMode}
                               options={[
-                                { label: "Tiled", value: "tiled", icon: <AppstoreOutlined /> },
-                                { label: "List", value: "list", icon: <UnorderedListOutlined /> },
+                                {
+                                  label: "Tiled",
+                                  value: "tiled",
+                                  icon: <AppstoreOutlined />,
+                                },
+                                {
+                                  label: "List",
+                                  value: "list",
+                                  icon: <UnorderedListOutlined />,
+                                },
                               ]}
                             />
                           </div>
@@ -8625,88 +8877,213 @@ export default function SLFMonitoring({
                               {Object.entries(groups).map(([group, items]) =>
                                 galleryViewMode === "list" ? (
                                   <div key={group}>
-                                    <Divider plain orientation="left" style={{ marginTop: 0 }}>
+                                    <Divider
+                                      plain
+                                      orientation="left"
+                                      style={{ marginTop: 0 }}
+                                    >
                                       {group}
                                     </Divider>
                                     <List
                                       size="small"
                                       dataSource={items}
-                                      renderItem={(item) => (
-                                        <List.Item
-                                          actions={[
-                                            <a
-                                              key="open"
-                                              href={resolveMediaUrl(item.url)}
-                                              target="_blank"
-                                              rel="noopener noreferrer"
-                                            >
-                                              <LinkOutlined /> Open in new tab
-                                            </a>,
-                                          ]}
-                                        >
-                                          <List.Item.Meta
-                                            avatar={
-                                              <Image
-                                                src={resolveMediaUrl(item.url, { thumbnail: true })}
-                                                preview={{ src: resolveMediaUrl(item.url) }}
-                                                width={64}
-                                                height={48}
-                                                loading="lazy"
-                                                decoding="async"
-                                                style={{ objectFit: "cover", borderRadius: 4 }}
-                                                fallback="data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='64' height='48'%3E%3Crect width='100%25' height='100%25' fill='%23f0f0f0'/%3E%3C/svg%3E"
-                                              />
-                                            }
-                                            title={<Text style={{ fontSize: 12 }}>{fileName(item)}</Text>}
-                                            description={
-                                              <Text type="secondary" style={{ fontSize: 11 }}>
-                                                {item.folder || "General"} · {item.component || "SLF Component"}
-                                              </Text>
-                                            }
-                                          />
-                                        </List.Item>
-                                      )}
+                                      renderItem={(item) => {
+                                        const kind = getMediaKind(item.url);
+                                        return (
+                                          <List.Item
+                                            actions={[
+                                              <a
+                                                key="open"
+                                                href={resolveMediaOpenUrl(
+                                                  item.url,
+                                                )}
+                                                target="_blank"
+                                                rel="noopener noreferrer"
+                                              >
+                                                <LinkOutlined /> Open in new tab
+                                              </a>,
+                                            ]}
+                                          >
+                                            <List.Item.Meta
+                                              avatar={
+                                                kind === "image" ? (
+                                                  <Image
+                                                    src={resolveMediaUrl(
+                                                      item.url,
+                                                      { thumbnail: true },
+                                                    )}
+                                                    preview={{
+                                                      src: resolveMediaUrl(
+                                                        item.url,
+                                                      ),
+                                                    }}
+                                                    width={64}
+                                                    height={48}
+                                                    loading="lazy"
+                                                    decoding="async"
+                                                    style={{
+                                                      objectFit: "cover",
+                                                      borderRadius: 4,
+                                                    }}
+                                                    fallback="data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='64' height='48'%3E%3Crect width='100%25' height='100%25' fill='%23f0f0f0'/%3E%3C/svg%3E"
+                                                  />
+                                                ) : (
+                                                  <a
+                                                    href={resolveMediaOpenUrl(
+                                                      item.url,
+                                                    )}
+                                                    target="_blank"
+                                                    rel="noopener noreferrer"
+                                                    style={{
+                                                      width: 64,
+                                                      height: 48,
+                                                      borderRadius: 4,
+                                                      background: isDark
+                                                        ? "#1f1f1f"
+                                                        : "#f0f0f0",
+                                                      display: "flex",
+                                                      alignItems: "center",
+                                                      justifyContent: "center",
+                                                      fontSize: 22,
+                                                      color:
+                                                        kind === "pdf"
+                                                          ? "#cf1322"
+                                                          : "#1677ff",
+                                                    }}
+                                                  >
+                                                    {kind === "video" ? (
+                                                      <PlayCircleOutlined />
+                                                    ) : kind === "pdf" ? (
+                                                      <FilePdfOutlined />
+                                                    ) : (
+                                                      <FileTextOutlined />
+                                                    )}
+                                                  </a>
+                                                )
+                                              }
+                                              title={
+                                                <Text style={{ fontSize: 12 }}>
+                                                  {fileName(item)}
+                                                </Text>
+                                              }
+                                              description={
+                                                <Text
+                                                  type="secondary"
+                                                  style={{ fontSize: 11 }}
+                                                >
+                                                  {item.folder || "General"} ·{" "}
+                                                  {item.component ||
+                                                    "SLF Component"}
+                                                </Text>
+                                              }
+                                            />
+                                          </List.Item>
+                                        );
+                                      }}
                                     />
                                   </div>
                                 ) : (
                                   <div key={group}>
-                                    <Divider plain orientation="left" style={{ marginTop: 0 }}>
+                                    <Divider
+                                      plain
+                                      orientation="left"
+                                      style={{ marginTop: 0 }}
+                                    >
                                       {group}
                                     </Divider>
                                     <Row gutter={[8, 8]}>
-                                      {items.map((item, i) => (
-                                        <Col key={`${item.url}-${i}`} xs={12} sm={8} md={6}>
-                                          <Image
-                                            src={resolveMediaUrl(item.url, { thumbnail: true })}
-                                            preview={{ src: resolveMediaUrl(item.url) }}
-                                            loading="lazy"
-                                            decoding="async"
-                                            fallback="data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='200' height='110'%3E%3Crect width='100%25' height='100%25' fill='%23f0f0f0'/%3E%3Ctext x='50%25' y='50%25' dominant-baseline='middle' text-anchor='middle' fill='%23999' font-size='12' font-family='sans-serif'%3EImage unavailable%3C/text%3E%3C/svg%3E"
-                                            style={{
-                                              width: "100%",
-                                              borderRadius: 6,
-                                              objectFit: "cover",
-                                              height: 110,
-                                            }}
-                                          />
-                                          <a
-                                            href={resolveMediaUrl(item.url)}
-                                            target="_blank"
-                                            rel="noopener noreferrer"
-                                            style={{ fontSize: 11, display: "inline-block", marginTop: 4 }}
+                                      {items.map((item, i) => {
+                                        const kind = getMediaKind(item.url);
+                                        return (
+                                          <Col
+                                            key={`${item.url}-${i}`}
+                                            xs={12}
+                                            sm={8}
+                                            md={6}
                                           >
-                                            <LinkOutlined /> Open
-                                          </a>
-                                          {item.caption && (
-                                            <Text
-                                              type="secondary"
-                                              style={{ display: "block", fontSize: 11 }}
+                                            {kind === "image" ? (
+                                              <Image
+                                                src={resolveMediaUrl(item.url, {
+                                                  thumbnail: true,
+                                                })}
+                                                preview={{
+                                                  src: resolveMediaUrl(
+                                                    item.url,
+                                                  ),
+                                                }}
+                                                loading="lazy"
+                                                decoding="async"
+                                                fallback="data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='200' height='110'%3E%3Crect width='100%25' height='100%25' fill='%23f0f0f0'/%3E%3Ctext x='50%25' y='50%25' dominant-baseline='middle' text-anchor='middle' fill='%23999' font-size='12' font-family='sans-serif'%3EImage unavailable%3C/text%3E%3C/svg%3E"
+                                                style={{
+                                                  width: "100%",
+                                                  borderRadius: 6,
+                                                  objectFit: "cover",
+                                                  height: 110,
+                                                }}
+                                              />
+                                            ) : (
+                                              <a
+                                                href={resolveMediaOpenUrl(
+                                                  item.url,
+                                                )}
+                                                target="_blank"
+                                                rel="noopener noreferrer"
+                                                style={{
+                                                  width: "100%",
+                                                  height: 110,
+                                                  borderRadius: 6,
+                                                  background: isDark
+                                                    ? "#1f1f1f"
+                                                    : "#f0f0f0",
+                                                  display: "flex",
+                                                  alignItems: "center",
+                                                  justifyContent: "center",
+                                                  fontSize: 36,
+                                                  color:
+                                                    kind === "pdf"
+                                                      ? "#cf1322"
+                                                      : kind === "video"
+                                                        ? "#722ed1"
+                                                        : "#1677ff",
+                                                }}
+                                              >
+                                                {kind === "video" ? (
+                                                  <PlayCircleOutlined />
+                                                ) : kind === "pdf" ? (
+                                                  <FilePdfOutlined />
+                                                ) : (
+                                                  <FileTextOutlined />
+                                                )}
+                                              </a>
+                                            )}
+                                            <a
+                                              href={resolveMediaOpenUrl(
+                                                item.url,
+                                              )}
+                                              target="_blank"
+                                              rel="noopener noreferrer"
+                                              style={{
+                                                fontSize: 11,
+                                                display: "inline-block",
+                                                marginTop: 4,
+                                              }}
                                             >
-                                              {item.caption}
-                                            </Text>
-                                          )}
-                                        </Col>
-                                      ))}
+                                              <LinkOutlined /> Open
+                                            </a>
+                                            {item.caption && (
+                                              <Text
+                                                type="secondary"
+                                                style={{
+                                                  display: "block",
+                                                  fontSize: 11,
+                                                }}
+                                              >
+                                                {item.caption}
+                                              </Text>
+                                            )}
+                                          </Col>
+                                        );
+                                      })}
                                     </Row>
                                   </div>
                                 ),
@@ -8731,10 +9108,15 @@ export default function SLFMonitoring({
                           rowKey={(_, i) => i}
                           size="small"
                           pagination={false}
+                          tableLayout="fixed"
+                          // Horizontal scroll kicks in only when the fixed columns
+                          // truly can't fit, keeping the table inside the modal.
+                          scroll={{ x: 640 }}
                           columns={[
                             {
                               title: "Title",
                               dataIndex: "title",
+                              ellipsis: { showTitle: true },
                               render: (v) => (
                                 <Text strong style={{ fontSize: 12 }}>
                                   {v || "—"}
@@ -8744,13 +9126,15 @@ export default function SLFMonitoring({
                             {
                               title: "Type",
                               dataIndex: "docType",
-                              width: 160,
+                              width: 150,
+                              ellipsis: true,
                               render: (v) =>
                                 v ? <Tag color="purple">{v}</Tag> : "—",
                             },
                             {
                               title: "Description",
                               dataIndex: "description",
+                              ellipsis: { showTitle: true },
                               render: (v) =>
                                 v ? (
                                   <Text
@@ -8766,19 +9150,28 @@ export default function SLFMonitoring({
                             {
                               title: "File",
                               dataIndex: "url",
-                              width: 110,
+                              width: 96,
+                              fixed: "right",
                               render: (v, doc) => {
-                                const raw = normalizeStoredFileUrl(v) || normalizeStoredFileUrl(doc?.fileUrl);
+                                const raw =
+                                  normalizeStoredFileUrl(v) ||
+                                  normalizeStoredFileUrl(doc?.fileUrl);
                                 if (!raw) return "—";
-                                const openUrl = isDriveUrl(raw)
-                                  ? raw
-                                  : resolveMediaUrl(raw);
+                                const kind = getMediaKind(raw);
                                 return (
                                   <Button
                                     size="small"
                                     type="link"
-                                    icon={<FilePdfOutlined />}
-                                    href={openUrl}
+                                    icon={
+                                      kind === "pdf" ? (
+                                        <FilePdfOutlined />
+                                      ) : kind === "image" ? (
+                                        <FileImageOutlined />
+                                      ) : (
+                                        <EyeOutlined />
+                                      )
+                                    }
+                                    href={resolveMediaOpenUrl(raw)}
                                     target="_blank"
                                     rel="noopener noreferrer"
                                   >
@@ -9174,43 +9567,43 @@ export default function SLFMonitoring({
           <Space>
             <TeamOutlined style={{ color: "#fa8c16" }} />
 
-        <Modal
-          title={
-            <Space>
-              <BellOutlined style={{ color: "#fa8c16" }} />
-              <span>Notify Assigned SLF Users</span>
-            </Space>
-          }
-          open={!!capacityAlertModal?.open}
-          onCancel={() => setCapacityAlertModal(null)}
-          onOk={sendCapacityAlert}
-          okText="Send Notification"
-          confirmLoading={capacityAlertSending}
-          width={620}
-          destroyOnHidden
-        >
-          {capacityAlertModal?.cell && (
-            <Space direction="vertical" size={12} style={{ width: "100%" }}>
-              <Alert
-                type="warning"
-                showIcon
-                message={`${capacityAlertModal.record?.lgu || "SLF"} Cell ${capacityAlertModal.cell.index + 1} is ${capacityAlertModal.cell.pct}% full`}
-                description="This sends a portal notification to users assigned to this SLF and also creates an admin notification."
-              />
-              <Input.TextArea
-                rows={5}
-                value={capacityAlertModal.message}
-                onChange={(event) =>
-                  setCapacityAlertModal((prev) => ({
-                    ...prev,
-                    message: event.target.value,
-                  }))
-                }
-                placeholder="Write the notification message for assigned SLF users"
-              />
-            </Space>
-          )}
-        </Modal>
+            <Modal
+              title={
+                <Space>
+                  <BellOutlined style={{ color: "#fa8c16" }} />
+                  <span>Notify Assigned SLF Users</span>
+                </Space>
+              }
+              open={!!capacityAlertModal?.open}
+              onCancel={() => setCapacityAlertModal(null)}
+              onOk={sendCapacityAlert}
+              okText="Send Notification"
+              confirmLoading={capacityAlertSending}
+              width={620}
+              destroyOnHidden
+            >
+              {capacityAlertModal?.cell && (
+                <Space direction="vertical" size={12} style={{ width: "100%" }}>
+                  <Alert
+                    type="warning"
+                    showIcon
+                    message={`${capacityAlertModal.record?.lgu || "SLF"} Cell ${capacityAlertModal.cell.index + 1} is ${capacityAlertModal.cell.pct}% full`}
+                    description="This sends a portal notification to users assigned to this SLF and also creates an admin notification."
+                  />
+                  <Input.TextArea
+                    rows={5}
+                    value={capacityAlertModal.message}
+                    onChange={(event) =>
+                      setCapacityAlertModal((prev) => ({
+                        ...prev,
+                        message: event.target.value,
+                      }))
+                    }
+                    placeholder="Write the notification message for assigned SLF users"
+                  />
+                </Space>
+              )}
+            </Modal>
             <Text strong>LGU Served — SLF Details</Text>
           </Space>
         }
@@ -9359,7 +9752,9 @@ export default function SLFMonitoring({
                               <Statistic
                                 title="SLF Facilities"
                                 value={inR3.length}
-                                styles={{ content: { color: "#fa8c16", fontSize: 22 } }}
+                                styles={{
+                                  content: { color: "#fa8c16", fontSize: 22 },
+                                }}
                               />
                             </Card>
                           </Col>
@@ -9375,7 +9770,9 @@ export default function SLFMonitoring({
                               <Statistic
                                 title="Total LGUs Served"
                                 value={totalInR3}
-                                styles={{ content: { color: "#fa8c16", fontSize: 22 } }}
+                                styles={{
+                                  content: { color: "#fa8c16", fontSize: 22 },
+                                }}
                               />
                             </Card>
                           </Col>
@@ -9391,7 +9788,9 @@ export default function SLFMonitoring({
                               <Statistic
                                 title="Avg LGUs/SLF"
                                 value={(totalInR3 / inR3.length).toFixed(1)}
-                                styles={{ content: { color: "#fa8c16", fontSize: 22 } }}
+                                styles={{
+                                  content: { color: "#fa8c16", fontSize: 22 },
+                                }}
                               />
                             </Card>
                           </Col>
@@ -9439,7 +9838,9 @@ export default function SLFMonitoring({
                               <Statistic
                                 title="SLF Facilities"
                                 value={outR3.length}
-                                styles={{ content: { color: "#1890ff", fontSize: 22 } }}
+                                styles={{
+                                  content: { color: "#1890ff", fontSize: 22 },
+                                }}
                               />
                             </Card>
                           </Col>
@@ -9455,7 +9856,9 @@ export default function SLFMonitoring({
                               <Statistic
                                 title="Total LGUs Served"
                                 value={totalOutR3}
-                                styles={{ content: { color: "#1890ff", fontSize: 22 } }}
+                                styles={{
+                                  content: { color: "#1890ff", fontSize: 22 },
+                                }}
                               />
                             </Card>
                           </Col>
@@ -9471,7 +9874,9 @@ export default function SLFMonitoring({
                               <Statistic
                                 title="Avg LGUs/SLF"
                                 value={(totalOutR3 / outR3.length).toFixed(1)}
-                                styles={{ content: { color: "#1890ff", fontSize: 22 } }}
+                                styles={{
+                                  content: { color: "#1890ff", fontSize: 22 },
+                                }}
                               />
                             </Card>
                           </Col>
@@ -9721,8 +10126,18 @@ export default function SLFMonitoring({
           </Space>
         }
         open={dailySubmissionsModal.open}
-        onCancel={() => setDailySubmissionsModal({ open: false, cell: null, rows: [] })}
-        footer={<Button onClick={() => setDailySubmissionsModal({ open: false, cell: null, rows: [] })}>Close</Button>}
+        onCancel={() =>
+          setDailySubmissionsModal({ open: false, cell: null, rows: [] })
+        }
+        footer={
+          <Button
+            onClick={() =>
+              setDailySubmissionsModal({ open: false, cell: null, rows: [] })
+            }
+          >
+            Close
+          </Button>
+        }
         width={980}
         destroyOnHidden
       >
@@ -9733,24 +10148,41 @@ export default function SLFMonitoring({
           dataSource={dailySubmissionsModal.rows}
           pagination={{ pageSize: 8, size: "small" }}
           scroll={{ x: 900 }}
-          locale={{ emptyText: "No daily portal submissions found for this cell" }}
+          locale={{
+            emptyText: "No daily portal submissions found for this cell",
+          }}
           columns={[
             {
               title: "Date Submitted",
               width: 150,
-              render: (_, row) => row.submission?.createdAt ? dayjs(row.submission.createdAt).format("MM/DD/YYYY h:mm A") : "—",
+              render: (_, row) =>
+                row.submission?.createdAt
+                  ? dayjs(row.submission.createdAt).format("MM/DD/YYYY h:mm A")
+                  : "—",
             },
             {
               title: "Submission ID",
               width: 160,
-              render: (_, row) => <Text strong style={{ fontSize: 12 }}>{row.submission?.idNo || row.submission?.submissionId || "—"}</Text>,
+              render: (_, row) => (
+                <Text strong style={{ fontSize: 12 }}>
+                  {row.submission?.idNo || row.submission?.submissionId || "—"}
+                </Text>
+              ),
             },
             {
               title: "Waste Generator",
               width: 190,
               render: (_, row) => (
-                <Text style={{ fontSize: 12, whiteSpace: "normal", wordBreak: "break-word" }}>
-                  {row.submission?.lguCompanyName || row.submission?.companyName || "—"}
+                <Text
+                  style={{
+                    fontSize: 12,
+                    whiteSpace: "normal",
+                    wordBreak: "break-word",
+                  }}
+                >
+                  {row.submission?.lguCompanyName ||
+                    row.submission?.companyName ||
+                    "—"}
                 </Text>
               ),
             },
@@ -9759,37 +10191,61 @@ export default function SLFMonitoring({
               width: 160,
               render: (_, row) => (
                 <Space direction="vertical" size={0}>
-                  <Text style={{ fontSize: 12 }}>{row.truck?.plateNumber || "No plate"}</Text>
-                  <Text type="secondary" style={{ fontSize: 11 }}>{row.truck?.disposalTicketNo || row.truck?.ticketNo || "No ticket"}</Text>
+                  <Text style={{ fontSize: 12 }}>
+                    {row.truck?.plateNumber || "No plate"}
+                  </Text>
+                  <Text type="secondary" style={{ fontSize: 11 }}>
+                    {row.truck?.disposalTicketNo ||
+                      row.truck?.ticketNo ||
+                      "No ticket"}
+                  </Text>
                 </Space>
               ),
             },
             {
               title: "Waste Type",
               width: 160,
-              render: (_, row) => <Tag color={isHazardousCellType(row.truck?.wasteType) ? "red" : "blue"}>{row.truck?.wasteType || "Residual"}</Tag>,
+              render: (_, row) => (
+                <Tag
+                  color={
+                    isHazardousCellType(row.truck?.wasteType) ? "red" : "blue"
+                  }
+                >
+                  {row.truck?.wasteType || "Residual"}
+                </Tag>
+              ),
             },
             {
               title: "Volume",
               width: 130,
               align: "right",
-              render: (_, row) => `${Number(row.truck?.actualVolume || 0).toLocaleString(undefined, { maximumFractionDigits: 3 })} ${normalizeUnit(row.truck?.actualVolumeUnit || dailySubmissionsModal.cell?.unit || "tons")}`,
+              render: (_, row) =>
+                `${Number(row.truck?.actualVolume || 0).toLocaleString(undefined, { maximumFractionDigits: 3 })} ${normalizeUnit(row.truck?.actualVolumeUnit || dailySubmissionsModal.cell?.unit || "tons")}`,
             },
             {
               title: "Status",
               width: 120,
-              render: (_, row) => <Tag>{row.submission?.status || "pending"}</Tag>,
+              render: (_, row) => (
+                <Tag>{row.submission?.status || "pending"}</Tag>
+              ),
             },
           ]}
         />
       </Modal>
       <Modal
-        title={<Space><HistoryOutlined />Submission History and Cell Placement</Space>}
+        title={
+          <Space>
+            <HistoryOutlined />
+            Submission History and Cell Placement
+          </Space>
+        }
         open={!!cellAssignmentModal}
         onCancel={() => setCellAssignmentModal(null)}
         width={980}
         footer={[
-          <Button key="close" onClick={() => setCellAssignmentModal(null)}>Close</Button>,
+          <Button key="close" onClick={() => setCellAssignmentModal(null)}>
+            Close
+          </Button>,
           <Button
             key="save"
             type="primary"
@@ -9805,163 +10261,238 @@ export default function SLFMonitoring({
         ]}
         destroyOnHidden
       >
-        {cellAssignmentModal && (() => {
-          const activeCells = getActiveCellOptions();
-          const selected = (cellAssignmentModal.submissions || []).find(
-            (submission) => submission._id === cellAssignmentModal.selectedId,
-          );
-          return (
-            <Space direction="vertical" size={12} style={{ width: "100%" }}>
-              <Alert
-                type={activeCells.length === 0 ? "warning" : "info"}
-                showIcon
-                message={
-                  activeCells.length === 0
-                    ? "No active cells are available. Turn on at least one cell before assigning submitted truck volumes."
-                    : "Assign each submitted truck volume to the active cell where the waste was actually placed."
-                }
-              />
-              <Row gutter={12}>
-                <Col xs={24} md={9}>
-                  <List
-                    size="small"
-                    bordered
-                    style={{ maxHeight: 420, overflowY: "auto" }}
-                    dataSource={cellAssignmentModal.submissions || []}
-                    locale={{ emptyText: "No portal submissions found for this SLF" }}
-                    renderItem={(submission) => (
-                      <List.Item
-                        onClick={() => setCellAssignmentModal((prev) => ({ ...prev, selectedId: submission._id }))}
-                        style={{
-                          cursor: "pointer",
-                          background: submission._id === cellAssignmentModal.selectedId
-                            ? (isDark ? "rgba(22,119,255,0.16)" : "#e6f4ff")
-                            : "transparent",
-                        }}
-                      >
-                        <List.Item.Meta
-                          avatar={<Avatar icon={<FileTextOutlined />} />}
-                          title={<Text strong>{submission.idNo || "No ID"}</Text>}
-                          description={`${submission.lguCompanyName || "Unnamed"} - ${submission.createdAt ? dayjs(submission.createdAt).format("MM/DD/YYYY") : "No date"}`}
-                        />
-                      </List.Item>
-                    )}
-                  />
-                </Col>
-                <Col xs={24} md={15}>
-                  {!selected ? (
-                    <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="Select a submission" />
-                  ) : (() => {
-                    // Flatten trucks → per-vehicle rows so each vehicle's waste
-                    // can be placed in its own active cell (matches portal model).
-                    const placementRows = [];
-                    (selected.trucks || []).forEach((truck, truckIndex) => {
-                      if (Array.isArray(truck.vehicles) && truck.vehicles.length > 0) {
-                        truck.vehicles.forEach((veh, vehicleIndex) => {
-                          placementRows.push({
-                            rowKey: `${truckIndex}-${vehicleIndex}`,
-                            truckIndex,
-                            vehicleIndex,
-                            plate: veh.plateNumber || truck.disposalTicketNo || "-",
-                            wasteType: veh.wasteType || truck.wasteType || "Residual",
-                            volume: veh.actualVolume != null ? veh.actualVolume : truck.actualVolume,
-                            volumeUnit: veh.actualVolumeUnit || truck.actualVolumeUnit || "tons",
-                            cellSource: veh,
-                          });
-                        });
-                      } else {
-                        placementRows.push({
-                          rowKey: `${truckIndex}-t`,
-                          truckIndex,
-                          vehicleIndex: null,
-                          plate: truck.plateNumber || truck.disposalTicketNo || "-",
-                          wasteType: truck.wasteType || "Residual",
-                          volume: truck.actualVolume,
-                          volumeUnit: truck.actualVolumeUnit || "tons",
-                          cellSource: truck,
-                        });
-                      }
-                    });
-                    return (
-                    <Table
-                      className="portal-user-wrap-table"
+        {cellAssignmentModal &&
+          (() => {
+            const activeCells = getActiveCellOptions();
+            const selected = (cellAssignmentModal.submissions || []).find(
+              (submission) => submission._id === cellAssignmentModal.selectedId,
+            );
+            return (
+              <Space direction="vertical" size={12} style={{ width: "100%" }}>
+                <Alert
+                  type={activeCells.length === 0 ? "warning" : "info"}
+                  showIcon
+                  message={
+                    activeCells.length === 0
+                      ? "No active cells are available. Turn on at least one cell before assigning submitted truck volumes."
+                      : "Assign each submitted truck volume to the active cell where the waste was actually placed."
+                  }
+                />
+                <Row gutter={12}>
+                  <Col xs={24} md={9}>
+                    <List
                       size="small"
-                      rowKey="rowKey"
-                      pagination={false}
-                      dataSource={placementRows}
+                      bordered
+                      style={{ maxHeight: 420, overflowY: "auto" }}
+                      dataSource={cellAssignmentModal.submissions || []}
                       locale={{
-                        emptyText: "No truck records found in this portal submission",
+                        emptyText: "No portal submissions found for this SLF",
                       }}
-                      columns={[
-                        { title: "Truck / Plate", width: 150, render: (_, row) => <Text>{row.plate}</Text> },
-                        {
-                          title: "Waste Type",
-                          width: 140,
-                          render: (_, row) => (
-                            <Tag color={/haz|inert/i.test(row.wasteType) ? "volcano" : "green"}>
-                              {row.wasteType}
-                            </Tag>
-                          ),
-                        },
-                        {
-                          title: "Volume",
-                          width: 110,
-                          render: (_, row) => `${Number(row.volume || 0).toLocaleString()} ${normalizeUnit(row.volumeUnit)}`,
-                        },
-                        {
-                          title: "Portal Cell",
-                          width: 100,
-                          render: (_, row) => {
-                            const cellName = row.cellSource?.cellName;
-                            return cellName
-                              ? <Tag color="cyan" bordered={false} style={{ fontSize: 11 }}>{cellName}</Tag>
-                              : <Text type="secondary" style={{ fontSize: 11 }}>—</Text>;
-                          },
-                        },
-                        {
-                          title: "Assign Cell",
-                          render: (_, row) => {
-                            const compatible = activeCells.filter((cell) =>
-                              /haz|inert/i.test(row.wasteType)
-                                ? isHazardousCellType(cell.type)
-                                : !isHazardousCellType(cell.type),
-                            );
-                            const cellList = compatible.length ? compatible : activeCells;
-                            // Pre-select the portal-submitted cell index when it maps to
-                            // an active cell; show it ready for the admin to confirm.
-                            const portalIndex = getTruckCellIndex(row.cellSource);
-                            const preselected = cellList.some((cell) => cell.index === portalIndex)
-                              ? portalIndex
-                              : undefined;
-                            return (
-                              <Select
-                                style={{ width: "100%" }}
-                                placeholder={preselected == null ? "Select active cell" : undefined}
-                                value={preselected}
-                                options={cellList.map((cell) => ({ label: cell.label, value: cell.index }))}
-                                onChange={(value) =>
-                                  updateCellAssignmentLocal(
-                                    selected._id,
-                                    row.truckIndex,
-                                    value,
-                                    row.vehicleIndex,
-                                  )
-                                }
-                                allowClear
-                                disabled={activeCells.length === 0}
-                              />
-                            );
-                          },
-                        },
-                      ]}
+                      renderItem={(submission) => (
+                        <List.Item
+                          onClick={() =>
+                            setCellAssignmentModal((prev) => ({
+                              ...prev,
+                              selectedId: submission._id,
+                            }))
+                          }
+                          style={{
+                            cursor: "pointer",
+                            background:
+                              submission._id === cellAssignmentModal.selectedId
+                                ? isDark
+                                  ? "rgba(22,119,255,0.16)"
+                                  : "#e6f4ff"
+                                : "transparent",
+                          }}
+                        >
+                          <List.Item.Meta
+                            avatar={<Avatar icon={<FileTextOutlined />} />}
+                            title={
+                              <Text strong>{submission.idNo || "No ID"}</Text>
+                            }
+                            description={`${submission.lguCompanyName || "Unnamed"} - ${submission.createdAt ? dayjs(submission.createdAt).format("MM/DD/YYYY") : "No date"}`}
+                          />
+                        </List.Item>
+                      )}
                     />
-                    );
-                  })()}
-                </Col>
-              </Row>
-            </Space>
-          );
-        })()}
+                  </Col>
+                  <Col xs={24} md={15}>
+                    {!selected ? (
+                      <Empty
+                        image={Empty.PRESENTED_IMAGE_SIMPLE}
+                        description="Select a submission"
+                      />
+                    ) : (
+                      (() => {
+                        // Flatten trucks → per-vehicle rows so each vehicle's waste
+                        // can be placed in its own active cell (matches portal model).
+                        const placementRows = [];
+                        (selected.trucks || []).forEach((truck, truckIndex) => {
+                          if (
+                            Array.isArray(truck.vehicles) &&
+                            truck.vehicles.length > 0
+                          ) {
+                            truck.vehicles.forEach((veh, vehicleIndex) => {
+                              placementRows.push({
+                                rowKey: `${truckIndex}-${vehicleIndex}`,
+                                truckIndex,
+                                vehicleIndex,
+                                plate:
+                                  veh.plateNumber ||
+                                  truck.disposalTicketNo ||
+                                  "-",
+                                wasteType:
+                                  veh.wasteType ||
+                                  truck.wasteType ||
+                                  "Residual",
+                                volume:
+                                  veh.actualVolume != null
+                                    ? veh.actualVolume
+                                    : truck.actualVolume,
+                                volumeUnit:
+                                  veh.actualVolumeUnit ||
+                                  truck.actualVolumeUnit ||
+                                  "tons",
+                                cellSource: veh,
+                              });
+                            });
+                          } else {
+                            placementRows.push({
+                              rowKey: `${truckIndex}-t`,
+                              truckIndex,
+                              vehicleIndex: null,
+                              plate:
+                                truck.plateNumber ||
+                                truck.disposalTicketNo ||
+                                "-",
+                              wasteType: truck.wasteType || "Residual",
+                              volume: truck.actualVolume,
+                              volumeUnit: truck.actualVolumeUnit || "tons",
+                              cellSource: truck,
+                            });
+                          }
+                        });
+                        return (
+                          <Table
+                            className="portal-user-wrap-table"
+                            size="small"
+                            rowKey="rowKey"
+                            pagination={false}
+                            dataSource={placementRows}
+                            locale={{
+                              emptyText:
+                                "No truck records found in this portal submission",
+                            }}
+                            columns={[
+                              {
+                                title: "Truck / Plate",
+                                width: 150,
+                                render: (_, row) => <Text>{row.plate}</Text>,
+                              },
+                              {
+                                title: "Waste Type",
+                                width: 140,
+                                render: (_, row) => (
+                                  <Tag
+                                    color={
+                                      /haz|inert/i.test(row.wasteType)
+                                        ? "volcano"
+                                        : "green"
+                                    }
+                                  >
+                                    {row.wasteType}
+                                  </Tag>
+                                ),
+                              },
+                              {
+                                title: "Volume",
+                                width: 110,
+                                render: (_, row) =>
+                                  `${Number(row.volume || 0).toLocaleString()} ${normalizeUnit(row.volumeUnit)}`,
+                              },
+                              {
+                                title: "Portal Cell",
+                                width: 100,
+                                render: (_, row) => {
+                                  const cellName = row.cellSource?.cellName;
+                                  return cellName ? (
+                                    <Tag
+                                      color="cyan"
+                                      bordered={false}
+                                      style={{ fontSize: 11 }}
+                                    >
+                                      {cellName}
+                                    </Tag>
+                                  ) : (
+                                    <Text
+                                      type="secondary"
+                                      style={{ fontSize: 11 }}
+                                    >
+                                      —
+                                    </Text>
+                                  );
+                                },
+                              },
+                              {
+                                title: "Assign Cell",
+                                render: (_, row) => {
+                                  const compatible = activeCells.filter(
+                                    (cell) =>
+                                      /haz|inert/i.test(row.wasteType)
+                                        ? isHazardousCellType(cell.type)
+                                        : !isHazardousCellType(cell.type),
+                                  );
+                                  const cellList = compatible.length
+                                    ? compatible
+                                    : activeCells;
+                                  // Pre-select the portal-submitted cell index when it maps to
+                                  // an active cell; show it ready for the admin to confirm.
+                                  const portalIndex = getTruckCellIndex(
+                                    row.cellSource,
+                                  );
+                                  const preselected = cellList.some(
+                                    (cell) => cell.index === portalIndex,
+                                  )
+                                    ? portalIndex
+                                    : undefined;
+                                  return (
+                                    <Select
+                                      style={{ width: "100%" }}
+                                      placeholder={
+                                        preselected == null
+                                          ? "Select active cell"
+                                          : undefined
+                                      }
+                                      value={preselected}
+                                      options={cellList.map((cell) => ({
+                                        label: cell.label,
+                                        value: cell.index,
+                                      }))}
+                                      onChange={(value) =>
+                                        updateCellAssignmentLocal(
+                                          selected._id,
+                                          row.truckIndex,
+                                          value,
+                                          row.vehicleIndex,
+                                        )
+                                      }
+                                      allowClear
+                                      disabled={activeCells.length === 0}
+                                    />
+                                  );
+                                },
+                              },
+                            ]}
+                          />
+                        );
+                      })()
+                    )}
+                  </Col>
+                </Row>
+              </Space>
+            );
+          })()}
       </Modal>
     </div>
   );

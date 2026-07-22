@@ -35,8 +35,11 @@ export default function SLFWasteGenerators({
   canEditCellPlacement = true,
   canRepairIds = false,
   isDeveloper = false,
+  initialTab = null,
+  submissionsContext = null,
 }) {
   const [pendingHaulerReqs, setPendingHaulerReqs] = useState(0);
+  const [activeTab, setActiveTab] = useState(null);
 
   useEffect(() => {
     api
@@ -94,42 +97,10 @@ export default function SLFWasteGenerators({
           canDelete={canDelete}
           canRepairIds={canRepairIds}
           isDeveloper={isDeveloper}
+          submissionsContext={submissionsContext}
         />
       ),
       hidden: !canViewSubmissions,
-    },
-    {
-      key: "support-tickets",
-      label: (
-        <span>
-          <CustomerServiceOutlined /> Support Tickets
-          {openTickets > 0 && (
-            <Badge
-              count={openTickets}
-              size="small"
-              style={{ marginLeft: 6, backgroundColor: "#ff4d4f" }}
-            />
-          )}
-        </span>
-      ),
-      children: <SupportTickets canEdit={canEdit} />,
-      hidden: !canViewSubmissions,
-    },
-    {
-      key: "reports",
-      label: (
-        <>
-          <BarChartOutlined /> Reports
-        </>
-      ),
-      children: (
-        <Reports
-          isDark={isDark}
-          canEdit={canEditReports}
-          canDelete={canDeleteReports}
-        />
-      ),
-      hidden: !canViewReports,
     },
     {
       key: "baseline",
@@ -165,7 +136,7 @@ export default function SLFWasteGenerators({
       children: <HaulerRequests isDark={isDark} canEdit={canEdit} />,
       hidden: !canViewSubmissions,
     },
-     {
+    {
       key: "cell-placement",
       label: (
         <>
@@ -174,6 +145,40 @@ export default function SLFWasteGenerators({
       ),
       children: <CellWastePlacement canEdit={canEditCellPlacement} />,
       hidden: !canViewCellPlacement,
+    },
+
+    {
+      key: "reports",
+      label: (
+        <>
+          <BarChartOutlined /> Reports
+        </>
+      ),
+      children: (
+        <Reports
+          isDark={isDark}
+          canEdit={canEditReports}
+          canDelete={canDeleteReports}
+        />
+      ),
+      hidden: !canViewReports,
+    },
+    {
+      key: "support-tickets",
+      label: (
+        <span>
+          <CustomerServiceOutlined /> Support Tickets
+          {openTickets > 0 && (
+            <Badge
+              count={openTickets}
+              size="small"
+              style={{ marginLeft: 6, backgroundColor: "#ff4d4f" }}
+            />
+          )}
+        </span>
+      ),
+      children: <SupportTickets canEdit={canEdit} />,
+      hidden: !canViewSubmissions,
     },
   ].filter((item) => !item.hidden);
 
@@ -196,7 +201,8 @@ export default function SLFWasteGenerators({
         bodyStyle={{ padding: "8px 16px 16px" }}
       >
         <Tabs
-          defaultActiveKey={tabItems[0]?.key}
+          activeKey={activeTab || initialTab || tabItems.find((t) => !t.hidden)?.key}
+          onChange={setActiveTab}
           items={tabItems}
           destroyOnHidden={false}
         />

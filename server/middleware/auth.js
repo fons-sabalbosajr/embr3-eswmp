@@ -56,4 +56,36 @@ function developerOnly(req, res, next) {
   next();
 }
 
-module.exports = { authMiddleware, requireAnyAuth, adminOnly, developerOnly };
+// Enforce a granular per-feature permission on the backend, mirroring the
+// frontend `hasAccess(key, level)` semantics exactly (developer bypasses all;
+// otherwise the user's stored `permissions[key][level]` must be true). The JWT
+// only carries { id, role }, so the fresh permission set is loaded from the DB —
+// this keeps direct API calls from bypassing the UI permission gates. Use AFTER
+// `authMiddleware`/`adminOnly`.
+function requirePermission(key, level = "view") {
+  return async (req, res, next) => {
+    try {
+      if (req.user?.role === "developer") return next();
+      const User = require("../models/User");
+      const u = await User.findById(req.user?.id).select("role permissions").lean();
+      if (!u) return res.status(401).json({ message: "User not found" });
+      if (u.role === "developer") return next();
+      const p = u.permissions?.[key];
+      const ok = p === true || (p && typeof p === "object" && p[level] === true);
+      if (!ok) {
+        writeLog("warn", "access.denied.permission", {
+          message: `User lacks ${key}.${level} for ${req.method} ${req.originalUrl}`,
+          user: req.user?.email || req.user?.id || "",
+          ip: req.ip,
+          meta: { key, level, role: u.role || "none", path: req.originalUrl, method: req.method },
+        });
+        return res.status(403).json({ message: "You do not have permission to perform this action" });
+      }
+      next();
+    } catch {
+      res.status(500).json({ message: "Permission check failed" });
+    }
+  };
+}
+
+module.exports = { authMiddleware, requireAnyAuth, adminOnly, developerOnly, requirePermission };

@@ -427,7 +427,7 @@ router.get("/stats", async (req, res) => {
         ]),
         SlfFacility.find(
         { ...scopedFilter, latitude: { $ne: null }, longitude: { $ne: null } },
-          { province: 1, lgu: 1, barangay: 1, manilaBayArea: 1, latitude: 1, longitude: 1, statusOfSLF: 1, category: 1, ownership: 1, volumeCapacity: 1, noOfLGUServed: 1, focalPerson: 1, enmo: 1, yearStartedOperation: 1 }
+          { province: 1, lgu: 1, barangay: 1, manilaBayArea: 1, latitude: 1, longitude: 1, statusOfSLF: 1, category: 1, ownership: 1, volumeCapacity: 1, noOfLGUServed: 1, focalPerson: 1, enmo: 1, yearStartedOperation: 1, galleryPhotos: 1, galleryItems: 1 }
         ),
         // Per-facility management details for dashboard drill-down modals
         SlfFacility.find(scopedFilter, {

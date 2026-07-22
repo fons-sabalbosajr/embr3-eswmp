@@ -7,6 +7,7 @@ const { sendPortalAnnouncementEmail } = require("../utils/email");
 const { verifyDriveAccess, getDriveConfigStatus } = require("../utils/googleDrive");
 const { invalidateDriveMaintenanceCache } = require("../utils/driveMaintenanceGuard");
 const { authMiddleware, adminOnly, developerOnly } = require("../middleware/auth");
+const { refreshAdmin, broadcastRefresh } = require("../utils/socketEmit");
 const { writeLog } = require("../utils/logger");
 const { NON_DUMMY_CLAUSE } = require("../utils/dummyFilter");
 
@@ -17,7 +18,9 @@ function serializeAnnouncement(item = {}) {
     _id: item._id,
     enabled: item.enabled !== false,
     type: item.type || item.portalAnnouncementType || "info",
+    priority: ["low", "normal", "high", "urgent"].includes(item.priority) ? item.priority : "normal",
     title: item.title || item.portalAnnouncementTitle || "",
+    summary: item.summary || "",
     message: item.message || item.portalAnnouncementMessage || "",
     startAt: item.startAt ?? item.portalAnnouncementStartAt ?? null,
     endAt: item.endAt ?? item.portalAnnouncementEndAt ?? null,
@@ -133,6 +136,7 @@ router.post("/fields", authMiddleware, adminOnly, async (req, res) => {
   try {
     const field = new PortalField(req.body);
     await field.save();
+    refreshAdmin(req, "settings");
     res.status(201).json({ message: "Field created", data: field });
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });
@@ -144,6 +148,7 @@ router.put("/fields/:id", authMiddleware, adminOnly, async (req, res) => {
   try {
     const field = await PortalField.findByIdAndUpdate(req.params.id, req.body, { returnDocument: "after" });
     if (!field) return res.status(404).json({ message: "Field not found" });
+    refreshAdmin(req, "settings");
     res.json({ message: "Field updated", data: field });
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });
@@ -154,6 +159,7 @@ router.put("/fields/:id", authMiddleware, adminOnly, async (req, res) => {
 router.delete("/fields/:id", authMiddleware, adminOnly, async (req, res) => {
   try {
     await PortalField.findByIdAndDelete(req.params.id);
+    refreshAdmin(req, "settings");
     res.json({ message: "Field deleted" });
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });
@@ -174,6 +180,18 @@ router.get("/app", async (req, res) => {
     // Use flattenMaps so Mongoose Map fields (e.g. dashboardTabs) serialize as plain objects
     const out = settings.toObject({ flattenMaps: true });
     if (out.smtpPass) out.smtpPass = "••••••••";
+    // #5: never return the Automation Agent API key in plain text — expose only
+    // whether one is stored so the UI can show a "stored" hint.
+    if (out.automationAgent?.provider) {
+      // Never expose the API key (encrypted or legacy) or its ciphertext blob.
+      out.automationAgent.apiKeySet = !!(out.automationAgent.provider.apiKeyEnc || out.automationAgent.provider.apiKey);
+      out.automationAgent.provider.apiKey = "";
+      out.automationAgent.provider.apiKeyEnc = "";
+    }
+    // The masking audit trail carries changer emails (PII) — never expose it on
+    // the public settings read. The boolean flag itself IS public (the portal
+    // needs it); the audit is available only via the developer-only endpoint.
+    if (out.maskSensitiveSlfAudit) delete out.maskSensitiveSlfAudit;
     res.json(out);
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });
@@ -195,11 +213,94 @@ router.put("/app", authMiddleware, adminOnly, async (req, res) => {
         }
         delete req.body.dashboardTabs;
       }
+      // #5: a blank Automation Agent API key must NOT wipe a previously stored key
+      // (the GET route masks it, so a normal round-trip sends it empty).
+      if (req.body.automationAgent) {
+        const incoming = req.body.automationAgent;
+        if (incoming.provider && !String(incoming.provider.apiKey || "").trim()) {
+          incoming.provider.apiKey = settings.automationAgent?.provider?.apiKey || "";
+        }
+      }
       Object.assign(settings, req.body);
     }
     await settings.save();
     clearYearVisibilityCache();
-    res.json({ message: "Settings updated", data: settings.toObject({ flattenMaps: true }) });
+    const outData = settings.toObject({ flattenMaps: true });
+    if (outData.automationAgent?.provider) {
+      outData.automationAgent.apiKeySet = !!(outData.automationAgent.provider.apiKeyEnc || outData.automationAgent.provider.apiKey);
+      outData.automationAgent.provider.apiKey = "";
+      outData.automationAgent.provider.apiKeyEnc = "";
+    }
+    if (outData.maskSensitiveSlfAudit) delete outData.maskSensitiveSlfAudit;
+    refreshAdmin(req, "settings");
+    res.json({ message: "Settings updated", data: outData });
+  } catch (error) {
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+});
+
+// ── SLF Portal sensitive-value masking (developer-only) ──────────────────────
+// Global privacy toggle. When ON, sensitive SLF Portal values render as "*****"
+// across every portal surface. Only the developer role may change it, and every
+// change is audited. Portal users can never override it (this is the only write
+// path, and it is developer-gated). A change broadcasts to ALL open portals +
+// the admin so the flag updates in real time without a page reload.
+router.get("/slf-masking", authMiddleware, developerOnly, async (_req, res) => {
+  try {
+    let settings = await AppSettings.findOne();
+    if (!settings) settings = await AppSettings.create({});
+    const audit = (settings.maskSensitiveSlfAudit || [])
+      .slice(-25)
+      .reverse()
+      .map((a) => ({
+        changedByEmail: a.changedByEmail || "",
+        changedByRole: a.changedByRole || "",
+        previousValue: !!a.previousValue,
+        newValue: !!a.newValue,
+        at: a.at,
+      }));
+    res.json({
+      maskSensitiveSlfValues: !!settings.maskSensitiveSlfValues,
+      updatedAt: settings.maskSensitiveSlfValuesUpdatedAt || null,
+      audit,
+    });
+  } catch (error) {
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+});
+
+router.put("/slf-masking", authMiddleware, developerOnly, async (req, res) => {
+  try {
+    let settings = await AppSettings.findOne();
+    if (!settings) settings = await AppSettings.create({});
+    const next = !!req.body?.maskSensitiveSlfValues;
+    const prev = !!settings.maskSensitiveSlfValues;
+    if (next !== prev) {
+      settings.maskSensitiveSlfValues = next;
+      settings.maskSensitiveSlfValuesUpdatedAt = new Date();
+      settings.maskSensitiveSlfAudit.push({
+        changedBy: req.user?.id || null,
+        changedByEmail: req.user?.email || req.user?.username || "",
+        changedByRole: req.user?.role || "",
+        previousValue: prev,
+        newValue: next,
+        at: new Date(),
+      });
+      // Keep the audit trail bounded.
+      if (settings.maskSensitiveSlfAudit.length > 200) {
+        settings.maskSensitiveSlfAudit = settings.maskSensitiveSlfAudit.slice(-200);
+      }
+      await settings.save();
+      writeLog("info", "settings.slfMasking.updated", {
+        message: `SLF sensitive-value masking ${next ? "enabled" : "disabled"}`,
+        user: req.user?.email || req.user?.id || "",
+        meta: { previousValue: prev, newValue: next },
+      });
+      // Real-time: every portal + admin re-reads settings.
+      broadcastRefresh(req, "app-settings");
+      refreshAdmin(req, "settings");
+    }
+    res.json({ maskSensitiveSlfValues: next, updatedAt: settings.maskSensitiveSlfValuesUpdatedAt || null });
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });
   }
@@ -228,6 +329,9 @@ router.post("/app/portal-announcements", authMiddleware, adminOnly, async (req, 
     if (item.enabled) settings.portalAnnouncements.forEach((ann) => { ann.enabled = false; });
     settings.portalAnnouncements.push(item);
     const savedItem = settings.portalAnnouncements[settings.portalAnnouncements.length - 1];
+    // Author captured once at creation; serializeAnnouncement never emits it, so
+    // subsequent PUT edits (Object.assign) preserve this value.
+    savedItem.createdBy = req.user?.email || req.user?.username || req.user?.id || "";
     if (item.enabled) syncCurrentAnnouncement(settings, savedItem);
     await settings.save();
     clearYearVisibilityCache();
@@ -715,6 +819,7 @@ router.put("/org-chart", authMiddleware, adminOnly, async (req, res) => {
     if (!settings) settings = new AppSettings();
     settings.orgChart = req.body.orgChart || [];
     await settings.save();
+    refreshAdmin(req, "settings");
     res.json({ message: "Org chart updated", data: settings.orgChart });
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });

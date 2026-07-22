@@ -4,7 +4,7 @@ import { MailOutlined, ArrowLeftOutlined, LockOutlined, SafetyOutlined } from "@
 import { Link } from "react-router-dom";
 import Swal from "sweetalert2";
 import api from "../api";
-import embLogo from "../assets/emblogo.svg";
+import AuthBrandLogos from "../components/AuthBrandLogos";
 import bgEmb from "../assets/bgemb.webp";
 import "./Auth.css";
 
@@ -215,9 +215,7 @@ export default function AdminForgotPassword() {
 
       <div className="auth-center">
         <div className="auth-brand-header">
-          <div className="auth-brand-logo-circle">
-            <img src={embLogo} alt="EMBR3 Logo" />
-          </div>
+          <AuthBrandLogos />
           <Title level={2} className="auth-brand-title">EMBR3 ESWMP</Title>
           <Text className="auth-brand-subtitle">{brandSubtitles[step]}</Text>
         </div>

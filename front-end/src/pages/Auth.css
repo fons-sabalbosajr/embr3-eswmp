@@ -217,6 +217,37 @@
   object-fit: contain;
 }
 
+/* Paired EMB + Bagong Pilipinas brand marks */
+.auth-brand-logos {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  margin-bottom: 10px;
+  flex-wrap: nowrap;
+}
+
+.auth-brand-logos .auth-brand-logo-circle {
+  margin-bottom: 0;
+  flex: 0 0 auto;
+}
+
+/* The Bagong Pilipinas seal already ships as a transparent PNG — it sits in the
+   same subtle translucent circle as the EMB mark so its transparency shows
+   through (no opaque chip/background behind it). */
+
+/* Accessibility: visible keyboard-focus rings on interactive auth controls.
+   Additive to antd's own focus styling; only shows for keyboard users. */
+.auth-form .ant-input-affix-wrapper:focus-within,
+.auth-form .ant-input:focus-visible,
+.auth-btn-primary:focus-visible,
+.auth-btn-secondary:focus-visible,
+.auth-forgot-link:focus-visible,
+.auth-card a:focus-visible {
+  outline: 2px solid #4c9aff;
+  outline-offset: 2px;
+}
+
 .auth-brand-title {
   color: #fff !important;
   font-size: 28px !important;

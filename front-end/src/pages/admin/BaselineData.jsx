@@ -39,6 +39,7 @@ import {
 } from "@ant-design/icons";
 import Swal from "sweetalert2";
 import api from "../../api";
+import MessageUserButton from "../../components/MessageUserButton";
 import dayjs from "dayjs";
 import { fetchWithCache, invalidateCache } from "../../utils/pageCache";
 import { getSocket } from "../../utils/socket";
@@ -816,6 +817,14 @@ export default function BaselineData({
               }}
             />
           </Tooltip>
+          {/* Item #5: same Message User flow as the Summary tab (shared component,
+              same API/model/real-time delivery), targeting this SLF's portal user. */}
+          <MessageUserButton
+            slfGenerator={r.slfGenerator}
+            slfName={r.slfName}
+            size="small"
+            type="text"
+          />
           {r.baselineUpdateRequested && (
             <>
               <Tooltip title="Approve Update Request">

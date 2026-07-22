@@ -24,6 +24,17 @@
 
 const norm = (v) => String(v || "").trim().toLowerCase();
 
+// A submission is a resubmission once it carries prior idNo(s).
+const isResub = (s) => Array.isArray(s?.previousIdNos) && s.previousIdNos.length > 0;
+
+// Latest RELEVANT activity for sorting: resubmittedAt (updatedAt) for a
+// resubmission, otherwise submittedAt (createdAt). Missing/invalid → 0 (oldest).
+const latestActivityOf = (s) => {
+  const raw = isResub(s) ? s.updatedAt || s.createdAt : s.createdAt || s.updatedAt;
+  const t = new Date(raw || 0).getTime();
+  return Number.isFinite(t) ? t : 0;
+};
+
 // Mirrors the admin's rowKeyExpr singleton conditions.
 function groupKeyFor(sub) {
   const id = String(sub?.submissionId || "").trim();
@@ -56,7 +67,7 @@ export function groupSubmissions(submissions = []) {
   for (const [key, children] of buckets) {
     // A "group" of one is just that submission — do not wrap it in a parent row.
     if (children.length === 1) {
-      rows.push({ ...children[0], isGroup: false });
+      rows.push({ ...children[0], isGroup: false, latestActivityAt: latestActivityOf(children[0]) });
       continue;
     }
 
@@ -84,6 +95,15 @@ export function groupSubmissions(submissions = []) {
       // Existing, already-normalized denormalized metrics — no invented maths.
       totalVolumeM3: children.reduce((n, c) => n + Number(c.totalVolumeM3 || 0), 0),
       totalVolumeTons: children.reduce((n, c) => n + Number(c.totalVolumeTons || 0), 0),
+      // Item #3: never silently add tons + m³. When a batch mixes both, keep the
+      // per-unit totals separate (above) and flag the inconsistency so the UI can
+      // show them apart with a warning.
+      mixedUnits:
+        children.some((c) => Number(c.totalVolumeTons || 0) > 0) &&
+        children.some((c) => Number(c.totalVolumeM3 || 0) > 0),
+      // Latest relevant activity across the batch (resubmittedAt/updatedAt for
+      // resubmissions, else submittedAt/createdAt) — drives descending sort.
+      latestActivityAt: Math.max(...children.map(latestActivityOf), 0),
       truckCount: children.reduce((n, c) => n + Number(c.truckCount || 0), 0),
       // Union of the cells the group's submissions were placed into (counts summed),
       // plus any waste still unassigned across the group.
@@ -111,11 +131,10 @@ export function groupSubmissions(submissions = []) {
     });
   }
 
-  // Newest first, matching the existing history ordering.
+  // Item #3: sort by the latest relevant activity (resubmittedAt else submittedAt),
+  // descending — groups and individual rows use the same key.
   return rows.sort(
-    (a, b) =>
-      new Date(b.createdAt || b.dateOfDisposal || 0) -
-      new Date(a.createdAt || a.dateOfDisposal || 0),
+    (a, b) => (b.latestActivityAt || 0) - (a.latestActivityAt || 0),
   );
 }
 

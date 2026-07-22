@@ -21,19 +21,18 @@ import {
 } from "antd";
 import {
   CalendarOutlined,
-  EyeOutlined,
   ReloadOutlined,
   SearchOutlined,
   FilePdfOutlined,
   BankOutlined,
   InboxOutlined,
   CarOutlined,
-  DatabaseOutlined,
   DownloadOutlined,
   ExperimentOutlined,
   WarningOutlined,
   CheckCircleOutlined,
   ClockCircleOutlined,
+  MessageOutlined,
 } from "@ant-design/icons";
 import dayjs from "dayjs";
 import GaugeMeter, { computeGaugePercent } from "../../components/GaugeMeter";
@@ -95,6 +94,19 @@ function formatVolume(m3, tons, unit = "m³") {
   const value = u === "tons" ? tons : m3;
   const v = formatVolumeValue(value);
   return v ? `${v} ${u}` : "—";
+}
+
+// Safe volume formatter for summary metrics: shows a real "0" when the value is
+// a valid number that happens to be empty, and "N/A" only when the metric is
+// genuinely unavailable (null / undefined / NaN). Never does arithmetic on the
+// raw input — it only coerces once and checks finiteness.
+function formatVolumeSafe(m3, tons, unit = "m³") {
+  const u = normalizeUnit(unit);
+  const value = u === "tons" ? tons : m3;
+  if (value == null) return "N/A";
+  const n = Number(value);
+  if (!Number.isFinite(n)) return "N/A";
+  return `${n.toLocaleString(undefined, { maximumFractionDigits: 2 })} ${u}`;
 }
 
 function addNameVariant(map, name, value) {
@@ -263,53 +275,43 @@ function CountUp({ value = 0, duration = 900, style }) {
   return <span style={style}>{display.toLocaleString()}</span>;
 }
 
-function SummaryTile({ icon, color, label, children, subtitle, isDark, delay = 0 }) {
+// Compact metric used inside grouped summary cards (no card chrome of its own,
+// so several sit cleanly within one grouped Card).
+function MiniStat({ icon, color, label, children, subtitle }) {
   return (
-    <Card
-      size="small"
-      className="summary-tile"
-      style={{
-        borderRadius: 12,
-        animationDelay: `${delay}ms`,
-        background: isDark ? "#1f1f1f" : "#fff",
-      }}
-      styles={{ body: { padding: "14px 16px" } }}
-    >
-      <div className="summary-tile-accent" style={{ background: color }} />
-      <Space align="start" size={12} style={{ width: "100%" }}>
-        <span
-          className="summary-tile-icon"
-          style={{ background: `${color}1f`, color }}
+    <div style={{ display: "flex", gap: 10, alignItems: "flex-start" }}>
+      <span
+        className="summary-tile-icon"
+        style={{ background: `${color}1f`, color, flexShrink: 0 }}
+      >
+        {icon}
+      </span>
+      <div style={{ minWidth: 0 }}>
+        <Text
+          type="secondary"
+          style={{ fontSize: 12, display: "block", lineHeight: 1.2 }}
         >
-          {icon}
-        </span>
-        <div style={{ minWidth: 0 }}>
-          <Text
-            type="secondary"
-            style={{ fontSize: 12, display: "block", lineHeight: 1.2 }}
-          >
-            {label}
-          </Text>
-          <div
-            style={{
-              fontSize: 24,
-              fontWeight: 700,
-              color,
-              lineHeight: 1.25,
-              marginTop: 2,
-              wordBreak: "break-word",
-            }}
-          >
-            {children}
-          </div>
-          {subtitle && (
-            <Text type="secondary" style={{ fontSize: 11 }}>
-              {subtitle}
-            </Text>
-          )}
+          {label}
+        </Text>
+        <div
+          style={{
+            fontSize: 20,
+            fontWeight: 700,
+            color,
+            lineHeight: 1.25,
+            marginTop: 2,
+            wordBreak: "break-word",
+          }}
+        >
+          {children}
         </div>
-      </Space>
-    </Card>
+        {subtitle && (
+          <Text type="secondary" style={{ fontSize: 11 }}>
+            {subtitle}
+          </Text>
+        )}
+      </div>
+    </div>
   );
 }
 
@@ -326,12 +328,56 @@ export default function SubmissionSummary({ isDark }) {
   const [calendarRecord, setCalendarRecord] = useState(null);
   const [calendarLoading, setCalendarLoading] = useState(false);
   const [calendarDate, setCalendarDate] = useState(dayjs());
+  // Item #2: Daily Submission Details modal (opens when a calendar date is clicked).
+  const [dailyOpen, setDailyOpen] = useState(false);
   // #4: disposal-calendar export — a custom date range, or "Export All" from the
   // first recorded submission.
   const [exportRange, setExportRange] = useState(null);
-  const [submissionDetail, setSubmissionDetail] = useState(null);
   const [portalUsers, setPortalUsers] = useState([]);
   const [reportOpen, setReportOpen] = useState(false);
+
+  // Item #4: admin → portal-user direct message (from the SLF Submissions
+  // Breakdown "Message User" action).
+  const [msgModal, setMsgModal] = useState({ open: false, row: null });
+  const [msgText, setMsgText] = useState("");
+  const [msgSending, setMsgSending] = useState(false);
+
+  const openMessageUser = (row) => {
+    setMsgText("");
+    setMsgModal({ open: true, row });
+  };
+
+  const sendPortalMessage = async () => {
+    const text = msgText.trim();
+    if (!text) {
+      Modal.error({ title: "Message required", content: "Please enter a message before sending." });
+      return;
+    }
+    const row = msgModal.row || {};
+    const slfGenerator =
+      row.slfGenerator && typeof row.slfGenerator === "object" ? row.slfGenerator._id : row.slfGenerator;
+    setMsgSending(true);
+    try {
+      const { data } = await api.post("/portal-messages", {
+        slfGenerator: slfGenerator || undefined,
+        slfName: row.slfName || undefined,
+        message: text,
+      });
+      setMsgModal({ open: false, row: null });
+      setMsgText("");
+      Modal.success({
+        title: "Message Sent",
+        content: `Your message was delivered to ${data?.count || 1} portal user${(data?.count || 1) === 1 ? "" : "s"} assigned to ${row.slfName || "this SLF"}.`,
+      });
+    } catch (err) {
+      Modal.error({
+        title: "Could Not Send Message",
+        content: err.response?.data?.message || "Something went wrong while sending the message.",
+      });
+    } finally {
+      setMsgSending(false);
+    }
+  };
 
   useEffect(() => {
     ensureSummaryTileStyles();
@@ -352,7 +398,6 @@ export default function SubmissionSummary({ isDark }) {
       setBaselines(EMPTY_ROWS);
       setPortalUsers(EMPTY_ROWS);
       setCalendarRecord(null);
-      setSubmissionDetail(null);
       setTiles(null);
     };
   }, []);
@@ -553,6 +598,79 @@ export default function SubmissionSummary({ isDark }) {
     });
     return acc;
   }, { submissions: 0, trucks: 0, m3: 0, tons: 0 }), [selectedDayRecords]);
+
+  // Item #2: facility behind the open calendar — source of operational status +
+  // the declared unit for unit-mismatch detection.
+  const calendarFacility = useMemo(() => {
+    if (!calendarRecord) return null;
+    const genId = calendarRecord.slfGenerator?._id || calendarRecord.slfGenerator;
+    return (
+      (genId && facilityById.get(String(genId))) ||
+      facilityMap.get(normalizeKey(calendarRecord.slfName)) ||
+      null
+    );
+  }, [calendarRecord, facilityById, facilityMap]);
+
+  // Item #2: per-record enrichment + issue detection for the selected day, using
+  // the app's existing business rules. Each record carries its OWN stored unit so
+  // historical records stay accurate even if the SLF unit changes later.
+  const selectedDayDetail = useMemo(() => {
+    const facility = calendarFacility;
+    const facUnit = normalizeUnit(
+      facility?.wasteReceivedUnit || facility?.volumeCapacityUnit || "",
+    );
+    const nonOperational = /non/i.test(String(facility?.statusOfSLF || ""));
+    // Duplicate detection: same generator + same disposal date appearing more than once.
+    const byGenerator = {};
+    selectedDayRecords.forEach((r) => {
+      const g = String(r.lguCompanyName || r.companyName || r.generatorName || "").trim().toLowerCase();
+      if (g) byGenerator[g] = (byGenerator[g] || 0) + 1;
+    });
+
+    const rows = selectedDayRecords.map((record) => {
+      const trucks = Array.isArray(record.trucks) ? record.trucks : [];
+      let tons = 0;
+      let m3 = 0;
+      const units = new Set();
+      trucks.forEach((truck) => {
+        const rows2 = (truck.vehicles || []).filter((v) => Number(v.actualVolume || 0) > 0);
+        const list = rows2.length ? rows2 : [truck];
+        list.forEach((row) => {
+          const u = normalizeUnit(row.actualVolumeUnit || truck.actualVolumeUnit || record.baselineUnit || facUnit || "tons");
+          const v = Number(row.actualVolume || 0);
+          if (u) units.add(u);
+          if (u === "tons") tons += v; else m3 += v;
+        });
+      });
+      const totalVol = tons + m3;
+      const unit = units.size === 1 ? [...units][0] : normalizeUnit(record.baselineUnit || facUnit || "tons");
+      const isResub = Array.isArray(record.previousIdNos) && record.previousIdNos.length > 0;
+      const acknowledged = String(record.status || "") === "acknowledged";
+
+      const issues = [];
+      if (!record.dateOfDisposal) issues.push("Missing disposal date");
+      if (trucks.length === 0) issues.push("No transport entries recorded");
+      if (!(totalVol > 0)) issues.push("Zero or invalid disposal quantity");
+      if (units.size > 1) issues.push("Mixed units within one submission");
+      else if (facUnit && [...units][0] && [...units][0] !== facUnit) issues.push(`Unit mismatch — recorded in ${[...units][0]}, SLF declares ${facUnit}`);
+      if (nonOperational) issues.push("Submitted while SLF is tagged non-operational");
+      if (isResub && !acknowledged) issues.push("Pending resubmission");
+      if (!acknowledged && record.status === "pending" && !isResub) issues.push("Unacknowledged submission");
+      if (["reverted", "revert_requested"].includes(record.status)) issues.push("Reverted for correction");
+      if (record.status === "rejected") issues.push("Rejected submission");
+      const gKey = String(record.lguCompanyName || record.companyName || record.generatorName || "").trim().toLowerCase();
+      if (gKey && byGenerator[gKey] > 1) issues.push("Possible duplicate submission for this date");
+      if (record.dateOfDisposal && record.createdAt) {
+        const late = dayjs(record.createdAt).startOf("day").diff(dayjs(record.dateOfDisposal).startOf("day"), "day");
+        if (late > 1) issues.push(`Late submission — encoded ${late} days after the disposal date`);
+      }
+
+      return { record, totalVol, tons, m3, unit, isResub, acknowledged, nonOperational, issues };
+    });
+
+    const issueCount = rows.reduce((n, r) => n + r.issues.length, 0);
+    return { rows, facility, facUnit, nonOperational, issueCount };
+  }, [selectedDayRecords, calendarFacility]);
 
   const selectedCellRows = useMemo(() => {
     if (!calendarRecord) return [];
@@ -814,7 +932,7 @@ export default function SubmissionSummary({ isDark }) {
 
   const columns = [
     {
-      title: "SLF",
+      title: "Sanitary Landfill (SLF)",
       dataIndex: "slfName",
       fixed: "left",
       width: 300,
@@ -857,16 +975,27 @@ export default function SubmissionSummary({ isDark }) {
     },
     {
       title: "Action",
-      width: 110,
+      width: 170,
       align: "center",
       render: (_, row) => (
-        <Button
-          size="small"
-          type="primary"
-          onClick={() => openCalendar(row)}
-        >
-          View
-        </Button>
+        <Space size={4}>
+          <Button
+            size="small"
+            type="primary"
+            onClick={() => openCalendar(row)}
+          >
+            View
+          </Button>
+          <Button
+            size="small"
+            icon={<MessageOutlined />}
+            onClick={() => openMessageUser(row)}
+            ghost
+            type="primary"
+          >
+            Message
+          </Button>
+        </Space>
       ),
     },
   ];
@@ -887,107 +1016,126 @@ export default function SubmissionSummary({ isDark }) {
             ),
             children: (
       <Row gutter={[12, 12]}>
-        <Col xs={12} sm={12} md={8} lg={6}>
-          <SummaryTile
-            icon={<BankOutlined />}
-            color="#2f54eb"
-            label="Reporting SLFs"
-            subtitle="Active landfill facilities"
-            isDark={isDark}
-            delay={0}
+        {/* Group 1 — Submissions & Facilities (Total Submissions, Acknowledged,
+            Pending, Reporting SLFs grouped together, plus Truck Entries). */}
+        <Col xs={24} lg={15}>
+          <Card
+            size="small"
+            className="summary-tile"
+            title={
+              <Text strong style={{ fontSize: 13 }}>
+                <InboxOutlined /> Submissions &amp; Facilities
+              </Text>
+            }
+            style={{
+              borderRadius: 12,
+              height: "100%",
+              background: isDark ? "#1f1f1f" : "#fff",
+            }}
+            styles={{ body: { padding: "14px 16px" } }}
           >
-            <CountUp value={filteredRows.length} />
-          </SummaryTile>
+            {/* #2: single compact row on desktop — items flex-distribute evenly and
+                wrap cleanly on smaller screens (no oversized cards or large gaps). */}
+            <Row gutter={[10, 10]} wrap>
+              <Col flex="1 1 120px" style={{ minWidth: 0 }}>
+                <MiniStat
+                  icon={<InboxOutlined />}
+                  color="#13c2c2"
+                  label="Total Submissions"
+                  subtitle={`${totals.statuses.pending || 0} pending review`}
+                >
+                  <CountUp value={totals.submissions} />
+                </MiniStat>
+              </Col>
+              <Col flex="1 1 120px" style={{ minWidth: 0 }}>
+                <MiniStat
+                  icon={<CheckCircleOutlined />}
+                  color="#389e0d"
+                  label="Acknowledged"
+                  subtitle="Reviewed & accepted"
+                >
+                  <CountUp value={totals.statuses.acknowledged || 0} />
+                </MiniStat>
+              </Col>
+              <Col flex="1 1 120px" style={{ minWidth: 0 }}>
+                <MiniStat
+                  icon={<ClockCircleOutlined />}
+                  color="#d48806"
+                  label="Pending"
+                  subtitle="Awaiting admin action"
+                >
+                  <CountUp value={totals.statuses.pending || 0} />
+                </MiniStat>
+              </Col>
+              <Col flex="1 1 120px" style={{ minWidth: 0 }}>
+                <MiniStat
+                  icon={<BankOutlined />}
+                  color="#2f54eb"
+                  label="Reporting SLFs"
+                  subtitle="Active landfill facilities"
+                >
+                  <CountUp value={filteredRows.length} />
+                </MiniStat>
+              </Col>
+              <Col flex="1 1 120px" style={{ minWidth: 0 }}>
+                <MiniStat
+                  icon={<CarOutlined />}
+                  color="#fa8c16"
+                  label="Truck Entries"
+                  subtitle="Total disposal trips"
+                >
+                  <CountUp value={totals.trucks} />
+                </MiniStat>
+              </Col>
+            </Row>
+          </Card>
         </Col>
-        <Col xs={12} sm={12} md={8} lg={6}>
-          <SummaryTile
-            icon={<InboxOutlined />}
-            color="#13c2c2"
-            label="Submissions"
-            subtitle={`${totals.statuses.pending || 0} pending review`}
-            isDark={isDark}
-            delay={60}
+        {/* Group 2 — Waste Breakdown (Residual + Hazardous merged into one card).
+            Hazardous uses the safe formatter so a valid-but-empty value reads "0"
+            rather than "-". */}
+        <Col xs={24} lg={9}>
+          <Card
+            size="small"
+            className="summary-tile"
+            title={
+              <Text strong style={{ fontSize: 13 }}>
+                <ExperimentOutlined /> Waste Breakdown
+              </Text>
+            }
+            style={{
+              borderRadius: 12,
+              height: "100%",
+              background: isDark ? "#1f1f1f" : "#fff",
+            }}
+            styles={{ body: { padding: "14px 16px" } }}
           >
-            <CountUp value={totals.submissions} />
-          </SummaryTile>
-        </Col>
-        <Col xs={12} sm={12} md={8} lg={6}>
-          <SummaryTile
-            icon={<CarOutlined />}
-            color="#fa8c16"
-            label="Truck Entries"
-            subtitle="Total disposal trips"
-            isDark={isDark}
-            delay={120}
-          >
-            <CountUp value={totals.trucks} />
-          </SummaryTile>
-        </Col>
-        <Col xs={12} sm={12} md={8} lg={6}>
-          <SummaryTile
-            icon={<DatabaseOutlined />}
-            color="#722ed1"
-            label="Total Waste Volume"
-            subtitle="All accepted waste"
-            isDark={isDark}
-            delay={180}
-          >
-            <span style={{ fontSize: 19, fontWeight: 700 }}>
-              {formatVolume(totals.m3, totals.tons, displayUnit)}
-            </span>
-          </SummaryTile>
-        </Col>
-        <Col xs={12} sm={12} md={8} lg={6}>
-          <SummaryTile
-            icon={<ExperimentOutlined />}
-            color="#52c41a"
-            label="Residual Waste"
-            subtitle="Non-hazardous volume"
-            isDark={isDark}
-            delay={240}
-          >
-            <span style={{ fontSize: 17, fontWeight: 700 }}>
-              {formatVolume(totals.residualM3, totals.residualTons, displayUnit)}
-            </span>
-          </SummaryTile>
-        </Col>
-        <Col xs={12} sm={12} md={8} lg={6}>
-          <SummaryTile
-            icon={<WarningOutlined />}
-            color="#cf1322"
-            label="Hazardous Waste"
-            subtitle="Treated hazardous volume"
-            isDark={isDark}
-            delay={300}
-          >
-            <span style={{ fontSize: 17, fontWeight: 700 }}>
-              {formatVolume(totals.hazardousM3, totals.hazardousTons, displayUnit)}
-            </span>
-          </SummaryTile>
-        </Col>
-        <Col xs={12} sm={12} md={8} lg={6}>
-          <SummaryTile
-            icon={<CheckCircleOutlined />}
-            color="#389e0d"
-            label="Acknowledged"
-            subtitle="Reviewed & accepted"
-            isDark={isDark}
-            delay={360}
-          >
-            <CountUp value={totals.statuses.acknowledged || 0} />
-          </SummaryTile>
-        </Col>
-        <Col xs={12} sm={12} md={8} lg={6}>
-          <SummaryTile
-            icon={<ClockCircleOutlined />}
-            color="#d48806"
-            label="Pending"
-            subtitle="Awaiting admin action"
-            isDark={isDark}
-            delay={420}
-          >
-            <CountUp value={totals.statuses.pending || 0} />
-          </SummaryTile>
+            <Row gutter={[16, 16]}>
+              <Col xs={12}>
+                <MiniStat
+                  icon={<ExperimentOutlined />}
+                  color="#52c41a"
+                  label="Residual Waste"
+                  subtitle="Non-hazardous volume"
+                >
+                  <span style={{ fontSize: 17, fontWeight: 700 }}>
+                    {formatVolumeSafe(totals.residualM3, totals.residualTons, displayUnit)}
+                  </span>
+                </MiniStat>
+              </Col>
+              <Col xs={12}>
+                <MiniStat
+                  icon={<WarningOutlined />}
+                  color="#cf1322"
+                  label="Hazardous Waste"
+                  subtitle="Treated hazardous volume"
+                >
+                  <span style={{ fontSize: 17, fontWeight: 700 }}>
+                    {formatVolumeSafe(totals.hazardousM3, totals.hazardousTons, displayUnit)}
+                  </span>
+                </MiniStat>
+              </Col>
+            </Row>
+          </Card>
         </Col>
       </Row>
             ),
@@ -1071,12 +1219,27 @@ export default function SubmissionSummary({ isDark }) {
       />
 
       <Modal
-        title={calendarRecord ? <Space><CalendarOutlined /> <span>{calendarRecord.slfName}</span><Text type="secondary" style={{ fontSize: 13 }}>Disposal Calendar</Text></Space> : "Disposal Calendar"}
-        open={!!calendarRecord}
-        onCancel={() => setCalendarRecord(null)}
-        footer={
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
-            {/* #4: export a custom date range, or everything from the first record. */}
+        // Header: title on the left, date-range + export controls on the right.
+        // Responsive flex wraps the controls below the title on narrow screens; the
+        // paddingRight keeps them clear of the modal close (X). (#1)
+        title={
+          <div
+            style={{
+              display: "flex",
+              justifyContent: "space-between",
+              alignItems: "center",
+              flexWrap: "wrap",
+              gap: 8,
+              paddingRight: 28,
+            }}
+          >
+            <Space>
+              <CalendarOutlined />
+              <span>{calendarRecord?.slfName || "Disposal Calendar"}</span>
+              {calendarRecord && (
+                <Text type="secondary" style={{ fontSize: 13 }}>Disposal Calendar</Text>
+              )}
+            </Space>
             <Space wrap size={6}>
               <DatePicker.RangePicker
                 size="small"
@@ -1084,17 +1247,23 @@ export default function SubmissionSummary({ isDark }) {
                 onChange={(v) => setExportRange(v)}
                 allowClear
               />
-              <Button size="small" icon={<DownloadOutlined />} onClick={() => handleExportCalendar("range")}>
+              <Button size="small" type="primary" ghost icon={<DownloadOutlined />} onClick={() => handleExportCalendar("range")}>
                 Export Range
               </Button>
-              <Button size="small" type="primary" ghost icon={<DownloadOutlined />} onClick={() => handleExportCalendar("all")}>
+              <Button size="small" type="primary" icon={<DownloadOutlined />} onClick={() => handleExportCalendar("all")}>
                 Export All
               </Button>
             </Space>
-            <Button onClick={() => setCalendarRecord(null)}>Close</Button>
           </div>
         }
+        open={!!calendarRecord}
+        onCancel={() => setCalendarRecord(null)}
+        footer={<Button onClick={() => setCalendarRecord(null)}>Close</Button>}
         width={1600}
+        // #1: sit the modal higher with less top gap while keeping the header/close
+        // on-screen and the body internally scrollable on smaller viewports.
+        style={{ top: 20 }}
+        styles={{ body: { maxHeight: "calc(100vh - 150px)", overflowY: "auto" } }}
         destroyOnHidden
       >
         {calendarRecord && (
@@ -1141,7 +1310,7 @@ export default function SubmissionSummary({ isDark }) {
                       <SummaryDisposalCalendar
                         calendarDate={calendarDate}
                         calendarEvents={calendarEvents}
-                        onDateChange={setCalendarDate}
+                        onDateChange={(d) => { setCalendarDate(d); setDailyOpen(true); }}
                       />
                     </Suspense>
                   </Spin>
@@ -1227,100 +1396,13 @@ export default function SubmissionSummary({ isDark }) {
                       },
                     },
                     { title: "Status", dataIndex: "status", width: 90, render: (value) => <Tag color={statusColor[value] || "default"}>{value?.replace("_", " ") || "pending"}</Tag> },
-                    { title: "", width: 54, render: (_, record) => <Button size="small" icon={<EyeOutlined />} onClick={() => setSubmissionDetail(record)} /> },
                   ]}
                 />
               </Card>
-              <Button
-                icon={<EyeOutlined />}
-                style={{ marginTop: 12 }}
-                block
-                disabled={selectedDayRecords.length === 0}
-                onClick={() => selectedDayRecords[0] && setSubmissionDetail(selectedDayRecords[0])}
-              >
-                {selectedDayRecords.length} submission(s) on selected date
-              </Button>
             </Col>
           </Row>
         )}
       </Modal>
-
-      <Modal
-        title={submissionDetail ? <Space><EyeOutlined /> <span>{submissionDetail.idNo || "Submission Details"}</span></Space> : "Submission Details"}
-        open={!!submissionDetail}
-        onCancel={() => setSubmissionDetail(null)}
-        footer={<Button onClick={() => setSubmissionDetail(null)}>Close</Button>}
-        width={1400}
-        destroyOnHidden
-      >
-        {submissionDetail && (
-          <Space direction="vertical" size={14} style={{ width: "100%" }}>
-            <Row gutter={[12, 12]}>
-              <Col xs={24} md={8}>
-                <Card size="small" style={{ borderRadius: 8 }}>
-                  <Statistic title="Generator" value={submissionDetail.lguCompanyName || submissionDetail.companyName || "Not encoded"} valueStyle={{ fontSize: 16 }} />
-                </Card>
-              </Col>
-              <Col xs={24} md={8}>
-                <Card size="small" style={{ borderRadius: 8 }}>
-                  <Statistic title="Disposal Date" value={submissionDetail.dateOfDisposal ? dayjs(submissionDetail.dateOfDisposal).format("MM/DD/YYYY") : "—"} valueStyle={{ fontSize: 16 }} />
-                </Card>
-              </Col>
-              <Col xs={24} md={8}>
-                <Card size="small" style={{ borderRadius: 8 }}>
-                  <Statistic title="Status" value={submissionDetail.status?.replace("_", " ") || "pending"} valueStyle={{ fontSize: 16 }} />
-                </Card>
-              </Col>
-            </Row>
-            <Table
-              size="small"
-              pagination={true}
-              className="portal-user-wrap-table"
-              dataSource={submissionDetail.trucks || []}
-              rowKey={(_, index) => index}
-              scroll={{ x: "max-content" }}
-              locale={{ emptyText: "No truck entries recorded" }}
-              columns={[
-                { title: "Truck", width: 60, render: (_, __, index) => index + 1 },
-                { title: "Ticket", dataIndex: "disposalTicketNo", render: (value) => value || "Not encoded" },
-                { title: "Plate No.", dataIndex: "plateNumber", render: (value, truck) => value || truck.plateNo || "Not encoded" },
-                { title: "Hauler", dataIndex: "hauler", render: (value, truck) => value || truck.haulerName || "Not encoded" },
-                { title: "Waste Type", dataIndex: "wasteType", render: (value) => value || "Residual" },
-                {
-                  title: "Cell(s)",
-                  render: (_, truck) => {
-                    const cells = (truck.vehicles || [])
-                      .map((v) => v.cellName)
-                      .filter(Boolean);
-                    return cells.length
-                      ? [...new Set(cells)].join(", ")
-                      : truck.cellName || "—";
-                  },
-                },
-                {
-                  title: "Actual Volume",
-                  align: "right",
-                  render: (_, truck) => `${Number(truck.actualVolume || 0).toLocaleString(undefined, { maximumFractionDigits: 2 })} ${normalizeUnit(truck.actualVolumeUnit || submissionDetail.baselineUnit || "m³")}`,
-                },
-              ].map((col) => ({
-                ...col,
-                onHeaderCell: () => ({
-                  style: { whiteSpace: "normal", wordBreak: "break-word", fontSize: 11 },
-                }),
-                onCell: () => ({
-                  style: {
-                    whiteSpace: "normal",
-                    overflowWrap: "anywhere",
-                    wordBreak: "break-word",
-                    fontSize: 11,
-                  },
-                }),
-              }))}
-            />
-          </Space>
-        )}
-      </Modal>
-
       {reportOpen && (
         <Suspense fallback={null}>
           <SlfSubmissionReport
@@ -1335,6 +1417,122 @@ export default function SubmissionSummary({ isDark }) {
           />
         </Suspense>
       )}
+
+      {/* Item #4: Message the SLF's assigned portal user(s) */}
+      <Modal
+        title={<span><MessageOutlined /> Message Portal User</span>}
+        open={msgModal.open}
+        onCancel={() => { setMsgModal({ open: false, row: null }); setMsgText(""); }}
+        onOk={sendPortalMessage}
+        okText="Send"
+        confirmLoading={msgSending}
+        okButtonProps={{ disabled: !msgText.trim() }}
+        destroyOnClose
+      >
+        <div style={{ marginBottom: 10 }}>
+          <Text type="secondary">To (assigned portal user of):</Text>{" "}
+          <Text strong>{msgModal.row?.slfName || "—"}</Text>
+        </div>
+        <Input.TextArea
+          rows={5}
+          maxLength={4000}
+          showCount
+          value={msgText}
+          onChange={(e) => setMsgText(e.target.value)}
+          placeholder="Write your message to the portal user…"
+          onPressEnter={(e) => { if ((e.ctrlKey || e.metaKey)) sendPortalMessage(); }}
+        />
+        <Text type="secondary" style={{ fontSize: 12, display: "block", marginTop: 8 }}>
+          The user will see this after logging in to the SLF Portal. Delivered in real time.
+        </Text>
+      </Modal>
+
+      {/* Item #2: Daily Submission Details — opens when a calendar date is clicked */}
+      <Modal
+        title={
+          <span>
+            <CalendarOutlined /> Daily Submission Details
+            {calendarRecord?.slfName ? ` — ${calendarRecord.slfName}` : ""}
+          </span>
+        }
+        open={dailyOpen}
+        onCancel={() => setDailyOpen(false)}
+        footer={<Button onClick={() => setDailyOpen(false)}>Close</Button>}
+        width={860}
+      >
+        <div style={{ marginBottom: 12 }}>
+          <Text strong style={{ fontSize: 15 }}>{calendarDate.format("dddd, MMMM D, YYYY")}</Text>
+          {calendarFacility?.statusOfSLF && (
+            <Tag
+              color={/non/i.test(calendarFacility.statusOfSLF) ? "red" : "green"}
+              style={{ marginLeft: 8 }}
+            >
+              {calendarFacility.statusOfSLF}
+            </Tag>
+          )}
+        </div>
+
+        {calendarLoading ? (
+          <div style={{ textAlign: "center", padding: "40px 0" }}><Spin /></div>
+        ) : selectedDayRecords.length === 0 ? (
+          <Empty description="No submission recorded for this date" />
+        ) : (
+          <>
+            {selectedDayDetail.issueCount > 0 && (
+              <Alert
+                type="warning"
+                showIcon
+                style={{ marginBottom: 12 }}
+                message={`${selectedDayDetail.issueCount} issue${selectedDayDetail.issueCount === 1 ? "" : "s"} detected on this date`}
+                description={
+                  <ul style={{ margin: "6px 0 0", paddingLeft: 18 }}>
+                    {selectedDayDetail.rows.flatMap((r, i) =>
+                      r.issues.map((iss, j) => (
+                        <li key={`${i}-${j}`}>
+                          <Text type="secondary">{r.record.idNo || r.record.submissionId || "Record"}:</Text> {iss}
+                        </li>
+                      )),
+                    )}
+                  </ul>
+                }
+              />
+            )}
+            <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+              {selectedDayDetail.rows.map(({ record, totalVol, unit, isResub, acknowledged, issues }) => (
+                <Card key={record._id} size="small" style={{ borderRadius: 8, borderLeft: `3px solid ${issues.length ? "#fa8c16" : "#52c41a"}` }}>
+                  <Row gutter={[12, 8]}>
+                    <Col xs={12} md={8}><Text type="secondary">Submission ID:</Text><br /><Text strong>{record.idNo || record.submissionId || "—"}</Text></Col>
+                    <Col xs={12} md={8}><Text type="secondary">Generator:</Text><br /><Text>{record.lguCompanyName || record.companyName || record.generatorName || "—"}</Text></Col>
+                    <Col xs={12} md={8}><Text type="secondary">Disposal Quantity:</Text><br /><Text strong>{formatVolume(unit === "tons" ? 0 : totalVol, unit === "tons" ? totalVol : 0, unit)}</Text></Col>
+                    <Col xs={12} md={8}><Text type="secondary">Submitted:</Text><br /><Text>{record.createdAt ? dayjs(record.createdAt).format("MMM D, YYYY h:mm A") : "—"}</Text></Col>
+                    <Col xs={12} md={8}><Text type="secondary">{isResub ? "Resubmitted:" : "Last Updated:"}</Text><br /><Text>{record.updatedAt ? dayjs(record.updatedAt).format("MMM D, YYYY h:mm A") : "—"}</Text></Col>
+                    <Col xs={12} md={8}>
+                      <Text type="secondary">Status:</Text><br />
+                      <Tag color={acknowledged ? "green" : record.status === "rejected" ? "red" : /revert/.test(record.status || "") ? "orange" : "gold"}>
+                        {acknowledged ? "Acknowledged" : (record.status || "pending")}
+                      </Tag>
+                      {isResub && <Tag color="orange">Resubmission</Tag>}
+                    </Col>
+                    {(record.remarks || record.resubmitComment || record.revertReason) && (
+                      <Col xs={24}><Text type="secondary">Remarks:</Text><br /><Text>{record.remarks || record.resubmitComment || record.revertReason}</Text></Col>
+                    )}
+                    {record.submittedBy && (
+                      <Col xs={24} md={12}><Text type="secondary">Submitted by:</Text> <Text>{record.submittedBy}</Text></Col>
+                    )}
+                  </Row>
+                  {issues.length > 0 && (
+                    <div style={{ marginTop: 8 }}>
+                      {issues.map((iss, i) => (
+                        <Tag key={i} color="warning" style={{ marginBottom: 4 }}>{iss}</Tag>
+                      ))}
+                    </div>
+                  )}
+                </Card>
+              ))}
+            </div>
+          </>
+        )}
+      </Modal>
     </div>
   );
 }

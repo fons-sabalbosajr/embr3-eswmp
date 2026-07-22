@@ -62,6 +62,7 @@ import {
   CarOutlined,
   ExperimentOutlined,
   ApartmentOutlined,
+  FilePdfOutlined,
   AlertOutlined,
   AuditOutlined,
   ContainerOutlined,
@@ -88,55 +89,26 @@ import {
   TableOutlined,
   MailOutlined,
 } from "@ant-design/icons";
-import { useNavigate } from "react-router-dom";
-import Swal from "sweetalert2";
-import AccountSettings from "./admin/AccountSettings";
-const FieldSettings = lazy(() => import("./admin/FieldSettings"));
-const SubmissionSettings = lazy(() => import("./admin/SubmissionSettings"));
-const DeveloperSettings = lazy(() => import("./admin/DeveloperSettings"));
-const DataReferences = lazy(() => import("./admin/DataReferences"));
-const SLFMonitoring = lazy(() => import("./admin/SLFMonitoring"));
-const SLFWasteGenerators = lazy(() => import("./admin/SLFWasteGenerators"));
-const DisposalActivityCalendar = lazy(() => import("./admin/DisposalActivityCalendar"));
-const OrgChartSettings = lazy(() => import("./admin/OrgChartSettings"));
-const TenYearSWMPlan = lazy(() => import("./admin/TenYearSWMPlan"));
-const FundedMRF = lazy(() => import("./admin/FundedMRF"));
-const LguInitiatedMRF = lazy(() => import("./admin/LguInitiatedMRF"));
-const TrashTraps = lazy(() => import("./admin/TrashTraps"));
-const SwmEquipment = lazy(() => import("./admin/SwmEquipment"));
-const OpenDumpsites = lazy(() => import("./admin/OpenDumpsites"));
-const ResidualContainment = lazy(() => import("./admin/ResidualContainment"));
-const ProjectDescScoping = lazy(() => import("./admin/ProjectDescScoping"));
-const TransferStations = lazy(() => import("./admin/TransferStations"));
-const LguAssistDiversion = lazy(() => import("./admin/LguAssistDiversion"));
-const TechnicalAssistance = lazy(() => import("./admin/TechnicalAssistance"));
-const Reports = lazy(() => import("./admin/Reports"));
-const SupportTab = lazy(() => import("./admin/SupportTab"));
-const NotificationManagement = lazy(() => import("./admin/NotificationManagement"));
-const PortalUsers = lazy(() => import("./admin/PortalUsers"));
-const Messaging = lazy(() => import("./admin/Messaging"));
-import api from "../api";
-import { getAdminDisplayName } from "../utils/adminIdentity";
-import secureStorage from "../utils/secureStorage";
-import { DataRefProvider } from "../utils/dataRef";
-import GaugeMeter, { computeGaugePercent } from "../components/GaugeMeter";
-// Centralized cell + unit logic — shared with Cell Infra Overview and SLF Monitoring
-// so the General Dashboard cannot drift into its own formulas.
+import AdminTipCard from "../admin/AdminTipCard";
+import api from "../../api";
+import GaugeMeter, { computeGaugePercent } from "../../components/GaugeMeter";
 import {
   resolveCellName,
   getCellStatusConfig,
   getCellTypeConfig,
   isNonExistentCell,
-} from "../utils/cellVisuals";
-import { convertVolume, resolveCellUnit } from "../utils/volumeUnits";
-import embLogo from "../assets/emblogo.svg";
+  getSlfColor,
+  getSlfCapacityColor,
+} from "../../utils/cellVisuals";
+import { convertVolume, resolveCellUnit } from "../../utils/volumeUnits";
+import secureStorage from "../../utils/secureStorage";
+import { getSocket } from "../../utils/socket";
+import { mapPresentationFor } from "../../utils/submissionStatus";
 import {
   MapContainer,
   TileLayer,
   Marker,
   Popup,
-  GeoJSON,
-  useMap,
 } from "react-leaflet";
 import {
   BarChart,
@@ -153,1600 +125,33 @@ import {
   YAxis,
 } from "recharts";
 import L from "leaflet";
-import "leaflet/dist/leaflet.css";
 import dayjs from "dayjs";
 import relativeTime from "dayjs/plugin/relativeTime";
-import { connectSocket, disconnectSocket } from "../utils/socket";
+import {
+  STATUS_COLORS,
+  getPlanStatus,
+  planStatusIcon,
+  classifySlfStatus,
+  firstSlfPhoto,
+  MAP_MARKER,
+  TILE_LAYERS,
+} from "./constants";
+import { ProvinceBoundary, FitBounds } from "./MapPrimitives";
+import DashboardSkeleton from "./DashboardSkeleton";
+
 dayjs.extend(relativeTime);
 
-// Fix default Leaflet marker icons
-delete L.Icon.Default.prototype._getIconUrl;
-L.Icon.Default.mergeOptions({
-  iconRetinaUrl:
-    "https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon-2x.png",
-  iconUrl: "https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon.png",
-  shadowUrl: "https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png",
-});
-
-const STATUS_COLORS = {
-  Approved: { bg: "#52c41a", icon: "✓" },
-  "For Renewal": { bg: "#faad14", icon: "▲" },
-  Other: { bg: "#8c8c8c", icon: "●" },
-};
-const getPlanStatus = (forRenewal) => {
-  if (!forRenewal) return "Other";
-  if (/approved/i.test(forRenewal)) return "Approved";
-  if (/renewal/i.test(forRenewal)) return "For Renewal";
-  return "Other";
-};
-const planStatusIcon = (forRenewal) => {
-  const s = STATUS_COLORS[getPlanStatus(forRenewal)];
-  return L.divIcon({
-    className: "",
-    html: `<div style="width:20px;height:20px;border-radius:50%;background:${s.bg};border:2px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,.35);display:flex;align-items:center;justify-content:center;color:#fff;font-size:11px;font-weight:bold">${s.icon}</div>`,
-    iconSize: [20, 20],
-    iconAnchor: [10, 10],
-    popupAnchor: [0, -12],
-  });
-};
-
-/* Province boundary overlay — fetches PH province GeoJSON and highlights filtered province */
-const PH_GEOJSON_URL =
-  "https://raw.githubusercontent.com/macoymejia/geojsonph/master/Province/Provinces.json";
-let _phGeoCache = null;
-
-function ProvinceBoundary({ province }) {
-  const map = useMap();
-  const [geoData, setGeoData] = useState(null);
-  useEffect(() => {
-    if (!province) return;
-    let cancelled = false;
-    const load = async () => {
-      if (!_phGeoCache) {
-        try {
-          const res = await fetch(PH_GEOJSON_URL);
-          _phGeoCache = await res.json();
-        } catch {
-          _phGeoCache = null;
-          return;
-        }
-      }
-      if (!_phGeoCache || cancelled) return;
-      const match = _phGeoCache.features.filter((f) => {
-        const name = (
-          f.properties.PROVINCE ||
-          f.properties.NAME ||
-          f.properties.name ||
-          ""
-        ).toUpperCase();
-        return (
-          name === province.toUpperCase() ||
-          name.includes(province.toUpperCase()) ||
-          province.toUpperCase().includes(name)
-        );
-      });
-      if (cancelled) return;
-      if (match.length > 0) {
-        const fc = { type: "FeatureCollection", features: match };
-        setGeoData(fc);
-        try {
-          const layer = L.geoJSON(fc);
-          map.fitBounds(layer.getBounds(), { padding: [50, 50], maxZoom: 11 });
-        } catch {}
-      }
-    };
-    load();
-    return () => {
-      cancelled = true;
-    };
-  }, [province, map]);
-  if (!geoData) return null;
-  return (
-    <GeoJSON
-      data={geoData}
-      style={{
-        color: "#1890ff",
-        weight: 3,
-        fillColor: "#1890ff",
-        fillOpacity: 0.1,
-        dashArray: "6 4",
-      }}
-    />
-  );
-}
-
-function FitBounds({ points }) {
-  const map = useMap();
-  const fitted = useRef(false);
-  useEffect(() => {
-    if (!fitted.current && points.length > 0) {
-      const bounds = L.latLngBounds(points.map((p) => [p.lat, p.lng]));
-      map.fitBounds(bounds, { padding: [40, 40], maxZoom: 10 });
-      fitted.current = true;
-    }
-  }, [points, map]);
-  return null;
-}
-
-function DashboardSkeleton({ isDark }) {
-  const panelBg = isDark ? "#141414" : "#fff";
-  const border = isDark ? "1px solid #303030" : "1px solid #f0f0f0";
-
-  return (
-    <div style={{ padding: "4px 0 16px" }}>
-      <div style={{ display: "flex", gap: 12, marginBottom: 16, overflow: "hidden" }}>
-        {Array.from({ length: 6 }).map((_, index) => (
-          <Skeleton.Button key={index} active size="small" style={{ width: index === 0 ? 180 : 150, height: 34, borderRadius: 8 }} />
-        ))}
-      </div>
-      <Row gutter={[16, 16]} style={{ marginBottom: 16 }}>
-        {Array.from({ length: 4 }).map((_, index) => (
-          <Col xs={12} md={6} key={index}>
-            <Card style={{ borderRadius: 10, height: 110, background: panelBg, border }} bodyStyle={{ padding: 16 }}>
-              <Skeleton active paragraph={{ rows: 1, width: ["70%"] }} title={{ width: "45%" }} />
-            </Card>
-          </Col>
-        ))}
-      </Row>
-      <Row gutter={[16, 16]}>
-        <Col xs={24} lg={14}>
-          <Row gutter={[16, 16]}>
-            {Array.from({ length: 6 }).map((_, index) => (
-              <Col xs={24} sm={12} key={index}>
-                <Card style={{ borderRadius: 10, height: 280, background: panelBg, border }} bodyStyle={{ padding: 18 }}>
-                  <Skeleton active paragraph={{ rows: 6 }} title={{ width: "52%" }} />
-                </Card>
-              </Col>
-            ))}
-          </Row>
-        </Col>
-        <Col xs={24} lg={10}>
-          <Card style={{ borderRadius: 10, minHeight: 872, background: panelBg, border }} bodyStyle={{ padding: 18 }}>
-            <Skeleton active paragraph={{ rows: 12 }} title={{ width: "46%" }} />
-          </Card>
-        </Col>
-      </Row>
-    </div>
-  );
-}
-
-const TILE_LAYERS = {
-  street: {
-    name: "Street",
-    url: "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
-    attr: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
-  },
-  satellite: {
-    name: "Satellite",
-    url: "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
-    attr: "&copy; Esri, Maxar, Earthstar",
-  },
-  terrain: {
-    name: "Terrain",
-    url: "https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png",
-    attr: "&copy; OpenTopoMap",
-  },
-  dark: {
-    name: "Dark",
-    url: "https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png",
-    attr: "&copy; CARTO",
-  },
-};
-
-const { Header, Sider, Content } = Layout;
 const { Title, Text } = Typography;
 const { useBreakpoint } = Grid;
 
-export default function AdminHome() {
-  const [collapsed, setCollapsed] = useState(false);
-  const [user, setUser] = useState(null);
-  const [activeMenu, setActiveMenu] = useState("dashboard");
-  const [isDark, setIsDark] = useState(false);
-  const [primaryColor, setPrimaryColor] = useState("#1a3353");
-  const [siderColor, setSiderColor] = useState("#1a3353");
-  const [siderColorDark, setSiderColorDark] = useState("#111927");
-  const [headerColor, setHeaderColor] = useState("#ffffff");
-  const [headerColorDark, setHeaderColorDark] = useState("#141414");
-  const [sidebarStyle, setSidebarStyle] = useState("gradient");
-  const [portalAnnouncementActive, setPortalAnnouncementActive] = useState(false);
-  const [portalAnnouncementModalOpen, setPortalAnnouncementModalOpen] = useState(false);
-  const [currentPortalAnnouncement, setCurrentPortalAnnouncement] = useState(null);
-  const [developerSettingsInitialTab, setDeveloperSettingsInitialTab] = useState("general");
-  const [currentTime, setCurrentTime] = useState(dayjs());
-  const [profileModalOpen, setProfileModalOpen] = useState(false);
-  const [driveMaintenanceMode, setDriveMaintenanceMode] = useState(false);
-  const [drawerOpen, setDrawerOpen] = useState(false);
-  const [notifOpen, setNotifOpen] = useState(false);
-  const [notifications, setNotifications] = useState([]);
-  const [unreadCount, setUnreadCount] = useState(0);
-  const [notifLoading, setNotifLoading] = useState(false);
-  const [notifHistoryOpen, setNotifHistoryOpen] = useState(false);
-  const [notifHistory, setNotifHistory] = useState([]);
-  const [notifHistoryLoading, setNotifHistoryLoading] = useState(false);
-  const [notifHistoryPagination, setNotifHistoryPagination] = useState({ current: 1, pageSize: 20, total: 0 });
-  const [notifHistoryDateRange, setNotifHistoryDateRange] = useState(null);
-  const [messageOpen, setMessageOpen] = useState(false);
-  const [quickMessages, setQuickMessages] = useState([]);
-  const [messageUnreadCount, setMessageUnreadCount] = useState(0);
-  const [messageLoading, setMessageLoading] = useState(false);
+// Lazy-loaded panels embedded inside dashboard tabs (Suspense-wrapped at each use).
+const DisposalActivityCalendar = lazy(() => import("../admin/DisposalActivityCalendar"));
+const HaulerClientsPanel = lazy(() => import("../admin/HaulerClientsPanel"));
+const SlfAnalyticsRow = lazy(() => import("../admin/SlfAnalyticsRow"));
+const ClientRelationshipView = lazy(() => import("../admin/ClientRelationshipView"));
+
+export default function DashboardContent({ user, isDark, setActiveMenu, onOpenSubmissions, canOpenSubmissions }) {
   const screens = useBreakpoint();
-  const isMobile = !screens.md;
-  const navigate = useNavigate();
-
-  const syncPortalAnnouncementFlag = (settings = {}) => {
-    const now = Date.now();
-    const startsAt = settings.portalAnnouncementStartAt
-      ? new Date(settings.portalAnnouncementStartAt).getTime()
-      : null;
-    const endsAt = settings.portalAnnouncementEndAt
-      ? new Date(settings.portalAnnouncementEndAt).getTime()
-      : null;
-    setPortalAnnouncementActive(
-      !!settings.portalAnnouncementEnabled &&
-        (!startsAt || startsAt <= now) &&
-        (!endsAt || endsAt >= now),
-    );
-    setCurrentPortalAnnouncement(settings);
-  };
-
-  const syncCurrentUser = useCallback(async () => {
-    try {
-      const { data } = await api.get("/auth/me");
-      const nextUser = {
-        id: data._id || data.id,
-        firstName: data.firstName,
-        lastName: data.lastName,
-        username: data.username,
-        email: data.email,
-        role: data.role,
-        position: data.position,
-        designation: data.designation,
-        permissions: data.permissions,
-      };
-      secureStorage.setJSON("user", nextUser);
-      setUser(nextUser);
-      return nextUser;
-    } catch {
-      return null;
-    }
-  }, []);
-
-  useEffect(() => {
-    const stored = secureStorage.getJSON("user");
-    if (!stored) {
-      navigate("/admin/login", { replace: true });
-      return;
-    }
-    setUser(stored);
-    syncCurrentUser();
-
-    // Load theme preference
-    const savedTheme = secureStorage.get("admin-theme");
-    const savedColor = secureStorage.get("admin-primary-color");
-    if (savedColor) setPrimaryColor(savedColor);
-    if (savedTheme) {
-      setIsDark(savedTheme === "dark");
-    }
-    // Always sync from server
-    api
-      .get("/settings/app")
-      .then(({ data }) => {
-        const dark = data.theme === "dark";
-        setIsDark(dark);
-        secureStorage.set("admin-theme", dark ? "dark" : "light");
-        if (data.primaryColor) {
-          setPrimaryColor(data.primaryColor);
-          secureStorage.set("admin-primary-color", data.primaryColor);
-        }
-        if (data.siderColor) setSiderColor(data.siderColor);
-        if (data.siderColorDark) setSiderColorDark(data.siderColorDark);
-        if (data.headerColor) setHeaderColor(data.headerColor);
-        if (data.headerColorDark) setHeaderColorDark(data.headerColorDark);
-        if (data.sidebarStyle) setSidebarStyle(data.sidebarStyle);
-        syncPortalAnnouncementFlag(data);
-        setDriveMaintenanceMode(!!data.driveMaintenanceMode);
-      })
-      .catch(() => {});
-  }, [navigate, syncCurrentUser]);
-
-  useEffect(() => {
-    const handleFocus = () => syncCurrentUser();
-    window.addEventListener("focus", handleFocus);
-    const interval = setInterval(syncCurrentUser, 30000);
-    return () => {
-      window.removeEventListener("focus", handleFocus);
-      clearInterval(interval);
-    };
-  }, [syncCurrentUser]);
-
-  // ── Idle auto-logout (10 minutes of inactivity) ──
-  useEffect(() => {
-    if (user?.role === "developer") return undefined;
-    const IDLE_MS = 10 * 60 * 1000;
-    let timer;
-    let idledOut = false;
-
-    const onIdle = () => {
-      if (idledOut) return;
-      idledOut = true;
-      secureStorage.clearAll();
-      Swal.fire({
-        icon: "warning",
-        title: "Session Expired",
-        text: "You have been automatically logged out due to inactivity.",
-        confirmButtonText: "OK",
-        allowOutsideClick: false,
-        allowEscapeKey: false,
-      }).then(() => {
-        window.location.replace("/eswm-pipeline/admin/login");
-      });
-    };
-
-    const resetTimer = () => {
-      if (idledOut) return;
-      clearTimeout(timer);
-      timer = setTimeout(onIdle, IDLE_MS);
-    };
-
-    const events = ["mousemove", "keydown", "mousedown", "scroll", "touchstart"];
-    events.forEach((e) => document.addEventListener(e, resetTimer, { passive: true }));
-    resetTimer();
-
-    return () => {
-      clearTimeout(timer);
-      events.forEach((e) => document.removeEventListener(e, resetTimer));
-    };
-  }, [user?.role]);
-
-  useEffect(() => {
-    const timer = setInterval(() => setCurrentTime(dayjs()), 1000);
-    return () => clearInterval(timer);
-  }, []);
-
-  // Notification polling
-  const fetchNotifications = useCallback(async () => {
-    try {
-      setNotifLoading(true);
-      const { data } = await api.get("/notifications/admin");
-      setNotifications(data.notifications || []);
-      setUnreadCount(data.unreadCount || 0);
-    } catch { /* silent */ }
-    finally { setNotifLoading(false); }
-  }, []);
-
-  const markNotifRead = async (id) => {
-    try {
-      await api.patch(`/notifications/${id}/read`);
-      setNotifications((prev) => prev.map((n) => n._id === id ? { ...n, read: true } : n));
-      setNotifHistory((prev) => prev.map((n) => n._id === id ? { ...n, read: true } : n));
-      setUnreadCount((prev) => Math.max(0, prev - 1));
-    } catch { /* silent */ }
-  };
-
-  const markAllRead = async () => {
-    try {
-      await api.patch("/notifications/admin/read-all");
-      setNotifications((prev) => prev.map((n) => ({ ...n, read: true })));
-      setNotifHistory((prev) => prev.map((n) => ({ ...n, read: true })));
-      setUnreadCount(0);
-    } catch { /* silent */ }
-  };
-
-  const fetchNotificationHistory = useCallback(async (page = 1, pageSize = 20, range = notifHistoryDateRange) => {
-    setNotifHistoryLoading(true);
-    try {
-      const params = { page, limit: pageSize };
-      if (range?.[0]) params.dateFrom = range[0].startOf("day").toISOString();
-      if (range?.[1]) params.dateTo = range[1].endOf("day").toISOString();
-      const { data } = await api.get("/notifications/admin", {
-        params,
-      });
-      setNotifHistory(data.notifications || []);
-      setNotifHistoryPagination({
-        current: page,
-        pageSize,
-        total: data.total || 0,
-      });
-    } catch {
-      /* silent */
-    } finally {
-      setNotifHistoryLoading(false);
-    }
-  }, [notifHistoryDateRange]);
-
-  const openNotificationHistory = () => {
-    setNotifOpen(false);
-    setNotifHistoryOpen(true);
-    fetchNotificationHistory(1, notifHistoryPagination.pageSize);
-  };
-
-  const openNotificationTarget = (notification) => {
-    if (!notification.read) markNotifRead(notification._id);
-    const target = getNotifTarget(notification.type);
-    if (target) {
-      setActiveMenu(target);
-      setNotifOpen(false);
-      setNotifHistoryOpen(false);
-    }
-  };
-
-  const previewMessage = (thread) => {
-    if (thread.draft?.body) return thread.draft.body;
-    if (thread.lastMessage?.body) return thread.lastMessage.body;
-    if (thread.lastMessage?.attachments?.length) return "Attachment sent";
-    if (thread.lastMessage?.appLinks?.length) return "App data attached";
-    return "No messages yet";
-  };
-
-  const applyRealtimeNotification = useCallback((payload = {}) => {
-    fetchNotifications();
-    if (!payload?.title) return;
-    const realtimeItem = {
-      _id: `rt-${Date.now()}`,
-      recipient: "admin",
-      type: payload.type || "notification",
-      title: payload.title,
-      message: payload.message || "",
-      meta: payload.meta || {},
-      read: false,
-      createdAt: new Date().toISOString(),
-    };
-    setNotifications((prev) => [realtimeItem, ...prev].slice(0, 10));
-    setUnreadCount((prev) => prev + 1);
-  }, [fetchNotifications]);
-
-  const senderName = (sender) => {
-    if (!sender) return "Unknown User";
-    return `${sender.firstName || ""} ${sender.lastName || ""}`.trim() || sender.username || sender.email || "Unknown User";
-  };
-
-  const fetchMessagePreview = useCallback(async () => {
-    try {
-      setMessageLoading(true);
-      const { data } = await api.get("/messages/conversations?folder=inbox");
-      const list = Array.isArray(data) ? data : [];
-      setQuickMessages(list.slice(0, 6));
-      setMessageUnreadCount(list.reduce((total, thread) => total + (thread.unreadCount || 0), 0));
-    } catch { /* silent */ }
-    finally { setMessageLoading(false); }
-  }, []);
-
-  useEffect(() => {
-    // Wait until the authenticated admin is resolved (/auth/me) before hitting
-    // protected endpoints or opening the socket — otherwise the first render
-    // fires /messages/conversations (401) and connects a socket with no identity.
-    if (!user?.email) return undefined;
-    fetchNotifications();
-    fetchMessagePreview();
-    const socket = connectSocket("admin", { email: user.email, userId: user.id || user._id });
-    // Named handlers so cleanup removes ONLY this component's listeners.
-    // (`socket.off(event)` with no handler also tears down the listeners other
-    // pages registered on the same shared socket, and leaves their closures
-    // attached to an orphaned socket instance.)
-    const onDataRefresh = ({ target } = {}) => {
-      fetchNotifications();
-      if (["submissions", "baselines", "tickets", "portal-users", "notifications"].includes(target)) {
-        fetchMessagePreview();
-      }
-    };
-    const onInternalMessage = () => fetchMessagePreview();
-    const onMessageRefresh = () => fetchMessagePreview();
-    socket.on("notification", applyRealtimeNotification);
-    socket.on("data-refresh", onDataRefresh);
-    socket.on("internal-message", onInternalMessage);
-    socket.on("message-refresh", onMessageRefresh);
-    return () => {
-      socket.off("notification", applyRealtimeNotification);
-      socket.off("data-refresh", onDataRefresh);
-      socket.off("internal-message", onInternalMessage);
-      socket.off("message-refresh", onMessageRefresh);
-      disconnectSocket();
-    };
-  }, [applyRealtimeNotification, fetchNotifications, fetchMessagePreview, user?.email, user?.id, user?._id]);
-
-  const markMessageThreadRead = async (threadId) => {
-    const threadUnread = quickMessages.find((thread) => thread._id === threadId)?.unreadCount || 0;
-    try {
-      await api.patch(`/messages/conversations/${threadId}/read`);
-      setQuickMessages((prev) => prev.map((thread) => thread._id === threadId ? { ...thread, unreadCount: 0 } : thread));
-      setMessageUnreadCount((prev) => Math.max(0, prev - threadUnread));
-    } catch { /* silent */ }
-  };
-
-  const markAllMessagesRead = async () => {
-    const unreadThreads = quickMessages.filter((thread) => thread.unreadCount > 0);
-    try {
-      await Promise.all(unreadThreads.map((thread) => api.patch(`/messages/conversations/${thread._id}/read`)));
-      setQuickMessages((prev) => prev.map((thread) => ({ ...thread, unreadCount: 0 })));
-      setMessageUnreadCount(0);
-    } catch { /* silent */ }
-  };
-
-  const getNotifIcon = (type) => {
-    if (type === "new_submission") return <InboxOutlined style={{ color: "#2f54eb" }} />;
-    if (type === "resubmission") return <ReconciliationOutlined style={{ color: "#13c2c2" }} />;
-    if (type === "new_portal_user") return <TeamOutlined style={{ color: "#52c41a" }} />;
-    if (type === "portal_verification_submitted") return <SafetyCertificateOutlined style={{ color: "#722ed1" }} />;
-    if (type === "support_ticket" || type === "support_ticket_reply") return <CustomerServiceOutlined style={{ color: "#fa8c16" }} />;
-    if (type?.includes("baseline")) return <DatabaseOutlined style={{ color: "#1677ff" }} />;
-    if (type?.includes("edit_request")) return <FormOutlined style={{ color: "#eb2f96" }} />;
-    if (type === "cell_capacity_alert") return <WarningOutlined style={{ color: "#faad14" }} />;
-    if (type === "portal_user_email") return <MailOutlined style={{ color: "#1677ff" }} />;
-    return <BellOutlined style={{ color: "#fa8c16" }} />;
-  };
-
-  const getNotifTarget = (type) => {
-    if (["new_submission", "resubmission", "baseline_update_request", "baseline_update", "submission_revert_followup", "submission_temp_deleted", "submission_edit_request", "cell_capacity_alert"].includes(type)) return "slf-waste-generators";
-    if (["new_portal_user", "portal_verification_submitted", "portal_user_email"].includes(type)) return "settings-portal-users";
-    if (type === "support_ticket" || type === "support_ticket_reply") return "dev-support";
-    return null;
-  };
-
-  const toggleTheme = () => {
-    const next = !isDark;
-    setIsDark(next);
-    secureStorage.set("admin-theme", next ? "dark" : "light");
-  };
-
-  const handleLogout = () => {
-    secureStorage.clearAll();
-    navigate("/admin/login");
-  };
-
-  const isDeveloper = user?.role === "developer";
-  const perms = user?.permissions || {};
-  const hasAccess = (key, level = "view") => {
-    if (isDeveloper) return true;
-    const p = perms[key];
-    if (p === undefined) return false;
-    if (typeof p === "boolean") return p; // backward compat
-    return p?.[level] === true;
-  };
-  const hasExplicitAccess = (key, level = "view") => {
-    if (isDeveloper) return true;
-    const p = perms[key];
-    if (p === undefined) return false;
-    if (typeof p === "boolean") return p;
-    return p?.[level] === true;
-  };
-  const canEdit = (key) => hasAccess(key, "edit");
-  const canDelete = (key) => hasAccess(key, "delete");
-
-  const menuItems = useMemo(() => {
-    const items = [];
-    const comingSoonStyle = { opacity: 0.4, cursor: "not-allowed" };
-
-    if (hasAccess("dashboard")) {
-      items.push({
-        key: "dashboard",
-        icon: <DashboardOutlined />,
-        label: "Dashboard",
-      });
-    }
-
-    if (hasAccess("messaging")) {
-      items.push({
-        key: "messaging",
-        icon: <MessageOutlined />,
-        label: "Messaging",
-      });
-    }
-
-    // ── SWM Programs ──
-    const swmChildren = [];
-    if (hasAccess("trashTraps")) swmChildren.push({ key: "cs-trash-traps", icon: <ExperimentOutlined />, label: "Trash Traps" });
-    if (hasAccess("tenYearSwm")) swmChildren.push({ key: "10yr-plan", icon: <FundProjectionScreenOutlined />, label: "10 Year SWM Plan" });
-    if (hasAccess("fundedMrf")) swmChildren.push({ key: "funded-mrf", icon: <BankOutlined />, label: "Funded MRF" });
-    if (hasAccess("lguInitiatedMrf")) swmChildren.push({ key: "cs-lgu-mrf", icon: <ApartmentOutlined />, label: "LGU Initiated MRF" });
-    if (hasAccess("swmEquipment")) swmChildren.push({ key: "cs-swm-equip", icon: <CarOutlined />, label: "SWM Equipments" });
-    if (swmChildren.length > 0) {
-      items.push({
-        key: "swm-programs",
-        icon: <AppstoreOutlined />,
-        label: "SWM Programs",
-        children: swmChildren,
-      });
-    }
-
-    // ── Sanitary Landfill Monitoring ──
-    const slfChildren = [];
-    if (hasAccess("sanitaryLandfills") && hasAccess("slfMonitoring")) {
-      slfChildren.push({
-        key: "slf-monitoring",
-        icon: <ReconciliationOutlined />,
-        label: "SLF Data Table",
-      });
-    }
-    if (hasAccess("sanitaryLandfills") && (hasAccess("submissions") || hasAccess("reports") || hasAccess("baselineData") || hasAccess("cellWastePlacement"))) {
-      slfChildren.push({
-        key: "slf-waste-generators",
-        icon: <InboxOutlined />,
-        label: "Portal Submissions",
-      });
-    }
-    if (hasAccess("sanitaryLandfills") && slfChildren.length > 0) {
-      items.push({
-        key: "slf-group",
-        icon: <SafetyCertificateOutlined />,
-        label: "Sanitary Landfill",
-        children: slfChildren,
-      });
-    }
-
-    // ── Monitoring & Assistance ──
-    const monChildren = [];
-    if (hasAccess("technicalAssistance")) monChildren.push({ key: "cs-tech-assist", icon: <FundOutlined />, label: "Technical Asst. (Brgy)" });
-    if (hasAccess("transferStations")) monChildren.push({ key: "cs-transfer-station", icon: <ContainerOutlined />, label: "Transfer Station" });
-    if (hasAccess("openDumpsites")) monChildren.push({ key: "cs-open-dump", icon: <DeleteOutlined />, label: "Open Dump Sites" });
-    if (hasAccess("projectDescScoping")) monChildren.push({ key: "cs-pds", icon: <FileDoneOutlined />, label: "PDS (Scoping)" });
-    if (hasAccess("residualContainment")) monChildren.push({ key: "cs-rca", icon: <AlertOutlined />, label: "Residual Containment" });
-    if (hasAccess("lguAssistDiversion")) monChildren.push({ key: "cs-lgu-diversion", icon: <EnvironmentOutlined />, label: "LGU Asst. & Diversion" });
-    if (monChildren.length > 0) {
-      items.push({
-        key: "monitoring-assist",
-        icon: <AuditOutlined />,
-        label: "Monitoring",
-        children: monChildren,
-      });
-    }
-
-    // ── Settings ──
-    {
-      const settingsChildren = [];
-      if (hasAccess("portalFields")) {
-        settingsChildren.push({
-          key: "settings-fields",
-          icon: <FormOutlined />,
-          label: "Portal Fields",
-        });
-      }
-      if (hasAccess("dataReferences")) {
-        settingsChildren.push({
-          key: "settings-data-refs",
-          icon: <DatabaseOutlined />,
-          label: "Data References",
-        });
-      }
-      if (hasAccess("orgChart")) {
-        settingsChildren.push({
-          key: "settings-org-chart",
-          icon: <ApartmentOutlined />,
-          label: "Org Chart",
-        });
-      }
-      if (isDeveloper) {
-        settingsChildren.push({
-          key: "settings-portal-users",
-          icon: <TeamOutlined />,
-          label: "Portal User Management",
-        });
-      } else if (hasAccess("portalUsers")) {
-        settingsChildren.push({
-          key: "settings-portal-users",
-          icon: <TeamOutlined />,
-          label: "Portal User Management",
-        });
-      }
-      if (settingsChildren.length > 0) {
-        items.push({ type: "divider" });
-        items.push({
-          key: "settings",
-          icon: <SettingOutlined />,
-          label: "Settings",
-          children: settingsChildren,
-        });
-      }
-    }
-
-    {
-      const devChildren = [];
-      // Developer-only: App Settings (incl. Dev Portal Credential) and
-      // Accounts & Roles are restricted to the real developer role — no explicit
-      // permission grant can open them. Enforced again on the backend.
-      if (isDeveloper) {
-        devChildren.push({
-          key: "dev-settings",
-          icon: <ToolOutlined />,
-          label: "App Settings",
-        });
-      }
-      if (isDeveloper) {
-        devChildren.push({
-          key: "settings-accounts",
-          icon: <TeamOutlined />,
-          label: "Accounts & Roles",
-        });
-      }
-      if (isDeveloper || hasAccess("supportTickets")) {
-        devChildren.push({
-          key: "dev-support",
-          icon: <CustomerServiceOutlined />,
-          label: "Support & Tickets",
-        });
-      }
-      if (isDeveloper || hasExplicitAccess("notificationManagement")) {
-        devChildren.push({
-          key: "dev-notifications",
-          icon: <BellOutlined />,
-          label: "Notification Management",
-        });
-      }
-      if (devChildren.length > 0) {
-        items.push({
-          key: "developer",
-          icon: <CodeOutlined />,
-          label: isDeveloper ? "Developer" : "Administration",
-          children: devChildren,
-        });
-      }
-    }
-
-    return items;
-  }, [isDeveloper, user?.permissions, user?.role]);
-
-  const userMenuItems = [
-    {
-      key: "profile",
-      icon: <UserOutlined />,
-      label: (
-        <span>
-          Profile{" "}
-          {isDeveloper && (
-            <Tag color="purple" style={{ marginLeft: 4, fontSize: 10 }}>
-              DEV
-            </Tag>
-          )}
-        </span>
-      ),
-    },
-    { type: "divider" },
-    {
-      key: "logout",
-      icon: <LogoutOutlined />,
-      label: "Logout",
-      danger: true,
-    },
-  ];
-
-  const handleUserMenuClick = ({ key }) => {
-    if (key === "logout") handleLogout();
-    if (key === "profile") setProfileModalOpen(true);
-  };
-
-  const renderContent = () => {
-    const denied = (
-      <DashboardContent
-        user={user}
-        isDark={isDark}
-        setActiveMenu={setActiveMenu}
-      />
-    );
-
-    // Coming soon pages — (none remaining)
-
-    switch (activeMenu) {
-      case "10yr-plan":
-        return <TenYearSWMPlan isDark={isDark} canEdit={canEdit("tenYearSwm")} canDelete={canDelete("tenYearSwm")} />;
-      case "funded-mrf":
-        return <FundedMRF isDark={isDark} canEdit={canEdit("fundedMrf")} canDelete={canDelete("fundedMrf")} />;
-      case "cs-lgu-mrf":
-        return <LguInitiatedMRF isDark={isDark} canEdit={canEdit("lguInitiatedMrf")} canDelete={canDelete("lguInitiatedMrf")} />;
-      case "cs-trash-traps":
-        return <TrashTraps isDark={isDark} canEdit={canEdit("trashTraps")} canDelete={canDelete("trashTraps")} />;
-      case "cs-swm-equip":
-        return <SwmEquipment isDark={isDark} canEdit={canEdit("swmEquipment")} canDelete={canDelete("swmEquipment")} />;
-      case "cs-open-dump":
-        return <OpenDumpsites isDark={isDark} canEdit={canEdit("openDumpsites")} canDelete={canDelete("openDumpsites")} />;
-      case "cs-rca":
-        return <ResidualContainment isDark={isDark} canEdit={canEdit("residualContainment")} canDelete={canDelete("residualContainment")} />;
-      case "cs-pds":
-        return <ProjectDescScoping isDark={isDark} canEdit={canEdit("projectDescScoping")} canDelete={canDelete("projectDescScoping")} />;
-      case "cs-transfer-station":
-        return <TransferStations isDark={isDark} canEdit={canEdit("transferStations")} canDelete={canDelete("transferStations")} />;
-      case "cs-lgu-diversion":
-        return <LguAssistDiversion isDark={isDark} canEdit={canEdit("lguAssistDiversion")} canDelete={canDelete("lguAssistDiversion")} />;
-      case "cs-tech-assist":
-        return <TechnicalAssistance isDark={isDark} canEdit={canEdit("technicalAssistance")} canDelete={canDelete("technicalAssistance")} />;
-      case "settings-accounts":
-        // Developer-only (direct-URL/menu-selection guard).
-        return isDeveloper ? <AccountSettings isDark={isDark} /> : denied;
-      case "settings-portal-users":
-        return (isDeveloper || hasAccess("portalUsers")) ? (
-          <PortalUsers
-            isDark={isDark}
-            canEdit={isDeveloper || canEdit("portalUsers")}
-            canDelete={isDeveloper || canDelete("portalUsers")}
-            canEmail={isDeveloper || hasExplicitAccess("portalUserEmail", "edit")}
-            canSeePortalData={isDeveloper || hasExplicitAccess("portalData")}
-          />
-        ) : denied;
-      case "messaging":
-        return hasAccess("messaging") ? <Messaging isDark={isDark} currentUser={user} driveDisabled={driveMaintenanceMode} /> : denied;
-      case "settings-fields":
-        return hasAccess("portalFields") ? <FieldSettings isDark={isDark} canEdit={canEdit("portalFields")} canDelete={canDelete("portalFields")} /> : denied;
-      case "settings-data-refs":
-        return hasAccess("dataReferences") ? <DataReferences isDark={isDark} canEdit={canEdit("dataReferences")} canDelete={canDelete("dataReferences")} /> : denied;
-      case "settings-org-chart":
-        return hasAccess("orgChart") ? <OrgChartSettings isDark={isDark} canEdit={canEdit("orgChart")} canDelete={canDelete("orgChart")} /> : denied;
-      case "slf-monitoring":
-        return hasAccess("slfMonitoring") ? <SLFMonitoring isDark={isDark} canEdit={canEdit("slfMonitoring")} canDelete={canDelete("slfMonitoring")} driveDisabled={driveMaintenanceMode} /> : denied;
-      case "slf-waste-generators":
-        return hasAccess("submissions") || hasAccess("reports") || hasAccess("baselineData") || hasAccess("cellWastePlacement") ? (
-          <SLFWasteGenerators
-            isDark={isDark}
-            canViewSubmissions={hasAccess("submissions")}
-            canEdit={canEdit("submissions")}
-            canDelete={canDelete("submissions")}
-            canViewReports={hasAccess("reports")}
-            canEditReports={canEdit("reports")}
-            canDeleteReports={canDelete("reports")}
-            canViewBaseline={hasAccess("baselineData")}
-            canEditBaseline={canEdit("baselineData")}
-            canDeleteBaseline={canDelete("baselineData")}
-            canOverrideBaselineUnlock={isDeveloper}
-            canViewCellPlacement={hasAccess("cellWastePlacement")}
-            canEditCellPlacement={canEdit("cellWastePlacement")}
-            canRepairIds={isDeveloper}
-            isDeveloper={isDeveloper}
-          />
-        ) : (
-          denied
-        );
-      case "dev-support":
-        return (isDeveloper || hasAccess("supportTickets")) ? <SupportTab isDark={isDark} canEdit={canEdit("supportTickets")} canDelete={canDelete("supportTickets")} /> : denied;
-      case "dev-notifications":
-        return (isDeveloper || hasExplicitAccess("notificationManagement")) ? <NotificationManagement isDark={isDark} /> : denied;
-      case "dev-settings":
-        // Developer-only (direct-URL/menu-selection guard).
-        return isDeveloper ? (
-          <DeveloperSettings
-            isDark={isDark}
-            isDeveloper={isDeveloper}
-            initialActiveKey={developerSettingsInitialTab}
-            onSettingsSaved={(s) => {
-              if (s.primaryColor) {
-                setPrimaryColor(s.primaryColor);
-                secureStorage.set("admin-primary-color", s.primaryColor);
-              }
-              if (s.theme) {
-                setIsDark(s.theme === "dark");
-                secureStorage.set("admin-theme", s.theme);
-              }
-              if (s.siderColor) setSiderColor(s.siderColor);
-              if (s.siderColorDark) setSiderColorDark(s.siderColorDark);
-              if (s.headerColor) setHeaderColor(s.headerColor);
-              if (s.headerColorDark) setHeaderColorDark(s.headerColorDark);
-              if (s.sidebarStyle) setSidebarStyle(s.sidebarStyle);
-              syncPortalAnnouncementFlag(s);
-            }}
-          />
-        ) : (
-          <DashboardContent
-            user={user}
-            isDark={isDark}
-            setActiveMenu={setActiveMenu}
-          />
-        );
-      default:
-        return (
-          <DashboardContent
-            user={user}
-            isDark={isDark}
-            setActiveMenu={setActiveMenu}
-          />
-        );
-    }
-  };
-
-  // Theme-aware styles
-  const s = useMemo(
-    () =>
-      getStyles(isDark, {
-        siderColor,
-        siderColorDark,
-        headerColor,
-        headerColorDark,
-        sidebarStyle,
-      }),
-    [
-      isDark,
-      siderColor,
-      siderColorDark,
-      headerColor,
-      headerColorDark,
-      sidebarStyle,
-    ],
-  );
-
-  const siderMenu = (
-    <>
-      <div style={s.logo}>
-        <img
-          src={embLogo}
-          alt="EMBR3"
-          style={{
-            height: isMobile ? 36 : collapsed ? 32 : 40,
-            marginRight: isMobile ? 10 : collapsed ? 0 : 10,
-            transition: "all 0.2s",
-          }}
-        />
-        {(isMobile || !collapsed) && (
-          <Title level={5} style={s.logoText}>
-            EMBR3 ESWMP
-          </Title>
-        )}
-      </div>
-      <div style={{ flex: 1, overflowY: "auto", overflowX: "hidden" }}>
-        <Menu
-          theme="dark"
-          mode="inline"
-          selectedKeys={[activeMenu]}
-          onClick={({ key }) => {
-            setActiveMenu(key);
-            if (isMobile) setDrawerOpen(false);
-          }}
-          items={menuItems}
-          inlineIndent={12}
-          style={{
-            background: "transparent",
-            borderRight: 0,
-            padding: "8px 0",
-          }}
-          className="sider-menu"
-        />
-      </div>
-      {(isMobile || !collapsed) && (
-        <div style={s.siderFooter}>
-          <Text
-            style={{
-              color: "rgba(255,255,255,0.35)",
-              fontSize: 10,
-              letterSpacing: 0.5,
-            }}
-          >
-            EMBR3-ESWMP v1.0.0
-          </Text>
-        </div>
-      )}
-    </>
-  );
-
-  // Block rendering until auth is checked — prevents dashboard flash
-  if (!user) return null;
-
-  return (
-    <DataRefProvider>
-    <ConfigProvider
-      theme={{
-        algorithm: isDark ? antTheme.darkAlgorithm : antTheme.defaultAlgorithm,
-        token: { colorPrimary: primaryColor },
-      }}
-    >
-      <Layout style={{ minHeight: "100vh" }} data-theme={isDark ? "dark" : "light"}>
-        {/* Desktop Sider */}
-        {!isMobile && (
-          <Sider
-            trigger={null}
-            collapsible
-            collapsed={collapsed}
-            style={s.sider}
-            width={220}
-          >
-            {siderMenu}
-          </Sider>
-        )}
-
-        {/* Mobile Drawer */}
-        {isMobile && (
-          <Drawer
-            placement="left"
-            open={drawerOpen}
-            onClose={() => setDrawerOpen(false)}
-            size={260}
-            styles={{
-              body: {
-                padding: 0,
-                background: isDark
-                  ? siderColorDark || "#111927"
-                  : siderColor || "#1a3353",
-                display: "flex",
-                flexDirection: "column",
-              },
-            }}
-            closable={false}
-          >
-            {siderMenu}
-          </Drawer>
-        )}
-
-        <Layout style={{ height: "100vh", overflow: "auto" }}>
-          <Header style={s.header}>
-            <Button
-              type="text"
-              icon={
-                isMobile ? (
-                  <MenuUnfoldOutlined />
-                ) : collapsed ? (
-                  <MenuUnfoldOutlined />
-                ) : (
-                  <MenuFoldOutlined />
-                )
-              }
-              onClick={() =>
-                isMobile ? setDrawerOpen(true) : setCollapsed(!collapsed)
-              }
-              style={{ fontSize: 18, color: isDark ? "#fff" : undefined }}
-            />
-            <div className="admin-header-right">
-              {!isMobile && (
-                <div
-                  className="admin-clock"
-                  style={{
-                    display: "flex",
-                    alignItems: "center",
-                    marginRight: 16,
-                    gap: 6,
-                  }}
-                >
-                  <ClockCircleOutlined
-                    style={{ fontSize: 14, color: isDark ? "#999" : "#888" }}
-                  />
-                  <Text
-                    style={{
-                      fontSize: 13,
-                      color: isDark ? "#ccc" : "#666",
-                      whiteSpace: "nowrap",
-                    }}
-                  >
-                    {currentTime.format("ddd, MMM DD YYYY \u2014 h:mm:ss A")}
-                  </Text>
-                </div>
-              )}
-              <Tooltip title="Check SLF portal announcements">
-                <Tag
-                  color={portalAnnouncementActive ? "green" : "default"}
-                  icon={<BellOutlined />}
-                  onClick={() => setPortalAnnouncementModalOpen(true)}
-                  style={{
-                    cursor: "pointer",
-                    marginRight: 12,
-                    display: "inline-flex",
-                    alignItems: "center",
-                  }}
-                >
-                  Portal Announcements
-                </Tag>  
-              </Tooltip>
-              <Switch
-                checked={!isDark}
-                onChange={toggleTheme}
-                checkedChildren={<BulbFilled />}
-                unCheckedChildren={<BulbOutlined />}
-                style={{ marginRight: 12 }}
-              />
-              <Popover
-                open={messageOpen}
-                onOpenChange={(open) => {
-                  setMessageOpen(open);
-                  if (open) fetchMessagePreview();
-                }}
-                trigger="click"
-                placement="bottomRight"
-                arrow={false}
-                overlayInnerStyle={{ padding: 0, borderRadius: 12, overflow: "hidden" }}
-                overlayStyle={{ width: 380 }}
-                content={
-                  <div>
-                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "14px 16px 10px", borderBottom: isDark ? "1px solid #303030" : "1px solid #f0f0f0" }}>
-                      <Space size={8}><MessageOutlined /><Text strong style={{ fontSize: 15 }}>Messages</Text></Space>
-                      {messageUnreadCount > 0 && (
-                        <Button type="link" size="small" onClick={markAllMessagesRead} style={{ fontSize: 12, padding: 0 }}>Mark as read</Button>
-                      )}
-                    </div>
-                    <div style={{ maxHeight: 420, overflowY: "auto" }}>
-                      {messageLoading && quickMessages.length === 0 ? (
-                        <div style={{ padding: 16 }}><Skeleton active avatar paragraph={{ rows: 3 }} /></div>
-                      ) : quickMessages.length === 0 ? (
-                        <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No messages" style={{ padding: "40px 0" }} />
-                      ) : (
-                        <List
-                          dataSource={quickMessages}
-                          renderItem={(thread) => {
-                            const isUnread = thread.unreadCount > 0;
-                            const lastSender = thread.lastMessage?.sender;
-                            return (
-                              <div
-                                key={thread._id}
-                                onClick={() => {
-                                  setActiveMenu("messaging");
-                                  setMessageOpen(false);
-                                }}
-                                style={{
-                                  display: "flex", gap: 12, padding: "12px 16px",
-                                  cursor: "pointer",
-                                  background: isUnread ? (isDark ? "rgba(47,84,235,0.06)" : "#f0f5ff") : "transparent",
-                                  borderBottom: isDark ? "1px solid #303030" : "1px solid #f5f5f5",
-                                }}
-                              >
-                                <Avatar style={{ backgroundColor: isUnread ? "#2f54eb" : (isDark ? "#303030" : "#d9e6f2") }} icon={<UserOutlined />} />
-                                <div style={{ flex: 1, minWidth: 0 }}>
-                                  <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
-                                    <Text strong={isUnread} style={{ fontSize: 13 }} ellipsis>{thread.subject}</Text>
-                                    <Text type="secondary" style={{ fontSize: 11, whiteSpace: "nowrap" }}>{dayjs(thread.lastMessageAt || thread.updatedAt).fromNow()}</Text>
-                                  </div>
-                                  <Text type="secondary" style={{ display: "block", fontSize: 12 }} ellipsis>
-                                    {lastSender ? `${senderName(lastSender)}: ` : ""}{previewMessage(thread)}
-                                  </Text>
-                                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 4 }}>
-                                    {isUnread ? <Badge count={thread.unreadCount} size="small" /> : <Text type="secondary" style={{ fontSize: 11 }}>Read</Text>}
-                                    {isUnread && (
-                                      <Button
-                                        type="link"
-                                        size="small"
-                                        onClick={(event) => {
-                                          event.stopPropagation();
-                                          markMessageThreadRead(thread._id);
-                                        }}
-                                        style={{ padding: 0, fontSize: 12 }}
-                                      >
-                                        Mark as read
-                                      </Button>
-                                    )}
-                                  </div>
-                                </div>
-                              </div>
-                            );
-                          }}
-                        />
-                      )}
-                    </div>
-                    <div style={{ padding: 12, borderTop: isDark ? "1px solid #303030" : "1px solid #f0f0f0", textAlign: "center" }}>
-                      <Button type="primary" block icon={<MessageOutlined />} onClick={() => { setActiveMenu("messaging"); setMessageOpen(false); }}>
-                        See all in Messaging
-                      </Button>
-                    </div>
-                  </div>
-                }
-              >
-                <Badge count={messageUnreadCount} size="small" offset={[-6, 6]} style={{ backgroundColor: "#2f54eb", boxShadow: isDark ? "0 0 0 2px #141414" : "0 0 0 2px #fff", fontSize: 10, lineHeight: "16px", height: 16, minWidth: 16, padding: "0 4px" }}>
-                  <Tooltip title="Messages">
-                    <Button
-                      type="text"
-                      icon={<MessageOutlined />}
-                      style={{
-                        fontSize: 18,
-                        color: isDark ? "#999" : "#666",
-                        marginRight: 4,
-                      }}
-                    />
-                  </Tooltip>
-                </Badge>
-              </Popover>
-              <Popover
-                open={notifOpen}
-                onOpenChange={setNotifOpen}
-                trigger="click"
-                placement="bottomRight"
-                arrow={false}
-                overlayInnerStyle={{ padding: 0, borderRadius: 12, overflow: "hidden" }}
-                overlayStyle={{ width: 380 }}
-                content={
-                  <div>
-                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "14px 16px 10px", borderBottom: isDark ? "1px solid #303030" : "1px solid #f0f0f0" }}>
-                      <Text strong style={{ fontSize: 15 }}>Notifications</Text>
-                      {unreadCount > 0 && (
-                        <Button type="link" size="small" onClick={markAllRead} style={{ fontSize: 12, padding: 0 }}>Mark all as read</Button>
-                      )}
-                    </div>
-                    <div style={{ maxHeight: 420, overflowY: "auto" }}>
-                      {notifLoading && notifications.length === 0 ? (
-                        <div style={{ textAlign: "center", padding: "40px 0" }}><Spin size="small" /></div>
-                      ) : notifications.length === 0 ? (
-                        <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No notifications" style={{ padding: "40px 0" }} />
-                      ) : (
-                        <List
-                          dataSource={notifications}
-                          renderItem={(n) => (
-                            <div
-                              key={n._id}
-                            onClick={() => {
-                              openNotificationTarget(n);
-                            }}
-                              style={{
-                                display: "flex", gap: 12, padding: "12px 16px",
-                                cursor: getNotifTarget(n.type) ? "pointer" : (n.read ? "default" : "pointer"),
-                                background: n.read ? "transparent" : (isDark ? "rgba(47,84,235,0.06)" : "#f0f5ff"),
-                                borderBottom: isDark ? "1px solid #303030" : "1px solid #f5f5f5",
-                                transition: "background 0.2s",
-                              }}
-                            >
-                              <div style={{ width: 36, height: 36, borderRadius: "50%", background: isDark ? "#1f1f1f" : "#f5f5f5", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 16, flexShrink: 0 }}>
-                                {getNotifIcon(n.type)}
-                              </div>
-                              <div style={{ flex: 1, minWidth: 0 }}>
-                                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 8 }}>
-                                  <Text strong={!n.read} style={{ fontSize: 13, lineHeight: 1.3 }}>{n.title}</Text>
-                                  {!n.read && <div style={{ width: 8, height: 8, borderRadius: "50%", background: "#2f54eb", flexShrink: 0, marginTop: 4 }} />}
-                                </div>
-                                <Text type="secondary" style={{ fontSize: 12, lineHeight: 1.3, display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" }}>{n.message}</Text>
-                                <Text type="secondary" style={{ fontSize: 11, marginTop: 2, display: "block" }}>{dayjs(n.createdAt).fromNow()}</Text>
-                              </div>
-                            </div>
-                          )}
-                        />
-                      )}
-                    </div>
-                    <div style={{ padding: 12, borderTop: isDark ? "1px solid #303030" : "1px solid #f0f0f0", textAlign: "center" }}>
-                      <Button type="link" block icon={<BellOutlined />} onClick={openNotificationHistory}>
-                        View previous notifications
-                      </Button>
-                    </div>
-                  </div>
-                }
-              >
-                <Badge count={unreadCount} size="small" offset={[-6, 6]} style={{ backgroundColor: "#ff4d4f", boxShadow: isDark ? "0 0 0 2px #141414" : "0 0 0 2px #fff", fontSize: 10, lineHeight: "16px", height: 16, minWidth: 16, padding: "0 4px" }}>
-                  <Button
-                    type="text"
-                    icon={<BellOutlined />}
-                    style={{
-                      fontSize: 18,
-                      color: isDark ? "#999" : "#666",
-                      marginRight: 12,
-                    }}
-                  />
-                </Badge>
-              </Popover>
-              <Dropdown
-                menu={{ items: userMenuItems, onClick: handleUserMenuClick }}
-                trigger={["click"]}
-              >
-                <div style={s.userInfo}>
-                  <Avatar
-                    style={{ backgroundColor: isDark ? "#2a4060" : "#1a3353" }}
-                    icon={<UserOutlined />}
-                  />
-                  <Text
-                    strong
-                    style={{
-                      marginLeft: 8,
-                      cursor: "pointer",
-                      color: isDark ? "#fff" : undefined,
-                    }}
-                  >
-                    {user?.firstName}
-                  </Text>
-                </div>
-              </Dropdown>
-            </div>
-          </Header>
-
-          <Content
-            className="admin-content"
-            style={{ background: isDark ? "#1f1f1f" : "#f0f2f5" }}
-          >
-            {driveMaintenanceMode && (
-              <Alert
-                type="error"
-                banner
-                showIcon
-                icon={<AlertOutlined />}
-                message="Google Drive is currently in maintenance mode."
-                description="All file uploads (documents, images, LOI attachments) are disabled until Drive access is restored. Data entry and Excel imports are unaffected. Go to Developer Settings → Portal & Email to disable maintenance mode once Drive is available again."
-                style={{ marginBottom: 0, borderRadius: 0 }}
-              />
-            )}
-            <Suspense fallback={<div style={{ display: "flex", justifyContent: "center", alignItems: "center", padding: 80 }}><Spin size="large" /></div>}>
-            {renderContent()}
-            </Suspense>
-          </Content>
-
-          <div style={s.footer}>
-            <Text style={{ color: isDark ? "#666" : "#999", fontSize: 12 }}>
-              © 2026 EMBR3 — Ecological Solid Waste Management Pipeline. All
-              rights reserved.
-            </Text>
-          </div>
-        </Layout>
-      </Layout>
-
-      <Modal
-        title={
-          <Space size={12}>
-            <Avatar
-              shape="square"
-              size={40}
-              icon={<BellOutlined />}
-              style={{
-                background: currentPortalAnnouncement?.portalAnnouncementEnabled
-                  ? "linear-gradient(135deg, #1a3353 0%, #2f54eb 100%)"
-                  : "linear-gradient(135deg, #8c8c8c 0%, #bfbfbf 100%)",
-                color: "#fff",
-                borderRadius: 12,
-              }}
-            />
-            <div>
-              <div style={{ fontWeight: 700, fontSize: 18, lineHeight: 1.2 }}>
-                SLF Portal Announcement
-              </div>
-              <Text type="secondary" style={{ fontSize: 12 }}>
-                Review the currently published header announcement and its visibility.
-              </Text>
-            </div>
-          </Space>
-        }
-        open={portalAnnouncementModalOpen}
-        onCancel={() => setPortalAnnouncementModalOpen(false)}
-        footer={
-          <Space>
-            <Button
-              onClick={() => {
-                setPortalAnnouncementModalOpen(false);
-                setDeveloperSettingsInitialTab("announcements");
-                setActiveMenu("dev-settings");
-              }}
-            >
-              Manage Announcement
-            </Button>
-            <Button type="primary" onClick={() => setPortalAnnouncementModalOpen(false)}>Close</Button>
-          </Space>
-        }
-        width={760}
-        styles={{
-          body: {
-            maxHeight: "68vh",
-            overflowY: "auto",
-            paddingRight: 8,
-          },
-        }}
-      >
-        {currentPortalAnnouncement?.portalAnnouncementEnabled ? (
-          <Space direction="vertical" size={16} style={{ width: "100%" }}>
-            <Card
-              bordered={false}
-              style={{
-                borderRadius: 18,
-                background:
-                  currentPortalAnnouncement.portalAnnouncementType === "warning"
-                    ? "linear-gradient(135deg, #fff7e6 0%, #fff1b8 100%)"
-                    : currentPortalAnnouncement.portalAnnouncementType === "error"
-                      ? "linear-gradient(135deg, #fff1f0 0%, #ffccc7 100%)"
-                      : currentPortalAnnouncement.portalAnnouncementType === "success"
-                        ? "linear-gradient(135deg, #f6ffed 0%, #d9f7be 100%)"
-                        : "linear-gradient(135deg, #f0f5ff 0%, #d6e4ff 100%)",
-                boxShadow: "0 14px 34px rgba(0,0,0,0.08)",
-              }}
-            >
-              <Space direction="vertical" size={10} style={{ width: "100%" }}>
-                <Space wrap>
-                  <Tag color={currentPortalAnnouncement.portalAnnouncementType || "blue"} style={{ borderRadius: 999, paddingInline: 10 }}>
-                    {(currentPortalAnnouncement.portalAnnouncementType || "info").toUpperCase()}
-                  </Tag>
-                  <Tag color="green" style={{ borderRadius: 999, paddingInline: 10 }}>
-                    PUBLISHED
-                  </Tag>
-                </Space>
-                <div style={{ fontSize: 24, fontWeight: 800, color: "#1a3353", lineHeight: 1.15 }}>
-                  {currentPortalAnnouncement.portalAnnouncementTitle || "SLF Portal Announcement"}
-                </div>
-                <Text style={{ whiteSpace: "pre-wrap", fontSize: 14, lineHeight: 1.75, color: "#243b53" }}>
-                  {currentPortalAnnouncement.portalAnnouncementMessage || "No announcement message set."}
-                </Text>
-              </Space>
-            </Card>
-          </Space>
-        ) : (
-          <Card
-            bordered={false}
-            style={{
-              borderRadius: 18,
-              background: "linear-gradient(135deg, #fafafa 0%, #f5f5f5 100%)",
-              textAlign: "center",
-            }}
-          >
-            <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No published portal announcement" />
-            <Button
-              type="primary"
-              style={{ marginTop: 8 }}
-              onClick={() => {
-                setPortalAnnouncementModalOpen(false);
-                setDeveloperSettingsInitialTab("announcements");
-                setActiveMenu("dev-settings");
-              }}
-            >
-              Create Announcement
-            </Button>
-          </Card>
-        )}
-      </Modal>
-
-      <Modal
-        title={
-          <Space>
-            <BellOutlined />
-            <span>Previous Notifications</span>
-            {unreadCount > 0 && <Badge count={unreadCount} size="small" />}
-          </Space>
-        }
-        open={notifHistoryOpen}
-        onCancel={() => setNotifHistoryOpen(false)}
-        footer={
-          <Space>
-            {unreadCount > 0 && <Button onClick={markAllRead}>Mark all as read</Button>}
-            <Button type="primary" onClick={() => setNotifHistoryOpen(false)}>Close</Button>
-          </Space>
-        }
-        width={860}
-      >
-        <Space wrap style={{ width: "100%", justifyContent: "space-between", marginBottom: 12 }}>
-          <DatePicker.RangePicker
-            value={notifHistoryDateRange}
-            onChange={(range) => {
-              setNotifHistoryDateRange(range);
-              fetchNotificationHistory(1, notifHistoryPagination.pageSize, range);
-            }}
-            allowClear
-          />
-          <Button icon={<ReloadOutlined />} onClick={() => fetchNotificationHistory(1, notifHistoryPagination.pageSize, notifHistoryDateRange)} loading={notifHistoryLoading}>
-            Refresh
-          </Button>
-        </Space>
-        <List
-          loading={notifHistoryLoading}
-          dataSource={notifHistory}
-          locale={{ emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No previous notifications" /> }}
-          pagination={
-            notifHistoryPagination.total > notifHistoryPagination.pageSize
-              ? {
-                  current: notifHistoryPagination.current,
-                  pageSize: notifHistoryPagination.pageSize,
-                  total: notifHistoryPagination.total,
-                  showSizeChanger: true,
-                  pageSizeOptions: ["10", "20", "50"],
-                  showTotal: (total, range) => `${range[0]}-${range[1]} of ${total}`,
-                  onChange: (page, pageSize) => fetchNotificationHistory(page, pageSize, notifHistoryDateRange),
-                }
-              : false
-          }
-          renderItem={(notification) => {
-            const target = getNotifTarget(notification.type);
-            return (
-              <List.Item
-                key={notification._id}
-                onClick={() => openNotificationTarget(notification)}
-                style={{
-                  cursor: target || !notification.read ? "pointer" : "default",
-                  padding: "12px 4px",
-                  background: notification.read ? "transparent" : isDark ? "rgba(47,84,235,0.06)" : "#f0f5ff",
-                  borderRadius: 8,
-                  marginBottom: 4,
-                }}
-              >
-                <List.Item.Meta
-                  avatar={
-                    <div style={{ width: 38, height: 38, borderRadius: "50%", background: isDark ? "#1f1f1f" : "#f5f5f5", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 16 }}>
-                      {getNotifIcon(notification.type)}
-                    </div>
-                  }
-                  title={
-                    <Space size={6} wrap>
-                      <Text strong={!notification.read}>{notification.title}</Text>
-                      {!notification.read && <Badge status="processing" text="Unread" />}
-                    </Space>
-                  }
-                  description={
-                    <div>
-                      <Text type="secondary" style={{ display: "block" }}>{notification.message}</Text>
-                      <Text type="secondary" style={{ fontSize: 11 }}>{dayjs(notification.createdAt).format("MMM D, YYYY h:mm A")}</Text>
-                    </div>
-                  }
-                />
-              </List.Item>
-            );
-          }}
-        />
-      </Modal>
-
-      <Modal
-        title={
-          <Space>
-            <UserOutlined /> My Profile
-          </Space>
-        }
-        open={profileModalOpen}
-        onCancel={() => setProfileModalOpen(false)}
-        footer={
-          <Button onClick={() => setProfileModalOpen(false)}>Close</Button>
-        }
-      >
-        {user && (
-          <>
-            <div style={{ textAlign: "center", marginBottom: 16 }}>
-              <Avatar
-                size={72}
-                style={{ backgroundColor: primaryColor }}
-                icon={<UserOutlined />}
-              />
-              <div style={{ marginTop: 12 }}>
-                <Title level={4} style={{ margin: 0 }}>
-                  {getAdminDisplayName(user) || "Admin"}
-                </Title>
-                <Tag
-                  color={
-                    user.role === "developer"
-                      ? "purple"
-                      : user.role === "admin"
-                        ? "gold"
-                        : "blue"
-                  }
-                  style={{ marginTop: 6 }}
-                >
-                  {user.role?.toUpperCase()}
-                </Tag>
-              </div>
-            </div>
-            <Divider style={{ margin: "12px 0" }} />
-            <Descriptions column={1} size="small">
-              <Descriptions.Item label="Email">{user.email}</Descriptions.Item>
-              <Descriptions.Item label="Position">
-                {user.position || "\u2014"}
-              </Descriptions.Item>
-              <Descriptions.Item label="Designation">
-                {user.designation || "\u2014"}
-              </Descriptions.Item>
-            </Descriptions>
-          </>
-        )}
-      </Modal>
-    </ConfigProvider>
-    </DataRefProvider>
-  );
-}
-
-function ComingSoonContent({ isDark, title, description }) {
-  const textColor = isDark ? "#e0e0e0" : "#1a3353";
-  return (
-    <div
-      style={{
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        minHeight: 400,
-      }}
-    >
-      <Card
-        style={{
-          borderRadius: 16,
-          textAlign: "center",
-          maxWidth: 480,
-          width: "100%",
-          boxShadow: isDark
-            ? "0 4px 24px rgba(0,0,0,0.3)"
-            : "0 4px 24px rgba(0,0,0,0.08)",
-        }}
-      >
-        <div style={{ fontSize: 56, marginBottom: 16, opacity: 0.25 }}>🚧</div>
-        <Title level={3} style={{ margin: 0, color: textColor }}>
-          {title}
-        </Title>
-        <Text
-          type="secondary"
-          style={{ display: "block", marginTop: 8, fontSize: 15 }}
-        >
-          {description ||
-            "This module is currently under development and will be available soon."}
-        </Text>
-        <Tag
-          color="gold"
-          style={{ marginTop: 20, fontSize: 13, padding: "4px 16px" }}
-        >
-          Coming Soon
-        </Tag>
-      </Card>
-    </div>
-  );
-}
-
-function DashboardContent({ user, isDark, setActiveMenu }) {
   const [stats, setStats] = useState(null);
   const [swmStats, setSwmStats] = useState(null);
   const [mrfStats, setMrfStats] = useState(null);
@@ -1764,6 +169,7 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
   const [loading, setLoading] = useState(true);
   const [dashTab, setDashTab] = useState(null);
   const [dashboardTabSettings, setDashboardTabSettings] = useState(null);
+  const [slfClientSummary, setSlfClientSummary] = useState({ lgu: 0, private: 0, total: 0, loading: true, error: false });
   const [tileKey, setTileKey] = useState("street");
   const [mapFilterProvince, setMapFilterProvince] = useState(null);
   const [mapFilterStatus, setMapFilterStatus] = useState(null);
@@ -2016,23 +422,25 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
     [slfFacStats && slfFacStats.mapData],
   );
 
+  // SLF Location Map: today's submission status keyed by SLF id (declared before
+  // the map-status memos below that read it, to avoid a TDZ access during render).
+  const [slfToday, setSlfToday] = useState({ byId: {}, generatedAt: null, loading: false, error: false });
+
+  // The map Status filter now filters by SUBMISSION status for the selected date
+  // (acknowledged / pending / no-submission) — the map's focus.
+  const mapSubStatus = (record) => {
+    const s = slfToday.byId[String(record._id)]?.submissionStatus;
+    return s === "acknowledged" || s === "pending" || s === "pending-resubmission" ? s : "no-submission";
+  };
   const filteredSlfMapPts = useMemo(() => {
     let pts = slfMapPts;
     if (slfFilterProvince)
       pts = pts.filter((p) => p.record.province === slfFilterProvince);
-    if (slfFilterStatus) {
-      if (slfFilterStatus === "Operational")
-        pts = pts.filter(
-          (p) =>
-            /operational/i.test(p.record.statusOfSLF) &&
-            !/non/i.test(p.record.statusOfSLF),
-        );
-      else if (slfFilterStatus === "Non-Operational")
-        pts = pts.filter((p) => /non/i.test(p.record.statusOfSLF));
-      else pts = pts.filter((p) => !p.record.statusOfSLF);
-    }
+    if (slfFilterStatus)
+      pts = pts.filter((p) => mapSubStatus(p.record) === slfFilterStatus);
     return pts;
-  }, [slfMapPts, slfFilterProvince, slfFilterStatus]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [slfMapPts, slfFilterProvince, slfFilterStatus, slfToday.byId]);
 
   const slfProvinceOptions = useMemo(() => {
     const set = new Set(
@@ -2095,6 +503,53 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
     });
   };
 
+  // ── SLF Location Map: today's submission status (one aggregated request) ──
+  // Selected map day (official Manila "today" by default). Marker status is
+  // computed for THIS date; future dates are disabled.
+  const [slfMapDate, setSlfMapDate] = useState(() => dayjs());
+  const slfTodayAbort = useRef(null);
+  const fetchTodayStatus = useCallback(async (dateStr) => {
+    // Cancel any obsolete in-flight request (fast date/filter changes).
+    if (slfTodayAbort.current) slfTodayAbort.current.abort();
+    const controller = new AbortController();
+    slfTodayAbort.current = controller;
+    setSlfToday((p) => ({ ...p, loading: true }));
+    try {
+      const { data } = await api.get("/data-slf/today-status", {
+        params: dateStr ? { date: dateStr } : {},
+        signal: controller.signal,
+      });
+      const byId = {};
+      (data?.statuses || []).forEach((s) => { byId[String(s.slfId)] = s; });
+      setSlfToday({ byId, generatedAt: data?.generatedAt || new Date().toISOString(), loading: false, error: false });
+    } catch (err) {
+      if (err?.code === "ERR_CANCELED" || err?.name === "CanceledError") return; // superseded
+      setSlfToday((p) => ({ ...p, loading: false, error: true }));
+    }
+  }, []);
+  const slfDateStr = slfMapDate ? slfMapDate.format("YYYY-MM-DD") : "";
+  useEffect(() => {
+    let id = null;
+    const start = () => { if (!id) id = setInterval(() => fetchTodayStatus(slfDateStr), 5 * 60 * 1000); };
+    const stop = () => { if (id) { clearInterval(id); id = null; } };
+    const onVis = () => { if (document.hidden) stop(); else { fetchTodayStatus(slfDateStr); start(); } };
+    fetchTodayStatus(slfDateStr);
+    start();
+    document.addEventListener("visibilitychange", onVis);
+    // Smooth in-place refresh (map layer only, not the whole dashboard) when a
+    // submission is acknowledged/reverted/rejected/restored elsewhere.
+    const socket = getSocket();
+    const onRefresh = ({ target } = {}) => {
+      if (["submissions", "slf-waste-generators", "baselines"].includes(target)) fetchTodayStatus(slfDateStr);
+    };
+    if (socket) socket.on("data-refresh", onRefresh);
+    return () => {
+      stop();
+      document.removeEventListener("visibilitychange", onVis);
+      if (socket) socket.off("data-refresh", onRefresh);
+    };
+  }, [fetchTodayStatus, slfDateStr]);
+
   const slfStatusIcon = (statusOfSLF) => {
     const isOp = /operational/i.test(statusOfSLF) && !/non/i.test(statusOfSLF);
     const isNonOp = /non/i.test(statusOfSLF);
@@ -2107,6 +562,54 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
       iconAnchor: [10, 10],
       popupAnchor: [0, -12],
     });
+  };
+
+  // Marker for the SLF map keyed to the classified submission status for the
+  // selected day (shared rule): submitted→blue pulse ✓, pending→yellow pulse ◷,
+  // reverted→orange ↺, rejected→red ✕, no-submission→gray ○, unknown→gray ?.
+  // Non-operational SLFs with no submission keep the explicit inactive marker.
+  // Distinguished by icon shape + label + tooltip, not colour alone.
+  const staticMarker = (color, glyph) => L.divIcon({
+    className: "",
+    html: `<div style="width:20px;height:20px;border-radius:50%;background:${color};border:2px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,.35);display:flex;align-items:center;justify-content:center;color:#fff;font-size:11px;font-weight:bold">${glyph}</div>`,
+    iconSize: [20, 20], iconAnchor: [10, 10], popupAnchor: [0, -12],
+  });
+  const pulseMarker = (color, glyph, ringClass) => L.divIcon({
+    className: "",
+    html: `<div class="slf-today"><span class="${ringClass}"></span><div class="slf-today-dot" style="background:${color}">${glyph}</div></div>`,
+    iconSize: [22, 22], iconAnchor: [11, 11], popupAnchor: [0, -14],
+  });
+  // ONE marker per SLF, resolved by a strict priority so several concurrent
+  // conditions never draw conflicting pulses. Only attention-states (pending /
+  // resubmission) pulse; settled states (non-operational, acknowledged, none) are
+  // static. Colours reuse the existing status palette; resubmission stays distinct.
+  //   1 Non-operational restriction   → red ✕ (static)
+  //   2 Pending resubmission          → orange ↻ (pulse)
+  //   3 Pending initial submission    → yellow ◷ (pulse)   [= unacknowledged pending]
+  //   4 Acknowledged (up to date)     → blue ✓ (static)
+  //   5 No submission for the period  → gray ○ (static)    [missing / not monitored]
+  const slfTodayIcon = (record) => {
+    const op = classifySlfStatus(record.statusOfSLF);
+    // 1: non-operational overrides everything (cell subject to EMB R3 verification).
+    if (op === "nonOperational") return staticMarker("#ff4d4f", "✕");
+    const sub = slfToday.byId[String(record._id)]?.submissionStatus;
+    // 2: pending resubmission — distinct resubmission colour, pulsing.
+    if (sub === "pending-resubmission") {
+      const m = MAP_MARKER["pending-resubmission"];
+      return pulseMarker(m.color, m.glyph, m.ring);
+    }
+    // 3: pending initial submission (unacknowledged) — pulsing.
+    if (sub === "pending") {
+      const m = MAP_MARKER.pending;
+      return pulseMarker(m.color, m.glyph, m.ring);
+    }
+    // 4: acknowledged — operational and up to date for the period (calm, no pulse).
+    if (sub === "acknowledged") {
+      const m = MAP_MARKER.acknowledged;
+      return staticMarker(m.color, m.glyph);
+    }
+    // 5: no submission for the required reporting period — missing / not monitored.
+    return staticMarker("#8c8c8c", "○");
   };
 
   const tile = TILE_LAYERS[tileKey];
@@ -2192,6 +695,42 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
     const interval = setInterval(() => fetchStats(), 60000);
     return () => clearInterval(interval);
   }, [fetchStats]);
+
+  // DB-driven unique LGU / Private-sector client counts for the served tiles,
+  // sourced from the managed SLF Clients collection. Refreshed on mount and on
+  // the same 60s cadence as the rest of the dashboard so the tiles reflect
+  // client record changes.
+  const fetchClientSummary = useCallback(async () => {
+    try {
+      const { data } = await api.get("/slf-clients/summary");
+      setSlfClientSummary({
+        lgu: data?.lgu || 0,
+        private: data?.private || 0,
+        total: data?.total || 0,
+        loading: false,
+        error: false,
+      });
+    } catch {
+      setSlfClientSummary((prev) => ({ ...prev, loading: false, error: true }));
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchClientSummary();
+    const interval = setInterval(() => fetchClientSummary(), 60000);
+    return () => clearInterval(interval);
+  }, [fetchClientSummary]);
+
+  // Refresh the served tiles immediately when a client is added/edited/
+  // deactivated/deleted or a baseline sync runs (server emits data-refresh
+  // "slf-clients"), rather than waiting for the 60s poll.
+  useEffect(() => {
+    const socket = getSocket();
+    if (!socket) return undefined;
+    const onRefresh = ({ target } = {}) => { if (target === "slf-clients") fetchClientSummary(); };
+    socket.on("data-refresh", onRefresh);
+    return () => socket.off("data-refresh", onRefresh);
+  }, [fetchClientSummary]);
 
   const statusColors = {
     pending: "#faad14",
@@ -7501,6 +6040,20 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
     const slfTile = TILE_LAYERS[slfTileKey];
     const slfPrivateCount = slfByOwnership["Private"] || slfByOwnership["private"] || 0;
 
+    // #6: single source of truth for the SLF totals. Both the dashboard tile and
+    // the Facility Portfolio modal derive Total / Operational / Non-Operational
+    // from the SAME actual SLF Data Table records (managementData) with ONE status
+    // classifier — never hardcoded and never diverging between the two views.
+    const slfMgmt = slfFacStats.managementData || [];
+    const slfCounts = slfMgmt.reduce(
+      (acc, r) => {
+        acc.total += 1;
+        acc[classifySlfStatus(r.statusOfSLF)] += 1;
+        return acc;
+      },
+      { total: 0, operational: 0, nonOperational: 0, unmonitored: 0 },
+    );
+
     const SLF_CATEGORY_DESC = {
       "Cat 1": "< 15 TPD",
       "Cat 2": "15\u201375 TPD",
@@ -7508,11 +6061,12 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
       "Cat 4": "> 150 TPD",
     };
 
-    // #2/#3: shorter stacked cards → a shorter SLF Location Map card, whose height
-    // stays exactly the 3 stacked left cards + their 2 gutters (SLF_CARD_H * 3 + 32),
-    // so the map aligns with the left column and vertical spacing stays minimal.
+    // #2/#3: shorter stacked cards → a shorter SLF Location Map card. The left
+    // column is two rows (Status/Category, then Prevention), so the map height is
+    // 2 card heights + their single gutter, keeping the map aligned with the left
+    // column and the vertical spacing minimal.
     const SLF_CARD_H = 300;
-    const SLF_MAP_H = SLF_CARD_H * 3 + 32;
+    const SLF_MAP_H = SLF_CARD_H * 2 + 16;
 
     tabItems.push({
       key: "slf-monitoring",
@@ -7537,12 +6091,14 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                       >
                         <Statistic
                           title="Total SLF"
-                          value={slfFacStats.totalRecords}
+                          value={slfCounts.total}
                           prefix={<BankOutlined style={{ color: "#2f54eb" }} />}
                         />
                         <Text type="secondary" style={{ fontSize: 11 }}>
                           <CheckCircleOutlined style={{ color: "#52c41a", marginRight: 3 }} />
-                          {slfByStatus["Operational"] || 0}/{slfFacStats.totalRecords} Operational
+                          {slfCounts.operational} Operational
+                          <CloseCircleOutlined style={{ color: "#ff4d4f", margin: "0 3px 0 6px" }} />
+                          {slfCounts.nonOperational} Non-Op
                         </Text>
                       </Card>
                     </Col>
@@ -7568,28 +6124,47 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                       <Card
                         hoverable
                         style={{ borderRadius: 10, height: 110, borderLeft: "4px solid #fa8c16", cursor: "pointer" }}
-                        loading={loading}
+                        loading={loading || slfClientSummary.loading}
                         styles={{ body: { padding: "10px 14px" } }}
                         onClick={() => setSlfDashModal({ combo: "served" })}
                       >
+                        {/* DB-driven unique-client counts from the managed SLF Clients
+                            collection. On a fetch error, fall back to the facility-derived
+                            counts so the tile is never blank. */}
                         <Row gutter={16} align="middle">
                           <Col span={12}>
                             <Statistic
                               title="LGUs Served"
-                              value={slfOps.totalLGUsServed || 0}
+                              value={slfClientSummary.error ? (slfOps.totalLGUsServed || 0) : slfClientSummary.lgu}
                               prefix={<TeamOutlined style={{ color: "#fa8c16" }} />}
                             />
                           </Col>
                           <Col span={12}>
                             <Statistic
                               title="Private Sectors Served"
-                              value={slfPrivateCount}
+                              value={slfClientSummary.error ? slfPrivateCount : slfClientSummary.private}
                               prefix={<BankOutlined style={{ color: "#722ed1" }} />}
                             />
                           </Col>
                         </Row>
                         <Text type="secondary" style={{ fontSize: 11 }}>
-                          Combined — click for LGUs &amp; Private Sectors tabs
+                          {slfClientSummary.error ? (
+                            <Text type="warning" style={{ fontSize: 11 }}>Live count unavailable — showing facility estimate</Text>
+                          ) : slfClientSummary.total === 0 ? (
+                            <Text type="secondary" style={{ fontSize: 11 }}>No clients recorded yet — click to manage</Text>
+                          ) : (
+                            <>
+                              Unique clients:{" "}
+                              <Text style={{ fontSize: 11, color: "#1677ff", fontWeight: 600 }}>
+                                {slfClientSummary.lgu} LGU
+                              </Text>{" "}
+                              ·{" "}
+                              <Text style={{ fontSize: 11, color: "#722ed1", fontWeight: 600 }}>
+                                {slfClientSummary.private} Private
+                              </Text>{" "}
+                              — click for details
+                            </>
+                          )}
                         </Text>
                       </Card>
                     </Col>
@@ -7631,190 +6206,22 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                     </Col>
                   </Row>
 
-                  {/* Two-column layout: cards left, map right */}
-                  <Row gutter={[16, 16]}>
-                    {/* LEFT COLUMN — Stats cards */}
+                  {/* Second row: SLF Disposal Calendar (left) + SLF Location Map
+                      (right), side by side on desktop, stacked on smaller screens. */}
+                  <Row gutter={[16, 16]} align="stretch">
+                    {/* LEFT COLUMN — SLF Disposal Calendar. Height is pinned to the
+                        same SLF_MAP_H as the Location Map so both cards are exactly
+                        equal on desktop; on smaller screens the map stacks below and
+                        the calendar falls back to its natural height. */}
                     <Col xs={24} lg={14}>
-                      <Row gutter={[16, 16]}>
-                        {/* By Status */}
-                        <Col xs={24} sm={12}>
-                          <Card
-                            title={
-                              <>
-                                <CheckCircleOutlined /> By Status
-                              </>
-                            }
-                            style={{ borderRadius: 10, height: SLF_CARD_H }}
-                            loading={loading}
-                            styles={{
-                              body: { overflow: "auto", height: SLF_CARD_H},
-                            }}
-                          >
-                            <div
-                              style={{
-                                display: "flex",
-                                flexDirection: "column",
-                                gap: 12,
-                              }}
-                            >
-                              {Object.entries(slfByStatus).map(([status, count]) => (
-                                <div key={status}>
-                                  <div
-                                    style={{
-                                      display: "flex",
-                                      justifyContent: "space-between",
-                                      marginBottom: 4,
-                                    }}
-                                  >
-                                    <Text>{status}</Text>
-                                    <Text strong>
-                                      {count}{" "}
-                                      <span style={{ color: "#999", fontWeight: 400 }}>
-                                        (
-                                        {slfFacStats.totalRecords > 0
-                                          ? Math.round(
-                                              (count / slfFacStats.totalRecords) * 100,
-                                            )
-                                          : 0}
-                                        %)
-                                      </span>
-                                    </Text>
-                                  </div>
-                                  <Progress
-                                    percent={
-                                      slfFacStats.totalRecords > 0
-                                        ? Math.round(
-                                            (count / slfFacStats.totalRecords) * 100,
-                                          )
-                                        : 0
-                                    }
-                                    showInfo={false}
-                                    strokeColor={/non/i.test(status) ? "#ff4d4f" : "#52c41a"}
-                                    size="small"
-                                  />
-                                </div>
-                              ))}
-                            </div>
-                          </Card>
-                        </Col>
-
-                        {/* By Category */}
-                        <Col xs={24} sm={12}>
-                          <Card
-                            title={
-                              <>
-                                <BankOutlined /> By Category
-                              </>
-                            }
-                            style={{ borderRadius: 10, height: SLF_CARD_H }}
-                            loading={loading}
-                            styles={{
-                              body: { overflow: "auto", height: SLF_CARD_H},
-                            }}
-                          >
-                            <div
-                              style={{
-                                display: "flex",
-                                flexDirection: "column",
-                                gap: 12,
-                              }}
-                            >
-                              {Object.entries(slfByCategory).map(([cat, count]) => (
-                                <div key={cat}>
-                                  <div
-                                    style={{
-                                      display: "flex",
-                                      justifyContent: "space-between",
-                                      marginBottom: 4,
-                                    }}
-                                  >
-                                    <Text>{cat}{SLF_CATEGORY_DESC[cat] ? ` \u2014 ${SLF_CATEGORY_DESC[cat]}` : ""}</Text>
-                                    <Text strong>
-                                      {count}{" "}
-                                      <span style={{ color: "#999", fontWeight: 400 }}>
-                                        (
-                                        {slfFacStats.totalRecords > 0
-                                          ? Math.round(
-                                              (count / slfFacStats.totalRecords) * 100,
-                                            )
-                                          : 0}
-                                        %)
-                                      </span>
-                                    </Text>
-                                  </div>
-                                  <Progress
-                                    percent={
-                                      slfFacStats.totalRecords > 0
-                                        ? Math.round(
-                                            (count / slfFacStats.totalRecords) * 100,
-                                          )
-                                        : 0
-                                    }
-                                    showInfo={false}
-                                    strokeColor="#722ed1"
-                                    size="small"
-                                  />
-                                </div>
-                              ))}
-                            </div>
-                          </Card>
-                        </Col>
-
-                        {/* Consolidated Prevention Measures (Trash Slide + Fire).
-                            One card + one tabbed modal (combo: "prevention"). Values
-                            come from actual SLF Data Table records (trashSlideMeasures
-                            / firePrevMeasures per facility). */}
-                        <Col xs={24}>
-                          <Card
-                            title={<><SafetyCertificateOutlined /> Prevention Measures</>}
-                            hoverable
-                            onClick={() => setSlfDashModal({ combo: "prevention" })}
-                            style={{ borderRadius: 10, height: SLF_CARD_H, cursor: "pointer", borderTop: "3px solid #fa541c" }}
-                            loading={loading}
-                            styles={{ body: { overflow: "auto", height: SLF_CARD_H + 57, padding: "12px 16px" } }}
-                          >
-                            <Row gutter={[10, 10]}>
-                              <Col xs={24} sm={12}>
-                                <div style={{ padding: "8px 10px", background: isDark ? "rgba(250,140,22,0.12)" : "#fff7e6", borderRadius: 8, border: "1px solid #ffd591" }}>
-                                  <Text strong style={{ fontSize: 12, display: "block", marginBottom: 6 }}>
-                                    <WarningOutlined style={{ color: "#fa8c16", marginRight: 4 }} /> Trash Slide Prevention
-                                  </Text>
-                                  <Row gutter={8}>
-                                    <Col span={12}>
-                                      <Text type="secondary" style={{ fontSize: 10, display: "block" }}>Total Measures</Text>
-                                      <Text strong style={{ fontSize: 20, color: "#fa8c16" }}>{(slfOps.totalTrashSlideMeasures || 0).toLocaleString()}</Text>
-                                    </Col>
-                                    <Col span={12}>
-                                      <Text type="secondary" style={{ fontSize: 10, display: "block" }}>Facilities</Text>
-                                      <Text strong style={{ fontSize: 20, color: "#d46b08" }}>{(slfOps.trashSlideFacilities || 0).toLocaleString()}</Text>
-                                    </Col>
-                                  </Row>
-                                </div>
-                              </Col>
-                              <Col xs={24} sm={12}>
-                                <div style={{ padding: "8px 10px", background: isDark ? "rgba(255,77,79,0.12)" : "#fff1f0", borderRadius: 8, border: "1px solid #ffa39e" }}>
-                                  <Text strong style={{ fontSize: 12, display: "block", marginBottom: 6 }}>
-                                    <FireOutlined style={{ color: "#ff4d4f", marginRight: 4 }} /> Fire Prevention
-                                  </Text>
-                                  <Row gutter={8}>
-                                    <Col span={12}>
-                                      <Text type="secondary" style={{ fontSize: 10, display: "block" }}>Total Measures</Text>
-                                      <Text strong style={{ fontSize: 20, color: "#ff4d4f" }}>{(slfOps.totalFirePrevMeasures || 0).toLocaleString()}</Text>
-                                    </Col>
-                                    <Col span={12}>
-                                      <Text type="secondary" style={{ fontSize: 10, display: "block" }}>Facilities</Text>
-                                      <Text strong style={{ fontSize: 20, color: "#cf1322" }}>{(slfOps.firePreventionFacilities || 0).toLocaleString()}</Text>
-                                    </Col>
-                                  </Row>
-                                </div>
-                              </Col>
-                            </Row>
-                            <div style={{ marginTop: 10, textAlign: "center" }}>
-                              <Text type="secondary" style={{ fontSize: 11 }}>Click to view Trash Slide &amp; Fire Prevention details per SLF</Text>
-                            </div>
-                          </Card>
-                        </Col>
-                      </Row>
+                      <Suspense fallback={<div style={{ padding: 24, textAlign: "center" }}><Spin /></div>}>
+                        <DisposalActivityCalendar
+                          isDark={isDark}
+                          height={screens?.lg ? SLF_MAP_H : undefined}
+                          onOpenSubmissions={onOpenSubmissions}
+                          canOpenSubmissions={canOpenSubmissions}
+                        />
+                      </Suspense>
                     </Col>
 
                     {/* RIGHT COLUMN — SLF Map (sticky) */}
@@ -7823,7 +6230,7 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                         style={{
                           position: "sticky",
                           top: 80,
-                          height: SLF_CARD_H
+                          height: SLF_MAP_H,
                         }}
                       >
                         <Card
@@ -7841,10 +6248,29 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                               )}
                             </>
                           }
-                          style={{ borderRadius: 10, height: 200 * 3 + 32, overflow: "hidden" }}
+                          style={{
+                            borderRadius: 10,
+                            height: "100%",
+                            overflow: "hidden",
+                            display: "flex",
+                            flexDirection: "column",
+                          }}
                           loading={loading}
                           extra={
                             <Space size={4}>
+                              {slfToday.generatedAt && (
+                                <Text type="secondary" style={{ fontSize: 10 }}>
+                                  {slfToday.error ? "status unavailable" : `updated ${new Date(slfToday.generatedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`}
+                                </Text>
+                              )}
+                              <Tooltip title="Refresh today's submission status">
+                                <Button
+                                  size="small"
+                                  icon={<ReloadOutlined />}
+                                  loading={slfToday.loading}
+                                  onClick={() => fetchTodayStatus(slfDateStr)}
+                                />
+                              </Tooltip>
                               <Tooltip title="Street">
                                 <Button
                                   size="small"
@@ -7880,7 +6306,13 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                             </Space>
                           }
                           styles={{
-                            body: { padding: 0, height: "calc(100% - 100px)" },
+                            body: {
+                              padding: 0,
+                              flex: 1,
+                              minHeight: 0,
+                              display: "flex",
+                              flexDirection: "column",
+                            },
                           }}
                         >
                           {/* Filter bar */}
@@ -7892,6 +6324,7 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                               background: isDark ? "#1f1f1f" : "#fafafa",
                               borderBottom: isDark ? "1px solid #303030" : "1px solid #f0f0f0",
                               flexWrap: "wrap",
+                              flex: "0 0 auto",
                             }}
                           >
                             <Select
@@ -7910,15 +6343,25 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                               value={slfFilterStatus}
                               onChange={setSlfFilterStatus}
                               options={[
-                                { label: "✓ Operational", value: "Operational" },
-                                {
-                                  label: "✕ Non-Operational",
-                                  value: "Non-Operational",
-                                },
+                                { label: "✓ Acknowledged Submission", value: "acknowledged" },
+                                { label: "◷ Pending Submission", value: "pending" },
+                                { label: "↻ Pending Resubmission", value: "pending-resubmission" },
+                                { label: "○ No Submission Today", value: "no-submission" },
                               ]}
+                              style={{ minWidth: 160, flex: 1 }}
+                            />
+                            {/* Submission-status date (official tz today by default; no future dates). */}
+                            <DatePicker
+                              size="small"
+                              allowClear={false}
+                              value={slfMapDate}
+                              onChange={(d) => setSlfMapDate(d || dayjs())}
+                              disabledDate={(d) => d && d.isAfter(dayjs(), "day")}
+                              format="MMM D, YYYY"
                               style={{ minWidth: 130, flex: 1 }}
                             />
-                            {(slfFilterProvince || slfFilterStatus) && (
+                            {slfToday.loading && <Spin size="small" />}
+                            {(slfFilterProvince || slfFilterStatus || !slfMapDate.isSame(dayjs(), "day")) && (
                               <Button
                                 size="small"
                                 type="link"
@@ -7926,72 +6369,60 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                                 onClick={() => {
                                   setSlfFilterProvince(null);
                                   setSlfFilterStatus(null);
+                                  setSlfMapDate(dayjs());
                                 }}
                               >
                                 Clear
                               </Button>
                             )}
-                            {/* Legend */}
+                            {/* Legend — priority order; wraps cleanly so chips never
+                                overlap the filters/map controls on narrow screens. */}
                             <div
                               style={{
                                 display: "flex",
-                                gap: 8,
+                                flexWrap: "wrap",
+                                gap: "6px 12px",
                                 alignItems: "center",
                                 marginLeft: "auto",
                                 fontSize: 11,
+                                lineHeight: 1.4,
                                 color: "#999",
+                                maxWidth: "100%",
                               }}
                             >
-                              <span>
-                                <span
-                                  style={{
-                                    display: "inline-block",
-                                    width: 10,
-                                    height: 10,
-                                    borderRadius: "50%",
-                                    background: "#52c41a",
-                                    marginRight: 3,
-                                    verticalAlign: "middle",
-                                  }}
-                                />
-                                Operational
-                              </span>
-                              <span>
-                                <span
-                                  style={{
-                                    display: "inline-block",
-                                    width: 10,
-                                    height: 10,
-                                    borderRadius: "50%",
-                                    background: "#ff4d4f",
-                                    marginRight: 3,
-                                    verticalAlign: "middle",
-                                  }}
-                                />
-                                Non-Op
-                              </span>
-                              <span>
-                                <span
-                                  style={{
-                                    display: "inline-block",
-                                    width: 10,
-                                    height: 10,
-                                    borderRadius: "50%",
-                                    background: "#8c8c8c",
-                                    marginRight: 3,
-                                    verticalAlign: "middle",
-                                  }}
-                                />
-                                Not Yet Monitored
-                              </span>
+                              {[
+                                { title: "Assigned SLF is non-operational — cell subject to EMB R3 verification (highest priority)", color: "#ff4d4f", glyph: "✕", label: "Non-operational" },
+                                { title: "Pending resubmission — previously reverted, resubmitted and awaiting review (pulsing orange)", color: MAP_MARKER["pending-resubmission"].color, glyph: "↻", label: "Pending Resubmission", ring: "rgba(250,140,22,0.35)" },
+                                { title: "Pending initial submission for the selected date (pulsing yellow)", color: MAP_MARKER.pending.color, glyph: "◷", label: "Pending Submission", ring: "rgba(250,173,20,0.35)" },
+                                { title: "Acknowledged submission — operational and up to date for the period", color: MAP_MARKER.acknowledged.color, glyph: "✓", label: "Acknowledged" },
+                                { title: "No submission for the required reporting period (missing / not yet monitored)", color: "#8c8c8c", glyph: "○", label: "No submission" },
+                              ].map((it) => (
+                                <span key={it.label} title={it.title} style={{ display: "inline-flex", alignItems: "center", gap: 4, whiteSpace: "nowrap" }}>
+                                  <span style={{ flex: "0 0 auto", width: 10, height: 10, borderRadius: "50%", background: it.color, boxShadow: it.ring ? `0 0 0 3px ${it.ring}` : "none" }} />
+                                  {it.label}
+                                </span>
+                              ))}
                             </div>
                           </div>
+                          {/* CSS-only pulse for submitted-today markers; respects reduced-motion. */}
+                          <style>{`
+                            .slf-today { position: relative; width: 22px; height: 22px; }
+                            .slf-today-dot { width: 20px; height: 20px; border-radius: 50%; border: 2px solid #fff; box-shadow: 0 1px 4px rgba(0,0,0,.35); display: flex; align-items: center; justify-content: center; color: #fff; font-size: 11px; font-weight: bold; position: absolute; top: 1px; left: 1px; z-index: 1; }
+                            .slf-today-ring { position: absolute; top: 1px; left: 1px; width: 20px; height: 20px; border-radius: 50%; background: rgba(22,119,255,0.55); z-index: 0; animation: slfPulse 1.8s ease-out infinite; }
+                            .slf-today-badge { position: absolute; top: -4px; right: -4px; width: 12px; height: 12px; border-radius: 50%; background: #1677ff; color: #fff; font-size: 9px; line-height: 12px; text-align: center; border: 1.5px solid #fff; z-index: 2; }
+                            .slf-wait-dot { width: 20px; height: 20px; border-radius: 50%; border: 2px solid #fff; box-shadow: 0 1px 4px rgba(0,0,0,.35); display: flex; align-items: center; justify-content: center; background: #faad14; position: absolute; top: 1px; left: 1px; z-index: 1; }
+                            .slf-wait-ring { position: absolute; top: 1px; left: 1px; width: 20px; height: 20px; border-radius: 50%; background: rgba(250,173,20,0.5); z-index: 0; animation: slfPulse 2.1s ease-out infinite; }
+                            .slf-resub-ring { position: absolute; top: 1px; left: 1px; width: 20px; height: 20px; border-radius: 50%; background: rgba(250,140,22,0.5); z-index: 0; animation: slfPulse 2.0s ease-out infinite; }
+                            @keyframes slfPulse { 0% { transform: scale(1); opacity: 0.7; } 70% { transform: scale(2.3); opacity: 0; } 100% { transform: scale(2.3); opacity: 0; } }
+                            @media (prefers-reduced-motion: reduce) { .slf-today-ring, .slf-wait-ring, .slf-resub-ring { animation: none; box-shadow: 0 0 0 3px rgba(22,119,255,0.35); } .slf-wait-ring { box-shadow: 0 0 0 3px rgba(250,173,20,0.35); } .slf-resub-ring { box-shadow: 0 0 0 3px rgba(250,140,22,0.35); } }
+                          `}</style>
                           {filteredSlfMapPts.length > 0 ? (
                             <MapContainer
                               center={[15.0, 120.7]}
                               zoom={8}
                               style={{
-                                height: "100%",
+                                flex: 1,
+                                minHeight: 0,
                                 width: "100%",
                                 borderRadius: "0 0 10px 10px",
                               }}
@@ -8012,234 +6443,162 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                                 <Marker
                                   key={pt.record._id || idx}
                                   position={[pt.lat, pt.lng]}
-                                  icon={slfStatusIcon(pt.record.statusOfSLF)}
+                                  icon={slfTodayIcon(pt.record)}
                                 >
-                                  <Popup maxWidth={300} minWidth={240}>
-                                    <div
-                                      className="popup-light"
-                                      style={{
-                                        fontSize: 12,
-                                        lineHeight: 1.7,
-                                        padding: 2,
-                                      }}
-                                    >
-                                      <div
-                                        style={{
-                                          fontWeight: 700,
-                                          fontSize: 14,
-                                          marginBottom: 2,
-                                        }}
-                                      >
-                                        {pt.record.lgu}
-                                      </div>
-                                      <div
-                                        style={{
-                                          display: "flex",
-                                          gap: 4,
-                                          flexWrap: "wrap",
-                                          marginBottom: 6,
-                                        }}
-                                      >
-                                        <span
-                                          style={{
-                                            display: "inline-flex",
-                                            alignItems: "center",
-                                            gap: 3,
-                                            background: isDark ? "rgba(22,119,255,0.15)" : "#e6f7ff",
-                                            color: "#1890ff",
-                                            borderRadius: 4,
-                                            padding: "1px 6px",
-                                            fontSize: 11,
-                                          }}
+                                  <Popup maxWidth={300} minWidth={250}>
+                                    {(() => {
+                                      const rec = pt.record;
+                                      const photo = firstSlfPhoto(rec);
+                                      const s = rec.statusOfSLF;
+                                      const isOp = /operational/i.test(s) && !/non/i.test(s);
+                                      const isNon = /non/i.test(s);
+                                      const muted = isDark ? "#8c8c8c" : "#8c8c8c";
+                                      const label = isDark ? "#bfbfbf" : "#595959";
+                                      const InfoRow = ({ icon, text, value }) => (
+                                        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, marginTop: 4 }}>
+                                          <span style={{ display: "inline-flex", alignItems: "center", gap: 5, color: label, minWidth: 0 }}>
+                                            {icon}
+                                            <span style={{ whiteSpace: "nowrap" }}>{text}</span>
+                                          </span>
+                                          <strong style={{ textAlign: "right", overflow: "hidden", textOverflow: "ellipsis" }}>{value}</strong>
+                                        </div>
+                                      );
+                                      return (
+                                        <div
+                                          className="popup-light"
+                                          style={{ fontSize: 12, lineHeight: 1.55, padding: 0, maxWidth: 280 }}
                                         >
-                                          <EnvironmentOutlined /> {pt.record.province}
-                                        </span>
-                                        {pt.record.barangay && (
-                                          <span
+                                          {/* Today's submission status (icon shape + label + tooltip text — not colour alone) */}
+                                          {(() => {
+                                            const today = slfToday.byId[String(rec._id)];
+                                            const key = today?.submissionStatus === "acknowledged" || today?.submissionStatus === "pending"
+                                              ? today.submissionStatus : "no-submission";
+                                            const meta = mapPresentationFor(key);
+                                            const color = meta.color;
+                                            const count = today?.submissionCount;
+                                            const vol = today?.totalVolume;
+                                            const t = today?.latestSubmissionAt ? new Date(today.latestSubmissionAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : null;
+                                            return (
+                                              <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap", margin: "0 0 6px" }}>
+                                                <span aria-hidden style={{ width: 8, height: 8, borderRadius: "50%", background: color, display: "inline-block" }} />
+                                                <strong style={{ color }}>{meta.glyph} {meta.label}</strong>
+                                                {today && <span style={{ color: muted, fontSize: 11 }}>· {count} record{count === 1 ? "" : "s"}{vol ? ` · ${vol} m³` : ""}{t ? ` · ${t}` : ""}</span>}
+                                              </div>
+                                            );
+                                          })()}
+                                          {/* Photo banner (first valid gallery photo) or placeholder (#5) */}
+                                          <div
                                             style={{
-                                              display: "inline-flex",
+                                              position: "relative",
+                                              height: 118,
+                                              margin: "-2px -2px 8px",
+                                              borderRadius: "8px 8px 0 0",
+                                              overflow: "hidden",
+                                              background: isDark
+                                                ? "linear-gradient(135deg,#1f2933,#111a22)"
+                                                : "linear-gradient(135deg,#e6f4ff,#f0f5ff)",
+                                              display: "flex",
                                               alignItems: "center",
-                                              gap: 3,
-                                              background: isDark ? "#303030" : "#f0f0f0",
-                                              color: "#595959",
-                                              borderRadius: 4,
-                                              padding: "1px 6px",
-                                              fontSize: 11,
+                                              justifyContent: "center",
                                             }}
                                           >
-                                            {pt.record.barangay}
-                                          </span>
-                                        )}
-                                        {pt.record.manilaBayArea && (
-                                          <span
-                                            style={{
-                                              display: "inline-flex",
-                                              alignItems: "center",
-                                              gap: 3,
-                                              background:
-                                                pt.record.manilaBayArea === "MBA"
-                                                  ? (isDark ? "rgba(22,119,255,0.15)" : "#e6f7ff")
-                                          : (isDark ? "#303030" : "#f5f5f5"),
-                                              color:
-                                                pt.record.manilaBayArea === "MBA"
-                                                  ? "#1890ff"
-                                                  : "#8c8c8c",
-                                              borderRadius: 4,
-                                              padding: "1px 6px",
-                                              fontSize: 11,
-                                            }}
-                                          >
-                                            <GlobalOutlined /> {pt.record.manilaBayArea}
-                                          </span>
-                                        )}
-                                      </div>
-                                      <hr
-                                        style={{
-                                          margin: "4px 0 6px",
-                                          border: "none",
-                                          borderTop: isDark ? "1px solid #303030" : "1px solid #f0f0f0",
-                                        }}
-                                      />
-                                      <div
-                                        style={{
-                                          display: "flex",
-                                          gap: 4,
-                                          flexWrap: "wrap",
-                                          marginBottom: 6,
-                                        }}
-                                      >
-                                        {(() => {
-                                          const s = pt.record.statusOfSLF;
-                                          const isOp =
-                                            /operational/i.test(s) && !/non/i.test(s);
-                                          const isNon = /non/i.test(s);
-                                          return (
+                                            {photo ? (
+                                              <img
+                                                src={photo}
+                                                alt={rec.lgu}
+                                                loading="lazy"
+                                                referrerPolicy="no-referrer"
+                                                style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
+                                                onError={(e) => {
+                                                  e.currentTarget.style.display = "none";
+                                                  e.currentTarget.parentNode.querySelector("[data-ph]").style.display = "flex";
+                                                }}
+                                              />
+                                            ) : null}
+                                            <div
+                                              data-ph
+                                              style={{
+                                                display: photo ? "none" : "flex",
+                                                position: "absolute",
+                                                inset: 0,
+                                                flexDirection: "column",
+                                                alignItems: "center",
+                                                justifyContent: "center",
+                                                gap: 4,
+                                                color: "#8ab4d8",
+                                              }}
+                                            >
+                                              <BankOutlined style={{ fontSize: 26 }} />
+                                              <span style={{ fontSize: 11, color: muted }}>No photo available</span>
+                                            </div>
+                                            {/* Status ribbon over the photo */}
                                             <span
                                               className={`status-badge ${isOp ? "status-badge-compliant" : isNon ? "status-badge-noncompliant" : "status-badge-pending"}`}
+                                              style={{ position: "absolute", top: 8, left: 8, fontSize: 11 }}
                                             >
                                               <SafetyCertificateOutlined />{" "}
-                                              {isOp
-                                                ? "Operational"
-                                                : isNon
-                                                  ? "Non-Operational"
-                                                  : "Not Yet Monitored"}
+                                              {isOp ? "Operational" : isNon ? "Non-Operational" : "Not Yet Monitored"}
                                             </span>
-                                          );
-                                        })()}
-                                        {pt.record.category && (
-                                          <span
-                                            style={{
-                                              display: "inline-flex",
-                                              alignItems: "center",
-                                              gap: 3,
-                                              background: isDark ? "rgba(114,46,209,0.15)" : "#f9f0ff",
-                                              color: "#722ed1",
-                                              borderRadius: 4,
-                                              padding: "1px 6px",
-                                              fontSize: 11,
-                                            }}
-                                          >
-                                            {pt.record.category}
-                                          </span>
-                                        )}
-                                      </div>
-                                      <div
-                                        style={{
-                                          background: isDark ? "#1f1f1f" : "#fafafa",
-                                          borderRadius: 6,
-                                          padding: "6px 8px",
-                                          marginBottom: 6,
-                                        }}
-                                      >
-                                        {pt.record.volumeCapacity != null && (
-                                          <div
-                                            style={{
-                                              display: "flex",
-                                              justifyContent: "space-between",
-                                              marginBottom: 3,
-                                            }}
-                                          >
-                                            <span style={{ color: "#595959" }}>
-                                              <BarChartOutlined
-                                                style={{ color: "#722ed1" }}
-                                              />{" "}
-                                              Capacity
-                                            </span>
-                                            <strong>
-                                              {Number(pt.record.volumeCapacity).toLocaleString()}
-                                            </strong>
                                           </div>
-                                        )}
-                                        {pt.record.noOfLGUServed != null && (
-                                          <div
-                                            style={{
-                                              display: "flex",
-                                              justifyContent: "space-between",
-                                              marginBottom: 3,
-                                            }}
-                                          >
-                                            <span style={{ color: "#595959" }}>
-                                              <TeamOutlined
-                                                style={{ color: "#fa8c16" }}
-                                              />{" "}
-                                              LGUs Served
-                                            </span>
-                                            <strong>
-                                              {pt.record.noOfLGUServed}
-                                            </strong>
+
+                                          <div style={{ padding: "0 4px 4px" }}>
+                                            <div style={{ fontWeight: 700, fontSize: 15, lineHeight: 1.25, marginBottom: 4 }}>
+                                              {rec.lgu}
+                                            </div>
+                                            {/* Location + tags */}
+                                            <div style={{ display: "flex", gap: 4, flexWrap: "wrap", marginBottom: 8 }}>
+                                              <span style={{ display: "inline-flex", alignItems: "center", gap: 3, background: isDark ? "rgba(22,119,255,0.15)" : "#e6f7ff", color: "#1890ff", borderRadius: 4, padding: "1px 6px", fontSize: 11 }}>
+                                                <EnvironmentOutlined /> {rec.province}
+                                              </span>
+                                              {rec.barangay && (
+                                                <span style={{ display: "inline-flex", alignItems: "center", gap: 3, background: isDark ? "#303030" : "#f0f0f0", color: "#595959", borderRadius: 4, padding: "1px 6px", fontSize: 11 }}>
+                                                  {rec.barangay}
+                                                </span>
+                                              )}
+                                              {rec.category && (
+                                                <span style={{ display: "inline-flex", alignItems: "center", gap: 3, background: isDark ? "rgba(114,46,209,0.15)" : "#f9f0ff", color: "#722ed1", borderRadius: 4, padding: "1px 6px", fontSize: 11 }}>
+                                                  {rec.category}
+                                                </span>
+                                              )}
+                                              {rec.manilaBayArea === "MBA" && (
+                                                <span style={{ display: "inline-flex", alignItems: "center", gap: 3, background: isDark ? "rgba(22,119,255,0.15)" : "#e6f7ff", color: "#1890ff", borderRadius: 4, padding: "1px 6px", fontSize: 11 }}>
+                                                  <GlobalOutlined /> MBA
+                                                </span>
+                                              )}
+                                            </div>
+                                            {/* Key metadata */}
+                                            <div style={{ background: isDark ? "#1f1f1f" : "#fafafa", borderRadius: 6, padding: "6px 8px" }}>
+                                              {rec.volumeCapacity != null && (
+                                                <InfoRow icon={<BarChartOutlined style={{ color: "#722ed1" }} />} text="Capacity" value={`${Number(rec.volumeCapacity).toLocaleString()} m³`} />
+                                              )}
+                                              {rec.noOfLGUServed != null && (
+                                                <InfoRow icon={<TeamOutlined style={{ color: "#fa8c16" }} />} text="LGUs Served" value={rec.noOfLGUServed} />
+                                              )}
+                                              {rec.yearStartedOperation && (
+                                                <InfoRow icon={<CalendarOutlined style={{ color: "#13c2c2" }} />} text="Year Started" value={rec.yearStartedOperation} />
+                                              )}
+                                              {rec.ownership && (
+                                                <InfoRow icon={<BankOutlined style={{ color: "#2f54eb" }} />} text="Ownership" value={rec.ownership} />
+                                              )}
+                                            </div>
+                                            {(rec.focalPerson || rec.enmo) && (
+                                              <div style={{ marginTop: 6 }}>
+                                                {rec.focalPerson && (
+                                                  <div style={{ display: "flex", alignItems: "center", gap: 5, color: label }}>
+                                                    <UserOutlined style={{ color: "#13c2c2" }} /> Focal: <strong>{rec.focalPerson}</strong>
+                                                  </div>
+                                                )}
+                                                {rec.enmo && (
+                                                  <div style={{ display: "flex", alignItems: "center", gap: 5, color: label }}>
+                                                    <TeamOutlined style={{ color: "#52c41a" }} /> ENMO: <strong>{rec.enmo}</strong>
+                                                  </div>
+                                                )}
+                                              </div>
+                                            )}
                                           </div>
-                                        )}
-                                        {pt.record.yearStartedOperation && (
-                                          <div
-                                            style={{
-                                              display: "flex",
-                                              justifyContent: "space-between",
-                                            }}
-                                          >
-                                            <span style={{ color: "#595959" }}>
-                                              <CalendarOutlined
-                                                style={{ color: "#13c2c2" }}
-                                              />{" "}
-                                              Year Started
-                                            </span>
-                                            <strong>
-                                              {pt.record.yearStartedOperation}
-                                            </strong>
-                                          </div>
-                                        )}
-                                      </div>
-                                      {pt.record.focalPerson && (
-                                        <div
-                                          style={{
-                                            display: "flex",
-                                            alignItems: "center",
-                                            gap: 5,
-                                            marginBottom: 2,
-                                          }}
-                                        >
-                                          <UserOutlined style={{ color: "#13c2c2" }} />{" "}
-                                          <span style={{ color: "#595959" }}>
-                                            Focal:
-                                          </span>{" "}
-                                          <strong>{pt.record.focalPerson}</strong>
                                         </div>
-                                      )}
-                                      {pt.record.enmo && (
-                                        <div
-                                          style={{
-                                            display: "flex",
-                                            alignItems: "center",
-                                            gap: 5,
-                                          }}
-                                        >
-                                          <TeamOutlined style={{ color: "#52c41a" }} />{" "}
-                                          <span style={{ color: "#595959" }}>
-                                            ENMO:
-                                          </span>{" "}
-                                          {pt.record.enmo}
-                                        </div>
-                                      )}
-                                    </div>
+                                      );
+                                    })()}
                                   </Popup>
                                 </Marker>
                               ))}
@@ -8247,7 +6606,8 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                           ) : (
                             <div
                               style={{
-                                height: "100%",
+                                flex: 1,
+                                minHeight: 0,
                                 display: "flex",
                                 alignItems: "center",
                                 justifyContent: "center",
@@ -8261,19 +6621,89 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                     </Col>
                   </Row>
 
-                  {/* ── Daily Disposal Activity Calendar — full-width, flush below the map/cards cluster ── */}
-                  <div style={{ marginTop: 16, marginBottom: 0 }}>
+                  {/* ── Analytics row (replaces By Status / By Category):
+                        Waste Submission Trends · Most Active Portal Users ·
+                        Waste Volume by SLF. Self-contained data + charts. ── */}
+                  <div style={{ marginTop: 16 }}>
                     <Suspense fallback={<div style={{ padding: 24, textAlign: "center" }}><Spin /></div>}>
-                      <DisposalActivityCalendar isDark={isDark} />
+                      <SlfAnalyticsRow isDark={isDark} period="daily" />
                     </Suspense>
                   </div>
+
+                  {/* ── Preventive Measures — directly below the analytics row ── */}
+                  <Row gutter={[16, 16]} style={{ marginBottom: 16 }}>
+                    <Col xs={24}>
+                      <Card
+                        title={<><SafetyCertificateOutlined /> Prevention Measures</>}
+                        hoverable
+                        onClick={() => setSlfDashModal({ combo: "prevention" })}
+                        style={{ borderRadius: 10, cursor: "pointer", borderTop: "3px solid #fa541c" }}
+                        loading={loading}
+                        styles={{ body: { padding: "12px 16px" } }}
+                      >
+                        <Row gutter={[10, 10]}>
+                          <Col xs={24} sm={12}>
+                            <div style={{ padding: "8px 10px", background: isDark ? "rgba(250,140,22,0.12)" : "#fff7e6", borderRadius: 8, border: "1px solid #ffd591" }}>
+                              <Text strong style={{ fontSize: 12, display: "block", marginBottom: 6 }}>
+                                <WarningOutlined style={{ color: "#fa8c16", marginRight: 4 }} /> Trash Slide Prevention
+                              </Text>
+                              <Row gutter={8}>
+                                <Col span={12}>
+                                  <Text type="secondary" style={{ fontSize: 10, display: "block" }}>Total Measures</Text>
+                                  <Text strong style={{ fontSize: 20, color: "#fa8c16" }}>{(slfOps.totalTrashSlideMeasures || 0).toLocaleString()}</Text>
+                                </Col>
+                                <Col span={12}>
+                                  <Text type="secondary" style={{ fontSize: 10, display: "block" }}>Facilities</Text>
+                                  <Text strong style={{ fontSize: 20, color: "#d46b08" }}>{(slfOps.trashSlideFacilities || 0).toLocaleString()}</Text>
+                                </Col>
+                              </Row>
+                            </div>
+                          </Col>
+                          <Col xs={24} sm={12}>
+                            <div style={{ padding: "8px 10px", background: isDark ? "rgba(255,77,79,0.12)" : "#fff1f0", borderRadius: 8, border: "1px solid #ffa39e" }}>
+                              <Text strong style={{ fontSize: 12, display: "block", marginBottom: 6 }}>
+                                <FireOutlined style={{ color: "#ff4d4f", marginRight: 4 }} /> Fire Prevention
+                              </Text>
+                              <Row gutter={8}>
+                                <Col span={12}>
+                                  <Text type="secondary" style={{ fontSize: 10, display: "block" }}>Total Measures</Text>
+                                  <Text strong style={{ fontSize: 20, color: "#ff4d4f" }}>{(slfOps.totalFirePrevMeasures || 0).toLocaleString()}</Text>
+                                </Col>
+                                <Col span={12}>
+                                  <Text type="secondary" style={{ fontSize: 10, display: "block" }}>Facilities</Text>
+                                  <Text strong style={{ fontSize: 20, color: "#cf1322" }}>{(slfOps.firePreventionFacilities || 0).toLocaleString()}</Text>
+                                </Col>
+                              </Row>
+                            </div>
+                          </Col>
+                        </Row>
+                        <div style={{ marginTop: 10, textAlign: "center" }}>
+                          <Text type="secondary" style={{ fontSize: 11 }}>Click to view Trash Slide &amp; Fire Prevention details per SLF</Text>
+                        </div>
+                      </Card>
+                    </Col>
+                  </Row>
 
                   {/* ── SLF Dashboard Drill-Down Modals ── */}
                   {slfDashModal && (() => {
                     const mgmtData = (slfFacStats.managementData || []);
                     const PAG = { pageSize: 15, showSizeChanger: true, pageSizeOptions: ["10", "15", "25", "50"], showTotal: (t) => `${t} total entries` };
-                    const slfCol = { title: "LGU / SLF", dataIndex: "slfName", width: 180, fixed: "left", render: (v) => <Text strong style={{ fontSize: 12 }}>{v}</Text> };
-                    const provCol = { title: "Province", dataIndex: "province", width: 160, render: (v) => <Text type="secondary" style={{ fontSize: 12 }}>{v || "—"}</Text> };
+                    // Long LGU/SLF and province names are clipped with an ellipsis and
+                    // revealed in full on hover, so a fixed-width column never wraps to a
+                    // taller row or pushes the table past the modal edge.
+                    // #3: no `fixed: "left"` — a sticky first column forces a
+                    // horizontal scroll container even when the table fits, leaving it
+                    // detached from the modal width. Long names ellipsis with a tooltip
+                    // instead. Horizontal scroll is enabled per-table only when the
+                    // summed column widths genuinely overflow (see recordsScroll below).
+                    const slfCol = { title: "LGU / SLF", dataIndex: "slfName", width: 200, ellipsis: { showTitle: false }, render: (v) => <Tooltip title={v}><Text strong style={{ fontSize: 12 }}>{v}</Text></Tooltip> };
+                    // A table fits the modal (~1120px body) when its columns sum under
+                    // this budget; otherwise it scrolls horizontally to max-content.
+                    const recordsScrollX = (cols) => {
+                      const sum = (cols || []).reduce((s, c) => s + (Number(c.width) || 160), 0);
+                      return sum > 1080 ? "max-content" : undefined;
+                    };
+                    const provCol = { title: "Province", dataIndex: "province", width: 150, ellipsis: { showTitle: false }, render: (v) => <Tooltip title={v || "—"}><Text type="secondary" style={{ fontSize: 12 }}>{v || "—"}</Text></Tooltip> };
                     const metricColor = {
                       total: "#2f54eb",
                       cells: "#13c2c2",
@@ -8352,8 +6782,8 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                         flatten: (r) => (r.trashSlideMeasures || []).map((m, i) => ({ key: `${r.lgu}_${i}`, slfName: r.lgu, province: r.province, measure: m.measure, description: m.description, status: m.status, attachments: m.attachments || [] })),
                         columns: [
                           slfCol, provCol,
-                          { title: "Measure", dataIndex: "measure", width: 200, render: (v) => v || "—" },
-                          { title: "Description", dataIndex: "description", ellipsis: true, render: (v) => v || <Text type="secondary">—</Text> },
+                          { title: "Measure", dataIndex: "measure", width: 200, ellipsis: { showTitle: false }, render: (v) => <Tooltip title={v}>{v || "—"}</Tooltip> },
+                          { title: "Description", dataIndex: "description", width: 320, ellipsis: { showTitle: false }, render: (v) => v ? <Tooltip title={v}>{v}</Tooltip> : <Text type="secondary">—</Text> },
                           { title: "Status", dataIndex: "status", width: 150, render: (v) => v ? <Tag color={v === "Implemented" ? "green" : v === "Pending" ? "orange" : "default"}>{v}</Tag> : "—" },
                           { title: "Attachments", dataIndex: "attachments", width: 110, align: "center", render: (v) => (v || []).length ? <Tag color="orange">{v.length} file(s)</Tag> : <Text type="secondary" style={{ fontSize: 11 }}>—</Text> },
                         ],
@@ -8365,8 +6795,8 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                         flatten: (r) => (r.firePrevMeasures || []).map((m, i) => ({ key: `${r.lgu}_${i}`, slfName: r.lgu, province: r.province, measure: m.measure, description: m.description, status: m.status, attachments: m.attachments || [] })),
                         columns: [
                           slfCol, provCol,
-                          { title: "Measure", dataIndex: "measure", width: 200, render: (v) => v || "—" },
-                          { title: "Description", dataIndex: "description", ellipsis: true, render: (v) => v || <Text type="secondary">—</Text> },
+                          { title: "Measure", dataIndex: "measure", width: 200, ellipsis: { showTitle: false }, render: (v) => <Tooltip title={v}>{v || "—"}</Tooltip> },
+                          { title: "Description", dataIndex: "description", width: 320, ellipsis: { showTitle: false }, render: (v) => v ? <Tooltip title={v}>{v}</Tooltip> : <Text type="secondary">—</Text> },
                           { title: "Status", dataIndex: "status", width: 150, render: (v) => v ? <Tag color={v === "Implemented" ? "green" : v === "Pending" ? "orange" : "default"}>{v}</Tag> : "—" },
                           { title: "Attachments", dataIndex: "attachments", width: 110, align: "center", render: (v) => (v || []).length ? <Tag color="red">{v.length} file(s)</Tag> : <Text type="secondary" style={{ fontSize: 11 }}>—</Text> },
                         ],
@@ -8481,6 +6911,10 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                           tabs: [
                             { key: "lgu", label: <span><TeamOutlined /> LGUs Served</span> },
                             { key: "private", label: <span><BankOutlined /> Private Sectors Served</span> },
+                            // Distinct clients from Portal Baseline → Haulers → Clients,
+                            // grouped with their portal user(s). Custom-rendered (not a
+                            // filter/flatten config) — see the `custom` branch below.
+                            { key: "clients", label: <span><TeamOutlined /> Clients (Haulers)</span>, custom: "clients" },
                           ],
                         },
                         prevention: {
@@ -8505,13 +6939,42 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                               </Button>
                             </div>
                           }
-                          width={1050}
+                          width={1300}
+                          style={{ top: 24, maxWidth: "96vw" }}
                           destroyOnHidden
-                          styles={{ body: { maxHeight: "72vh", overflowY: "auto" } }}
+                          styles={{ body: { maxHeight: "calc(100vh - 200px)", overflowY: "auto", overflowX: "hidden" } }}
                         >
                           <Tabs
                             defaultActiveKey={comboMeta.tabs[0].key}
                             items={comboMeta.tabs.map((t) => {
+                              // Custom-rendered tabs (e.g. Clients from Haulers) do not
+                              // use the filter/flatten/columns config.
+                              if (t.custom === "clients") {
+                                return {
+                                  key: t.key,
+                                  label: t.label,
+                                  children: (
+                                    <Suspense fallback={<div style={{ padding: 24, textAlign: "center" }}><Spin /></div>}>
+                                      <HaulerClientsPanel />
+                                    </Suspense>
+                                  ),
+                                };
+                              }
+                              // Item #2: LGUs Served / Private Sectors — master-list-based
+                              // relationship map (deduped by client id, multi-hauler/SLF
+                              // detection, unserved LGUs), replacing the old submission-derived
+                              // filter/flatten view.
+                              if (t.key === "lgu" || t.key === "private") {
+                                return {
+                                  key: t.key,
+                                  label: t.label,
+                                  children: (
+                                    <Suspense fallback={<div style={{ padding: 24, textAlign: "center" }}><Spin /></div>}>
+                                      <ClientRelationshipView type={t.key === "lgu" ? "LGU" : "Private Sector"} />
+                                    </Suspense>
+                                  ),
+                                };
+                              }
                               const c = modalConfig[t.key];
                               const rows = mgmtData.filter(c.filter);
                               const data = rows.flatMap(c.flatten);
@@ -8539,7 +7002,7 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                                       </Col>
                                     </Row>
                                     {data.length ? (
-                                      <Table dataSource={data} columns={c.columns} size="small" pagination={PAG} scroll={{ x: "max-content" }} bordered />
+                                      <Table dataSource={data} columns={c.columns} size="small" tableLayout="fixed" pagination={PAG} scroll={{ x: recordsScrollX(c.columns), y: 420 }} bordered />
                                     ) : (
                                       <Empty description="No records available for this category." />
                                     )}
@@ -8674,11 +7137,19 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                           <div style={{ display: "flex", justifyContent: "space-between" }}>
                             <Button onClick={() => { setSlfDashModal(null); setSlfCellDrill(null); }}>Close</Button>
                             <Button type="primary" icon={<TableOutlined />} onClick={() => { setSlfDashModal(null); setSlfCellDrill(null); setActiveMenu("slf-monitoring"); }}>
-                              View in SLF Monitoring
+                              View in SLF Data Table
                             </Button>
                           </div>
                         }
-                        width={1050}
+                        width={1160}
+                        style={{ top: 24, maxWidth: "96vw" }}
+                        styles={{
+                          body: {
+                            maxHeight: "calc(100vh - 160px)",
+                            overflowY: "auto",
+                            overflowX: "hidden",
+                          },
+                        }}
                         destroyOnHidden
                       >
                         {flatData.length === 0 ? (
@@ -8698,15 +7169,15 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                                       title={
                                         drillFacility ? (
                                           <Space wrap>
-                                            <Button size="small" onClick={() => setSlfCellDrill(null)}>← Back to all SLFs</Button>
-                                            <span><ContainerOutlined /> {drillFacility.name} — Cell Breakdown</span>
+                                            <Button size="small" type="primary" onClick={() => setSlfCellDrill(null)}>← Back</Button>
+                                            <span>{drillFacility.name} — Cell Breakdown</span>
                                           </Space>
                                         ) : (
-                                          <><ContainerOutlined /> Operational SLF Cells — Capacity Gauges <Text type="secondary" style={{ fontSize: 11, fontWeight: 400 }}>(click a card for cell details)</Text></>
+                                          <>Sanitary Landfill Cell Operations <Text type="secondary" style={{ fontSize: 11, fontWeight: 400 }}>(click a card for cell details)</Text></>
                                         )
                                       }
                                       style={{ borderRadius: 8 }}
-                                      styles={{ body: { maxHeight: 460, overflowY: "auto" } }}
+                                      styles={{ body: { maxHeight: "min(78vh, 1000px)", overflowY: "auto" } }}
                                     >
                                       {cellGaugeFacilities.length === 0 ? (
                                         <Empty description="No cell infrastructure data available." />
@@ -8756,21 +7227,31 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                                         </>
                                       ) : (
                                         <Row gutter={[12, 12]}>
-                                          {cellGaugeFacilities.slice(0, 12).map((f) => (
-                                            <Col xs={12} sm={8} md={6} key={f.key}>
-                                              <Card size="small" hoverable onClick={() => setSlfCellDrill(f.key)} style={{ borderRadius: 8, textAlign: "center", height: "100%", cursor: "pointer" }}>
-                                                {/* #1: thinner arc (values/colors unchanged) */}
-                                                <GaugeMeter percent={f.percent} size={112} thickness={6} color={color} />
-                                                <div style={{ fontSize: 12, fontWeight: 600, marginTop: 4 }}>{f.name}</div>
-                                                <Text type="secondary" style={{ fontSize: 11 }}>{f.province}</Text>
-                                                <div style={{ marginTop: 4 }}>
-                                                  <Tag color="cyan">{f.numberOfCell} cells</Tag>
-                                                  <Tag color="green">{f.opCells} op</Tag>
-                                                </div>
-                                                <div style={{ marginTop: 2 }}><Text type="secondary" style={{ fontSize: 10 }}>Click to view cells</Text></div>
-                                              </Card>
-                                            </Col>
-                                          ))}
+                                          {cellGaugeFacilities.slice(0, 12).map((f, idx) => {
+                                            // Each SLF keeps its own palette colour below
+                                            // the warning band; the gauge then escalates
+                                            // to warning/alarming/critical as it fills.
+                                            const slfColor = getSlfColor(f.key, idx);
+                                            const gaugeColor = getSlfCapacityColor(f.percent, {
+                                              baseColor: slfColor,
+                                              exists: f.numberOfCell > 0,
+                                            });
+                                            return (
+                                              <Col xs={12} sm={8} md={6} key={f.key}>
+                                                <Card size="small" hoverable onClick={() => setSlfCellDrill(f.key)} style={{ borderRadius: 8, textAlign: "center", height: "100%", cursor: "pointer", borderTop: `3px solid ${slfColor}` }}>
+                                                  {/* #1: thinner arc, coloured by SLF palette + capacity band */}
+                                                  <GaugeMeter percent={f.percent} size={112} thickness={6} color={gaugeColor} />
+                                                  <div style={{ fontSize: 12, fontWeight: 600, marginTop: 4 }}>{f.name}</div>
+                                                  <Text type="secondary" style={{ fontSize: 11 }}>{f.province}</Text>
+                                                  <div style={{ marginTop: 4 }}>
+                                                    <Tag color="cyan">{f.numberOfCell} cells</Tag>
+                                                    <Tag color="green">{f.opCells} op</Tag>
+                                                  </div>
+                                                  <div style={{ marginTop: 2 }}><Text type="secondary" style={{ fontSize: 10 }}>Click to view cells</Text></div>
+                                                </Card>
+                                              </Col>
+                                            );
+                                          })}
                                         </Row>
                                       )}
                                     </Card>
@@ -8810,18 +7291,25 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                                         <Empty description="No capacity data available." />
                                       ) : (
                                         <Row gutter={[12, 12]}>
-                                          {capacityGaugeFacilities.slice(0, 12).map((f) => (
-                                            <Col xs={12} sm={8} md={6} key={f.key}>
-                                              <Card size="small" style={{ borderRadius: 8, textAlign: "center", height: "100%" }}>
-                                                <GaugeMeter percent={f.percent} size={112} color={color} />
-                                                <div style={{ fontSize: 12, fontWeight: 600, marginTop: 4 }}>{f.name}</div>
-                                                <Text type="secondary" style={{ fontSize: 11 }}>{f.province}</Text>
-                                                <div style={{ marginTop: 4 }}>
-                                                  <Tag color="magenta">{Number(f.totalCap).toLocaleString()} m³</Tag>
-                                                </div>
-                                              </Card>
-                                            </Col>
-                                          ))}
+                                          {capacityGaugeFacilities.slice(0, 12).map((f, idx) => {
+                                            const slfColor = getSlfColor(f.key, idx);
+                                            const gaugeColor = getSlfCapacityColor(f.percent, {
+                                              baseColor: slfColor,
+                                              exists: f.totalCap > 0,
+                                            });
+                                            return (
+                                              <Col xs={12} sm={8} md={6} key={f.key}>
+                                                <Card size="small" style={{ borderRadius: 8, textAlign: "center", height: "100%", borderTop: `3px solid ${slfColor}` }}>
+                                                  <GaugeMeter percent={f.percent} size={112} color={gaugeColor} />
+                                                  <div style={{ fontSize: 12, fontWeight: 600, marginTop: 4 }}>{f.name}</div>
+                                                  <Text type="secondary" style={{ fontSize: 11 }}>{f.province}</Text>
+                                                  <div style={{ marginTop: 4 }}>
+                                                    <Tag color="magenta">{Number(f.totalCap).toLocaleString()} m³</Tag>
+                                                  </div>
+                                                </Card>
+                                              </Col>
+                                            );
+                                          })}
                                         </Row>
                                       )}
                                     </Card>
@@ -8887,8 +7375,122 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                                       </Col>
                                     </Row>
                                   </>
+                                ) : (slfDashModal.type === "leachate" || slfDashModal.type === "gas") ? (
+                                  (() => {
+                                    // Domain summary + status distribution derived
+                                    // ONLY from fields that exist on the records
+                                    // (pond/vent details). No fabricated metrics.
+                                    const hasDetail = (r) => r.status && r.status !== "—";
+                                    const detailRows = flatData.filter(hasDetail);
+                                    const opCount = detailRows.filter((r) => /active|operational/i.test(r.status || "")).length;
+                                    const maintCount = detailRows.filter((r) => /maintenance/i.test(r.status || "")).length;
+                                    const statusDist = Object.entries(
+                                      detailRows.reduce((acc, r) => {
+                                        const s = String(r.status || "Unspecified");
+                                        acc[s] = (acc[s] || 0) + 1;
+                                        return acc;
+                                      }, {}),
+                                    ).map(([name, value]) => ({ name, value }));
+                                    const STATUS_COLORS = { Active: "#52c41a", Operational: "#52c41a", "Under Maintenance": "#faad14" };
+                                    const PIE_COLORS = ["#1890ff", "#52c41a", "#faad14", "#722ed1", "#13c2c2", "#eb2f96", "#8c8c8c"];
+                                    const isLeachate = slfDashModal.type === "leachate";
+                                    return (
+                                  <>
+                                    <Row gutter={[12, 12]} style={{ marginBottom: 16 }}>
+                                      <Col xs={12} md={6}>
+                                        <Card size="small" style={{ borderRadius: 8, border: `1px solid ${color}33`, background: `${color}0d` }}>
+                                          <Statistic title={`Total ${cfg.metricLabel}`} value={totalMetricValue} valueStyle={{ color, fontSize: 22 }} prefix={isLeachate ? <AlertOutlined /> : <SafetyCertificateOutlined />} formatter={(v) => Number(v || 0).toLocaleString()} />
+                                        </Card>
+                                      </Col>
+                                      <Col xs={12} md={6}>
+                                        <Card size="small" style={{ borderRadius: 8 }}>
+                                          <Statistic title="Facilities w/ Systems" value={sourceRows.length} valueStyle={{ fontSize: 22 }} prefix={<BankOutlined style={{ color }} />} />
+                                        </Card>
+                                      </Col>
+                                      <Col xs={12} md={6}>
+                                        <Card size="small" style={{ borderRadius: 8 }}>
+                                          <Statistic title="Operational" value={opCount} valueStyle={{ fontSize: 22, color: "#52c41a" }} prefix={<CheckCircleOutlined />} suffix={maintCount > 0 ? <Text type="secondary" style={{ fontSize: 12 }}>· {maintCount} maint.</Text> : null} />
+                                        </Card>
+                                      </Col>
+                                      <Col xs={12} md={6}>
+                                        <Card size="small" style={{ borderRadius: 8 }}>
+                                          <Statistic title="Detail Records" value={detailRows.length} valueStyle={{ fontSize: 22 }} prefix={<FileTextOutlined style={{ color }} />} />
+                                        </Card>
+                                      </Col>
+                                    </Row>
+                                    <Row gutter={[16, 16]}>
+                                      <Col xs={24} lg={10}>
+                                        <Card size="small" title={<><PieChartOutlined /> Status Distribution</>} style={{ borderRadius: 8, height: "100%" }}>
+                                          {statusDist.length === 0 ? (
+                                            <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No status details recorded." style={{ padding: "30px 0" }} />
+                                          ) : (
+                                            <ResponsiveContainer width="100%" height={240}>
+                                              <RePieChart>
+                                                <Pie data={statusDist} cx="50%" cy="50%" innerRadius={45} outerRadius={80} paddingAngle={statusDist.length > 1 ? 3 : 0} dataKey="value" isAnimationActive={false} label={({ name, value }) => `${name}: ${value}`}>
+                                                  {statusDist.map((entry, i) => (
+                                                    <Cell key={i} fill={STATUS_COLORS[entry.name] || PIE_COLORS[i % PIE_COLORS.length]} />
+                                                  ))}
+                                                </Pie>
+                                                <RechartsTooltip formatter={(v) => Number(v).toLocaleString()} />
+                                              </RePieChart>
+                                            </ResponsiveContainer>
+                                          )}
+                                        </Card>
+                                      </Col>
+                                      <Col xs={24} lg={14}>
+                                        <Card size="small" title={<><BarChartOutlined /> Top SLFs by {cfg.metricLabel}</>} style={{ borderRadius: 8, height: "100%" }}>
+                                          <Space direction="vertical" size={10} style={{ width: "100%" }}>
+                                            {topFacilities.map((item, index) => {
+                                              const percent = Math.round((item.value / maxFacility) * 100);
+                                              return (
+                                                <div key={`${item.name}-${index}`}>
+                                                  <div style={{ display: "flex", justifyContent: "space-between", gap: 12, marginBottom: 4 }}>
+                                                    <Text strong style={{ fontSize: 12 }}>{index + 1}. {item.name}</Text>
+                                                    <Text style={{ fontSize: 12, color }}>{Number(item.value).toLocaleString()} {cfg.metricLabel}</Text>
+                                                  </div>
+                                                  <Progress percent={percent} showInfo={false} strokeColor={color} trailColor="#f0f0f0" size="small" />
+                                                  <Text type="secondary" style={{ fontSize: 11 }}>{item.province} • {item.status}</Text>
+                                                </div>
+                                              );
+                                            })}
+                                          </Space>
+                                        </Card>
+                                      </Col>
+                                    </Row>
+                                  </>
+                                    );
+                                  })()
                                 ) : (
                                   <>
+                                    {/* #6: Total SLF portfolio leads with the verified
+                                        Total / Operational / Non-Operational counts —
+                                        the SAME slfCounts used by the dashboard tile
+                                        (single source, single classifier). Other metric
+                                        modals keep the generic metric summary. */}
+                                    {slfDashModal.type === "total" ? (
+                                      <Row gutter={[12, 12]} style={{ marginBottom: 16 }}>
+                                        <Col xs={12} md={6}>
+                                          <Card size="small" style={{ borderRadius: 8, border: `1px solid ${color}33`, background: `${color}0d` }}>
+                                            <Statistic title="Total SLF Facilities" value={slfCounts.total} valueStyle={{ color, fontSize: 22 }} formatter={(v) => Number(v || 0).toLocaleString()} />
+                                          </Card>
+                                        </Col>
+                                        <Col xs={12} md={6}>
+                                          <Card size="small" style={{ borderRadius: 8 }}>
+                                            <Statistic title="Operational" value={slfCounts.operational} prefix={<CheckCircleOutlined style={{ color: "#52c41a" }} />} valueStyle={{ color: "#52c41a", fontSize: 22 }} />
+                                          </Card>
+                                        </Col>
+                                        <Col xs={12} md={6}>
+                                          <Card size="small" style={{ borderRadius: 8 }}>
+                                            <Statistic title="Non-Operational" value={slfCounts.nonOperational} prefix={<CloseCircleOutlined style={{ color: "#ff4d4f" }} />} valueStyle={{ color: "#ff4d4f", fontSize: 22 }} />
+                                          </Card>
+                                        </Col>
+                                        <Col xs={12} md={6}>
+                                          <Card size="small" style={{ borderRadius: 8 }}>
+                                            <Statistic title="Provinces Covered" value={provinceData.length} valueStyle={{ fontSize: 22 }} />
+                                          </Card>
+                                        </Col>
+                                      </Row>
+                                    ) : (
                                     <Row gutter={[12, 12]} style={{ marginBottom: 16 }}>
                                       <Col xs={24} md={6}>
                                         <Card size="small" style={{ borderRadius: 8, border: `1px solid ${color}33`, background: `${color}0d` }}>
@@ -8911,6 +7513,7 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                                         </Card>
                                       </Col>
                                     </Row>
+                                    )}
 
                                     <Row gutter={[16, 16]}>
                                       <Col xs={24} lg={14}>
@@ -8977,8 +7580,9 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
                                         dataSource={flatData}
                                         columns={cfg.columns}
                                         size="small"
+                                        tableLayout="fixed"
                                         pagination={PAG}
-                                        scroll={{ x: "max-content" }}
+                                        scroll={{ x: recordsScrollX(cfg.columns) }}
                                         bordered
                                       />
                                     ),
@@ -10065,14 +8669,16 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
           />
         )}
       </Modal>
-      <div style={{ marginBottom: 16, display: "flex", alignItems: "center", justifyContent: "flex-end", flexWrap: "wrap", gap: 8 }}>
-        <div style={{ marginRight: "auto" }}>
-          <Title level={3} style={{ margin: 0, color: textColor }}>Dashboard</Title>
-          <Text type="secondary">System overview, monitoring summaries, and current portal activity.</Text>
+      {/* Compact Main Dashboard header — tight title/subtitle spacing; the tip card
+          flex-grows into the free width and wraps below the title on narrow screens. */}
+      <div style={{ marginBottom: 6, display: "flex", alignItems: "center", justifyContent: "flex-end", flexWrap: "wrap", gap: 10 }}>
+        <div style={{ marginRight: "auto", minWidth: 180 }}>
+          <Title level={3} style={{ margin: 0, color: textColor, lineHeight: 1.15 }}>Dashboard</Title>
+          <Text type="secondary" style={{ fontSize: 12 }}>System overview, monitoring summaries, and current portal activity.</Text>
         </div>
-        <Space size="middle">
-          {loading && <Spin size="small" />}
-        </Space>
+        {loading && <Spin size="small" />}
+        {/* Isolated + memoized: rotating tip state never re-renders the dashboard. */}
+        <AdminTipCard isDark={isDark} />
       </div>
       {/* Filter tabs by dashboard visibility settings, wrap maintenance tabs */}
       {dashboardTabSettings === null ? (
@@ -10110,7 +8716,7 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
             onChange={setDashTab}
             items={filteredTabs}
             size="large"
-            style={{ marginTop: 8 }}
+            style={{ marginTop: 0 }}
             // Top-level dashboard tabs. antd keeps every pane you have visited
             // mounted, so without this the SLF gauge grids, charts and their
             // derived arrays from earlier tabs all stayed live behind the one you
@@ -10122,99 +8728,4 @@ function DashboardContent({ user, isDark, setActiveMenu }) {
       })()}
     </>
   );
-}
-
-function getStyles(isDark, opts = {}) {
-  const {
-    siderColor = "#1a3353",
-    siderColorDark = "#111927",
-    headerColor = "#ffffff",
-    headerColorDark = "#141414",
-    sidebarStyle = "gradient",
-  } = opts;
-
-  const baseSider = isDark ? siderColorDark : siderColor;
-  const siderBg =
-    sidebarStyle === "gradient"
-      ? `linear-gradient(180deg, ${baseSider} 0%, ${adjustBrightness(baseSider, 30)} 100%)`
-      : baseSider;
-
-  return {
-    sider: {
-      background: siderBg,
-      boxShadow: "2px 0 8px rgba(0,0,0,0.15)",
-      display: "flex",
-      flexDirection: "column",
-    },
-    logo: {
-      height: 64,
-      display: "flex",
-      alignItems: "center",
-      justifyContent: "center",
-      borderBottom: "1px solid rgba(255,255,255,0.08)",
-    },
-    logoText: {
-      color: "#fff",
-      margin: 0,
-      fontWeight: 800,
-      letterSpacing: 1,
-    },
-    siderFooter: {
-      padding: "12px 16px",
-      textAlign: "center",
-      borderTop: "1px solid rgba(255,255,255,0.06)",
-    },
-    header: {
-      background: isDark ? headerColorDark : headerColor,
-      padding: "0 24px",
-      display: "flex",
-      alignItems: "center",
-      justifyContent: "space-between",
-      boxShadow: isDark
-        ? "0 1px 4px rgba(0,0,0,0.3)"
-        : "0 1px 4px rgba(0,0,0,0.06)",
-      position: "sticky",
-      top: 0,
-      zIndex: 10,
-    },
-    headerRight: {
-      display: "flex",
-      alignItems: "center",
-    },
-    userInfo: {
-      display: "flex",
-      alignItems: "center",
-      cursor: "pointer",
-      padding: "4px 8px",
-      borderRadius: 8,
-    },
-    content: {
-      margin: 24,
-      padding: 24,
-      background: isDark ? "#1f1f1f" : "#f0f2f5",
-      minHeight: 280,
-      flex: "1 0 auto",
-    },
-    footer: {
-      textAlign: "center",
-      padding: "16px 24px",
-      background: isDark ? "#141414" : "#fff",
-      borderTop: isDark ? "1px solid #303030" : "1px solid #f0f0f0",
-    },
-  };
-}
-
-// Lighten / darken a hex color by `amount` (positive = lighten)
-function adjustBrightness(hex, amount) {
-  let c = hex.replace("#", "");
-  if (c.length === 3)
-    c = c
-      .split("")
-      .map((ch) => ch + ch)
-      .join("");
-  const num = parseInt(c, 16);
-  const r = Math.min(255, Math.max(0, ((num >> 16) & 0xff) + amount));
-  const g = Math.min(255, Math.max(0, ((num >> 8) & 0xff) + amount));
-  const b = Math.min(255, Math.max(0, (num & 0xff) + amount));
-  return `#${((1 << 24) | (r << 16) | (g << 8) | b).toString(16).slice(1)}`;
 }

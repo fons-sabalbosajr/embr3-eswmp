@@ -236,9 +236,9 @@ export default function NotificationManagement({ isDark }) {
       title: "Message",
       dataIndex: "message",
       key: "message",
-      width: isCompact ? 180 : 240,
-      minWidth: isCompact ? 160 : 240,
-      onCell: () => ({ style: { ...wrapCellStyle, maxWidth: isCompact ? 180 : 240 } }),
+      width: isCompact ? 200 : 240,
+      minWidth: isCompact ? 190 : 240,
+      onCell: () => ({ style: { ...wrapCellStyle, maxWidth: isCompact ? 200 : 240 } }),
       render: (v) => <Text type="secondary" style={{ fontSize: 12 }}>{v || "—"}</Text>,
     },
     {

@@ -88,7 +88,7 @@ export const CONVERSION_WARNINGS = {
 // The unit an SLF facility DECLARES, per the fields "Set Field Units" writes.
 // Order mirrors the precedence the app already used (wasteReceivedUnit first).
 // Falls back to m³ only when the facility declares nothing at all.
-export function resolveFacilityUnit(facility, fallback = M3) {
+export function resolveFacilityUnit(facility, fallback = TONS) {
   const candidates = [
     facility?.wasteReceivedUnit,
     facility?.volumeCapacityUnit,
@@ -102,7 +102,9 @@ export function resolveFacilityUnit(facility, fallback = M3) {
     const u = normalizeUnit(c);
     if (u) return u;
   }
-  return normalizeUnit(fallback) || M3;
+  // Default unit is TONS; m³ is used only when a facility is explicitly
+  // configured for it (its declared unit fields above resolve to m³).
+  return normalizeUnit(fallback) || TONS;
 }
 
 // The declared unit for a single cell, falling back to the facility's unit.

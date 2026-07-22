@@ -23,9 +23,9 @@ const slfFacilitySchema = new mongoose.Schema(
     yearStartedOperation: { type: Number },
     category: { type: String, trim: true },
     volumeCapacity: { type: Number },
-    volumeCapacityUnit: { type: String, trim: true, default: 'm³' },
+    volumeCapacityUnit: { type: String, trim: true, default: 'tons' },
     receivingVolumeCapacity: { type: Number },
-    receivingVolumeCapacityUnit: { type: String, trim: true, default: 'm³' },
+    receivingVolumeCapacityUnit: { type: String, trim: true, default: 'tons' },
     noOfLGUServed: { type: Number },
     lguServedList: [{ type: String, trim: true }],
     privateCompaniesServed: [{ type: String, trim: true }],
@@ -78,14 +78,14 @@ const slfFacilitySchema = new mongoose.Schema(
     statusOfSLF: { type: String, trim: true },
     remainingLifeSpan: { type: String, trim: true },
     actualResidualWasteReceived: { type: Number },
-    wasteReceivedUnit: { type: String, trim: true, default: 'm³' },
-    estimatedVolumeWasteUnit: { type: String, trim: true, default: 'm³' },
+    wasteReceivedUnit: { type: String, trim: true, default: 'tons' },
+    estimatedVolumeWasteUnit: { type: String, trim: true, default: 'tons' },
     numberOfCell: { type: Number },
     // Optional per-cell custom display names. Index-aligned with the other cell
     // arrays. Empty/missing entry => fall back to the derived "Cell N" label.
     cellNames: [{ type: String, trim: true }],
     cellCapacities: [{ type: Number }],
-    cellCapacityUnits: [{ type: String, enum: ["m³", "tons", "m3"], default: "m³" }],
+    cellCapacityUnits: [{ type: String, enum: ["m³", "tons", "m3"], default: "tons" }],
     cellStatuses: [{ type: String, enum: ["Active Cell", "Used/Completed", "Under Construction", "Reserved Area", "Not Existed", "Operational", "Closed", "Reserved Cell"], default: "Active Cell" }],
     cellTypes: [{ type: String, trim: true, default: "Residual" }], // per-cell: "Residual" or "Treated Haz Waste"
     // per-cell: whether portal/SLF users may dispose volume-waste submissions into this cell.
@@ -93,7 +93,7 @@ const slfFacilitySchema = new mongoose.Schema(
     cellSubmissionAllowed: [{ type: Boolean }],
     cellNotes: [{ type: String, trim: true }], // per-cell notes (used for Under Construction / Reserved Cell status)
     cellFillValues: [{ type: Number }],
-    cellFillUnits: [{ type: String, enum: ["m³", "tons", "m3"], default: "m³" }],
+    cellFillUnits: [{ type: String, enum: ["m³", "tons", "m3"], default: "tons" }],
     estimatedVolumeWaste: { type: Number },
     noOfLeachatePond: { type: Number },
     numberOfGasVents: { type: Number },
