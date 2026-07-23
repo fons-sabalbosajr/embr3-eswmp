@@ -574,3 +574,55 @@ body:has([data-theme="dark"]) .swal2-validation-message {
     font-size: 13px;
   }
 }
+
+/* ── Responsive safety net (high-impact hardening) ──────────────────────────
+   Complements the media queries above so no page scrolls sideways and wide
+   content stays contained across 320px → ultrawide. */
+html {
+  overflow-x: hidden;
+  max-width: 100%;
+}
+/* Media/embeds/code never force the page wider than the viewport. */
+img,
+video,
+canvas,
+svg,
+iframe {
+  max-width: 100%;
+}
+pre,
+code {
+  max-width: 100%;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+/* antd tables keep their own horizontal scroll INSIDE the wrapper (never pushing
+   the page); wide tables should still set scroll={{ x }} for column layout. */
+.ant-table-wrapper {
+  max-width: 100%;
+}
+.ant-table-wrapper .ant-table-content,
+.ant-table-wrapper .ant-table-body {
+  overflow-x: auto;
+}
+/* Reusable horizontal-scroll container for any wide block (charts, chip rows). */
+.responsive-scroll-x {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  max-width: 100%;
+}
+/* Keep modals within the viewport on every size. */
+.ant-modal {
+  max-width: calc(100vw - 16px);
+}
+.ant-modal-body {
+  overflow-wrap: anywhere;
+}
+/* Comfortable touch targets for icon-only controls on touch devices. */
+@media (max-width: 576px) {
+  .ant-btn-icon-only.ant-btn-sm {
+    min-width: 30px;
+    min-height: 30px;
+  }
+}

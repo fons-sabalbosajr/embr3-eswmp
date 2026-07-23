@@ -11,6 +11,12 @@ router.use(authMiddleware, adminOnly);
 
 const PERM = "region3Lgu";
 const actor = (req) => req.headers["x-user-name"] || req.headers["x-user-email"] || "admin";
+
+// Masterlist edits change the served/unserved LGU metrics — invalidate the
+// relationship-map cache so the LGUs Served tab reflects the change immediately.
+const invalidateRelMap = () => {
+  try { require("./slfClients").clearRelMapCache?.(); } catch { /* optional */ }
+};
 const LGU_TYPES = Region3Lgu.LGU_TYPES;
 
 function pickBody(body = {}) {
@@ -94,7 +100,7 @@ router.post("/", requirePermission(PERM, "edit"), async (req, res) => {
     const record = new Region3Lgu({ ...body, source: body.source || "manual", createdBy: actor(req), updatedBy: actor(req) });
     await record.save();
     res.status(201).json(record);
-    refreshAdmin(req, "region3-lgu");
+    refreshAdmin(req, "region3-lgu"); invalidateRelMap();
     writeLog("info", "region3-lgu.create", { message: `Region 3 LGU created: ${record.name}, ${record.province}`, req });
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });
@@ -117,7 +123,7 @@ router.put("/:id", requirePermission(PERM, "edit"), async (req, res) => {
     record.updatedBy = actor(req);
     await record.save();
     res.json(record);
-    refreshAdmin(req, "region3-lgu");
+    refreshAdmin(req, "region3-lgu"); invalidateRelMap();
     writeLog("info", "region3-lgu.update", { message: `Region 3 LGU updated: ${record.name}`, req });
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });
@@ -131,7 +137,7 @@ router.delete("/:id", requirePermission(PERM, "delete"), async (req, res) => {
     const record = await Region3Lgu.findByIdAndDelete(req.params.id);
     if (!record) return res.status(404).json({ message: "Not found" });
     res.json({ message: "Deleted" });
-    refreshAdmin(req, "region3-lgu");
+    refreshAdmin(req, "region3-lgu"); invalidateRelMap();
     writeLog("warn", "region3-lgu.delete", { message: `Region 3 LGU deleted: ${record.name}`, req });
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });
@@ -163,7 +169,7 @@ router.post("/import", requirePermission(PERM, "edit"), async (req, res) => {
       }
     }
     res.json(result);
-    refreshAdmin(req, "region3-lgu");
+    refreshAdmin(req, "region3-lgu"); invalidateRelMap();
     writeLog("info", "region3-lgu.import", { message: `Region 3 LGU import: +${result.created} created, ${result.updated} updated, ${result.invalid} invalid`, req });
   } catch (error) {
     res.status(500).json({ message: "Import failed", error: error.message });

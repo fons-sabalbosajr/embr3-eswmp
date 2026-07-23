@@ -83,7 +83,7 @@ const DISPOSAL_STATUS_META = {
 };
 const statusMeta = (key) => DISPOSAL_STATUS_META[key] || { label: key || "Unknown", color: "default", icon: null };
 
-export default function DisposalActivityCalendar({ isDark, height, onOpenSubmissions, canOpenSubmissions = false }) {
+export default function DisposalActivityCalendar({ isDark, height, onOpenSubmissions, canOpenSubmissions = false, selectedDate: mapDate, onSelectDate }) {
   const [records, setRecords] = useState([]);
   const [userByEmail, setUserByEmail] = useState({});
   const [loading, setLoading] = useState(true);
@@ -377,12 +377,108 @@ export default function DisposalActivityCalendar({ isDark, height, onOpenSubmiss
     [weekStart],
   );
 
+  // Single day-click entry point: set the visible month, tell the parent so the
+  // SLF map updates to THIS date (even when the day has no activity → neutral
+  // markers), and open the day-detail modal when there are records.
   const openDay = (date) => {
     setCursor(date);
+    if (onSelectDate) onSelectDate(date);
     if (dayData(date)) setSelectedDate(date);
   };
 
   const border = isDark ? "#303030" : "#f0f0f0";
+
+  // ── Year view ── 12-month summary grid for the visible year (cursor). Each
+  // month card aggregates the actual statuses from the loaded records; clicking a
+  // month opens that month. Counts are only shown for months that have data, so
+  // empty months never display misleading totals.
+  const yearMonths = useMemo(() => {
+    const year = cursor.year();
+    const buckets = Array.from({ length: 12 }, (_, m) => ({
+      m,
+      label: dayjs(new Date(year, m, 1)).format("MMM"),
+      submissions: 0,
+      acknowledged: 0,
+      pending: 0,
+      reverted: 0,
+      rejected: 0,
+      slfs: new Set(),
+    }));
+    filteredRecords.forEach((r) => {
+      const d = dayjs(r.dateOfDisposal);
+      if (!d.isValid() || d.year() !== year) return;
+      const b = buckets[d.month()];
+      b.submissions += 1;
+      b.slfs.add(r.slfName || r.lguCompanyName || "");
+      const s = String(r.status || "").toLowerCase();
+      if (s.includes("acknowledg") || s === "approved" || s === "accepted" || s === "completed") b.acknowledged += 1;
+      else if (s.includes("reject")) b.rejected += 1;
+      else if (s.includes("revert")) b.reverted += 1;
+      else b.pending += 1;
+    });
+    return buckets.map((b) => ({ ...b, slfCount: b.slfs.size }));
+  }, [filteredRecords, cursor]);
+
+  const renderYearGrid = () => {
+    const chip = (label, n, color) =>
+      n > 0 ? (
+        <Tooltip key={label} title={`${n} ${label}`}>
+          <Tag color={color} style={{ margin: "1px 2px 0 0", fontSize: 10, padding: "0 5px" }}>{label[0]}:{n}</Tag>
+        </Tooltip>
+      ) : null;
+    return (
+      <div
+        style={{
+          display: "grid",
+          gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))",
+          gap: 10,
+          padding: "4px 4px 8px",
+        }}
+      >
+        {yearMonths.map((mo) => {
+          const has = mo.submissions > 0;
+          return (
+            <div
+              key={mo.m}
+              role="button"
+              tabIndex={0}
+              aria-label={`${mo.label} ${cursor.year()} — ${mo.submissions} submissions`}
+              onClick={() => { setCursor(cursor.month(mo.m)); setViewMode("month"); }}
+              onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setCursor(cursor.month(mo.m)); setViewMode("month"); } }}
+              style={{
+                border: `1px solid ${border}`,
+                borderRadius: 10,
+                padding: "10px 12px",
+                cursor: "pointer",
+                background: has ? (isDark ? "rgba(24,144,255,0.08)" : "#f7fbff") : (isDark ? "transparent" : "#fafafa"),
+                transition: "box-shadow .15s ease, transform .1s ease",
+              }}
+            >
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
+                <Text strong style={{ fontSize: 14 }}>{mo.label}</Text>
+                <Text type="secondary" style={{ fontSize: 11 }}>{mo.submissions || "—"}{mo.submissions ? " subm." : ""}</Text>
+              </div>
+              {has ? (
+                <>
+                  <div style={{ display: "flex", flexWrap: "wrap", marginTop: 4 }}>
+                    {chip("Acknowledged", mo.acknowledged, "blue")}
+                    {chip("Pending", mo.pending, "gold")}
+                    {chip("Reverted", mo.reverted, "orange")}
+                    {chip("Rejected", mo.rejected, "red")}
+                  </div>
+                  <Text type="secondary" style={{ fontSize: 11, display: "block", marginTop: 4 }}>
+                    {mo.slfCount} active SLF{mo.slfCount === 1 ? "" : "s"}
+                  </Text>
+                </>
+              ) : (
+                <Text type="secondary" style={{ fontSize: 11, display: "block", marginTop: 6 }}>No activity</Text>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    );
+  };
 
   const renderWeekStrip = () => (
     <div>
@@ -683,10 +779,10 @@ export default function DisposalActivityCalendar({ isDark, height, onOpenSubmiss
         <div style={{ minWidth: 0 }}>
           <Text strong style={{ fontSize: 15, display: "block" }}>
             <CalendarOutlined style={{ color: "#1677ff", marginRight: 6 }} />
-            SLF Disposal Calendar
+            SLF Operators Disposal Submission Calendar
           </Text>
           <Text type="secondary" style={{ fontSize: 12 }}>
-            Recorded disposal activities by date across SLF Portal users and
+            Recorded disposal activities by date across SLF Portal Operators and
             facilities. Click a day to see that day&apos;s disposal records.
           </Text>
         </div>
@@ -735,11 +831,36 @@ export default function DisposalActivityCalendar({ isDark, height, onOpenSubmiss
               options={[
                 { label: "Week", value: "week" },
                 { label: "Month", value: "month" },
+                { label: "Year", value: "year" },
               ]}
             />
           </Space>
         )}
       </div>
+
+      {/* Month/Year navigation — upper-left. Prev/Next step the visible period and
+          the active label shows the current month+year (or year). Keyboard-accessible
+          buttons; filters and any selected SLF are preserved. */}
+      {!loading && records.length > 0 && viewMode !== "week" && (
+        <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "0 4px 6px" }}>
+          <Button
+            size="small"
+            icon={<LeftOutlined />}
+            aria-label={viewMode === "year" ? "Previous year" : "Previous month"}
+            onClick={() => setCursor((c) => c.subtract(1, viewMode === "year" ? "year" : "month"))}
+          />
+          <Text strong style={{ fontSize: 13, minWidth: 128, textAlign: "center" }}>
+            {viewMode === "year" ? cursor.format("YYYY") : cursor.format("MMMM YYYY")}
+          </Text>
+          <Button
+            size="small"
+            icon={<RightOutlined />}
+            aria-label={viewMode === "year" ? "Next year" : "Next month"}
+            onClick={() => setCursor((c) => c.add(1, viewMode === "year" ? "year" : "month"))}
+          />
+          <Button size="small" type="link" onClick={() => setCursor(dayjs())}>Today</Button>
+        </div>
+      )}
       {loading ? (
         <div style={{ textAlign: "center", padding: "40px 0" }}>
           <Spin />
@@ -758,16 +879,15 @@ export default function DisposalActivityCalendar({ isDark, height, onOpenSubmiss
         >
           {viewMode === "week" ? (
             renderWeekStrip()
+          ) : viewMode === "year" ? (
+            renderYearGrid()
           ) : (
             <Calendar
               value={cursor}
               onPanelChange={(v) => setCursor(v)}
               cellRender={cellRender}
               onSelect={(date, info) => {
-                if (info?.source === "date" || !info) {
-                  setCursor(date);
-                  if (dayData(date)) setSelectedDate(date);
-                }
+                if (info?.source === "date" || !info) openDay(date);
               }}
             />
           )}

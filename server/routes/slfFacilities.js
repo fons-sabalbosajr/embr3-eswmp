@@ -13,7 +13,7 @@ const router = express.Router();
 // Require an authenticated caller on every route below. Closes anonymous access
 // to facility master data (create/update/delete included). Both frontends
 // always send a Bearer token.
-const { requireAnyAuth } = require("../middleware/auth");
+const { requireAnyAuth, adminOnly } = require("../middleware/auth");
 const { validateBody } = require("../utils/validate");
 router.use(requireAnyAuth);
 
@@ -904,6 +904,174 @@ router.get("/history/:lgu", async (req, res) => {
     res.json(records);
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });
+  }
+});
+
+// ── Prevention Measures: narrative + secure document summaries (admin only) ──
+//
+// Collect this facility's Prevention-Measures documents (Fire Prevention, Trash
+// Slide Measures, and flat Preventive Measures files) with their narrative and a
+// derived file name. Only URLs that belong to THIS facility are ever considered —
+// the summary endpoint refuses any URL not in this list (no cross-SLF leakage).
+function collectPreventionDocs(facility) {
+  const docs = [];
+  const fileNameOf = (url) => {
+    try {
+      const clean = String(url || "").split("?")[0].split("#")[0];
+      const seg = decodeURIComponent(clean.split("/").pop() || "");
+      return seg || "document";
+    } catch { return "document"; }
+  };
+  const pushNested = (arr, docType) =>
+    (Array.isArray(arr) ? arr : []).forEach((m) => {
+      const narrative = [m?.measure, m?.description].filter(Boolean).join(" — ");
+      (Array.isArray(m?.attachments) ? m.attachments : []).forEach((url) => {
+        if (url) docs.push({ url, fileName: fileNameOf(url), docType, narrative: narrative || "" });
+      });
+    });
+  pushNested(facility.firePrevMeasures, "Fire Prevention");
+  pushNested(facility.trashSlideMeasures, "Trash Slide Measures");
+  (Array.isArray(facility.preventiveMeasureFiles) ? facility.preventiveMeasureFiles : []).forEach((url) => {
+    if (url) docs.push({ url, fileName: fileNameOf(url), docType: "Preventive Measures", narrative: "" });
+  });
+  return docs;
+}
+
+// Official narrative entries (manually entered) per prevention category.
+function collectPreventionNarratives(facility) {
+  const out = [];
+  const add = (arr, docType) =>
+    (Array.isArray(arr) ? arr : []).forEach((m) => {
+      if (m?.measure || m?.description) {
+        out.push({ docType, measure: m.measure || "", description: m.description || "", status: m.status || "" });
+      }
+    });
+  add(facility.firePrevMeasures, "Fire Prevention");
+  add(facility.trashSlideMeasures, "Trash Slide Measures");
+  return out;
+}
+
+// GET the Prevention-Measures view model for a facility: official narratives,
+// the source documents (with metadata), and any cached VERA summaries — pruned to
+// documents that currently belong to this facility.
+router.get("/:id/prevention-measures", adminOnly, async (req, res) => {
+  try {
+    if (!mongoose.isValidObjectId(req.params.id)) return res.status(400).json({ message: "Invalid id" });
+    const facility = await SlfFacility.findById(req.params.id)
+      .select("lgu slfName firePrevMeasures trashSlideMeasures preventiveMeasureFiles preventionSummaries")
+      .lean();
+    if (!facility) return res.status(404).json({ message: "Facility not found" });
+
+    const documents = collectPreventionDocs(facility);
+    const validUrls = new Set(documents.map((d) => d.url));
+    const summaries = (facility.preventionSummaries || []).filter((s) => validUrls.has(s.fileUrl));
+
+    const AppSettings = require("../models/AppSettings");
+    const agent = require("../utils/automationAgent");
+    const settings = await AppSettings.findOne().lean().catch(() => null);
+    const aiAvailable = agent.isOperational(settings?.automationAgent || {});
+
+    res.json({
+      slfName: facility.slfName || facility.lgu || "",
+      narratives: collectPreventionNarratives(facility),
+      documents,
+      summaries,
+      aiAvailable,
+    });
+  } catch (error) {
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+});
+
+// POST generate / refresh the VERA summary for ONE prevention document.
+// Body: { fileUrl }. The URL MUST belong to this facility (isolation). Extraction
+// failures and low confidence are surfaced as warnings — never a fabricated
+// summary. The result is cached (keyed by fileUrl) so a replaced document (new
+// URL) is re-summarized automatically.
+router.post("/:id/prevention-summary", adminOnly, async (req, res) => {
+  const controller = new AbortController();
+  try {
+    if (!mongoose.isValidObjectId(req.params.id)) return res.status(400).json({ message: "Invalid id" });
+    const fileUrl = String(req.body?.fileUrl || "").trim();
+    if (!fileUrl) return res.status(400).json({ message: "fileUrl is required" });
+
+    const facility = await SlfFacility.findById(req.params.id);
+    if (!facility) return res.status(404).json({ message: "Facility not found" });
+
+    // Isolation: the URL must be one of THIS facility's prevention documents.
+    const docs = collectPreventionDocs(facility);
+    const doc = docs.find((d) => d.url === fileUrl);
+    if (!doc) return res.status(403).json({ message: "That document does not belong to this facility." });
+
+    const AppSettings = require("../models/AppSettings");
+    const agent = require("../utils/automationAgent");
+    const { extractFromUrl } = require("../utils/docExtract");
+    const { summarizeDocument } = require("../utils/preventionSummary");
+
+    const settings = await AppSettings.findOne();
+    const agentConfig = settings?.automationAgent || {};
+    if (!agent.isOperational(agentConfig)) {
+      return res.status(200).json({ ok: false, code: "unavailable", message: "The AI summary service is not configured. The document metadata and official narrative are still available." });
+    }
+
+    // Extract text (validates size/type/permission; refuses encrypted/corrupt).
+    const extracted = await extractFromUrl(fileUrl);
+    const slfName = facility.slfName || facility.lgu || "";
+
+    const upsertSummary = async (entry) => {
+      const list = facility.preventionSummaries || [];
+      const idx = list.findIndex((s) => s.fileUrl === fileUrl);
+      const record = {
+        fileUrl,
+        fileName: doc.fileName,
+        docType: doc.docType,
+        summary: entry.summary || "",
+        confidence: entry.confidence || "",
+        warning: entry.warning || "",
+        model: entry.model || "",
+        generatedAt: new Date(),
+        generatedBy: req.user?.email || req.user?.id || "",
+      };
+      if (idx >= 0) list[idx] = record; else list.push(record);
+      facility.preventionSummaries = list;
+      facility.markModified("preventionSummaries");
+      await facility.save();
+      return record;
+    };
+
+    if (!extracted.ok) {
+      // No reliable text → cache a warning (no fabricated summary).
+      const record = await upsertSummary({ confidence: extracted.meta?.ext ? "low" : "", warning: extracted.warning });
+      return res.json({ ok: true, degraded: true, summary: null, warning: extracted.warning, code: extracted.code, record });
+    }
+
+    const abortTimer = setTimeout(() => controller.abort(), agent.resolveTimeoutMs(agentConfig) + 2000);
+    let result;
+    try {
+      result = await summarizeDocument({ text: extracted.text, docName: doc.fileName, slfName, agentConfig, signal: controller.signal });
+    } finally {
+      clearTimeout(abortTimer);
+    }
+
+    if (!result.ok) {
+      return res.status(200).json({ ok: false, code: result.code, message: result.message });
+    }
+    const record = await upsertSummary({
+      summary: result.summary,
+      confidence: extracted.confidence,
+      warning: extracted.warning,
+      model: result.model,
+    });
+    writeLog("info", "prevention.summary.generated", {
+      message: `Prevention summary generated for ${slfName}`,
+      user: req.user?.email || req.user?.id || "",
+      meta: { facilityId: String(facility._id), docType: doc.docType },
+    });
+    res.json({ ok: true, summary: result.summary, warning: extracted.warning, sourceDocument: doc.fileName, record });
+  } catch (error) {
+    const { sanitizeError } = require("../utils/aiErrors");
+    const { message, code } = sanitizeError(error, "", "anthropic");
+    res.status(200).json({ ok: false, code, message });
   }
 });
 

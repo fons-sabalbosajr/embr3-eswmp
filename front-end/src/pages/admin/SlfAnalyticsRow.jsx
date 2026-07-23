@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
-import { Card, Row, Col, Segmented, Empty, Spin, Typography, Space, Tag, Button, Modal, Statistic, Table } from "antd";
+import { Card, Row, Col, Segmented, Empty, Typography, Space, Tag, Button, Modal, Statistic, Table, Avatar, Tooltip } from "antd";
 import { BarChartOutlined, LineChartOutlined, TeamOutlined, ExpandAltOutlined } from "@ant-design/icons";
+import { convertVolume, TONS, M3 } from "../../utils/volumeUnits";
 import {
   ResponsiveContainer,
   AreaChart,
@@ -19,8 +20,29 @@ import api from "../../api";
 
 const { Text } = Typography;
 
-const UNIT = "m³"; // all aggregation is normalized to m³ (totalVolumeM3)
+// Displayed unit is TONS. Records are aggregated in m³ (the denormalized
+// totalVolumeM3), then converted ONCE to tons for display via the shared
+// convertVolume (×0.2) — a real conversion, never a relabel. This keeps the unit
+// centralized in utils/volumeUnits so kg/m³/tons can never be mixed silently.
+const UNIT = TONS;
+const toTons = (m3) => Math.round((convertVolume(m3, M3, TONS) ?? 0) * 100) / 100;
 const COLORS = ["#1677ff", "#52c41a", "#722ed1", "#fa8c16", "#13c2c2", "#eb2f96", "#2f54eb", "#a0d911"];
+
+// Initials for the default avatar when a portal user has no profile image.
+const initialsOf = (name) => {
+  const parts = String(name || "").trim().split(/\s+/).filter(Boolean);
+  if (!parts.length) return "?";
+  if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
+  return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
+};
+// Deterministic avatar colour from the name (stable per user, no PII).
+const AVATAR_COLORS = ["#1677ff", "#52c41a", "#722ed1", "#fa8c16", "#13c2c2", "#eb2f96", "#2f54eb", "#a0d911"];
+const avatarColor = (name) => {
+  const s = String(name || "");
+  let h = 0;
+  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0;
+  return AVATAR_COLORS[h % AVATAR_COLORS.length];
+};
 
 // A submission counts once. "Valid" = not rejected/reverted/cancelled; the period
 // filter narrows it further. Volume is read from the denormalized totalVolumeM3 so
@@ -110,26 +132,35 @@ export default function SlfAnalyticsRow({ isDark, period = "monthly" }) {
           trendMode === "monthly"
             ? dayjs(b.key + "-01").format("MMM 'YY")
             : dayjs(b.key).format("MMM D"),
-        volume: Math.round(b.volume * 100) / 100,
+        volume: toTons(b.volume), // m³ → tons
       }));
   }, [records, trendMode]);
   const trendData = useMemo(() => trendDataAll.slice(-18), [trendDataAll]);
 
-  // ── Most Active Portal Users ── (full ranking; the card shows the top 8)
+  // ── Most Active Portal Users ── (full ranking; the card shows the top 8).
+  // Enriched with the user's most-associated SLF / organization for the avatar
+  // list. Only portal-account submissions are counted; no email/PII is surfaced.
   const activeUsersAll = useMemo(() => {
     const map = new Map();
     records.forEach((r) => {
       const email = String(r.submittedBy || "").trim().toLowerCase();
       const name = userByEmail[email] || r.submittedBy || r.lguCompanyName || "Unknown";
       const key = email || name;
-      const b = map.get(key) || { name, submissions: 0, volume: 0 };
+      const b = map.get(key) || { name, submissions: 0, volume: 0, _slfCounts: {} };
       b.submissions += 1;
       b.volume += num(r.totalVolumeM3);
+      const slf = r.slfName || r.lguCompanyName || "";
+      if (slf) b._slfCounts[slf] = (b._slfCounts[slf] || 0) + 1;
       map.set(key, b);
     });
     return [...map.values()]
       .sort((a, b) => b.submissions - a.submissions)
-      .map((u) => ({ ...u, volume: Math.round(u.volume * 100) / 100 }));
+      .map((u) => {
+        // Most frequently associated SLF/org for this user.
+        const slf = Object.entries(u._slfCounts).sort((a, b) => b[1] - a[1])[0]?.[0] || "";
+        const { _slfCounts, ...rest } = u;
+        return { ...rest, slf, volume: toTons(u.volume) };
+      });
   }, [records, userByEmail]);
   const activeUsers = useMemo(() => activeUsersAll.slice(0, 8), [activeUsersAll]);
 
@@ -145,9 +176,10 @@ export default function SlfAnalyticsRow({ isDark, period = "monthly" }) {
     return [...map.values()]
       .filter((s) => s.volume > 0)
       .sort((a, b) => b.volume - a.volume)
-      .map((s) => ({ ...s, volume: Math.round(s.volume * 100) / 100 }));
+      .map((s) => ({ ...s, volume: toTons(s.volume) })); // m³ → tons
   }, [records]);
-  const volumeBySlf = useMemo(() => volumeBySlfAll.slice(0, 8), [volumeBySlfAll]);
+  // The card now shows ALL SLFs (scrollable, dynamic height) — no silent top-N cut.
+  const volumeBySlf = volumeBySlfAll;
 
   const cardStyle = { borderRadius: 10, height: "100%" };
   const grid = { xs: 24, md: 12, lg: 8 };
@@ -175,6 +207,56 @@ export default function SlfAnalyticsRow({ isDark, period = "monthly" }) {
       </g>
     );
   };
+
+  // Ranked portal-user avatar list (replaces the old bar chart). Rank #, initials
+  // avatar (default when no profile image), name, associated SLF/org, and the
+  // activity count. Scrolls within the card; no PII (email) is shown.
+  const renderActiveUsers = (users, maxHeight = CHART_H) => (
+    <div style={{ maxHeight, overflowY: "auto", paddingRight: 4 }}>
+      {users.map((u, i) => (
+        <div
+          key={`${u.name}-${i}`}
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 10,
+            padding: "7px 4px",
+            borderBottom: `1px solid ${isDark ? "#1f1f1f" : "#f0f0f0"}`,
+          }}
+        >
+          <span
+            style={{
+              flex: "0 0 auto", width: 22, textAlign: "center", fontWeight: 700,
+              fontSize: 13, color: i < 3 ? "#722ed1" : axisColor,
+            }}
+          >
+            {i + 1}
+          </span>
+          <Avatar size={32} style={{ flex: "0 0 auto", background: avatarColor(u.name) }}>
+            {initialsOf(u.name)}
+          </Avatar>
+          <div style={{ minWidth: 0, flex: 1 }}>
+            <Tooltip title={u.name}>
+              <div style={{ fontWeight: 600, fontSize: 13, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                {u.name}
+              </div>
+            </Tooltip>
+            {u.slf && (
+              <Tooltip title={u.slf}>
+                <div style={{ fontSize: 11, color: axisColor, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                  {u.slf}
+                </div>
+              </Tooltip>
+            )}
+          </div>
+          <div style={{ flex: "0 0 auto", textAlign: "right" }}>
+            <div style={{ fontWeight: 700, fontSize: 14, color: "#722ed1" }}>{Number(u.submissions).toLocaleString()}</div>
+            <div style={{ fontSize: 10, color: axisColor }}>submission{u.submissions === 1 ? "" : "s"}</div>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
 
   const chartCard = (title, icon, extra, hasData, chart, moreKey) => (
     <Col {...grid}>
@@ -288,28 +370,27 @@ export default function SlfAnalyticsRow({ isDark, period = "monthly" }) {
             <Col xs={24} md={8}><Card size="small"><Statistic title="Total Submissions" value={data.reduce((s, d) => s + d.submissions, 0)} formatter={(v) => Number(v).toLocaleString()} /></Card></Col>
           )}
         </Row>
-        <ResponsiveContainer width="100%" height={Math.max(DETAIL_H, data.length * 30)}>
-          <BarChart data={data} layout="vertical" margin={{ top: 4, right: 24, left: 4, bottom: 0 }}>
-            <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke={isDark ? "#303030" : "#f0f0f0"} />
-            <XAxis type="number" tick={{ fontSize: 11, fill: axisColor }} allowDecimals={false} />
-            <YAxis type="category" dataKey="name" width={160} tick={<TruncatedYAxisTick />} interval={0} />
-            <RTooltip
-              formatter={(v, n) =>
-                isUsers
-                  ? [Number(v).toLocaleString(), n === "submissions" ? "Submissions" : "Volume"]
-                  : [`${Number(v).toLocaleString()} ${UNIT}`, "Volume"]
-              }
-              labelFormatter={(l) => l}
-            />
-            <Legend />
-            <Bar dataKey={isUsers ? "submissions" : "volume"} name={isUsers ? "Submissions" : "Volume"} radius={[0, 4, 4, 0]} isAnimationActive={false}>
-              {data.map((_, i) => (
-                <RCell key={i} fill={COLORS[i % COLORS.length]} />
-              ))}
-            </Bar>
-          </BarChart>
-        </ResponsiveContainer>
-        <Table
+        {isUsers ? (
+          renderActiveUsers(activeUsersAll, DETAIL_H)
+        ) : (
+          <div style={{ maxHeight: DETAIL_H, overflowY: "auto", overflowX: "hidden" }}>
+            <ResponsiveContainer width="100%" height={Math.max(DETAIL_H, data.length * 28)}>
+              <BarChart data={data} layout="vertical" margin={{ top: 4, right: 24, left: 4, bottom: 0 }}>
+                <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke={isDark ? "#303030" : "#f0f0f0"} />
+                <XAxis type="number" tick={{ fontSize: 11, fill: axisColor }} />
+                <YAxis type="category" dataKey="name" width={160} tick={<TruncatedYAxisTick />} interval={0} />
+                <RTooltip formatter={(v) => [`${Number(v).toLocaleString()} ${UNIT}`, "Volume"]} labelFormatter={(l) => l} />
+                <Legend />
+                <Bar dataKey="volume" name="Volume" radius={[0, 4, 4, 0]} isAnimationActive={false}>
+                  {data.map((_, i) => (
+                    <RCell key={i} fill={COLORS[i % COLORS.length]} />
+                  ))}
+                </Bar>
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+        )}
+        {/* <Table
           size="small"
           style={{ marginTop: 12 }}
           dataSource={data.map((d, i) => ({ key: i, rank: i + 1, ...d }))}
@@ -321,7 +402,7 @@ export default function SlfAnalyticsRow({ isDark, period = "monthly" }) {
             { title: `Volume (${UNIT})`, dataIndex: "volume", align: "right", render: (v) => Number(v).toLocaleString() },
             ...(isUsers ? [{ title: "Submissions", dataIndex: "submissions", align: "right" }] : []),
           ]}
-        />
+        /> */}
       </>
     );
   };
@@ -370,43 +451,33 @@ export default function SlfAnalyticsRow({ isDark, period = "monthly" }) {
         <TeamOutlined style={{ color: "#722ed1" }} />,
         <Tag color="purple" style={{ margin: 0 }}>Top {activeUsers.length}</Tag>,
         activeUsers.length > 0,
-        <ResponsiveContainer width="100%" height={CHART_H}>
-          <BarChart data={activeUsers} layout="vertical" margin={{ top: 4, right: 12, left: 4, bottom: 0 }}>
-            <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke={isDark ? "#303030" : "#f0f0f0"} />
-            <XAxis type="number" tick={{ fontSize: 11, fill: axisColor }} allowDecimals={false} />
-            <YAxis type="category" dataKey="name" width={120} tick={<TruncatedYAxisTick />} />
-            <RTooltip
-              formatter={(v, n) => [Number(v).toLocaleString(), n === "submissions" ? "Submissions" : "Volume"]}
-              labelFormatter={(l) => l}
-            />
-            <Bar dataKey="submissions" radius={[0, 4, 4, 0]} name="submissions" isAnimationActive={false}>
-              {activeUsers.map((_, i) => (
-                <RCell key={i} fill={COLORS[i % COLORS.length]} />
-              ))}
-            </Bar>
-          </BarChart>
-        </ResponsiveContainer>,
+        renderActiveUsers(activeUsers),
         "users",
       )}
 
       {chartCard(
         "Waste Volume by SLF",
         <BarChartOutlined style={{ color: "#52c41a" }} />,
-        <Text type="secondary" style={{ fontSize: 11 }}>in {UNIT}</Text>,
+        <Text type="secondary" style={{ fontSize: 11 }}>tons · {volumeBySlf.length} SLFs</Text>,
         volumeBySlf.length > 0,
-        <ResponsiveContainer width="100%" height={CHART_H}>
-          <BarChart data={volumeBySlf} layout="vertical" margin={{ top: 4, right: 12, left: 8, bottom: 0 }}>
-            <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke={isDark ? "#303030" : "#f0f0f0"} />
-            <XAxis type="number" tick={{ fontSize: 11, fill: axisColor }} />
-            <YAxis type="category" dataKey="name" width={140} interval={0} tick={<TruncatedYAxisTick />} />
-            <RTooltip labelFormatter={(name) => name} formatter={(v) => [`${Number(v).toLocaleString()} ${UNIT}`, "Volume"]} />
-            <Bar dataKey="volume" radius={[0, 4, 4, 0]} isAnimationActive={false}>
-              {volumeBySlf.map((_, i) => (
-                <RCell key={i} fill={COLORS[i % COLORS.length]} />
-              ))}
-            </Bar>
-          </BarChart>
-        </ResponsiveContainer>,
+        // ALL registered SLFs — no silent top-N cut. Horizontal bars in a scroll
+        // container; the chart's height grows with the SLF count (≥26px/bar) so
+        // every label stays readable, truncated with a full-name tooltip.
+        <div style={{ maxHeight: CHART_H, overflowY: "auto", overflowX: "hidden", paddingRight: 4 }}>
+          <ResponsiveContainer width="100%" height={Math.max(CHART_H, volumeBySlf.length * 26)}>
+            <BarChart data={volumeBySlf} layout="vertical" margin={{ top: 4, right: 12, left: 8, bottom: 0 }}>
+              <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke={isDark ? "#303030" : "#f0f0f0"} />
+              <XAxis type="number" tick={{ fontSize: 11, fill: axisColor }} label={{ value: `Volume (${UNIT})`, position: "insideBottom", offset: -2, fontSize: 10, fill: axisColor }} />
+              <YAxis type="category" dataKey="name" width={140} interval={0} tick={<TruncatedYAxisTick />} />
+              <RTooltip labelFormatter={(name) => name} formatter={(v) => [`${Number(v).toLocaleString()} ${UNIT}`, "Volume"]} />
+              <Bar dataKey="volume" radius={[0, 4, 4, 0]} isAnimationActive={false}>
+                {volumeBySlf.map((_, i) => (
+                  <RCell key={i} fill={COLORS[i % COLORS.length]} />
+                ))}
+              </Bar>
+            </BarChart>
+          </ResponsiveContainer>
+        </div>,
         "slf",
       )}
 

@@ -1901,7 +1901,11 @@ export default function SubmissionSettings({
             Close
           </Button>
         }
-        width={960}
+        width="min(960px, 96vw)"
+        centered
+        // Scroll long content INSIDE the modal so it never overflows the viewport;
+        // the title and footer (Close) stay fixed and accessible.
+        styles={{ body: { maxHeight: "72vh", overflowY: "auto", overflowX: "hidden" } }}
         destroyOnHidden
       >
         {groupedEntriesRecord && (
@@ -1925,60 +1929,66 @@ export default function SubmissionSettings({
               </Text>
             </div>
 
-            {/* Summary cards for the selected group */}
-            <Row gutter={[10, 10]}>
-              <Col xs={12} md={6}>
-                <Card size="small" styles={{ body: { padding: "10px 12px" } }}>
-                  <Text type="secondary" style={{ fontSize: 11 }}>Total Entries</Text>
-                  <div style={{ fontSize: 20, fontWeight: 700, color: ACCENT }}>
-                    {groupedSummary.totalEntries}
-                  </div>
-                </Card>
-              </Col>
-              <Col xs={12} md={6}>
-                <Card size="small" styles={{ body: { padding: "10px 12px" } }}>
-                  <Text type="secondary" style={{ fontSize: 11 }}>Assigned Cell(s)</Text>
-                  <div style={{ fontSize: 20, fontWeight: 700, color: "#13c2c2" }}>
-                    {groupedSummary.cells.length || "—"}
-                  </div>
-                  {groupedSummary.cells.length > 0 && (
-                    <div style={{ marginTop: 2 }}>
-                      {groupedSummary.cells.slice(0, 4).map((c) => (
-                        <Tag key={c} color="cyan" style={{ margin: "2px 2px 0 0", fontSize: 10 }}>{c}</Tag>
-                      ))}
-                      {groupedSummary.cells.length > 4 && (
-                        <Tag style={{ fontSize: 10 }}>+{groupedSummary.cells.length - 4}</Tag>
+            {/* Summary tiles — uniform equal-height cards in a responsive grid.
+                CSS grid with align-items:stretch keeps every tile the same height
+                regardless of content length; each tile shares one radius/padding
+                and a fixed-height header label so values line up. */}
+            <div
+              style={{
+                display: "grid",
+                gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))",
+                gap: 10,
+              }}
+            >
+              {(() => {
+                const wasteValue = groupedSummary.unit === "tons" ? groupedSummary.tons : groupedSummary.m3;
+                const tileBody = { padding: "10px 12px", height: "100%", display: "flex", flexDirection: "column" };
+                const tileStyle = { borderRadius: 10, height: "100%" };
+                const label = (t) => <Text type="secondary" style={{ fontSize: 11, display: "block", minHeight: 16 }}>{t}</Text>;
+                return (
+                  <>
+                    <Card size="small" style={tileStyle} styles={{ body: tileBody }}>
+                      {label("Total Entries")}
+                      <div style={{ fontSize: 20, fontWeight: 700, color: ACCENT, wordBreak: "break-word" }}>
+                        {groupedSummary.totalEntries}
+                      </div>
+                    </Card>
+                    <Card size="small" style={tileStyle} styles={{ body: tileBody }}>
+                      {label("Assigned Cell(s)")}
+                      <div style={{ fontSize: 20, fontWeight: 700, color: "#13c2c2" }}>
+                        {groupedSummary.cells.length || "—"}
+                      </div>
+                      {groupedSummary.cells.length > 0 && (
+                        <div style={{ marginTop: 2 }}>
+                          {groupedSummary.cells.slice(0, 4).map((c) => (
+                            <Tag key={c} color="cyan" style={{ margin: "2px 2px 0 0", fontSize: 10, maxWidth: "100%", whiteSpace: "normal", wordBreak: "break-word" }}>{c}</Tag>
+                          ))}
+                          {groupedSummary.cells.length > 4 && (
+                            <Tag style={{ fontSize: 10 }}>+{groupedSummary.cells.length - 4}</Tag>
+                          )}
+                        </div>
                       )}
-                    </div>
-                  )}
-                </Card>
-              </Col>
-              <Col xs={12} md={6}>
-                <Card size="small" styles={{ body: { padding: "10px 12px" } }}>
-                  <Text type="secondary" style={{ fontSize: 11 }}>Total Waste Volume</Text>
-                  <div style={{ fontSize: 16, fontWeight: 700, color: "#722ed1" }}>
-                    {(() => {
-                      const value = groupedSummary.unit === "tons" ? groupedSummary.tons : groupedSummary.m3;
-                      return value > 0
-                        ? `${Math.round(value).toLocaleString()} ${groupedSummary.unit}`
-                        : "—";
-                    })()}
-                  </div>
-                </Card>
-              </Col>
-              <Col xs={12} md={6}>
-                <Card size="small" styles={{ body: { padding: "10px 12px" } }}>
-                  <Text type="secondary" style={{ fontSize: 11 }}>Status Summary</Text>
-                  <div style={{ marginTop: 4 }}>
-                    {Object.entries(groupedSummary.statusCounts).map(([s, n]) => (
-                      <Tag key={s} color={statusColors[s] || "default"} style={{ margin: "0 4px 4px 0" }}>
-                        {s}: {n}
-                      </Tag>
-                    ))}
-                  </div>
-                </Card>
-              </Col>
-            </Row>
+                    </Card>
+                    <Card size="small" style={tileStyle} styles={{ body: tileBody }}>
+                      {label("Total Waste Volume")}
+                      <div style={{ fontSize: 16, fontWeight: 700, color: "#722ed1", wordBreak: "break-word" }}>
+                        {wasteValue > 0 ? `${Math.round(wasteValue).toLocaleString()} ${groupedSummary.unit}` : "—"}
+                      </div>
+                    </Card>
+                    <Card size="small" style={tileStyle} styles={{ body: tileBody }}>
+                      {label("Status Summary")}
+                      <div style={{ marginTop: 4, display: "flex", flexWrap: "wrap", gap: 2 }}>
+                        {Object.entries(groupedSummary.statusCounts).map(([s, n]) => (
+                          <Tag key={s} color={statusColors[s] || "default"} style={{ margin: 0, whiteSpace: "normal", wordBreak: "break-word" }}>
+                            {s}: {n}
+                          </Tag>
+                        ))}
+                      </div>
+                    </Card>
+                  </>
+                );
+              })()}
+            </div>
 
             {/* Simple status distribution visual */}
             {groupedSummary.totalEntries > 0 && (

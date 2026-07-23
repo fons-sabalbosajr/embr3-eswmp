@@ -150,11 +150,12 @@ export default function SlfClients({ isDark, canView = true, canEdit = true, can
     }
   }, []);
 
-  // Lightweight open-issue count for the toolbar badge.
+  // Authoritative open-issue count for the toolbar badge — one source of truth
+  // (server countDocuments), not the length of a fetched list.
   const fetchOpenIssueCount = useCallback(async () => {
     try {
-      const { data } = await api.get("/slf-clients/issues", { params: { status: "open" } });
-      setOpenIssueCount(Array.isArray(data) ? data.length : 0);
+      const { data } = await api.get("/slf-clients/issues/count", { params: { status: "open" } });
+      setOpenIssueCount(Number(data?.count) || 0);
     } catch { /* non-blocking */ }
   }, []);
   useEffect(() => { fetchOpenIssueCount(); }, [fetchOpenIssueCount]);
@@ -624,11 +625,16 @@ export default function SlfClients({ isDark, canView = true, canEdit = true, can
               <Button icon={<TeamOutlined />} onClick={handleCleanup} loading={cleaning}>Clean Duplicates</Button>
             </Tooltip>
           )}
-          <Badge count={openIssueCount} size="small">
+          <Badge
+            count={openIssueCount}
+            size="small"
+            overflowCount={99}
+            aria-label={`${openIssueCount} unresolved issue${openIssueCount === 1 ? "" : "s"}`}
+          >
             <Button icon={<WarningOutlined />} onClick={openIssues}>Issues</Button>
           </Badge>
           <Button icon={<DownloadOutlined />} onClick={handleExport} disabled={!filtered.length}>Export</Button>
-          <Tooltip title="Refresh"><Button icon={<ReloadOutlined />} onClick={() => fetchRecords(true)} loading={loading} /></Tooltip>
+          <Tooltip title="Refresh"><Button icon={<ReloadOutlined />} onClick={() => { fetchRecords(true); fetchOpenIssueCount(); }} loading={loading} /></Tooltip>
         </Space>
       </div>
 

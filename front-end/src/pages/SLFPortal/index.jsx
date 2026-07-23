@@ -99,6 +99,7 @@ import {
   ResponsiveContainer,
 } from "recharts";
 import api from "../../api";
+import { SUPPORT_EMAIL, SUPPORT_MAILTO } from "../../config/appContact";
 import { useErrorCard } from "../../utils/ErrorHandler";
 import secureStorage from "../../utils/secureStorage";
 import { fetchWithCache, invalidateCache } from "../../utils/pageCache";
@@ -106,6 +107,8 @@ import { connectSocket, disconnectSocket } from "../../utils/socket";
 import embLogo from "../../assets/emblogo.svg";
 import "./SLFPortal.css";
 import SLFPortalModals from "./SLFPortalModals";
+import VeraChat from "./Vera/VeraChat";
+import VeraOnboarding from "../../components/VeraOnboarding";
 import DraftsScheduledPanel from "./DraftsScheduledPanel";
 import RequestsPanel from "./RequestsPanel";
 import HistoryPanel from "./HistoryPanel";
@@ -4413,7 +4416,7 @@ export default function SLFPortal() {
     [slfInfo?.statusOfSLF],
   );
   const NON_OPERATIONAL_MESSAGE =
-    "Your assigned SLF is currently tagged as non-operational and its cell is subject to EMB Region III verification. New submissions cannot be officially submitted while this restriction is active — any submission attempt is saved as a Draft. For assistance, contact EMB Region III at emb_region3@emb.gov.ph.";
+    `Your assigned SLF is currently tagged as non-operational and its cell is subject to EMB Region III verification. New submissions cannot be officially submitted while this restriction is active — any submission attempt is saved as a Draft. For assistance, contact EMB Region III at ${SUPPORT_EMAIL}.`;
 
   const submitBlockers = useMemo(() => {
     const list = [];
@@ -4481,7 +4484,7 @@ export default function SLFPortal() {
           </ul>
           <p style={{ marginBottom: 0 }}>
             For assistance, contact <strong>EMB Region III</strong> at{" "}
-            <a href="mailto:emb_region3@emb.gov.ph">emb_region3@emb.gov.ph</a>.
+            <a href={SUPPORT_MAILTO}>{SUPPORT_EMAIL}</a>.
           </p>
         </div>
       ),
@@ -9342,6 +9345,26 @@ export default function SLFPortal() {
           editingRevertedId={editingRevertedId}
           setEditingRevertedId={setEditingRevertedId}
         />
+        {/* VERA — Virtual Environmental Response Assistant (floating chatbot).
+            Replaces the retired Support & FAQ button; folds ticket access in via
+            the support drawer handlers. */}
+        <VeraChat
+          activeMenu={activeMenu}
+          isMobile={isMobile}
+          onOpenNewTicket={() => {
+            setSupportTab("new-ticket");
+            setSupportDrawerOpen(true);
+            if (supportTickets.length === 0) fetchSupportTickets();
+            markPortalNotificationsRead("support");
+          }}
+          onOpenMyTickets={() => {
+            setSupportTab("my-tickets");
+            setSupportDrawerOpen(true);
+            if (supportTickets.length === 0) fetchSupportTickets();
+            markPortalNotificationsRead("support");
+          }}
+        />
+        <VeraOnboarding portal="slf" userId={portalUser?.email || portalUser?._id} />
         <Modal
           title={
             <Space>

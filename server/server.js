@@ -43,6 +43,7 @@ const haulerDeleteRequestRoutes = require("./routes/haulerDeleteRequests");
 const uploadRoutes = require("./routes/upload");
 const messageRoutes = require("./routes/messages");
 const automationAgentRoutes = require("./routes/automationAgent");
+const veraRoutes = require("./routes/vera");
 
 const app = express();
 const server = http.createServer(app);
@@ -192,6 +193,18 @@ const automationAgentLimiter = rateLimit({
     ipKeyGenerator(req.ip || req.socket?.remoteAddress || "unknown"),
 });
 
+// VERA chatbot burst limiter — portal-user facing, so a more generous ceiling than
+// the admin automation agent. Per-user DAILY limits are enforced in the route.
+const veraLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: Number(process.env.VERA_RATE_MAX ?? (IS_PROD ? 120 : 400)),
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { message: "Too many chat requests, please slow down and try again shortly." },
+  keyGenerator: (req) =>
+    ipKeyGenerator(req.ip || req.socket?.remoteAddress || "unknown"),
+});
+
 app.use(cors({
   origin(origin, cb) {
     // Allow requests with no origin (e.g. server-to-server, curl)
@@ -334,6 +347,9 @@ app.use("/api/settings", settingsRoutes);
 // burst limiter guards the whole router; DAILY per-user/global limits are
 // enforced inside the route from the usage log.
 app.use("/api", automationAgentLimiter, automationAgentRoutes);
+// VERA chatbot (portal-user + admin). Burst limiter guards the router; per-user
+// DAILY limit is enforced inside the route from the usage log.
+app.use("/api/vera", veraLimiter, veraRoutes);
 app.use("/api/users", usersRoutes);
 app.use("/api/logs", logsRoutes);
 app.use("/api/transactions", transactionsRoutes);

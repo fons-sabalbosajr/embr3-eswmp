@@ -190,6 +190,23 @@ const slfFacilitySchema = new mongoose.Schema(
       docType: { type: String, trim: true },
     }],
 
+    // VERA-generated Prevention-Measures document summaries (cache). Keyed by the
+    // source document URL so a REPLACED document (which always gets a new URL)
+    // invalidates automatically — a summary is only ever shown for a document that
+    // currently belongs to THIS facility (no cross-SLF leakage). Regenerated on
+    // demand from the admin Prevention view.
+    preventionSummaries: [{
+      fileUrl: { type: String, trim: true },     // source document (identity/invalidation key)
+      fileName: { type: String, trim: true },
+      docType: { type: String, trim: true },     // "Fire Prevention" | "Trash Slide Measures" | "Preventive Measures" | …
+      summary: { type: String, trim: true },
+      confidence: { type: String, trim: true },  // "high" | "low"
+      warning: { type: String, trim: true },     // set when no reliable summary could be produced
+      model: { type: String, trim: true },
+      generatedAt: { type: Date },
+      generatedBy: { type: String, trim: true },
+    }],
+
     // Link to SLF Generator (portal)
     slfGenerator: { type: mongoose.Schema.Types.ObjectId, ref: "SLFGenerator" },
 

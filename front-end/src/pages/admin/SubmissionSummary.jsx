@@ -1294,6 +1294,12 @@ export default function SubmissionSummary({ isDark }) {
                   .submission-fc .fc-daygrid-day-number { font-weight: 600; color: ${isDark ? "#d9d9d9" : "#1a3353"}; }
                   .submission-fc .fc-selected-day { background: ${isDark ? "rgba(47,84,235,0.18)" : "#f0f5ff"}; }
                   .submission-fc .fc-event { border-radius: 6px; padding: 2px 4px; border: 0; }
+                  /* FullCalendar's "+more" popover defaults to z-index 9999, which
+                     paints ABOVE the antd Daily Details modal (z-index ~1000). Cap it
+                     back INTO the antd scale so the modal always wins — no arbitrary
+                     escalation of the modal's z-index. Sticky header stays below too. */
+                  .submission-fc .fc-popover { z-index: 900 !important; }
+                  .submission-fc .fc-scrollgrid-section-sticky > * { z-index: 1 !important; }
                 `}</style>
                 <div className="submission-fc">
                   <Spin
@@ -1458,7 +1464,10 @@ export default function SubmissionSummary({ isDark }) {
         open={dailyOpen}
         onCancel={() => setDailyOpen(false)}
         footer={<Button onClick={() => setDailyOpen(false)}>Close</Button>}
-        width={860}
+        width="min(860px, 96vw)"
+        centered
+        // Scroll long daily details inside the modal; title + Close stay visible.
+        styles={{ body: { maxHeight: "70vh", overflowY: "auto", overflowX: "hidden" } }}
       >
         <div style={{ marginBottom: 12 }}>
           <Text strong style={{ fontSize: 15 }}>{calendarDate.format("dddd, MMMM D, YYYY")}</Text>
