@@ -583,6 +583,8 @@ export default function DisposalActivityCalendar({ isDark, height, onOpenSubmiss
         rows.push({
           key: `${record._id || ref}-r`,
           slf, slfId, user, submittedBy: record.submittedBy || "", ref, status, statusKey,
+          date: record.dateOfDisposal || null,
+          hauler: "—",
           client: "—", plate: "—", cell: "—", wasteType: "—",
           volume: recVolume(record),
           volumeNum: rv, volUnit: unit,
@@ -602,6 +604,9 @@ export default function DisposalActivityCalendar({ isDark, height, onOpenSubmiss
           rows.push({
             key: `${record._id || ref}-${ti}-${vi}`,
             slf, slfId, user, submittedBy: record.submittedBy || "", ref, status, statusKey,
+            date: record.dateOfDisposal || null,
+            // Hauler is recorded on the truck, not the vehicle.
+            hauler: truck.hauler || truck.haulerName || "—",
             client: clients.length ? [...new Set(clients)].join(", ") : "—",
             plate: v.plateNumber || truck.plateNumber || "—",
             cell: v.cellName || truck.cellName || "—",
@@ -625,10 +630,14 @@ export default function DisposalActivityCalendar({ isDark, height, onOpenSubmiss
     const map = new Map();
     modalRows.forEach((r) => {
       const name = r.slf || "—";
-      if (!map.has(name)) {
-        map.set(name, { name, slfId: r.slfId || "", submittedBy: r.submittedBy || "", rows: [], refs: new Set(), users: new Set(), vol: {}, statusCounts: {} });
+      // Group on the facility ID when the record carries one — grouping on the
+      // NAME split a single SLF into two rows whenever some of its submissions
+      // still held an older name snapshot, double-counting its trips and volume.
+      const groupKey = r.slfId ? `id:${r.slfId}` : `name:${name}`;
+      if (!map.has(groupKey)) {
+        map.set(groupKey, { name, slfId: r.slfId || "", submittedBy: r.submittedBy || "", rows: [], refs: new Set(), users: new Set(), vol: {}, statusCounts: {} });
       }
-      const g = map.get(name);
+      const g = map.get(groupKey);
       if (!g.slfId && r.slfId) g.slfId = r.slfId;
       if (!g.submittedBy && r.submittedBy) g.submittedBy = r.submittedBy;
       g.rows.push(r);
@@ -670,6 +679,25 @@ export default function DisposalActivityCalendar({ isDark, height, onOpenSubmiss
       render: (v) => (
         <Tooltip title={v}>
           <Text strong style={{ fontSize: 12 }}>{v}</Text>
+        </Tooltip>
+      ),
+    },
+    {
+      title: "Date",
+      dataIndex: "date",
+      width: 110,
+      render: (v) => (
+        <Text style={{ fontSize: 12 }}>{v ? dayjs(v).format("MMM D, YYYY") : "—"}</Text>
+      ),
+    },
+    {
+      title: "Hauler",
+      dataIndex: "hauler",
+      width: 150,
+      ellipsis: { showTitle: false },
+      render: (v) => (
+        <Tooltip title={v}>
+          <Text style={{ fontSize: 12 }}>{v || "—"}</Text>
         </Tooltip>
       ),
     },
@@ -1166,7 +1194,7 @@ export default function DisposalActivityCalendar({ isDark, height, onOpenSubmiss
                           ? { pageSize: 10, size: "small", showSizeChanger: false, hideOnSinglePage: true }
                           : false
                       }
-                      scroll={{ x: 760 }}
+                      scroll={{ x: 1020 }}
                       columns={disposalColumns}
                     />
                   ),

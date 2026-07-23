@@ -7,8 +7,32 @@ const Notification = require("../models/Notification");
 const { writeLog } = require("../utils/logger");
 const { notifyAdmin, notifyPortal, refreshAdmin, refreshPortal } = require("../utils/socketEmit");
 const { NON_DUMMY_CLAUSE } = require("../utils/dummyFilter");
+const { isSameSlfSite, facilityDisplayName } = require("../utils/slfIdentity");
 
 const router = express.Router();
+
+// SECONDARY safeguard only — the primary defence against duplicate SLFs is that
+// every relationship (submissions, baselines, portal assignments) is keyed on the
+// facility `_id`, so a renamed SLF can never split into two. This catches the
+// remaining human path: someone typing a second facility row for a site that
+// already exists under a differently-worded name, in the SAME dataYear. Rows that
+// differ only by dataYear are the intended year-versioned model and are allowed.
+async function findDuplicateSiteFacility(candidate, { excludeId = null } = {}) {
+  if (!candidate?.lgu) return null;
+  const year = candidate.dataYear ?? new Date().getFullYear();
+  const filter = { deletedAt: null, dataYear: year };
+  if (excludeId) filter._id = { $ne: excludeId };
+  // Dummy/test facilities live in their own space and never collide with real ones.
+  if (candidate.isDummy) filter.isDummy = true;
+  else filter.isDummy = { $ne: true };
+  if (candidate.province) filter.province = candidate.province;
+
+  const peers = await SlfFacility.find(filter)
+    .select("_id lgu ownership province dataYear")
+    .setOptions({ includeHiddenYears: true })
+    .lean();
+  return peers.find((peer) => isSameSlfSite(peer, candidate)) || null;
+}
 
 // Require an authenticated caller on every route below. Closes anonymous access
 // to facility master data (create/update/delete included). Both frontends
@@ -477,7 +501,27 @@ router.post("/", validateBody({
   noOfLGUServed: { type: "number", min: 0 },
 }), async (req, res) => {
   try {
+    // Block an accidental second facility row for a site that already exists in
+    // this data year under a differently-worded name (see findDuplicateSiteFacility).
+    // `?allowDuplicate=true` is the deliberate override for two genuinely separate
+    // facilities that happen to normalize alike.
+    if (req.query.allowDuplicate !== "true") {
+      const duplicate = await findDuplicateSiteFacility(req.body);
+      if (duplicate) {
+        return res.status(409).json({
+          message: `"${facilityDisplayName(duplicate)}" already exists for ${duplicate.dataYear} and appears to be the same SLF. Edit that record instead, or resubmit with allowDuplicate=true if these are genuinely different facilities.`,
+          code: "DUPLICATE_SLF",
+          existingId: String(duplicate._id),
+          existingName: facilityDisplayName(duplicate),
+          dataYear: duplicate.dataYear,
+        });
+      }
+    }
     const record = await SlfFacility.create(req.body);
+    // Same as the update path: tell every admin view to reload from the server so
+    // a newly created facility is never left living only in one client's state.
+    refreshAdmin(req, "submissions");
+    refreshAdmin(req, "baselines");
     res.status(201).json(record);
     writeLog("info", "slfFacility.create", { message: `Created SLF: ${record.lgu}`, ip: req.ip });
   } catch (error) {
@@ -495,6 +539,31 @@ router.put("/:id", async (req, res) => {
     });
     const record = await SlfFacility.findOne({ _id: req.params.id, deletedAt: null });
     if (!record) return res.status(404).json({ message: "Record not found" });
+
+    // Renaming/re-yearing a facility onto another existing facility's identity
+    // would recreate the duplicate this fix removes — reject it the same way a
+    // duplicate create is rejected.
+    if (req.query.allowDuplicate !== "true" && (update.lgu || update.dataYear || update.ownership)) {
+      const duplicate = await findDuplicateSiteFacility(
+        {
+          lgu: update.lgu ?? record.lgu,
+          ownership: update.ownership ?? record.ownership,
+          province: update.province ?? record.province,
+          dataYear: update.dataYear ?? record.dataYear,
+          isDummy: update.isDummy ?? record.isDummy,
+        },
+        { excludeId: record._id },
+      );
+      if (duplicate) {
+        return res.status(409).json({
+          message: `"${facilityDisplayName(duplicate)}" already exists for ${duplicate.dataYear} and appears to be the same SLF. Merge into that record instead, or resubmit with allowDuplicate=true if these are genuinely different facilities.`,
+          code: "DUPLICATE_SLF",
+          existingId: String(duplicate._id),
+          existingName: facilityDisplayName(duplicate),
+          dataYear: duplicate.dataYear,
+        });
+      }
+    }
 
     // Capture the SLF display name before the update so a rename can be
     // propagated to portal users and their submission/baseline records.

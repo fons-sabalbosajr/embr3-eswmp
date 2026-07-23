@@ -235,6 +235,11 @@ export default function SLFPortal() {
   const [slfInfoLoading, setSlfInfoLoading] = useState(false);
   const [baselineLoading, setBaselineLoading] = useState(false);
   const [slfInfoRefresh, setSlfInfoRefresh] = useState(0);
+  // Bumped after a baseline write so the fetch effect below re-runs and the cell
+  // tables are re-seeded from what the server actually PERSISTED — not from the
+  // local draft. Without this, an edited cell name / waste type / volume was only
+  // ever visible as local state and reverted to the stored values on reload.
+  const [baselineRefresh, setBaselineRefresh] = useState(0);
   // Item #4: admin → portal-user messages shown after login.
   const [portalMessages, setPortalMessages] = useState([]);
   const [slfCardExpanded, setSlfCardExpanded] = useState(false);
@@ -1134,7 +1139,12 @@ export default function SLFPortal() {
       const baseLabel = cellLabelFor(index);
       return {
         label: `${baseLabel} - ${type}${status ? ` (${status})` : ""}`,
-        value: `Cell ${index + 1}`,
+        // The option's VALUE is the cell's declared name from the facility's cell
+        // infrastructure — it used to be the positional `Cell N`. Picking the cell
+        // shown as "Cell 1A" therefore wrote the string "Cell 1" into the baseline
+        // entry, so the Baseline Data table never showed the cell the user had
+        // actually chosen. `cellIndex` below stays the relationship key.
+        value: resolveCellName(slfInfo, index),
         cellType: type,
         cellIndex: index,
         status,
@@ -1750,7 +1760,7 @@ export default function SLFPortal() {
     // Stable primitive deps (see slfInfo effect above) so a portalUser reference
     // change doesn't abort the in-flight baseline fetch.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeSlfId, activeSlfName]);
+  }, [activeSlfId, activeSlfName, baselineRefresh]);
 
   // Re-fetch baseline when admin approves/rejects
   useEffect(() => {
@@ -2599,8 +2609,15 @@ export default function SLFPortal() {
     const converted =
       stored === declared ? row.volume : convertVolume(row.volume, stored, declared);
     setEditingKey(row.key);
+    // Resolve the name from the cell's stable index so an entry saved under an old
+    // (or positional) label opens pre-selected on the cell it actually refers to,
+    // rather than as an unmatched "(not in cell infra)" value.
+    const canonicalName =
+      typeof row.cellIndex === "number"
+        ? resolveCellName(slfInfo, row.cellIndex, row.cellName)
+        : row.cellName;
     setDraft({
-      cellName: row.cellName,
+      cellName: canonicalName || row.cellName,
       cellType: row.cellType,
       cellIndex: row.cellIndex,
       wasteType: row.wasteType,
@@ -3015,30 +3032,32 @@ export default function SLFPortal() {
       const isInertEntry = (entry) => wasteTypeOf(entry).includes("inert") || isLegacyInertHazard(entry);
       const sumCellEntries = (entries, predicate) =>
         entries.filter(predicate).reduce((sum, entry) => sum + (Number(entry.volume) || 0), 0);
-      const activeCellResidualVolume =
-        sumCellEntries(activeCellEntries, isResidualEntry) ||
-        baselineValues.activeCellResidualVolume ||
-        undefined;
-      const activeCellInertVolume =
-        sumCellEntries(activeCellEntries, isInertEntry) ||
-        baselineValues.activeCellInertVolume ||
-        undefined;
-      const activeCellHazardousVolume =
-        sumCellEntries(activeCellEntries, isHazardousEntry) ||
-        baselineValues.activeCellHazardousVolume ||
-        undefined;
-      const closedCellResidualVolume =
-        sumCellEntries(closedCellEntries, isResidualEntry) ||
-        baselineValues.closedCellResidualVolume ||
-        undefined;
-      const closedCellInertVolume =
-        sumCellEntries(closedCellEntries, isInertEntry) ||
-        baselineValues.closedCellInertVolume ||
-        undefined;
-      const closedCellHazardousVolume =
-        sumCellEntries(closedCellEntries, isHazardousEntry) ||
-        baselineValues.closedCellHazardousVolume ||
-        undefined;
+      // When cell entries exist they are AUTHORITATIVE for the legacy per-waste-type
+      // totals. The previous `sum || formValue || undefined` fallback meant changing
+      // an entry's Waste Type left the vacated bucket holding its old figure (the sum
+      // became 0, which is falsy, so the stale form value won) — the edit looked like
+      // it had not applied. `null` is sent rather than `undefined` so an emptied
+      // bucket is actually cleared on the server instead of being skipped.
+      const entryTotal = (entries, predicate, fallback) =>
+        entries.length ? sumCellEntries(entries, predicate) || null : fallback || undefined;
+      const activeCellResidualVolume = entryTotal(
+        activeCellEntries, isResidualEntry, baselineValues.activeCellResidualVolume,
+      );
+      const activeCellInertVolume = entryTotal(
+        activeCellEntries, isInertEntry, baselineValues.activeCellInertVolume,
+      );
+      const activeCellHazardousVolume = entryTotal(
+        activeCellEntries, isHazardousEntry, baselineValues.activeCellHazardousVolume,
+      );
+      const closedCellResidualVolume = entryTotal(
+        closedCellEntries, isResidualEntry, baselineValues.closedCellResidualVolume,
+      );
+      const closedCellInertVolume = entryTotal(
+        closedCellEntries, isInertEntry, baselineValues.closedCellInertVolume,
+      );
+      const closedCellHazardousVolume = entryTotal(
+        closedCellEntries, isHazardousEntry, baselineValues.closedCellHazardousVolume,
+      );
 
       await api.patch(
         `/data-slf/portal-save-baseline/${encodeURIComponent(activeSlfName)}`,
@@ -3108,6 +3127,10 @@ export default function SLFPortal() {
 
       setBaselineSaved(true);
       setBaselineUpdatePending(false);
+      // Re-read the saved baseline so the Active/Closed Cell tables (and the
+      // totals derived from them) show what was persisted, immediately — the same
+      // values a page reload would produce.
+      setBaselineRefresh((n) => n + 1);
 
       Swal.fire({
         icon: "success",

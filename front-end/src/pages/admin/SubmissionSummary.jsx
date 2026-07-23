@@ -45,6 +45,10 @@ import { fetchWithCache, invalidateCache } from "../../utils/pageCache";
 import { getSocket } from "../../utils/socket";
 import excludeDummy from "../../utils/excludeDummy";
 import { convertVolume } from "../../utils/volumeUnits";
+import {
+  buildSubmissionWasteEntries,
+  formatWasteEntryTotals,
+} from "../../utils/submissionEntries";
 
 const { Text } = Typography;
 const ACCENT = "#2f54eb";
@@ -665,12 +669,23 @@ export default function SubmissionSummary({ isDark }) {
         if (late > 1) issues.push(`Late submission — encoded ${late} days after the disposal date`);
       }
 
-      return { record, totalVol, tons, m3, unit, isResub, acknowledged, nonOperational, issues };
+      // Per-waste-entry breakdown for the modal — one row per truck/vehicle load,
+      // each carrying its own hauler, waste type, volume + unit and cell.
+      const wasteEntries = buildSubmissionWasteEntries(record, {
+        slfName: calendarRecord?.slfName || record.slfName,
+        fallbackUnit: facUnit,
+      });
+
+      return {
+        record, totalVol, tons, m3, unit, isResub, acknowledged, nonOperational, issues,
+        wasteEntries,
+        volumeSummary: formatWasteEntryTotals(wasteEntries, unit),
+      };
     });
 
     const issueCount = rows.reduce((n, r) => n + r.issues.length, 0);
     return { rows, facility, facUnit, nonOperational, issueCount };
-  }, [selectedDayRecords, calendarFacility]);
+  }, [selectedDayRecords, calendarFacility, calendarRecord?.slfName]);
 
   const selectedCellRows = useMemo(() => {
     if (!calendarRecord) return [];
@@ -776,34 +791,69 @@ export default function SubmissionSummary({ isDark }) {
       return;
     }
     const unit = normalizeUnit(calendarRecord.baselineUnit || displayUnit);
-    const volumeOf = (record) => {
-      const trucks = record.trucks || [];
-      if (trucks.length === 0) {
-        return unit === "tons" ? Number(record.totalVolumeTons || 0) : Number(record.totalVolumeM3 || 0);
-      }
-      return trucks.reduce((sum, t) => {
-        const v = convertVolume(Number(t.actualVolume || 0), t.actualVolumeUnit || record.baselineUnit || unit, unit);
-        return sum + (v || 0);
-      }, 0);
-    };
     const esc = (v) => `"${String(v ?? "").replace(/"/g, '""')}"`;
-    const header = ["Date", "SLF", "Submission ID", "Generator", "Trucks", `Volume (${unit})`, "Status"];
+    // One row per WASTE ENTRY, not one per submission. Every volume ships with its
+    // own Unit of Measurement column plus a normalized column in the SLF's declared
+    // unit, so no exported quantity is ambiguous. The SLF name comes from the
+    // calendar row, which the server now resolves from the canonical facility
+    // record — so a renamed/duplicated name can no longer produce two sets of rows
+    // for the same facility.
+    const header = [
+      "SLF Name",
+      "Submission Date",
+      "Submission ID",
+      "Generator",
+      "Hauler",
+      "Plate No.",
+      "Waste Type",
+      "Waste Volume",
+      "Unit of Measurement",
+      `Volume (${unit})`,
+      "Cell",
+      "Status",
+    ];
+    const seenEntryKeys = new Set();
     const rows = filtered
       .slice()
       .sort((a, b) => dayjs(a.dateOfDisposal).valueOf() - dayjs(b.dateOfDisposal).valueOf())
-      .map((r) =>
-        [
-          dayjs(r.dateOfDisposal).format("YYYY-MM-DD"),
-          calendarRecord.slfName || r.slfName || "",
-          r.idNo || r.submissionId || "",
-          r.lguCompanyName || r.companyName || "",
-          r.truckCount ?? (r.trucks?.length ?? 0),
-          Number(volumeOf(r).toFixed(2)),
-          r.status || "pending",
-        ]
-          .map(esc)
-          .join(","),
+      .flatMap((record) =>
+        buildSubmissionWasteEntries(record, {
+          slfName: calendarRecord.slfName || record.slfName,
+          fallbackUnit: unit,
+        })
+          // Guard against the same underlying entry being emitted twice if a
+          // record were ever fetched under two identities.
+          .filter((entry) => {
+            if (seenEntryKeys.has(entry.key)) return false;
+            seenEntryKeys.add(entry.key);
+            return true;
+          })
+          .map((entry) => {
+            const normalized = convertVolume(entry.volume, entry.unit, unit);
+            return [
+              entry.slfName,
+              entry.date ? dayjs(entry.date).format("YYYY-MM-DD") : "",
+              entry.submissionId,
+              record.lguCompanyName || record.companyName || "",
+              entry.hauler || "",
+              entry.plateNumber || "",
+              entry.wasteType || "",
+              entry.volume == null ? "" : Number(entry.volume.toFixed(2)),
+              // Never blank when a volume is present — an unlabelled quantity is
+              // exactly what this column exists to prevent.
+              entry.volume == null ? "" : entry.unit || "unit not recorded",
+              normalized == null ? "" : Number(normalized.toFixed(2)),
+              entry.cell || "Unplaced",
+              entry.status || "pending",
+            ]
+              .map(esc)
+              .join(",");
+          }),
       );
+    if (rows.length === 0) {
+      Modal.info({ title: "Nothing to export", content: "No waste entries fall in the selected range." });
+      return;
+    }
     const csv = [header.map(esc).join(","), ...rows].join("\n");
     const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
     const url = URL.createObjectURL(blob);
@@ -1507,12 +1557,15 @@ export default function SubmissionSummary({ isDark }) {
               />
             )}
             <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-              {selectedDayDetail.rows.map(({ record, totalVol, unit, isResub, acknowledged, issues }) => (
+              {selectedDayDetail.rows.map(({ record, isResub, acknowledged, issues, wasteEntries, volumeSummary }) => (
                 <Card key={record._id} size="small" style={{ borderRadius: 8, borderLeft: `3px solid ${issues.length ? "#fa8c16" : "#52c41a"}` }}>
                   <Row gutter={[12, 8]}>
                     <Col xs={12} md={8}><Text type="secondary">Submission ID:</Text><br /><Text strong>{record.idNo || record.submissionId || "—"}</Text></Col>
                     <Col xs={12} md={8}><Text type="secondary">Generator:</Text><br /><Text>{record.lguCompanyName || record.companyName || record.generatorName || "—"}</Text></Col>
-                    <Col xs={12} md={8}><Text type="secondary">Disposal Quantity:</Text><br /><Text strong>{formatVolume(unit === "tons" ? 0 : totalVol, unit === "tons" ? totalVol : 0, unit)}</Text></Col>
+                    {/* Every quantity is shown with the unit it was recorded in; a
+                        submission mixing units reads as "A m³ + B tons", never as one
+                        ambiguous number. */}
+                    <Col xs={12} md={8}><Text type="secondary">Disposal Quantity:</Text><br /><Text strong>{volumeSummary}</Text></Col>
                     <Col xs={12} md={8}><Text type="secondary">Submitted:</Text><br /><Text>{record.createdAt ? dayjs(record.createdAt).format("MMM D, YYYY h:mm A") : "—"}</Text></Col>
                     <Col xs={12} md={8}><Text type="secondary">{isResub ? "Resubmitted:" : "Last Updated:"}</Text><br /><Text>{record.updatedAt ? dayjs(record.updatedAt).format("MMM D, YYYY h:mm A") : "—"}</Text></Col>
                     <Col xs={12} md={8}>
@@ -1529,6 +1582,66 @@ export default function SubmissionSummary({ isDark }) {
                       <Col xs={24} md={12}><Text type="secondary">Submitted by:</Text> <Text>{record.submittedBy}</Text></Col>
                     )}
                   </Row>
+
+                  {/* Waste breakdown — one row per waste entry in the submission,
+                      instead of the single combined value shown previously. */}
+                  <div style={{ marginTop: 10 }}>
+                    <Text type="secondary" style={{ fontSize: 12 }}>
+                      Waste Breakdown ({wasteEntries.length} entr{wasteEntries.length === 1 ? "y" : "ies"})
+                    </Text>
+                    <Table
+                      size="small"
+                      style={{ marginTop: 6 }}
+                      rowKey="key"
+                      dataSource={wasteEntries}
+                      pagination={wasteEntries.length > 8 ? { pageSize: 8, size: "small" } : false}
+                      scroll={{ x: 760 }}
+                      locale={{ emptyText: "No waste entries recorded for this submission" }}
+                      columns={[
+                        {
+                          title: "Date",
+                          dataIndex: "date",
+                          width: 110,
+                          render: (value) => (value ? dayjs(value).format("MMM D, YYYY") : "—"),
+                        },
+                        { title: "Hauler", dataIndex: "hauler", width: 150, render: (v) => v || "—" },
+                        {
+                          title: "Waste Type",
+                          dataIndex: "wasteType",
+                          width: 150,
+                          render: (v) =>
+                            v ? (
+                              <Tag color={/hazard/i.test(v) ? "volcano" : "blue"}>{v}</Tag>
+                            ) : (
+                              "—"
+                            ),
+                        },
+                        {
+                          title: "Volume",
+                          dataIndex: "volume",
+                          width: 100,
+                          align: "right",
+                          render: (v) =>
+                            v == null ? "—" : v.toLocaleString(undefined, { maximumFractionDigits: 2 }),
+                        },
+                        // The unit is its OWN column so no exported/displayed volume
+                        // can ever be read without knowing what it is measured in.
+                        { title: "Unit", dataIndex: "unit", width: 70, render: (v) => v || "—" },
+                        { title: "Cell", dataIndex: "cell", width: 110, render: (v) => v || "Unplaced" },
+                        {
+                          title: "Status",
+                          dataIndex: "status",
+                          width: 120,
+                          render: (v) => (
+                            <Tag color={v === "acknowledged" ? "green" : v === "rejected" ? "red" : /revert/.test(v || "") ? "orange" : "gold"}>
+                              {v || "pending"}
+                            </Tag>
+                          ),
+                        },
+                      ]}
+                    />
+                  </div>
+
                   {issues.length > 0 && (
                     <div style={{ marginTop: 8 }}>
                       {issues.map((iss, i) => (

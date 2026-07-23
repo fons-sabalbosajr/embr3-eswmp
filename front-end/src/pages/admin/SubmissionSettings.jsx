@@ -23,6 +23,7 @@ import {
   Alert,
   Progress,
   Pagination,
+  message,
 } from "antd";
 import {
   CheckOutlined,
@@ -50,6 +51,7 @@ import {
   ToolOutlined,
 } from "@ant-design/icons";
 import { exportToExcel } from "../../utils/exportExcel";
+import { buildSubmissionWasteEntries } from "../../utils/submissionEntries";
 import Swal from "sweetalert2";
 import api from "../../api";
 import secureStorage from "../../utils/secureStorage";
@@ -640,6 +642,96 @@ export default function SubmissionSettings({
   // groups, so the table renders the grouped rows as-is. `pagination.total`
   // (group count) comes from the server — do not derive it from row length.
   const filteredTableRows = tableRows;
+
+  // ── SLF submission export ──
+  // Exports one row per WASTE ENTRY, not one per submission, so hauler, waste type,
+  // cell and — critically — the unit of measurement for every volume are present.
+  // The table's own rows carry no `trucks` (the list endpoint strips them to keep
+  // the page light), so the current page is re-fetched with includeTrucks before
+  // expanding. `slfName` comes from the record's populated facility whenever one
+  // exists, so a stale name snapshot can't split one SLF across two labels.
+  const [exportingSubmissions, setExportingSubmissions] = useState(false);
+  const handleExportSubmissions = useCallback(async () => {
+    setExportingSubmissions(true);
+    try {
+      const { data: resp } = await api.get("/data-slf", {
+        params: {
+          mode: "list",
+          grouped: "true",
+          includeTrucks: "true",
+          page: pagination.current,
+          limit: pagination.pageSize,
+          ...(isDeveloper ? { includeDummy: "true" } : {}),
+          ...(statusFilter && statusFilter !== "all" ? { status: statusFilter } : {}),
+          ...(cellPlacementFilter && cellPlacementFilter !== "all"
+            ? { cellPlacement: cellPlacementFilter }
+            : {}),
+          ...(debouncedSearch.trim() ? { search: debouncedSearch.trim() } : {}),
+        },
+      });
+      const records = Array.isArray(resp) ? resp : Array.isArray(resp?.data) ? resp.data : [];
+
+      const seen = new Set();
+      const rows = [];
+      records.forEach((record) => {
+        const facility = record.slfGenerator;
+        const canonicalName =
+          (facility && typeof facility === "object"
+            ? `${facility.lgu || ""}${facility.ownership ? ` (${facility.ownership})` : ""}`.trim()
+            : "") ||
+          record.slfName ||
+          "";
+        buildSubmissionWasteEntries(record, {
+          slfName: canonicalName,
+          fallbackUnit: record.baselineUnit,
+        }).forEach((entry) => {
+          // The same submission can be reachable under more than one identity;
+          // de-duplicate on the entry key so no row is written twice.
+          if (seen.has(entry.key)) return;
+          seen.add(entry.key);
+          rows.push({
+            "SLF Name": entry.slfName,
+            "Submission Date": entry.date ? dayjs(entry.date).format("YYYY-MM-DD") : "",
+            "ID No.": entry.submissionId,
+            "LGU/Company": record.lguCompanyName || "",
+            Hauler: entry.hauler || "",
+            "Plate No.": entry.plateNumber || "",
+            "Waste Type": entry.wasteType || "",
+            "Waste Volume": entry.volume == null ? "" : Number(entry.volume.toFixed(2)),
+            // Always populated alongside a volume — an unlabelled quantity is
+            // exactly what this column exists to prevent.
+            "Unit of Measurement":
+              entry.volume == null ? "" : entry.unit || "unit not recorded",
+            Cell: entry.cell || "Unplaced",
+            Status: entry.status || "pending",
+            "Submitted By": record.submittedBy || "",
+            "Submitted At": record.createdAt
+              ? dayjs(record.createdAt).format("YYYY-MM-DD HH:mm")
+              : "",
+          });
+        });
+      });
+
+      if (!rows.length) {
+        message.info("No waste entries to export for the current filters.");
+        return;
+      }
+      exportToExcel(rows, "SLF Submissions");
+    } catch (err) {
+      message.error(
+        err?.response?.data?.message || "Could not build the submission export.",
+      );
+    } finally {
+      setExportingSubmissions(false);
+    }
+  }, [
+    pagination.current,
+    pagination.pageSize,
+    isDeveloper,
+    statusFilter,
+    cellPlacementFilter,
+    debouncedSearch,
+  ]);
 
   const selectedEntryIds = useMemo(() => {
     const ids = new Set();
@@ -1786,23 +1878,8 @@ export default function SubmissionSettings({
            <Button
             icon={<DownloadOutlined />}
             type="primary"
-            onClick={() => {
-              const rows = filteredTableRows.map((d) => ({
-                "ID No.": d.idNo,
-                "LGU/Company": d.lguCompanyName,
-                "Company Type": d.companyType,
-                "Date of Disposal": d.dateOfDisposal
-                  ? dayjs(d.dateOfDisposal).format("YYYY-MM-DD")
-                  : "",
-                Status: d.status,
-                Trucks: d.truckCount ?? d.trucks?.length ?? 0,
-                "Submitted By": d.submittedBy || "",
-                "Submitted At": d.createdAt
-                  ? dayjs(d.createdAt).format("YYYY-MM-DD HH:mm")
-                  : "",
-              }));
-              exportToExcel(rows, "Submissions");
-            }}
+            loading={exportingSubmissions}
+            onClick={handleExportSubmissions}
           >
             Export Excel
           </Button>
