@@ -70,6 +70,7 @@ import {
   FileDoneOutlined,
   FundOutlined,
   SafetyCertificateOutlined,
+  RobotOutlined,
   AppstoreOutlined,
   BellOutlined,
   MessageOutlined,
@@ -79,6 +80,7 @@ import {
   CopyOutlined,
   CheckCircleOutlined,
   CloseCircleOutlined,
+  InfoCircleOutlined,
   CalendarOutlined,
   DatabaseOutlined,
   HistoryOutlined,
@@ -89,7 +91,8 @@ import {
   TableOutlined,
   MailOutlined,
 } from "@ant-design/icons";
-import AdminTipCard from "../admin/AdminTipCard";
+import VeraCard from "../admin/VeraCard";
+import PreventionMeasuresPanel from "../admin/PreventionMeasuresPanel";
 import api from "../../api";
 import GaugeMeter, { computeGaugePercent } from "../../components/GaugeMeter";
 import {
@@ -103,7 +106,6 @@ import {
 import { convertVolume, resolveCellUnit } from "../../utils/volumeUnits";
 import secureStorage from "../../utils/secureStorage";
 import { getSocket } from "../../utils/socket";
-import { mapPresentationFor } from "../../utils/submissionStatus";
 import {
   MapContainer,
   TileLayer,
@@ -191,6 +193,7 @@ export default function DashboardContent({ user, isDark, setActiveMenu, onOpenSu
   const [slfFilterProvince, setSlfFilterProvince] = useState(null);
   const [slfFilterStatus, setSlfFilterStatus] = useState(null);
   const [slfDashModal, setSlfDashModal] = useState(null); // { type: dashboard metric key }
+  const [preventionPanel, setPreventionPanel] = useState(null); // { facilityId, slfName } | null
   const [slfCellDrill, setSlfCellDrill] = useState(null); // selected SLF in Cell Infrastructure modal → per-cell cards
 
   const mapPts = useMemo(
@@ -422,22 +425,23 @@ export default function DashboardContent({ user, isDark, setActiveMenu, onOpenSu
     [slfFacStats && slfFacStats.mapData],
   );
 
-  // SLF Location Map: today's submission status keyed by SLF id (declared before
-  // the map-status memos below that read it, to avoid a TDZ access during render).
+  // SLF Location Map: per-SLF submission status FOR THE SELECTED CALENDAR DATE,
+  // keyed by SLF id (declared before the map-status memos below that read it, to
+  // avoid a TDZ access during render). The map is date-specific: it reflects the
+  // day chosen in the Disposal Calendar, not an overall "latest" status.
   const [slfToday, setSlfToday] = useState({ byId: {}, generatedAt: null, loading: false, error: false });
 
-  // The map Status filter now filters by SUBMISSION status for the selected date
-  // (acknowledged / pending / no-submission) — the map's focus.
-  const mapSubStatus = (record) => {
-    const s = slfToday.byId[String(record._id)]?.submissionStatus;
-    return s === "acknowledged" || s === "pending" || s === "pending-resubmission" ? s : "no-submission";
-  };
+  // Resolved marker status for an SLF on the selected date, or "no-data" when the
+  // SLF has no disposal activity that date. Used by BOTH the markers and the
+  // Status filter so they can never disagree.
+  const slfMarkerStatusKey = (record) =>
+    slfToday.byId[String(record._id)]?.submissionStatus || "no-data";
   const filteredSlfMapPts = useMemo(() => {
     let pts = slfMapPts;
     if (slfFilterProvince)
       pts = pts.filter((p) => p.record.province === slfFilterProvince);
     if (slfFilterStatus)
-      pts = pts.filter((p) => mapSubStatus(p.record) === slfFilterStatus);
+      pts = pts.filter((p) => slfMarkerStatusKey(p.record) === slfFilterStatus);
     return pts;
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [slfMapPts, slfFilterProvince, slfFilterStatus, slfToday.byId]);
@@ -530,17 +534,19 @@ export default function DashboardContent({ user, isDark, setActiveMenu, onOpenSu
   const slfDateStr = slfMapDate ? slfMapDate.format("YYYY-MM-DD") : "";
   useEffect(() => {
     let id = null;
-    const start = () => { if (!id) id = setInterval(() => fetchTodayStatus(slfDateStr), 5 * 60 * 1000); };
+    const refresh = () => fetchTodayStatus(slfDateStr);
+    const start = () => { if (!id) id = setInterval(refresh, 5 * 60 * 1000); };
     const stop = () => { if (id) { clearInterval(id); id = null; } };
-    const onVis = () => { if (document.hidden) stop(); else { fetchTodayStatus(slfDateStr); start(); } };
-    fetchTodayStatus(slfDateStr);
+    const onVis = () => { if (document.hidden) stop(); else { refresh(); start(); } };
+    refresh();
     start();
     document.addEventListener("visibilitychange", onVis);
     // Smooth in-place refresh (map layer only, not the whole dashboard) when a
-    // submission is acknowledged/reverted/rejected/restored elsewhere.
+    // submission/calendar record is created/updated/deleted/acknowledged/reverted —
+    // markers for the selected date update without a stale cache.
     const socket = getSocket();
     const onRefresh = ({ target } = {}) => {
-      if (["submissions", "slf-waste-generators", "baselines"].includes(target)) fetchTodayStatus(slfDateStr);
+      if (["submissions", "slf-waste-generators", "baselines"].includes(target)) refresh();
     };
     if (socket) socket.on("data-refresh", onRefresh);
     return () => {
@@ -579,37 +585,36 @@ export default function DashboardContent({ user, isDark, setActiveMenu, onOpenSu
     html: `<div class="slf-today"><span class="${ringClass}"></span><div class="slf-today-dot" style="background:${color}">${glyph}</div></div>`,
     iconSize: [22, 22], iconAnchor: [11, 11], popupAnchor: [0, -14],
   });
-  // ONE marker per SLF, resolved by a strict priority so several concurrent
-  // conditions never draw conflicting pulses. Only attention-states (pending /
-  // resubmission) pulse; settled states (non-operational, acknowledged, none) are
-  // static. Colours reuse the existing status palette; resubmission stays distinct.
-  //   1 Non-operational restriction   → red ✕ (static)
+  // ONE marker per SLF, keyed to that SLF's disposal status FOR THE SELECTED
+  // CALENDAR DATE so the marker matches the Disposal Activity calendar. Resolved
+  // by strict priority so concurrent conditions never draw conflicting pulses.
+  // Only attention-states (pending / resubmission) pulse; settled states are
+  // static. Colours/glyphs come from the shared MAP_MARKER config.
+  //   1 Non-operational restriction   → red ✕ (static, highest priority)
   //   2 Pending resubmission          → orange ↻ (pulse)
-  //   3 Pending initial submission    → yellow ◷ (pulse)   [= unacknowledged pending]
-  //   4 Acknowledged (up to date)     → blue ✓ (static)
-  //   5 No submission for the period  → gray ○ (static)    [missing / not monitored]
-  const slfTodayIcon = (record) => {
+  //   3 Pending initial submission    → yellow ◷ (pulse)
+  //   4 Reverted (sent back)          → orange ↺ (static)
+  //   5 Rejected (not accepted)       → red ⊘ (static)
+  //   6 Acknowledged                  → blue ✓ (static)
+  //   7 No activity for the date      → light-gray – (static)  [neutral default]
+  const slfMarkerIcon = (record) => {
     const op = classifySlfStatus(record.statusOfSLF);
-    // 1: non-operational overrides everything (cell subject to EMB R3 verification).
     if (op === "nonOperational") return staticMarker("#ff4d4f", "✕");
-    const sub = slfToday.byId[String(record._id)]?.submissionStatus;
-    // 2: pending resubmission — distinct resubmission colour, pulsing.
+    const sub = slfToday.byId[String(record._id)]?.submissionStatus || "no-data";
     if (sub === "pending-resubmission") {
       const m = MAP_MARKER["pending-resubmission"];
       return pulseMarker(m.color, m.glyph, m.ring);
     }
-    // 3: pending initial submission (unacknowledged) — pulsing.
     if (sub === "pending") {
       const m = MAP_MARKER.pending;
       return pulseMarker(m.color, m.glyph, m.ring);
     }
-    // 4: acknowledged — operational and up to date for the period (calm, no pulse).
-    if (sub === "acknowledged") {
-      const m = MAP_MARKER.acknowledged;
-      return staticMarker(m.color, m.glyph);
-    }
-    // 5: no submission for the required reporting period — missing / not monitored.
-    return staticMarker("#8c8c8c", "○");
+    if (sub === "reverted") { const m = MAP_MARKER.reverted; return staticMarker(m.color, m.glyph); }
+    if (sub === "rejected") { const m = MAP_MARKER.rejected; return staticMarker(m.color, m.glyph); }
+    if (sub === "acknowledged") { const m = MAP_MARKER.acknowledged; return staticMarker(m.color, m.glyph); }
+    // Fallback: no calendar record ever vs. a resolved no-submission state.
+    const m = MAP_MARKER[sub] || MAP_MARKER["no-data"];
+    return staticMarker(m.color, m.glyph);
   };
 
   const tile = TILE_LAYERS[tileKey];
@@ -6090,15 +6095,21 @@ export default function DashboardContent({ user, isDark, setActiveMenu, onOpenSu
                         onClick={() => setSlfDashModal({ type: "total" })}
                       >
                         <Statistic
-                          title="Total SLF"
-                          value={slfCounts.total}
+                          title={
+                            <Tooltip title="Counts SLFs whose official facility status is classified Operational (same definition used on the map, Cell Infrastructure and reports). A non-operational facility is never counted as operational even if it still submits data. Excludes deleted and test records.">
+                              <span>Operational SLFs <InfoCircleOutlined style={{ color: "#8c8c8c", fontSize: 12 }} /></span>
+                            </Tooltip>
+                          }
+                          value={slfCounts.operational}
                           prefix={<BankOutlined style={{ color: "#2f54eb" }} />}
                         />
                         <Text type="secondary" style={{ fontSize: 11 }}>
-                          <CheckCircleOutlined style={{ color: "#52c41a", marginRight: 3 }} />
-                          {slfCounts.operational} Operational
+                          {slfCounts.total} total registered
                           <CloseCircleOutlined style={{ color: "#ff4d4f", margin: "0 3px 0 6px" }} />
-                          {slfCounts.nonOperational} Non-Op
+                          {slfCounts.nonOperational} non-operational
+                          {slfCounts.unmonitored > 0 && (
+                            <span> · {slfCounts.unmonitored} not yet monitored</span>
+                          )}
                         </Text>
                       </Card>
                     </Col>
@@ -6220,6 +6231,10 @@ export default function DashboardContent({ user, isDark, setActiveMenu, onOpenSu
                           height={screens?.lg ? SLF_MAP_H : undefined}
                           onOpenSubmissions={onOpenSubmissions}
                           canOpenSubmissions={canOpenSubmissions}
+                          // Share the selected disposal date with the SLF map so a
+                          // day-click updates the map's date-specific markers.
+                          selectedDate={slfMapDate}
+                          onSelectDate={setSlfMapDate}
                         />
                       </Suspense>
                     </Col>
@@ -6343,10 +6358,12 @@ export default function DashboardContent({ user, isDark, setActiveMenu, onOpenSu
                               value={slfFilterStatus}
                               onChange={setSlfFilterStatus}
                               options={[
-                                { label: "✓ Acknowledged Submission", value: "acknowledged" },
+                                { label: "✓ Acknowledged", value: "acknowledged" },
                                 { label: "◷ Pending Submission", value: "pending" },
                                 { label: "↻ Pending Resubmission", value: "pending-resubmission" },
-                                { label: "○ No Submission Today", value: "no-submission" },
+                                { label: "↺ Reverted", value: "reverted" },
+                                { label: "⊘ Rejected", value: "rejected" },
+                                { label: "– No Activity", value: "no-data" },
                               ]}
                               style={{ minWidth: 160, flex: 1 }}
                             />
@@ -6392,10 +6409,12 @@ export default function DashboardContent({ user, isDark, setActiveMenu, onOpenSu
                             >
                               {[
                                 { title: "Assigned SLF is non-operational — cell subject to EMB R3 verification (highest priority)", color: "#ff4d4f", glyph: "✕", label: "Non-operational" },
-                                { title: "Pending resubmission — previously reverted, resubmitted and awaiting review (pulsing orange)", color: MAP_MARKER["pending-resubmission"].color, glyph: "↻", label: "Pending Resubmission", ring: "rgba(250,140,22,0.35)" },
-                                { title: "Pending initial submission for the selected date (pulsing yellow)", color: MAP_MARKER.pending.color, glyph: "◷", label: "Pending Submission", ring: "rgba(250,173,20,0.35)" },
-                                { title: "Acknowledged submission — operational and up to date for the period", color: MAP_MARKER.acknowledged.color, glyph: "✓", label: "Acknowledged" },
-                                { title: "No submission for the required reporting period (missing / not yet monitored)", color: "#8c8c8c", glyph: "○", label: "No submission" },
+                                { title: "Pending resubmission for the selected date — previously reverted, resubmitted and awaiting review (pulsing orange)", color: MAP_MARKER["pending-resubmission"].color, glyph: "↻", label: "Pending Resubmission", ring: "rgba(250,140,22,0.35)" },
+                                { title: "Pending initial submission for the selected date, awaiting review (pulsing yellow)", color: MAP_MARKER.pending.color, glyph: "◷", label: "Pending Submission", ring: "rgba(250,173,20,0.35)" },
+                                { title: "Submission reverted for correction on the selected date", color: MAP_MARKER.reverted.color, glyph: "↺", label: "Reverted" },
+                                { title: "Submission rejected (not accepted) on the selected date", color: MAP_MARKER.rejected.color, glyph: "⊘", label: "Rejected" },
+                                { title: "Acknowledged submission for the selected date", color: MAP_MARKER.acknowledged.color, glyph: "✓", label: "Acknowledged" },
+                                { title: "No disposal activity for the selected date", color: MAP_MARKER["no-data"].color, glyph: "–", label: "No activity" },
                               ].map((it) => (
                                 <span key={it.label} title={it.title} style={{ display: "inline-flex", alignItems: "center", gap: 4, whiteSpace: "nowrap" }}>
                                   <span style={{ flex: "0 0 auto", width: 10, height: 10, borderRadius: "50%", background: it.color, boxShadow: it.ring ? `0 0 0 3px ${it.ring}` : "none" }} />
@@ -6443,7 +6462,7 @@ export default function DashboardContent({ user, isDark, setActiveMenu, onOpenSu
                                 <Marker
                                   key={pt.record._id || idx}
                                   position={[pt.lat, pt.lng]}
-                                  icon={slfTodayIcon(pt.record)}
+                                  icon={slfMarkerIcon(pt.record)}
                                 >
                                   <Popup maxWidth={300} minWidth={250}>
                                     {(() => {
@@ -6468,21 +6487,30 @@ export default function DashboardContent({ user, isDark, setActiveMenu, onOpenSu
                                           className="popup-light"
                                           style={{ fontSize: 12, lineHeight: 1.55, padding: 0, maxWidth: 280 }}
                                         >
-                                          {/* Today's submission status (icon shape + label + tooltip text — not colour alone) */}
+                                          {/* Latest Disposal Calendar status — the same state the marker shows
+                                              (icon shape + label + tooltip text, not colour alone). */}
                                           {(() => {
-                                            const today = slfToday.byId[String(rec._id)];
-                                            const key = today?.submissionStatus === "acknowledged" || today?.submissionStatus === "pending"
-                                              ? today.submissionStatus : "no-submission";
-                                            const meta = mapPresentationFor(key);
-                                            const color = meta.color;
-                                            const count = today?.submissionCount;
-                                            const vol = today?.totalVolume;
-                                            const t = today?.latestSubmissionAt ? new Date(today.latestSubmissionAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : null;
+                                            const day = slfToday.byId[String(rec._id)];
+                                            const key = day?.submissionStatus || "no-data";
+                                            const STATUS_LABELS = {
+                                              acknowledged: "Acknowledged",
+                                              pending: "Pending Submission",
+                                              "pending-resubmission": "Pending Resubmission",
+                                              reverted: "Reverted",
+                                              rejected: "Rejected",
+                                              "no-submission": "No Submission",
+                                              "no-data": "No Activity",
+                                            };
+                                            const m = MAP_MARKER[key] || MAP_MARKER["no-data"];
+                                            const color = m.color;
+                                            const count = day?.submissionCount;
+                                            const vol = day?.totalVolume;
+                                            const dateLabel = slfMapDate ? slfMapDate.format("MMM D, YYYY") : "";
                                             return (
                                               <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap", margin: "0 0 6px" }}>
                                                 <span aria-hidden style={{ width: 8, height: 8, borderRadius: "50%", background: color, display: "inline-block" }} />
-                                                <strong style={{ color }}>{meta.glyph} {meta.label}</strong>
-                                                {today && <span style={{ color: muted, fontSize: 11 }}>· {count} record{count === 1 ? "" : "s"}{vol ? ` · ${vol} m³` : ""}{t ? ` · ${t}` : ""}</span>}
+                                                <strong style={{ color }}>{m.glyph} {STATUS_LABELS[key] || "No Activity"}</strong>
+                                                <span style={{ color: muted, fontSize: 11 }}>· {dateLabel}{count ? ` · ${count} record${count === 1 ? "" : "s"}` : ""}{vol ? ` · ${vol} m³` : ""}</span>
                                               </div>
                                             );
                                           })()}
@@ -6779,26 +6807,26 @@ export default function DashboardContent({ user, isDark, setActiveMenu, onOpenSu
                         title: <Space><WarningOutlined style={{ color: "#fa8c16" }} /> Trash Slide Prevention — All Measures</Space>,
                         metricLabel: "measures",
                         filter: (r) => (r.trashSlideMeasures?.length || 0) > 0,
-                        flatten: (r) => (r.trashSlideMeasures || []).map((m, i) => ({ key: `${r.lgu}_${i}`, slfName: r.lgu, province: r.province, measure: m.measure, description: m.description, status: m.status, attachments: m.attachments || [] })),
+                        flatten: (r) => (r.trashSlideMeasures || []).map((m, i) => ({ key: `${r.lgu}_${i}`, facilityId: r._id, slfName: r.lgu, province: r.province, measure: m.measure, description: m.description, status: m.status, attachments: m.attachments || [] })),
                         columns: [
                           slfCol, provCol,
                           { title: "Measure", dataIndex: "measure", width: 200, ellipsis: { showTitle: false }, render: (v) => <Tooltip title={v}>{v || "—"}</Tooltip> },
                           { title: "Description", dataIndex: "description", width: 320, ellipsis: { showTitle: false }, render: (v) => v ? <Tooltip title={v}>{v}</Tooltip> : <Text type="secondary">—</Text> },
                           { title: "Status", dataIndex: "status", width: 150, render: (v) => v ? <Tag color={v === "Implemented" ? "green" : v === "Pending" ? "orange" : "default"}>{v}</Tag> : "—" },
-                          { title: "Attachments", dataIndex: "attachments", width: 110, align: "center", render: (v) => (v || []).length ? <Tag color="orange">{v.length} file(s)</Tag> : <Text type="secondary" style={{ fontSize: 11 }}>—</Text> },
+                          { title: "Documents & Summary", dataIndex: "attachments", width: 180, align: "center", render: (v, row) => (v || []).length ? <Button size="small" icon={<RobotOutlined />} onClick={() => setPreventionPanel({ facilityId: row.facilityId, slfName: row.slfName })}>{v.length} doc{v.length === 1 ? "" : "s"} · Summarize</Button> : <Text type="secondary" style={{ fontSize: 11 }}>—</Text> },
                         ],
                       },
                       firePrev: {
                         title: <Space><FireOutlined style={{ color: "#ff4d4f" }} /> Fire Prevention — All Measures</Space>,
                         metricLabel: "measures",
                         filter: (r) => (r.firePrevMeasures?.length || 0) > 0,
-                        flatten: (r) => (r.firePrevMeasures || []).map((m, i) => ({ key: `${r.lgu}_${i}`, slfName: r.lgu, province: r.province, measure: m.measure, description: m.description, status: m.status, attachments: m.attachments || [] })),
+                        flatten: (r) => (r.firePrevMeasures || []).map((m, i) => ({ key: `${r.lgu}_${i}`, facilityId: r._id, slfName: r.lgu, province: r.province, measure: m.measure, description: m.description, status: m.status, attachments: m.attachments || [] })),
                         columns: [
                           slfCol, provCol,
                           { title: "Measure", dataIndex: "measure", width: 200, ellipsis: { showTitle: false }, render: (v) => <Tooltip title={v}>{v || "—"}</Tooltip> },
                           { title: "Description", dataIndex: "description", width: 320, ellipsis: { showTitle: false }, render: (v) => v ? <Tooltip title={v}>{v}</Tooltip> : <Text type="secondary">—</Text> },
                           { title: "Status", dataIndex: "status", width: 150, render: (v) => v ? <Tag color={v === "Implemented" ? "green" : v === "Pending" ? "orange" : "default"}>{v}</Tag> : "—" },
-                          { title: "Attachments", dataIndex: "attachments", width: 110, align: "center", render: (v) => (v || []).length ? <Tag color="red">{v.length} file(s)</Tag> : <Text type="secondary" style={{ fontSize: 11 }}>—</Text> },
+                          { title: "Documents & Summary", dataIndex: "attachments", width: 180, align: "center", render: (v, row) => (v || []).length ? <Button size="small" icon={<RobotOutlined />} onClick={() => setPreventionPanel({ facilityId: row.facilityId, slfName: row.slfName })}>{v.length} doc{v.length === 1 ? "" : "s"} · Summarize</Button> : <Text type="secondary" style={{ fontSize: 11 }}>—</Text> },
                         ],
                       },
                       cells: {
@@ -8677,8 +8705,8 @@ export default function DashboardContent({ user, isDark, setActiveMenu, onOpenSu
           <Text type="secondary" style={{ fontSize: 12 }}>System overview, monitoring summaries, and current portal activity.</Text>
         </div>
         {loading && <Spin size="small" />}
-        {/* Isolated + memoized: rotating tip state never re-renders the dashboard. */}
-        <AdminTipCard isDark={isDark} />
+        {/* VERA assistant card — opens the shared VeraChat via the `vera:open` event. */}
+        <VeraCard isDark={isDark} />
       </div>
       {/* Filter tabs by dashboard visibility settings, wrap maintenance tabs */}
       {dashboardTabSettings === null ? (
@@ -8726,6 +8754,14 @@ export default function DashboardContent({ user, isDark, setActiveMenu, onOpenSu
           />
         );
       })()}
+
+      {/* Per-SLF Prevention Measures — official narrative + VERA document summaries. */}
+      <PreventionMeasuresPanel
+        open={!!preventionPanel}
+        facilityId={preventionPanel?.facilityId}
+        slfName={preventionPanel?.slfName}
+        onClose={() => setPreventionPanel(null)}
+      />
     </>
   );
 }

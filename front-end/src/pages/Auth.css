@@ -236,10 +236,10 @@
    same subtle translucent circle as the EMB mark so its transparency shows
    through (no opaque chip/background behind it). */
 
-/* Accessibility: visible keyboard-focus rings on interactive auth controls.
-   Additive to antd's own focus styling; only shows for keyboard users. */
-.auth-form .ant-input-affix-wrapper:focus-within,
-.auth-form .ant-input:focus-visible,
+/* Accessibility: visible keyboard-focus rings on buttons/links.
+   Inputs are handled by a single consolidated ring below (they must NOT also get
+   this outline, or the outline + the input's own box-shadow ring read as two
+   nested boxes). */
 .auth-btn-primary:focus-visible,
 .auth-btn-secondary:focus-visible,
 .auth-forgot-link:focus-visible,
@@ -555,10 +555,36 @@
   border-color: #2d5f8a !important;
 }
 
+/* ── Single, clean focus state for ALL auth fields ──────────────────────────
+   One ring per field. The control that owns the visible border (a standalone
+   input, a password/search affix WRAPPER, a textarea, or a select selector)
+   draws exactly one box-shadow ring; the browser's default outline and antd's
+   default focus shadow are suppressed so nothing stacks. This replaces the old
+   combination of an inner-input ring + a wrapper ring + a focus-visible outline
+   that rendered as duplicate boxes inside and outside the field. */
 .auth-form .ant-input:focus,
-.auth-form .ant-input-affix-wrapper-focused {
+.auth-form .ant-input:focus-visible,
+.auth-form textarea.ant-input:focus,
+.auth-form textarea.ant-input:focus-visible,
+.auth-form .ant-input-outlined:focus,
+.auth-form .ant-input-affix-wrapper-focused,
+.auth-form .ant-input-affix-wrapper:focus-within,
+.auth-form .ant-input-search .ant-input-affix-wrapper-focused,
+.auth-form .ant-select-focused .ant-select-selector {
   border-color: #1a3353 !important;
-  box-shadow: 0 0 0 3px rgba(26,51,83,0.08) !important;
+  box-shadow: 0 0 0 3px rgba(26,51,83,0.15) !important;
+  outline: none !important;
+}
+
+/* The inner <input> inside a password/search/select affix wrapper must NOT draw
+   its own ring, border, or outline — the WRAPPER above owns the focus state.
+   Without this, focusing a password field showed a second box inside the first. */
+.auth-form .ant-input-affix-wrapper .ant-input:focus,
+.auth-form .ant-input-affix-wrapper .ant-input:focus-visible,
+.auth-form .ant-select-selector .ant-select-selection-search-input:focus {
+  border-color: transparent !important;
+  box-shadow: none !important;
+  outline: none !important;
 }
 
 /* Primary button */

@@ -2071,7 +2071,64 @@ router.patch("/:id/reject-edit", async (req, res) => {
 router.get("/today-status", adminOnly, async (req, res) => {
   try {
     const { dayRangeFor } = require("../utils/appTime");
-    const { normalizeStatus, classifyMapStatus } = require("../utils/submissionStatus");
+    const { normalizeStatus, classifyMapStatus, classifySlfStatus } = require("../utils/submissionStatus");
+
+    // ── mode=latest ──────────────────────────────────────────────────────────
+    // Per SLF, classify the LATEST applicable Disposal Calendar record (its most
+    // recent dateOfDisposal), using the FULL workflow classification so the map
+    // marker matches the Disposal Activity calendar (submitted/pending/reverted/
+    // rejected) instead of collapsing reverted/rejected to gray. SLFs with no
+    // calendar record at all are simply absent — the client renders a distinct
+    // "no calendar data" fallback for them. Reused by the SLF Location Map so a
+    // marker reflects an SLF's real last-known status, not just "today".
+    if (String(req.query.mode || "").toLowerCase() === "latest") {
+      const groups = await DataSLF.aggregate([
+        { $match: { deletedAt: null, isDummy: { $ne: true }, dateOfDisposal: { $ne: null } } },
+        { $sort: { dateOfDisposal: -1 } },
+        { $group: {
+          _id: "$slfGenerator",
+          slfName: { $first: "$slfName" },
+          latestDate: { $first: "$dateOfDisposal" },
+          // Keep only the most recent entries (bounded) — enough to cover the
+          // latest calendar day plus its resubmission context.
+          entries: { $push: { d: "$dateOfDisposal", s: "$status", resub: { $gt: [ { $size: { $ifNull: ["$previousIdNos", []] } }, 0 ] } } },
+          submissionCount: { $sum: 1 },
+          totalVolume: { $sum: { $ifNull: ["$totalVolumeM3", 0] } },
+        } },
+        { $addFields: { entries: { $slice: ["$entries", 60] } } },
+      ]).allowDiskUse(true);
+
+      const dayKey = (d) => (d ? new Date(d).toISOString().slice(0, 10) : "");
+      const statuses = groups
+        .filter((g) => g._id)
+        .map((g) => {
+          const latestKey = dayKey(g.latestDate);
+          // Records ON the latest calendar day only.
+          const dayEntries = (g.entries || []).filter((e) => dayKey(e.d) === latestKey);
+          const norm = dayEntries.map((e) => normalizeStatus(e.s));
+          // Full state: submitted | pending | reverted | rejected | none.
+          const full = classifySlfStatus(norm);
+          // A pending latest day whose pending records are resubmissions surfaces
+          // as pending-resubmission (matches the day view's distinction).
+          const resubNorm = dayEntries.filter((e) => e.resub).map((e) => normalizeStatus(e.s));
+          const isResubPending = classifySlfStatus(resubNorm) === "pending";
+          let submissionStatus =
+            full === "submitted" ? "acknowledged"
+              : full === "pending" ? (isResubPending ? "pending-resubmission" : "pending")
+                : full; // reverted | rejected | none
+          if (submissionStatus === "none") submissionStatus = "no-submission";
+          return {
+            slfId: String(g._id),
+            slfName: g.slfName || "",
+            submissionStatus,
+            latestSubmissionAt: g.latestDate,
+            submissionCount: g.submissionCount,
+            totalVolume: Math.round((g.totalVolume || 0) * 100) / 100,
+          };
+        });
+      return res.json({ generatedAt: new Date(), mode: "latest", statuses });
+    }
+
     // No future dates (unless a future reporting workflow requires them).
     const requested = String(req.query.date || "").trim();
     const now = todayRange();
@@ -2104,26 +2161,25 @@ router.get("/today-status", adminOnly, async (req, res) => {
         latestStatusUpdatedAt: { $max: "$updatedAt" },
       } },
     ]);
-    // Map status is one of: acknowledged | pending | no-submission. Only SLFs
-    // with a valid pending/acknowledged submission are returned as positive;
-    // reverted/rejected-only groups classify to "no-submission" (omitted so the
-    // frontend renders them the same as SLFs absent from the list).
+    // Date-specific status per SLF for the selected day, using the FULL workflow
+    // classification so the map marker matches the Disposal Calendar: acknowledged
+    // | pending | pending-resubmission | reverted | rejected. SLFs with no record
+    // for the day are absent (the client renders a neutral "no-activity" marker).
     const statuses = rows
       .filter((r) => r._id)
       .map((r) => {
-        const mapStatus = classifyMapStatus((r.statuses || []).map(normalizeStatus));
-        // A pending group whose pending entries are resubmissions (previously
-        // reverted) surfaces as a distinct "pending-resubmission" state so the
-        // map can flag it separately from a pending initial submission.
-        const resubMapStatus = classifyMapStatus((r.resubStatuses || []).filter(Boolean).map(normalizeStatus));
+        const full = classifySlfStatus((r.statuses || []).map(normalizeStatus));
+        // A pending day whose pending entries are resubmissions (previously
+        // reverted) surfaces distinctly from a pending initial submission.
+        const resubFull = classifySlfStatus((r.resubStatuses || []).filter(Boolean).map(normalizeStatus));
         const submissionStatus =
-          mapStatus === "pending" && resubMapStatus === "pending"
-            ? "pending-resubmission"
-            : mapStatus;
+          full === "submitted" ? "acknowledged"
+            : full === "pending" ? (resubFull === "pending" ? "pending-resubmission" : "pending")
+              : full; // reverted | rejected | none
         return {
           slfId: String(r._id),
           slfName: r.slfName || "",
-          submissionStatus,
+          submissionStatus: submissionStatus === "none" ? "no-submission" : submissionStatus,
           latestSubmissionAt: r.latestSubmissionAt,
           submissionCount: r.submissionCount,
           totalVolume: Math.round((r.totalVolume || 0) * 100) / 100,
@@ -3515,6 +3571,18 @@ router.patch("/:id/admin-edit", async (req, res) => {
       });
     } catch { /* silent */ }
     res.json(populated);
+    // Propagate the edit live — mirror the sibling status/edit handlers so other
+    // admin tabs refresh and the affected portal user is notified (their history
+    // refetches on the "notification" event). Without this the edit landed in the
+    // DB but every other open view stayed stale until a manual reload.
+    refreshAdmin(req, "submissions");
+    if (entry.submittedBy) {
+      notifyPortal(req, entry.submittedBy, {
+        type: "submission_edited",
+        title: "Submission Updated",
+        message: `An admin updated submission ${entry.idNo}.`,
+      });
+    }
     writeLog("info", "submission.update", {
       message: `Submission ${entry.idNo} edited by admin`,
       user: req.body.updatedBy || getRequestActor(req),

@@ -2,7 +2,7 @@
 // dashboard. No React, no component state. Extracted from index.jsx so the map
 // panels, calendar and dropdowns all read the same source of truth.
 import L from "leaflet";
-import { MAP_PRESENTATION } from "../../utils/submissionStatus";
+import { MAP_PRESENTATION, STATUS_PRESENTATION } from "../../utils/submissionStatus";
 import {
   resolveMediaUrl,
   normalizeStoredFileUrl,
@@ -63,14 +63,22 @@ export const firstSlfPhoto = (record) => {
   return "";
 };
 
-// SLF map — THREE states only (map focus): acknowledged (blue pulse ✓),
-// pending (yellow pulse ◷), no-submission (gray static ○). Colours/glyphs come
-// from the SHARED MAP_PRESENTATION so map/calendar/dropdown never diverge.
+// SLF map marker states. When the map keys markers to each SLF's LATEST Disposal
+// Calendar record (mode=latest), it uses the FULL workflow states so a marker
+// matches the Disposal Activity calendar: acknowledged (blue pulse ✓), pending
+// (yellow pulse ◷), pending-resubmission (orange pulse ↻), reverted (orange
+// static ↺), rejected (red static ⊘), no-submission (gray static ○), and a
+// distinct "no-data" fallback (light-gray –) for SLFs with no calendar record at
+// all. Colours/glyphs come from the SHARED presentation config so the map, the
+// calendar and the legend never diverge (no hard-coded per-SLF values).
 export const MAP_MARKER = {
   acknowledged: { color: MAP_PRESENTATION.acknowledged.color, glyph: MAP_PRESENTATION.acknowledged.glyph, ring: "slf-today-ring" },
   pending: { color: MAP_PRESENTATION.pending.color, glyph: MAP_PRESENTATION.pending.glyph, ring: "slf-wait-ring" },
   "pending-resubmission": { color: MAP_PRESENTATION["pending-resubmission"].color, glyph: MAP_PRESENTATION["pending-resubmission"].glyph, ring: "slf-resub-ring" },
+  reverted: { color: STATUS_PRESENTATION.reverted.color, glyph: "↺", ring: null },
+  rejected: { color: STATUS_PRESENTATION.rejected.color, glyph: "⊘", ring: null },
   "no-submission": { color: MAP_PRESENTATION["no-submission"].color, glyph: MAP_PRESENTATION["no-submission"].glyph, ring: null },
+  "no-data": { color: "#bfbfbf", glyph: "–", ring: null },
 };
 
 export const TILE_LAYERS = {

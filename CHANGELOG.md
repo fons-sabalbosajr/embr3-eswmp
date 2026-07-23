@@ -8,6 +8,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — VERA assistant & operational tooling (1.5.0)
+- VERA (Virtual Environmental Response Assistant): role-aware chatbot for the SLF
+  Portal and Admin Portal — KB-grounded answers with a rule-based fallback when no
+  AI provider is configured, a "thinking" state with cancel/retry/timeout, a shared
+  animated flame icon, first-login onboarding, and a dashboard VERA tips card. Role
+  is enforced from the authenticated token; a restricted guard refuses developer /
+  secret topics for every role. Reuses the existing Automation Agent provider layer.
+- Prevention Measures: secure document summaries (PDF/DOCX/TXT via `pdf-parse` +
+  `mammoth`) with source references, low-confidence warnings, size/type validation,
+  per-SLF isolation, and cached/invalidated results — shown separately from the
+  official narrative.
+- LGU reconciliation: deterministic + province-scoped fuzzy matcher (`lguMatch`),
+  admin review panel with accept/reject/manual-review, non-destructive alias
+  linking, and an immutable `LguLinkAudit` trail. New endpoints
+  `GET /slf-clients/lgu-reconciliation`, `POST /:id/link-lgu`,
+  `POST /:id/flag-manual-review`, and `GET /slf-clients/issues/count`.
+- Dedicated VERA notification bell (admin/developer) surfacing deterministic,
+  sanitized findings (unlinked LGUs, data-quality, provider health) via
+  `GET /vera/notifications`.
+
+### Changed — dashboard, map & counting
+- SLF Location Map markers are date-specific to the Disposal Calendar selection;
+  the calendar gains month prev/next navigation and a year summary view. Marker /
+  legend / status come from one shared `MAP_MARKER` config.
+- Total SLF tile headlines the operational count (status-based; a non-operational
+  facility that still submits is not counted) with total + non-operational
+  secondary and a rule tooltip.
+- LGUs-Served counting is municipality-unique (by masterlist id, cities included),
+  private-sector counted separately; summary tiles sit in one equal-width row.
+- Dashboard waste volumes displayed in tons via the shared `convertVolume`; the
+  "Most Active Portal Users" widget is a ranked avatar list; "Waste Volume by SLF"
+  shows all SLFs.
+- FAQ retired in favour of VERA; support contact email centralized to
+  `eswmr3@emb.gov.ph` (`config/appContact.js`, `server/config/contact.js`).
+
+### Fixed
+- Nested Daily Submission Details modal now layers above the FullCalendar popover
+  and sticky header (z-index brought into the antd scale, no arbitrary escalation).
+- Hauler Clients Issues badge uses an authoritative server count (`/issues/count`),
+  `99+` overflow, and an accessible label; refreshes on resolve/reopen/refresh.
+- Duplicate/nested focus outlines on authentication inputs consolidated to one
+  accessible ring across all auth pages.
+- `admin-edit` submissions now emit a live refresh so other admin tabs and the
+  portal user update without a manual reload.
+
 ### Security
 - Closed anonymous access to the core API. A new `requireAnyAuth` middleware
   (valid admin- or portal-realm JWT) now gates every route in `dataSLF`,

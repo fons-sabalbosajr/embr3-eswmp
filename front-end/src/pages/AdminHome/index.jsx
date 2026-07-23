@@ -93,6 +93,9 @@ import { useNavigate } from "react-router-dom";
 import Swal from "sweetalert2";
 import AccountSettings from "../admin/AccountSettings";
 import AdminTipCard from "../admin/AdminTipCard";
+import VeraChat from "../SLFPortal/Vera/VeraChat";
+import VeraOnboarding from "../../components/VeraOnboarding";
+import VeraNotificationBell from "./VeraNotificationBell";
 const FieldSettings = lazy(() => import("../admin/FieldSettings"));
 const SubmissionSettings = lazy(() => import("../admin/SubmissionSettings"));
 const DeveloperSettings = lazy(() => import("../admin/DeveloperSettings"));
@@ -1276,6 +1279,9 @@ export default function AdminHome() {
                   />
                 </Badge>
               </Popover>
+              {/* Dedicated VERA notification bell — separate icon + dropdown from the
+                  standard bell above; surfaces deterministic VERA findings. */}
+              <VeraNotificationBell isDark={isDark} userId={user?.email || user?.id || user?._id} />
               <Dropdown
                 menu={{ items: userMenuItems, onClick: handleUserMenuClick }}
                 trigger={["click"]}
@@ -1328,6 +1334,11 @@ export default function AdminHome() {
           </div>
         </Layout>
       </Layout>
+
+      {/* VERA — Admin assistant (role-gated to admin KB by the backend; developer
+          topics are refused). Ticket actions hidden on the admin side. */}
+      <VeraChat activeMenu={activeMenu} isMobile={isMobile} hideTicketActions />
+      <VeraOnboarding portal="admin" userId={user?.email || user?.id || user?._id} />
 
       <Modal
         title={

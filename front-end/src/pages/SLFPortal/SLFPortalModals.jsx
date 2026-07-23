@@ -11,11 +11,12 @@ import {
   CloseCircleOutlined, ContainerOutlined, DatabaseOutlined, DeleteOutlined,
   EditOutlined, EnvironmentOutlined, EyeOutlined, FileTextOutlined,
   InfoCircleOutlined, MailOutlined, MessageOutlined, PieChartOutlined,
-  PlusOutlined, QuestionCircleOutlined, SaveOutlined, SendOutlined,
+  PlusOutlined, ProfileOutlined, SaveOutlined, SendOutlined,
   TeamOutlined, UndoOutlined, UploadOutlined, UserOutlined, WifiOutlined,
   ClockCircleOutlined,
 } from "@ant-design/icons";
 import { EMPTY_VEHICLE } from "./constants";
+import { SUPPORT_EMAIL, SUPPORT_MAILTO } from "../../config/appContact";
 import api from "../../api";
 import secureStorage from "../../utils/secureStorage";
 import { convertVolume } from "../../utils/volumeUnits";
@@ -142,7 +143,10 @@ const TicketAttachment = ({ att, index }) => {
   );
 };
 
-const SUPPORT_TAB_KEYS = ["faq", "new-ticket", "my-tickets"];
+// FAQ retired — its content now lives in VERA (server/utils/veraKnowledge.js) and
+// is surfaced through the floating VERA chatbot. The support drawer keeps only the
+// ticket tabs, launched from VERA's quick actions.
+const SUPPORT_TAB_KEYS = ["new-ticket", "my-tickets"];
 const SUPPORT_CATEGORY_OPTIONS = [
   { label: "Technical Issue", value: "Technical Issue" },
   { label: "Data Correction", value: "Data Correction" },
@@ -157,109 +161,6 @@ const SUPPORT_PRIORITY_OPTIONS = [
   { label: "Medium", value: "Medium" },
   { label: "High", value: "High" },
   { label: "Urgent", value: "Urgent" },
-];
-// Support & FAQ content — kept in step with the current portal workflow: locked
-// baseline unit, required vehicle capacity, Review-and-Submit gating, and the
-// Organize Cells rules for approved submissions with unassigned waste.
-const SUPPORT_FAQ_ITEMS = [
-  {
-    key: "1",
-    label: "What information is required to submit?",
-    icon: <FileTextOutlined style={{ color: "#1677ff" }} />,
-    content:
-      "A submission needs: your Waste Generator (company) information, saved Baseline Data, the Date of Disposal, and at least one transport entry. Each transport entry requires a disposal ticket no., hauler, plate number, actual volume, waste type, and a disposal cell. Hazardous Waste Code is required for every Treated Hazardous Waste entry. All volumes use your declared baseline unit.",
-  },
-  {
-    key: "2",
-    label: "How do I submit disposal data?",
-    icon: <SendOutlined style={{ color: "#1677ff" }} />,
-    content:
-      "Go to Data Entry, complete the Basic Information, Baseline, and Waste Generator Information tabs, add your transport entries, then use Review & Submit. The button stays disabled until every requirement is met — hover it to see exactly what is still missing.",
-  },
-  {
-    key: "3",
-    label: "How do I add and select accredited haulers?",
-    icon: <TeamOutlined style={{ color: "#fa8c16" }} />,
-    content:
-      "Add your accredited haulers (with their vehicles) on the Baseline / Accredited Haulers tab before your first submission. When encoding a transport entry, pick the hauler and plate number from your accredited list so the portal can validate the truck against its registered capacity.",
-  },
-  {
-    key: "4",
-    label: "What are Hauler Clients and where do they show?",
-    icon: <BankOutlined style={{ color: "#722ed1" }} />,
-    content:
-      "Hauler Clients are the private-sector clients associated with an accredited hauler. They appear in a Hauler Clients column right after the Hauler Name in your Waste Generator Information and in the admin submission view. Leave it blank if a hauler has no clients — it shows as “—”.",
-  },
-  {
-    key: "5",
-    label: "Is Vehicle Capacity required?",
-    icon: <CarOutlined style={{ color: "#eb2f96" }} />,
-    content:
-      "Every accredited-hauler vehicle must have a Vehicle Capacity greater than 0. For Truck Capacity: it is REQUIRED on every uploaded disposal row (the parser and server reject a missing/zero value), and OPTIONAL when you add a transport entry manually — any missing historical truck capacity is completed later in Organize Cells. A present value must always be greater than 0.",
-  },
-  {
-    key: "6",
-    label: "Why is Review & Submit disabled?",
-    icon: <CheckCircleOutlined style={{ color: "#52c41a" }} />,
-    content:
-      "Review & Submit is disabled while any requirement is unmet — incomplete company/baseline/disposal info, a missing disposal cell or hazardous code, a vehicle without capacity, an unresolved reverted submission, or past submissions still needing Organize Cells. Hover the button for the exact checklist. The server re-validates everything again on submit.",
-  },
-  {
-    key: "7",
-    label: "How do I organize and assign SLF cells?",
-    icon: <ContainerOutlined style={{ color: "#13c2c2" }} />,
-    content:
-      "Open Organize Cells from the menu. For each unassigned waste record, pick an open (active, not full) disposal cell; you can also complete any missing historical truck capacity there. Use the checkboxes and the bulk-assign bar to place many rows at once, then Save Placement.",
-  },
-  {
-    key: "8",
-    label: "I have approved submissions with unassigned waste — what now?",
-    icon: <ContainerOutlined style={{ color: "#722ed1" }} />,
-    content:
-      "Approved submissions that still contain waste not placed into a cell appear in Organize Cells. Assign the remaining records to cells (already-assigned records stay as they are, and the approved status is not reverted). Once every record is assigned, the submission drops off the list. New submissions are blocked until this is done.",
-  },
-  {
-    key: "9",
-    label: "How do I update baseline data?",
-    icon: <DatabaseOutlined style={{ color: "#389e0d" }} />,
-    content:
-      "Baseline data locks after your first submission. Use Request Update on the Baseline tab; an admin reviews and approves or rejects it. Track the request under My Requests.",
-  },
-  {
-    key: "10",
-    label: "How do I edit a submitted entry?",
-    icon: <AuditOutlined style={{ color: "#d48806" }} />,
-    content:
-      "Open Submission History, select the record, and send a Request Edit. The admin team approves or rejects it. If a submission is reverted, correct and resubmit it — an unresolved revert older than 24 hours blocks new submissions.",
-  },
-  {
-    key: "11",
-    label: "How do I read Submission History and statuses?",
-    icon: <BarChartOutlined style={{ color: "#1677ff" }} />,
-    content:
-      "Pending = awaiting admin review. Acknowledged/Approved = accepted (may still need cells organized). Revert Requested / Reverted = sent back for correction. Rejected = not accepted and locked. Use History to see each record's status and cell-placement progress.",
-  },
-  {
-    key: "12",
-    label: "Common validation errors and how to fix them",
-    icon: <InfoCircleOutlined style={{ color: "#fa8c16" }} />,
-    content:
-      "“Disposal Cell required” — pick a cell for the entry. “Unit must be <baseline>” — every entry uses your declared baseline unit. “Capacity exceeds +10%” — the entered capacity is too high versus the registered vehicle. “Vehicle Capacity required” — fill capacity on Accredited Haulers. “Organize past submissions first” — complete Organize Cells before submitting.",
-  },
-  {
-    key: "13",
-    label: "What file formats can I upload?",
-    icon: <UploadOutlined style={{ color: "#722ed1" }} />,
-    content:
-      "The portal accepts Excel (.xlsx, .xls) and CSV files for bulk accredited-hauler and transport-entry uploads. Rows are validated on import; fix any flagged rows before adding them.",
-  },
-  {
-    key: "14",
-    label: "Who do I contact for help?",
-    icon: <MailOutlined style={{ color: "#cf1322" }} />,
-    content:
-      "Open a support ticket from this panel for portal, account, or submission concerns. You can also email emb_region3@emb.gov.ph.",
-  },
 ];
 
 const getSupportStatusColor = (status) =>
@@ -3420,7 +3321,7 @@ export default function SLFPortalModals({
         <Text style={{ display: "block", marginBottom: 12 }}>
           Please state the reason for requesting changes on this approved
           submission. You may also send an email to{" "}
-          <Text strong>emb_region3@emb.gov.ph</Text> for follow-up.
+          <Text strong>{SUPPORT_EMAIL}</Text> for follow-up.
         </Text>
         <TextArea
           rows={4}
@@ -3434,11 +3335,11 @@ export default function SLFPortalModals({
           <Button
             type="link"
             icon={<MailOutlined />}
-            href="mailto:emb_region3@emb.gov.ph"
+            href={SUPPORT_MAILTO}
             target="_blank"
             style={{ padding: 0 }}
           >
-            Email emb_region3@emb.gov.ph
+            Email {SUPPORT_EMAIL}
           </Button>
         </div>
       </Modal>
@@ -3619,36 +3520,9 @@ export default function SLFPortalModals({
         {messageUnreadCount > 0 && <Badge count={messageUnreadCount} size="small" />}
       </Button>
 
-      {/* ── Support & FAQ Floating Button ── */}
-      <Button
-        type="primary"
-        icon={<QuestionCircleOutlined />}
-        onClick={() => {
-          setSupportDrawerOpen(true);
-          if (supportTickets.length === 0) fetchSupportTickets();
-          markPortalNotificationsRead("support");
-        }}
-        style={{
-          position: "fixed",
-          bottom: 32,
-          right: 32,
-          zIndex: 999,
-          height: 48,
-          borderRadius: 24,
-          fontSize: 15,
-          fontWeight: 600,
-          display: "flex",
-          alignItems: "center",
-          gap: 8,
-          background: "#1a3353",
-          borderColor: "#1a3353",
-          boxShadow: "0 4px 16px rgba(0,0,0,0.25)",
-          paddingInline: 20,
-        }}
-      >
-        Support &amp; FAQ
-        {supportUnreadCount > 0 && <Badge count={supportUnreadCount} size="small" />}
-      </Button>
+      {/* Support & FAQ floating button retired — VERA (the floating chatbot in
+          index.jsx) now handles help/FAQ and launches the support ticket flow via
+          its quick actions. The support drawer below is opened from VERA. */}
 
       {/* ── Admin Messages Popup ── */}
       <Modal
@@ -3702,11 +3576,11 @@ export default function SLFPortalModals({
         title={
           <div className="slf-support-modal-title">
             <div className="slf-support-modal-heading">
-              <span className="slf-support-modal-icon"><QuestionCircleOutlined /></span>
+              <span className="slf-support-modal-icon"><MessageOutlined /></span>
               <div>
-                <div className="slf-support-modal-title-text">Support &amp; FAQ</div>
+                <div className="slf-support-modal-title-text">Support Tickets</div>
                 <Text type="secondary" className="slf-support-modal-subtitle">
-                  Ask for help, review common answers, and track every ticket in one place.
+                  Open a ticket and track every request in one place. For quick answers, ask VERA.
                 </Text>
               </div>
             </div>
@@ -3723,17 +3597,17 @@ export default function SLFPortalModals({
           <div className="slf-support-hero">
             <div>
               <Text className="slf-support-hero-kicker">EMB Region III Portal Help Desk</Text>
-              <div className="slf-support-hero-title">Fast answers for filing, updates, and account issues</div>
+              <div className="slf-support-hero-title">Direct support for filing, updates, and account issues</div>
               <Text className="slf-support-hero-copy">
-                Use the FAQ for common workflow questions or open a ticket for anything that needs direct support.
+                Open a ticket for anything that needs the team. For quick how-to answers, ask VERA — the floating assistant.
               </Text>
             </div>
             <div className="slf-support-hero-stats">
               <div className="slf-support-stat-card">
-                <span className="slf-support-stat-icon slf-support-stat-icon-blue"><QuestionCircleOutlined /></span>
+                <span className="slf-support-stat-icon slf-support-stat-icon-blue"><ProfileOutlined /></span>
                 <div>
-                  <div className="slf-support-stat-value">{SUPPORT_FAQ_ITEMS.length}</div>
-                  <div className="slf-support-stat-label">Quick answers</div>
+                  <div className="slf-support-stat-value">{supportTickets.length}</div>
+                  <div className="slf-support-stat-label">Your tickets</div>
                 </div>
               </div>
               <div className="slf-support-stat-card">
@@ -3750,45 +3624,6 @@ export default function SLFPortalModals({
           onChange={setSupportTab}
           className="slf-support-tabs"
           items={[
-            {
-              key: "faq",
-              label: (
-                <span className="slf-support-tab-label">
-                  <span className="slf-support-tab-icon slf-support-tab-icon-blue"><QuestionCircleOutlined /></span>
-                  FAQ
-                  {(portalNotificationCounts.total || 0) > 0 && (
-                    <Badge dot style={{ marginLeft: 6 }} />
-                  )}
-                </span>
-              ),
-              children: (
-                <div className="slf-support-pane">
-                  <div className="slf-support-section-header">
-                    <div>
-                      <div className="slf-support-section-title">Frequently Asked Questions</div>
-                      <Text type="secondary">Answers to the issues portal users hit most often.</Text>
-                    </div>
-                    <Tag color="blue">Self-service</Tag>
-                  </div>
-                  <Collapse
-                    activeKey={faqActiveKey}
-                    onChange={setFaqActiveKey}
-                    ghost
-                    className="slf-support-faq"
-                    items={SUPPORT_FAQ_ITEMS.map((item) => ({
-                      key: item.key,
-                      label: (
-                        <span className="slf-support-faq-label">
-                          <span className="slf-support-faq-icon">{item.icon}</span>
-                          <span>{item.label}</span>
-                        </span>
-                      ),
-                      children: <Text className="slf-support-faq-copy">{item.content}</Text>,
-                    }))}
-                  />
-                </div>
-              ),
-            },
             {
               key: "new-ticket",
               label: (

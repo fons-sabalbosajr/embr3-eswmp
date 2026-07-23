@@ -168,23 +168,77 @@ router.get("/relationship-map", requirePermission(PERM, "view"), async (req, res
       return [...m.values()].filter(Boolean);
     };
 
+    // ── Municipality resolver (LGU only) ─────────────────────────────────────
+    // Resolve each LGU client to a STABLE masterlist municipality id so counts are
+    // by unique municipality — never by client name, barangay, hauler, SLF, or
+    // duplicate record. Municipality-level = lguType ∈ {Municipality, City} (the
+    // user-confirmed definition; Provinces are excluded). Match by normalized
+    // name + province (with aliases) against the master list.
+    const MUNI_TYPES = ["Municipality", "City"];
+    let masterMunis = [];
+    let resolveMunicipality = () => null;
+    if (type === "LGU") {
+      masterMunis = await Region3Lgu.find({ status: "Active", lguType: { $in: MUNI_TYPES } })
+        .select("name normalizedName province normalizedProvince municipalityCity psgcCode lguType aliases")
+        .lean();
+      const byKey = new Map();       // "normName|normProv" → master
+      const byNameOnly = new Map();  // "normName" → master (only kept when unambiguous)
+      const nameDupes = new Set();
+      masterMunis.forEach((m) => {
+        const prov = m.normalizedProvince || normalizeName(m.province);
+        const names = [m.normalizedName || normalizeName(m.name), ...(m.aliases || []).map(normalizeName)].filter(Boolean);
+        names.forEach((n) => {
+          byKey.set(`${n}|${prov}`, m);
+          if (byNameOnly.has(n) && byNameOnly.get(n)._id.toString() !== m._id.toString()) nameDupes.add(n);
+          else byNameOnly.set(n, m);
+        });
+      });
+      resolveMunicipality = (c) => {
+        const prov = normalizeName(c.province);
+        const candidates = [c.municipalityCity, c.name].map(normalizeName).filter(Boolean);
+        for (const n of candidates) {
+          const hit = byKey.get(`${n}|${prov}`);
+          if (hit) return hit;
+        }
+        // Name-only fallback ONLY when that name maps to exactly one municipality.
+        for (const n of candidates) {
+          if (!nameDupes.has(n) && byNameOnly.has(n)) return byNameOnly.get(n);
+        }
+        return null;
+      };
+    }
+
+    // Best-effort barangay extraction from a free-text address ("Brgy. X, ...").
+    const deriveBarangay = (address) => {
+      const s = String(address || "");
+      const m = s.match(/(?:brgy\.?|barangay)\s+([^,;]+)/i);
+      return m ? m[1].trim() : "";
+    };
+
     const rows = clients
       .map((c) => {
         const haulers = distinctHaulers(c);
         const slfs = distinctSlfs(c);
         const missingHauler = haulers.length === 0;
         const missingSlf = slfs.length === 0;
-        const remarks = [];
-        if (missingHauler) remarks.push("No hauler assigned");
-        if (missingSlf) remarks.push("No SLF assigned");
-        if (haulers.length > 1) remarks.push(`${haulers.length} haulers`);
-        if (slfs.length > 1) remarks.push(`${slfs.length} SLFs`);
+        const master = type === "LGU" ? resolveMunicipality(c) : null;
+        const municipalityId = master ? String(master._id) : "";
+        const remarksList = [];
+        if (type === "Private Sector") remarksList.push("Private-sector record");
+        if (missingHauler || missingSlf) remarksList.push("Incomplete assignment");
+        if (haulers.length > 1) remarksList.push("Multiple haulers");
+        if (slfs.length > 1) remarksList.push("Multiple SLFs");
+        if (type === "LGU" && !municipalityId) remarksList.push("Missing masterlist link");
+        if (!missingHauler && !missingSlf && remarksList.length === 0) remarksList.push("Active");
         return {
           _id: String(c._id),
           name: c.name,
           clientType: c.clientTypeLabel || "",
-          province: c.province || "",
-          municipalityCity: c.municipalityCity || c.address || "",
+          province: (master && master.province) || c.province || "",
+          municipalityCity: (master && (master.municipalityCity || master.name)) || c.municipalityCity || c.address || "",
+          municipalityId,
+          psgc: master ? master.psgcCode || "" : "",
+          barangay: deriveBarangay(c.address),
           haulers, slfs,
           haulerCount: haulers.length,
           slfCount: slfs.length,
@@ -192,7 +246,8 @@ router.get("/relationship-map", requirePermission(PERM, "view"), async (req, res
           multiSlf: slfs.length > 1,
           missingHauler, missingSlf,
           serviceStatus: missingHauler || missingSlf ? "Incomplete" : "Served",
-          remarks: remarks.join(" · "),
+          remarksList,
+          remarks: remarksList.join(" · "),
         };
       })
       .sort((a, b) => a.name.localeCompare(b.name));
@@ -207,22 +262,34 @@ router.get("/relationship-map", requirePermission(PERM, "view"), async (req, res
       missingAssignments: rows.filter((r) => r.missingHauler || r.missingSlf).length,
     };
 
-    // LGU universe comes from the Region III master list (App Settings).
+    // Private-sector clients served (counted separately, never mixed with LGUs).
+    summary.privateClientsServed = await SlfClient.countDocuments({
+      deletedAt: null, isCanonical: true, mergedInto: null, status: "Active",
+      isDummy: { $ne: true }, type: "Private Sector",
+    }).catch(() => 0);
+
     if (type === "LGU") {
-      const masters = await Region3Lgu.find({ status: "Active" })
-        .select("name normalizedName province municipalityCity")
-        .lean();
-      const servedKeys = new Set(rows.map((r) => normalizeName(r.name)).filter(Boolean));
-      const unserved = masters
-        .filter((m) => {
-          const key = m.normalizedName || normalizeName(m.name);
-          return key && !servedKeys.has(key);
-        })
-        .map((m) => ({ _id: String(m._id), name: m.name, province: m.province || "", municipalityCity: m.municipalityCity || "" }))
+      // Served = distinct masterlist municipality ids among clients that have a
+      // hauler (multi-hauler / multi-SLF / duplicates / barangays collapse to one).
+      const servedIds = new Set(
+        rows.filter((r) => r.municipalityId && r.haulerCount > 0).map((r) => r.municipalityId),
+      );
+      const total = masterMunis.length;
+      const unserved = masterMunis
+        .filter((m) => !servedIds.has(String(m._id)))
+        .map((m) => ({ _id: String(m._id), name: m.name, province: m.province || "", municipalityCity: m.municipalityCity || "", lguType: m.lguType }))
         .sort((a, b) => a.name.localeCompare(b.name));
-      summary.totalMasterLgus = masters.length;
+      const served = servedIds.size;
+      summary.totalMasterMunicipalities = total;
+      summary.servedMunicipalities = served;
+      summary.unservedMunicipalities = unserved.length;
+      summary.coveragePercent = total > 0 ? Math.round((served / total) * 1000) / 10 : 0;
+      summary.municipalityBasis = "Municipality + City (Provinces excluded)";
+      summary.unlinkedClients = rows.filter((r) => !r.municipalityId).length;
+      // Back-compat aliases (older UI keys).
+      summary.totalMasterLgus = total;
+      summary.servedCount = served;
       summary.unservedCount = unserved.length;
-      summary.servedCount = Math.max(0, masters.length - unserved.length);
       const payload = { rows, summary, unserved };
       _relMapCache.set(type, { data: payload, expires: Date.now() + REL_MAP_TTL_MS });
       res.json(payload);
@@ -277,6 +344,23 @@ router.get("/issues", requirePermission(PERM, "view"), async (req, res) => {
     if (req.query.flagType) filter.flagType = req.query.flagType;
     const issues = await SlfDataIssue.find(filter).sort({ status: 1, updatedAt: -1 }).lean();
     res.json(issues);
+  } catch (error) {
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+});
+
+// ── Authoritative open-issue count for the Issues badge. Single source of truth
+//    (countDocuments) — never a client-side length of a fetched list. Counts only
+//    OPEN issues; resolved/ignored are excluded, and SlfDataIssue's unique
+//    `signature` already prevents duplicate open rows. ──
+router.get("/issues/count", requirePermission(PERM, "view"), async (req, res) => {
+  try {
+    const SlfDataIssue = require("../models/SlfDataIssue");
+    const status = ["open", "resolved", "ignored"].includes(req.query.status) ? req.query.status : "open";
+    const filter = { status };
+    if (req.query.flagType) filter.flagType = req.query.flagType;
+    const count = await SlfDataIssue.countDocuments(filter);
+    res.json({ count });
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });
   }
@@ -364,6 +448,160 @@ router.get("/sync/:jobId", requirePermission(PERM, "view"), async (req, res) => 
 });
 
 // ── Single record ──
+// ── LGU reconciliation (admin) ───────────────────────────────────────────────
+// Detect municipality-level LGU clients that don't deterministically resolve to
+// the official masterlist, and propose masterlist matches (deterministic first,
+// fuzzy within-province last). Read-only detection — no production record is
+// changed here; linking happens only via the explicit /link-lgu action below.
+async function loadMuniMasters() {
+  const Region3Lgu = require("../models/Region3Lgu");
+  return Region3Lgu.find({ status: "Active", lguType: { $in: ["Municipality", "City"] } })
+    .select("name normalizedName province normalizedProvince municipalityCity psgcCode lguType aliases")
+    .lean();
+}
+
+router.get("/lgu-reconciliation", requirePermission(PERM, "view"), async (req, res) => {
+  try {
+    const { matchClient } = require("../utils/lguMatch");
+    const masters = await loadMuniMasters();
+    const clients = await SlfClient.find({
+      deletedAt: null, isCanonical: true, mergedInto: null, status: "Active",
+      isDummy: { $ne: true }, type: "LGU",
+    }).select("name municipalityCity province address hauler haulerRelationships portalUserRelationships").lean();
+
+    const deriveBarangay = (address) => {
+      const m = String(address || "").match(/(?:brgy\.?|barangay)\s+([^,;]+)/i);
+      return m ? m[1].trim() : "";
+    };
+    const hasHauler = (c) => !!String(c.hauler || "").trim() || (c.haulerRelationships || []).some((r) => r.hauler) || (c.portalUserRelationships || []).some((r) => r.hauler);
+
+    const byClass = { exact: 0, high: 0, medium: 0, multiple: 0, none: 0, invalid: 0 };
+    const linkedMasterIds = new Set();
+    const unlinked = [];
+    clients.forEach((c) => {
+      const r = matchClient({ municipality: c.municipalityCity, province: c.province, name: c.name }, masters);
+      byClass[r.classification] = (byClass[r.classification] || 0) + 1;
+      const deterministic = r.classification === "exact" || (r.suggestions[0] && r.suggestions[0].method === "alias");
+      if (deterministic) {
+        if (r.suggestions[0]) linkedMasterIds.add(r.suggestions[0].masterId);
+        return; // already linked — not shown for review
+      }
+      unlinked.push({
+        clientId: String(c._id),
+        original: c.municipalityCity || c.name || "",
+        province: c.province || "",
+        barangay: deriveBarangay(c.address),
+        hasHauler: hasHauler(c),
+        classification: r.classification,
+        reason: r.reason || "",
+        suggestions: r.suggestions,
+      });
+    });
+
+    const summary = {
+      totalLguClients: clients.length,
+      linked: clients.length - unlinked.length,
+      unlinkedCount: unlinked.length,
+      byClass,
+      // Official (verified) served = unique masters linked deterministically.
+      verifiedServedMunicipalities: linkedMasterIds.size,
+      // Unverified = unlinked records that have a hauler (would count once linked).
+      unverifiedRecords: unlinked.filter((u) => u.hasHauler).length,
+      manualReview: byClass.multiple + byClass.none + byClass.invalid,
+    };
+    res.json({ unlinked, summary });
+  } catch (error) {
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+});
+
+// Link an unlinked client to a chosen masterlist municipality — NON-destructively.
+// Adds the client's original value as an approved alias on the master (so the
+// resolver links it and future variants), optionally corrects the client's
+// municipality/province to the canonical value, and records an immutable audit
+// row that preserves the original value. Recalculates coverage (cache clear).
+router.post("/:id/link-lgu", requirePermission(PERM, "edit"), async (req, res) => {
+  try {
+    const Region3Lgu = require("../models/Region3Lgu");
+    const LguLinkAudit = require("../models/LguLinkAudit");
+    const { normMuni } = require("../utils/lguMatch");
+    if (!mongoose.isValidObjectId(req.params.id)) return res.status(404).json({ message: "Client not found" });
+    const { masterId, addAlias = true, correctClient = false, confidence = "", method = "manual" } = req.body || {};
+    if (!mongoose.isValidObjectId(masterId)) return res.status(400).json({ message: "A valid masterId is required" });
+
+    const client = await SlfClient.findById(req.params.id);
+    if (!client) return res.status(404).json({ message: "Client not found" });
+    if (client.type !== "LGU") return res.status(400).json({ message: "Only LGU clients can be linked" });
+    const master = await Region3Lgu.findById(masterId);
+    if (!master || master.status !== "Active" || !["Municipality", "City"].includes(master.lguType)) {
+      return res.status(400).json({ message: "Selected masterlist municipality is not valid" });
+    }
+
+    const originalValue = client.municipalityCity || client.name || "";
+    const aliasValue = normMuni(originalValue);
+    let decision = "corrected";
+
+    if (addAlias && aliasValue) {
+      const existing = (master.aliases || []).map((a) => normMuni(a));
+      if (!existing.includes(aliasValue)) {
+        master.aliases = [...(master.aliases || []), aliasValue];
+        master.updatedBy = req.headers["x-user-name"] || req.headers["x-user-email"] || "admin";
+        await master.save();
+        decision = "alias-added";
+      } else {
+        decision = "accepted";
+      }
+    }
+    if (correctClient) {
+      client.municipalityCity = master.municipalityCity || master.name;
+      client.province = master.province || client.province;
+      await client.save();
+      decision = "corrected";
+    }
+
+    await LguLinkAudit.create({
+      client: client._id,
+      originalValue,
+      originalProvince: client.province || "",
+      suggestedMasterId: master._id,
+      suggestedName: master.name,
+      confidence,
+      method,
+      decision,
+      reviewer: req.headers["x-user-name"] || req.headers["x-user-email"] || "admin",
+      previousLink: "",
+      newLink: `${master._id} · ${master.name}`,
+    });
+
+    clearRelMapCache();
+    try { require("../utils/veraFindings").clearFindingsCache(); } catch { /* optional */ }
+    res.json({ ok: true, decision, master: { _id: String(master._id), name: master.name, province: master.province } });
+  } catch (error) {
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+});
+
+// Flag an unlinked client for manual review (records the decision; no data change).
+router.post("/:id/flag-manual-review", requirePermission(PERM, "edit"), async (req, res) => {
+  try {
+    const LguLinkAudit = require("../models/LguLinkAudit");
+    if (!mongoose.isValidObjectId(req.params.id)) return res.status(404).json({ message: "Client not found" });
+    const client = await SlfClient.findById(req.params.id).select("name municipalityCity province type").lean();
+    if (!client) return res.status(404).json({ message: "Client not found" });
+    await LguLinkAudit.create({
+      client: req.params.id,
+      originalValue: client.municipalityCity || client.name || "",
+      originalProvince: client.province || "",
+      decision: "manual-review",
+      method: "manual",
+      reviewer: req.headers["x-user-name"] || req.headers["x-user-email"] || "admin",
+      notes: String(req.body?.notes || "").slice(0, 500),
+    });
+    res.json({ ok: true });
+  } catch (error) {
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+});
 router.get("/:id", requirePermission(PERM, "view"), async (req, res) => {
   try {
     if (!mongoose.isValidObjectId(req.params.id)) return res.status(404).json({ message: "Client not found" });
@@ -470,3 +708,6 @@ router.delete("/:id", requirePermission(PERM, "delete"), async (req, res) => {
 });
 
 module.exports = router;
+// Exposed so the LGU masterlist route can invalidate the served/unserved counts
+// immediately when masterlist entries change (add/edit/delete/import).
+module.exports.clearRelMapCache = clearRelMapCache;

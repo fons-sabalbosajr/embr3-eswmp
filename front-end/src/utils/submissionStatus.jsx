@@ -59,11 +59,8 @@ export const STATUS_PRESENTATION = {
 // MAP presentation keyed by the 3 map states (acknowledged/pending/no-submission).
 export const MAP_PRESENTATION = {
   acknowledged: { key: "acknowledged", label: "Acknowledged Submission", color: "#1677ff", icon: CheckCircleFilled, glyph: "✓", tip: "Has an acknowledged submission for the selected date", pulse: true },
-  pending: { key: "pending", label: "Pending Submission", color: "#faad14", icon: ClockCircleFilled, glyph: "◷", tip: "Has a pending initial submission for the selected date", pulse: true },
-  // Pending resubmission (previously reverted, now resubmitted and awaiting review).
-  // Uses the system's resubmission colour (the "reverted" orange) so it reads as
-  // distinct from a pending initial submission.
-  "pending-resubmission": { key: "pending-resubmission", label: "Pending Resubmission", color: "#fa8c16", icon: UndoOutlined, glyph: "↻", tip: "Has a pending resubmission (previously reverted) for the selected date", pulse: true },
+  pending: { key: "pending", label: "Submission", color: "#faad14", icon: ClockCircleFilled, glyph: "◷", tip: "Has a pending initial submission for the selected date", pulse: true },
+  "pending-resubmission": { key: "pending-resubmission", label: "Resubmission", color: "#fa8c16", icon: UndoOutlined, glyph: "↻", tip: "Has a pending resubmission (previously reverted) for the selected date", pulse: true },
   "no-submission": { key: "no-submission", label: "No Submission Today", color: "#8c8c8c", icon: MinusCircleOutlined, glyph: "○", tip: "No pending or acknowledged submission for the selected date", pulse: false },
 };
 export const mapPresentationFor = (key) => MAP_PRESENTATION[key] || MAP_PRESENTATION["no-submission"];
