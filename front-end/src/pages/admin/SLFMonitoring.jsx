@@ -328,6 +328,11 @@ export default function SLFMonitoring({
   const [filterStatus, setFilterStatus] = useState(null);
   const [filterCategory, setFilterCategory] = useState(null);
   const [filterMonth, setFilterMonth] = useState(null);
+  // Data Year the table is showing. `null` = "Latest per SLF" (the historical
+  // behaviour). Without this the table only ever rendered each facility's newest
+  // dataYear row, so a record saved against an EARLIER year vanished from view the
+  // moment it was created — it was still in the database, just never listed.
+  const [filterDataYear, setFilterDataYear] = useState(null);
   const [quickFilter, setQuickFilter] = useState(null);
   // #5: filter bar is now toggled from the header toolbar (collapsed by default so
   // the table gets more vertical space); the active-filter count stays on the button.
@@ -1376,6 +1381,8 @@ export default function SLFMonitoring({
       return;
     }
     let saved = false;
+    let savedYear = null;
+    let savedIdentity = null;
     const wasEditing = Boolean(editing?._id);
     setSaving(true);
     try {
@@ -1595,6 +1602,8 @@ export default function SLFMonitoring({
         invalidateCache(`${CACHE_KEY}-fast`);
         invalidateCache(`${CACHE_KEY}-full`);
         secureStorage.invalidateDashboard();
+        savedYear = data.dataYear ?? editYear;
+        savedIdentity = data;
         Swal.fire(
           "Saved",
           `${payload.lgu || "SLF"} data records successfully saved!`,
@@ -1610,6 +1619,8 @@ export default function SLFMonitoring({
         invalidateCache(`${CACHE_KEY}-fast`);
         invalidateCache(`${CACHE_KEY}-full`);
         secureStorage.invalidateDashboard();
+        savedYear = data.dataYear ?? editYear;
+        savedIdentity = data;
         Swal.fire(
           "Saved",
           `${payload.lgu || "SLF"} data records successfully saved!`,
@@ -1637,6 +1648,24 @@ export default function SLFMonitoring({
     }
     setSaving(false);
     if (!saved) return;
+
+    // The server — not the local optimistic state above — is the source of truth
+    // for what the table shows. Re-read it so the row reflects exactly what was
+    // persisted (and so a failed/partial write can't leave a phantom row behind).
+    await fetchRecords(true);
+    // A record saved against a year other than the facility's newest one is hidden
+    // by the default "latest per SLF" view, which is what made saved records look
+    // like they had disappeared. Point the table at the year that was just written.
+    if (savedYear != null && savedIdentity) {
+      const facilityKey = (r) =>
+        [r.province, r.lgu, r.barangay].filter(Boolean).join("|").toLowerCase();
+      const savedKey = facilityKey(savedIdentity);
+      const hiddenByNewerYear = records.some(
+        (r) => facilityKey(r) === savedKey && (r.dataYear || 0) > savedYear,
+      );
+      if (hiddenByNewerYear) setFilterDataYear(savedYear);
+    }
+
     if (!wasEditing) {
       setModalOpen(false);
       setConvArea(null);
@@ -1827,6 +1856,9 @@ export default function SLFMonitoring({
       invalidateCache(`${CACHE_KEY}-fast`);
       invalidateCache(`${CACHE_KEY}-full`);
       secureStorage.invalidateDashboard();
+      // Re-read from the server so the table matches what was actually deleted —
+      // e.g. an earlier dataYear row for the same SLF now takes the visible slot.
+      await fetchRecords(true);
       Swal.fire({
         icon: "success",
         title: "Moved to Trash",
@@ -1888,7 +1920,16 @@ export default function SLFMonitoring({
       data = data.filter((r) => Number(r.numberOfGasVents || 0) > 0);
     }
 
-    // Deduplicate by LGU — keep only the latest dataYear record per facility
+    // A specific Data Year is an EXACT view: show every record stored for that
+    // year and skip the "latest per facility" collapse entirely, so a record saved
+    // against an older year is visible instead of being hidden behind a newer one.
+    if (filterDataYear != null) {
+      return data.filter(
+        (r) => (r.dataYear || new Date().getFullYear()) === filterDataYear,
+      );
+    }
+
+    // Default view: deduplicate by facility — keep only the latest dataYear record.
     const map = new Map();
     for (const r of data) {
       const key =
@@ -1909,6 +1950,7 @@ export default function SLFMonitoring({
     filterStatus,
     filterCategory,
     filterMonth,
+    filterDataYear,
     quickFilter,
   ]);
 
@@ -1918,6 +1960,7 @@ export default function SLFMonitoring({
     filterStatus ||
     filterCategory ||
     filterMonth ||
+    filterDataYear != null ||
     quickFilter;
   // Count of active dropdown/quick filters (search shown separately) — badged on
   // the header Filters button so the indicator stays visible when collapsed (#5).
@@ -1926,14 +1969,16 @@ export default function SLFMonitoring({
     filterStatus,
     filterCategory,
     filterMonth,
+    filterDataYear,
     quickFilter,
-  ].filter(Boolean).length;
+  ].filter((value) => value != null && value !== "").length;
   const clearFilters = () => {
     setSearchText("");
     setFilterProvince(null);
     setFilterStatus(null);
     setFilterCategory(null);
     setFilterMonth(null);
+    setFilterDataYear(null);
     setQuickFilter(null);
   };
   // Summary tiles — single memoized pass over `filtered` (was ~25 separate
@@ -3313,6 +3358,28 @@ export default function SLFMonitoring({
                     options={monthOptions}
                     suffixIcon={<CalendarOutlined />}
                   />
+                  <Tooltip title="Latest shows each SLF's most recent data year only. Pick a year to see every record stored for that year.">
+                    <Select
+                      placeholder="Data Year"
+                      value={filterDataYear}
+                      onChange={setFilterDataYear}
+                      allowClear
+                      style={{
+                        width: "100%",
+                        minWidth: 110,
+                        maxWidth: 150,
+                      }}
+                      size="small"
+                      options={[
+                        { label: "Latest per SLF", value: null },
+                        ...availableYears.map((year) => ({
+                          label: String(year),
+                          value: year,
+                        })),
+                      ]}
+                      suffixIcon={<CalendarOutlined />}
+                    />
+                  </Tooltip>
                   {hasFilters && (
                     <Tooltip title="Clear all filters">
                       <Button

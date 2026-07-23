@@ -146,7 +146,10 @@ function devWantsDummy(req) {
 // name — collectCellNames() resolves cellIndex against it rather than trusting the
 // name copied onto the submission at submit time (which goes stale on rename).
 // It is a short string array, so it costs almost nothing.
-const SLF_GENERATOR_REF_FIELDS = "_id lgu slfName province dataYear cellNames";
+// `ownership` is part of an SLF's canonical display name (`lgu (ownership)`), so
+// consumers that render or export the facility name can build it from the
+// populated facility rather than trusting a possibly-stale `slfName` snapshot.
+const SLF_GENERATOR_REF_FIELDS = "_id lgu ownership slfName province dataYear cellNames";
 
 // Province code mapping (mirrors DataSLF model)
 const PROVINCE_CODES = {
@@ -434,8 +437,22 @@ function hasTruckVolume(entry) {
   return (entry?.trucks || []).some((truck) => Number(truck?.actualVolume || 0) > 0);
 }
 
+// A doc is "baseline-only" when it carries no transport entries at all. This is
+// exactly the set `findMatchingBaselineOnlyIds` writes to, so the READ below must
+// prefer the same set — otherwise the portal saves a baseline edit onto doc A while
+// GET /baseline keeps serving doc B, and the edited cell name / waste type / volume
+// silently reverts on reload.
+function isBaselineOnlyRecord(entry) {
+  return !(Array.isArray(entry?.trucks) ? entry.trucks : []).length;
+}
+
 function chooseBaselineRecord(entries = []) {
-  return entries.find((entry) => !hasTruckVolume(entry)) || entries[0] || null;
+  return (
+    entries.find(isBaselineOnlyRecord) ||
+    entries.find((entry) => !hasTruckVolume(entry)) ||
+    entries[0] ||
+    null
+  );
 }
 
 function escapeRegExp(value) {
@@ -2453,8 +2470,29 @@ router.get("/summary-by-slf", async (req, res) => {
         },
       },
       {
+        // Group on the STABLE facility id, not the denormalized `slfName` string.
+        // A facility that was renamed (or whose submissions carry an older name
+        // snapshot) produced one row per name variant, so the same SLF appeared
+        // twice in the breakdown and its submissions/volumes were double-counted
+        // across the summary tiles, filters and exports. The name only acts as a
+        // grouping key for legacy records that have no facility id at all.
+        $addFields: {
+          _groupKey: {
+            $cond: [
+              { $ifNull: ["$slfGenerator", false] },
+              { $concat: ["id:", { $toString: "$slfGenerator" }] },
+              { $concat: ["name:", { $ifNull: ["$slfName", "Unassigned SLF"] }] },
+            ],
+          },
+        },
+      },
+      {
         $group: {
-          _id: { $ifNull: ["$slfName", "Unassigned SLF"] },
+          _id: "$_groupKey",
+          // Only a fallback: the display name is resolved from the facility record
+          // below. For name-keyed groups every doc shares this value anyway, so no
+          // ordering stage (and no blocking in-memory sort) is needed here.
+          slfName: { $first: { $ifNull: ["$slfName", "Unassigned SLF"] } },
           slfGenerator: { $first: "$slfGenerator" },
           baselineUnit: { $first: "$baselineUnit" },
           submissions: { $sum: 1 },
@@ -2475,12 +2513,36 @@ router.get("/summary-by-slf", async (req, res) => {
           lastDisposalDate: { $max: "$dateOfDisposal" },
         },
       },
-      { $sort: { _id: 1 } },
     ]);
-    res.json(
-      rows.map((row) => ({
+
+    // Resolve each grouped row's display name from the CANONICAL facility record
+    // (by id) so the breakdown shows one current name per SLF, even when older
+    // submissions still carry a previous name snapshot.
+    const facilityIds = [
+      ...new Set(rows.map((row) => row.slfGenerator).filter(Boolean).map(String)),
+    ].filter((id) => mongoose.Types.ObjectId.isValid(id));
+    const facilityDocs = facilityIds.length
+      ? await SlfFacility.find({ _id: { $in: facilityIds } })
+          .select("_id lgu ownership")
+          .lean()
+      : [];
+    const facilityNameById = new Map(
+      facilityDocs.map((facility) => [
+        String(facility._id),
+        `${facility.lgu || ""}${facility.ownership ? ` (${facility.ownership})` : ""}`.trim(),
+      ]),
+    );
+
+    const payload = rows
+      .map((row) => {
+        const genId = row.slfGenerator ? String(row.slfGenerator) : "";
+        // Key stays a stable string (the facility id when known) so the client's
+        // rowKey/search/filters keep working; the response shape is unchanged.
+        const canonicalName =
+          (genId && facilityNameById.get(genId)) || row.slfName || "Unassigned SLF";
+        return {
         key: row._id,
-        slfName: row._id,
+        slfName: canonicalName,
         slfGenerator: row.slfGenerator || null,
         baselineUnit: row.baselineUnit || "m³",
         submissions: row.submissions,
@@ -2501,8 +2563,11 @@ router.get("/summary-by-slf", async (req, res) => {
         hazardousM3: row.hazardousM3,
         hazardousTons: row.hazardousTons,
         lastDisposalDate: row.lastDisposalDate,
-      })),
-    );
+        };
+      })
+      .sort((a, b) => String(a.slfName).localeCompare(String(b.slfName)));
+
+    res.json(payload);
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });
   }

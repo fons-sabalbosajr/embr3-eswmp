@@ -20,6 +20,10 @@ import { SUPPORT_EMAIL, SUPPORT_MAILTO } from "../../config/appContact";
 import api from "../../api";
 import secureStorage from "../../utils/secureStorage";
 import { convertVolume } from "../../utils/volumeUnits";
+import {
+  buildSubmissionWasteEntries,
+  formatWasteEntryTotals,
+} from "../../utils/submissionEntries";
 import { useSensitiveMask, MASK_PLACEHOLDER } from "../../utils/sensitiveMask";
 
 const { Text } = Typography;
@@ -1945,9 +1949,19 @@ export default function SLFPortalModals({
         {historyDetailModal &&
           (() => {
             const d = historyDetailModal;
-            const totalVolume = (d.trucks || []).reduce(
-              (s, t) => s + (t.actualVolume || 0),
-              0,
+            // Break the submission into its individual waste entries — a truck that
+            // split its load across several vehicles contributes one row per vehicle,
+            // each with its own waste type, volume, unit and cell.
+            const wasteEntries = buildSubmissionWasteEntries(d, {
+              slfName: d.slfName,
+              fallbackUnit: baselineUnit,
+            });
+            // Previously this summed `actualVolume` across trucks with no regard for
+            // each truck's unit and then labelled the result "tons" — a 5× error
+            // whenever any entry was recorded in m³.
+            const totalVolumeSummary = formatWasteEntryTotals(
+              wasteEntries,
+              d.totalVolumeAcceptedUnit || baselineUnit,
             );
             const sectionTitle = (icon, text) => (
               <div
@@ -2186,14 +2200,9 @@ export default function SLFPortalModals({
                         <div style={{ marginTop: 4 }}>
                           <Text
                             strong
-                            style={{ fontSize: 18, color: "#fa8c16" }}
+                            style={{ fontSize: 16, color: "#fa8c16" }}
                           >
-                            {totalVolume > 0
-                              ? totalVolume.toLocaleString()
-                              : "0"}
-                          </Text>{" "}
-                          <Text type="secondary" style={{ fontSize: 11 }}>
-                            tons
+                            {totalVolumeSummary}
                           </Text>
                         </div>
                       </div>
@@ -2654,26 +2663,28 @@ export default function SLFPortalModals({
                             <CarOutlined
                               style={{ color: "#1a3353", marginRight: 6 }}
                             />
-                            Transport & Disposal ({(d.trucks || []).length}{" "}
-                            entries)
+                            Transport & Disposal ({wasteEntries.length} waste
+                            entr{wasteEntries.length === 1 ? "y" : "ies"} across{" "}
+                            {(d.trucks || []).length} truck
+                            {(d.trucks || []).length === 1 ? "" : "s"})
                           </Text>
                         ),
                         children:
-                          (d.trucks || []).length > 0 ? (
+                          wasteEntries.length > 0 ? (
                             <Table
-                              dataSource={d.trucks}
-                              rowKey={(_, i) => i}
+                              dataSource={wasteEntries}
+                              rowKey="key"
                               size="small"
-                              scroll={{ x: 720 }}
+                              scroll={{ x: 900 }}
                               pagination={
-                                (d.trucks || []).length > 10
+                                wasteEntries.length > 10
                                   ? {
                                       pageSize: 10,
                                       size: "small",
                                       showSizeChanger: true,
                                       pageSizeOptions: [10, 20, 50, 100],
                                       showTotal: (total) =>
-                                        `${total} truck entr${total === 1 ? "y" : "ies"}`,
+                                        `${total} waste entr${total === 1 ? "y" : "ies"}`,
                                     }
                                   : false
                               }
@@ -2687,8 +2698,17 @@ export default function SLFPortalModals({
                                   ),
                                 },
                                 {
+                                  title: "Date",
+                                  key: "date",
+                                  width: 110,
+                                  render: (_, e) =>
+                                    e.date
+                                      ? dayjs(e.date).format("MMM D, YYYY")
+                                      : "—",
+                                },
+                                {
                                   title: "Ticket No.",
-                                  dataIndex: "disposalTicketNo",
+                                  dataIndex: "ticketNo",
                                   key: "ticket",
                                   render: (v) => v || "—",
                                 },
@@ -2703,27 +2723,6 @@ export default function SLFPortalModals({
                                   dataIndex: "plateNumber",
                                   key: "plate",
                                   render: (v) => v || "—",
-                                },
-                                {
-                                  title: "Capacity",
-                                  key: "cap",
-                                  render: (_, t) =>
-                                    t.truckCapacity
-                                      ? `${t.truckCapacity} ${(t.truckCapacityUnit || baselineUnit).replace("m3", "m³")}`
-                                      : "—",
-                                },
-                                {
-                                  title: "Volume",
-                                  key: "vol",
-                                  render: (_, t) =>
-                                    t.actualVolume != null ? (
-                                      <Text strong style={{ color: "#52c41a" }}>
-                                        {t.actualVolume}{" "}
-                                        {t.actualVolumeUnit || baselineUnit}
-                                      </Text>
-                                    ) : (
-                                      "—"
-                                    ),
                                 },
                                 {
                                   title: "Waste Type",
@@ -2744,18 +2743,47 @@ export default function SLFPortalModals({
                                     ),
                                 },
                                 {
+                                  title: "Volume",
+                                  key: "vol",
+                                  align: "right",
+                                  width: 90,
+                                  render: (_, e) =>
+                                    e.volume != null ? (
+                                      <Text strong style={{ color: "#52c41a" }}>
+                                        {e.volume.toLocaleString(undefined, {
+                                          maximumFractionDigits: 2,
+                                        })}
+                                      </Text>
+                                    ) : (
+                                      "—"
+                                    ),
+                                },
+                                {
+                                  // Unit kept in its own column so a volume is never
+                                  // read (or copied out) without its unit.
+                                  title: "Unit",
+                                  dataIndex: "unit",
+                                  key: "unit",
+                                  width: 70,
+                                  render: (v) => v || "—",
+                                },
+                                {
+                                  title: "Cell",
+                                  dataIndex: "cell",
+                                  key: "cell",
+                                  width: 110,
+                                  render: (v) =>
+                                    v || (
+                                      <Text type="secondary">Unplaced</Text>
+                                    ),
+                                },
+                                {
                                   title: "HW Code",
                                   key: "hw",
-                                  render: (_, t) => {
-                                    const codes = Array.isArray(t.hazWasteCode)
-                                      ? t.hazWasteCode
-                                      : t.hazWasteCode
-                                        ? [t.hazWasteCode]
-                                        : [];
-                                    return codes.length > 0
-                                      ? codes.join(", ")
-                                      : "—";
-                                  },
+                                  render: (_, e) =>
+                                    e.hazWasteCodes.length > 0
+                                      ? e.hazWasteCodes.join(", ")
+                                      : "—",
                                 },
                               ]}
                             />
