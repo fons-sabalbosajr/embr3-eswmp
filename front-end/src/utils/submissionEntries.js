@@ -22,6 +22,49 @@ function resolveCellLabel(source, fallback) {
   return Number.isInteger(index) ? `Cell ${index + 1}` : "";
 }
 
+function normalizeClientList(value) {
+  const list = Array.isArray(value) ? value : value != null && value !== "" ? [value] : [];
+  const seen = new Set();
+  return list
+    .map((client) => {
+      if (client == null) return null;
+      if (typeof client === "string") {
+        const name = client.trim();
+        return name ? { name, details: "" } : null;
+      }
+      if (typeof client !== "object") {
+        const name = String(client).trim();
+        return name ? { name, details: "" } : null;
+      }
+      const name = String(client.clientName || client.name || client.company || client.companyName || client.client || "").trim();
+      if (!name) return null;
+      const detailParts = [client.clientType, client.provinceName || client.province, client.municipalityName || client.municipality]
+        .map((part) => String(part || "").trim())
+        .filter(Boolean);
+      return { name, details: detailParts.join(" · ") };
+    })
+    .filter(Boolean)
+    .filter((client) => {
+      const key = client.name.toLowerCase();
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+}
+
+function resolveEntryClients(source, truck, record) {
+  const direct = normalizeClientList(source?.selectedClients);
+  if (direct.length) return direct;
+  const truckClients = normalizeClientList(truck?.selectedClients || truck?.clients || truck?.haulerClients || truck?.privateSectorClients);
+  if (truckClients.length) return truckClients;
+  const haulerName = String(truck?.hauler || truck?.haulerName || "").trim().toLowerCase();
+  if (!haulerName) return [];
+  const hauler = (record?.accreditedHaulers || []).find(
+    (item) => String(item?.haulerName || item?.name || "").trim().toLowerCase() === haulerName,
+  );
+  return normalizeClientList(hauler?.privateSectorClients || hauler?.clients);
+}
+
 /**
  * @returns {Array<{
  *   key: string, submissionId: string, date: Date|null, hauler: string,
@@ -71,6 +114,7 @@ export function buildSubmissionWasteEntries(record, { slfName = "", fallbackUnit
         slfName: slfName || record.slfName || "",
         status: record.status || "pending",
         hazWasteCodes: codes.filter(Boolean),
+        clients: resolveEntryClients(source, truck, record),
         truckIndex,
         vehicleIndex,
       });
@@ -101,6 +145,7 @@ export function buildSubmissionWasteEntries(record, { slfName = "", fallbackUnit
         slfName: slfName || record.slfName || "",
         status: record.status || "pending",
         hazWasteCodes: [],
+        clients: [],
         truckIndex: -1,
         vehicleIndex: null,
       });

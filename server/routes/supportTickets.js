@@ -15,7 +15,9 @@ const router = express.Router();
 // Require an authenticated caller on every route below. Support tickets contain
 // user contact details and attachments; they must not be readable/editable
 // anonymously. Both frontends always send a Bearer token.
-const { requireAnyAuth } = require("../middleware/auth");
+const { requireAnyAuth, adminOnly } = require("../middleware/auth");
+const { requirePortalRule } = require("../utils/portalPolicy");
+const { investigateTicket } = require("../utils/veraTicketInvestigator");
 router.use(requireAnyAuth);
 
 const MAX_TICKET_UPLOAD_MB = 15;
@@ -76,7 +78,7 @@ router.post(
 );
 
 // Portal: Create a support ticket
-router.post("/", async (req, res) => {
+router.post("/", requirePortalRule("can_create_support_tickets"), async (req, res) => {
   try {
     const { portalUser, portalUserEmail, portalUserName, companyName, slfName, subject, category, priority, message, attachments = [] } = req.body;
     if (!portalUserEmail || !subject || !message) {
@@ -128,6 +130,20 @@ router.post("/", async (req, res) => {
       user: portalUserEmail,
       meta: { ticketNo: ticket.ticketNo },
     });
+
+    // VERA answers first for portal tickets. This is best-effort: ticket creation
+    // must not fail if VERA cannot investigate, but when it succeeds the portal
+    // user sees an immediate first reply while admins/developers can still follow
+    // up on the same thread.
+    try {
+      await runVeraInvestigation(ticket, req);
+    } catch (veraErr) {
+      writeLog("warn", "support.vera.auto-reply.failed", {
+        message: `VERA could not auto-reply to ${ticket.ticketNo}: ${veraErr.message}`,
+        user: portalUserEmail,
+        meta: { ticketNo: ticket.ticketNo },
+      });
+    }
 
     res.status(201).json({ message: "Support ticket created", data: ticket });
   } catch (error) {
@@ -292,6 +308,100 @@ router.post("/:id/portal-reply", async (req, res) => {
     refreshAdmin(req, "tickets");
 
     res.json({ message: "Reply added", data: ticket });
+  } catch (error) {
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+});
+
+// ── VERA: investigate a ticket, reply, and record the result (admin/developer) ──
+// Runs the evidence-first investigation, posts VERA's SAFE user-facing reply to the
+// thread (visible to the portal user), and stores the admin-only investigation
+// record + processing status. Never claims a fix; escalates when warranted.
+async function runVeraInvestigation(ticket, req) {
+  ticket.veraStatus = "investigating";
+  await ticket.save();
+
+  const result = await investigateTicket(ticket);
+
+  // Post VERA's reply to the conversation (preserves the full thread/audit trail).
+  ticket.replies.push({
+    message: result.response,
+    repliedBy: "vera",
+    repliedByName: "VERA (Virtual Environmental Response Assistant)",
+    isAdmin: true,
+  });
+  if (ticket.status === "open") ticket.status = "in_progress";
+
+  ticket.veraStatus = result.processingStatus;
+  ticket.veraInvestigation = {
+    investigatedAt: new Date(),
+    affectedModule: result.affectedModule,
+    investigationSummary: result.investigationSummary,
+    issueCategory: result.issueCategory,
+    investigationComplete: result.investigationComplete !== false,
+    missingInformation: result.missingInformation || [],
+    suggestedNextSteps: result.suggestedNextSteps || [],
+    evidenceReviewed: result.evidenceReviewed,
+    confidence: result.confidence,
+    responseSent: result.response,
+    escalationStatus: result.escalate ? "escalated" : "none",
+    processingStatus: result.processingStatus,
+    source: result.source,
+  };
+  await ticket.save();
+
+  // Notify the portal user (their ticket thread refetches on this event) + admins.
+  try {
+    await Notification.create({
+      recipient: ticket.portalUser?.toString() || ticket.portalUserEmail,
+      type: "support_ticket_reply",
+      title: "VERA replied to your ticket",
+      message: `VERA responded to ${ticket.ticketNo}: ${ticket.subject}`,
+      meta: { ticketNo: ticket.ticketNo, vera: true },
+    });
+  } catch { /* silent */ }
+  notifyPortal(req, ticket.portalUserEmail, { type: "support_ticket_reply", title: "VERA replied to your ticket" });
+  if (result.escalate) {
+    notifyAdmin(req, { type: "support_ticket", title: "VERA escalated a ticket", message: `${ticket.ticketNo} escalated for review` });
+  }
+  refreshAdmin(req, "tickets");
+
+  writeLog("info", "support.vera.investigate", {
+    message: `VERA investigated ${ticket.ticketNo}: ${result.issueCategory} (${result.escalate ? "escalated" : "answered"})`,
+    user: req.user?.email || "vera",
+    meta: { ticketNo: ticket.ticketNo, category: result.issueCategory, escalated: result.escalate },
+  });
+
+  return result;
+}
+
+router.post("/:id/vera-investigate", adminOnly, async (req, res) => {
+  try {
+    const ticket = await SupportTicket.findById(req.params.id);
+    if (!ticket) return res.status(404).json({ message: "Ticket not found" });
+    const result = await runVeraInvestigation(ticket, req);
+    res.json({ message: "VERA investigation complete", data: ticket, result });
+  } catch (error) {
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+});
+
+// Process the current highest-priority OPEN ticket not yet handled by VERA — the
+// capability test entry point ("the current urgent open ticket").
+router.post("/vera-investigate-urgent", adminOnly, async (req, res) => {
+  try {
+    const PRIORITY_ORDER = { Urgent: 0, High: 1, Medium: 2, Low: 3 };
+    const candidates = await SupportTicket.find({
+      status: { $in: ["open", "in_progress"] },
+      veraStatus: { $in: ["none", "investigating", null] },
+    }).sort({ createdAt: 1 }).limit(100);
+    if (!candidates.length) return res.status(404).json({ message: "No eligible open ticket to investigate" });
+    candidates.sort((a, b) =>
+      (PRIORITY_ORDER[a.priority] ?? 9) - (PRIORITY_ORDER[b.priority] ?? 9) ||
+      new Date(a.createdAt) - new Date(b.createdAt));
+    const ticket = candidates[0];
+    const result = await runVeraInvestigation(ticket, req);
+    res.json({ message: `VERA processed ${ticket.ticketNo}`, ticketNo: ticket.ticketNo, data: ticket, result });
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });
   }

@@ -404,6 +404,9 @@ app.use("/api/slf-data-files", require("./routes/slfDataFiles"));
 app.use("/api/portal-queue", require("./routes/portalQueue"));
 app.use("/api/portal-messages", require("./routes/portalMessages"));
 app.use("/api/dev-portal", require("./routes/devPortal"));
+// Developer-only Portal User Rules configuration (router enforces authMiddleware +
+// developerOnly on every route).
+app.use("/api/portal-user-rules", require("./routes/portalUserRules"));
 // Developer-only raw submission maintenance + volume analysis. The router itself
 // applies authMiddleware + developerOnly to every route.
 app.use("/api/raw-submissions", require("./routes/rawSubmissions"));

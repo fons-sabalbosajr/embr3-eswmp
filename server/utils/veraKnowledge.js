@@ -180,6 +180,31 @@ const KNOWLEDGE_BASE = [
     related: ["review-submit-disabled", "vehicle-capacity", "organize-cells"],
   },
   {
+    id: "units-and-conversion",
+    category: "errors",
+    question: "What units does the portal use, and how are tons and m³ related?",
+    keywords: [
+      "unit", "units", "tons", "ton", "tonnes", "m3", "m³", "cubic meter", "cubic metre",
+      "convert", "conversion", "volume unit", "which unit", "unit must be", "change unit",
+    ],
+    answer:
+      "The portal works in two volume units: tons and m³ (cubic meters). Every entry must use your SLF's declared baseline unit — that is why you may see “Unit must be <baseline>”. If you need to convert between them the system uses a fixed factor: m³ = tons ÷ 0.50, and tons = m³ × 0.50. You do not convert by hand — enter the value in your declared unit and the system stores your original value and shows the converted figure where needed, so your number is never altered. If your declared unit looks wrong, ask an admin to update it with Set Field Units; a value with no unit cannot be counted and will be flagged.",
+    related: ["validation-errors", "update-baseline", "vehicle-capacity"],
+  },
+  {
+    id: "submission-not-saved",
+    category: "errors",
+    question: "My submission failed or didn't save — what should I do?",
+    keywords: [
+      "failed", "failed submission", "did not save", "didn't save", "not saved", "disappeared",
+      "missing submission", "lost", "server error", "submit failed", "no confirmation",
+      "double submit", "submitted twice", "duplicate",
+    ],
+    answer:
+      "First check Submission History — it reflects what the server actually saved, so if your entry is there it was recorded (even if the confirmation was slow). If it is not there, submit again: the portal uses an idempotency key, so a retry of the same submission will not create a duplicate. If it still fails, the error is recorded for the admin team automatically; open a support ticket here in VERA with the date and SLF so an admin can check. Do not keep re-clicking Submit — wait for the result or the error message.",
+    related: ["statuses", "edit-submitted", "contact-support"],
+  },
+  {
     id: "upload-formats",
     category: "upload",
     question: "What file formats can I upload?",

@@ -1606,6 +1606,25 @@ export default function SubmissionSummary({ isDark }) {
                         },
                         { title: "Hauler", dataIndex: "hauler", width: 150, render: (v) => v || "—" },
                         {
+                          title: "Client",
+                          dataIndex: "clients",
+                          width: 190,
+                          render: (clients) => {
+                            const list = Array.isArray(clients) ? clients : [];
+                            if (!list.length) return <Text type="secondary">No client recorded</Text>;
+                            return (
+                              <Space direction="vertical" size={2}>
+                                {list.map((client) => (
+                                  <span key={client.name}>
+                                    <Text>{client.name}</Text>
+                                    {client.details && <Text type="secondary"> ({client.details})</Text>}
+                                  </span>
+                                ))}
+                              </Space>
+                            );
+                          },
+                        },
+                        {
                           title: "Waste Type",
                           dataIndex: "wasteType",
                           width: 150,

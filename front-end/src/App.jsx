@@ -37,6 +37,7 @@ function App() {
 
         {/* Admin Side */}
         <Route path="/admin" element={<AdminHome />} />
+        <Route path="/admin/app-settings/vera-workarounds" element={<AdminHome />} />
         <Route path="/admin/login" element={<Login />} />
         <Route path="/admin/signup" element={<Signup />} />
         <Route path="/admin/verify-email" element={<VerifyEmail />} />

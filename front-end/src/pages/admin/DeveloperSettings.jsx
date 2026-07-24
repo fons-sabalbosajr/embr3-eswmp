@@ -83,8 +83,10 @@ import DummyDataConfig from "./DummyDataConfig";
 import SLFDataTableFiles from "./SLFDataTableFiles";
 import SubmissionRawData from "./SubmissionRawData";
 import AutomationAgentSettings from "./AutomationAgentSettings";
+import PortalUserRules from "./PortalUserRules";
 import AnnouncementManager from "./AnnouncementManager";
 import Region3LguData from "./Region3LguData";
+import VeraWorkarounds from "./VeraWorkarounds";
 
 const { Title, Text } = Typography;
 const { Option } = Select;
@@ -127,13 +129,13 @@ const TAB_GROUPS = [
     key: "grp-security",
     label: "Security & Access",
     icon: <LockOutlined />,
-    tabs: ["security", "portal-security", "dev-portal-credential"],
+    tabs: ["security", "portal-security", "portal-rules", "dev-portal-credential"],
   },
   {
     key: "grp-system",
     label: "System & Logs",
     icon: <ToolOutlined />,
-    tabs: ["system", "automation-agent"],
+    tabs: ["system", "automation-agent", "vera-workarounds"],
   },
 ];
 
@@ -2375,6 +2377,11 @@ export default function DeveloperSettings({onSettingsSaved, isDark, isDeveloper 
             ),
           },
           {
+            key: "portal-rules",
+            label: <span><SafetyCertificateOutlined /> Portal User Rules</span>,
+            children: <PortalUserRules />,
+          },
+          {
             key: "system",
             label: <span><ToolOutlined /> System &amp; Logs</span>,
             children: (
@@ -2530,6 +2537,11 @@ export default function DeveloperSettings({onSettingsSaved, isDark, isDeveloper 
             children: (
               <AutomationAgentSettings initial={settings?.automationAgent} isDark={isDark} />
             ),
+          },
+          {
+            key: "vera-workarounds",
+            label: <span><RobotOutlined /> VERA Workarounds and Logs</span>,
+            children: <VeraWorkarounds isDark={isDark} />,
           },
           {
             key: "deleted-submissions",

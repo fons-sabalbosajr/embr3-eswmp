@@ -1,4 +1,4 @@
-import { Card, Badge, Button, Row, Col, Space, Spin, Tag, Progress, Tooltip, Typography } from "antd";
+import { Alert, Card, Badge, Button, Row, Col, Space, Spin, Tag, Progress, Tooltip, Typography } from "antd";
 import {
   BankOutlined,
   BarChartOutlined,
@@ -10,6 +10,7 @@ import {
   FileTextOutlined,
   InfoCircleOutlined,
   PieChartOutlined,
+  RobotOutlined,
   SendOutlined,
   TeamOutlined,
 } from "@ant-design/icons";
@@ -177,6 +178,48 @@ export default function AssignedSlfDashboard({
                 </Tooltip>
               }
             >
+              {/* ── VERA contextual guidance (Issue 4) ──────────────────────────
+                  A single, de-duplicated inline message that reports the EXACT
+                  outstanding issues (never a generic "please complete your data")
+                  and confirms completion once resolved. It is derived purely from
+                  live submission state, so a fixed issue clears its own message on
+                  the next render — no stale warnings linger after resolution. */}
+              {!slfInfoLoading &&
+                (submitBlockers.length > 0 ? (
+                  <Alert
+                    type="warning"
+                    showIcon
+                    icon={<RobotOutlined />}
+                    style={{ marginBottom: 16 }}
+                    message={
+                      <Text strong style={{ fontSize: 13 }}>
+                        VERA — {submitBlockers.length} item
+                        {submitBlockers.length === 1 ? "" : "s"} need
+                        {submitBlockers.length === 1 ? "s" : ""} attention before you can submit
+                      </Text>
+                    }
+                    description={
+                      <ul style={{ margin: "6px 0 0", paddingLeft: 18, fontSize: 12.5 }}>
+                        {submitBlockers.map((reason, i) => (
+                          <li key={i}>{reason}</li>
+                        ))}
+                      </ul>
+                    }
+                  />
+                ) : baselineSaved ? (
+                  <Alert
+                    type="success"
+                    showIcon
+                    icon={<RobotOutlined />}
+                    style={{ marginBottom: 16 }}
+                    message={
+                      <Text style={{ fontSize: 12.5 }}>
+                        VERA: Baseline Data is complete and all required fields are valid.
+                        No additional updates are required — you can submit.
+                      </Text>
+                    }
+                  />
+                ) : null)}
               {slfInfoLoading ? (
                 <div style={{ textAlign: "center", padding: "40px 0" }}>
                   <Spin size="large" />

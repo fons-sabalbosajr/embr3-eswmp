@@ -8,8 +8,46 @@ const { writeLog } = require("../utils/logger");
 const { notifyAdmin, notifyPortal, refreshAdmin, refreshPortal } = require("../utils/socketEmit");
 const { NON_DUMMY_CLAUSE } = require("../utils/dummyFilter");
 const { isSameSlfSite, facilityDisplayName } = require("../utils/slfIdentity");
+const { normalizeUnit: normalizeUnitStrict } = require("../utils/volumeUnits");
+const PortalPolicyAudit = require("../models/PortalPolicyAudit");
 
 const router = express.Router();
+
+// The facility unit fields that together define the SLF's official "global unit".
+const UNIT_FIELDS = [
+  "wasteReceivedUnit", "volumeCapacityUnit", "receivingVolumeCapacityUnit",
+  "estimatedVolumeWasteUnit", "baselineUnit",
+];
+// The single configured global unit for a facility ("" when none is set yet), read
+// from the same fields "Set Field Units" writes. Array unit fields count too.
+function configuredGlobalUnit(rec) {
+  for (const f of UNIT_FIELDS) {
+    const u = normalizeUnitStrict(rec?.[f]);
+    if (u) return u;
+  }
+  for (const arr of [rec?.cellCapacityUnits, rec?.cellFillUnits]) {
+    const u = normalizeUnitStrict((Array.isArray(arr) ? arr : []).find(Boolean));
+    if (u) return u;
+  }
+  return "";
+}
+// The global unit an incoming update WOULD set ("" when the update touches no unit
+// field). Used to detect a unit change and compare against the configured unit.
+function incomingGlobalUnit(update) {
+  for (const f of UNIT_FIELDS) {
+    if (update[f] !== undefined) {
+      const u = normalizeUnitStrict(update[f]);
+      if (u) return u;
+    }
+  }
+  for (const key of ["cellCapacityUnits", "cellFillUnits"]) {
+    if (Array.isArray(update[key])) {
+      const u = normalizeUnitStrict(update[key].find(Boolean));
+      if (u) return u;
+    }
+  }
+  return "";
+}
 
 // SECONDARY safeguard only — the primary defence against duplicate SLFs is that
 // every relationship (submissions, baselines, portal assignments) is keyed on the
@@ -530,7 +568,7 @@ router.post("/", validateBody({
 });
 
 // Update
-router.put("/:id", async (req, res) => {
+router.put("/:id", adminOnly, async (req, res) => {
   try {
     const update = { ...(req.body || {}) };
     ["_id", "id", "createdAt", "updatedAt", "deletedAt", "__v"].forEach((key) => delete update[key]);
@@ -539,6 +577,28 @@ router.put("/:id", async (req, res) => {
     });
     const record = await SlfFacility.findOne({ _id: req.params.id, deletedAt: null });
     if (!record) return res.status(404).json({ message: "Record not found" });
+
+    // ── Global unit lock ──────────────────────────────────────────────────────
+    // Once an official global unit is configured for a facility, only an
+    // admin/developer caller on this admin-only route may change it. Portal users
+    // still cannot reach this route. Unit changes are audited because they affect
+    // table, modal, export and capacity displays.
+    const prevUnit = configuredGlobalUnit(record);
+    const nextUnit = incomingGlobalUnit(update);
+    const unitIsChanging = !!nextUnit && !!prevUnit && nextUnit !== prevUnit;
+    if (unitIsChanging && req.user?.role !== "admin" && req.user?.role !== "developer") {
+      writeLog("warn", "unit.change.denied", {
+        message: `Non-developer attempted to change global unit ${prevUnit} → ${nextUnit} for facility ${req.params.id}`,
+        user: req.user?.email || req.user?.id || "",
+        ip: req.ip,
+        meta: { facilityId: req.params.id, from: prevUnit, to: nextUnit, role: req.user?.role },
+      });
+      return res.status(403).json({
+        message: "The official global unit is locked. Only an authorized admin or developer may change it.",
+        code: "GLOBAL_UNIT_LOCKED",
+        currentUnit: prevUnit,
+      });
+    }
 
     // Renaming/re-yearing a facility onto another existing facility's identity
     // would recreate the duplicate this fix removes — reject it the same way a
@@ -589,8 +649,60 @@ router.put("/:id", async (req, res) => {
       });
     });
 
+    // ── Cell Infrastructure wipe guard (defense-in-depth) ─────────────────────
+    // A facility edit must never blank out populated cell infrastructure. If the
+    // client sends an EMPTY array for a cell field while the stored record still
+    // has data (e.g. a modal saved from a tab whose cell inputs were unmounted, or
+    // any partial payload), drop that key so the existing values are preserved
+    // instead of overwritten. A genuine reduction of cells sends a shorter but
+    // non-empty array, which is still applied; only a total wipe-to-[] is blocked.
+    const CELL_INFRA_ARRAYS = [
+      "cellNames", "cellCapacities", "cellCapacityUnits", "cellStatuses",
+      "cellTypes", "cellSubmissionAllowed", "cellNotes", "cellFillValues", "cellFillUnits",
+    ];
+    const preservedCellArrays = [];
+    for (const key of CELL_INFRA_ARRAYS) {
+      if (
+        Array.isArray(update[key]) && update[key].length === 0 &&
+        Array.isArray(record[key]) && record[key].length > 0
+      ) {
+        delete update[key];
+        preservedCellArrays.push(key);
+      }
+    }
+    if (preservedCellArrays.length) {
+      writeLog("warn", "slfFacility.cell_wipe_prevented", {
+        message: `Ignored empty ${preservedCellArrays.join(", ")} for ${record.lgu || record._id} to preserve existing cell infrastructure`,
+        ip: req.ip,
+        meta: { facilityId: String(record._id), preserved: preservedCellArrays },
+      });
+    }
+
     record.set(update);
     await record.save();
+
+    // Audit a global-unit change (previous → new, scope, who).
+    if (unitIsChanging && (req.user?.role === "admin" || req.user?.role === "developer")) {
+      try {
+        await PortalPolicyAudit.create({
+          type: "global_unit",
+          changedBy: req.user?.email || req.user?.id || "developer",
+          changedById: req.user?.id || "",
+          changedByRole: req.user?.role || "",
+          targetFacility: record._id,
+          affectedScope: `Facility ${facilityDisplayName(record) || record._id} (all unit fields, cells, submissions display)`,
+          previousValue: prevUnit,
+          newValue: nextUnit,
+          reason: typeof req.body?.unitChangeReason === "string" ? req.body.unitChangeReason.trim() : "",
+        });
+      } catch { /* audit is best-effort */ }
+      writeLog("info", "unit.change", {
+        message: `Developer changed global unit ${prevUnit} → ${nextUnit} for facility ${record._id}`,
+        user: req.user?.email || req.user?.id || "",
+        ip: req.ip,
+        meta: { facilityId: String(record._id), from: prevUnit, to: nextUnit },
+      });
+    }
 
     // ── Propagate a CELL rename across the app ────────────────────────────────
     //

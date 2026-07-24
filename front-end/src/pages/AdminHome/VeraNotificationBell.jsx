@@ -21,6 +21,21 @@ const SEVERITY = {
 
 const seenKey = (userId) => `vera_notif_seen_${userId || "admin"}`;
 
+const headerIconButtonStyle = (isDark, open) => ({
+  width: 32,
+  height: 32,
+  minWidth: 32,
+  padding: 0,
+  borderRadius: 8,
+  display: "inline-flex",
+  alignItems: "center",
+  justifyContent: "center",
+  color: isDark ? "#999" : "#666",
+  background: open ? (isDark ? "rgba(255,255,255,0.08)" : "#f5f5f5") : undefined,
+  marginRight: 12,
+  verticalAlign: "middle",
+});
+
 export default function VeraNotificationBell({ isDark, userId }) {
   const [open, setOpen] = useState(false);
   const [items, setItems] = useState([]);
@@ -89,7 +104,23 @@ export default function VeraNotificationBell({ isDark, userId }) {
                       <Text strong style={{ fontSize: 13, lineHeight: 1.3 }}>{n.title}</Text>
                       <Tag color={sev.color} style={{ margin: 0, fontSize: 10 }}>{sev.label}</Tag>
                     </div>
+                    {(n.sourceModule || n.status) && (
+                      <div style={{ display: "flex", flexWrap: "wrap", gap: 4, margin: "3px 0 1px" }}>
+                        {n.sourceModule && <Tag style={{ margin: 0, fontSize: 10 }}>{n.sourceModule}</Tag>}
+                        {n.status && <Tag color={n.status === "resolved" ? "green" : "default"} style={{ margin: 0, fontSize: 10 }}>{n.status}</Tag>}
+                      </div>
+                    )}
                     <Text type="secondary" style={{ fontSize: 12, lineHeight: 1.35, display: "-webkit-box", WebkitLineClamp: 3, WebkitBoxOrient: "vertical", overflow: "hidden" }}>{n.message}</Text>
+                    {(n.affectedUser || n.affectedSlf) && (
+                      <Text type="secondary" style={{ fontSize: 11, marginTop: 2, display: "block" }}>
+                        Affected: {[n.affectedSlf, n.affectedUser].filter(Boolean).join(" · ")}
+                      </Text>
+                    )}
+                    {n.recommendedAction && (
+                      <Text style={{ fontSize: 11, marginTop: 2, display: "block", color: isDark ? "#69b1ff" : "#1677ff" }}>
+                        → {n.recommendedAction}
+                      </Text>
+                    )}
                     <Text type="secondary" style={{ fontSize: 11, marginTop: 2, display: "block" }}>{n.createdAt ? dayjs(n.createdAt).fromNow() : ""}</Text>
                   </div>
                 </div>
@@ -128,8 +159,8 @@ export default function VeraNotificationBell({ isDark, userId }) {
           <Button
             type="text"
             aria-label={`${unread} unread VERA notifications`}
-            icon={<span style={{ display: "inline-flex" }}><VeraFlameIcon size={20} /></span>}
-            style={{ fontSize: 18, marginRight: 12 }}
+            icon={<span style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", lineHeight: 0 }}><VeraFlameIcon size={24} /></span>}
+            style={headerIconButtonStyle(isDark, open)}
           />
         </Badge>
       </Tooltip>

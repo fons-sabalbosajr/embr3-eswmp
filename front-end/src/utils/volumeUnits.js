@@ -4,8 +4,8 @@
 // (SLFMonitoring helpers, SubmissionSummary, SLFPortal, CellWastePlacement,
 // DummyCellPlacementModal) plus an inline `/0.2` in SlfSubmissionReport — and
 // they DISAGREED: some defaulted a missing source unit to "tons", others to
-// "m³". Since the factor is 0.2, guessing wrong is a 25× error. Everything now
-// routes through here.
+// "m³". Guessing the wrong source unit is a multiple-x error, so everything now
+// routes through here with a single configured factor.
 //
 // Where the units come from (the "Set Field Units" tool):
 //   Set Field Units does not write a global config — it stamps the chosen unit
@@ -18,9 +18,12 @@
 // (actualVolumeUnit). A submission may therefore be in m³ while the facility
 // declares tons — that is the case this module exists to normalize.
 
-// m³ ↔ tons density factor. 1 m³ of waste ≈ 0.2 tons.
-// Mirrored server-side by DataSLF.TON_PER_M3 / server/utils/volumeUnits.js.
-export const TON_PER_M3 = 0.2;
+// m³ ↔ tons density factor: tons = m³ × TON_PER_M3, m³ = tons / TON_PER_M3.
+// Per the configured business rule the factor is 0.50 (tons = m³ × 0.50, i.e.
+// m³ = tons / 0.50). This is the frontend source of truth for the factor and is
+// mirrored server-side by server/utils/volumeUnits.js (which the server model,
+// route, and cellAvailability all import). Change it in those two files only.
+export const TON_PER_M3 = 0.5;
 
 export const M3 = "m³";
 export const TONS = "tons";

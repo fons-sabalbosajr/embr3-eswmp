@@ -267,6 +267,28 @@ export default function SupportTickets({ canEdit = true }) {
     setDetail((prev) => (prev && prev._id === updated._id ? updated : prev));
   }, []);
 
+  const [veraLoading, setVeraLoading] = useState(false);
+  const runVeraInvestigate = useCallback(async () => {
+    if (!detail) return;
+    setVeraLoading(true);
+    try {
+      const { data } = await api.post(`/support-tickets/${detail._id}/vera-investigate`);
+      updateLocalTicket(data?.data);
+      const r = data?.result;
+      Swal.fire(
+        "VERA investigation complete",
+        r
+          ? `Classified as “${r.issueCategoryLabel || r.issueCategory}” (${r.confidence} confidence). ${r.escalate ? "Escalated for review." : "A grounded reply was posted to the ticket."}`
+          : "VERA posted a reply to this ticket.",
+        r?.escalate ? "warning" : "success",
+      );
+    } catch (err) {
+      Swal.fire("Error", err.response?.data?.message || "VERA could not investigate this ticket", "error");
+    } finally {
+      setVeraLoading(false);
+    }
+  }, [detail, updateLocalTicket]);
+
   const handleReply = useCallback(
     async ({ resolve = false } = {}) => {
       if (!detail) return;
@@ -623,6 +645,81 @@ export default function SupportTickets({ canEdit = true }) {
               message="How to fix this"
               description={CATEGORY_GUIDE[detail.category] || CATEGORY_GUIDE.Other}
             />
+
+            {/* VERA investigation — evidence-first classification + grounded reply. */}
+            <Card
+              size="small"
+              style={{ marginBottom: 12, borderRadius: 8, borderColor: "#d3adf7" }}
+              title={<Space><span role="img" aria-label="vera">🔥</span><Text strong style={{ fontSize: 12 }}>VERA Investigation</Text></Space>}
+              extra={
+                canEdit && (
+                  <Button size="small" type="primary" ghost loading={veraLoading} onClick={runVeraInvestigate}>
+                    {detail.veraInvestigation?.investigatedAt ? "Re-investigate" : "Investigate with VERA"}
+                  </Button>
+                )
+              }
+            >
+              {detail.veraInvestigation?.investigatedAt ? (
+                <Space direction="vertical" size={4} style={{ width: "100%" }}>
+                  <Space wrap size={4}>
+                    <Tag color="purple">{detail.veraInvestigation.issueCategory || "unknown"}</Tag>
+                    <Tag>{detail.veraInvestigation.affectedModule}</Tag>
+                    <Tag color={detail.veraInvestigation.confidence === "high" ? "green" : detail.veraInvestigation.confidence === "medium" ? "gold" : "default"}>
+                      {detail.veraInvestigation.confidence || "—"} confidence
+                    </Tag>
+                    <Tag color={detail.veraInvestigation.escalationStatus === "escalated" ? "red" : "blue"}>
+                      {detail.veraInvestigation.escalationStatus === "escalated" ? "Escalated" : (STATUS_META[detail.veraStatus]?.label || detail.veraStatus || "answered")}
+                    </Tag>
+                  </Space>
+                  <Text type="secondary" style={{ fontSize: 12 }}>{detail.veraInvestigation.investigationSummary}</Text>
+                  {detail.veraInvestigation.investigationComplete === false && (
+                    <Alert
+                      type="warning"
+                      showIcon
+                      style={{ borderRadius: 6, margin: "2px 0" }}
+                      message="Investigation incomplete — awaiting user"
+                      description={
+                        <div style={{ fontSize: 11 }}>
+                          {Array.isArray(detail.veraInvestigation.missingInformation) && detail.veraInvestigation.missingInformation.length > 0 && (
+                            <>
+                              <Text strong style={{ fontSize: 11 }}>Missing information</Text>
+                              <ul style={{ margin: "2px 0 6px", paddingLeft: 18 }}>
+                                {detail.veraInvestigation.missingInformation.map((m, i) => <li key={i}>{m}</li>)}
+                              </ul>
+                            </>
+                          )}
+                          {Array.isArray(detail.veraInvestigation.suggestedNextSteps) && detail.veraInvestigation.suggestedNextSteps.length > 0 && (
+                            <>
+                              <Text strong style={{ fontSize: 11 }}>Suggested next steps</Text>
+                              <ul style={{ margin: "2px 0 0", paddingLeft: 18 }}>
+                                {detail.veraInvestigation.suggestedNextSteps.map((s, i) => <li key={i}>{s}</li>)}
+                              </ul>
+                            </>
+                          )}
+                        </div>
+                      }
+                    />
+                  )}
+                  {Array.isArray(detail.veraInvestigation.evidenceReviewed) && detail.veraInvestigation.evidenceReviewed.length > 0 && (
+                    <div>
+                      <Text strong style={{ fontSize: 11 }}>Evidence reviewed</Text>
+                      <ul style={{ margin: "2px 0 0", paddingLeft: 18 }}>
+                        {detail.veraInvestigation.evidenceReviewed.map((e, i) => (
+                          <li key={i}><Text type="secondary" style={{ fontSize: 11 }}>{e}</Text></li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                  <Text type="secondary" style={{ fontSize: 11 }}>
+                    Investigated {dayjs(detail.veraInvestigation.investigatedAt).format("MMM DD, YYYY h:mm A")} — response posted to the thread below.
+                  </Text>
+                </Space>
+              ) : (
+                <Text type="secondary" style={{ fontSize: 12 }}>
+                  VERA has not investigated this ticket yet. Investigating gathers the user's recent activity, submissions, and validation events, classifies the issue, and posts a grounded reply (or escalates).
+                </Text>
+              )}
+            </Card>
 
             <Text strong style={{ fontSize: 12 }}>Issue Details</Text>
             <Paragraph style={{ fontSize: 13, marginTop: 4, whiteSpace: "pre-wrap" }}>

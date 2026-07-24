@@ -208,6 +208,10 @@ export default function SubmissionSettings({
     pageSize: DEFAULT_PAGE_SIZE,
     total: 0,
   });
+  // True total number of submission ENTRIES across all matched groups (the server
+  // returns this alongside `total`, which counts collapsed grouped rows). Shown so
+  // the admin sees the real submission count, not just the number of grouped rows.
+  const [entryTotal, setEntryTotal] = useState(0);
   const [viewRecord, setViewRecord] = useState(null);
   const [groupedEntriesRecord, setGroupedEntriesRecord] = useState(null);
   // Compact summary for the Group Entries modal — derived only from fields the
@@ -419,7 +423,8 @@ export default function SubmissionSettings({
                     ? resp.data
                     : [];
                 const total = typeof resp?.total === "number" ? resp.total : rows.length;
-                return { rows: rows.map(normalizeSubmissionRecord), total };
+                const totalEntries = typeof resp?.totalEntries === "number" ? resp.totalEntries : total;
+                return { rows: rows.map(normalizeSubmissionRecord), total, totalEntries };
               }),
           {
             ttl: CACHE_TTL,
@@ -434,6 +439,9 @@ export default function SubmissionSettings({
               setData(rows);
               if (payload && typeof payload.total === "number") {
                 setPagination((prev) => ({ ...prev, total: payload.total }));
+              }
+              if (payload && typeof payload.totalEntries === "number") {
+                setEntryTotal(payload.totalEntries);
               }
               setLoading(false);
             },
@@ -659,8 +667,11 @@ export default function SubmissionSettings({
           mode: "list",
           grouped: "true",
           includeTrucks: "true",
-          page: pagination.current,
-          limit: pagination.pageSize,
+          page: 1,
+          limit: 1,
+          // Export the ENTIRE filtered result set (every group + all its entries),
+          // not just the current page — the server returns all groups when all=true.
+          all: "true",
           ...(isDeveloper ? { includeDummy: "true" } : {}),
           ...(statusFilter && statusFilter !== "all" ? { status: statusFilter } : {}),
           ...(cellPlacementFilter && cellPlacementFilter !== "all"
@@ -690,11 +701,15 @@ export default function SubmissionSettings({
           if (seen.has(entry.key)) return;
           seen.add(entry.key);
           rows.push({
-            "SLF Name": entry.slfName,
+            "Submission Reference": entry.submissionId,
             "Submission Date": entry.date ? dayjs(entry.date).format("YYYY-MM-DD") : "",
-            "ID No.": entry.submissionId,
+            "SLF Name": entry.slfName,
+            "Facility Category": facility?.category || record.category || "",
             "LGU/Company": record.lguCompanyName || "",
-            Hauler: entry.hauler || "",
+            "Hauler Name": entry.hauler || "",
+            "Hauler Details": [entry.plateNumber ? `Plate ${entry.plateNumber}` : "", entry.ticketNo ? `Ticket ${entry.ticketNo}` : ""].filter(Boolean).join("; "),
+            "Client Name": (entry.clients || []).map((client) => client.name).join(", ") || "No client recorded",
+            "Client Details": (entry.clients || []).map((client) => client.details).filter(Boolean).join("; "),
             "Plate No.": entry.plateNumber || "",
             "Waste Type": entry.wasteType || "",
             "Waste Volume": entry.volume == null ? "" : Number(entry.volume.toFixed(2)),
@@ -702,11 +717,14 @@ export default function SubmissionSettings({
             // exactly what this column exists to prevent.
             "Unit of Measurement":
               entry.volume == null ? "" : entry.unit || "unit not recorded",
-            Cell: entry.cell || "Unplaced",
-            Status: entry.status || "pending",
+            "Cell or Disposal Area": entry.cell || "Unplaced",
+            "Submission Status": entry.status || "pending",
             "Submitted By": record.submittedBy || "",
-            "Submitted At": record.createdAt
+            "Created Date": record.createdAt
               ? dayjs(record.createdAt).format("YYYY-MM-DD HH:mm")
+              : "",
+            "Last Updated Date": record.updatedAt
+              ? dayjs(record.updatedAt).format("YYYY-MM-DD HH:mm")
               : "",
           });
         });
@@ -716,7 +734,7 @@ export default function SubmissionSettings({
         message.info("No waste entries to export for the current filters.");
         return;
       }
-      exportToExcel(rows, "SLF Submissions");
+      exportToExcel(rows, `SLF_Submissions_Filtered_${dayjs().format("YYYY-MM-DD")}`);
     } catch (err) {
       message.error(
         err?.response?.data?.message || "Could not build the submission export.",
@@ -725,8 +743,8 @@ export default function SubmissionSettings({
       setExportingSubmissions(false);
     }
   }, [
-    pagination.current,
     pagination.pageSize,
+    pagination.total,
     isDeveloper,
     statusFilter,
     cellPlacementFilter,
@@ -1191,6 +1209,12 @@ export default function SubmissionSettings({
       companyProvince: record.companyProvince,
       companyMunicipality: record.companyMunicipality,
       companyBarangay: record.companyBarangay,
+      // Cell Operations — initialize from the stored record so the modal shows the
+      // saved values instead of always defaulting to m³ / Active (which also made a
+      // "no-op" save silently reset them).
+      currentCellVolume: record.currentCellVolume,
+      currentCellVolumeUnit: (record.currentCellVolumeUnit || "m³").replace("m3", "m³"),
+      cellStatus: record.cellStatus || "Active",
       baselineUnit:
         record.baselineUnit || record.totalVolumeAcceptedUnit || "m³",
       totalVolumeAccepted: record.totalVolumeAccepted,
@@ -1841,6 +1865,9 @@ export default function SubmissionSettings({
             <Option value="none">No Cells Assigned</Option>
             <Option value="nowaste">No Waste Data</Option>
           </Select>
+          <Tag color="geekblue" style={{ padding: "4px 8px", fontSize: 12 }}>
+            {entryTotal.toLocaleString()} submissions · {pagination.total.toLocaleString()} grouped rows
+          </Tag>
           {canRepairIds && (
             <Button
               icon={<ToolOutlined />}
@@ -1875,13 +1902,13 @@ export default function SubmissionSettings({
             loading={loading}
             type="primary"
           />
-           <Button
+          <Button
             icon={<DownloadOutlined />}
             type="primary"
             loading={exportingSubmissions}
             onClick={handleExportSubmissions}
           >
-            Export Excel
+            Export All Filtered Excel
           </Button>
           {selectedRowKeys.length > 0 && (
             <>
@@ -1943,7 +1970,9 @@ export default function SubmissionSettings({
             total={pagination.total}
             showSizeChanger
             pageSizeOptions={["15", "25", "50", "100"]}
-            showTotal={(total, range) => `${range[0]}-${range[1]} of ${total}`}
+            showTotal={(total, range) =>
+              `${range[0]}-${range[1]} of ${total.toLocaleString()} grouped row${total === 1 ? "" : "s"} · ${entryTotal.toLocaleString()} submission${entryTotal === 1 ? "" : "s"}`
+            }
             onChange={(nextPage, nextPageSize) => {
               setSelectedRowKeys([]);
               setPagination((prev) => ({

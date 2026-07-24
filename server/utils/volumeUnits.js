@@ -8,8 +8,13 @@
 // submission may be in m³ while its facility declares tons — normalizing that
 // gap is what this module is for.
 
-// 1 m³ of waste ≈ 0.2 tons. Also exposed as DataSLF.TON_PER_M3.
-const TON_PER_M3 = 0.2;
+// m³ ↔ tons density factor: tons = m³ × TON_PER_M3, m³ = tons / TON_PER_M3.
+// Per the configured business rule the factor is 0.50 (tons = m³ × 0.50, i.e.
+// m³ = tons / 0.50). THIS is the single source of truth for the factor: the
+// server model (DataSLF), the dataSLF route, and cellAvailability all import it
+// from here rather than hardcoding, and the frontend mirrors the same value in
+// front-end/src/utils/volumeUnits.js. Change it in these two places only.
+const TON_PER_M3 = 0.5;
 
 const M3 = "m³";
 const TONS = "tons";
@@ -28,7 +33,7 @@ function isKnownUnit(unit) {
 
 // Returns `null` — never a silently wrong number — when the value isn't numeric
 // or a unit is missing/unrecognised. This is what stops an unlabelled m³ value
-// from being summed as tons (a 25× error at this factor).
+// from being summed as tons (a multiple-x error at any factor).
 function convertVolume(value, fromUnit, toUnit) {
   const n = typeof value === "number" ? value : Number(value);
   if (value === null || value === undefined || value === "" || !Number.isFinite(n)) return null;
