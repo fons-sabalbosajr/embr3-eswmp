@@ -199,8 +199,10 @@ const dataSLFSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-// m³ ↔ tons conversion (mirrors the frontend TON_PER_M3 = 0.2 assumption).
-const TON_PER_M3 = 0.2;
+// m³ ↔ tons conversion factor — imported from the single source of truth
+// (server/utils/volumeUnits.js) so the model, route, and cell-availability check
+// can never drift out of sync. Also re-exposed as DataSLF.TON_PER_M3 below.
+const { TON_PER_M3 } = require("../utils/volumeUnits");
 const normalizeVolumeUnit = (unit) => String(unit || "m³").replace("m3", "m³").trim().toLowerCase();
 
 // Compute denormalized metric fields from a trucks array + disposal date.

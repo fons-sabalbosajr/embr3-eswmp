@@ -88,7 +88,9 @@ import { useNavigate } from "react-router-dom";
 import Swal from "sweetalert2";
 import dayjs from "dayjs";
 import relativeTime from "dayjs/plugin/relativeTime";
+import customParseFormat from "dayjs/plugin/customParseFormat";
 dayjs.extend(relativeTime);
+dayjs.extend(customParseFormat);
 import * as XLSX from "xlsx";
 import {
   PieChart,
@@ -172,6 +174,10 @@ import {
   parseUploadNumber,
   getUploadMissingColumns,
   getUploadRowErrors,
+  getUploadRelationshipErrors,
+  findUploadHauler,
+  findUploadClientForHauler,
+  UPLOAD_COLUMNS,
 } from "./uploadHelpers";
 import { convertVolume, resolveCellUnit, resolveFacilityUnit } from "../../utils/volumeUnits";
 import { isHazardousWasteType } from "../../utils/wasteCategories";
@@ -412,7 +418,6 @@ export default function SLFPortal() {
   const [faqActiveKey, setFaqActiveKey] = useState([]);
   // Profile modal
   const [profileModalOpen, setProfileModalOpen] = useState(false);
-  const watchedCompanyName = Form.useWatch("lguCompanyName", companyForm);
   const watchedDisposalDate = Form.useWatch("dateOfDisposal", entryForm);
   const watchedTotalVolumeAccepted = Form.useWatch(
     "totalVolumeAccepted",
@@ -495,7 +500,6 @@ export default function SLFPortal() {
     return issues;
   }, [haulers]);
 
-  const missingBasicInfo = !String(watchedCompanyName || "").trim();
   const missingBaselineInfo =
     !baselineSaved &&
     (watchedTotalVolumeAccepted == null || watchedTotalVolumeAccepted === "");
@@ -506,8 +510,12 @@ export default function SLFPortal() {
   const wasteGenValidationIssues = validateWasteGeneration(trucks);
   const missingDisposalInfo =
     !watchedDisposalDate || trucks.length === 0 || wasteGenValidationIssues.length > 0;
+  // General/Basic (Company) Information is pre-populated from the assigned SLF and
+  // is intentionally EXCLUDED from submission-completion rules (Issue 3): it already
+  // holds saved data and must never block a submission or be counted as an
+  // "incomplete section". It stays fully viewable/editable — it just no longer
+  // gates submission eligibility. Only the real Data Entry sections do.
   const hasReviewMissing =
-    missingBasicInfo ||
     missingBaselineInfo ||
     missingDisposalInfo ||
     missingHazardousCodeTrucks.length > 0;
@@ -3153,9 +3161,13 @@ export default function SLFPortal() {
       Swal.fire({
         icon: "error",
         title: "Save Failed",
+        // Issue 4: VERA-branded, specific save-failure guidance. The modal is NOT
+        // dismissed to a "saved" state — baselineSaved stays false so the user can
+        // review the highlighted fields and retry without losing their input.
         text:
-          err.response?.data?.message ||
-          "Could not save baseline. Please try again.",
+          "VERA: Your changes were not saved. " +
+          (err.response?.data?.message ||
+            "Please review the highlighted fields and try again."),
       });
     } finally {
       setBaselineSavingLoading(false);
@@ -3533,20 +3545,53 @@ export default function SLFPortal() {
         const missingColumns = getUploadMissingColumns(headers, effectiveType);
         setUploadMissingColumns(missingColumns);
         // Normalize column names
+        const normalizeUploadDate = (value) => {
+          if (value instanceof Date) return dayjs(value).isValid() ? dayjs(value).format("YYYY-MM-DD") : "";
+          if (typeof value === "number") {
+            const parsed = XLSX.SSF.parse_date_code(value);
+            if (parsed) return dayjs(new Date(parsed.y, parsed.m - 1, parsed.d)).format("YYYY-MM-DD");
+          }
+          const text = cleanUploadText(value);
+          if (!text) return "";
+          const parsed = dayjs(text, ["YYYY-MM-DD", "MM/DD/YYYY", "M/D/YYYY", "YYYY/MM/DD"], true);
+          return parsed.isValid() ? parsed.format("YYYY-MM-DD") : text;
+        };
+        const resolveUploadCell = (value) => {
+          const text = cleanUploadText(value);
+          const comparable = text.toLowerCase();
+          const match = activeCellOptions.find((option) => {
+            const values = [option.value, option.cellName, option.label]
+              .filter(Boolean)
+              .map((candidate) => cleanUploadText(candidate).toLowerCase());
+            return values.includes(comparable);
+          });
+          return {
+            cellName: match?.value || text,
+            cellIndex: typeof match?.cellIndex === "number" ? match.cellIndex : null,
+            cellType: match?.cellType || "",
+          };
+        };
         const normalized = jsonData.map((row, i) => {
-          const normalized = { key: `upload-${i}-${Date.now()}` };
+          const normalized = { key: `upload-${i}-${Date.now()}`, _rowNumber: i + 2 };
           for (const [key, value] of Object.entries(row)) {
             const k = uploadHeaderKey(key);
             if (effectiveType === "truck") {
-              if (k.includes("ticket") || k.includes("disposal"))
+              if (UPLOAD_COLUMNS.truck.find((column) => column.field === "disposalDate")?.matches(k))
+                normalized.disposalDate = normalizeUploadDate(value);
+              else if (UPLOAD_COLUMNS.truck.find((column) => column.field === "disposalTicketNo")?.matches(k))
                 normalized.disposalTicketNo = cleanUploadText(value);
-              else if (k.includes("hauler")) normalized.hauler = cleanUploadText(value);
+              else if (UPLOAD_COLUMNS.truck.find((column) => column.field === "hauler")?.matches(k)) normalized.hauler = cleanUploadText(value);
+              else if (UPLOAD_COLUMNS.truck.find((column) => column.field === "client")?.matches(k)) normalized.client = cleanUploadText(value);
               else if (k.includes("plate"))
                 normalized.plateNumber = cleanUploadText(value);
               else if (k.includes("capacity") && !k.includes("unit"))
                 normalized.truckCapacity = parseUploadNumber(value);
-              else if (k.includes("volume") && !k.includes("unit"))
+              else if (UPLOAD_COLUMNS.truck.find((column) => column.field === "actualVolume")?.matches(k))
                 normalized.actualVolume = parseUploadNumber(value);
+              else if (UPLOAD_COLUMNS.truck.find((column) => column.field === "actualVolumeUnit")?.matches(k))
+                normalized.actualVolumeUnit = normalizeUnit(value || baselineUnit || slfUnit);
+              else if (UPLOAD_COLUMNS.truck.find((column) => column.field === "cellName")?.matches(k))
+                Object.assign(normalized, resolveUploadCell(value));
               else if (k.includes("waste") && k.includes("type"))
                 normalized.wasteType = cleanUploadText(value);
               else if (k.includes("haz") || k.includes("code"))
@@ -3578,9 +3623,24 @@ export default function SLFPortal() {
                   .filter(Boolean);
             }
           }
+          const relationshipErrors = effectiveType === "truck"
+            ? getUploadRelationshipErrors(normalized, haulers)
+            : [];
+          if (effectiveType === "truck" && relationshipErrors.length === 0) {
+            const matchedHauler = findUploadHauler(haulers, normalized.hauler);
+            const matchedClient = findUploadClientForHauler(matchedHauler, normalized.client);
+            if (matchedClient && !matchedClient.ambiguous && !matchedClient.inactiveOnly) {
+              normalized._matchedClient = matchedClient;
+            }
+          }
+          const cellKnown = effectiveType !== "truck" || !normalized.cellName || normalized.cellIndex != null || activeCellOptions.length === 0;
           return {
             ...normalized,
-            _errors: getUploadRowErrors(normalized, effectiveType),
+            _errors: [
+              ...getUploadRowErrors(normalized, effectiveType),
+              ...relationshipErrors,
+              ...(cellKnown ? [] : [`Row ${normalized._rowNumber} — Cell or Disposal Area "${normalized.cellName}" is not an available cell under this SLF.`]),
+            ],
           };
         });
         setUploadPreviewData(normalized);
@@ -3597,7 +3657,9 @@ export default function SLFPortal() {
               key: "disposalTicketNo",
               width: 130,
             },
+            { title: "Disposal Date", dataIndex: "disposalDate", key: "disposalDate", width: 130 },
             { title: "Hauler", dataIndex: "hauler", key: "hauler", width: 170 },
+            { title: "Client", dataIndex: "client", key: "client", width: 170 },
             {
               title: "Plate No.",
               dataIndex: "plateNumber",
@@ -3611,6 +3673,8 @@ export default function SLFPortal() {
               width: 110,
             },
             { title: "Volume", dataIndex: "actualVolume", key: "actualVolume", width: 110 },
+            { title: "Unit", dataIndex: "actualVolumeUnit", key: "actualVolumeUnit", width: 90 },
+            { title: "Cell", dataIndex: "cellName", key: "cellName", width: 130 },
             { title: "Waste Type", dataIndex: "wasteType", key: "wasteType", width: 150 },
             {
               title: "Validation",
@@ -3618,7 +3682,7 @@ export default function SLFPortal() {
               width: 180,
               render: (_, row) =>
                 row._errors?.length ? (
-                  <Tag color="red">Missing: {row._errors.join(", ")}</Tag>
+                  <Tag color="red">Issue: {row._errors.join(", ")}</Tag>
                 ) : (
                   <Tag color="green">Ready</Tag>
                 ),
@@ -3692,7 +3756,7 @@ export default function SLFPortal() {
               width: 180,
               render: (_, row) =>
                 row._errors?.length ? (
-                  <Tag color="red">Missing: {row._errors.join(", ")}</Tag>
+                  <Tag color="red">Issue: {row._errors.join(", ")}</Tag>
                 ) : (
                   <Tag color="green">Ready</Tag>
                 ),
@@ -3780,25 +3844,42 @@ export default function SLFPortal() {
         // for it (manually-entered rows keep capacity optional). Transient — the
         // DataSLF schema has no such field, so it is dropped on save.
         entrySource: "upload",
+        disposalDate: d.disposalDate || "",
         disposalTicketNo: d.disposalTicketNo || "",
         hauler: d.hauler || "",
         plateNumber: d.plateNumber || "",
         truckCapacity: parseUploadNumber(d.truckCapacity),
-        truckCapacityUnit: baselineUnit || slfUnit,
+        truckCapacityUnit: d.actualVolumeUnit || baselineUnit || slfUnit,
         vehicles: d.plateNumber
           ? [
               {
                 plateNumber: d.plateNumber,
                 capacity: parseUploadNumber(d.truckCapacity),
-                capacityUnit: baselineUnit || slfUnit,
+                capacityUnit: d.actualVolumeUnit || baselineUnit || slfUnit,
+                actualVolume: parseUploadNumber(d.actualVolume),
+                actualVolumeUnit: d.actualVolumeUnit || baselineUnit || slfUnit,
+                wasteType: d.wasteType || "Residual",
+                hazWasteCode: d.hazWasteCode || [],
+                cellIndex: d.cellIndex,
+                cellName: d.cellName || "",
+                cellType: d.cellType || "",
+                selectedClients: d._matchedClient ? [d._matchedClient] : [],
               },
             ]
           : [],
         actualVolume: parseUploadNumber(d.actualVolume),
-        actualVolumeUnit: baselineUnit || slfUnit,
+        actualVolumeUnit: d.actualVolumeUnit || baselineUnit || slfUnit,
         wasteType: d.wasteType || "Residual",
+        cellIndex: d.cellIndex,
+        cellName: d.cellName || "",
+        cellType: d.cellType || "",
         hazWasteCode: d.hazWasteCode || [],
+        selectedClients: d._matchedClient ? [d._matchedClient] : [],
       }));
+      const uploadDates = [...new Set(newTrucks.map((truck) => truck.disposalDate).filter(Boolean))];
+      if (uploadDates.length === 1 && !entryForm.getFieldValue("dateOfDisposal")) {
+        entryForm.setFieldsValue({ dateOfDisposal: dayjs(uploadDates[0]) });
+      }
       setTrucks((prev) => [...prev, ...newTrucks]);
     } else {
       const newHaulers = uploadPreviewData.map((d) => ({
@@ -3845,12 +3926,64 @@ export default function SLFPortal() {
             ? value.split(",").map((s) => s.trim()).filter(Boolean)
             : value;
         const updated = { ...row, [field]: coercedValue };
+        if (uploadType === "truck") {
+          updated._relationshipErrors = getUploadRelationshipErrors(updated, haulers);
+        }
         return {
           ...updated,
-          _errors: getUploadRowErrors(updated, uploadType || "truck"),
+          _errors: [
+            ...getUploadRowErrors(updated, uploadType || "truck"),
+            ...(updated._relationshipErrors || []),
+          ],
         };
       }),
     );
+  };
+
+  const downloadDisposalTemplate = () => {
+    const headers = UPLOAD_COLUMNS.truck.map((column) => column.label);
+    const sample = UPLOAD_COLUMNS.truck.map((column) => column.sample || "");
+    const workbook = XLSX.utils.book_new();
+    const worksheet = XLSX.utils.aoa_to_sheet([headers, sample]);
+    worksheet["!cols"] = headers.map((header) => ({ wch: Math.max(18, header.length + 2) }));
+
+    const instructions = [
+      ["Waste Generator Disposal Entry Upload Instructions"],
+      ["Relationship rule", "Selected SLF -> Hauler -> Client. The Client column is required and must identify a client assigned to the specified hauler under the selected SLF."],
+      ["No auto-create", "The upload does not create new clients. Add or correct clients in Baseline / Accredited Haulers first."],
+      ["Dates", "Use YYYY-MM-DD, MM/DD/YYYY, or a real Excel date value. All rows in one import must use the same disposal date."],
+      ["Numbers", "Waste Volume and Truck Capacity must be positive numbers. Commas are accepted."],
+      ["Units", "Use tons, m3, or m³. The unit must match the selected SLF's declared baseline unit."],
+      ["Cells", "Use an available Cell or Disposal Area from the selected SLF. Example: Cell 1."],
+      [],
+      ["Column", "Required", "Accepted format", "Sample", "Validation rule"],
+      ...UPLOAD_COLUMNS.truck.map((column) => [
+        column.label,
+        column.required ? "Required" : "Optional",
+        column.format || "Text",
+        column.sample || "",
+        column.description || "",
+      ]),
+      [],
+      ["Common upload errors"],
+      ["Missing Client column"],
+      ["Empty Client value"],
+      ["Client exists but belongs to another hauler or SLF"],
+      ["Duplicate or inactive client record"],
+      ["Unknown cell/disposal area"],
+    ];
+    XLSX.utils.book_append_sheet(workbook, worksheet, "Disposal Entries");
+    XLSX.utils.book_append_sheet(workbook, XLSX.utils.aoa_to_sheet(instructions), "Instructions");
+
+    const wasteTypeCol = headers.indexOf("Waste Type");
+    const unitCol = headers.indexOf("Unit of Measurement");
+    if (worksheet["!ref"]) {
+      worksheet["!dataValidation"] = [
+        ...(wasteTypeCol >= 0 ? [{ sqref: `${XLSX.utils.encode_col(wasteTypeCol)}2:${XLSX.utils.encode_col(wasteTypeCol)}200`, type: "list", formula1: '"Residual,Hazardous Waste,Treated Hazardous Waste"' }] : []),
+        ...(unitCol >= 0 ? [{ sqref: `${XLSX.utils.encode_col(unitCol)}2:${XLSX.utils.encode_col(unitCol)}200`, type: "list", formula1: '"tons,m3,m³"' }] : []),
+      ];
+    }
+    XLSX.writeFile(workbook, "Waste_Generator_Disposal_Entry_Template.xlsx");
   };
 
   const cleanTruckForSubmit = ({ key, vehicles, selectedClients, ...rest }) => {
@@ -4170,18 +4303,11 @@ export default function SLFPortal() {
   // ── Review & Submit handlers ──
 
   const handleReviewOpen = async () => {
-    try {
-      await companyForm.validateFields();
-    } catch {
-      showError({
-        type: "warning",
-        title: "Incomplete Company Info",
-        message:
-          "Please complete the Company Information in the Basic Information tab.",
-      });
-      setActiveTab("basic-info");
-      return;
-    }
+    // Issue 3: General/Basic (Company) Information must NOT block a submission. It
+    // is pre-populated saved data, so we validate it only to surface inline field
+    // highlights — we never abort the review/submit flow on it. buildSubmissionEntry
+    // guarantees a valid company name via the assigned-facility fallback.
+    companyForm.validateFields().catch(() => {});
     if (!baselineSaved) {
       try {
         await baselineForm.validateFields();
@@ -4216,17 +4342,8 @@ export default function SLFPortal() {
       setActiveTab("disposal");
       return;
     }
-    const companyVals = companyForm.getFieldsValue();
-    if (!companyVals?.lguCompanyName) {
-      showError({
-        type: "warning",
-        title: "Incomplete Waste Generator Info",
-        message:
-          "Please fill in Company Name in the Waste Generator's Information tab.",
-      });
-      setActiveTab("basic-info");
-      return;
-    }
+    // Issue 3: no hard block on Company Name here — buildSubmissionEntry falls back
+    // to the assigned SLF name, so General Information can never stall a submission.
     if (missingHazardousCodeTrucks.length > 0) {
       const list = missingHazardousCodeTrucks
         .map(
@@ -4285,8 +4402,16 @@ export default function SLFPortal() {
     return {
       ...disposalValues,
       ...companyValues,
+      // Company/General Information is no longer a submission blocker (Issue 3), so
+      // guarantee a non-empty company name here (backend requires it) by falling
+      // back to the assigned facility name — the user is never forced back to the
+      // Basic Information tab just to satisfy a required field.
       lguCompanyName:
-        companyValues.lguCompanyName || disposalValues.lguCompanyName || "",
+        companyValues.lguCompanyName ||
+        disposalValues.lguCompanyName ||
+        slfInfo?.lgu ||
+        activeSlfName ||
+        "",
       companyType:
         companyValues.companyType ||
         disposalValues.companyType ||
@@ -4444,8 +4569,15 @@ export default function SLFPortal() {
   const submitBlockers = useMemo(() => {
     const list = [];
     if (slfNonOperational) list.push(NON_OPERATIONAL_MESSAGE);
-    if (missingBasicInfo) list.push("Complete the Waste Generator's Company Information.");
-    if (missingBaselineInfo) list.push("Complete the Baseline Data (Total Volume Accepted).");
+    // NOTE: Basic/Company ("General") Information is intentionally NOT a blocker
+    // (Issue 3) — it is pre-populated saved data and must not gate submissions.
+    if (missingBaselineInfo) {
+      // Name the exact missing baseline field(s) instead of a vague "complete the
+      // baseline" (Issue 2). Total Volume Accepted is the one hard requirement.
+      list.push(
+        "Baseline Data is incomplete — enter Total Volume Accepted before submitting.",
+      );
+    }
     if (!watchedDisposalDate) list.push("Select the Date of Disposal.");
     if ((trucks || []).length === 0) list.push("Add at least one transport entry.");
     else if (wasteGenValidationIssues.length > 0) {
@@ -4469,7 +4601,6 @@ export default function SLFPortal() {
     return list;
   }, [
     slfNonOperational,
-    missingBasicInfo,
     missingBaselineInfo,
     watchedDisposalDate,
     trucks,
@@ -6371,7 +6502,9 @@ export default function SLFPortal() {
                       <span>
                         <InfoCircleOutlined />{" "}
                         {isMobile ? "Basic Info" : "Basic Information"}
-                        <RequiredDot show={missingBasicInfo} />
+                        {/* Issue 3: General/Basic Information is excluded from
+                            submission-completion rules — no "required" dot so it is
+                            never flagged as blocking an otherwise-complete submission. */}
                       </span>
                     ),
                     children: (
@@ -6606,17 +6739,25 @@ export default function SLFPortal() {
                                       addonAfter={
                                         (baselineUnit || slfUnit) === "m³" ? "m³" : "tons"
                                       }
+                                      // #2: 0 is a VALID Total Volume Accepted —
+                                      // the previous `v ? … : ""` formatter blanked
+                                      // out a saved zero (and any falsy-but-valid
+                                      // value), making real data look missing. Only
+                                      // an empty/null/undefined value renders blank.
                                       formatter={(v) =>
-                                        v
-                                          ? Number(v).toLocaleString(
-                                              undefined,
-                                              {
-                                                maximumFractionDigits: 2,
-                                              },
-                                            )
-                                          : ""
+                                        v === "" || v === null || v === undefined
+                                          ? ""
+                                          : Number(v).toLocaleString(undefined, {
+                                              maximumFractionDigits: 2,
+                                            })
                                       }
-                                      parser={(v) => v?.replace(/,/g, "")}
+                                      parser={(v) => {
+                                        const cleaned = String(v ?? "").replace(
+                                          /,/g,
+                                          "",
+                                        );
+                                        return cleaned === "" ? null : cleaned;
+                                      }}
                                     />
                                   </Form.Item>
                                 </Col>
@@ -7222,7 +7363,6 @@ export default function SLFPortal() {
                                 size="small"
                                 type="primary"
                                 icon={<PlusOutlined />}
-                                className="slf-primary-btn"
                                 onClick={() => openTruckModal(null)}
                               >
                                 Add Entry
@@ -7832,28 +7972,54 @@ export default function SLFPortal() {
                 loaded baseline haulers (no extra fetch), recalculated whenever the
                 clients change. Non-blocking; distinct from validation errors. */}
             {(() => {
-              let count = 0;
+              // #11: list EACH incomplete hauler-client pair and the EXACT detail(s)
+              // that are missing, instead of only a count — so the user knows which
+              // client (and which field) to fix.
+              const issues = [];
               (haulers || []).forEach((h) => {
-                const haulerOk = !!String(h.haulerName || "").trim();
+                const haulerName = String(h.haulerName || "").trim();
                 (h.privateSectorClients || []).forEach((c) => {
-                  const miss = !String(c.clientName || "").trim()
-                    || !String(c.clientType || "").trim()
-                    || !String(c.provinceName || c.province || "").trim()
-                    || !String(c.municipalityName || c.municipality || "").trim()
-                    || !haulerOk;
-                  if (miss) count += 1;
+                  const missing = [];
+                  if (!String(c.clientName || "").trim()) missing.push("Client Name");
+                  if (!String(c.clientType || "").trim()) missing.push("Client Type");
+                  if (!String(c.provinceName || c.province || "").trim()) missing.push("Province");
+                  if (!String(c.municipalityName || c.municipality || "").trim()) missing.push("Municipality");
+                  if (!haulerName) missing.push("Hauler Name");
+                  if (missing.length) {
+                    issues.push({
+                      hauler: haulerName || "(unnamed hauler)",
+                      client: String(c.clientName || "").trim() || "(unnamed client)",
+                      missing,
+                    });
+                  }
                 });
               });
-              if (!count) return null;
+              if (!issues.length) return null;
               return (
                 <Alert
                   type="warning"
                   showIcon
                   style={{ marginBottom: 12, borderRadius: 8 }}
-                  message={<Text strong style={{ fontSize: 12 }}>{count} incomplete hauler-client record{count === 1 ? "" : "s"}</Text>}
+                  message={<Text strong style={{ fontSize: 12 }}>{issues.length} incomplete hauler-client record{issues.length === 1 ? "" : "s"}</Text>}
                   description={
                     <div style={{ fontSize: 12 }}>
-                      Complete the client location and classification details to ensure accurate regional reporting and submission validation.
+                      <div style={{ marginBottom: 6 }}>
+                        Complete the following client details for accurate regional reporting and submission validation:
+                      </div>
+                      <ul style={{ margin: 0, paddingLeft: 16, maxHeight: 168, overflowY: "auto" }}>
+                        {issues.slice(0, 12).map((it, i) => (
+                          <li key={i} style={{ marginBottom: 3 }}>
+                            <Text strong>{it.hauler}</Text>
+                            {" → "}
+                            <Text>{it.client}</Text>
+                            {": "}
+                            <Text type="danger">missing {it.missing.join(", ")}</Text>
+                          </li>
+                        ))}
+                      </ul>
+                      {issues.length > 12 && (
+                        <Text type="secondary">+{issues.length - 12} more record(s)…</Text>
+                      )}
                       <div style={{ marginTop: 8 }}>
                         <Button size="small" type="primary" onClick={() => setActiveTab("baseline")}>
                           Complete in Baseline Data
@@ -9353,6 +9519,7 @@ export default function SLFPortal() {
           handleSaveClosedCellEntry={handleSaveClosedCellEntry}
           handleConfirmUpload={handleConfirmUpload}
           proceedToFilePicker={proceedToFilePicker}
+          downloadDisposalTemplate={downloadDisposalTemplate}
           updateUploadCell={updateUploadCell}
           handleOpenWasteReceived={handleOpenWasteReceived}
           handleSaveFacilityDetails={handleSaveFacilityDetails}

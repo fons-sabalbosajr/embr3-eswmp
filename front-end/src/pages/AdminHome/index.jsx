@@ -89,7 +89,7 @@ import {
   TableOutlined,
   MailOutlined,
 } from "@ant-design/icons";
-import { useNavigate } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router-dom";
 import Swal from "sweetalert2";
 import AccountSettings from "../admin/AccountSettings";
 import AdminTipCard from "../admin/AdminTipCard";
@@ -230,6 +230,7 @@ export default function AdminHome() {
   const screens = useBreakpoint();
   const isMobile = !screens.md;
   const navigate = useNavigate();
+  const location = useLocation();
 
   const syncPortalAnnouncementFlag = (settings = {}) => {
     const now = Date.now();
@@ -316,6 +317,13 @@ export default function AdminHome() {
       clearInterval(interval);
     };
   }, [syncCurrentUser]);
+
+  useEffect(() => {
+    if (location.pathname.endsWith("/admin/app-settings/vera-workarounds")) {
+      setDeveloperSettingsInitialTab("vera-workarounds");
+      setActiveMenu("dev-settings");
+    }
+  }, [location.pathname]);
 
   // ── Idle auto-logout (10 minutes of inactivity) ──
   useEffect(() => {
@@ -547,6 +555,7 @@ export default function AdminHome() {
   };
 
   const isDeveloper = user?.role === "developer";
+  const canOpenAppSettings = isDeveloper || user?.role === "admin";
   const perms = user?.permissions || {};
   const hasAccess = (key, level = "view") => {
     if (isDeveloper) return true;
@@ -709,10 +718,9 @@ export default function AdminHome() {
 
     {
       const devChildren = [];
-      // Developer-only: App Settings (incl. Dev Portal Credential) and
-      // Accounts & Roles are restricted to the real developer role — no explicit
-      // permission grant can open them. Enforced again on the backend.
-      if (isDeveloper) {
+      // App Settings includes admin/developer VERA logs; developer-only panes
+      // remain guarded inside the page and on their backend routes.
+      if (canOpenAppSettings) {
         devChildren.push({
           key: "dev-settings",
           icon: <ToolOutlined />,
@@ -751,7 +759,7 @@ export default function AdminHome() {
     }
 
     return items;
-  }, [isDeveloper, user?.permissions, user?.role]);
+  }, [canOpenAppSettings, isDeveloper, user?.permissions, user?.role]);
 
   const userMenuItems = [
     {
@@ -887,8 +895,7 @@ export default function AdminHome() {
       case "dev-notifications":
         return (isDeveloper || hasExplicitAccess("notificationManagement")) ? <NotificationManagement isDark={isDark} /> : denied;
       case "dev-settings":
-        // Developer-only (direct-URL/menu-selection guard).
-        return isDeveloper ? (
+        return canOpenAppSettings ? (
           <DeveloperSettings
             isDark={isDark}
             isDeveloper={isDeveloper}

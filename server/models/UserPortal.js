@@ -92,11 +92,26 @@ const userPortalSchema = new mongoose.Schema(
     },
     // Presence tracking — updated on portal activity to derive online/offline.
     lastActiveAt: { type: Date, default: null },
-    // Admin-managed portal access control (per-user feature & cell access)
+    // Admin-managed portal access control (per-user feature & cell access).
+    // Extended with developer-configurable portal rules — see utils/portalPolicy.js,
+    // the single source of truth for rule keys, defaults, and enforcement. Legacy
+    // fields (canSubmitDisposal/canEditBaseline/canUploadExcel) are kept and mapped
+    // to rule keys so users configured before this feature keep their behavior.
+    // A field left undefined falls back to the catalog default in portalPolicy —
+    // NOT to the schema default — so "unset" means "use policy default".
     portalAccess: {
       canSubmitDisposal: { type: Boolean, default: true },
       canEditBaseline: { type: Boolean, default: true },
       canUploadExcel: { type: Boolean, default: true },
+      // Developer-configurable rules (default resolved by portalPolicy when unset).
+      canChangeGlobalUnit: { type: Boolean },   // default false (developer-only)
+      canEditSubmitted: { type: Boolean },       // default true
+      canDeleteSubmitted: { type: Boolean },     // default true
+      canReopenClosed: { type: Boolean },        // default false
+      canManageCells: { type: Boolean },         // default true
+      canCreateTickets: { type: Boolean },       // default true
+      canViewVera: { type: Boolean },            // default true
+      canAccessReports: { type: Boolean },       // default true
       // Restrict which disposal cells this user may dispose into.
       // Empty array => no restriction (all admin-allowed open cells available).
       // Stored as cell value labels, e.g. "Cell 1".

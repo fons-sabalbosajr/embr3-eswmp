@@ -4,7 +4,8 @@
 // front-end cannot place waste into a full, completed, out-of-service, or
 // nonexistent cell. Kept intentionally small and dependency-free.
 
-const TON_PER_M3 = 0.2;
+// Single source of truth for the m³ ↔ tons factor (server/utils/volumeUnits.js).
+const { TON_PER_M3 } = require("./volumeUnits");
 
 function normUnit(u) {
   return String(u || "m³").replace("m3", "m³").trim().toLowerCase();

@@ -123,10 +123,6 @@ import {
 } from "./shared/submissionRecords";
 
 const { Title, Text } = Typography;
-// ACCENT: see slf-monitoring/helpers.js
-// CHART_COLORS: see slf-monitoring/helpers.js
-
-// Extracted to reduce file size below Babel 500KB limit
 import SlfDashboardTab, {
   sumBy,
   groupMetric,
@@ -159,6 +155,7 @@ import SlfDashboardTab, {
 } from "./slf-monitoring/SlfDashboardTab";
 import WasteBaselineInfo from "./slf-monitoring/WasteBaselineInfo";
 import PortalGenerators from "./slf-monitoring/PortalGenerators";
+import HaulerClientsTab from "./slf-monitoring/HaulerClientsTab";
 import {
   resolveCellName,
   getCellTypeConfig,
@@ -200,15 +197,30 @@ import {
   normalizeStoredFileUrl,
 } from "./slf-monitoring/helpers.jsx";
 
-// Stable empty array — returning a fresh [] from a memo would give it a new
-// identity every render and re-run every downstream memo that depends on it.
 const EMPTY_ROWS = [];
+const SLF_DOCUMENT_TYPE_OPTIONS = [
+  { label: "ECC", value: "ECC" },
+  { label: "Permit", value: "Permit" },
+  { label: "Monitoring Report", value: "Monitoring Report" },
+  { label: "Compliance Certificate", value: "Compliance Certificate" },
+  { label: "Site Plan", value: "Site Plan" },
+  { label: "Other", value: "Other" },
+];
 
-// One-time injected stylesheet for the Facility Details left-tabs, so active vs
-// inactive tabs read with clear hierarchy (inactive de-emphasized but readable,
-// active bold + tinted, visible hover + focus) regardless of each label's own
-// accent colour. Opacity/weight/background are used because they are not
-// overridden by the inline label text colours.
+const fileNameFromUrl = (value, fallback = "file") => {
+  const raw = Array.isArray(value) ? value[0]?.url || value[0]?.name : value;
+  if (!raw) return fallback;
+  try {
+    const pathname = new URL(raw, window.location.origin).pathname;
+    return decodeURIComponent(pathname.split("/").pop() || fallback);
+  } catch {
+    return String(raw).split("/").pop() || fallback;
+  }
+};
+
+const uploadFileFromValue = (value) => (Array.isArray(value) ? value[0] : null);
+const fileUrlFromValue = (value) => uploadFileFromValue(value)?.url || uploadFileFromValue(value)?.response?.url || (typeof value === "string" ? value : "");
+
 function ensureSlfDetailTabStyles() {
   if (typeof document === "undefined") return;
   if (document.getElementById("slf-detail-tabs-styles")) return;
@@ -1019,6 +1031,15 @@ export default function SLFMonitoring({
             },
           ]
         : [];
+    const declaredCellUnit = normalizeUnit(
+      record.wasteReceivedUnit ||
+        record.volumeCapacityUnit ||
+        record.receivingVolumeCapacityUnit ||
+        record.estimatedVolumeWasteUnit ||
+        record.cellCapacityUnits?.find(Boolean) ||
+        record.cellFillUnits?.find(Boolean) ||
+        "tons",
+    );
     form.setFieldsValue({
       ...record,
       cellNames:
@@ -1027,7 +1048,7 @@ export default function SLFMonitoring({
       cellCapacities: record.cellCapacities || [],
       cellCapacityUnits:
         record.cellCapacityUnits ||
-        Array.from({ length: record.numberOfCell || 0 }, () => "m³"),
+        Array.from({ length: record.numberOfCell || 0 }, () => declaredCellUnit),
       cellStatuses: (
         record.cellStatuses ||
         Array.from({ length: record.numberOfCell || 0 }, () => "Active Cell")
@@ -1046,11 +1067,11 @@ export default function SLFMonitoring({
         Array.from({ length: record.numberOfCell || 0 }, () => null),
       cellFillUnits:
         record.cellFillUnits ||
-        Array.from({ length: record.numberOfCell || 0 }, () => "m³"),
+        Array.from({ length: record.numberOfCell || 0 }, () => declaredCellUnit),
       lguServedList: record.lguServedList || [],
       privateCompaniesServed: record.privateCompaniesServed || [],
-      volumeCapacityUnit: record.volumeCapacityUnit || "m³",
-      receivingVolumeCapacityUnit: record.receivingVolumeCapacityUnit || "m³",
+      volumeCapacityUnit: record.volumeCapacityUnit || declaredCellUnit,
+      receivingVolumeCapacityUnit: record.receivingVolumeCapacityUnit || declaredCellUnit,
       wastewaterTreatmentFacilityType: asStringArray(
         record.wastewaterTreatmentFacilityType,
       ),
@@ -1077,8 +1098,8 @@ export default function SLFMonitoring({
       dateReportReviewedFocal: record.dateReportReviewedFocal
         ? dayjs(record.dateReportReviewedFocal)
         : null,
-      wasteReceivedUnit: record.wasteReceivedUnit || "m³",
-      estimatedVolumeWasteUnit: record.estimatedVolumeWasteUnit || "m³",
+      wasteReceivedUnit: record.wasteReceivedUnit || declaredCellUnit,
+      estimatedVolumeWasteUnit: record.estimatedVolumeWasteUnit || declaredCellUnit,
       dateReportApproved: record.dateReportApproved
         ? dayjs(record.dateReportApproved)
         : null,
@@ -1397,10 +1418,23 @@ export default function SLFMonitoring({
           )
           .filter(Boolean);
       const existingRecord = editing || {};
+      // The Global Unit Tool and other controls set values via form.setFieldsValue
+      // on fields that are NOT rendered as <Form.Item> (e.g. wasteReceivedUnit,
+      // volumeCapacityUnit, estimatedVolumeWasteUnit, cellCapacityUnits,
+      // cellFillUnits) or that live on a tab that `destroyOnHidden` has unmounted.
+      // `validateFields()` only returns MOUNTED, registered fields, so those unit
+      // changes were invisible here and the save silently reverted them to the old
+      // stored unit. `getFieldsValue(true)` returns the ENTIRE form store (registered
+      // or not, mounted or not), so it captures exactly those values. It sits between
+      // the validated values and the existing record: validated user input wins,
+      // then the live store, then the record on disk.
+      const storeValues = form.getFieldsValue(true);
       const fieldValue = (key, fallback) =>
         values[key] !== undefined
           ? values[key]
-          : (existingRecord[key] ?? fallback);
+          : storeValues[key] !== undefined
+            ? storeValues[key]
+            : (existingRecord[key] ?? fallback);
       const fileFieldValue = (key) =>
         values[key] !== undefined
           ? fromFileList(values[key])
@@ -1481,8 +1515,10 @@ export default function SLFMonitoring({
         normalizeUnit(
           fieldValue("wasteReceivedUnit") ||
             fieldValue("volumeCapacityUnit") ||
-            "m³",
-        ) || "m³";
+            (fieldValue("cellCapacityUnits", []) || []).find(Boolean) ||
+            (fieldValue("cellFillUnits", []) || []).find(Boolean) ||
+            "tons",
+        ) || "tons";
       const cellCountForUnits =
         Number(fieldValue("numberOfCell", 0)) ||
         (fieldValue("cellCapacities", []) || []).length;
@@ -1510,6 +1546,24 @@ export default function SLFMonitoring({
         cellNotes: fieldValue("cellNotes", []),
         cellFillValues: fieldValue("cellFillValues", []),
         cellFillUnits: uniformCellUnits,
+        // Explicitly carry the facility-level unit fields. They are set by the
+        // Global Unit Tool via setFieldsValue but are NOT <Form.Item>s, so `...values`
+        // (validateFields output) omits them and a m³→tons change was being dropped
+        // on save. `fieldValue` now reads the live form store, so these reflect the
+        // applied unit. The tool relabels units only (never converts the numbers),
+        // matching its confirm dialog.
+        volumeCapacityUnit: normalizeUnit(
+          fieldValue("volumeCapacityUnit", baselineCellUnit),
+        ),
+        receivingVolumeCapacityUnit: normalizeUnit(
+          fieldValue("receivingVolumeCapacityUnit", baselineCellUnit),
+        ),
+        wasteReceivedUnit: normalizeUnit(
+          fieldValue("wasteReceivedUnit", baselineCellUnit),
+        ),
+        estimatedVolumeWasteUnit: normalizeUnit(
+          fieldValue("estimatedVolumeWasteUnit", baselineCellUnit),
+        ),
         hasWastewaterTreatmentFacility,
         wastewaterTreatmentFacilityType: hasWastewaterTreatmentFacility
           ? asStringArray(fieldValue("wastewaterTreatmentFacilityType", []))
@@ -1792,16 +1846,71 @@ export default function SLFMonitoring({
       (form.getFieldValue("cellCapacities") || []).length,
       (form.getFieldValue("cellFillValues") || []).length,
     );
-    form.setFieldsValue({
-      volumeCapacityUnit: unit,
-      receivingVolumeCapacityUnit: unit,
-      wasteReceivedUnit: unit,
-      estimatedVolumeWasteUnit: unit,
-      cellCapacityUnits: Array.from({ length: cellCount }, () => unit),
-      cellFillUnits: Array.from({ length: cellCount }, () => unit),
-    });
-    message.success(`Units set to ${unit}`);
-    setUnitToolOpen(false);
+    const applyUnits = async () => {
+      form.setFieldsValue({
+        volumeCapacityUnit: unit,
+        receivingVolumeCapacityUnit: unit,
+        wasteReceivedUnit: unit,
+        estimatedVolumeWasteUnit: unit,
+        cellCapacityUnits: Array.from({ length: cellCount }, () => unit),
+        cellFillUnits: Array.from({ length: cellCount }, () => unit),
+      });
+      setUnitToolOpen(false);
+      if (editing?._id) {
+        await handleSave();
+      } else {
+        message.success(`Units set to ${unit}. Save the SLF record to persist the change.`);
+      }
+    };
+
+    // The unit currently declared on the facility (any of its unit fields).
+    const currentUnit = normalizeUnit(
+      form.getFieldValue("volumeCapacityUnit") ||
+        form.getFieldValue("wasteReceivedUnit") ||
+        form.getFieldValue("receivingVolumeCapacityUnit") ||
+        form.getFieldValue("estimatedVolumeWasteUnit") ||
+        (form.getFieldValue("cellCapacityUnits") || []).find(Boolean) ||
+        "",
+    );
+
+    // Any existing numeric value a relabel (no conversion) would silently reinterpret.
+    const numericFields = [
+      form.getFieldValue("volumeCapacity"),
+      form.getFieldValue("receivingVolumeCapacity"),
+      form.getFieldValue("actualResidualWasteReceived"),
+      form.getFieldValue("estimatedVolumeWaste"),
+      ...(form.getFieldValue("cellCapacities") || []),
+      ...(form.getFieldValue("cellFillValues") || []),
+    ];
+    const sample = numericFields.map(Number).find((n) => Number.isFinite(n) && n > 0);
+
+    // Warn ONLY when this actually reinterprets data: the unit is genuinely
+    // changing AND the facility already has values. The tool relabels every unit
+    // field but does NOT convert the numbers, so make that explicit before saving.
+    // zIndex sits above this tool's own Modal (1700) so the confirm can't hide
+    // behind it — the modal-layering rule.
+    if (currentUnit && currentUnit !== unit && sample !== undefined) {
+      Modal.confirm({
+        title: `Change unit to ${unit} without converting values?`,
+        zIndex: 1800,
+        okText: `Yes, relabel to ${unit}`,
+        cancelText: "Cancel",
+        okButtonProps: { style: { background: "#faad14", borderColor: "#faad14" } },
+        content: (
+          <span>
+            This sets the unit on <b>every</b> capacity, fill, receiving and estimated
+            field of this SLF (and all its cells) from <b>{currentUnit}</b> to{" "}
+            <b>{unit}</b> — but it does <b>not</b> convert the numbers. For example,{" "}
+            <b>{sample} {currentUnit}</b> will become <b>{sample} {unit}</b> (not the
+            converted equivalent). Only continue if the stored values are already in{" "}
+            {unit}; otherwise cancel and enter the correct {unit} values.
+          </span>
+        ),
+        onOk: applyUnits,
+      });
+      return;
+    }
+    applyUnits();
   };
 
   const copyText = async (value, label = "Value") => {
@@ -4669,13 +4778,20 @@ export default function SLFMonitoring({
                                   form.getFieldValue("cellFillValues") || [];
                                 const curFillUnits =
                                   form.getFieldValue("cellFillUnits") || [];
+                                const declaredUnit = normalizeUnit(
+                                  form.getFieldValue("wasteReceivedUnit") ||
+                                    form.getFieldValue("volumeCapacityUnit") ||
+                                    curUnits.find(Boolean) ||
+                                    curFillUnits.find(Boolean) ||
+                                    "tons",
+                                );
                                 const next = Array.from(
                                   { length: val || 0 },
                                   (_, i) => cur[i] ?? null,
                                 );
                                 const nextUnits = Array.from(
                                   { length: val || 0 },
-                                  (_, i) => curUnits[i] || "m³",
+                                  (_, i) => curUnits[i] || declaredUnit,
                                 );
                                 const nextSt = Array.from(
                                   { length: val || 0 },
@@ -4703,7 +4819,7 @@ export default function SLFMonitoring({
                                 const nextFillUnits = Array.from(
                                   { length: val || 0 },
                                   (_, i) =>
-                                    curFillUnits[i] || nextUnits[i] || "m³",
+                                    curFillUnits[i] || nextUnits[i] || declaredUnit,
                                 );
                                 form.setFieldsValue({
                                   cellCapacities: next,
@@ -4714,9 +4830,69 @@ export default function SLFMonitoring({
                                   cellNotes: nextNotes,
                                   cellFillValues: nextFill,
                                   cellFillUnits: nextFillUnits,
+                                  volumeCapacityUnit: declaredUnit,
+                                  receivingVolumeCapacityUnit: declaredUnit,
+                                  wasteReceivedUnit: declaredUnit,
+                                  estimatedVolumeWasteUnit: declaredUnit,
                                 });
                               }}
                             />
+                          </Form.Item>
+                        </Col>
+                        {/* #3: editable Waste Received under Cell Infrastructure.
+                            Binds to the EXISTING facility field `actualResidualWasteReceived`
+                            (no duplicate field is created) + its `wasteReceivedUnit`.
+                            The unit follows the facility's declared baseline unit
+                            (locked addon, mirroring the per-cell unit rule). Feeds the
+                            utilization preview when no per-cell fill values are set. */}
+                        <Col xs={24} sm={16} md={10}>
+                          <Form.Item
+                            noStyle
+                            dependencies={["wasteReceivedUnit", "volumeCapacityUnit"]}
+                          >
+                            {() => {
+                              const wrUnit = normalizeUnit(
+                                form.getFieldValue("wasteReceivedUnit") ||
+                                  form.getFieldValue("volumeCapacityUnit") ||
+                                  "m³",
+                              );
+                              return (
+                                <Form.Item
+                                  name="actualResidualWasteReceived"
+                                  label="Waste Received"
+                                  tooltip="Total waste this facility has received (since start of operation). Used for capacity utilization when no per-cell fill values are recorded. 0 is a valid value."
+                                  rules={[
+                                    {
+                                      type: "number",
+                                      min: 0,
+                                      message: "Must be 0 or greater",
+                                    },
+                                  ]}
+                                >
+                                  <InputNumber
+                                    style={{ width: "100%" }}
+                                    min={0}
+                                    step={0.01}
+                                    placeholder="0.00"
+                                    addonAfter={wrUnit}
+                                    formatter={(v) =>
+                                      v === "" || v === null || v === undefined
+                                        ? ""
+                                        : Number(v).toLocaleString(undefined, {
+                                            maximumFractionDigits: 2,
+                                          })
+                                    }
+                                    parser={(v) => {
+                                      const cleaned = String(v ?? "").replace(
+                                        /,/g,
+                                        "",
+                                      );
+                                      return cleaned === "" ? null : cleaned;
+                                    }}
+                                  />
+                                </Form.Item>
+                              );
+                            }}
                           </Form.Item>
                         </Col>
                       </Row>
@@ -4746,8 +4922,10 @@ export default function SLFMonitoring({
                             normalizeUnit(
                               form.getFieldValue("wasteReceivedUnit") ||
                                 form.getFieldValue("volumeCapacityUnit") ||
-                                "m³",
-                            ) || "m³";
+                                (form.getFieldValue("cellCapacityUnits") || []).find(Boolean) ||
+                                (form.getFieldValue("cellFillUnits") || []).find(Boolean) ||
+                                "tons",
+                            ) || "tons";
                           return (
                             <>
                               <Divider
@@ -5303,7 +5481,7 @@ export default function SLFMonitoring({
                                           ).toLocaleString(undefined, {
                                             maximumFractionDigits: 0,
                                           })}{" "}
-                                          m³ (at 0.20 t/m³)
+                                          m³ (at 0.50 t/m³)
                                         </div>
                                       )}
                                   </div>
@@ -6283,124 +6461,110 @@ export default function SLFMonitoring({
                   ),
                   children: (
                     <>
-                      <Divider orientation="left" plain>
-                        SLF Component Gallery
-                      </Divider>
+                      <Alert
+                        type="info"
+                        showIcon
+                        style={{ marginBottom: 12 }}
+                        message="Gallery images are managed in a table. Upload or replace a photo from the Actions column, then save the SLF record."
+                      />
                       <Form.List name="galleryItems">
                         {(fields, { add, remove }) => (
                           <>
-                            {fields.map(({ key, name, ...rest }, idx) => (
-                              <Card
-                                key={key}
-                                size="small"
-                                title={
-                                  <Space size={6}>
-                                    <FileImageOutlined
-                                      style={{ color: "#1677ff" }}
-                                    />
-                                    <Text strong style={{ fontSize: 12 }}>
-                                      Gallery Item {idx + 1}
-                                    </Text>
-                                  </Space>
-                                }
-                                style={{ marginBottom: 10, borderRadius: 8 }}
-                                extra={
-                                  <Button
-                                    size="small"
-                                    type="text"
-                                    danger
-                                    icon={<DeleteOutlined />}
-                                    onClick={() => remove(name)}
-                                  >
-                                    Remove
-                                  </Button>
-                                }
-                              >
-                                <Row gutter={[12, 0]}>
-                                  <Col xs={24} sm={12} md={8}>
-                                    <Form.Item
-                                      {...rest}
-                                      name={[name, "component"]}
-                                      label="SLF Component"
-                                    >
-                                      <Select
-                                        allowClear
-                                        showSearch
-                                        placeholder="Select component"
-                                        options={GALLERY_COMPONENT_OPTIONS}
-                                      />
+                            <Table
+                              size="small"
+                              rowKey="key"
+                              dataSource={fields}
+                              pagination={fields.length > 5 ? { pageSize: 5, size: "small" } : false}
+                              scroll={{ x: 1180 }}
+                              locale={{ emptyText: <Empty description="No gallery images added" /> }}
+                              columns={[
+                                {
+                                  title: "Preview",
+                                  width: 96,
+                                  render: (_, field) => {
+                                    const value = form.getFieldValue(["galleryItems", field.name, "url"]);
+                                    const url = fileUrlFromValue(value);
+                                    return url ? <Image src={resolveMediaUrl(url)} width={54} height={42} style={{ objectFit: "cover", borderRadius: 6 }} /> : <FileImageOutlined style={{ fontSize: 24, color: "#8c8c8c" }} />;
+                                  },
+                                },
+                                {
+                                  title: "File Name",
+                                  width: 180,
+                                  render: (_, field) => {
+                                    const value = form.getFieldValue(["galleryItems", field.name, "url"]);
+                                    return <Text ellipsis style={{ maxWidth: 160 }}>{fileNameFromUrl(value, "photo")}</Text>;
+                                  },
+                                },
+                                {
+                                  title: "Category",
+                                  width: 190,
+                                  render: (_, field) => (
+                                    <Form.Item name={[field.name, "component"]} style={{ margin: 0 }}>
+                                      <Select allowClear showSearch placeholder="Component" options={GALLERY_COMPONENT_OPTIONS} />
                                     </Form.Item>
-                                  </Col>
-                                  <Col xs={24} sm={12} md={8}>
-                                    <Form.Item
-                                      {...rest}
-                                      name={[name, "folder"]}
-                                      label="Folder"
-                                    >
-                                      <Select
-                                        mode="tags"
-                                        maxTagCount={1}
-                                        placeholder="Create or select folder"
-                                        tokenSeparators={[","]}
-                                      />
-                                    </Form.Item>
-                                  </Col>
-                                  <Col xs={24} sm={24} md={8}>
-                                    <Form.Item
-                                      {...rest}
-                                      name={[name, "caption"]}
-                                      label="Caption"
-                                    >
+                                  ),
+                                },
+                                {
+                                  title: "Description",
+                                  width: 220,
+                                  render: (_, field) => (
+                                    <Form.Item name={[field.name, "caption"]} style={{ margin: 0 }}>
                                       <Input placeholder="Photo caption" />
                                     </Form.Item>
-                                  </Col>
-                                  <Col span={24}>
-                                    <Form.Item
-                                      {...rest}
-                                      name={[name, "url"]}
-                                      label="Photo"
-                                      valuePropName="fileList"
-                                      getValueFromEvent={(e) =>
-                                        Array.isArray(e) ? e : e?.fileList
-                                      }
-                                    >
-                                      <Upload
-                                        {...slfUploadProps}
-                                        listType="picture-card"
-                                        maxCount={1}
-                                        accept="image/*"
-                                        action={
-                                          driveDisabled
-                                            ? undefined
-                                            : "/eswm-pipeline/api/upload"
-                                        }
-                                        disabled={driveDisabled}
-                                        headers={getUploadHeaders()}
-                                      >
-                                        <div>
-                                          <PlusOutlined />
-                                          <div
-                                            style={{
-                                              marginTop: 8,
-                                              fontSize: 12,
-                                            }}
-                                          >
-                                            Upload Photo
-                                            <br />
-                                            <Text
-                                              type="secondary"
-                                              style={{ fontSize: 11 }}
-                                            >
-                                              Max 200 MB
-                                            </Text>
-                                          </div>
-                                        </div>
-                                      </Upload>
+                                  ),
+                                },
+                                {
+                                  title: "Folder",
+                                  width: 180,
+                                  render: (_, field) => (
+                                    <Form.Item name={[field.name, "folder"]} style={{ margin: 0 }}>
+                                      <Select mode="tags" maxTagCount={1} placeholder="Folder" tokenSeparators={[","]} />
                                     </Form.Item>
-                                  </Col>
-                                </Row>
-                              </Card>
-                            ))}
+                                  ),
+                                },
+                                { title: "Uploaded By", width: 130, render: () => <Text type="secondary">—</Text> },
+                                { title: "Upload Date", width: 130, render: () => <Text type="secondary">—</Text> },
+                                {
+                                  title: "File Size",
+                                  width: 100,
+                                  render: (_, field) => {
+                                    const file = uploadFileFromValue(form.getFieldValue(["galleryItems", field.name, "url"]));
+                                    return file?.size ? formatFileSize(file.size) : <Text type="secondary">—</Text>;
+                                  },
+                                },
+                                {
+                                  title: "Status",
+                                  width: 100,
+                                  render: (_, field) => {
+                                    const file = uploadFileFromValue(form.getFieldValue(["galleryItems", field.name, "url"]));
+                                    const url = fileUrlFromValue(form.getFieldValue(["galleryItems", field.name, "url"]));
+                                    return <Tag color={file?.status === "error" ? "red" : url ? "green" : "default"}>{file?.status === "uploading" ? "Uploading" : file?.status === "error" ? "Error" : url ? "Ready" : "Missing"}</Tag>;
+                                  },
+                                },
+                                {
+                                  title: "Actions",
+                                  fixed: "right",
+                                  width: 210,
+                                  render: (_, field) => {
+                                    const url = fileUrlFromValue(form.getFieldValue(["galleryItems", field.name, "url"]));
+                                    return (
+                                      <Space size={4}>
+                                        <Form.Item name={[field.name, "url"]} valuePropName="fileList" getValueFromEvent={(e) => Array.isArray(e) ? e : e?.fileList} style={{ margin: 0 }}>
+                                          <Upload {...slfUploadProps} maxCount={1} accept="image/*" action={driveDisabled ? undefined : "/eswm-pipeline/api/upload"} disabled={driveDisabled} headers={getUploadHeaders()} showUploadList={false}>
+                                            <Tooltip title={url ? "Replace image" : "Upload image"}><Button size="small" icon={<UploadOutlined />} disabled={driveDisabled} /></Tooltip>
+                                          </Upload>
+                                        </Form.Item>
+                                        <Tooltip title="View / preview"><Button size="small" icon={<EyeOutlined />} disabled={!url} onClick={() => window.open(resolveMediaOpenUrl(url), "_blank", "noopener,noreferrer")} /></Tooltip>
+                                        <Tooltip title="Open in new tab"><Button size="small" icon={<LinkOutlined />} disabled={!url} onClick={() => window.open(resolveMediaOpenUrl(url), "_blank", "noopener,noreferrer")} /></Tooltip>
+                                        <Popconfirm title="Delete this gallery image?" okText="Delete" okButtonProps={{ danger: true }} onConfirm={() => remove(field.name)}>
+                                          <Tooltip title="Delete"><Button size="small" danger icon={<DeleteOutlined />} /></Tooltip>
+                                        </Popconfirm>
+                                      </Space>
+                                    );
+                                  },
+                                },
+                              ]}
+                            />
                             <Button
                               type="dashed"
                               onClick={() => add({})}
@@ -6412,43 +6576,10 @@ export default function SLFMonitoring({
                           </>
                         )}
                       </Form.List>
-                      <Divider
-                        orientation="left"
-                        plain
-                        style={{ marginTop: 16 }}
-                      >
-                        Legacy Photo Uploads
-                      </Divider>
-                      <Form.Item
-                        name="galleryPhotos"
-                        valuePropName="fileList"
-                        getValueFromEvent={(e) =>
-                          Array.isArray(e) ? e : e?.fileList
-                        }
-                      >
-                        <Upload
-                          {...slfUploadProps}
-                          listType="picture-card"
-                          accept="image/*"
-                          multiple
-                          action={
-                            driveDisabled
-                              ? undefined
-                              : "/eswm-pipeline/api/upload"
-                          }
-                          disabled={driveDisabled}
-                          headers={getUploadHeaders()}
-                        >
-                          <div>
-                            <PlusOutlined />
-                            <div style={{ marginTop: 8, fontSize: 12 }}>
-                              Upload Photo
-                              <br />
-                              <Text type="secondary" style={{ fontSize: 11 }}>
-                                Max 200 MB
-                              </Text>
-                            </div>
-                          </div>
+                      <Divider orientation="left" plain style={{ marginTop: 16 }}>Legacy Photo Uploads</Divider>
+                      <Form.Item name="galleryPhotos" valuePropName="fileList" getValueFromEvent={(e) => Array.isArray(e) ? e : e?.fileList}>
+                        <Upload {...slfUploadProps} listType="picture" accept="image/*" multiple action={driveDisabled ? undefined : "/eswm-pipeline/api/upload"} disabled={driveDisabled} headers={getUploadHeaders()}>
+                          <Button icon={<UploadOutlined />} disabled={driveDisabled}>Upload Legacy Photos</Button>
                         </Upload>
                       </Form.Item>
                     </>
@@ -6463,124 +6594,103 @@ export default function SLFMonitoring({
                   ),
                   children: (
                     <>
-                      <Divider orientation="left" plain>
-                        SLF Documents
-                      </Divider>
+                      <Alert
+                        type="info"
+                        showIcon
+                        style={{ marginBottom: 12 }}
+                        message="Documents are managed in a table. Edit metadata inline, upload or replace a file from the Actions column, then save the SLF record."
+                      />
                       <Form.List name="slfDocuments">
                         {(fields, { add, remove }) => (
                           <>
-                            {fields.map(({ key, name, ...rest }, idx) => (
-                              <Card
-                                key={key}
-                                size="small"
-                                title={
-                                  <Space size={6}>
-                                    <FilePdfOutlined
-                                      style={{ color: "#722ed1" }}
-                                    />
-                                    <Text strong style={{ fontSize: 12 }}>
-                                      Document {idx + 1}
-                                    </Text>
-                                  </Space>
-                                }
-                                style={{ marginBottom: 10, borderRadius: 8 }}
-                                extra={
-                                  <Button
-                                    size="small"
-                                    type="text"
-                                    danger
-                                    icon={<MinusCircleOutlined />}
-                                    onClick={() => remove(name)}
-                                  >
-                                    Remove
-                                  </Button>
-                                }
-                              >
-                                <Row gutter={[12, 0]}>
-                                  <Col xs={24} sm={10}>
-                                    <Form.Item
-                                      {...rest}
-                                      name={[name, "title"]}
-                                      label="Title"
-                                      rules={[
-                                        {
-                                          required: true,
-                                          message: "Title required",
-                                        },
-                                      ]}
-                                    >
+                            <Table
+                              size="small"
+                              rowKey="key"
+                              dataSource={fields}
+                              pagination={fields.length > 6 ? { pageSize: 6, size: "small" } : false}
+                              scroll={{ x: 1220 }}
+                              locale={{ emptyText: <Empty description="No SLF documents added" /> }}
+                              columns={[
+                                {
+                                  title: "File Preview or Type",
+                                  width: 130,
+                                  render: (_, field) => {
+                                    const url = fileUrlFromValue(form.getFieldValue(["slfDocuments", field.name, "url"]));
+                                    const kind = getMediaKind(url);
+                                    return <Tag icon={kind === "image" ? <FileImageOutlined /> : <FilePdfOutlined />} color={url ? "purple" : "default"}>{kind || "document"}</Tag>;
+                                  },
+                                },
+                                {
+                                  title: "File Name",
+                                  width: 190,
+                                  render: (_, field) => (
+                                    <Form.Item name={[field.name, "title"]} rules={[{ required: true, message: "Title required" }]} style={{ margin: 0 }}>
                                       <Input placeholder="Document title" />
                                     </Form.Item>
-                                  </Col>
-                                  <Col xs={24} sm={14}>
-                                    <Form.Item
-                                      {...rest}
-                                      name={[name, "docType"]}
-                                      label="Document Type"
-                                    >
-                                      <Select
-                                        allowClear
-                                        placeholder="Select type"
-                                        options={[
-                                          { label: "ECC", value: "ECC" },
-                                          { label: "Permit", value: "Permit" },
-                                          {
-                                            label: "Monitoring Report",
-                                            value: "Monitoring Report",
-                                          },
-                                          {
-                                            label: "Compliance Certificate",
-                                            value: "Compliance Certificate",
-                                          },
-                                          {
-                                            label: "Site Plan",
-                                            value: "Site Plan",
-                                          },
-                                          { label: "Other", value: "Other" },
-                                        ]}
-                                      />
+                                  ),
+                                },
+                                {
+                                  title: "Category",
+                                  width: 180,
+                                  render: (_, field) => (
+                                    <Form.Item name={[field.name, "docType"]} style={{ margin: 0 }}>
+                                      <Select allowClear placeholder="Type" options={SLF_DOCUMENT_TYPE_OPTIONS} />
                                     </Form.Item>
-                                  </Col>
-                                  <Col xs={24}>
-                                    <Form.Item
-                                      {...rest}
-                                      name={[name, "description"]}
-                                      label="Description"
-                                    >
-                                      <Input placeholder="Brief description of the document" />
+                                  ),
+                                },
+                                {
+                                  title: "Description",
+                                  width: 260,
+                                  render: (_, field) => (
+                                    <Form.Item name={[field.name, "description"]} style={{ margin: 0 }}>
+                                      <Input placeholder="Description" />
                                     </Form.Item>
-                                  </Col>
-                                  <Col xs={24}>
-                                    <Form.Item
-                                      {...rest}
-                                      name={[name, "url"]}
-                                      label="File"
-                                      valuePropName="fileList"
-                                      getValueFromEvent={(e) =>
-                                        Array.isArray(e) ? e : e?.fileList
-                                      }
-                                    >
-                                      <Upload
-                                        {...slfUploadProps}
-                                        maxCount={1}
-                                        accept=".pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx"
-                                        action={
-                                          driveDisabled
-                                            ? undefined
-                                            : "/eswm-pipeline/api/upload"
-                                        }
-                                        disabled={driveDisabled}
-                                        headers={getUploadHeaders()}
-                                      >
-                                        <Button icon={<FilePdfOutlined />}>
-                                          Upload Document (max 200 MB)
-                                        </Button>
-                                      </Upload>
-                                    </Form.Item>
-                                  </Col>
-                                </Row>
-                              </Card>
-                            ))}
+                                  ),
+                                },
+                                { title: "Uploaded By", width: 130, render: () => <Text type="secondary">—</Text> },
+                                { title: "Upload Date", width: 130, render: () => <Text type="secondary">—</Text> },
+                                {
+                                  title: "File Size",
+                                  width: 100,
+                                  render: (_, field) => {
+                                    const file = uploadFileFromValue(form.getFieldValue(["slfDocuments", field.name, "url"]));
+                                    return file?.size ? formatFileSize(file.size) : <Text type="secondary">—</Text>;
+                                  },
+                                },
+                                {
+                                  title: "Status",
+                                  width: 100,
+                                  render: (_, field) => {
+                                    const file = uploadFileFromValue(form.getFieldValue(["slfDocuments", field.name, "url"]));
+                                    const url = fileUrlFromValue(form.getFieldValue(["slfDocuments", field.name, "url"]));
+                                    return <Tag color={file?.status === "error" ? "red" : url ? "green" : "default"}>{file?.status === "uploading" ? "Uploading" : file?.status === "error" ? "Error" : url ? "Ready" : "Missing"}</Tag>;
+                                  },
+                                },
+                                {
+                                  title: "Actions",
+                                  fixed: "right",
+                                  width: 230,
+                                  render: (_, field) => {
+                                    const url = fileUrlFromValue(form.getFieldValue(["slfDocuments", field.name, "url"]));
+                                    return (
+                                      <Space size={4}>
+                                        <Form.Item name={[field.name, "url"]} valuePropName="fileList" getValueFromEvent={(e) => Array.isArray(e) ? e : e?.fileList} style={{ margin: 0 }}>
+                                          <Upload {...slfUploadProps} maxCount={1} accept=".pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx" action={driveDisabled ? undefined : "/eswm-pipeline/api/upload"} disabled={driveDisabled} headers={getUploadHeaders()} showUploadList={false}>
+                                            <Tooltip title={url ? "Replace file" : "Upload file"}><Button size="small" icon={<UploadOutlined />} disabled={driveDisabled} /></Tooltip>
+                                          </Upload>
+                                        </Form.Item>
+                                        <Tooltip title="View / preview"><Button size="small" icon={<EyeOutlined />} disabled={!url} onClick={() => window.open(resolveMediaOpenUrl(url), "_blank", "noopener,noreferrer")} /></Tooltip>
+                                        <Tooltip title="Open in new tab"><Button size="small" icon={<LinkOutlined />} disabled={!url} onClick={() => window.open(resolveMediaOpenUrl(url), "_blank", "noopener,noreferrer")} /></Tooltip>
+                                        <Tooltip title="Download"><Button size="small" icon={<DownloadOutlined />} disabled={!url} onClick={() => window.open(resolveMediaOpenUrl(url), "_blank", "noopener,noreferrer")} /></Tooltip>
+                                        <Popconfirm title="Delete this document?" okText="Delete" okButtonProps={{ danger: true }} onConfirm={() => remove(field.name)}>
+                                          <Tooltip title="Delete"><Button size="small" danger icon={<DeleteOutlined />} /></Tooltip>
+                                        </Popconfirm>
+                                      </Space>
+                                    );
+                                  },
+                                },
+                              ]}
+                            />
                             <Button
                               type="dashed"
                               onClick={() =>
@@ -9061,6 +9171,15 @@ export default function SLFMonitoring({
                                     <Row gutter={[8, 8]}>
                                       {items.map((item, i) => {
                                         const kind = getMediaKind(item.url);
+                                        // Gallery items are photos, but files stored
+                                        // on Google Drive have NO extension, so
+                                        // getMediaKind returns "file" and the tile
+                                        // used to fall through to a generic icon —
+                                        // the thumbnail image was never shown. Treat
+                                        // "file"/extension-less items as images here
+                                        // (only real videos/pdfs keep the icon).
+                                        const isImageLike =
+                                          kind === "image" || kind === "file";
                                         return (
                                           <Col
                                             key={`${item.url}-${i}`}
@@ -9068,7 +9187,7 @@ export default function SLFMonitoring({
                                             sm={8}
                                             md={6}
                                           >
-                                            {kind === "image" ? (
+                                            {isImageLike ? (
                                               <Image
                                                 src={resolveMediaUrl(item.url, {
                                                   thumbnail: true,
@@ -9252,6 +9371,21 @@ export default function SLFMonitoring({
                       ) : (
                         <Empty description="No documents uploaded yet" />
                       ),
+                  },
+                  {
+                    key: "haulers-clients",
+                    label: (
+                      <span style={{ color: "#13c2c2" }}>
+                        <TeamOutlined /> Haulers &amp; Clients
+                      </span>
+                    ),
+                    children: (
+                      <HaulerClientsTab
+                        baselineData={baselineData}
+                        loading={loadingBaseline}
+                        savedAt={baselineData?.savedAt}
+                      />
+                    ),
                   },
                   ...(detailViewRecord.slfGenerator
                     ? [

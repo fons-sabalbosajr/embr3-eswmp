@@ -27,7 +27,9 @@ const router = express.Router();
 // Developer-only, always. Applied to every route in this file.
 router.use(authMiddleware, developerOnly);
 
-const TON_PER_M3 = DataSLF.TON_PER_M3 || 0.2;
+// Single source of truth for the m³ ↔ tons factor (server/utils/volumeUnits.js),
+// same value the DataSLF model exposes — no hardcoded fallback to drift from it.
+const { TON_PER_M3 } = require("../utils/volumeUnits");
 
 function actor(req) {
   return req.user?.email || req.user?.username || req.user?.id || "developer";

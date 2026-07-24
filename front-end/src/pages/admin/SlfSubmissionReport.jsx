@@ -97,11 +97,15 @@ const RECENT_UPDATES = {
     "SLF operators can now save a submission as a draft and finish it later.",
     "Submissions can be scheduled to send automatically at a chosen date and time.",
     "The admin SLF monitoring dashboard loads faster with clearer per-operator breakdowns.",
+    "Portal support tickets now receive an immediate VERA first response before administrator follow-up.",
+    "The Portal Submissions tab now separates true submission-entry counts from grouped table rows.",
   ],
   features: [
     "New printable SLF Data & Portal Submissions report with summary cards, charts, and tables.",
     "Reports can be exported as PDF (print) or DOCX, now including charts and full data tables.",
     "The Group Entries view shows the assigned disposal cell and a quick summary per submission group.",
+    "Generate Reports previews now surface report-specific related details such as cell placement, tons, receiving capacity, portal access, and hauler-client relationships.",
+    "SLF Documents and Gallery are managed through table-based upload and metadata views.",
   ],
   fixes: [
     "Export layout: charts are scaled to the printable page width and tables reflow instead of clipping, so sections no longer overlap across pages.",
@@ -109,6 +113,9 @@ const RECENT_UPDATES = {
     "DOCX chart rendering: charts are captured from the live SVG and embedded via MHTML (multipart/related) so pie/bar/line graphs display in Word instead of being dropped as data-URI images.",
     "Socket.IO/auth handling: the admin socket and protected message APIs now wait for the authenticated session, and the production Socket.IO path is proxied without stripping its prefix — removing WebSocket handshake failures and 401 errors.",
     "Data mapping: the submissions list API now returns assigned cell names so the Group Entries modal can show per-entry cell placement.",
+    "Cell Infrastructure unit handling: tons no longer snaps back to m³ when cell rows are resized or reopened.",
+    "Disposal-entry uploads now require and validate Client under the selected SLF → Hauler relationship.",
+    "Filtered Excel export now includes all matched submission groups and expands them into waste-entry breakdown rows.",
   ],
 };
 
@@ -263,6 +270,10 @@ export default function SlfSubmissionReport({
   facilities = [],
   baselines = [],
   totals,
+  // Live portal announcement(s) + recent portal/admin changes (transactions) so the
+  // "Recent Updates" section reflects the CURRENT state, not a static release note.
+  announcements = [],
+  recentChanges = [],
 }) {
   const [trend, setTrend] = useState([]);
   const [trendLoading, setTrendLoading] = useState(false);
@@ -1234,9 +1245,47 @@ export default function SlfSubmissionReport({
 
         <div className="slf-page-break" />
 
-        {/* Recent updates */}
-        <Section title="Recent Updates">
+        {/* Recent updates — LIVE announcements + portal/admin changes first, then
+            the static release notes. Reflects the current portal/admin state. */}
+        <Section title="Recent Announcements & Changes">
           <div style={{ fontSize: 12, lineHeight: 1.7 }}>
+            <Text strong style={{ color: "#722ed1" }}>Current Announcements</Text>
+            {(Array.isArray(announcements) ? announcements : []).filter((a) => a && (a.title || a.message)).length ? (
+              <ul style={{ margin: "4px 0 10px", paddingLeft: 18 }}>
+                {(Array.isArray(announcements) ? announcements : [])
+                  .filter((a) => a && (a.title || a.message))
+                  .slice(0, 6)
+                  .map((a, i) => (
+                    <li key={`a${i}`}>
+                      <b>{a.title || "Announcement"}</b>
+                      {a.message ? ` — ${a.message}` : ""}
+                      {a.startAt || a.updatedAt ? (
+                        <Text type="secondary"> ({dayjs(a.startAt || a.updatedAt).format("MM/DD/YYYY")})</Text>
+                      ) : null}
+                    </li>
+                  ))}
+              </ul>
+            ) : (
+              <div style={{ margin: "4px 0 10px" }}><Text type="secondary">No active portal announcements.</Text></div>
+            )}
+            <Text strong style={{ color: "#1677ff" }}>Recent Portal / Admin Changes</Text>
+            {(Array.isArray(recentChanges) ? recentChanges : []).length ? (
+              <ul style={{ margin: "4px 0 10px", paddingLeft: 18 }}>
+                {(Array.isArray(recentChanges) ? recentChanges : [])
+                  .slice(0, 10)
+                  .map((t, i) => (
+                    <li key={`c${i}`}>
+                      {t.type ? <b>{String(t.type).replace(/_/g, " ")}: </b> : null}
+                      {t.description || t.message || t.companyName || "Change recorded"}
+                      {t.createdAt ? (
+                        <Text type="secondary"> ({dayjs(t.createdAt).format("MM/DD/YYYY")})</Text>
+                      ) : null}
+                    </li>
+                  ))}
+              </ul>
+            ) : (
+              <div style={{ margin: "4px 0 10px" }}><Text type="secondary">No recent changes recorded.</Text></div>
+            )}
             <Text strong style={{ color: "#2f54eb" }}>Updates</Text>
             <ul style={{ margin: "4px 0 10px", paddingLeft: 18 }}>
               {RECENT_UPDATES.updates.map((u, i) => <li key={`u${i}`}>{u}</li>)}

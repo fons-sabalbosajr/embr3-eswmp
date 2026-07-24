@@ -56,6 +56,39 @@ const supportTicketSchema = new mongoose.Schema(
       default: "open",
     },
 
+    // VERA processing status — separate from the admin lifecycle `status` above so
+    // VERA automation never overwrites an admin's manual status. Mirrors the spec
+    // workflow states.
+    veraStatus: {
+      type: String,
+      enum: ["none", "investigating", "awaiting_user", "answered_by_vera", "escalated", "resolved"],
+      default: "none",
+      index: true,
+    },
+
+    // VERA investigation record (one per ticket; re-running replaces it). Stores the
+    // full audit of what VERA looked at and concluded, for admin review. VERA only
+    // ever writes SAFE, user-facing text into `responseSent`; raw evidence detail
+    // here is admin-only and never sent to the portal user.
+    veraInvestigation: {
+      investigatedAt: { type: Date, default: null },
+      affectedModule: { type: String, trim: true, default: "" },
+      investigationSummary: { type: String, trim: true, default: "" },
+      // user_correctable | validation | data | permission | api_db_failure | developer_intervention | unknown
+      issueCategory: { type: String, trim: true, default: "" },
+      evidenceReviewed: { type: [String], default: [] },
+      confidence: { type: String, enum: ["low", "medium", "high", ""], default: "" },
+      // Populated when VERA could not complete the investigation (Part 6): what it
+      // still needs and the safe steps offered to the user. Kept user-safe (no logs).
+      investigationComplete: { type: Boolean, default: true },
+      missingInformation: { type: [String], default: [] },
+      suggestedNextSteps: { type: [String], default: [] },
+      responseSent: { type: String, trim: true, default: "" },
+      escalationStatus: { type: String, enum: ["none", "escalated"], default: "none" },
+      processingStatus: { type: String, trim: true, default: "" }, // mirrors veraStatus at completion
+      source: { type: String, trim: true, default: "" }, // "model" | "fallback"
+    },
+
     replies: [supportReplySchema],
 
     resolvedAt: { type: Date },

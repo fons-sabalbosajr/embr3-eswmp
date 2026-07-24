@@ -9,13 +9,14 @@ import {
 import {
   AuditOutlined, BankOutlined, BarChartOutlined, CarOutlined, CheckCircleOutlined,
   CloseCircleOutlined, ContainerOutlined, DatabaseOutlined, DeleteOutlined,
-  EditOutlined, EnvironmentOutlined, EyeOutlined, FileTextOutlined,
+  DownloadOutlined, EditOutlined, EnvironmentOutlined, EyeOutlined, FileTextOutlined,
   InfoCircleOutlined, MailOutlined, MessageOutlined, PieChartOutlined,
   PlusOutlined, ProfileOutlined, SaveOutlined, SendOutlined,
   TeamOutlined, UndoOutlined, UploadOutlined, UserOutlined, WifiOutlined,
   ClockCircleOutlined,
 } from "@ant-design/icons";
 import { EMPTY_VEHICLE } from "./constants";
+import { UPLOAD_COLUMNS } from "./uploadHelpers";
 import { SUPPORT_EMAIL, SUPPORT_MAILTO } from "../../config/appContact";
 import api from "../../api";
 import secureStorage from "../../utils/secureStorage";
@@ -30,12 +31,6 @@ const { Text } = Typography;
 const { TextArea } = Input;
 const normalizeUnitLabel = (unit) => String(unit || "tons").replace("m3", "m³");
 
-// Switching a cell entry's unit must CONVERT the volume, not merely relabel it.
-// Relabelling turned "100" encoded as m³ into "100 tons" — a 5× overstatement that
-// then flowed straight into the baseline and every capacity calculation built on it.
-//
-// Uses the one shared conversion module (utils/volumeUnits), so this can never
-// drift from the factor the rest of the app — admin included — uses.
 function convertCellDraftUnit(draft, nextUnit, declaredUnit) {
   const from = normalizeUnitLabel(draft.unit || declaredUnit || "tons");
   const to = normalizeUnitLabel(nextUnit);
@@ -45,16 +40,11 @@ function convertCellDraftUnit(draft, nextUnit, declaredUnit) {
   return {
     ...draft,
     unit: to,
-    // Unconvertible (blank/garbage) → keep what the user typed rather than
-    // writing a guessed number. Rounded to 2dp so the field stays usable.
     volume:
       converted === null ? draft.volume : Math.round(converted * 100) / 100,
   };
 }
 
-// Tells the user when this entry's unit differs from the SLF's DECLARED unit, and
-// what the value comes to in that declared unit — the declared unit is the source
-// of truth every capacity/utilization figure is computed in.
 function CellEntryUnitHint({ draftUnit, declaredUnit }) {
   const declared = normalizeUnitLabel(declaredUnit || "tons");
   const current = normalizeUnitLabel(draftUnit || declaredUnit || "tons");
@@ -313,6 +303,7 @@ export default function SLFPortalModals({
   handleSaveClosedCellEntry,
   handleConfirmUpload,
   proceedToFilePicker,
+  downloadDisposalTemplate,
   updateUploadCell,
   handleOpenWasteReceived,
   handleSaveFacilityDetails,
@@ -4048,7 +4039,7 @@ export default function SLFPortalModals({
         }
         okButtonProps={{ className: "slf-primary-btn" }}
         cancelText="Cancel"
-        width={1000}
+        width={1400}
         destroyOnHidden
       >
         {uploadGuideType === "hauler" ? (
@@ -4176,47 +4167,26 @@ export default function SLFPortalModals({
               type="secondary"
               style={{ display: "block", marginBottom: 12 }}
             >
-              Your Excel or CSV file must contain the following columns (in any
-              order):
+              Your Excel or CSV file must contain the exact column headers below (in any order). The Client column is required and must follow Selected SLF → Hauler → Client.
             </Text>
+            <Button
+              icon={<DownloadOutlined />}
+              onClick={downloadDisposalTemplate}
+              style={{ marginBottom: 12 }}
+              type="primary"
+            >
+              Download Template
+            </Button>
             <Table
               size="small"
               pagination={false}
-              dataSource={[
-                {
-                  col: "Disposal Ticket No",
-                  desc: "Unique ticket/reference number",
-                  required: true,
-                },
-                {
-                  col: "Hauler Name",
-                  desc: "Name of the hauler who transported the waste",
-                  required: true,
-                },
-                {
-                  col: "Plate Number",
-                  desc: "Plate number of the truck",
-                  required: true,
-                },
-                {
-                  col: "Truck Capacity",
-                  // Required: every uploaded disposal row must carry a Truck
-                  // Capacity greater than 0. Missing/zero/negative rows are rejected
-                  // by the parser and again server-side.
-                  desc: "Truck capacity in the declared baseline unit — REQUIRED, must be greater than 0",
-                  required: true,
-                },
-                {
-                  col: "Actual Volume",
-                  desc: "Actual volume of waste transported",
-                  required: true,
-                },
-                {
-                  col: "Waste Type",
-                  desc: "e.g. Residual, Hazardous, Mixed",
-                  required: true,
-                },
-              ]}
+              dataSource={UPLOAD_COLUMNS.truck.map((column) => ({
+                col: column.label,
+                desc: column.description,
+                required: column.required,
+                format: column.format,
+                sample: column.sample,
+              }))}
               columns={[
                 {
                   title: "Column Header",
@@ -4225,6 +4195,13 @@ export default function SLFPortalModals({
                   render: (v) => <Text code>{v}</Text>,
                 },
                 { title: "Description", dataIndex: "desc" },
+                { title: "Accepted Format", dataIndex: "format", width: 220 },
+                {
+                  title: "Sample",
+                  dataIndex: "sample",
+                  width: 150,
+                  render: (v) => <Text code>{v}</Text>,
+                },
                 {
                   title: "Required",
                   dataIndex: "required",
@@ -4249,8 +4226,7 @@ export default function SLFPortalModals({
                 <InfoCircleOutlined
                   style={{ color: "#faad14", marginRight: 6 }}
                 />
-                Each row in the file represents one disposal trip. Volume unit
-                defaults to <Text code>m³</Text> unless specified.
+                Common upload errors include a missing <Text code>Client</Text> column, an empty Client value, an unknown hauler, a client that belongs to another hauler or SLF, duplicate/ambiguous client records, inactive clients, invalid units, and unavailable disposal cells. The upload never creates new clients automatically.
               </Text>
             </div>
           </div>

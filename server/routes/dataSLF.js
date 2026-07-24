@@ -18,6 +18,8 @@ const {
   toBaseM3,
 } = require("../utils/cellAvailability");
 const { authMiddleware, requireAnyAuth, adminOnly, developerOnly } = require("../middleware/auth");
+const { requirePortalRule } = require("../utils/portalPolicy");
+const { resolveTotalVolumeForUpdate } = require("../utils/baselineVolume");
 const { todayRange } = require("../utils/appTime");
 const { NON_DUMMY_CLAUSE } = require("../utils/dummyFilter");
 const {
@@ -31,6 +33,8 @@ const {
 const {
   normalizeUnit: strictNormalizeUnit,
   convertVolume: convertVolumeStrict,
+  TON_PER_M3,
+  toM3Expr,
 } = require("../utils/volumeUnits");
 const {
   normalizeWasteType: normalizeWasteCategory,
@@ -478,6 +482,53 @@ function normalizeUnit(unit) {
   return String(unit || "m³").replace("m3", "m³");
 }
 
+// Nested arrays that hold a submission's ENTIRE trucks / haulers / cell-entry
+// payload. An edit that changes a single scalar field must never blank one of
+// these out — a degenerate empty array (from a failed detail preload, a partial
+// client payload, or stale lean list state) would silently wipe every existing
+// truck/hauler/entry. That is exactly the "editing one field removes other saved
+// data" data-loss symptom. Guard against it: an incoming `[]` is ignored when the
+// stored value already has data, so a field edit can never delete unrelated saved
+// records. A genuine clear still happens through the dedicated delete/revert flows.
+const PARTIAL_UPDATE_PROTECTED_ARRAYS = [
+  "trucks",
+  "accreditedHaulers",
+  "activeCellEntries",
+  "closedCellEntries",
+];
+
+// Apply an allow-listed partial update to a DataSLF doc without ever wiping a
+// protected nested array to empty. Returns the list of fields whose empty payload
+// was skipped (for logging). Shared by the admin-edit and portal-resubmit handlers
+// so both enforce the same "preserve existing values not being edited" rule.
+function applyEntryUpdates(entry, body, allowedFields, req, action) {
+  const skipped = [];
+  for (const key of allowedFields) {
+    if (body[key] === undefined) continue;
+    const incoming = body[key];
+    if (
+      PARTIAL_UPDATE_PROTECTED_ARRAYS.includes(key) &&
+      Array.isArray(incoming) &&
+      incoming.length === 0 &&
+      Array.isArray(entry[key]) &&
+      entry[key].length > 0
+    ) {
+      skipped.push(key);
+      continue;
+    }
+    entry[key] = incoming;
+  }
+  if (skipped.length) {
+    writeLog("warn", `${action}.array_wipe_prevented`, {
+      message: `Ignored empty ${skipped.join(", ")} on ${entry.idNo || entry._id} to preserve existing saved data`,
+      user: getRequestActor(req, "system"),
+      ip: req?.ip,
+      meta: { id: String(entry._id), idNo: entry.idNo, skipped },
+    });
+  }
+  return skipped;
+}
+
 // Summarize how many truck rows in a submission have a cell assigned. Used by
 // the admin list to show a "Cells Assigned" badge without shipping full trucks.
 function computeCellPlacementSummary(entry) {
@@ -539,7 +590,8 @@ function collectCellNames(entry) {
 // stored — always derived so they can't go stale). Covers truck-capacity and
 // cell-placement attention flags. Cell near-full/full are cell-level and require
 // facility fill data, so they are surfaced in the Cell Waste Placement view.
-const TON_PER_M3 = 0.2;
+// TON_PER_M3 comes from the shared volumeUnits module (imported above) — the
+// single source of truth for the m³ ↔ tons factor.
 function toComparableVolume(value, fromUnit, toUnit) {
   const num = Number(value || 0);
   const from = normalizeUnit(fromUnit || "m³");
@@ -549,6 +601,18 @@ function toComparableVolume(value, fromUnit, toUnit) {
   if (from === "m³" && to === "tons") return num * TON_PER_M3;
   return num;
 }
+// Persist an unexpected 500 from an SLF CRUD handler to AppLog so it becomes
+// visible to admins (App Logs + the VERA notification bell, which surfaces recent
+// error-level SLF failures). Best-effort — never throws, never blocks the response.
+function logSlfCrudError(req, action, error, meta = {}) {
+  writeLog("error", action, {
+    message: `SLF CRUD failure (${action}): ${error?.message || "unknown error"}`,
+    user: getRequestActor(req, "system"),
+    ip: req?.ip,
+    meta: { ...meta, error: error?.message },
+  });
+}
+
 function computeSubmissionRemarks(entry, allowancePct = 10) {
   const remarks = [];
   const trucks = Array.isArray(entry?.trucks) ? entry.trucks : [];
@@ -734,6 +798,80 @@ function sanitizeClient(client) {
   };
 }
 
+const normalizeRelationshipText = (value) => String(value || "").trim().replace(/\s+/g, " ").toLowerCase();
+const clientRelationshipValues = (client) => {
+  if (typeof client === "string") return [client];
+  if (!client || typeof client !== "object") return [];
+  return [client.clientName, client.name, client.clientCode, client.code, client.clientId, client.id, client._id, client.key];
+};
+const haulerClientPool = (hauler) => [
+  ...(Array.isArray(hauler?.privateSectorClients) ? hauler.privateSectorClients : []),
+  ...(Array.isArray(hauler?.clients) ? hauler.clients : []),
+  ...(Array.isArray(hauler?.vehicles) ? hauler.vehicles.flatMap((vehicle) => vehicle?.selectedClients || []) : []),
+];
+
+async function getAuthoritativeHaulersForEntry(item) {
+  const query = item?.slfGenerator
+    ? { slfGenerator: item.slfGenerator, "accreditedHaulers.0": { $exists: true } }
+    : { slfName: item?.slfName, "accreditedHaulers.0": { $exists: true } };
+  const baselines = await DataSLF.find(query).select("accreditedHaulers createdAt").sort({ createdAt: -1 }).lean();
+  const savedHaulers = baselines.flatMap((baseline) => baseline.accreditedHaulers || []);
+  if (savedHaulers.length) return savedHaulers;
+  return Array.isArray(item?.accreditedHaulers) ? item.accreditedHaulers : [];
+}
+
+async function validateUploadedClientRelationships(item) {
+  const issues = [];
+  const trucks = Array.isArray(item?.trucks) ? item.trucks : [];
+  const uploadRows = trucks
+    .map((truck, index) => ({ truck, index }))
+    .filter(({ truck }) => String(truck?.entrySource || "").trim().toLowerCase() === "upload");
+  if (!uploadRows.length) return issues;
+
+  const haulers = await getAuthoritativeHaulersForEntry(item);
+  for (const { truck, index } of uploadRows) {
+    const rowLabel = `Row ${index + 1}`;
+    const selectedClients = Array.isArray(truck?.selectedClients) && truck.selectedClients.length
+      ? truck.selectedClients
+      : (Array.isArray(truck?.vehicles) ? truck.vehicles.flatMap((vehicle) => vehicle?.selectedClients || []) : []);
+    const client = selectedClients.find((c) => normalizeRelationshipText(c?.clientName || c));
+    if (!client) {
+      issues.push(`${rowLabel} — Client is required for uploaded disposal entries.`);
+      continue;
+    }
+
+    const haulerName = normalizeRelationshipText(truck?.hauler);
+    const haulerMatches = haulers.filter((hauler) => normalizeRelationshipText(hauler?.haulerName || hauler?.name) === haulerName);
+    if (haulerMatches.length === 0) {
+      issues.push(`${rowLabel} — Hauler "${truck?.hauler || ""}" is not assigned under this SLF.`);
+      continue;
+    }
+    if (haulerMatches.length > 1) {
+      issues.push(`${rowLabel} — Hauler "${truck?.hauler || ""}" is duplicated or ambiguous under this SLF.`);
+      continue;
+    }
+
+    const clientTargetValues = clientRelationshipValues(client).map(normalizeRelationshipText).filter(Boolean);
+    const candidates = haulerClientPool(haulerMatches[0]).filter((candidate) => {
+      const values = clientRelationshipValues(candidate).map(normalizeRelationshipText).filter(Boolean);
+      return values.some((value) => clientTargetValues.includes(value));
+    });
+    const activeCandidates = candidates.filter(
+      (candidate) => String(candidate?.status || candidate?.active || "active").toLowerCase() !== "inactive" && candidate?.isActive !== false,
+    );
+    if (activeCandidates.length === 0) {
+      const clientName = client?.clientName || client;
+      issues.push(`${rowLabel} — Client "${clientName}" is not assigned to hauler "${truck?.hauler || ""}" under this SLF.`);
+      continue;
+    }
+    if (activeCandidates.length > 1) {
+      const clientName = client?.clientName || client;
+      issues.push(`${rowLabel} — Client "${clientName}" is duplicated or ambiguous for hauler "${truck?.hauler || ""}" under this SLF.`);
+    }
+  }
+  return issues;
+}
+
 function sanitizeVehicle(vehicle, fallbackUnit = "m³") {
   if (!vehicle || typeof vehicle !== "object") return null;
   return {
@@ -914,6 +1052,20 @@ async function submitEntries({ entries, submittedBy, req, idempotencyKey = null 
   if (validationErrors.length) {
     const error = new Error(validationErrors.join(" | "));
     error.statusCode = 400;
+    throw error;
+  }
+
+  const uploadClientIssues = [];
+  for (let idx = 0; idx < sanitizedItems.length; idx += 1) {
+    const itemIssues = await validateUploadedClientRelationships(sanitizedItems[idx]);
+    itemIssues.forEach((message) => {
+      uploadClientIssues.push(`${sanitizedItems.length > 1 ? `Entry ${idx + 1}: ` : ""}${message}`);
+    });
+  }
+  if (uploadClientIssues.length) {
+    const error = new Error(uploadClientIssues.slice(0, 8).join(" | ") + (uploadClientIssues.length > 8 ? ` (+${uploadClientIssues.length - 8} more)` : ""));
+    error.statusCode = 400;
+    error.validationIssues = uploadClientIssues.map((message) => ({ tab: "waste-generation-information", field: "client", message }));
     throw error;
   }
 
@@ -1217,7 +1369,7 @@ async function submitEntries({ entries, submittedBy, req, idempotencyKey = null 
 }
 
 // Submit SLF data — batch (client portal)
-router.post("/", async (req, res) => {
+router.post("/", optionalAuth, requirePortalRule("can_submit_slf_data"), async (req, res) => {
   try {
     // A developer holding a read-only portal context must never be able to create
     // a REAL submission under the inspected user's name. This is the single most
@@ -1301,12 +1453,15 @@ router.post("/", async (req, res) => {
         ...(error.validationIssues ? { validationIssues: error.validationIssues } : {}),
       });
     }
+    // Unexpected failure of a real submission — record it so it surfaces to admins
+    // (App Logs + VERA notification bell) instead of failing silently for the user.
+    logSlfCrudError(req, "submission.create.error", error, { submittedBy: req.body?.submittedBy });
     res.status(500).json({ message: "Server error", error: error.message });
   }
 });
 
 // Update & resubmit a reverted entry (portal user)
-router.put("/:id", async (req, res) => {
+router.put("/:id", optionalAuth, requirePortalRule("can_edit_submitted_data"), async (req, res) => {
   try {
     const entry = await DataSLF.findById(req.params.id);
     if (!entry) return res.status(404).json({ message: "Entry not found" });
@@ -1319,6 +1474,7 @@ router.put("/:id", async (req, res) => {
       "dateOfDisposal", "lguCompanyName", "companyType", "address",
       "companyRegion", "companyProvince", "companyMunicipality", "companyBarangay",
       "trucks", "accreditedHaulers", "slfGenerator", "slfName",
+      "currentCellVolume", "currentCellVolumeUnit", "cellStatus",
       "baselineUnit", "totalVolumeAccepted", "totalVolumeAcceptedUnit",
       "activeCellResidualVolume", "activeCellResidualUnit",
       "activeCellInertVolume", "activeCellInertUnit",
@@ -1336,9 +1492,7 @@ router.put("/:id", async (req, res) => {
     if (updateErrors.length) {
       return res.status(400).json({ message: updateErrors.join(" ") });
     }
-    for (const field of allowedFields) {
-      if (sanitizedBody[field] !== undefined) entry[field] = sanitizedBody[field];
-    }
+    applyEntryUpdates(entry, sanitizedBody, allowedFields, req, "submission.resubmit");
     entry.status = "pending";
     entry.revertReason = "";
     entry.revertedBy = "";
@@ -1415,6 +1569,7 @@ router.put("/:id", async (req, res) => {
     });
   } catch (error) {
     if (error.statusCode) return res.status(error.statusCode).json({ message: error.message });
+    logSlfCrudError(req, "submission.resubmit.error", error, { id: req.params.id });
     res.status(500).json({ message: "Server error", error: error.message });
   }
 });
@@ -1470,6 +1625,24 @@ router.get("/baseline/:slfName", async (req, res) => {
     }
 
     if (!latest) return res.json(null);
+
+    // #2 defensive regression signal: a record that carries baseline data but has
+    // NO Total Volume Accepted is almost always a data-loss regression (the value
+    // was reset/dropped on a prior save). Log it — with non-sensitive context only
+    // (slfName + which baseline fields are present) — so it can be spotted in App
+    // Logs without ever exposing the numbers or user data to the portal response.
+    if (latest.totalVolumeAccepted == null && hasBaselineData(latest)) {
+      writeLog("warn", "baseline.missing_total_volume", {
+        message: `Baseline for "${latest.slfName || latest.lguCompanyName || "unknown"}" has no Total Volume Accepted but carries other baseline data`,
+        meta: {
+          slfName: latest.slfName || latest.lguCompanyName || null,
+          recordId: String(latest._id),
+          hasActiveCells: !!(latest.activeCellEntries?.length),
+          hasClosedCells: !!(latest.closedCellEntries?.length),
+          hasHaulers: !!(latest.accreditedHaulers?.length),
+        },
+      });
+    }
 
     const baselineUnit = latest.baselineUnit || latest.totalVolumeAcceptedUnit || "m³";
     const haulerSource =
@@ -1652,7 +1825,18 @@ router.put("/baselines/:id", async (req, res) => {
       "closedCellEntries",
     ];
     for (const f of fields) {
-      if (req.body[f] !== undefined) entry[f] = req.body[f];
+      if (req.body[f] === undefined) continue;
+      // #2: never blank out an existing Total Volume Accepted via a partial admin
+      // edit. A null/empty/non-numeric incoming value preserves the stored value
+      // (0 is valid and still applies; a numeric string is coerced to a Number).
+      // Deliberate clearing is done via DELETE /baselines/:id, not this handler.
+      if (f === "totalVolumeAccepted") {
+        const resolved = resolveTotalVolumeForUpdate(req.body[f]);
+        if (!resolved.apply) continue; // preserve existing stored value
+        entry[f] = resolved.value;
+        continue;
+      }
+      entry[f] = req.body[f];
     }
     await entry.save();
 
@@ -2257,14 +2441,24 @@ router.get("/stats", async (req, res) => {
                           as: "v",
                           in: {
                             wasteType: { $ifNull: ["$$v.wasteType", "$trucks.wasteType"] },
-                            volume: { $ifNull: ["$$v.actualVolume", 0] },
+                            // Normalize each entry to m³ using its own declared unit
+                            // (per-vehicle → per-truck fallback) so tons and m³ are
+                            // never summed as the same number. Same factor + rule the
+                            // summary tiles use, keeping /stats consistent with them.
+                            volume: toM3Expr(
+                              { $ifNull: ["$$v.actualVolume", 0] },
+                              { $ifNull: ["$$v.actualVolumeUnit", "$trucks.actualVolumeUnit"] },
+                            ),
                           },
                         },
                       },
                       [
                         {
                           wasteType: "$trucks.wasteType",
-                          volume: { $ifNull: ["$trucks.actualVolume", 0] },
+                          volume: toM3Expr(
+                            { $ifNull: ["$trucks.actualVolume", 0] },
+                            "$trucks.actualVolumeUnit",
+                          ),
                         },
                       ],
                     ],
@@ -2291,15 +2485,11 @@ router.get("/stats", async (req, res) => {
                 month: { $month: "$createdAt" },
               },
               count: { $sum: 1 },
-              totalVolume: {
-                $sum: {
-                  $reduce: {
-                    input: { $ifNull: ["$trucks", []] },
-                    initialValue: 0,
-                    in: { $add: ["$$value", { $ifNull: ["$$this.actualVolume", 0] }] },
-                  },
-                },
-              },
+              // Use the converted, denormalized m³ metric (same field the summary
+              // tiles use) instead of summing raw actualVolume — otherwise tons and
+              // m³ were added together and the dashboard trend disagreed with the
+              // summary totals.
+              totalVolume: { $sum: { $ifNull: ["$totalVolumeM3", 0] } },
             },
           },
           { $sort: { "_id.year": 1, "_id.month": 1 } },
@@ -2717,6 +2907,10 @@ router.get("/", optionalAuth, async (req, res) => {
     // plugin, so it stays consistent with the find() path.
     if (paginated && String(req.query.grouped || "").toLowerCase() === "true") {
       const skip = (page - 1) * limit;
+      // Export mode: return EVERY matched group (all their entries), bypassing
+      // pagination, so an Excel export covers the whole filtered result set — not
+      // just the current page. Row/entry breakdown happens client-side.
+      const exportAll = String(req.query.all || "").toLowerCase() === "true";
       const placementFilter = String(req.query.cellPlacement || "all").trim();
       // Batch key mirrors the client's getPortalSubmissionGroupKey: group only
       // when submittedBy (an email), company, and a non-reverted status exist;
@@ -2839,8 +3033,13 @@ router.get("/", optionalAuth, async (req, res) => {
       pipeline.push({ $sort: { gRank: 1, gSort: -1, sortDate: -1 } });
       pipeline.push({
         $facet: {
-          page: [{ $skip: skip }, { $limit: limit }],
+          // exportAll → no skip/limit (every group). Otherwise the current page.
+          page: exportAll ? [] : [{ $skip: skip }, { $limit: limit }],
           meta: [{ $count: "total" }],
+          // Total SUBMISSION ENTRIES across all matched groups (respects every
+          // filter, incl. cell-placement) — the true submission count the admin
+          // expects, vs. `total` which counts collapsed grouped ROWS.
+          metaEntries: [{ $group: { _id: null, n: { $sum: "$count" } } }],
         },
       });
 
@@ -2848,6 +3047,7 @@ router.get("/", optionalAuth, async (req, res) => {
       const facet = aggRes[0] || {};
       const pageGroups = facet.page || [];
       const total = facet.meta?.[0]?.total || 0;
+      const totalEntries = facet.metaEntries?.[0]?.n || 0;
 
       const idOrder = [];
       pageGroups.forEach((g) => (g.entryIds || []).forEach((id) => idOrder.push(id)));
@@ -2899,7 +3099,7 @@ router.get("/", optionalAuth, async (req, res) => {
           .forEach((e) => rows.push(enrich(e)));
       });
 
-      return res.json({ data: rows, total, page, limit });
+      return res.json({ data: rows, total, totalEntries, page, limit });
     }
 
     let query = DataSLF.find(filter)
@@ -3606,6 +3806,10 @@ router.patch("/:id/admin-edit", async (req, res) => {
       "dateOfDisposal", "lguCompanyName", "companyType", "address",
       "companyRegion", "companyProvince", "companyMunicipality", "companyBarangay",
       "trucks", "accreditedHaulers", "slfGenerator", "slfName",
+      // Cell Operations fields — exposed by the admin SLF Data Table edit modal but
+      // previously omitted here, so a unit/status change made in the modal was
+      // silently dropped by this controller. Now persisted (valid schema enums).
+      "currentCellVolume", "currentCellVolumeUnit", "cellStatus",
       "baselineUnit", "totalVolumeAccepted", "totalVolumeAcceptedUnit",
       "activeCellResidualVolume", "activeCellResidualUnit",
       "activeCellInertVolume", "activeCellInertUnit",
@@ -3617,9 +3821,21 @@ router.patch("/:id/admin-edit", async (req, res) => {
       "acceptsHazardousWaste",
     ];
     const updatedFields = allowed.filter((key) => req.body[key] !== undefined);
-    for (const key of allowed) {
-      if (req.body[key] !== undefined) entry[key] = req.body[key];
+    // Audit any unit-of-measurement change (previous → new, record, user, time).
+    const UNIT_AUDIT_FIELDS = [
+      "currentCellVolumeUnit", "baselineUnit", "totalVolumeAcceptedUnit",
+      "activeCellResidualUnit", "activeCellInertUnit", "activeCellHazardousUnit",
+      "closedCellResidualUnit", "closedCellInertUnit", "closedCellHazardousUnit",
+    ];
+    const unitChanges = [];
+    for (const key of UNIT_AUDIT_FIELDS) {
+      if (req.body[key] !== undefined) {
+        const prev = strictNormalizeUnit(entry[key]);
+        const next = strictNormalizeUnit(req.body[key]);
+        if (next && prev !== next) unitChanges.push({ field: key, from: prev || entry[key] || "", to: next });
+      }
     }
+    applyEntryUpdates(entry, req.body, allowed, req, "submission.admin-edit");
     await entry.save();
     const populated = await DataSLF.findById(entry._id).populate("slfGenerator");
     try {
@@ -3632,9 +3848,18 @@ router.patch("/:id/admin-edit", async (req, res) => {
         type: "admin_edit",
         description: `Admin edited submission ${entry.idNo}`,
         performedBy: req.body.updatedBy || getRequestActor(req),
-        meta: { idNo: entry.idNo, updatedFields },
+        meta: { idNo: entry.idNo, updatedFields, unitChanges: unitChanges.length ? unitChanges : undefined },
       });
     } catch { /* silent */ }
+    // Dedicated unit-of-measurement audit entry (previous → new, record, user, time).
+    if (unitChanges.length) {
+      writeLog("info", "submission.unit.change", {
+        message: `Unit change on ${entry.idNo}: ${unitChanges.map((c) => `${c.field} ${c.from || "—"}→${c.to}`).join(", ")}`,
+        user: req.body.updatedBy || getRequestActor(req),
+        ip: req.ip,
+        meta: { id: String(entry._id), idNo: entry.idNo, unitChanges },
+      });
+    }
     res.json(populated);
     // Propagate the edit live — mirror the sibling status/edit handlers so other
     // admin tabs refresh and the affected portal user is notified (their history
@@ -3655,6 +3880,7 @@ router.patch("/:id/admin-edit", async (req, res) => {
       meta: { id: entry._id, idNo: entry.idNo },
     });
   } catch (error) {
+    logSlfCrudError(req, "submission.admin-edit.error", error, { id: req.params.id });
     res.status(500).json({ message: "Server error", error: error.message });
   }
 });
@@ -3741,6 +3967,7 @@ router.patch("/:id/status", async (req, res) => {
       meta: { id: entry._id, status },
     });
   } catch (error) {
+    logSlfCrudError(req, "submission.status.error", error, { id: req.params.id, status: req.body?.status });
     res.status(500).json({ message: "Server error", error: error.message });
   }
 });
@@ -4518,6 +4745,7 @@ router.delete("/:id", async (req, res) => {
     res.json({ message: "Entry moved to trash" });
     writeLog("warn", "submission.delete", { message: `Submission soft-deleted: ${req.params.id}`, user: getRequestActor(req, "admin"), ip: req.ip });
   } catch (error) {
+    logSlfCrudError(req, "submission.delete.error", error, { id: req.params.id });
     res.status(500).json({ message: "Server error", error: error.message });
   }
 });
@@ -4831,7 +5059,7 @@ router.post("/:id/send-email", async (req, res) => {
 });
 
 // Portal user saves updated baseline data (after admin approval OR initial baseline save) — re-locks the record
-router.patch("/portal-save-baseline/:slfName", async (req, res) => {
+router.patch("/portal-save-baseline/:slfName", optionalAuth, requirePortalRule("can_change_baseline_data"), async (req, res) => {
   try {
     const slfName = decodeURIComponent(req.params.slfName);
     const {
@@ -4941,6 +5169,31 @@ router.patch("/portal-save-baseline/:slfName", async (req, res) => {
       if (v !== undefined) updateFields[k] = v;
     }
 
+    // ── #2 Total Waste Volume data-loss guard (safe partial update) ─────────────
+    // `totalVolumeAccepted` is a USER-ENTERED baseline figure — it is NOT recomputed
+    // from cell entries (unlike the flat activeCell*/closedCell* volumes, which are
+    // intentionally nullable via entry recomputation). So a null / empty / non-numeric
+    // value arriving here means "this edit did not provide it", never "clear it".
+    // Dropping it from $set preserves whatever is already stored, which is what
+    // stops an UNRELATED baseline edit (haulers, cells, company info…) from blanking
+    // a previously-saved Total Volume. A real number — including 0 — still updates,
+    // and a numeric string ("1500") is coerced to a canonical Number so a string
+    // never lands in a Number field.
+    if ("totalVolumeAccepted" in updateFields) {
+      const resolved = resolveTotalVolumeForUpdate(updateFields.totalVolumeAccepted);
+      if (resolved.apply) {
+        updateFields.totalVolumeAccepted = resolved.value; // canonical Number; 0 kept
+      } else {
+        const raw = updateFields.totalVolumeAccepted;
+        delete updateFields.totalVolumeAccepted; // preserve the stored value
+        writeLog("info", "baseline.total_volume.preserved", {
+          message: `Preserved existing Total Volume Accepted for "${slfName}" — incoming value was empty/non-numeric on a partial baseline save`,
+          user: submittedBy || slfName,
+          meta: { slfName, incoming: raw === undefined ? "undefined" : String(raw) },
+        });
+      }
+    }
+
     const updateResult = baselineOnlyIds.length > 0
       ? await DataSLF.updateMany({ _id: { $in: baselineOnlyIds } }, { $set: updateFields })
       : { matchedCount: 0 };
@@ -5030,7 +5283,9 @@ router.patch("/portal-save-baseline/:slfName", async (req, res) => {
     });
     refreshAdmin(req, "baselines");
 
-    res.json({ message: "Baseline saved and locked" });
+    // Return the freshly-persisted baseline so the portal can reload from the
+    // server's copy (not stale local form state) and reflect the save immediately.
+    res.json({ message: "Baseline saved and locked", data: latest || null });
   } catch (error) {
     if (error.statusCode) return res.status(error.statusCode).json({ message: error.message });
     res.status(500).json({ message: "Server error", error: error.message });
@@ -5038,7 +5293,7 @@ router.patch("/portal-save-baseline/:slfName", async (req, res) => {
 });
 
 // Portal user requests baseline field update — notifies admin
-router.post("/baseline-update-request", async (req, res) => {
+router.post("/baseline-update-request", optionalAuth, requirePortalRule("can_change_baseline_data"), async (req, res) => {
   try {
     const { slfName, requestedBy, fields, reason } = req.body || {};
     if (!slfName || !requestedBy) {
