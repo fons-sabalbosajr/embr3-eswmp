@@ -15,6 +15,7 @@ import api from "../../api";
 import { exportToExcel } from "../../utils/exportExcel";
 import { withSizeChanger } from "../../utils/tablePagination";
 import secureStorage from "../../utils/secureStorage";
+import { isDeveloper as isDeveloperUser } from "../../utils/adminIdentity";
 
 const { Title, Text } = Typography;
 
@@ -43,7 +44,7 @@ export default function Region3LguData({ isDark }) {
   // direct route only gets what their region3Lgu permission allows (backend also
   // enforces). Buttons hide when the level is missing.
   const user = secureStorage.getJSON("user") || {};
-  const isDeveloper = user.role === "developer";
+  const isDeveloper = isDeveloperUser(user);
   const perm = (level) => isDeveloper || user.permissions?.region3Lgu?.[level] === true;
   const canEdit = perm("edit");
   const canDelete = perm("delete");

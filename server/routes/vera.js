@@ -28,6 +28,8 @@ const AppLog = require("../models/AppLog");
 const VeraBacklogInvestigation = require("../models/VeraBacklogInvestigation");
 const agent = require("../utils/automationAgent");
 const vera = require("../utils/veraAssistant");
+const veraDev = require("../utils/veraDevInsights");
+const { isDeveloper } = require("../utils/developerIdentity");
 const { sanitizeError } = require("../utils/aiErrors");
 const { ASSISTANT_NAME, ASSISTANT_FULL_NAME } = require("../utils/veraKnowledge");
 
@@ -150,6 +152,28 @@ router.get("/status", requireAnyAuth, async (req, res) => {
       greeting: ctx.greeting,
       starterQuestions: ctx.starters,
     });
+  }
+});
+
+// ── GET /api/vera/insights ────────────────────────────────────────────────────
+// Curated operational metrics (safe aggregates, no raw records or secrets).
+// Admin + Developer only. Admins get the operational view; developers (with
+// Developer Mode on) get the full technical view. Powers VERA answers and can be
+// polled by admin/dev tooling. Sensitive data is restricted to these roles.
+router.get("/insights", requireAnyAuth, async (req, res) => {
+  const isDev = isDeveloper(req.user);
+  const isAdminTier = isDev || req.user?.role === "admin";
+  if (!isAdminTier) {
+    return res.status(403).json({ message: "Admin or developer access required" });
+  }
+  try {
+    const settings = await loadSettings();
+    const devModeOn = isDev && settings?.veraDeveloperMode !== false;
+    const view = devModeOn ? "developer" : "admin";
+    const insights = await veraDev.computeInsights(req);
+    res.json({ view, devMode: devModeOn, insights, summary: veraDev.insightsToPromptBlock(insights, view) });
+  } catch (e) {
+    res.status(500).json({ message: "VERA insights failed to load" });
   }
 });
 
@@ -340,6 +364,22 @@ router.post("/chat", requireAnyAuth, async (req, res) => {
   const { key } = agent.resolveKey(a);
   const started = Date.now();
 
+  // Operational insights: admins get the operational view; developers (with the
+  // Developer Mode toggle on) get the full technical view + wider dev scope.
+  // Metrics are computed only when the message asks for operational data, and only
+  // safe aggregates/log summaries (never raw records/secrets) ever reach the model.
+  // General/portal users never receive them.
+  const isDev = isDeveloper(req.user);
+  const isAdminTier = isDev || req.user?.role === "admin";
+  const devModeOn = isDev && settings?.veraDeveloperMode !== false;
+  let insightsBlock = "";
+  if (isAdminTier && veraDev.wantsInsights(message)) {
+    try {
+      const ins = await veraDev.computeInsights(req);
+      insightsBlock = veraDev.insightsToPromptBlock(ins, devModeOn ? "developer" : "admin");
+    } catch { /* metrics best-effort — never block the answer */ }
+  }
+
   // Abort budget slightly above the provider timeout so a request can't hang.
   const controller = new AbortController();
   const abortTimer = setTimeout(() => controller.abort(), agent.resolveTimeoutMs(a) + 2000);
@@ -352,6 +392,8 @@ router.post("/chat", requireAnyAuth, async (req, res) => {
       agentConfig: a,
       signal: controller.signal,
       role: req.user?.role, // portal_user | admin | developer — selects KB + RBAC
+      devMode: devModeOn,
+      insights: insightsBlock,
     });
     clearTimeout(abortTimer);
     const durationMs = Date.now() - started;

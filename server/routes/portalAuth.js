@@ -1006,15 +1006,25 @@ router.post("/forgot-password", async (req, res) => {
     user.resetTokenExpiry = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
     await user.save();
 
-    sendPortalResetPasswordEmail(user.email, user.firstName, resetCode).catch((emailErr) => {
+    // Await delivery so failures are visible/diagnosable (email.js also logs
+    // email.sent/email.failed). Anti-enumeration: return the same generic message
+    // whether or not the mail actually went out.
+    try {
+      await sendPortalResetPasswordEmail(user.email, user.firstName, resetCode);
+      writeLog("info", "portal.forgot-password", {
+        message: `Password reset code sent: ${user.email}`,
+        user: user.email,
+        ip: req.ip,
+      });
+    } catch (emailErr) {
       console.error("Failed to send portal reset password email:", emailErr.message);
-    });
-
-    writeLog("info", "portal.forgot-password", {
-      message: `Password reset code sent: ${user.email}`,
-      user: user.email,
-      ip: req.ip,
-    });
+      writeLog("error", "portal.forgot-password.failed", {
+        message: `Password reset code FAILED to send: ${user.email} — ${emailErr.message}`,
+        user: user.email,
+        ip: req.ip,
+        meta: { error: emailErr.message },
+      });
+    }
 
     res.json({ message: "If that email exists, a reset code has been sent." });
   } catch (error) {

@@ -12,6 +12,7 @@ import {
   MessageOutlined, FileAddOutlined, ProfileOutlined, WarningOutlined,
   ReloadOutlined, QuestionCircleOutlined,
 } from "@ant-design/icons";
+import { animate, utils } from "animejs";
 import api from "../../../api";
 import VeraFlameIcon from "../../../components/VeraFlameIcon";
 import "./VeraChat.css";
@@ -20,6 +21,29 @@ const STORAGE_KEY = "vera_chat_history";
 const MAX_STORED = 30;
 const MAX_INPUT = 1000;
 const HISTORY_TURNS = 8;
+const NUDGE_TTL_MS = 11000;
+
+const reducedMotion = () =>
+  typeof window !== "undefined" && window.matchMedia
+    ? window.matchMedia("(prefers-reduced-motion: reduce)").matches
+    : false;
+
+// Contextual feature-recommendation nudges keyed by the current page. Kept generic
+// and non-sensitive (guidance only). Admin vs portal chosen by the mount.
+const CONTEXT_NUDGES = {
+  portal: {
+    overview: "I can help you read your dashboard and capacity gauges. Ask me anytime.",
+    history: "Reviewing submissions? I can explain any status — pending, acknowledged, reverted, or rejected.",
+    "data-entry": "Encoding baseline data or a submission? I can guide you through cells, haulers, and avoiding incomplete details.",
+    requests: "Need to request an edit or revert? I can walk you through it.",
+  },
+  admin: {
+    dashboard: "Need a hand reading the dashboard or SLF Location Map? Just ask.",
+    "slf-waste-generators": "Reviewing submissions? I can walk you through acknowledging or reverting.",
+    "slf-monitoring": "I can explain the capacity gauges and facility statuses on this page.",
+    "settings-reports": "Generating a report? I can point you to the right filters first.",
+  },
+};
 
 function newId() {
   return `m_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
@@ -40,7 +64,11 @@ export default function VeraChat({
   const [thinkStage, setThinkStage] = useState(0); // rotates the "thinking" wording
   const [status, setStatus] = useState({ mode: "fallback", starterQuestions: [], greeting: "" });
   const [errorText, setErrorText] = useState("");
+  const [nudge, setNudge] = useState(null); // { id, text, cta } — contextual assist
 
+  const nudgeRef = useRef(null);
+  const launcherRef = useRef(null);
+  const nudgeTimerRef = useRef(null);
   const scrollRef = useRef(null);
   const inputRef = useRef(null);
   const abortRef = useRef(null);
@@ -95,6 +123,73 @@ export default function VeraChat({
     window.addEventListener("vera:open", onOpen);
     return () => window.removeEventListener("vera:open", onOpen);
   }, []);
+
+  // Show a contextual nudge — once per id per browser session, never while the
+  // chat is open, and auto-dismissed so it stays non-intrusive.
+  const showNudge = useCallback((id, text, cta) => {
+    if (!id || !text) return;
+    const key = `vera_nudge_${id}`;
+    try { if (sessionStorage.getItem(key)) return; } catch { /* ignore */ }
+    try { sessionStorage.setItem(key, "1"); } catch { /* ignore */ }
+    setNudge({ id, text, cta });
+    if (nudgeTimerRef.current) clearTimeout(nudgeTimerRef.current);
+    nudgeTimerRef.current = setTimeout(() => setNudge(null), NUDGE_TTL_MS);
+  }, []);
+
+  const dismissNudge = useCallback(() => {
+    if (nudgeTimerRef.current) clearTimeout(nudgeTimerRef.current);
+    setNudge(null);
+  }, []);
+
+  // Any part of the app can raise a data-driven nudge:
+  //   window.dispatchEvent(new CustomEvent("vera:nudge",
+  //     { detail: { id, text, cta } }))   // cta optional: true opens the chat
+  useEffect(() => {
+    const onNudge = (e) => {
+      const d = e?.detail || {};
+      showNudge(d.id, d.text, d.cta);
+    };
+    window.addEventListener("vera:nudge", onNudge);
+    return () => window.removeEventListener("vera:nudge", onNudge);
+  }, [showNudge]);
+
+  // Contextual feature recommendation when the user lands on a page (only while
+  // the chat is closed). Small delay so it doesn't fight the page transition.
+  useEffect(() => {
+    if (open || !activeMenu) return undefined;
+    const realm = hideTicketActions ? "admin" : "portal";
+    const text = CONTEXT_NUDGES[realm]?.[activeMenu];
+    if (!text) return undefined;
+    const t = setTimeout(() => showNudge(`ctx_${realm}_${activeMenu}`, text, true), 1400);
+    return () => clearTimeout(t);
+  }, [activeMenu, open, hideTicketActions, showNudge]);
+
+  // Clear the auto-dismiss timer + hide the nudge as soon as the chat opens.
+  useEffect(() => {
+    if (open) dismissNudge();
+  }, [open, dismissNudge]);
+
+  useEffect(() => () => { if (nudgeTimerRef.current) clearTimeout(nudgeTimerRef.current); }, []);
+
+  // Anime.js: entrance pop for the nudge bubble + a gentle attention bob of the
+  // launcher while a nudge is showing. Skipped under reduced motion.
+  useEffect(() => {
+    if (!nudge || reducedMotion()) return undefined;
+    const created = [];
+    if (nudgeRef.current) {
+      created.push(animate(nudgeRef.current, {
+        opacity: [0, 1], translateY: [10, 0], scale: [0.94, 1], duration: 360, ease: "outBack",
+        onComplete: (self) => { try { utils.cleanInlineStyles(self); } catch { /* ignore */ } },
+      }));
+    }
+    if (launcherRef.current) {
+      created.push(animate(launcherRef.current, {
+        translateY: [0, -5], duration: 900, ease: "inOutSine", loop: 4, alternate: true,
+        onComplete: (self) => { try { utils.cleanInlineStyles(self); } catch { /* ignore */ } },
+      }));
+    }
+    return () => created.forEach((a) => { try { a.pause?.(); a.revert?.(); } catch { /* ignore */ } });
+  }, [nudge]);
 
   // Lazy-load VERA status (greeting + starter questions + mode) on first open.
   useEffect(() => {
@@ -218,17 +313,38 @@ export default function VeraChat({
 
   return (
     <div className="vera-root">
-      {/* Floating launcher */}
+      {/* Floating launcher + contextual nudge bubble */}
       {!open && (
-        <button
-          type="button"
-          className="vera-launcher"
-          aria-label="Open VERA, the Virtual Environmental Response Assistant"
-          onClick={() => { setOpen(true); setMinimized(false); }}
-        >
-          <span className="vera-launcher-icon"><VeraFlameIcon size={24} /></span>
-          <span className="vera-launcher-label">Ask VERA</span>
-        </button>
+        <>
+          {nudge && (
+            <div className="vera-nudge" ref={nudgeRef} role="status">
+              <button type="button" className="vera-nudge-close" aria-label="Dismiss" onClick={dismissNudge}>×</button>
+              <span className="vera-nudge-icon"><VeraFlameIcon size={18} anime /></span>
+              <div className="vera-nudge-body">
+                <p className="vera-nudge-text">{nudge.text}</p>
+                {nudge.cta && (
+                  <button
+                    type="button"
+                    className="vera-nudge-cta"
+                    onClick={() => { dismissNudge(); setOpen(true); setMinimized(false); }}
+                  >
+                    Yes, guide me
+                  </button>
+                )}
+              </div>
+            </div>
+          )}
+          <button
+            type="button"
+            ref={launcherRef}
+            className="vera-launcher"
+            aria-label="Open VERA, the Virtual Environmental Response Assistant"
+            onClick={() => { setOpen(true); setMinimized(false); }}
+          >
+            <span className="vera-launcher-icon"><VeraFlameIcon size={24} /></span>
+            <span className="vera-launcher-label">Ask VERA</span>
+          </button>
+        </>
       )}
 
       {/* Chat window */}

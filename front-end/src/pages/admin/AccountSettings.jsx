@@ -44,7 +44,7 @@ import api from "../../api";
 import { exportToExcel } from "../../utils/exportExcel";
 import { withSizeChanger } from "../../utils/tablePagination";
 import secureStorage from "../../utils/secureStorage";
-import { getAdminDisplayName } from "../../utils/adminIdentity";
+import { getAdminDisplayName, isDeveloper as isDeveloperUser } from "../../utils/adminIdentity";
 import { rowMatchesSearch } from "./shared/tableFilters";
 
 const { Title, Text } = Typography;
@@ -111,7 +111,7 @@ export default function AccountSettings({ isDark }) {
   const [savingPerms, setSavingPerms] = useState(false);
 
   const currentUser = secureStorage.getJSON("user");
-  const isDeveloper = currentUser?.role === "developer";
+  const isDeveloper = isDeveloperUser(currentUser);
 
   const buildRolePermissions = (role) => {
     const updated = {};

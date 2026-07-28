@@ -125,7 +125,7 @@ const NotificationManagement = lazy(() => import("../admin/NotificationManagemen
 const PortalUsers = lazy(() => import("../admin/PortalUsers"));
 const Messaging = lazy(() => import("../admin/Messaging"));
 import api from "../../api";
-import { getAdminDisplayName } from "../../utils/adminIdentity";
+import { getAdminDisplayName, isDeveloper as isDeveloperUser } from "../../utils/adminIdentity";
 import secureStorage from "../../utils/secureStorage";
 import { DataRefProvider } from "../../utils/dataRef";
 import GaugeMeter, { computeGaugePercent } from "../../components/GaugeMeter";
@@ -327,7 +327,7 @@ export default function AdminHome() {
 
   // ── Idle auto-logout (10 minutes of inactivity) ──
   useEffect(() => {
-    if (user?.role === "developer") return undefined;
+    if (isDeveloperUser(user)) return undefined;
     const IDLE_MS = 10 * 60 * 1000;
     let timer;
     let idledOut = false;
@@ -456,6 +456,20 @@ export default function AdminHome() {
     setUnreadCount((prev) => prev + 1);
   }, [fetchNotifications]);
 
+  // VERA contextual runtime nudge: a gentle, non-intrusive status heads-up when
+  // there are unread notifications. VeraChat throttles it to once per session.
+  useEffect(() => {
+    if (unreadCount > 0) {
+      window.dispatchEvent(new CustomEvent("vera:nudge", {
+        detail: {
+          id: "admin_unread",
+          text: `You have ${unreadCount} new notification${unreadCount === 1 ? "" : "s"}. Would you like help reviewing them?`,
+          cta: true,
+        },
+      }));
+    }
+  }, [unreadCount]);
+
   const senderName = (sender) => {
     if (!sender) return "Unknown User";
     return `${sender.firstName || ""} ${sender.lastName || ""}`.trim() || sender.username || sender.email || "Unknown User";
@@ -554,7 +568,7 @@ export default function AdminHome() {
     navigate("/admin/login");
   };
 
-  const isDeveloper = user?.role === "developer";
+  const isDeveloper = isDeveloperUser(user);
   const canOpenAppSettings = isDeveloper || user?.role === "admin";
   const perms = user?.permissions || {};
   const hasAccess = (key, level = "view") => {
@@ -1570,7 +1584,7 @@ export default function AdminHome() {
                 </Title>
                 <Tag
                   color={
-                    user.role === "developer"
+                    isDeveloperUser(user)
                       ? "purple"
                       : user.role === "admin"
                         ? "gold"

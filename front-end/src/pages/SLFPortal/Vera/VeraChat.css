@@ -337,3 +337,68 @@
   .vera-launcher { padding: 0; width: 52px; height: 52px; justify-content: center; }
   .vera-launcher-icon { width: 40px; height: 40px; }
 }
+
+/* ── Contextual nudge bubble ──────────────────────────────────────────────── */
+.vera-nudge {
+  position: fixed;
+  right: 32px;
+  bottom: 92px;
+  z-index: 1001;
+  max-width: 290px;
+  display: flex;
+  gap: 10px;
+  padding: 14px 16px 14px 14px;
+  background: #ffffff;
+  color: #1f2d3d;
+  border: 1px solid #e4ebf2;
+  border-radius: 14px 14px 4px 14px;
+  box-shadow: 0 12px 30px rgba(26, 51, 83, 0.22);
+}
+.vera-nudge-icon {
+  flex: 0 0 auto;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: #f0fbfb;
+  box-shadow: inset 0 0 0 2px rgba(19, 194, 194, 0.25);
+}
+.vera-nudge-body { display: flex; flex-direction: column; gap: 8px; }
+.vera-nudge-text { margin: 0; font-size: 13px; line-height: 1.5; color: #33475b; }
+.vera-nudge-cta {
+  align-self: flex-start;
+  border: none;
+  cursor: pointer;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: #fff;
+  padding: 6px 14px;
+  border-radius: 8px;
+  background: var(--vera-grad);
+}
+.vera-nudge-cta:focus-visible { outline: 3px solid #91caff; outline-offset: 2px; }
+.vera-nudge-close {
+  position: absolute;
+  top: 6px;
+  right: 8px;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  font-size: 16px;
+  line-height: 1;
+  color: #94a3b8;
+}
+
+/* Dark portal / admin surfaces */
+.dark .vera-nudge, [data-theme="dark"] .vera-nudge {
+  background: #16233a;
+  color: #e6eefc;
+  border-color: #24365a;
+}
+.dark .vera-nudge-text, [data-theme="dark"] .vera-nudge-text { color: #c7d4e6; }
+
+@media (max-width: 640px) {
+  .vera-nudge { right: 16px; bottom: 84px; max-width: calc(100vw - 32px); }
+}

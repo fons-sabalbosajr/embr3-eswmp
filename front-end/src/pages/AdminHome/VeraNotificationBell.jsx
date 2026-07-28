@@ -52,7 +52,11 @@ export default function VeraNotificationBell({ isDark, userId }) {
     setLoading(true);
     try {
       const { data } = await api.get("/vera/notifications");
-      setItems(Array.isArray(data?.items) ? data.items : []);
+      const list = Array.isArray(data?.items) ? data.items : [];
+      // Defensive: always present latest first (newest createdAt on top),
+      // consistent with every other notification view.
+      list.sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0));
+      setItems(list);
     } catch { /* non-blocking */ } finally { setLoading(false); }
   }, []);
 

@@ -253,6 +253,14 @@ const appSettingsSchema = new mongoose.Schema(
     // Automation Agent configuration (config-only; see schema note above).
     automationAgent: { type: automationAgentSchema, default: () => ({}) },
 
+    // VERA Developer Mode — when enabled, VERA answers VERIFIED developer accounts
+    // with application architecture/API/authentication/diagnostics guidance and
+    // live curated operational metrics (counts, health booleans, uptime). It never
+    // affects portal users or normal admins, and is always enforced server-side
+    // against the developer role regardless of any client-supplied flag. Secrets,
+    // credentials, env values and connection strings stay blocked for everyone.
+    veraDeveloperMode: { type: Boolean, default: true },
+
     // Organizational Chart
     orgChart: {
       type: [{

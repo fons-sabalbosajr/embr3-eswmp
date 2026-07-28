@@ -44,6 +44,7 @@ import {
 } from "@ant-design/icons";
 import dayjs from "dayjs";
 import api from "../../api";
+import { getSocket } from "../../utils/socket";
 import { withSizeChanger } from "../../utils/tablePagination";
 import {
   CAPACITY_STATUS,
@@ -107,6 +108,20 @@ function RecordsPane({ options }) {
 
   useEffect(() => {
     fetchRows();
+  }, [fetchRows]);
+
+  // Live-sync submission statuses (pending/acknowledged/reverted/rejected) with
+  // admin acknowledge/revert/reject actions and portal resubmissions, so the SLF
+  // Data Table stays consistent with Portal Submissions and SLF Monitoring in
+  // real time (no manual refresh needed).
+  useEffect(() => {
+    const socket = getSocket();
+    if (!socket) return undefined;
+    const handler = ({ target } = {}) => {
+      if (!target || target === "submissions" || target === "baselines") fetchRows();
+    };
+    socket.on("data-refresh", handler);
+    return () => socket.off("data-refresh", handler);
   }, [fetchRows]);
 
   // Debounce the free-text search so a keystroke doesn't fire a request each time.
@@ -561,6 +576,18 @@ function VolumeAnalysisPane({ options, onInspect }) {
 
   useEffect(() => {
     fetchRows();
+  }, [fetchRows]);
+
+  // Live-sync the volume-analysis view with submission status changes so it never
+  // shows stale pending/acknowledged data relative to the other modules.
+  useEffect(() => {
+    const socket = getSocket();
+    if (!socket) return undefined;
+    const handler = ({ target } = {}) => {
+      if (!target || target === "submissions" || target === "baselines") fetchRows();
+    };
+    socket.on("data-refresh", handler);
+    return () => socket.off("data-refresh", handler);
   }, [fetchRows]);
 
   const setFilter = (key, value) => {

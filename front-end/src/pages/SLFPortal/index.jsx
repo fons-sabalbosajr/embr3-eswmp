@@ -1883,6 +1883,23 @@ export default function SLFPortal() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOnline, activeMenu, portalUser?.email, fetchSubmissions]);
 
+  // VERA contextual runtime nudge: gently remind the user when submissions were
+  // reverted for correction. Dispatched to the mounted VeraChat, which throttles
+  // it to once per browser session and keeps it non-intrusive.
+  useEffect(() => {
+    if (!Array.isArray(submissions) || submissions.length === 0) return;
+    const reverted = submissions.filter((s) => String(s?.status || "").toLowerCase().includes("revert")).length;
+    if (reverted > 0) {
+      window.dispatchEvent(new CustomEvent("vera:nudge", {
+        detail: {
+          id: "portal_reverted",
+          text: `You have ${reverted} submission${reverted === 1 ? "" : "s"} reverted for correction. Would you like me to guide you through resubmitting?`,
+          cta: true,
+        },
+      }));
+    }
+  }, [submissions]);
+
   // Item #4: admin → portal-user messages. Fetch the user's active (undismissed)
   // messages once after login, then receive new ones in real time over the portal
   // socket room (no polling). Only ever the intended user's own messages.
