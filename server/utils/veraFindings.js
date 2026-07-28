@@ -294,12 +294,14 @@ async function computeAdminFindings() {
     }
   } catch { /* non-blocking */ }
 
-  // Most severe first, then most recent — so critical failures lead the bell.
+  // Latest first: sort by createdAt descending so the newest finding always leads
+  // the bell, consistent with every other notification view. Severity breaks ties
+  // when two findings share the same timestamp.
   const sevRank = { critical: 0, warning: 1, recommendation: 2, informational: 3 };
   findings.sort((a, b) => {
-    const s = (sevRank[a.severity] ?? 9) - (sevRank[b.severity] ?? 9);
-    if (s !== 0) return s;
-    return new Date(b.createdAt) - new Date(a.createdAt);
+    const t = new Date(b.createdAt || 0) - new Date(a.createdAt || 0);
+    if (t !== 0) return t;
+    return (sevRank[a.severity] ?? 9) - (sevRank[b.severity] ?? 9);
   });
 
   return findings;

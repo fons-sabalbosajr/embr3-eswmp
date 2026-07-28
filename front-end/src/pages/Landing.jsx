@@ -1,8 +1,10 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
+import { animate, stagger, utils, createAnimatable } from "animejs";
 import emblogo from "../assets/emblogo.svg";
 import bplogo from "../assets/bagongpilipinaslogo.png";
 import bgemb from "../assets/bgemb.webp";
+import VeraFlameIcon from "../components/VeraFlameIcon";
 import "./Landing.css";
 
 export default function Landing() {
@@ -18,7 +20,10 @@ export default function Landing() {
   // Item #3: public CTAs open modals instead of navigating straight to login/admin.
   const [contactOpen, setContactOpen] = useState(false);
   const [ctaOpen, setCtaOpen] = useState(false);
+  const [showScrollTop, setShowScrollTop] = useState(false);
   const landingRef = useRef(null);
+  const scrollTopRef = useRef(null);
+  const veraSectionRef = useRef(null);
 
   // Apply theme
   useEffect(() => {
@@ -27,9 +32,13 @@ export default function Landing() {
     return () => document.documentElement.removeAttribute("data-landing-theme");
   }, [theme]);
 
-  // Scroll effect for navbar
+  // Scroll effect for navbar + floating scroll-to-top visibility
   useEffect(() => {
-    const onScroll = () => setScrolled(window.scrollY > 20);
+    const onScroll = () => {
+      const y = window.scrollY;
+      setScrolled(y > 20);
+      setShowScrollTop(y > 480);
+    };
     window.addEventListener("scroll", onScroll, { passive: true });
     return () => window.removeEventListener("scroll", onScroll);
   }, []);
@@ -55,6 +64,202 @@ export default function Landing() {
     els.forEach((el) => obs.observe(el));
     return () => obs.disconnect();
   }, []);
+
+  // Anime.js polish — ADDITIVE to the CSS reveals above, so all content stays
+  // visible even if this never runs. Text uses transform-only tweens (no opacity
+  // flash), and every one-shot animation cleans its inline styles on completion
+  // so CSS hover/transform states keep working. Fully skipped for users who
+  // prefer reduced motion, and confined to landingRef for performance.
+  useEffect(() => {
+    const root = landingRef.current;
+    if (!root) return undefined;
+    if (window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) return undefined;
+
+    const created = [];
+    const track = (a) => { if (a) created.push(a); return a; };
+    const cleanOnDone = (self) => { try { utils.cleanInlineStyles(self); } catch { /* ignore */ } };
+
+    // Hero: subtle staggered drift of the headline/lead/desc (NOT the buttons, to
+    // avoid leaving inline transforms on interactive elements).
+    const heroText = root.querySelectorAll(
+      ".lp-hero-text > .lp-hero-eyebrow, .lp-hero-text > h1, .lp-hero-text > .lp-hero-lead, .lp-hero-text > .lp-hero-desc"
+    );
+    if (heroText.length) {
+      track(animate(heroText, {
+        translateY: [18, 0],
+        duration: 720,
+        delay: stagger(90, { start: 120 }),
+        ease: "out(3)",
+        onComplete: cleanOnDone,
+      }));
+    }
+
+    // Scroll-triggered enhancements: feature-card icons pop in, CTA buttons get a
+    // one-time emphasis, and any [data-countup] number counts up. Uses a single
+    // IntersectionObserver (proven reliable on this page) to drive Anime.js.
+    const io = new IntersectionObserver((entries, obs) => {
+      entries.forEach((entry) => {
+        if (!entry.isIntersecting) return;
+        const el = entry.target;
+        obs.unobserve(el);
+        if (el.hasAttribute("data-countup")) {
+          const to = Number(el.getAttribute("data-countup")) || 0;
+          const suffix = el.getAttribute("data-countup-suffix") || "";
+          const obj = { v: 0 };
+          track(animate(obj, {
+            v: to,
+            duration: 1500,
+            ease: "out(3)",
+            onUpdate: () => { el.textContent = Math.round(obj.v).toLocaleString() + suffix; },
+          }));
+        } else if (el.classList.contains("lp-feature-icon")) {
+          track(animate(el, { scale: [0.6, 1], rotate: [-6, 0], duration: 560, ease: "outBack", onComplete: cleanOnDone }));
+        } else if (el.classList.contains("lp-cta-buttons")) {
+          track(animate(el.querySelectorAll(".lp-btn"), {
+            scale: [0.92, 1], translateY: [10, 0], duration: 560, delay: stagger(90), ease: "outBack", onComplete: cleanOnDone,
+          }));
+        }
+      });
+    }, { threshold: 0.2, rootMargin: "0px 0px -40px 0px" });
+
+    root.querySelectorAll(".lp-feature-card .lp-feature-icon, .lp-cta-buttons, [data-countup]").forEach((el) => io.observe(el));
+
+    return () => {
+      io.disconnect();
+      created.forEach((a) => { try { a.pause?.(); a.revert?.(); } catch { /* ignore */ } });
+    };
+  }, []);
+
+  // Hero device float + AI grid blink + About-map parallax (Anime.js). All looped
+  // idle motion is subtle, GPU-friendly (transform/opacity), and skipped for
+  // reduced-motion users. The map uses createAnimatable for smooth cursor-driven
+  // pseudo-3D tilt without spamming new animations on every mousemove.
+  useEffect(() => {
+    const root = landingRef.current;
+    if (!root) return undefined;
+    if (window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) return undefined;
+
+    const created = [];
+    const track = (a) => { if (a) created.push(a); return a; };
+    const cleanups = [];
+
+    // Floating devices — laptop and phone drift on different phases to read as
+    // real objects with depth (translate + rotate + easing, looping).
+    const laptop = root.querySelector(".lp-laptop");
+    if (laptop) {
+      track(animate(laptop, { translateY: [-6, 8], rotateZ: [-0.6, 0.6], duration: 4200, ease: "inOutSine", loop: true, alternate: true }));
+    }
+    const phone = root.querySelector(".lp-phone");
+    if (phone) {
+      track(animate(phone, { translateY: [10, -8], rotateZ: [1.2, -0.8], duration: 3600, ease: "inOutSine", loop: true, alternate: true, delay: 400 }));
+    }
+
+    // AI-inspired blinking grid — staggered opacity/scale pulse, randomized so it
+    // reads as data activity rather than a uniform blink.
+    const cells = root.querySelectorAll(".lp-hero-grid .lp-grid-cell");
+    if (cells.length) {
+      track(animate(cells, {
+        opacity: [{ to: 0.55 }, { to: 0.06 }],
+        scale: [{ to: 1.25 }, { to: 0.85 }],
+        duration: 2200,
+        delay: stagger(120, { from: "random" }),
+        ease: "inOutSine",
+        loop: true,
+        alternate: true,
+      }));
+    }
+
+    // About-map pseudo-3D parallax — cursor tilt via a persistent animatable.
+    const mapWrap = root.querySelector(".lp-about-map-wrapper");
+    if (mapWrap) {
+      const tilt = createAnimatable(mapWrap, { rotateX: 400, rotateY: 400, duration: 400, ease: "out(3)" });
+      const onMove = (e) => {
+        const r = mapWrap.getBoundingClientRect();
+        const px = (e.clientX - r.left) / r.width - 0.5;
+        const py = (e.clientY - r.top) / r.height - 0.5;
+        tilt.rotateY(px * 12);
+        tilt.rotateX(-py * 12);
+      };
+      const onLeave = () => { tilt.rotateX(0); tilt.rotateY(0); };
+      mapWrap.addEventListener("mousemove", onMove);
+      mapWrap.addEventListener("mouseleave", onLeave);
+      cleanups.push(() => {
+        mapWrap.removeEventListener("mousemove", onMove);
+        mapWrap.removeEventListener("mouseleave", onLeave);
+        try { tilt.revert?.(); } catch { /* ignore */ }
+      });
+    }
+
+    return () => {
+      created.forEach((a) => { try { a.pause?.(); a.revert?.(); } catch { /* ignore */ } });
+      cleanups.forEach((fn) => { try { fn(); } catch { /* ignore */ } });
+    };
+  }, []);
+
+  // VERA section — Anime.js entrance (scroll-triggered stagger of the intro +
+  // feature cards) plus continuous idle motion (orbiting rings, floating avatar,
+  // blinking accent grid). Content is visible by default so it never hides if this
+  // never runs; fully skipped under reduced motion.
+  useEffect(() => {
+    const section = veraSectionRef.current;
+    if (!section) return undefined;
+    if (window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) return undefined;
+
+    const created = [];
+    const track = (a) => { if (a) created.push(a); return a; };
+    const cleanDone = (self) => { try { utils.cleanInlineStyles(self); } catch { /* ignore */ } };
+
+    // Idle loops (start immediately; subtle).
+    const orb = section.querySelector(".lp-vera-avatar-orb");
+    if (orb) track(animate(orb, { translateY: [-6, 6], duration: 3200, ease: "inOutSine", loop: true, alternate: true }));
+    const ring1 = section.querySelector(".lp-vera-ring");
+    if (ring1) track(animate(ring1, { rotate: "1turn", duration: 14000, ease: "linear", loop: true }));
+    const ring2 = section.querySelector(".lp-vera-ring-2");
+    if (ring2) track(animate(ring2, { rotate: "-1turn", duration: 20000, ease: "linear", loop: true }));
+    const cells = section.querySelectorAll(".lp-vera-grid-cell");
+    if (cells.length) {
+      track(animate(cells, {
+        opacity: [0.05, 0.4], scale: [0.85, 1.15], duration: 2600,
+        delay: stagger(140, { from: "random" }), ease: "inOutSine", loop: true, alternate: true,
+      }));
+    }
+
+    // Entrance (once, when the section scrolls into view).
+    const io = new IntersectionObserver((entries, obs) => {
+      entries.forEach((entry) => {
+        if (!entry.isIntersecting) return;
+        obs.disconnect();
+        const intro = section.querySelector(".lp-vera-intro");
+        if (intro) track(animate(intro, { opacity: [0, 1], translateX: [-24, 0], duration: 720, ease: "out(3)", onComplete: cleanDone }));
+        const features = section.querySelectorAll(".lp-vera-feature");
+        if (features.length) {
+          track(animate(features, {
+            opacity: [0, 1], translateY: [24, 0], scale: [0.96, 1], duration: 620,
+            delay: stagger(90, { start: 120 }), ease: "outBack", onComplete: cleanDone,
+          }));
+        }
+      });
+    }, { threshold: 0.15, rootMargin: "0px 0px -60px 0px" });
+    io.observe(section);
+
+    return () => {
+      io.disconnect();
+      created.forEach((a) => { try { a.pause?.(); a.revert?.(); } catch { /* ignore */ } });
+    };
+  }, []);
+
+  // Scroll-to-top button: subtle Anime.js entrance pop when it becomes visible.
+  // Inline styles are cleaned on completion so the .visible CSS class stays in
+  // control of the later hide transition (otherwise inline opacity would stick).
+  useEffect(() => {
+    if (!showScrollTop || !scrollTopRef.current) return undefined;
+    if (window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) return undefined;
+    const a = animate(scrollTopRef.current, {
+      scale: [0.6, 1], opacity: [0, 1], translateY: [16, 0], duration: 340, ease: "outBack",
+      onComplete: (self) => { try { utils.cleanInlineStyles(self); } catch { /* ignore */ } },
+    });
+    return () => { try { a.pause?.(); a.revert?.(); } catch { /* ignore */ } };
+  }, [showScrollTop]);
 
   // Close mobile menu on scroll
   useEffect(() => {
@@ -107,6 +312,7 @@ export default function Landing() {
               <li><a href="#preview" onClick={(e) => { e.preventDefault(); scrollTo("preview"); }}>Preview</a></li>
               <li><a href="#about" onClick={(e) => { e.preventDefault(); scrollTo("about"); }}>About</a></li>
               <li><a href="#modules" onClick={(e) => { e.preventDefault(); scrollTo("modules"); }}>Modules</a></li>
+              <li><a href="#vera" onClick={(e) => { e.preventDefault(); scrollTo("vera"); }}>VERA</a></li>
               <li><a href="#contact" onClick={(e) => { e.preventDefault(); scrollTo("contact"); }}>Contact</a></li>
             </ul>
             <div className="lp-mobile-menu-actions">
@@ -145,6 +351,12 @@ export default function Landing() {
           <div className="lp-blur-orb lp-blur-orb-2" />
           <div className="lp-blur-orb lp-blur-orb-3" />
           <div className="lp-blur-orb lp-blur-orb-4" />
+        </div>
+        {/* AI-inspired blinking square grid — decorative, Anime.js-driven */}
+        <div className="lp-hero-grid" aria-hidden="true">
+          {Array.from({ length: 32 }).map((_, i) => (
+            <span className="lp-grid-cell" key={i} />
+          ))}
         </div>
         <div className="lp-container lp-hero-content">
           <div className="lp-hero-text animate-fade-up">
@@ -678,6 +890,60 @@ export default function Landing() {
         </div>
       </section>
 
+      {/* VERA — dedicated section with its own identity */}
+      <section className="lp-section lp-vera-section" id="vera" ref={veraSectionRef}>
+        <div className="lp-vera-bg" aria-hidden="true">
+          <div className="lp-vera-grid">
+            {Array.from({ length: 24 }).map((_, i) => <span className="lp-vera-grid-cell" key={i} />)}
+          </div>
+          <div className="lp-blur-orb lp-vera-orb lp-vera-orb-1" />
+          <div className="lp-blur-orb lp-vera-orb lp-vera-orb-2" />
+        </div>
+
+        <div className="lp-container lp-vera-inner">
+          <div className="lp-vera-intro">
+            <div className="lp-vera-avatar-wrap">
+              <span className="lp-vera-ring" aria-hidden="true" />
+              <span className="lp-vera-ring lp-vera-ring-2" aria-hidden="true" />
+              <span className="lp-vera-avatar-orb"><VeraFlameIcon size={64} anime title="VERA" /></span>
+            </div>
+            <span className="lp-section-tag lp-vera-tag">Meet VERA</span>
+            <h2>Your <span className="lp-gradient-text">AI Environmental Assistant</span></h2>
+            <p className="lp-vera-lead">
+              VERA — the Virtual Environmental Response Assistant — is built into the ESWMP
+              platform to guide users, surface issues early, and keep solid-waste reporting
+              accurate across Central Luzon.
+            </p>
+            <p className="lp-vera-desc">
+              Available inside the SLF Portal and Admin Dashboard, VERA answers questions grounded
+              in the system&apos;s own knowledge, watches your data for problems, and offers help
+              exactly when you need it — without ever exposing anything private.
+            </p>
+          </div>
+
+          <div className="lp-vera-features">
+            {[
+              { icon: <><path d="M12 2a2 2 0 0 1 2 2c0 .74-.4 1.39-1 1.73V7h1a7 7 0 0 1 7 7h1a1 1 0 0 1 1 1v3a1 1 0 0 1-1 1h-1a7 7 0 0 1-7 7h-4a7 7 0 0 1-7-7H2a1 1 0 0 1-1-1v-3a1 1 0 0 1 1-1h1a7 7 0 0 1 7-7h1V5.73c-.6-.34-1-.99-1-1.73a2 2 0 0 1 2-2z"/><circle cx="8.5" cy="14.5" r="1.5"/><circle cx="15.5" cy="14.5" r="1.5"/></>, title: "AI Assistance", desc: "Ask questions in plain language and get grounded, step-by-step guidance for any workflow." },
+              { icon: <><path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></>, title: "Smart Notifications", desc: "Timely reminders and status alerts — reverted submissions, pending reviews, new reports." },
+              { icon: <><path d="M3 3v18h18"/><path d="M18.7 8l-5.1 5.2-2.8-2.7L7 14.3"/></>, title: "Analytics Insights", desc: "Surface trends and data-quality issues so decisions rest on accurate, consistent figures." },
+              { icon: <><path d="M9 18h6"/><path d="M10 22h4"/><path d="M12 2a7 7 0 0 0-4 12.7c.6.5 1 1.3 1 2.1v.2h6v-.2c0-.8.4-1.6 1-2.1A7 7 0 0 0 12 2z"/></>, title: "Guided Workflows", desc: "Contextual, page-aware help that walks users through submissions and corrections." },
+              { icon: <><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></>, title: "Private by Design", desc: "VERA answers from the system's knowledge and never exposes credentials or private records." },
+              { icon: <><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></>, title: "Always Available", desc: "A persistent assistant across the Portal and Admin Dashboard — ready whenever you are." },
+            ].map((f, i) => (
+              <div className="lp-vera-feature" key={i}>
+                <span className="lp-vera-feature-icon">
+                  <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">{f.icon}</svg>
+                </span>
+                <div className="lp-vera-feature-body">
+                  <h3>{f.title}</h3>
+                  <p>{f.desc}</p>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </section>
+
       {/* CTA */}
       <section className="lp-section lp-cta">
         <div className="lp-cta-bg-shapes">
@@ -822,6 +1088,17 @@ export default function Landing() {
           </div>
         </div>
       )}
+
+      {/* Floating scroll-to-top — appears after scrolling; smooth scroll. */}
+      <button
+        type="button"
+        ref={scrollTopRef}
+        className={`lp-scroll-top${showScrollTop ? " visible" : ""}`}
+        aria-label="Scroll to top"
+        onClick={() => window.scrollTo({ top: 0, behavior: "smooth" })}
+      >
+        <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><polyline points="18 15 12 9 6 15" /></svg>
+      </button>
     </div>
   );
 }

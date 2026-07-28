@@ -36,6 +36,10 @@ const dontShowKey = (portal, userId) => `vera_onboarding_dontshow_${portal}_${us
 // Guards the top-right notification to once per login/browser session (sessionStorage
 // clears on logout→login of a fresh tab, so the reminder shows once per session).
 const notifiedKey = (portal, userId) => `vera_onboarding_notified_${portal}_${userId || "anon"}`;
+// Guards the full intro popup to once per browser session, so that after the user
+// dismisses OR skips it, it never re-appears on re-renders/identity changes within
+// the same session (it still returns on the next login unless "Do not show again").
+const shownKey = (portal, userId) => `vera_onboarding_shown_${portal}_${userId || "anon"}`;
 
 export default function VeraOnboarding({ portal = "slf", userId }) {
   const [open, setOpen] = useState(false);
@@ -53,11 +57,18 @@ export default function VeraOnboarding({ portal = "slf", userId }) {
     if (!userId) return; // wait until we know who the user is
     let dismissed = false;
     try { dismissed = !!localStorage.getItem(key); } catch { /* storage blocked */ }
-    if (!dismissed) {
+    // Once shown (and then closed/skipped) this session, never auto-reopen — even
+    // if this effect re-runs because the user identity object changed reference.
+    let shownThisSession = false;
+    const sk = shownKey(content.portal, userId);
+    try { shownThisSession = !!sessionStorage.getItem(sk); } catch { /* storage blocked */ }
+    if (!dismissed && !shownThisSession) {
+      try { sessionStorage.setItem(sk, "1"); } catch { /* best-effort */ }
       setDontShow(false);
       setOpen(true);
       return;
     }
+    if (!dismissed) return; // shown already this session; wait for next login
     // Opted out: reflect the persisted preference in the checkbox and show the
     // lightweight reminder once for this session.
     setDontShow(true);
@@ -116,7 +127,7 @@ export default function VeraOnboarding({ portal = "slf", userId }) {
         key: "meet",
         render: () => (
           <div className="vera-ob-slide vera-ob-hero">
-            <div className="vera-ob-hero-icon"><VeraFlameIcon size={56} /></div>
+            <div className="vera-ob-hero-icon"><VeraFlameIcon size={56} anime /></div>
             <div className="vera-ob-hero-name">{heroTitle}</div>
             <Text type="secondary" className="vera-ob-hero-full">{fullName}</Text>
             <Paragraph className="vera-ob-lead">{content.tagline}. {content.purpose}</Paragraph>
@@ -177,7 +188,7 @@ export default function VeraOnboarding({ portal = "slf", userId }) {
         key: "start",
         render: () => (
           <div className="vera-ob-slide vera-ob-hero">
-            <div className="vera-ob-hero-icon"><VeraFlameIcon size={48} /></div>
+            <div className="vera-ob-hero-icon"><VeraFlameIcon size={48} anime /></div>
             <div className="vera-ob-slide-title" style={{ justifyContent: "center" }}>Start Asking VERA</div>
             <Paragraph className="vera-ob-lead" style={{ textAlign: "center" }}>
               Type a question, tap a suggested starter, or ask “What can you help me with?”. VERA is ready whenever you are.

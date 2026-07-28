@@ -214,6 +214,8 @@ export default function DeveloperSettings({onSettingsSaved, isDark, isDeveloper 
   const [logs, setLogs] = useState([]);
   const [logsTotal, setLogsTotal] = useState(0);
   const [logsLoading, setLogsLoading] = useState(false);
+  const [veraDevMode, setVeraDevMode] = useState(true);
+  const [veraDevModeSaving, setVeraDevModeSaving] = useState(false);
   const [logLevel, setLogLevel] = useState("all");
   const [logSearch, setLogSearch] = useState("");
   const logFiltersRef = useRef({ level: "all", search: "" });
@@ -304,6 +306,7 @@ export default function DeveloperSettings({onSettingsSaved, isDark, isDeveloper 
     try {
       const { data } = await api.get("/settings/app");
       setSettings(data);
+      setVeraDevMode(data.veraDeveloperMode !== false);
       form.setFieldsValue({
         ...data,
         portalAnnouncementType: data.portalAnnouncementType || "info",
@@ -934,6 +937,20 @@ export default function DeveloperSettings({onSettingsSaved, isDark, isDeveloper 
       Swal.fire("Error", "Could not save dashboard settings", "error");
     } finally {
       setDashSaving(false);
+    }
+  };
+
+  const saveVeraDevMode = async (checked) => {
+    setVeraDevMode(checked);
+    setVeraDevModeSaving(true);
+    try {
+      await api.put("/settings/app", { veraDeveloperMode: checked });
+      Swal.fire({ icon: "success", title: `VERA Developer Mode ${checked ? "enabled" : "disabled"}`, timer: 1000, showConfirmButton: false });
+    } catch {
+      setVeraDevMode(!checked); // revert on failure
+      Swal.fire("Error", "Could not update VERA Developer Mode", "error");
+    } finally {
+      setVeraDevModeSaving(false);
     }
   };
 
@@ -2386,8 +2403,34 @@ export default function DeveloperSettings({onSettingsSaved, isDark, isDeveloper 
             label: <span><ToolOutlined /> System &amp; Logs</span>,
             children: (
               <>
-                {/* System Info (read-only) */}
-              
+                {/* VERA Developer Mode */}
+                <Card
+                  style={{ borderRadius: 10 }}
+                  title={
+                    <Space>
+                      <RobotOutlined style={{ color: "#722ed1" }} />
+                      <Text strong>VERA Developer Mode</Text>
+                    </Space>
+                  }
+                  extra={
+                    <Switch
+                      checked={veraDevMode}
+                      loading={veraDevModeSaving}
+                      onChange={saveVeraDevMode}
+                      checkedChildren="On"
+                      unCheckedChildren="Off"
+                    />
+                  }
+                >
+                  <Text type="secondary" style={{ fontSize: 13 }}>
+                    When enabled, VERA answers <strong>verified developer accounts</strong> with
+                    application architecture, API, authentication, database, background-service and
+                    diagnostics guidance, plus live curated operational metrics (system status,
+                    submission statistics, service &amp; database health). This never affects portal
+                    users or normal admins, and credentials, secrets, environment values and
+                    connection strings stay blocked for everyone.
+                  </Text>
+                </Card>
 
                 {/* App Logs */}
                 <Card

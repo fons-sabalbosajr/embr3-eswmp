@@ -157,6 +157,44 @@ async function getTransporter() {
   return transporter;
 }
 
+// ── Branded sender + central send wrapper ──────────────────────────────────────
+// All outgoing mail uses VERA as the display name. SMTP_FROM (if set) overrides the
+// address; otherwise the authenticated EMAIL_USER address is used.
+const FROM = () =>
+  `"VERA — EMBR3 ESWMP" <${process.env.SMTP_FROM || process.env.EMAIL_USER}>`;
+
+// Single choke-point for every send: forces the branded From, records delivery
+// status to AppLog (email.sent / email.failed), and re-throws on failure so
+// callers can react. `ctx.template` labels the log; falls back to the subject.
+async function sendMail(mailOptions = {}, ctx = {}) {
+  const opts = { ...mailOptions, from: FROM() };
+  const template = ctx.template || opts.subject || "email";
+  let writeLog;
+  try { ({ writeLog } = require("./logger")); } catch { writeLog = null; }
+  try {
+    const t = await getTransporter();
+    const info = await t.sendMail(opts);
+    if (info?.skipped) {
+      writeLog?.("info", "email.skipped", {
+        message: `Email skipped (maintenance mode): ${template} → ${opts.to}`,
+        meta: { template: ctx.template || null, to: opts.to, subject: opts.subject },
+      });
+    } else {
+      writeLog?.("info", "email.sent", {
+        message: `Email sent: ${template} → ${opts.to}`,
+        meta: { template: ctx.template || null, to: opts.to, subject: opts.subject, messageId: info?.messageId || null },
+      });
+    }
+    return info;
+  } catch (err) {
+    writeLog?.("error", "email.failed", {
+      message: `Email FAILED: ${template} → ${opts.to} — ${err.message}`,
+      meta: { template: ctx.template || null, to: opts.to, subject: opts.subject, error: err.message },
+    });
+    throw err;
+  }
+}
+
 // Verify SMTP connection on startup — non-fatal; the server keeps running if email is unavailable
 transporter.verify()
   .then(() => console.log("✅ Email transporter connected (SMTP ready)"))
@@ -259,13 +297,12 @@ async function sendVerificationEmail(email, firstName, token) {
   const verifyLink = `${getClientUrl()}/admin/verify-email?token=${token}`;
 
   const mailOptions = {
-    from: `"EMBR3 ESWMP" <${process.env.EMAIL_USER}>`,
     to: email,
     subject: "Verify Your Email - EMBR3 ESWMP",
     html: getVerificationEmailHTML(firstName, verifyLink),
   };
 
-  await (await getTransporter()).sendMail(mailOptions);
+  await sendMail(mailOptions);
 }
 
 function getAcknowledgementEmailHTML(data) {
@@ -352,13 +389,12 @@ function getAcknowledgementEmailHTML(data) {
 
 async function sendAcknowledgementEmail(email, data) {
   const mailOptions = {
-    from: `"EMBR3 ESWMP" <${process.env.EMAIL_USER}>`,
     to: email,
     subject: `Submission Acknowledged — ${data.submissionId} | EMBR3 ESWMP`,
     html: getAcknowledgementEmailHTML(data),
   };
 
-  await (await getTransporter()).sendMail(mailOptions);
+  await sendMail(mailOptions);
 }
 
 // ─── Portal Email Templates ───────────────────────────────────────────────────
@@ -413,8 +449,7 @@ async function sendPortalSignupEmail(email, firstName) {
       </p>
     </div>`;
 
-  return (await getTransporter()).sendMail({
-    from: `"EMBR3 ESWMP" <${process.env.EMAIL_USER}>`,
+  return sendMail({
     to: email,
     subject: "Registration Received — SLF Generators Portal",
     html: portalEmailWrapper(body),
@@ -452,8 +487,7 @@ async function sendPortalApprovalEmail(email, firstName, slfName) {
       </td></tr>
     </table>`;
 
-  await (await getTransporter()).sendMail({
-    from: `"EMBR3 ESWMP" <${process.env.EMAIL_USER}>`,
+  await sendMail({
     to: email,
     subject: "Account Approved — SLF Generators Portal",
     html: portalEmailWrapper(body),
@@ -484,8 +518,7 @@ async function sendPortalRejectionEmail(email, firstName, reason) {
       If you believe this was a mistake or have questions, please contact the ESWMP administration for further assistance.
     </p>`;
 
-  await (await getTransporter()).sendMail({
-    from: `"EMBR3 ESWMP" <${process.env.EMAIL_USER}>`,
+  await sendMail({
     to: email,
     subject: "Registration Update — SLF Generators Portal",
     html: portalEmailWrapper(body),
@@ -513,8 +546,7 @@ async function sendPortalResetPasswordEmail(email, firstName, resetCode) {
       </p>
     </div>`;
 
-  await (await getTransporter()).sendMail({
-    from: `"EMBR3 ESWMP" <${process.env.EMAIL_USER}>`,
+  await sendMail({
     to: email,
     subject: "Password Reset Code — SLF Generators Portal",
     html: portalEmailWrapper(body),
@@ -571,13 +603,12 @@ function getBulkAcknowledgeEmailHTML(data) {
 
 async function sendBulkAcknowledgeEmail(email, data) {
   const mailOptions = {
-    from: `"EMBR3 ESWMP" <${process.env.EMAIL_USER}>`,
     to: email,
     subject: `${data.totalEntries} Submission${data.totalEntries === 1 ? "" : "s"} Acknowledged | EMBR3 ESWMP`,
     html: getBulkAcknowledgeEmailHTML(data),
   };
 
-  await (await getTransporter()).sendMail(mailOptions);
+  await sendMail(mailOptions);
 }
 
 // 6. Admin password reset code
@@ -628,8 +659,7 @@ async function sendAdminResetPasswordEmail(email, firstName, resetCode) {
 </body>
 </html>`;
 
-  await (await getTransporter()).sendMail({
-    from: `"EMBR3 ESWMP" <${process.env.EMAIL_USER}>`,
+  await sendMail({
     to: email,
     subject: "Password Reset Code — EMBR3 ESWMP Admin",
     html: body,
@@ -650,8 +680,7 @@ async function sendSubmissionEmail(email, { subject, message, submissionId, comp
       If you have questions, please reply to this email or contact the administrator.
     </p>`;
 
-  return (await getTransporter()).sendMail({
-    from: `"EMBR3 ESWMP" <${process.env.EMAIL_USER}>`,
+  return sendMail({
     to: email,
     subject: `${subject} — EMBR3 ESWMP`,
     html: portalEmailWrapper(body),
@@ -690,8 +719,7 @@ async function sendAdminApprovalRequestEmail(developerEmail, firstName, lastName
       </p>
     </div>`;
 
-  await (await getTransporter()).sendMail({
-    from: `"EMBR3 ESWMP" <${process.env.EMAIL_USER}>`,
+  await sendMail({
     to: developerEmail,
     subject: "New Account Pending Approval — EMBR3 ESWMP",
     html: portalEmailWrapper(body),
@@ -723,8 +751,7 @@ async function sendAdminApprovedEmail(email, firstName) {
       </td></tr>
     </table>`;
 
-  await (await getTransporter()).sendMail({
-    from: `"EMBR3 ESWMP" <${process.env.EMAIL_USER}>`,
+  await sendMail({
     to: email,
     subject: "Account Approved — EMBR3 ESWMP",
     html: portalEmailWrapper(body),
@@ -755,8 +782,7 @@ async function sendAdminRejectedEmail(email, firstName, reason) {
       If you believe this was a mistake or have questions, please contact the ESWMP administration for further assistance.
     </p>`;
 
-  await (await getTransporter()).sendMail({
-    from: `"EMBR3 ESWMP" <${process.env.EMAIL_USER}>`,
+  await sendMail({
     to: email,
     subject: "Account Registration Update — EMBR3 ESWMP",
     html: portalEmailWrapper(body),
@@ -805,8 +831,7 @@ async function sendPortalVerificationReminderEmail(email, firstName) {
       </p>
     </div>`;
 
-  await (await getTransporter()).sendMail({
-    from: `"EMBR3 ESWMP" <${process.env.EMAIL_USER}>`,
+  await sendMail({
     to: email,
     subject: "Action Required: Update Your Verification — SLF Generators Portal",
     html: portalEmailWrapper(body),
@@ -856,8 +881,7 @@ async function sendHoldAccountFollowUpEmail(email, firstName) {
       </p>
     </div>`;
 
-  await (await getTransporter()).sendMail({
-    from: `"EMBR3 ESWMP" <${process.env.EMAIL_USER}>`,
+  await sendMail({
     to: email,
     subject: "Follow-Up: Document Requirements for Your SLF Portal Account Verification",
     html: portalEmailWrapper(body),
@@ -877,8 +901,7 @@ async function sendPortalCustomEmail(email, { subject, message, firstName }) {
       This message was sent by the EMBR3 ESWMP administration.
     </p>`;
 
-  await (await getTransporter()).sendMail({
-    from: `"EMBR3 ESWMP" <${process.env.EMAIL_USER}>`,
+  await sendMail({
     to: email,
     subject: `${subject} — EMBR3 ESWMP`,
     html: portalEmailWrapper(body),
@@ -906,8 +929,7 @@ async function sendPortalAnnouncementEmail(email, { subject, message, title, fir
       This announcement was posted by the EMBR3 ESWMP administration.
     </p>`;
 
-  return (await getTransporter()).sendMail({
-    from: `"EMBR3 ESWMP" <${process.env.EMAIL_USER}>`,
+  return sendMail({
     to: email,
     subject: `${subject || title || "SLF Portal Announcement"} - EMBR3 ESWMP`,
     html: portalEmailWrapper(body),
@@ -939,8 +961,7 @@ async function sendInternalMessageEmail(email, firstName, senderName, subject, p
       This is an automated notification. Reply inside the EMBR3 ESWMP app to keep the conversation secured.
     </p>`;
 
-  await (await getTransporter()).sendMail({
-    from: `"EMBR3 ESWMP" <${process.env.EMAIL_USER}>`,
+  await sendMail({
     to: email,
     subject: `New ESWMP Message: ${subject}`,
     html: portalEmailWrapper(body),
@@ -967,12 +988,47 @@ async function sendDevPortalPinEmail(email, firstName, pin) {
       </p>
     </div>`;
 
-  await (await getTransporter()).sendMail({
-    from: `"EMBR3 ESWMP" <${process.env.EMAIL_USER}>`,
+  await sendMail({
     to: email,
     subject: "Dev Portal Credential PIN — EMBR3 ESWMP",
     html: portalEmailWrapper(body),
-  });
+  }, { template: "dev-portal-pin" });
+}
+
+// System Alert — operational/health notice to admins or developers. `level`
+// tints the banner (info/warning/critical). Reuses the shared portal wrapper.
+async function sendSystemAlertEmail(email, { title, body, level = "info", ctaLabel, ctaUrl } = {}) {
+  const palette = {
+    info:     { bg: "#e6f4ff", border: "#91caff", text: "#0958d9", icon: "&#8505;" },
+    warning:  { bg: "#fff7e6", border: "#ffd591", text: "#ad4e00", icon: "&#9888;" },
+    critical: { bg: "#fff2f0", border: "#ffccc7", text: "#a8071a", icon: "&#9888;" },
+  };
+  const p = palette[level] || palette.info;
+  const cta = ctaUrl
+    ? `<table width="100%" cellpadding="0" cellspacing="0"><tr><td align="center" style="padding:4px 0 22px;">
+         <a href="${ctaUrl}" target="_blank" style="display:inline-block;background:#1a3353;color:#fff;text-decoration:none;padding:13px 34px;border-radius:8px;font-size:15px;font-weight:600;">${ctaLabel || "Open Dashboard"}</a>
+       </td></tr></table>`
+    : "";
+  const html = portalEmailWrapper(`
+    <div style="text-align:center;margin-bottom:20px;">
+      <div style="display:inline-block;background:${p.bg};border-radius:50%;padding:16px;">
+        <span style="font-size:30px;color:${p.text};">${p.icon}</span>
+      </div>
+    </div>
+    <h2 style="margin:0 0 8px;color:#1a3353;font-size:22px;text-align:center;">${title || "System Alert"}</h2>
+    <div style="padding:16px;background:${p.bg};border-radius:8px;border:1px solid ${p.border};margin:0 0 22px;">
+      <p style="margin:0;color:${p.text};font-size:14px;line-height:1.7;white-space:pre-wrap;">${body || ""}</p>
+    </div>
+    ${cta}
+    <p style="margin:0;color:#999;font-size:12px;line-height:1.5;text-align:center;">
+      Automated system alert from VERA — EMBR3 ESWMP. Do not reply to this email.
+    </p>`);
+
+  return sendMail({
+    to: email,
+    subject: `${level === "critical" ? "[CRITICAL] " : level === "warning" ? "[Warning] " : ""}${title || "System Alert"} — EMBR3 ESWMP`,
+    html,
+  }, { template: "system-alert" });
 }
 
 module.exports = {
@@ -994,6 +1050,7 @@ module.exports = {
   sendAdminApprovalRequestEmail,
   sendAdminApprovedEmail,
   sendAdminRejectedEmail,
+  sendSystemAlertEmail,
   verifyTransporter: () => transporter.verify(),
   invalidateEmailCache,
 };

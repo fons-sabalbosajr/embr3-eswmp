@@ -7131,6 +7131,22 @@ export default function DashboardContent({ user, isDark, setActiveMenu, onOpenSu
                       { cap: 0, fill: 0, cells: 0, op: 0 },
                     );
                     const cellsOverallPercent = computeGaugePercent({ usedCapacity: cellsOverall.fill, totalCapacity: cellsOverall.cap });
+                    // Group facility tiles by province for the modal. A stable global
+                    // index is carried alongside each facility so the SLF palette
+                    // colour stays consistent regardless of grouping. Province groups
+                    // are ordered by facility count (busiest first), then name.
+                    const stripProvince = (p) => String(p || "").replace(/^Province of\s+/i, "").trim() || "Unspecified";
+                    const cellGaugeByProvince = (() => {
+                      const groups = new Map();
+                      cellGaugeFacilities.forEach((f, idx) => {
+                        const prov = stripProvince(f.province);
+                        if (!groups.has(prov)) groups.set(prov, []);
+                        groups.get(prov).push({ f, idx });
+                      });
+                      return [...groups.entries()].sort(
+                        (a, b) => (b[1].length - a[1].length) || a[0].localeCompare(b[0]),
+                      );
+                    })();
                     // Selected SLF for the Cell Infrastructure per-cell drill-down.
                     const drillFacility = slfCellDrill ? cellGaugeFacilities.find((f) => f.key === slfCellDrill) : null;
 
@@ -7254,33 +7270,47 @@ export default function DashboardContent({ user, isDark, setActiveMenu, onOpenSu
                                           </Row>
                                         </>
                                       ) : (
-                                        <Row gutter={[12, 12]}>
-                                          {cellGaugeFacilities.slice(0, 12).map((f, idx) => {
-                                            // Each SLF keeps its own palette colour below
-                                            // the warning band; the gauge then escalates
-                                            // to warning/alarming/critical as it fills.
-                                            const slfColor = getSlfColor(f.key, idx);
-                                            const gaugeColor = getSlfCapacityColor(f.percent, {
-                                              baseColor: slfColor,
-                                              exists: f.numberOfCell > 0,
-                                            });
-                                            return (
-                                              <Col xs={12} sm={8} md={6} key={f.key}>
-                                                <Card size="small" hoverable onClick={() => setSlfCellDrill(f.key)} style={{ borderRadius: 8, textAlign: "center", height: "100%", cursor: "pointer", borderTop: `3px solid ${slfColor}` }}>
-                                                  {/* #1: thinner arc, coloured by SLF palette + capacity band */}
-                                                  <GaugeMeter percent={f.percent} size={112} thickness={6} color={gaugeColor} />
-                                                  <div style={{ fontSize: 12, fontWeight: 600, marginTop: 4 }}>{f.name}</div>
-                                                  <Text type="secondary" style={{ fontSize: 11 }}>{f.province}</Text>
-                                                  <div style={{ marginTop: 4 }}>
-                                                    <Tag color="cyan">{f.numberOfCell} cells</Tag>
-                                                    <Tag color="green">{f.opCells} op</Tag>
-                                                  </div>
-                                                  <div style={{ marginTop: 2 }}><Text type="secondary" style={{ fontSize: 10 }}>Click to view cells</Text></div>
-                                                </Card>
-                                              </Col>
-                                            );
-                                          })}
-                                        </Row>
+                                        /* Render EVERY facility with cell data — no cap (modal
+                                           body scrolls), grouped by province with a header per
+                                           group so operators can scan each province at a glance. */
+                                        <>
+                                          {cellGaugeByProvince.map(([province, items]) => (
+                                            <div key={province} style={{ marginBottom: 18 }}>
+                                              <div style={{ display: "flex", alignItems: "center", gap: 8, margin: "2px 0 10px", paddingBottom: 6, borderBottom: `1px solid ${isDark ? "rgba(255,255,255,0.1)" : "rgba(0,0,0,0.08)"}` }}>
+                                                <EnvironmentOutlined style={{ color: "#1677ff" }} />
+                                                <Text strong style={{ fontSize: 13 }}>{province}</Text>
+                                                <Tag color="blue" style={{ marginLeft: 2 }}>{items.length} SLF{items.length === 1 ? "" : "s"}</Tag>
+                                              </div>
+                                              <Row gutter={[12, 12]}>
+                                                {items.map(({ f, idx }) => {
+                                                  // Each SLF keeps its own palette colour below the
+                                                  // warning band; the gauge then escalates to
+                                                  // warning/alarming/critical as it fills.
+                                                  const slfColor = getSlfColor(f.key, idx);
+                                                  const gaugeColor = getSlfCapacityColor(f.percent, {
+                                                    baseColor: slfColor,
+                                                    exists: f.numberOfCell > 0,
+                                                  });
+                                                  return (
+                                                    <Col xs={12} sm={8} md={6} key={f.key}>
+                                                      <Card size="small" hoverable onClick={() => setSlfCellDrill(f.key)} style={{ borderRadius: 8, textAlign: "center", height: "100%", cursor: "pointer", borderTop: `3px solid ${slfColor}` }}>
+                                                        {/* #1: thinner arc, coloured by SLF palette + capacity band */}
+                                                        <GaugeMeter percent={f.percent} size={112} thickness={6} color={gaugeColor} />
+                                                        <div style={{ fontSize: 12, fontWeight: 600, marginTop: 4 }}>{f.name}</div>
+                                                        <Text type="secondary" style={{ fontSize: 11 }}>{f.province}</Text>
+                                                        <div style={{ marginTop: 4 }}>
+                                                          <Tag color="cyan">{f.numberOfCell} cells</Tag>
+                                                          <Tag color="green">{f.opCells} op</Tag>
+                                                        </div>
+                                                        <div style={{ marginTop: 2 }}><Text type="secondary" style={{ fontSize: 10 }}>Click to view cells</Text></div>
+                                                      </Card>
+                                                    </Col>
+                                                  );
+                                                })}
+                                              </Row>
+                                            </div>
+                                          ))}
+                                        </>
                                       )}
                                     </Card>
                                   </>
@@ -7319,7 +7349,8 @@ export default function DashboardContent({ user, isDark, setActiveMenu, onOpenSu
                                         <Empty description="No capacity data available." />
                                       ) : (
                                         <Row gutter={[12, 12]}>
-                                          {capacityGaugeFacilities.slice(0, 12).map((f, idx) => {
+                                          {/* Render every facility (no 12-cap) — modal scrolls. */}
+                                          {capacityGaugeFacilities.map((f, idx) => {
                                             const slfColor = getSlfColor(f.key, idx);
                                             const gaugeColor = getSlfCapacityColor(f.percent, {
                                               baseColor: slfColor,

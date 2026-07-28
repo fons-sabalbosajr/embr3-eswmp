@@ -541,7 +541,7 @@ router.post("/app/email-test", authMiddleware, adminOnly, async (req, res) => {
     if (sendTestTo) {
       const fromAddr = smtpFrom || smtpUser || process.env.EMAIL_USER;
       await transport.sendMail({
-        from: `"EMBR3 ESWMP (Test)" <${fromAddr}>`,
+        from: `"VERA — EMBR3 ESWMP (Test)" <${fromAddr}>`,
         to: sendTestTo,
         subject: "EMBR3 ESWMP — SMTP Test Email",
         html: `<p style="font-family:sans-serif">This is a test email from <strong>EMBR3 ESWMP</strong>.<br>

@@ -155,6 +155,77 @@ const ADMIN_KNOWLEDGE_BASE = [
   },
 ];
 
+// ── Developer-only knowledge (Developer Mode) ────────────────────────────────
+// Descriptive, architecture-level guidance surfaced ONLY to verified developer
+// accounts. NO secrets, keys, env values, connection strings, or internal prompts
+// — those remain blocked for everyone by the SECRET_TERMS guard in
+// veraAssistant.js. Selected only when role === "developer" (see contextFor()).
+const DEVELOPER_KNOWLEDGE_BASE = [
+  {
+    id: "dev-architecture",
+    category: "developer",
+    question: "What is the application architecture?",
+    keywords: ["architecture", "stack", "structure", "how is the app built", "tech stack", "overview", "components"],
+    answer:
+      "EMBR3 ESWMP is a React (Vite + Ant Design) single-page front-end talking to an Express/Node backend over a REST API, with MongoDB (Mongoose) for storage and Socket.IO for realtime updates. The backend is organized into routes/ (HTTP endpoints), models/ (Mongoose schemas), utils/ (shared logic — email, VERA, submission status, logging), middleware/ (auth), and services/ (sync/maintenance jobs). The front-end has an admin app (AdminHome) and an SLF portal (SLFPortal), sharing utils and components.",
+    related: ["dev-apis", "dev-database"],
+  },
+  {
+    id: "dev-apis",
+    category: "developer",
+    question: "How are the APIs structured?",
+    keywords: ["api", "apis", "endpoint", "endpoints", "routes", "rest", "http"],
+    answer:
+      "APIs are Express routers mounted under /api (e.g. /api/auth, /api/portal-auth, /api/data-slf, /api/notifications, /api/vera, /api/settings). Admin and portal clients both send a Bearer JWT; requireAnyAuth verifies the signature, while adminOnly/developerOnly/requirePermission add role- and permission-scoping. VERA has /api/vera/chat, /api/vera/status, /api/vera/notifications, /api/vera/logs, and (developer-only) /api/vera/insights.",
+    related: ["dev-auth", "dev-architecture"],
+  },
+  {
+    id: "dev-auth",
+    category: "developer",
+    question: "How does authentication and authorization work?",
+    keywords: ["auth", "authentication", "authorization", "jwt", "token", "login", "roles", "permissions", "rbac"],
+    answer:
+      "Auth uses signed JWTs (7-day expiry). Admin tokens carry { id, role } where role is admin or developer; portal tokens carry { id, role: 'portal_user' }. Passwords are bcrypt-hashed. Route guards live in middleware/auth.js: requireAnyAuth (any valid token), adminOnly (admin/developer), developerOnly, and requirePermission(key, level) which re-loads the fresh permission set from the DB so direct API calls can't bypass UI gates. Developer is recognized via utils/developerIdentity.js. (Actual secret values like JWT_SECRET are never disclosed.)",
+    related: ["dev-apis", "dev-architecture"],
+  },
+  {
+    id: "dev-database",
+    category: "developer",
+    question: "How do database operations work?",
+    keywords: ["database", "db", "mongo", "mongodb", "mongoose", "schema", "models", "collection", "persistence"],
+    answer:
+      "Data persists in MongoDB via Mongoose models in server/models/ (User, UserPortal, DataSLF, SlfFacility, Notification, AppLog, AppSettings, etc.). Submission records (DataSLF) carry a status enum: pending | acknowledged | rejected | revert_requested | reverted, normalized through utils/submissionStatus.js. AppLog is TTL-indexed (30-day expiry). Connection health is mongoose.connection.readyState. Ask me for 'database status' to see the live connection state and document counts.",
+    related: ["dev-architecture", "dev-diagnostics"],
+  },
+  {
+    id: "dev-services",
+    category: "developer",
+    question: "What background services and jobs exist?",
+    keywords: ["background", "service", "services", "job", "jobs", "worker", "cron", "scheduled", "sync", "queue"],
+    answer:
+      "Backend services live in server/services/ and utils/: slfSyncRunner and syncBaselineClients (SLF/baseline sync), cleanupDuplicateClients, scheduledSubmissionWorker (portal submission scheduling), and the driveMaintenanceGuard for Drive uploads. The Automation Agent config in AppSettings is configuration-only and does not start pollers on its own. Socket.IO broadcasts realtime data-refresh/notification events.",
+    related: ["dev-diagnostics", "dev-architecture"],
+  },
+  {
+    id: "dev-diagnostics",
+    category: "developer",
+    question: "How do I check logs, diagnostics, and system health?",
+    keywords: ["logs", "log", "diagnostics", "health", "monitoring", "status", "metrics", "uptime", "errors", "diagnostic"],
+    answer:
+      "Application events are written to the AppLog collection via utils/logger.js (writeLog level/action/message/meta) and surfaced in VERA Logs (/api/vera/logs) and the admin log views. Email delivery is logged as email.sent / email.failed. For live health, ask me 'system status', 'service health', or 'database status' and I'll report curated metrics (uptime, DB connection, email/AI/socket health, submission and user counts, 24h activity) from /api/vera/insights.",
+    related: ["dev-services", "dev-database"],
+  },
+];
+
+const DEVELOPER_SCOPE_TERMS = [
+  "architecture", "api", "apis", "endpoint", "endpoints", "route", "routes", "auth",
+  "authentication", "authorization", "jwt", "token", "role", "permission", "rbac",
+  "database", "db", "mongo", "mongodb", "mongoose", "schema", "model", "collection",
+  "service", "services", "job", "jobs", "worker", "cron", "scheduled", "sync", "queue",
+  "log", "logs", "diagnostic", "diagnostics", "health", "metric", "metrics", "uptime",
+  "status", "socket", "deployment", "environment", "system", "developer",
+];
+
 const ADMIN_STARTER_QUESTIONS = [
   "How do I approve a disposal submission?",
   "What do the SLF map marker colours mean?",
@@ -183,5 +254,7 @@ module.exports = {
   ADMIN_STARTER_QUESTIONS,
   ADMIN_SCOPE_TERMS,
   ADMIN_GREETING_REPLY,
+  DEVELOPER_KNOWLEDGE_BASE,
+  DEVELOPER_SCOPE_TERMS,
   SUPPORT_EMAIL,
 };

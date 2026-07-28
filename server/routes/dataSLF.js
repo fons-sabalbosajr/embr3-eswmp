@@ -9,7 +9,7 @@ const { writeLog } = require("../utils/logger");
 const Transaction = require("../models/Transaction");
 const Notification = require("../models/Notification");
 const UserPortal = require("../models/UserPortal");
-const { notifyAdmin, notifyPortal, refreshAdmin } = require("../utils/socketEmit");
+const { notifyAdmin, notifyPortal, refreshAdmin, refreshPortal } = require("../utils/socketEmit");
 const { isBataanSlfName } = require("../utils/mergeBataanSlf");
 const {
   isOperationalStatus,
@@ -3919,6 +3919,9 @@ router.patch("/:id/status", async (req, res) => {
         }
       } catch { /* silent */ }
       notifyPortal(req, entry.submittedBy, { type: "status_change", title: status === "acknowledged" ? "Submission Acknowledged" : "Submission Rejected" });
+      // Dedicated data-refresh so the portal Submissions view live-updates the
+      // status even if the notification path is missed.
+      if (entry.submittedBy) refreshPortal(req, entry.submittedBy, "submissions");
     }
     refreshAdmin(req, "submissions");
 
@@ -4142,6 +4145,7 @@ router.patch("/bulk-revert", async (req, res) => {
           });
         } catch { /* silent */ }
         notifyPortal(req, entry.submittedBy, { type: "reverted", title: "Submission Reverted" });
+        if (entry.submittedBy) refreshPortal(req, entry.submittedBy, "submissions");
       }
     }
 
@@ -4907,6 +4911,7 @@ router.patch("/:id/admin-revert", async (req, res) => {
         }
       } catch { /* silent */ }
       notifyPortal(req, entry.submittedBy, { type: "reverted", title: "Submission Reverted" });
+      if (entry.submittedBy) refreshPortal(req, entry.submittedBy, "submissions");
     }
     refreshAdmin(req, "submissions");
 
