@@ -7,7 +7,7 @@
 // Never blocks portal use: if anything here throws, the portal keeps working.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Modal, Button, Carousel, Typography, Checkbox, notification } from "antd";
+import { Modal, Button, Carousel, Typography, Checkbox, notification, message } from "antd";
 import {
   SendOutlined, FormOutlined, CalendarOutlined, SafetyCertificateOutlined,
   InfoCircleOutlined, WarningOutlined, CheckCircleOutlined, DashboardOutlined,
@@ -15,6 +15,8 @@ import {
 } from "@ant-design/icons";
 import VeraFlameIcon from "./VeraFlameIcon";
 import getOnboarding from "./veraOnboardingContent";
+import api from "../api";
+import secureStorage from "../utils/secureStorage";
 
 const { Text, Paragraph } = Typography;
 
@@ -26,15 +28,15 @@ const ICONS = {
 };
 
 // Explicit "Do not show again" preference — the ONLY thing that suppresses the
-// full intro. Persisted in localStorage per portal + user so it survives refresh,
-// logout and re-login (never only in React state). NB: this is intentionally a
-// NEW key, separate from the legacy `vera_onboarding_seen_*` flag. The old flag
-// was set on ANY dismissal, which is exactly the bug being fixed (the intro
-// vanished after a single view even without opting out); it is deliberately not
-// read here so users who never opted out see the intro again until they choose to.
-const dontShowKey = (portal, userId) => `vera_onboarding_dontshow_${portal}_${userId || "anon"}`;
-// Guards the top-right notification to once per login/browser session (sessionStorage
-// clears on logout→login of a fresh tab, so the reminder shows once per session).
+// full intro. Persisted SERVER-SIDE per user (GET/PUT /api/vera/onboarding), not in
+// localStorage: logout calls secureStorage.clearAll() → localStorage.clear(), which
+// silently erased the opt-out so the intro returned on the very next login. The
+// server copy also carries the choice across browsers and devices.
+//
+// The session guards below go through secureStorage, so the key is hashed and the
+// value encrypted. They used to be raw sessionStorage keys with the signed-in
+// user's EMAIL ADDRESS embedded in the key name, which put an identifier in
+// cleartext for anyone able to read the browser's storage.
 const notifiedKey = (portal, userId) => `vera_onboarding_notified_${portal}_${userId || "anon"}`;
 // Guards the full intro popup to once per browser session, so that after the user
 // dismisses OR skips it, it never re-appears on re-renders/identity changes within
@@ -46,7 +48,6 @@ export default function VeraOnboarding({ portal = "slf", userId }) {
   const [dontShow, setDontShow] = useState(false);
   const carouselRef = useRef(null);
   const content = useMemo(() => getOnboarding(portal), [portal]);
-  const key = dontShowKey(content.portal, userId);
 
   // Post-login behaviour, driven purely by the persisted preference:
   //  • preference NOT set → show the full intro popup every login (until opted out)
@@ -55,38 +56,59 @@ export default function VeraOnboarding({ portal = "slf", userId }) {
   //    by construction, so the popup and the top-right alert never both appear.
   useEffect(() => {
     if (!userId) return; // wait until we know who the user is
-    let dismissed = false;
-    try { dismissed = !!localStorage.getItem(key); } catch { /* storage blocked */ }
+    let cancelled = false;
+
     // Once shown (and then closed/skipped) this session, never auto-reopen — even
     // if this effect re-runs because the user identity object changed reference.
     let shownThisSession = false;
     const sk = shownKey(content.portal, userId);
-    try { shownThisSession = !!sessionStorage.getItem(sk); } catch { /* storage blocked */ }
-    if (!dismissed && !shownThisSession) {
-      try { sessionStorage.setItem(sk, "1"); } catch { /* best-effort */ }
+    try { shownThisSession = !!secureStorage.sessionGet(sk); } catch { /* storage blocked */ }
+
+    const optedOutReminder = () => {
+      setDontShow(true);
+      try {
+        const nk = notifiedKey(content.portal, userId);
+        if (!secureStorage.sessionGet(nk)) {
+          secureStorage.sessionSet(nk, "1");
+          notification.open({
+            key: nk,
+            message: "VERA",
+            description: "VERA is active and monitoring your portal data for issues.",
+            placement: "topRight",
+            duration: 4,
+            icon: <VeraFlameIcon size={22} />,
+          });
+        }
+      } catch { /* notification/storage best-effort — never block the portal */ }
+    };
+
+    const showIntro = () => {
+      try { secureStorage.sessionSet(sk, "1"); } catch { /* best-effort */ }
       setDontShow(false);
       setOpen(true);
-      return;
-    }
-    if (!dismissed) return; // shown already this session; wait for next login
-    // Opted out: reflect the persisted preference in the checkbox and show the
-    // lightweight reminder once for this session.
-    setDontShow(true);
-    try {
-      const nk = notifiedKey(content.portal, userId);
-      if (!sessionStorage.getItem(nk)) {
-        sessionStorage.setItem(nk, "1");
-        notification.open({
-          key: nk,
-          message: "VERA",
-          description: "VERA is active and monitoring your portal data for issues.",
-          placement: "topRight",
-          duration: 4,
-          icon: <VeraFlameIcon size={22} />,
-        });
-      }
-    } catch { /* notification/storage best-effort — never block the portal */ }
-  }, [key, content.portal, userId]);
+    };
+
+    // The server preference is the single source of truth. `open` starts false, so
+    // waiting for this response shows no modal flash — and it keeps the signed-in
+    // user's identity out of browser storage entirely.
+    api
+      .get("/vera/onboarding")
+      .then(({ data }) => {
+        if (cancelled) return;
+        if (data?.dismissed) {
+          if (!shownThisSession) optedOutReminder();
+          return;
+        }
+        if (!shownThisSession) showIntro();
+      })
+      .catch(() => {
+        // Preference unreadable (offline / server hiccup) — showing the intro is the
+        // safe default, and it stays dismissible.
+        if (!cancelled && !shownThisSession) showIntro();
+      });
+
+    return () => { cancelled = true; };
+  }, [content.portal, userId]);
 
   // Reopen on demand (VERA header "?"). Always opens, regardless of the preference.
   useEffect(() => {
@@ -96,16 +118,14 @@ export default function VeraOnboarding({ portal = "slf", userId }) {
   }, []);
 
   // Persist / clear the explicit opt-out preference (reversible — unchecking
-  // restores the intro on the next login).
-  const setDontShowPref = useCallback(
-    (checked) => {
-      try {
-        if (checked) localStorage.setItem(key, new Date().toISOString());
-        else localStorage.removeItem(key);
-      } catch { /* ignore */ }
-    },
-    [key],
-  );
+  // restores the intro on the next login). Server-side, so it survives the logout
+  // wipe and follows the user to another browser or device.
+  const setDontShowPref = useCallback((checked) => {
+    api.put("/vera/onboarding", { dismissed: checked }).catch(() => {
+      message.error("Could not save that preference. Please try again.");
+      setDontShow(!checked);
+    });
+  }, []);
 
   // Closing/skipping WITHOUT opting out does NOT persist anything, so the intro
   // returns on the next login. Only the "Do not show again" checkbox suppresses it.

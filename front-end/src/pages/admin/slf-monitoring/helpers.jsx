@@ -1,5 +1,5 @@
 import dayjs from 'dayjs';
-import { Tag, Typography, Upload, message } from 'antd';
+import { Tag, Typography, Upload, message, Progress, Tooltip } from 'antd';
 import { CheckCircleOutlined, CloseCircleOutlined, SyncOutlined } from '@ant-design/icons';
 import secureStorage from '../../../utils/secureStorage';
 import { getAdminDisplayName } from '../../../utils/adminIdentity';
@@ -172,25 +172,77 @@ const validateSlfUpload = (file) => {
   return true;
 };
 
+const uploadPercent = (file) =>
+  Math.max(0, Math.min(100, Math.round(Number(file?.percent) || 0)));
+
 const renderSlfUploadItem = (originNode, file) => {
   const sizeText = formatFileSize(getUploadFileSize(file));
-  const percent =
-    file?.status === "uploading" && Number.isFinite(file?.percent)
-      ? ` - ${Math.round(file.percent)}%`
-      : "";
-  if (!sizeText && !percent) return originNode;
+  const uploading = file?.status === "uploading";
+  const percent = uploadPercent(file);
+  if (!sizeText && !uploading) return originNode;
   return (
     <div className="slf-upload-list-item">
       {originNode}
+      {uploading && (
+        <Progress
+          percent={percent}
+          size="small"
+          status="active"
+          style={{ marginTop: 2, marginBottom: 0 }}
+        />
+      )}
       <Text
         type="secondary"
         style={{ display: "block", fontSize: 11, lineHeight: 1.3, marginTop: 2 }}
       >
         {sizeText}
-        {percent}
+        {uploading ? `${sizeText ? " " : ""}- ${percent}%` : ""}
       </Text>
     </div>
   );
+};
+
+// Upload feedback for the SINGLE-file tables (SLF Documents / Gallery). Those set
+// showUploadList={false}, so a row's Status cell is the only place an upload can
+// show itself — and it previously showed a bare "Uploading" tag with no indication
+// of progress, which against a 200 MB limit is a long blind wait with no way to
+// tell a slow transfer from a stalled one.
+const renderUploadStatusCell = (file, url) => {
+  if (file?.status === "uploading") {
+    const percent = uploadPercent(file);
+    return (
+      <Tooltip title={`Uploading${file?.name ? ` ${file.name}` : ""} — ${percent}%`}>
+        <div style={{ minWidth: 74 }}>
+          <Progress percent={percent} size="small" status="active" />
+        </div>
+      </Tooltip>
+    );
+  }
+  const label = file?.status === "error" ? "Error" : url ? "Ready" : "Missing";
+  const color = file?.status === "error" ? "red" : url ? "green" : "default";
+  return <Tag color={color}>{label}</Tag>;
+};
+
+// Antd's Form.Item clones its child and injects its OWN `onChange`, so any
+// onChange passed to <Upload> inside a Form.Item is discarded. `getValueFromEvent`
+// is therefore the only place that sees the raw upload event, which makes it the
+// only place upload feedback can be raised from. Without this, the Documents and
+// Gallery tables (which set showUploadList={false}) reported nothing at all — a
+// failed upload looked exactly like no upload, so admins had no way to tell that
+// a file had not been attached.
+const uploadEventToFileList = (e) => {
+  if (Array.isArray(e)) return e;
+  const file = e?.file;
+  if (file?.status === "done") {
+    message.success(`${file.name} uploaded.`);
+  } else if (file?.status === "error") {
+    const reason =
+      file.response?.message ||
+      file.error?.message ||
+      "The server rejected the upload.";
+    message.error(`${file.name} was not uploaded. ${reason}`);
+  }
+  return e?.fileList;
 };
 
 const slfUploadProps = {
@@ -307,7 +359,9 @@ export {
   getUploadFileSize,
   validateSlfUpload,
   renderSlfUploadItem,
+  renderUploadStatusCell,
   slfUploadProps,
+  uploadEventToFileList,
   convertVolume,
   convertVolumeSafe,
   resolveFacilityUnit,

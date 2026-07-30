@@ -2,7 +2,10 @@
 //
 // Self-contained: manages its own open/minimize state, conversation, and API
 // calls to /api/vera/chat. Renders assistant replies as PLAIN TEXT only (no HTML
-// injection). Minimal conversation history is kept in sessionStorage. Ticket
+// injection). Minimal conversation history is kept in sessionStorage, ENCRYPTED
+// through secureStorage — a transcript can contain facility and submission
+// details, and it previously sat there as readable plaintext JSON under an
+// obvious key name. Ticket
 // actions are delegated to the portal via props so the existing support flow is
 // reused, not duplicated.
 
@@ -15,6 +18,8 @@ import {
 import { animate, utils } from "animejs";
 import api from "../../../api";
 import VeraFlameIcon from "../../../components/VeraFlameIcon";
+import secureStorage from "../../../utils/secureStorage";
+import { buildVeraPageContext } from "../../../utils/veraPageContext";
 import "./VeraChat.css";
 
 const STORAGE_KEY = "vera_chat_history";
@@ -95,18 +100,15 @@ export default function VeraChat({
   // Restore minimal history from sessionStorage once.
   useEffect(() => {
     try {
-      const raw = sessionStorage.getItem(STORAGE_KEY);
-      if (raw) {
-        const parsed = JSON.parse(raw);
-        if (Array.isArray(parsed)) setMessages(parsed.slice(-MAX_STORED));
-      }
+      const parsed = secureStorage.sessionGetJSON(STORAGE_KEY);
+      if (Array.isArray(parsed)) setMessages(parsed.slice(-MAX_STORED));
     } catch { /* ignore */ }
   }, []);
 
   // Persist trimmed history.
   useEffect(() => {
     try {
-      sessionStorage.setItem(STORAGE_KEY, JSON.stringify(messages.slice(-MAX_STORED)));
+      secureStorage.sessionSetJSON(STORAGE_KEY, messages.slice(-MAX_STORED));
     } catch { /* ignore */ }
   }, [messages]);
 
@@ -129,8 +131,8 @@ export default function VeraChat({
   const showNudge = useCallback((id, text, cta) => {
     if (!id || !text) return;
     const key = `vera_nudge_${id}`;
-    try { if (sessionStorage.getItem(key)) return; } catch { /* ignore */ }
-    try { sessionStorage.setItem(key, "1"); } catch { /* ignore */ }
+    try { if (secureStorage.sessionGet(key)) return; } catch { /* ignore */ }
+    try { secureStorage.sessionSet(key, "1"); } catch { /* ignore */ }
     setNudge({ id, text, cta });
     if (nudgeTimerRef.current) clearTimeout(nudgeTimerRef.current);
     nudgeTimerRef.current = setTimeout(() => setNudge(null), NUDGE_TTL_MS);
@@ -229,7 +231,10 @@ export default function VeraChat({
     try {
       const res = await api.post(
         "/vera/chat",
-        { message: text, history, page: activeMenu },
+        // Snapshot of the data currently rendered, so a question about something
+        // visible on screen is answered from it instead of being refused as "live
+        // data I can't see". Null when the page has no data worth sending.
+        { message: text, history, page: activeMenu, pageContext: buildVeraPageContext(text, activeMenu) },
         { signal: controller.signal },
       );
       const data = res.data || {};
@@ -290,7 +295,7 @@ export default function VeraChat({
     if (abortRef.current) abortRef.current.abort();
     setMessages([]);
     setErrorText("");
-    try { sessionStorage.removeItem(STORAGE_KEY); } catch { /* ignore */ }
+    try { secureStorage.sessionRemove(STORAGE_KEY); } catch { /* ignore */ }
   }, []);
 
   const closeWindow = useCallback(() => {

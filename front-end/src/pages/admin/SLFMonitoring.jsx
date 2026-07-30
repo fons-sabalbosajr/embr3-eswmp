@@ -187,7 +187,9 @@ import {
   getUploadFileSize,
   validateSlfUpload,
   renderSlfUploadItem,
+  renderUploadStatusCell,
   slfUploadProps,
+  uploadEventToFileList,
   convertVolume,
   getWasteKind,
   isHazardousCellType,
@@ -6229,9 +6231,7 @@ export default function SLFMonitoring({
                           name="commitmentFiles"
                           label="Commitment File"
                           valuePropName="fileList"
-                          getValueFromEvent={(e) =>
-                            Array.isArray(e) ? e : e?.fileList
-                          }
+                          getValueFromEvent={uploadEventToFileList}
                         >
                           <Upload
                             {...slfUploadProps}
@@ -6256,9 +6256,7 @@ export default function SLFMonitoring({
                           name="progressReportFiles"
                           label="Progress Report"
                           valuePropName="fileList"
-                          getValueFromEvent={(e) =>
-                            Array.isArray(e) ? e : e?.fileList
-                          }
+                          getValueFromEvent={uploadEventToFileList}
                         >
                           <Upload
                             {...slfUploadProps}
@@ -6296,9 +6294,7 @@ export default function SLFMonitoring({
                       <Form.Item
                         name="preventiveMeasureFiles"
                         valuePropName="fileList"
-                        getValueFromEvent={(e) =>
-                          Array.isArray(e) ? e : e?.fileList
-                        }
+                        getValueFromEvent={uploadEventToFileList}
                       >
                         <Upload
                           {...slfUploadProps}
@@ -6394,9 +6390,7 @@ export default function SLFMonitoring({
                                     <Form.Item
                                       name={[field.name, "attachments"]}
                                       valuePropName="fileList"
-                                      getValueFromEvent={(e) =>
-                                        Array.isArray(e) ? e : e?.fileList
-                                      }
+                                      getValueFromEvent={uploadEventToFileList}
                                       style={{ margin: 0 }}
                                     >
                                       <Upload
@@ -6470,101 +6464,112 @@ export default function SLFMonitoring({
                       <Form.List name="galleryItems">
                         {(fields, { add, remove }) => (
                           <>
-                            <Table
-                              size="small"
-                              rowKey="key"
-                              dataSource={fields}
-                              pagination={fields.length > 5 ? { pageSize: 5, size: "small" } : false}
-                              scroll={{ x: 1180 }}
-                              locale={{ emptyText: <Empty description="No gallery images added" /> }}
-                              columns={[
-                                {
-                                  title: "Preview",
-                                  width: 96,
-                                  render: (_, field) => {
-                                    const value = form.getFieldValue(["galleryItems", field.name, "url"]);
-                                    const url = fileUrlFromValue(value);
-                                    return url ? <Image src={resolveMediaUrl(url)} width={54} height={42} style={{ objectFit: "cover", borderRadius: 6 }} /> : <FileImageOutlined style={{ fontSize: 24, color: "#8c8c8c" }} />;
+                            {/* Form.List skips re-rendering its children for value updates, so
+                                these cells (preview, file name, size, status, action buttons) read a
+                                STALE form store and kept showing "Missing" with View/Download
+                                disabled after a file had uploaded fine. shouldUpdate re-renders the
+                                table whenever the list value changes. */}
+                            <Form.Item
+                              noStyle
+                              shouldUpdate={(prev, cur) => prev.galleryItems !== cur.galleryItems}
+                            >
+                              {() => (
+                              <Table
+                                size="small"
+                                rowKey="key"
+                                dataSource={fields}
+                                pagination={fields.length > 5 ? { pageSize: 5, size: "small" } : false}
+                                scroll={{ x: 1180 }}
+                                locale={{ emptyText: <Empty description="No gallery images added" /> }}
+                                columns={[
+                                  {
+                                    title: "Preview",
+                                    width: 96,
+                                    render: (_, field) => {
+                                      const value = form.getFieldValue(["galleryItems", field.name, "url"]);
+                                      const url = fileUrlFromValue(value);
+                                      return url ? <Image src={resolveMediaUrl(url)} width={54} height={42} style={{ objectFit: "cover", borderRadius: 6 }} /> : <FileImageOutlined style={{ fontSize: 24, color: "#8c8c8c" }} />;
+                                    },
                                   },
-                                },
-                                {
-                                  title: "File Name",
-                                  width: 180,
-                                  render: (_, field) => {
-                                    const value = form.getFieldValue(["galleryItems", field.name, "url"]);
-                                    return <Text ellipsis style={{ maxWidth: 160 }}>{fileNameFromUrl(value, "photo")}</Text>;
+                                  {
+                                    title: "File Name",
+                                    width: 180,
+                                    render: (_, field) => {
+                                      const value = form.getFieldValue(["galleryItems", field.name, "url"]);
+                                      return <Text ellipsis style={{ maxWidth: 160 }}>{fileNameFromUrl(value, "photo")}</Text>;
+                                    },
                                   },
-                                },
-                                {
-                                  title: "Category",
-                                  width: 190,
-                                  render: (_, field) => (
-                                    <Form.Item name={[field.name, "component"]} style={{ margin: 0 }}>
-                                      <Select allowClear showSearch placeholder="Component" options={GALLERY_COMPONENT_OPTIONS} />
-                                    </Form.Item>
-                                  ),
-                                },
-                                {
-                                  title: "Description",
-                                  width: 220,
-                                  render: (_, field) => (
-                                    <Form.Item name={[field.name, "caption"]} style={{ margin: 0 }}>
-                                      <Input placeholder="Photo caption" />
-                                    </Form.Item>
-                                  ),
-                                },
-                                {
-                                  title: "Folder",
-                                  width: 180,
-                                  render: (_, field) => (
-                                    <Form.Item name={[field.name, "folder"]} style={{ margin: 0 }}>
-                                      <Select mode="tags" maxTagCount={1} placeholder="Folder" tokenSeparators={[","]} />
-                                    </Form.Item>
-                                  ),
-                                },
-                                { title: "Uploaded By", width: 130, render: () => <Text type="secondary">—</Text> },
-                                { title: "Upload Date", width: 130, render: () => <Text type="secondary">—</Text> },
-                                {
-                                  title: "File Size",
-                                  width: 100,
-                                  render: (_, field) => {
-                                    const file = uploadFileFromValue(form.getFieldValue(["galleryItems", field.name, "url"]));
-                                    return file?.size ? formatFileSize(file.size) : <Text type="secondary">—</Text>;
+                                  {
+                                    title: "Category",
+                                    width: 190,
+                                    render: (_, field) => (
+                                      <Form.Item name={[field.name, "component"]} style={{ margin: 0 }}>
+                                        <Select allowClear showSearch placeholder="Component" options={GALLERY_COMPONENT_OPTIONS} />
+                                      </Form.Item>
+                                    ),
                                   },
-                                },
-                                {
-                                  title: "Status",
-                                  width: 100,
-                                  render: (_, field) => {
-                                    const file = uploadFileFromValue(form.getFieldValue(["galleryItems", field.name, "url"]));
-                                    const url = fileUrlFromValue(form.getFieldValue(["galleryItems", field.name, "url"]));
-                                    return <Tag color={file?.status === "error" ? "red" : url ? "green" : "default"}>{file?.status === "uploading" ? "Uploading" : file?.status === "error" ? "Error" : url ? "Ready" : "Missing"}</Tag>;
+                                  {
+                                    title: "Description",
+                                    width: 220,
+                                    render: (_, field) => (
+                                      <Form.Item name={[field.name, "caption"]} style={{ margin: 0 }}>
+                                        <Input placeholder="Photo caption" />
+                                      </Form.Item>
+                                    ),
                                   },
-                                },
-                                {
-                                  title: "Actions",
-                                  fixed: "right",
-                                  width: 210,
-                                  render: (_, field) => {
-                                    const url = fileUrlFromValue(form.getFieldValue(["galleryItems", field.name, "url"]));
-                                    return (
-                                      <Space size={4}>
-                                        <Form.Item name={[field.name, "url"]} valuePropName="fileList" getValueFromEvent={(e) => Array.isArray(e) ? e : e?.fileList} style={{ margin: 0 }}>
-                                          <Upload {...slfUploadProps} maxCount={1} accept="image/*" action={driveDisabled ? undefined : "/eswm-pipeline/api/upload"} disabled={driveDisabled} headers={getUploadHeaders()} showUploadList={false}>
-                                            <Tooltip title={url ? "Replace image" : "Upload image"}><Button size="small" icon={<UploadOutlined />} disabled={driveDisabled} /></Tooltip>
-                                          </Upload>
-                                        </Form.Item>
-                                        <Tooltip title="View / preview"><Button size="small" icon={<EyeOutlined />} disabled={!url} onClick={() => window.open(resolveMediaOpenUrl(url), "_blank", "noopener,noreferrer")} /></Tooltip>
-                                        <Tooltip title="Open in new tab"><Button size="small" icon={<LinkOutlined />} disabled={!url} onClick={() => window.open(resolveMediaOpenUrl(url), "_blank", "noopener,noreferrer")} /></Tooltip>
-                                        <Popconfirm title="Delete this gallery image?" okText="Delete" okButtonProps={{ danger: true }} onConfirm={() => remove(field.name)}>
-                                          <Tooltip title="Delete"><Button size="small" danger icon={<DeleteOutlined />} /></Tooltip>
-                                        </Popconfirm>
-                                      </Space>
-                                    );
+                                  {
+                                    title: "Folder",
+                                    width: 180,
+                                    render: (_, field) => (
+                                      <Form.Item name={[field.name, "folder"]} style={{ margin: 0 }}>
+                                        <Select mode="tags" maxTagCount={1} placeholder="Folder" tokenSeparators={[","]} />
+                                      </Form.Item>
+                                    ),
                                   },
-                                },
-                              ]}
-                            />
+                                  { title: "Uploaded By", width: 130, render: () => <Text type="secondary">—</Text> },
+                                  { title: "Upload Date", width: 130, render: () => <Text type="secondary">—</Text> },
+                                  {
+                                    title: "File Size",
+                                    width: 100,
+                                    render: (_, field) => {
+                                      const file = uploadFileFromValue(form.getFieldValue(["galleryItems", field.name, "url"]));
+                                      return file?.size ? formatFileSize(file.size) : <Text type="secondary">—</Text>;
+                                    },
+                                  },
+                                  {
+                                    title: "Status",
+                                    width: 100,
+                                    render: (_, field) => {
+                                      const value = form.getFieldValue(["galleryItems", field.name, "url"]);
+                                      return renderUploadStatusCell(uploadFileFromValue(value), fileUrlFromValue(value));
+                                    },
+                                  },
+                                  {
+                                    title: "Actions",
+                                    fixed: "right",
+                                    width: 210,
+                                    render: (_, field) => {
+                                      const url = fileUrlFromValue(form.getFieldValue(["galleryItems", field.name, "url"]));
+                                      return (
+                                        <Space size={4}>
+                                          <Form.Item name={[field.name, "url"]} valuePropName="fileList" getValueFromEvent={uploadEventToFileList} style={{ margin: 0 }}>
+                                            <Upload {...slfUploadProps} maxCount={1} accept="image/*" action={driveDisabled ? undefined : "/eswm-pipeline/api/upload"} disabled={driveDisabled} headers={getUploadHeaders()} showUploadList={false}>
+                                              <Tooltip title={url ? "Replace image" : "Upload image"}><Button size="small" icon={<UploadOutlined />} disabled={driveDisabled} /></Tooltip>
+                                            </Upload>
+                                          </Form.Item>
+                                          <Tooltip title="View / preview"><Button size="small" icon={<EyeOutlined />} disabled={!url} onClick={() => window.open(resolveMediaOpenUrl(url), "_blank", "noopener,noreferrer")} /></Tooltip>
+                                          <Tooltip title="Open in new tab"><Button size="small" icon={<LinkOutlined />} disabled={!url} onClick={() => window.open(resolveMediaOpenUrl(url), "_blank", "noopener,noreferrer")} /></Tooltip>
+                                          <Popconfirm title="Delete this gallery image?" okText="Delete" okButtonProps={{ danger: true }} onConfirm={() => remove(field.name)}>
+                                            <Tooltip title="Delete"><Button size="small" danger icon={<DeleteOutlined />} /></Tooltip>
+                                          </Popconfirm>
+                                        </Space>
+                                      );
+                                    },
+                                  },
+                                ]}
+                              />
+                              )}
+                            </Form.Item>
                             <Button
                               type="dashed"
                               onClick={() => add({})}
@@ -6577,7 +6582,7 @@ export default function SLFMonitoring({
                         )}
                       </Form.List>
                       <Divider orientation="left" plain style={{ marginTop: 16 }}>Legacy Photo Uploads</Divider>
-                      <Form.Item name="galleryPhotos" valuePropName="fileList" getValueFromEvent={(e) => Array.isArray(e) ? e : e?.fileList}>
+                      <Form.Item name="galleryPhotos" valuePropName="fileList" getValueFromEvent={uploadEventToFileList}>
                         <Upload {...slfUploadProps} listType="picture" accept="image/*" multiple action={driveDisabled ? undefined : "/eswm-pipeline/api/upload"} disabled={driveDisabled} headers={getUploadHeaders()}>
                           <Button icon={<UploadOutlined />} disabled={driveDisabled}>Upload Legacy Photos</Button>
                         </Upload>
@@ -6603,94 +6608,105 @@ export default function SLFMonitoring({
                       <Form.List name="slfDocuments">
                         {(fields, { add, remove }) => (
                           <>
-                            <Table
-                              size="small"
-                              rowKey="key"
-                              dataSource={fields}
-                              pagination={fields.length > 6 ? { pageSize: 6, size: "small" } : false}
-                              scroll={{ x: 1220 }}
-                              locale={{ emptyText: <Empty description="No SLF documents added" /> }}
-                              columns={[
-                                {
-                                  title: "File Preview or Type",
-                                  width: 130,
-                                  render: (_, field) => {
-                                    const url = fileUrlFromValue(form.getFieldValue(["slfDocuments", field.name, "url"]));
-                                    const kind = getMediaKind(url);
-                                    return <Tag icon={kind === "image" ? <FileImageOutlined /> : <FilePdfOutlined />} color={url ? "purple" : "default"}>{kind || "document"}</Tag>;
+                            {/* Form.List skips re-rendering its children for value updates, so
+                                these cells (preview, file name, size, status, action buttons) read a
+                                STALE form store and kept showing "Missing" with View/Download
+                                disabled after a file had uploaded fine. shouldUpdate re-renders the
+                                table whenever the list value changes. */}
+                            <Form.Item
+                              noStyle
+                              shouldUpdate={(prev, cur) => prev.slfDocuments !== cur.slfDocuments}
+                            >
+                              {() => (
+                              <Table
+                                size="small"
+                                rowKey="key"
+                                dataSource={fields}
+                                pagination={fields.length > 6 ? { pageSize: 6, size: "small" } : false}
+                                scroll={{ x: 1220 }}
+                                locale={{ emptyText: <Empty description="No SLF documents added" /> }}
+                                columns={[
+                                  {
+                                    title: "File Preview or Type",
+                                    width: 130,
+                                    render: (_, field) => {
+                                      const url = fileUrlFromValue(form.getFieldValue(["slfDocuments", field.name, "url"]));
+                                      const kind = getMediaKind(url);
+                                      return <Tag icon={kind === "image" ? <FileImageOutlined /> : <FilePdfOutlined />} color={url ? "purple" : "default"}>{kind || "document"}</Tag>;
+                                    },
                                   },
-                                },
-                                {
-                                  title: "File Name",
-                                  width: 190,
-                                  render: (_, field) => (
-                                    <Form.Item name={[field.name, "title"]} rules={[{ required: true, message: "Title required" }]} style={{ margin: 0 }}>
-                                      <Input placeholder="Document title" />
-                                    </Form.Item>
-                                  ),
-                                },
-                                {
-                                  title: "Category",
-                                  width: 180,
-                                  render: (_, field) => (
-                                    <Form.Item name={[field.name, "docType"]} style={{ margin: 0 }}>
-                                      <Select allowClear placeholder="Type" options={SLF_DOCUMENT_TYPE_OPTIONS} />
-                                    </Form.Item>
-                                  ),
-                                },
-                                {
-                                  title: "Description",
-                                  width: 260,
-                                  render: (_, field) => (
-                                    <Form.Item name={[field.name, "description"]} style={{ margin: 0 }}>
-                                      <Input placeholder="Description" />
-                                    </Form.Item>
-                                  ),
-                                },
-                                { title: "Uploaded By", width: 130, render: () => <Text type="secondary">—</Text> },
-                                { title: "Upload Date", width: 130, render: () => <Text type="secondary">—</Text> },
-                                {
-                                  title: "File Size",
-                                  width: 100,
-                                  render: (_, field) => {
-                                    const file = uploadFileFromValue(form.getFieldValue(["slfDocuments", field.name, "url"]));
-                                    return file?.size ? formatFileSize(file.size) : <Text type="secondary">—</Text>;
+                                  {
+                                    title: "File Name",
+                                    width: 190,
+                                    render: (_, field) => (
+                                      <Form.Item name={[field.name, "title"]} rules={[{ required: true, message: "Title required" }]} style={{ margin: 0 }}>
+                                        <Input placeholder="Document title" />
+                                      </Form.Item>
+                                    ),
                                   },
-                                },
-                                {
-                                  title: "Status",
-                                  width: 100,
-                                  render: (_, field) => {
-                                    const file = uploadFileFromValue(form.getFieldValue(["slfDocuments", field.name, "url"]));
-                                    const url = fileUrlFromValue(form.getFieldValue(["slfDocuments", field.name, "url"]));
-                                    return <Tag color={file?.status === "error" ? "red" : url ? "green" : "default"}>{file?.status === "uploading" ? "Uploading" : file?.status === "error" ? "Error" : url ? "Ready" : "Missing"}</Tag>;
+                                  {
+                                    title: "Category",
+                                    width: 180,
+                                    render: (_, field) => (
+                                      <Form.Item name={[field.name, "docType"]} style={{ margin: 0 }}>
+                                        <Select allowClear placeholder="Type" options={SLF_DOCUMENT_TYPE_OPTIONS} />
+                                      </Form.Item>
+                                    ),
                                   },
-                                },
-                                {
-                                  title: "Actions",
-                                  fixed: "right",
-                                  width: 230,
-                                  render: (_, field) => {
-                                    const url = fileUrlFromValue(form.getFieldValue(["slfDocuments", field.name, "url"]));
-                                    return (
-                                      <Space size={4}>
-                                        <Form.Item name={[field.name, "url"]} valuePropName="fileList" getValueFromEvent={(e) => Array.isArray(e) ? e : e?.fileList} style={{ margin: 0 }}>
-                                          <Upload {...slfUploadProps} maxCount={1} accept=".pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx" action={driveDisabled ? undefined : "/eswm-pipeline/api/upload"} disabled={driveDisabled} headers={getUploadHeaders()} showUploadList={false}>
-                                            <Tooltip title={url ? "Replace file" : "Upload file"}><Button size="small" icon={<UploadOutlined />} disabled={driveDisabled} /></Tooltip>
-                                          </Upload>
-                                        </Form.Item>
-                                        <Tooltip title="View / preview"><Button size="small" icon={<EyeOutlined />} disabled={!url} onClick={() => window.open(resolveMediaOpenUrl(url), "_blank", "noopener,noreferrer")} /></Tooltip>
-                                        <Tooltip title="Open in new tab"><Button size="small" icon={<LinkOutlined />} disabled={!url} onClick={() => window.open(resolveMediaOpenUrl(url), "_blank", "noopener,noreferrer")} /></Tooltip>
-                                        <Tooltip title="Download"><Button size="small" icon={<DownloadOutlined />} disabled={!url} onClick={() => window.open(resolveMediaOpenUrl(url), "_blank", "noopener,noreferrer")} /></Tooltip>
-                                        <Popconfirm title="Delete this document?" okText="Delete" okButtonProps={{ danger: true }} onConfirm={() => remove(field.name)}>
-                                          <Tooltip title="Delete"><Button size="small" danger icon={<DeleteOutlined />} /></Tooltip>
-                                        </Popconfirm>
-                                      </Space>
-                                    );
+                                  {
+                                    title: "Description",
+                                    width: 260,
+                                    render: (_, field) => (
+                                      <Form.Item name={[field.name, "description"]} style={{ margin: 0 }}>
+                                        <Input placeholder="Description" />
+                                      </Form.Item>
+                                    ),
                                   },
-                                },
-                              ]}
-                            />
+                                  { title: "Uploaded By", width: 130, render: () => <Text type="secondary">—</Text> },
+                                  { title: "Upload Date", width: 130, render: () => <Text type="secondary">—</Text> },
+                                  {
+                                    title: "File Size",
+                                    width: 100,
+                                    render: (_, field) => {
+                                      const file = uploadFileFromValue(form.getFieldValue(["slfDocuments", field.name, "url"]));
+                                      return file?.size ? formatFileSize(file.size) : <Text type="secondary">—</Text>;
+                                    },
+                                  },
+                                  {
+                                    title: "Status",
+                                    width: 100,
+                                    render: (_, field) => {
+                                      const value = form.getFieldValue(["slfDocuments", field.name, "url"]);
+                                      return renderUploadStatusCell(uploadFileFromValue(value), fileUrlFromValue(value));
+                                    },
+                                  },
+                                  {
+                                    title: "Actions",
+                                    fixed: "right",
+                                    width: 230,
+                                    render: (_, field) => {
+                                      const url = fileUrlFromValue(form.getFieldValue(["slfDocuments", field.name, "url"]));
+                                      return (
+                                        <Space size={4}>
+                                          <Form.Item name={[field.name, "url"]} valuePropName="fileList" getValueFromEvent={uploadEventToFileList} style={{ margin: 0 }}>
+                                            <Upload {...slfUploadProps} maxCount={1} accept=".pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx" action={driveDisabled ? undefined : "/eswm-pipeline/api/upload"} disabled={driveDisabled} headers={getUploadHeaders()} showUploadList={false}>
+                                              <Tooltip title={url ? "Replace file" : "Upload file"}><Button size="small" icon={<UploadOutlined />} disabled={driveDisabled} /></Tooltip>
+                                            </Upload>
+                                          </Form.Item>
+                                          <Tooltip title="View / preview"><Button size="small" icon={<EyeOutlined />} disabled={!url} onClick={() => window.open(resolveMediaOpenUrl(url), "_blank", "noopener,noreferrer")} /></Tooltip>
+                                          <Tooltip title="Open in new tab"><Button size="small" icon={<LinkOutlined />} disabled={!url} onClick={() => window.open(resolveMediaOpenUrl(url), "_blank", "noopener,noreferrer")} /></Tooltip>
+                                          <Tooltip title="Download"><Button size="small" icon={<DownloadOutlined />} disabled={!url} onClick={() => window.open(resolveMediaOpenUrl(url), "_blank", "noopener,noreferrer")} /></Tooltip>
+                                          <Popconfirm title="Delete this document?" okText="Delete" okButtonProps={{ danger: true }} onConfirm={() => remove(field.name)}>
+                                            <Tooltip title="Delete"><Button size="small" danger icon={<DeleteOutlined />} /></Tooltip>
+                                          </Popconfirm>
+                                        </Space>
+                                      );
+                                    },
+                                  },
+                                ]}
+                              />
+                              )}
+                            </Form.Item>
                             <Button
                               type="dashed"
                               onClick={() =>

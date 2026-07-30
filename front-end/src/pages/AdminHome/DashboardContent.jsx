@@ -701,6 +701,25 @@ export default function DashboardContent({ user, isDark, setActiveMenu, onOpenSu
     return () => clearInterval(interval);
   }, [fetchStats]);
 
+  // The stat cards had only the 60s poll above — no socket — so approving a
+  // submission or editing an SLF record left every tile showing the old number for
+  // up to a minute, which reads as "the dashboard isn't updating". The map and the
+  // served-client tiles already subscribed to this event; the main tiles now do too.
+  // `fetchStats` reuses its cache-then-fetch path, so this is an in-place update
+  // rather than a visible reload.
+  useEffect(() => {
+    const socket = getSocket();
+    if (!socket) return undefined;
+    const REFRESH_TARGETS = new Set([
+      "submissions", "baselines", "slf-clients", "region3-lgu", "hauler-requests",
+    ]);
+    const onRefresh = ({ target } = {}) => {
+      if (!target || REFRESH_TARGETS.has(target)) fetchStats();
+    };
+    socket.on("data-refresh", onRefresh);
+    return () => socket.off("data-refresh", onRefresh);
+  }, [fetchStats]);
+
   // DB-driven unique LGU / Private-sector client counts for the served tiles,
   // sourced from the managed SLF Clients collection. Refreshed on mount and on
   // the same 60s cadence as the rest of the dashboard so the tiles reflect

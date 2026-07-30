@@ -17,6 +17,7 @@ import secureStorage from "../utils/secureStorage";
 import AuthBrandLogos from "../components/AuthBrandLogos";
 import bgEmb from "../assets/bgemb.webp";
 import "./Auth.css";
+import VeraAuthAssistant, { reportVeraAuthIssue } from "../components/VeraAuthAssistant";
 
 const { Title, Text } = Typography;
 
@@ -102,13 +103,19 @@ export default function PortalLogin() {
   // after an invalid/expired token (set in api.js), instead of a generic error.
   useEffect(() => {
     try {
-      if (sessionStorage.getItem("session_expired") === "1") {
-        sessionStorage.removeItem("session_expired");
+      if (secureStorage.sessionGet("session_expired") === "1") {
+        secureStorage.sessionRemove("session_expired");
         showError({ type: "warning", title: "Session Expired", message: "Your session has expired. Please sign in again to continue." });
       }
     } catch { /* ignore */ }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Maintenance disables sign-in AND password recovery, so offer VERA the moment
+  // that state is known rather than after the user has tried and failed.
+  useEffect(() => {
+    if (portalMaintenanceActive) reportVeraAuthIssue("maintenance");
+  }, [portalMaintenanceActive]);
 
   // Hard guard against duplicate auth requests: a fast double-click, an Enter-key
   // repeat, or a Strict-Mode re-invocation must never fire a second in-flight
@@ -154,12 +161,17 @@ export default function PortalLogin() {
         const handledAsDeveloper = await tryDeveloperLogin(values);
         if (handledAsDeveloper) return;
       }
+      // Offer VERA alongside the error dialog: the modal states WHAT went wrong,
+      // the hint offers help working out what to do about it.
       if (!navigator.onLine) {
         showError({ type: "offline", title: "You're Offline", message: "It seems you are not connected to the internet. Please check your connection and try again." });
+        reportVeraAuthIssue("offline");
       } else if (status === 429) {
         showError({ type: "warning", title: "Too Many Attempts", message: err.response?.data?.message || "Too many login attempts. Please wait a few minutes and try again." });
+        reportVeraAuthIssue("rate_limited");
       } else {
         showError({ type: "error", title: "Login Failed", message: err.response?.data?.message || "Something went wrong" });
+        reportVeraAuthIssue("login_failed");
       }
     } finally {
       loginInFlight.current = false;
@@ -612,6 +624,7 @@ export default function PortalLogin() {
           )}
         </Form>
       </Modal>
+      <VeraAuthAssistant page="portal-login" />
     </div>
   );
 }

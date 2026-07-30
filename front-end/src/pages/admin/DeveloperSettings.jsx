@@ -2609,7 +2609,7 @@ export default function DeveloperSettings({onSettingsSaved, isDark, isDeveloper 
                   <div style={{ textAlign: "center", padding: "40px 0", color: isDark ? "#666" : "#999" }}>
                     <DeleteOutlined style={{ fontSize: 32, marginBottom: 12, opacity: 0.3 }} />
                     <div>No deleted submissions</div>
-                    <Button type="link" size="small" onClick={fetchDeletedEntries} style={{ marginTop: 8 }}>Load deleted submissions</Button>
+                    <Button type="link" size="small" loading={deletedLoading} onClick={fetchDeletedEntries} style={{ marginTop: 8 }}>Load deleted submissions</Button>
                   </div>
                 ) : (
                   <ResponsiveTable
@@ -2777,7 +2777,7 @@ export default function DeveloperSettings({onSettingsSaved, isDark, isDeveloper 
                   <div style={{ textAlign: "center", padding: "40px 0", color: isDark ? "#666" : "#999" }}>
                     <DeleteOutlined style={{ fontSize: 32, marginBottom: 12, opacity: 0.3 }} />
                     <div>No deleted SLF data</div>
-                    <Button type="link" size="small" onClick={fetchDeletedSlfEntries} style={{ marginTop: 8 }}>Load deleted SLF data</Button>
+                    <Button type="link" size="small" loading={deletedSlfLoading} onClick={fetchDeletedSlfEntries} style={{ marginTop: 8 }}>Load deleted SLF data</Button>
                   </div>
                 ) : (
                   <ResponsiveTable

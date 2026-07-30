@@ -65,14 +65,23 @@ function loadFromJson(filePath) {
   }
 }
 
-const jsonPath =
-  process.argv[2] ||
-  process.env.GDRIVE_OAUTH_CLIENT_JSON ||
-  findNewestOAuthClientJson();
+// Same precedence as utils/generateDriveToken.js: an explicitly named file, then
+// .env, and only then a secrets/client_secret*.json auto-discovered by mtime.
+// Auto-discovery must NOT come first — picking whichever file is newest silently
+// overrode .env and could hand back a client that no longer exists in Google
+// Cloud Console ("Error 401: deleted_client").
+const fromJson =
+  loadFromJson(process.argv[2] || process.env.GDRIVE_OAUTH_CLIENT_JSON) ||
+  (process.env.GDRIVE_CLIENT_ID && process.env.GDRIVE_CLIENT_SECRET
+    ? {
+        clientId: process.env.GDRIVE_CLIENT_ID,
+        clientSecret: process.env.GDRIVE_CLIENT_SECRET,
+      }
+    : null) ||
+  loadFromJson(findNewestOAuthClientJson());
 
-const fromJson = loadFromJson(jsonPath);
-const CLIENT_ID = fromJson?.clientId || process.env.GDRIVE_CLIENT_ID;
-const CLIENT_SECRET = fromJson?.clientSecret || process.env.GDRIVE_CLIENT_SECRET;
+const CLIENT_ID = fromJson?.clientId;
+const CLIENT_SECRET = fromJson?.clientSecret;
 
 if (!CLIENT_ID || !CLIENT_SECRET) {
   console.error(

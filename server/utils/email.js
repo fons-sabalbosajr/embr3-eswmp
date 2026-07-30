@@ -111,6 +111,56 @@ function invalidateEmailCache() {
   _dbCache = { transporter: null, ts: 0 };
 }
 
+/**
+ * Is ANY outgoing mail transport actually configured?
+ *
+ * Password recovery calls this BEFORE looking up an account. If mail is globally
+ * unusable, the route can say so honestly instead of returning "a reset code has
+ * been sent" for a code that could never be delivered — which left users waiting on
+ * an email that was never going to arrive, with nothing in the UI to suggest
+ * otherwise.
+ *
+ * Checked before the account lookup on purpose: the answer is then identical for
+ * every input, so it cannot be used to probe which addresses are registered.
+ * Config presence only — no SMTP handshake, so it adds no latency to the request.
+ *
+ * @returns {Promise<{ ok: boolean, reason: string }>}
+ */
+async function isEmailDeliverable() {
+  const has = (v) => typeof v === "string" && v.trim() !== "";
+  try {
+    const AppSettings = require("../models/AppSettings");
+    const s = await AppSettings.findOne()
+      .select("smtpConfigured smtpHost smtpUser smtpPass emailMaintenanceMode")
+      .lean();
+    // Maintenance mode intentionally swallows all sends, so recovery genuinely
+    // cannot complete while it is on.
+    if (s?.emailMaintenanceMode) return { ok: false, reason: "maintenance" };
+    if (s?.smtpConfigured && has(s.smtpHost) && has(s.smtpUser) && has(s.smtpPass)) {
+      return { ok: true, reason: "db-smtp" };
+    }
+  } catch {
+    // DB unreachable — fall through to the env transports rather than hard-failing.
+  }
+
+  // Mirrors buildTransporter()'s order exactly. NOTE the app-password variable is
+  // EMAIL_APP_PASS (not EMAIL_PASS) — checking the wrong one reports a working
+  // setup as broken.
+  if (has(process.env.SMTP_HOST) && has(process.env.SMTP_USER || process.env.EMAIL_USER) && has(process.env.SMTP_PASS)) {
+    return { ok: true, reason: "env-smtp" };
+  }
+  if (has(process.env.EMAIL_USER) && has(process.env.GMAIL_REFRESH_TOKEN)) {
+    const viaJson = has(process.env.GDRIVE_OAUTH_CLIENT_JSON);
+    if ((has(process.env.GDRIVE_CLIENT_ID) && has(process.env.GDRIVE_CLIENT_SECRET)) || viaJson) {
+      return { ok: true, reason: "gmail-oauth" };
+    }
+  }
+  if (has(process.env.EMAIL_USER) && has(process.env.EMAIL_APP_PASS)) {
+    return { ok: true, reason: "gmail-app-password" };
+  }
+  return { ok: false, reason: "not_configured" };
+}
+
 // No-op stub returned when email maintenance mode is enabled.
 // All sendMail calls silently succeed without sending anything.
 const _noopTransporter = {
@@ -1053,4 +1103,5 @@ module.exports = {
   sendSystemAlertEmail,
   verifyTransporter: () => transporter.verify(),
   invalidateEmailCache,
+  isEmailDeliverable,
 };

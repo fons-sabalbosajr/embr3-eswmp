@@ -7,12 +7,14 @@ import api from "../api";
 import AuthBrandLogos from "../components/AuthBrandLogos";
 import bgEmb from "../assets/bgemb.webp";
 import "./Auth.css";
+import VeraAuthAssistant, { VeraAuthHelpLink, reportVeraAuthIssue } from "../components/VeraAuthAssistant";
 
 const { Title, Text } = Typography;
 
 export default function PortalForgotPassword() {
   const [step, setStep] = useState(1);
   const [loading, setLoading] = useState(false);
+  const [resending, setResending] = useState(false);
   const [email, setEmail] = useState("");
   const [code, setCode] = useState(["", "", "", "", "", ""]);
   const inputRefs = useRef([]);
@@ -23,8 +25,13 @@ export default function PortalForgotPassword() {
       await api.post("/portal-auth/forgot-password", { email: values.email });
       setEmail(values.email);
       setStep(2);
+      // Codes are not instant; nudge toward help before the user concludes it failed.
+      reportVeraAuthIssue("code_sent");
     } catch (err) {
       Swal.fire({ icon: "error", title: "Error", text: err.response?.data?.message || "Something went wrong. Please try again later." });
+      // 503 = recovery genuinely unavailable (mail transport down), which needs a
+      // different answer from an ordinary failure.
+      reportVeraAuthIssue(err.response?.status === 503 ? "recovery_unavailable" : "login_failed");
     } finally {
       setLoading(false);
     }
@@ -66,6 +73,7 @@ export default function PortalForgotPassword() {
       setStep(3);
     } catch (err) {
       Swal.fire({ icon: "error", title: "Invalid Code", text: err.response?.data?.message || "The code is invalid or has expired." });
+      reportVeraAuthIssue("code_failed");
     } finally {
       setLoading(false);
     }
@@ -79,13 +87,17 @@ export default function PortalForgotPassword() {
       Swal.fire({ icon: "success", title: "Success", text: data.message, confirmButtonColor: "#1a3353" });
     } catch (err) {
       Swal.fire({ icon: "error", title: "Error", text: err.response?.data?.message || "Something went wrong." });
+      reportVeraAuthIssue("reset_failed");
     } finally {
       setLoading(false);
     }
   };
 
+  // Tracked separately from `loading`: sharing that flag put the spinner on the
+  // "Verify Code" button while Resend — the button actually working — only greyed
+  // out, so the feedback appeared on the wrong control.
   const onResend = async () => {
-    setLoading(true);
+    setResending(true);
     try {
       await api.post("/portal-auth/forgot-password", { email });
       Swal.fire({ icon: "success", title: "Code Resent", text: "A new code has been sent to your email.", confirmButtonColor: "#1a3353" });
@@ -93,7 +105,7 @@ export default function PortalForgotPassword() {
     } catch (err) {
       Swal.fire({ icon: "error", title: "Error", text: err.response?.data?.message || "Failed to resend code." });
     } finally {
-      setLoading(false);
+      setResending(false);
     }
   };
 
@@ -170,7 +182,12 @@ export default function PortalForgotPassword() {
           <Button className="auth-btn-primary" type="primary" loading={loading} block onClick={onVerifyCode}>Verify Code</Button>
           <div style={{ textAlign: "center", marginTop: 16 }}>
             <Text type="secondary" style={{ fontSize: 13 }}>Didn&#39;t receive the code? </Text>
-            <Button type="link" style={{ padding: 0, color: "#2d5f8a", fontSize: 13 }} onClick={onResend} disabled={loading}>Resend</Button>
+            <Button type="link" style={{ padding: 0, color: "#2d5f8a", fontSize: 13 }} onClick={onResend} loading={resending} disabled={loading || resending}>Resend</Button>
+          </div>
+          <div style={{ textAlign: "center", marginTop: 4 }}>
+            <VeraAuthHelpLink ask="The reset code never arrived. What should I check?">
+              Code still not arriving? Get help
+            </VeraAuthHelpLink>
           </div>
           <div style={{ textAlign: "center", marginTop: 8 }}>
             <Button type="link" icon={<ArrowLeftOutlined />} style={{ color: "#1a3353" }} onClick={() => { setStep(1); setCode(["", "", "", "", "", ""]); }}>Change email</Button>
@@ -226,6 +243,7 @@ export default function PortalForgotPassword() {
       </div>
 
       <div className="auth-page-footer">&copy; 2026 EMBR3 &mdash; Environmental Management Bureau Region III</div>
+      <VeraAuthAssistant page="portal-forgot-password" />
     </div>
   );
 }

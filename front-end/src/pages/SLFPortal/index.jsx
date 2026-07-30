@@ -543,7 +543,7 @@ export default function SLFPortal() {
     const stableKey = portalUser?.email
       ? `${PORTAL_TOUR_DISMISSED_PREFIX}${portalUser.email}`
       : null;
-    if (stableKey && localStorage.getItem(stableKey) === "1") return;
+    if (stableKey && secureStorage.get(stableKey) === "1") return;
     setAnnouncementDismissed(false);
     setActiveMenu("data-entry");
     setUpdateTourCurrent(0);
@@ -895,12 +895,12 @@ export default function SLFPortal() {
   useEffect(() => {
     if (!portalAnnouncement || !portalUser) return;
     const key = `portal-announcement-seen-${portalAnnouncement.updatedAt || portalAnnouncement._id || portalAnnouncement.portalAnnouncementTitle}`;
-    if (sessionStorage.getItem(key) === "1") return;
-    sessionStorage.setItem(key, "1");
+    if (secureStorage.sessionGet(key) === "1") return;
+    secureStorage.sessionSet(key, "1");
     if (isPortalUpdateAnnouncement) {
       if (
         portalUpdateTourSeenKey &&
-        localStorage.getItem(portalUpdateTourSeenKey) !== "1"
+        secureStorage.get(portalUpdateTourSeenKey) !== "1"
       ) {
         openPortalUpdateTour();
       }
@@ -8665,7 +8665,7 @@ export default function SLFPortal() {
                 message="Could not load submissions"
                 description={cellOrganizerError}
                 action={
-                  <Button size="small" onClick={openCellOrganizer}>
+                  <Button size="small" loading={cellOrganizerLoading} onClick={openCellOrganizer}>
                     Retry
                   </Button>
                 }
@@ -9609,9 +9609,9 @@ export default function SLFPortal() {
             const stableKey = portalUser?.email
               ? `${PORTAL_TOUR_DISMISSED_PREFIX}${portalUser.email}`
               : null;
-            if (stableKey) localStorage.setItem(stableKey, "1");
+            if (stableKey) secureStorage.set(stableKey, "1");
             if (portalUpdateTourSeenKey) {
-              localStorage.setItem(portalUpdateTourSeenKey, "1");
+              secureStorage.set(portalUpdateTourSeenKey, "1");
             }
           }}
           onFinish={() => {
@@ -9620,9 +9620,9 @@ export default function SLFPortal() {
             const stableKey = portalUser?.email
               ? `${PORTAL_TOUR_DISMISSED_PREFIX}${portalUser.email}`
               : null;
-            if (stableKey) localStorage.setItem(stableKey, "1");
+            if (stableKey) secureStorage.set(stableKey, "1");
             if (portalUpdateTourSeenKey) {
-              localStorage.setItem(portalUpdateTourSeenKey, "1");
+              secureStorage.set(portalUpdateTourSeenKey, "1");
             }
           }}
           steps={updateTourSteps}

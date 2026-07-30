@@ -114,9 +114,11 @@ function handleSessionExpiry() {
     const loginPath = portal ? "/slfportal/login" : "/admin/login";
     const here = window.location.pathname + window.location.search;
     if (!/\/login$/.test(window.location.pathname)) {
-      try { sessionStorage.setItem(portal ? "portal_return_to" : "admin_return_to", here); } catch { /* ignore */ }
+      // Encrypted: `here` is the exact in-app path plus query string the user was
+      // on, which can carry record ids. It was being written as cleartext.
+      try { secureStorage.sessionSet(portal ? "portal_return_to" : "admin_return_to", here); } catch { /* ignore */ }
     }
-    try { sessionStorage.setItem("session_expired", "1"); } catch { /* ignore */ }
+    try { secureStorage.sessionSet("session_expired", "1"); } catch { /* ignore */ }
     // Drop the invalid auth state (never the whole store — keep drafts/prefs).
     secureStorage.remove(portal ? "portal_token" : "token");
     window.dispatchEvent(new CustomEvent("session-expired"));
