@@ -9,6 +9,7 @@ import { Popover, Badge, Button, List, Empty, Tag, Typography, Space, Spin, Tool
 import dayjs from "dayjs";
 import VeraFlameIcon from "../../components/VeraFlameIcon";
 import api from "../../api";
+import secureStorage from "../../utils/secureStorage";
 
 const { Text } = Typography;
 
@@ -19,6 +20,9 @@ const SEVERITY = {
   informational: { color: "default", label: "Info" },
 };
 
+// Goes through secureStorage: `userId` is the admin's email, so writing this key
+// name straight into localStorage put an identifier — plus the list of finding ids
+// they had seen — in cleartext for anything able to read browser storage.
 const seenKey = (userId) => `vera_notif_seen_${userId || "admin"}`;
 
 const headerIconButtonStyle = (isDark, open) => ({
@@ -41,7 +45,7 @@ export default function VeraNotificationBell({ isDark, userId }) {
   const [items, setItems] = useState([]);
   const [loading, setLoading] = useState(false);
   const [seenSig, setSeenSig] = useState(() => {
-    try { return localStorage.getItem(seenKey(userId)) || ""; } catch { return ""; }
+    try { return secureStorage.get(seenKey(userId)) || ""; } catch { return ""; }
   });
 
   const sig = useMemo(() => items.map((i) => i.id).join("|"), [items]);
@@ -68,7 +72,7 @@ export default function VeraNotificationBell({ isDark, userId }) {
 
   const markAllRead = useCallback(() => {
     setSeenSig(sig);
-    try { localStorage.setItem(seenKey(userId), sig); } catch { /* ignore */ }
+    try { secureStorage.set(seenKey(userId), sig); } catch { /* ignore */ }
   }, [sig, userId]);
 
   const onItemClick = (n) => {

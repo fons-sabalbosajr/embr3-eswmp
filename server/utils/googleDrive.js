@@ -325,7 +325,10 @@ async function verifyDriveAccess() {
       for (const target of folderTargets) {
         const response = await client.drive.files.get({
           fileId: target.id,
-          fields: "id,name,mimeType,capabilities(canAddChildren)",
+          // `driveId` is only present for items that live on a Shared Drive — the
+          // one place a service account is able to upload. See the upload-capability
+          // gate below.
+          fields: "id,name,mimeType,driveId,capabilities(canAddChildren)",
           supportsAllDrives: true,
         });
         folders.push({
@@ -333,15 +336,48 @@ async function verifyDriveAccess() {
           id: response.data.id,
           name: response.data.name,
           mimeType: response.data.mimeType,
+          sharedDrive: Boolean(response.data.driveId),
           writable: response.data.capabilities?.canAddChildren !== false,
         });
       }
+
+      // READING folder metadata is not proof that UPLOADS work, and conflating the
+      // two is how a dead OAuth refresh token stayed invisible: the service-account
+      // fallback can list these folders, so this check reported "Connected" while
+      // every admin upload failed over to local disk. A service account has no
+      // Drive storage of its own, so unless the target folders are on a Shared
+      // Drive it can never create a file there — report that as a failure.
+      const cannotUpload =
+        client.name === "service account" &&
+        folders.some((folder) => folder.key !== "haulerLoi" && !folder.sharedDrive);
+      if (cannotUpload) {
+        const reauthNeeded = attempts.length > 0;
+        const error = new Error(
+          "Google Drive can be read but NOT written to: only the service-account " +
+            "fallback could authenticate, and service accounts have no Drive storage " +
+            "of their own (the target folders are not on a Shared Drive), so every " +
+            "upload will fail. " +
+            (reauthNeeded ? DRIVE_ERROR_HINTS.auth_revoked : DRIVE_ERROR_HINTS.service_account_no_quota) +
+            (attempts.length ? ` (${attempts.join(" | ")})` : "")
+        );
+        error.driveErrorCode = reauthNeeded ? "auth_revoked" : "service_account_no_quota";
+        error.requiresReauth = reauthNeeded;
+        error.retryable = false;
+        error.hint = DRIVE_ERROR_HINTS[error.driveErrorCode];
+        throw error;
+      }
+
       return {
         ok: true,
         client: client.name,
         folders,
       };
     } catch (error) {
+      // The upload-capability gate above is already fully explained and is not a
+      // credential failure another client could recover from — surface it as-is.
+      if (error.driveErrorCode === "auth_revoked" || error.driveErrorCode === "service_account_no_quota") {
+        throw error;
+      }
       lastError = error;
       attempts.push(`${client.name}: ${error.message || error}`);
       const hasFallback = index < clients.length - 1;

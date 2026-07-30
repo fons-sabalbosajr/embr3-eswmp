@@ -16,6 +16,7 @@ const {
   sendPortalSignupEmail,
   sendPortalResetPasswordEmail,
   sendPortalCustomEmail,
+  isEmailDeliverable,
 } = require("../utils/email");
 const { notifyAdmin } = require("../utils/socketEmit");
 const Notification = require("../models/Notification");
@@ -995,6 +996,26 @@ router.post("/forgot-password", async (req, res) => {
     const { email } = req.body;
     if (!email) return res.status(400).json({ message: "Email is required" });
 
+    // Checked BEFORE the account lookup, deliberately: when mail is globally
+    // unusable every caller gets this same answer, so it reveals nothing about which
+    // addresses are registered. Previously a broken mail setup still replied "a reset
+    // code has been sent", leaving users waiting on an email that could never arrive.
+    const deliverable = await isEmailDeliverable();
+    if (!deliverable.ok) {
+      writeLog("error", "portal.forgot-password.undeliverable", {
+        message: `Password reset requested but no mail transport is usable (${deliverable.reason})`,
+        ip: req.ip,
+        meta: { reason: deliverable.reason },
+      });
+      return res.status(503).json({
+        message:
+          deliverable.reason === "maintenance"
+            ? "Password recovery is paused while email is under maintenance. Please try again later, or email eswmr3@emb.gov.ph for help."
+            : "Password recovery is temporarily unavailable because the email service is not reachable. Please email eswmr3@emb.gov.ph and an administrator will help you directly.",
+        code: "email_unavailable",
+      });
+    }
+
     const user = await UserPortal.findOne({ email: email.toLowerCase() });
     // Always return success to prevent email enumeration
     if (!user) {
@@ -1298,3 +1319,7 @@ router.post("/submit-verification", uploadSingle(upload, "verificationFile", { m
 });
 
 module.exports = router;
+// Exposed so utils/portalReadiness.js (which powers VERA's "what's still
+// outstanding?" answers) reuses the SAME cell-placement rule rather than restating
+// it — two copies of this would inevitably drift apart.
+module.exports.summarizeCellAssignment = summarizeCellAssignment;

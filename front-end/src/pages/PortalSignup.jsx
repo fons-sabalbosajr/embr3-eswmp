@@ -14,6 +14,7 @@ import api from "../api";
 import AuthBrandLogos from "../components/AuthBrandLogos";
 import bgEmb from "../assets/bgemb.webp";
 import "./Auth.css";
+import VeraAuthAssistant, { reportVeraAuthIssue } from "../components/VeraAuthAssistant";
 
 const { Title, Text } = Typography;
 
@@ -131,6 +132,7 @@ export default function PortalSignup() {
         }).then((result) => { if (result.isConfirmed) navigate("/slfportal/login"); });
       } else {
         Swal.fire({ icon: "error", title: "Registration Failed", text: msg });
+        reportVeraAuthIssue("signup_failed");
       }
     } finally {
       setLoading(false);
@@ -364,7 +366,7 @@ export default function PortalSignup() {
       </div>
 
       <div className="auth-page-footer">&copy; 2026 EMBR3 &mdash; Ecological Solid Waste Management Section</div>
+      <VeraAuthAssistant page="portal-signup" />
     </div>
   );
 }
-

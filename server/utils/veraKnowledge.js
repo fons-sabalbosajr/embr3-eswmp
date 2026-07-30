@@ -217,6 +217,33 @@ const KNOWLEDGE_BASE = [
     related: ["add-haulers", "vehicle-capacity", "validation-errors"],
   },
   {
+    id: "my-backlogs",
+    category: "submission",
+    question: "Do I have any backlogs / what is still pending before I can submit?",
+    keywords: [
+      "backlog", "backlogs", "pending", "outstanding", "incomplete", "remaining",
+      "what do i need", "still need", "left to do", "blocked", "blocker",
+      "why can't i submit", "cannot submit", "review submit disabled", "greyed out",
+      "not ready", "requirements", "to do", "unfinished",
+    ],
+    answer:
+      "Ask me “do I have any backlogs?” or “why can't I submit?” and I check your own account live: unresolved reverted submissions, past submissions still needing Organize Cells (unassigned disposal cells or missing Truck Capacity), your account/verification status, whether submission access is enabled, and whether your assigned SLF is operational. I name each outstanding item and the exact action to clear it. One thing I cannot see is the form you are typing into right now — Date of Disposal, transport entries, each entry's disposal cell and hazardous waste code are checked in your browser, so hover the disabled Review & Submit button for that live checklist.",
+    related: ["review-submit-disabled", "organize-cells", "edit-submitted"],
+  },
+  {
+    id: "account-access",
+    category: "support",
+    question: "I can't log in / I forgot my password — what do I do?",
+    keywords: [
+      "password", "forgot password", "reset password", "change password", "login",
+      "log in", "sign in", "cannot login", "can't log in", "locked out", "locked",
+      "account", "username", "credentials", "access", "wrong password", "invalid",
+    ],
+    answer:
+      "Use the “Forgot password” link on the portal login page — a reset link is sent to your registered email, so check spam if it does not arrive within a few minutes. If your email address has changed, or the account is locked or deactivated, only an EMB Region III admin can restore it: email eswmr3@emb.gov.ph with your facility name and the account's registered email. For security, nobody — including me — can retrieve or read your existing password; it can only be reset. Never share your password with anyone.",
+    related: ["contact-support"],
+  },
+  {
     id: "contact-support",
     category: "support",
     question: "Who do I contact for help?",

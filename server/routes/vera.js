@@ -29,6 +29,9 @@ const VeraBacklogInvestigation = require("../models/VeraBacklogInvestigation");
 const agent = require("../utils/automationAgent");
 const vera = require("../utils/veraAssistant");
 const veraDev = require("../utils/veraDevInsights");
+const portalReadiness = require("../utils/portalReadiness");
+const { SUPPORT_EMAIL: PUBLIC_SUPPORT_EMAIL } = require("../utils/veraAuthKnowledge");
+const veraPageData = require("../utils/veraPageData");
 const { isDeveloper } = require("../utils/developerIdentity");
 const { sanitizeError } = require("../utils/aiErrors");
 const { ASSISTANT_NAME, ASSISTANT_FULL_NAME } = require("../utils/veraKnowledge");
@@ -152,6 +155,190 @@ router.get("/status", requireAnyAuth, async (req, res) => {
       greeting: ctx.greeting,
       starterQuestions: ctx.starters,
     });
+  }
+});
+
+// ── VERA onboarding "Do not show again" ───────────────────────────────────────
+// Persisted per user, server-side. localStorage alone was not enough: logout calls
+// secureStorage.clearAll() → localStorage.clear(), which erased the opt-out, so the
+// introduction came back on the very next login. Works for BOTH realms — portal
+// tokens carry role "portal_user", admin tokens carry admin/developer/user.
+function onboardingModelFor(role) {
+  return role === "portal_user"
+    ? require("../models/UserPortal")
+    : require("../models/User");
+}
+
+// ── PUBLIC (unauthenticated) VERA for the auth pages ──────────────────────────
+// Lets a locked-out portal user get recovery help BEFORE they can sign in, which is
+// exactly when they need it and exactly when every other VERA route is unreachable.
+//
+// Deliberate constraints, because this is the only tokenless AI surface:
+//   * Role is hard-coded "public" — a caller cannot ask for another realm's KB.
+//   * NO database lookup of any kind. Nothing here can confirm whether an email is
+//     registered or what an account's state is, so it cannot be used to enumerate
+//     accounts.
+//   * Conversation history is accepted for continuity but never persisted, and the
+//     transcript is never written to UsageLog (metadata only), since an anonymous
+//     visitor cannot consent to logging.
+//   * The global veraLimiter already applies to /api/vera; this adds a tighter
+//     per-IP ceiling of its own.
+const publicChatHits = new Map(); // ip -> { count, resetAt }
+const PUBLIC_CHAT_WINDOW_MS = 10 * 60 * 1000;
+const PUBLIC_CHAT_MAX = Number(process.env.VERA_PUBLIC_CHAT_MAX || 20);
+
+function publicChatThrottled(ip) {
+  const now = Date.now();
+  const key = String(ip || "unknown");
+  const rec = publicChatHits.get(key);
+  if (!rec || now > rec.resetAt) {
+    publicChatHits.set(key, { count: 1, resetAt: now + PUBLIC_CHAT_WINDOW_MS });
+    // Opportunistic sweep so the map cannot grow without bound.
+    if (publicChatHits.size > 5000) {
+      for (const [k, v] of publicChatHits) if (now > v.resetAt) publicChatHits.delete(k);
+    }
+    return false;
+  }
+  rec.count += 1;
+  return rec.count > PUBLIC_CHAT_MAX;
+}
+
+router.post("/public-chat", async (req, res) => {
+  if (!VERA_ENABLED()) {
+    return res.status(200).json({
+      ok: false,
+      code: "disabled",
+      message: `VERA is currently unavailable. Please email ${PUBLIC_SUPPORT_EMAIL} for help with your account.`,
+    });
+  }
+  if (publicChatThrottled(req.ip)) {
+    return res.status(429).json({
+      ok: false,
+      code: "rate_limited",
+      message: `You've sent a lot of messages in a short time. Please wait a few minutes, or email ${PUBLIC_SUPPORT_EMAIL} for direct help.`,
+    });
+  }
+
+  const message = vera.sanitizeInput(String(req.body?.message || ""));
+  if (!message) {
+    return res.status(400).json({ ok: false, code: "empty", message: "Please type your question." });
+  }
+  const history = Array.isArray(req.body?.history) ? req.body.history.slice(-6) : [];
+  const page = String(req.body?.page || "").slice(0, 40);
+
+  const settings = await loadSettings().catch(() => null);
+  const a = settings?.automationAgent || {};
+  const started = Date.now();
+
+  try {
+    const result = await vera.answer({
+      message,
+      history,
+      page,
+      agentConfig: a,
+      role: "public", // hard-coded: never taken from the request
+    });
+    // Metadata only — an anonymous visitor's message is never stored, regardless of
+    // the configured logging level.
+    UsageLog.create({
+      userRole: "public",
+      feature: "vera_public_chat",
+      model: result.usedModel ? agent.resolveModel(a) : "fallback",
+      success: true,
+      durationMs: Date.now() - started,
+      inputTokens: result.inputTokens || 0,
+      outputTokens: result.outputTokens || 0,
+      dataCategories: ["account-recovery-help"],
+    }).catch(() => {});
+    return res.json({ ok: true, answer: result.answer, source: result.source });
+  } catch (err) {
+    // Degrade to the rule-based answer so a locked-out user still gets help.
+    let fallback = "";
+    try { fallback = vera.fallbackFor(message, "public"); } catch { /* ignore */ }
+    UsageLog.create({
+      userRole: "public",
+      feature: "vera_public_chat",
+      success: false,
+      durationMs: Date.now() - started,
+      dataCategories: ["account-recovery-help"],
+      errorMessage: sanitizeError(err).message,
+    }).catch(() => {});
+    return res.json({
+      ok: true,
+      answer: fallback || `I couldn't reach my assistant service. For account help, email ${PUBLIC_SUPPORT_EMAIL}.`,
+      source: "fallback",
+      degraded: true,
+    });
+  }
+});
+
+// Starter content for the public widget — static, no account data.
+router.get("/public-status", (_req, res) => {
+  const ctx = vera.contextFor("public");
+  res.json({
+    enabled: VERA_ENABLED(),
+    realm: "public",
+    name: ASSISTANT_NAME,
+    fullName: ASSISTANT_FULL_NAME,
+    greeting: ctx.greeting,
+    starterQuestions: ctx.starters,
+    supportEmail: PUBLIC_SUPPORT_EMAIL,
+  });
+});
+
+// ── GET /api/vera/portal-readiness ────────────────────────────────────────────
+// A portal user's own outstanding items ("backlogs") that would stop a Data Entry
+// submission. Derived server-side from their account + past submissions, so it is
+// authoritative rather than whatever the browser happens to have loaded. Scoped to
+// the CALLER: there is no id parameter, so one portal user can never read another's.
+router.get("/portal-readiness", requireAnyAuth, async (req, res) => {
+  if (req.user?.role !== "portal_user") {
+    return res.status(403).json({ message: "Portal account required." });
+  }
+  try {
+    const UserPortal = require("../models/UserPortal");
+    const portalUser = await UserPortal.findById(req.user.id)
+      .select("email status verificationRequired verificationSubmitted portalAccess assignedSlf assignedSlfName")
+      .lean();
+    if (!portalUser) return res.status(404).json({ message: "Portal account not found." });
+    const readiness = await portalReadiness.getPortalReadiness(portalUser);
+    res.json(readiness);
+  } catch (e) {
+    res.status(500).json({ message: "Could not check submission readiness.", error: e.message });
+  }
+});
+
+router.get("/onboarding", requireAnyAuth, async (req, res) => {
+  try {
+    const Model = onboardingModelFor(req.user?.role);
+    const doc = await Model.findById(req.user?.id).select("veraOnboardingDismissedAt").lean();
+    res.json({
+      dismissed: !!doc?.veraOnboardingDismissedAt,
+      dismissedAt: doc?.veraOnboardingDismissedAt || null,
+    });
+  } catch {
+    // Never block the portal on a preference read — showing the intro is the safe
+    // default, and the client still has its localStorage mirror to fall back on.
+    res.json({ dismissed: false, dismissedAt: null, unavailable: true });
+  }
+});
+
+router.put("/onboarding", requireAnyAuth, async (req, res) => {
+  try {
+    const dismissed = req.body?.dismissed === true || req.body?.dismissed === "true";
+    const Model = onboardingModelFor(req.user?.role);
+    const updated = await Model.findByIdAndUpdate(
+      req.user?.id,
+      { veraOnboardingDismissedAt: dismissed ? new Date() : null },
+      { new: true, select: "veraOnboardingDismissedAt" },
+    ).lean();
+    if (!updated) return res.status(404).json({ message: "User not found." });
+    res.json({
+      dismissed: !!updated.veraOnboardingDismissedAt,
+      dismissedAt: updated.veraOnboardingDismissedAt || null,
+    });
+  } catch (e) {
+    res.status(500).json({ message: "Could not save the preference.", error: e.message });
   }
 });
 
@@ -380,6 +567,41 @@ router.post("/chat", requireAnyAuth, async (req, res) => {
     } catch { /* metrics best-effort — never block the answer */ }
   }
 
+  // PAGE-CONTEXT-FIRST: a snapshot of the data the user currently has on screen,
+  // captured by the client. Sanitized before use (untrusted input) and only spent on
+  // the prompt when the question is actually about that data, so ordinary chat stays
+  // cheap. An empty dataset answers with the exact prescribed line — no model call.
+  let pageDataBlock = null;
+  const pageCtx = veraPageData.sanitizePageContext(req.body?.pageContext);
+  if (pageCtx && veraPageData.wantsPageData(message)) {
+    if (veraPageData.isEmptyDataset(pageCtx)) {
+      return res.json({ ok: true, answer: veraPageData.NO_RECORDS_REPLY, source: "guard" });
+    }
+    pageDataBlock = {
+      prompt: veraPageData.pageContextToPromptBlock(pageCtx),
+      summary: veraPageData.pageContextToUserSummary(pageCtx),
+    };
+  }
+
+  // Portal users asking about submitting / what is still outstanding get their OWN
+  // readiness attached as grounded facts, so VERA names the actual blocking items
+  // and the action for each instead of reciting the generic checklist. Always the
+  // caller's own account — never another user's.
+  let readinessBlock = "";
+  if (req.user?.role === "portal_user" && portalReadiness.wantsReadiness(message)) {
+    try {
+      const UserPortal = require("../models/UserPortal");
+      const pu = await UserPortal.findById(req.user.id)
+        .select("email status verificationRequired verificationSubmitted portalAccess assignedSlf assignedSlfName")
+        .lean();
+      if (pu) {
+        readinessBlock = portalReadiness.readinessToPromptBlock(
+          await portalReadiness.getPortalReadiness(pu),
+        );
+      }
+    } catch { /* readiness is best-effort — never block the answer */ }
+  }
+
   // Abort budget slightly above the provider timeout so a request can't hang.
   const controller = new AbortController();
   const abortTimer = setTimeout(() => controller.abort(), agent.resolveTimeoutMs(a) + 2000);
@@ -394,6 +616,8 @@ router.post("/chat", requireAnyAuth, async (req, res) => {
       role: req.user?.role, // portal_user | admin | developer — selects KB + RBAC
       devMode: devModeOn,
       insights: insightsBlock,
+      readiness: readinessBlock,
+      pageData: pageDataBlock,
     });
     clearTimeout(abortTimer);
     const durationMs = Date.now() - started;
@@ -429,7 +653,9 @@ router.post("/chat", requireAnyAuth, async (req, res) => {
     const { message: safeMsg, code } = sanitizeError(err, key, provider);
     let fallback = "";
     try {
-      fallback = vera.fallbackFor(message, req.user?.role);
+      // Pass the page snapshot through: a provider failure must not send a question
+      // about the visible table back to a generic help article.
+      fallback = vera.fallbackFor(message, req.user?.role, pageDataBlock?.summary || "");
     } catch { /* ignore */ }
 
     UsageLog.create({

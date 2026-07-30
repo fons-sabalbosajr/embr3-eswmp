@@ -218,6 +218,7 @@ export default function AdminHome() {
   const [notifications, setNotifications] = useState([]);
   const [unreadCount, setUnreadCount] = useState(0);
   const [notifLoading, setNotifLoading] = useState(false);
+  const [markingAllRead, setMarkingAllRead] = useState(false);
   const [notifHistoryOpen, setNotifHistoryOpen] = useState(false);
   const [notifHistory, setNotifHistory] = useState([]);
   const [notifHistoryLoading, setNotifHistoryLoading] = useState(false);
@@ -385,12 +386,15 @@ export default function AdminHome() {
   };
 
   const markAllRead = async () => {
+    setMarkingAllRead(true);
     try {
       await api.patch("/notifications/admin/read-all");
       setNotifications((prev) => prev.map((n) => ({ ...n, read: true })));
       setNotifHistory((prev) => prev.map((n) => ({ ...n, read: true })));
       setUnreadCount(0);
-    } catch { /* silent */ }
+    } catch { /* silent */ } finally {
+      setMarkingAllRead(false);
+    }
   };
 
   const fetchNotificationHistory = useCallback(async (page = 1, pageSize = 20, range = notifHistoryDateRange) => {
@@ -1239,7 +1243,7 @@ export default function AdminHome() {
                     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "14px 16px 10px", borderBottom: isDark ? "1px solid #303030" : "1px solid #f0f0f0" }}>
                       <Text strong style={{ fontSize: 15 }}>Notifications</Text>
                       {unreadCount > 0 && (
-                        <Button type="link" size="small" onClick={markAllRead} style={{ fontSize: 12, padding: 0 }}>Mark all as read</Button>
+                        <Button type="link" size="small" loading={markingAllRead} onClick={markAllRead} style={{ fontSize: 12, padding: 0 }}>Mark all as read</Button>
                       )}
                     </div>
                     <div style={{ maxHeight: 420, overflowY: "auto" }}>
@@ -1483,7 +1487,7 @@ export default function AdminHome() {
         onCancel={() => setNotifHistoryOpen(false)}
         footer={
           <Space>
-            {unreadCount > 0 && <Button onClick={markAllRead}>Mark all as read</Button>}
+            {unreadCount > 0 && <Button loading={markingAllRead} onClick={markAllRead}>Mark all as read</Button>}
             <Button type="primary" onClick={() => setNotifHistoryOpen(false)}>Close</Button>
           </Space>
         }

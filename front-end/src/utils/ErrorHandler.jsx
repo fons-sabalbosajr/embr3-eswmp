@@ -10,10 +10,40 @@ import {
   HomeOutlined,
   DownOutlined,
 } from "@ant-design/icons";
+import secureStorage from "./secureStorage";
 
 const { Text, Title } = Typography;
 const DYNAMIC_IMPORT_ERROR_RE = /Failed to fetch dynamically imported module|Importing a module script failed|error loading dynamically imported module/i;
 const DYNAMIC_IMPORT_RELOAD_KEY = "eswm-pipeline:dynamic-import-reload";
+
+/* ─────── Chunk-reload guards (encrypted) ───────
+   Previously one plaintext sessionStorage key per path
+   (`<prefix>:/admin/slf-monitoring`), which leaked the routes a user had visited
+   and which handleReload cleared with a prefix scan. secureStorage hashes key
+   names, so a prefix scan can no longer find them — every path is therefore held
+   in ONE encrypted record, which keeps "clear them all" to a single remove().
+   All access is defensive: this file backs the error boundary and must never be
+   the thing that throws.                                                        */
+const readReloadGuards = () => {
+  try {
+    return secureStorage.sessionGetJSON(DYNAMIC_IMPORT_RELOAD_KEY) || {};
+  } catch {
+    return {};
+  }
+};
+const markReloadGuard = (pathname) => {
+  try {
+    secureStorage.sessionSetJSON(DYNAMIC_IMPORT_RELOAD_KEY, {
+      ...readReloadGuards(),
+      [pathname]: 1,
+    });
+  } catch { /* storage blocked — worst case is one extra reload attempt */ }
+};
+const clearReloadGuards = () => {
+  try {
+    secureStorage.sessionRemove(DYNAMIC_IMPORT_RELOAD_KEY);
+  } catch { /* ignore */ }
+};
 
 /* ─────── Styled error modal (replaces SweetAlert) ─────── */
 
@@ -179,9 +209,9 @@ export class AppErrorBoundary extends Component {
     this.setState({ errorInfo });
     const message = error?.message || "";
     if (DYNAMIC_IMPORT_ERROR_RE.test(message)) {
-      const retryKey = `${DYNAMIC_IMPORT_RELOAD_KEY}:${window.location.pathname}`;
-      if (sessionStorage.getItem(retryKey) !== "1") {
-        sessionStorage.setItem(retryKey, "1");
+      const pathname = window.location.pathname;
+      if (readReloadGuards()[pathname] !== 1) {
+        markReloadGuard(pathname);
         window.location.reload();
         return;
       }
@@ -196,9 +226,7 @@ export class AppErrorBoundary extends Component {
   }
 
   handleReload = () => {
-    Object.keys(sessionStorage)
-      .filter((key) => key.startsWith(DYNAMIC_IMPORT_RELOAD_KEY))
-      .forEach((key) => sessionStorage.removeItem(key));
+    clearReloadGuards();
     this.setState({ hasError: false, error: null, errorInfo: null, copied: false, showStack: false });
     window.location.reload();
   };

@@ -2,7 +2,7 @@ const express = require("express");
 const jwt = require("jsonwebtoken");
 const crypto = require("crypto");
 const User = require("../models/User");
-const { sendAdminResetPasswordEmail, sendAdminApprovalRequestEmail, sendAdminApprovedEmail } = require("../utils/email");
+const { sendAdminResetPasswordEmail, sendAdminApprovalRequestEmail, sendAdminApprovedEmail, isEmailDeliverable } = require("../utils/email");
 const { writeLog } = require("../utils/logger");
 
 const router = express.Router();
@@ -138,6 +138,26 @@ router.post("/forgot-password", async (req, res) => {
   try {
     const { email } = req.body;
     if (!email) return res.status(400).json({ message: "Email is required" });
+
+    // Checked BEFORE the account lookup, deliberately: when mail is globally
+    // unusable every caller gets this same answer, so it reveals nothing about which
+    // addresses are registered. Previously a broken mail setup still replied "a reset
+    // code has been sent", leaving users waiting on an email that could never arrive.
+    const deliverable = await isEmailDeliverable();
+    if (!deliverable.ok) {
+      writeLog("error", "auth.forgot-password.undeliverable", {
+        message: `Admin password reset requested but no mail transport is usable (${deliverable.reason})`,
+        ip: req.ip,
+        meta: { reason: deliverable.reason },
+      });
+      return res.status(503).json({
+        message:
+          deliverable.reason === "maintenance"
+            ? "Password recovery is paused while email is under maintenance. Please try again later."
+            : "Password recovery is temporarily unavailable because the email service is not reachable. Please contact a system developer.",
+        code: "email_unavailable",
+      });
+    }
 
     const user = await User.findOne({ email: email.toLowerCase() });
     // Always return success to prevent email enumeration

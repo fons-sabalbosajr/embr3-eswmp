@@ -66,9 +66,7 @@ export default function MessageUserButton({
       icon={<MessageOutlined />}
       disabled={disabled}
       onClick={() => { setText(""); setOpen(true); }}
-    >
-      Message User
-    </Button>
+      />
   );
 
   return (

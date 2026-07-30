@@ -84,6 +84,7 @@ export default function AutomationAgentSettings({ isDark }) {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
+  const [clearingKey, setClearingKey] = useState(false);
   const [status, setStatus] = useState(null);
   const [catalog, setCatalog] = useState([]);
   const [usageToday, setUsageToday] = useState(0);
@@ -198,12 +199,15 @@ export default function AutomationAgentSettings({ isDark }) {
       confirmButtonText: "Clear key",
     });
     if (!res.isConfirmed) return;
+    setClearingKey(true);
     try {
       const { data } = await api.put("/developer/automation-agent/settings", { clearApiKey: true });
       setStatus(data.status || null);
       Swal.fire({ icon: "success", title: "Stored key cleared", timer: 1400, showConfirmButton: false });
     } catch (err) {
       Swal.fire("Error", err.response?.data?.message || "Could not clear key", "error");
+    } finally {
+      setClearingKey(false);
     }
   };
 
@@ -374,7 +378,7 @@ export default function AutomationAgentSettings({ isDark }) {
               <Input.Password placeholder={status?.keyConfigured ? "•••••••• (stored)" : info.keyPlaceholder} autoComplete="new-password" />
             </Form.Item>
             {status?.keySource === "database" && (
-              <Button size="small" danger type="link" onClick={clearStoredKey}>Clear stored key</Button>
+              <Button size="small" danger type="link" loading={clearingKey} onClick={clearStoredKey}>Clear stored key</Button>
             )}
             {info.free && (
               <Alert

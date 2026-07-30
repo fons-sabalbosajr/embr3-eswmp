@@ -145,6 +145,32 @@ const ADMIN_KNOWLEDGE_BASE = [
     related: ["update-slf-account"],
   },
   {
+    id: "slf-file-upload",
+    category: "slf-data",
+    question: "How do I attach a document or image to an SLF record?",
+    keywords: [
+      "upload", "attach", "attachment", "document", "documents", "image", "images",
+      "photo", "photos", "media", "file", "files", "slf data table", "data table",
+      "gallery", "commitment file", "progress report", "replace file", "drag and drop",
+    ],
+    answer:
+      "Open SLF Monitoring, edit the SLF record, then use the tab for the file type: Documents (PDF/Word/Excel/PowerPoint), Gallery (images), Commitment File and Progress Report (Compliance tab), or Preventive Measures. In the Documents and Gallery tables, use the upload button in the Actions column of the row — a progress bar shows the percentage while the file transfers, and the row's Status turns to Ready when it finishes. Nothing is attached until you SAVE the SLF record, so always save after uploading. Limit is 200 MB per file.",
+    related: ["slf-file-upload-failing", "update-slf-account"],
+  },
+  {
+    id: "slf-file-upload-failing",
+    category: "slf-data",
+    question: "Why did my document or image upload fail?",
+    keywords: [
+      "upload failed", "upload not working", "cannot upload", "can't upload", "unable to upload",
+      "upload error", "file not uploading", "failed", "stuck", "no progress", "upload disabled",
+      "drive unavailable", "maintenance",
+    ],
+    answer:
+      "Check these in order: (1) the upload buttons are greyed out when a Developer has switched on Drive Maintenance Mode — the admin header shows a maintenance banner while it is on; (2) the file must be under 200 MB and an accepted type (PDF, Word, Excel, PowerPoint, or an image) — the Documents table rejects other types; (3) a failed upload now shows a red error toast naming the file and the reason, and the row Status shows Error, so re-read that message; (4) if uploads fail for every file, the Google Drive connection may need re-authorizing — a Developer can confirm with Developer Settings → Google Drive Access → Test Connection and Test Upload. Files still attach if you save the record after a successful upload; a failed upload attaches nothing.",
+    related: ["slf-file-upload"],
+  },
+  {
     id: "what-is-vera-admin",
     category: "meta",
     question: "What can VERA help me with here?",

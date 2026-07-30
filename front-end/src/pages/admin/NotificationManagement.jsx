@@ -457,8 +457,21 @@ export default function NotificationManagement({ isDark }) {
           <Button key="close" onClick={() => { setDetailOpen(false); setSelectedNotif(null); }}>
             Close
           </Button>,
+          // RETURN the promise: antd's Popconfirm shows a spinner on its OK button and
+          // holds the popover open only while a thenable is pending. The old block body
+          // discarded it, so the delete ran invisibly and the modal shut before the
+          // request came back.
           selectedNotif && (
-            <Popconfirm key="del" title="Delete this notification?" onConfirm={() => { handleDelete(selectedNotif._id); setDetailOpen(false); setSelectedNotif(null); }}>
+            <Popconfirm
+              key="del"
+              title="Delete this notification?"
+              onConfirm={() =>
+                handleDelete(selectedNotif._id).then(() => {
+                  setDetailOpen(false);
+                  setSelectedNotif(null);
+                })
+              }
+            >
               <Button danger icon={<DeleteOutlined />}>Delete</Button>
             </Popconfirm>
           ),

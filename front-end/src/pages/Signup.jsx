@@ -7,6 +7,7 @@ import api from "../api";
 import AuthBrandLogos from "../components/AuthBrandLogos";
 import bgEmb from "../assets/bgemb.webp";
 import "./Auth.css";
+import VeraAuthAssistant from "../components/VeraAuthAssistant";
 
 const { Title, Text } = Typography;
 
@@ -118,6 +119,7 @@ export default function Signup() {
       </div>
 
       <div className="auth-page-footer">&copy; 2026 EMBR3 &mdash; Environmental Management Bureau Region III</div>
+      <VeraAuthAssistant page="admin-signup" />
     </div>
   );
 }

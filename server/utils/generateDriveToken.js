@@ -58,14 +58,35 @@ function loadOAuthClientFromJson(filePath) {
   };
 }
 
-const jsonPath =
+// Precedence: an explicitly named file wins, then GDRIVE_OAUTH_CLIENT_JSON, then
+// server/.env — and only as a last resort a client_secret*.json auto-discovered in
+// secrets/. Auto-discovery used to come FIRST, so whichever file happened to be
+// newest silently overrode .env. That is how a client which had been DELETED in
+// Google Cloud Console got used instead of the live one in .env, producing
+// "Error 401: deleted_client" at sign-in. utils/googleDrive.js resolves
+// credentials in this same order, so the token minted here now always belongs to
+// the client the server actually authenticates with.
+const explicitClient = loadOAuthClientFromJson(
   resolveCandidate(process.argv[2]) ||
-  resolveCandidate(process.env.GDRIVE_OAUTH_CLIENT_JSON) ||
-  findNewestOAuthClientJson();
+    resolveCandidate(process.env.GDRIVE_OAUTH_CLIENT_JSON),
+);
 
-const jsonClient = loadOAuthClientFromJson(jsonPath);
-const CLIENT_ID = jsonClient?.clientId || process.env.GDRIVE_CLIENT_ID;
-const CLIENT_SECRET = jsonClient?.clientSecret || process.env.GDRIVE_CLIENT_SECRET;
+const envClient =
+  process.env.GDRIVE_CLIENT_ID && process.env.GDRIVE_CLIENT_SECRET
+    ? {
+        clientId: process.env.GDRIVE_CLIENT_ID,
+        clientSecret: process.env.GDRIVE_CLIENT_SECRET,
+        source: "server/.env (GDRIVE_CLIENT_ID / GDRIVE_CLIENT_SECRET)",
+      }
+    : null;
+
+const jsonClient =
+  explicitClient ||
+  envClient ||
+  loadOAuthClientFromJson(findNewestOAuthClientJson());
+
+const CLIENT_ID = jsonClient?.clientId;
+const CLIENT_SECRET = jsonClient?.clientSecret;
 
 if (!CLIENT_ID || !CLIENT_SECRET) {
   console.error(
@@ -108,21 +129,53 @@ const server = http.createServer(async (req, res) => {
     console.log(`GDRIVE_REFRESH_TOKEN=${tokens.refresh_token}`);
     console.log("\nRestart the backend after saving .env.\n");
   } catch (err) {
+    const reason = err?.response?.data?.error || "";
     res.writeHead(500, { "Content-Type": "text/html" });
     res.end(`<h1>Failed</h1><pre>${String(err.message || err)}</pre>`);
     console.error("\nFailed to generate refresh token:", err.message || err);
+    // Name the client in the failure: these two errors are about the OAuth CLIENT,
+    // not the account being signed in, and that distinction is invisible otherwise.
+    if (reason === "deleted_client") {
+      console.error(
+        `\nThe OAuth client ${CLIENT_ID} has been DELETED in Google Cloud Console.\n` +
+          "Create a new OAuth client (or use one that still exists), then update\n" +
+          "GDRIVE_CLIENT_ID and GDRIVE_CLIENT_SECRET in server/.env.\n",
+      );
+    } else if (reason === "invalid_client") {
+      console.error(
+        `\nThe client secret does not match client ${CLIENT_ID}.\n` +
+          "Re-copy both values from the same OAuth client in Google Cloud Console.\n",
+      );
+    }
   } finally {
     server.close();
   }
 });
 
 server.listen(PORT, () => {
-  if (jsonClient?.source) {
-    console.log(`\nUsing OAuth client JSON: ${jsonClient.source}`);
-  } else {
-    console.log("\nUsing OAuth client credentials from server/.env");
-  }
-  console.log("\nOpen this URL in your browser and sign in with the Google Drive upload account:\n");
+  console.log(`\nUsing OAuth client from: ${jsonClient?.source || "server/.env"}`);
+  console.log(`Client ID              : ${CLIENT_ID}`);
+  console.log(`Redirect URI           : ${REDIRECT_URI}`);
+  console.log("   (this exact URI must be listed under Authorized redirect URIs on that client)");
+  console.log("\nOpening your browser — sign in with the Google account that OWNS the Drive folders.");
+  console.log("If it does not open, copy the FULL URL below (it is one single line):\n");
   console.log(authUrl);
   console.log("\nWaiting for Google OAuth callback on " + REDIRECT_URI + " ...\n");
+
+  // Opening the browser directly avoids the other failure mode seen here: the
+  // auth URL wraps across several terminal lines, and pasting a partial copy
+  // drops query params — Google then answers "Error 400: invalid_request,
+  // Required parameter is missing: response_type".
+  const { exec } = require("child_process");
+  const command =
+    process.platform === "win32"
+      ? `start "" "${authUrl}"`
+      : process.platform === "darwin"
+        ? `open "${authUrl}"`
+        : `xdg-open "${authUrl}"`;
+  exec(command, (err) => {
+    if (err) {
+      console.log("(Could not open the browser automatically — paste the full URL above.)\n");
+    }
+  });
 });

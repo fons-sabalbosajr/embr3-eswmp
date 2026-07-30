@@ -50,6 +50,10 @@ const userSchema = new mongoose.Schema(
     isApproved: { type: Boolean, default: false },
     resetToken: { type: String },
     resetTokenExpiry: { type: Date },
+    // "Do not show again" for the VERA introduction. Stored server-side because
+    // logout wipes localStorage (secureStorage.clearAll), which silently discarded
+    // the opt-out and made the intro reappear on the next login.
+    veraOnboardingDismissedAt: { type: Date, default: null },
   },
   { timestamps: true }
 );

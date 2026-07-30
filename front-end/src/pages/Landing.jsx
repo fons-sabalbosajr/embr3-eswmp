@@ -5,12 +5,15 @@ import emblogo from "../assets/emblogo.svg";
 import bplogo from "../assets/bagongpilipinaslogo.png";
 import bgemb from "../assets/bgemb.webp";
 import VeraFlameIcon from "../components/VeraFlameIcon";
+import secureStorage from "../utils/secureStorage";
 import "./Landing.css";
 
 export default function Landing() {
   const navigate = useNavigate();
   const [theme, setTheme] = useState(() => {
-    const stored = localStorage.getItem("embr3-theme");
+    // Stored through secureStorage (hashed key, encrypted value). Any pre-existing
+    // plaintext "embr3-theme" is migrated on import by secureStorage's _migrate().
+    const stored = secureStorage.get("embr3-theme");
     if (stored) return stored;
     if (window.matchMedia("(prefers-color-scheme: dark)").matches) return "dark";
     return "light";
@@ -28,7 +31,7 @@ export default function Landing() {
   // Apply theme
   useEffect(() => {
     document.documentElement.setAttribute("data-landing-theme", theme);
-    localStorage.setItem("embr3-theme", theme);
+    secureStorage.set("embr3-theme", theme);
     return () => document.documentElement.removeAttribute("data-landing-theme");
   }, [theme]);
 

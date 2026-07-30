@@ -67,7 +67,48 @@ function _store(key) {
 const _KNOWN = [
   "token", "user", "portal_token", "portal_user",
   "admin-theme", "admin-primary-color", "dashboard-stats-cache",
+  // Public landing-page theme. Listed so the value written as plaintext by earlier
+  // builds is converted and the cleartext key removed, rather than lingering.
+  "embr3-theme",
 ];
+/*  ── Legacy plaintext purge ────────────────────────────
+    Keys that EARLIER BUILDS wrote in cleartext and that nothing reads any more —
+    either because the feature moved server-side or because it now writes through
+    this module. Removing the writer does not remove data already sitting in a
+    user's browser, so these lingered in cleartext after the upgrade. The worst of
+    them embedded the signed-in user's EMAIL ADDRESS in the key name, e.g.
+    `vera_onboarding_dontshow_admin_someone@example.com`.
+
+    Prefix matching is possible precisely BECAUSE these are the old unhashed names;
+    it can never touch a current `_<hash>` entry. Values are discarded, not
+    migrated: the onboarding opt-out now lives on the user record, and every other
+    entry here is a disposable UI guard.                                          */
+const _LEGACY_PLAINTEXT_PREFIXES = [
+  "vera_onboarding_",                 // dontshow / notified / shown (embedded email)
+  "vera_notif_seen_",                 // admin bell signature (embedded email)
+  "vera_chat_history",                // VERA transcript
+  "vera_nudge_",                      // per-session nudge guards
+  "slf-portal-tour-dismissed-",       // embedded email
+  "slf-portal-update-tour-seen-",
+  "eswm-pipeline:dynamic-import-reload", // per-route chunk-reload guards
+  "portal_return_to",
+  "admin_return_to",
+  "session_expired",
+];
+
+function _purgeLegacyPlaintext() {
+  for (const store of [localStorage, sessionStorage]) {
+    try {
+      const doomed = [];
+      for (let i = 0; i < store.length; i += 1) {
+        const k = store.key(i);
+        if (k && _LEGACY_PLAINTEXT_PREFIXES.some((p) => k.startsWith(p))) doomed.push(k);
+      }
+      doomed.forEach((k) => store.removeItem(k));
+    } catch { /* storage unavailable — nothing to purge */ }
+  }
+}
+
 (function _migrate() {
   _KNOWN.forEach((k) => {
     const dest = _store(k);
@@ -92,6 +133,7 @@ const _KNOWN = [
       localStorage.removeItem(legKey);
     }
   });
+  _purgeLegacyPlaintext();
 })();
 
 /*  ── Public API ────────────────────────────────────────  */

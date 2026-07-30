@@ -1,6 +1,7 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Card, Row, Col, Segmented, Empty, Typography, Space, Tag, Button, Modal, Statistic, Table, Avatar, Tooltip } from "antd";
-import { BarChartOutlined, LineChartOutlined, TeamOutlined, ExpandAltOutlined } from "@ant-design/icons";
+import { BarChartOutlined, LineChartOutlined, TeamOutlined, ExpandAltOutlined, ReloadOutlined } from "@ant-design/icons";
+import { getSocket } from "../../utils/socket";
 import { convertVolume, TONS, M3 } from "../../utils/volumeUnits";
 import {
   ResponsiveContainer,
@@ -65,46 +66,82 @@ export default function SlfAnalyticsRow({ isDark, period = "monthly" }) {
   // the modal reads the SAME already-loaded records/aggregations as the cards.
   const [detail, setDetail] = useState(null);
 
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      setLoading(true);
-      try {
-        const [recRes, userRes] = await Promise.all([
-          api.get("/data-slf", { params: { mode: "list" } }),
-          api.get("/portal-users").catch(() => ({ data: [] })),
-        ]);
-        if (cancelled) return;
-        const data = recRes.data;
-        const rows = Array.isArray(data?.data) ? data.data : Array.isArray(data) ? data : [];
-        // Dedupe by _id so a repeated row can never inflate a chart.
-        const seen = new Set();
-        const deduped = rows.filter((r) => {
-          const id = r?._id || `${r?.slfName}-${r?.dateOfDisposal}-${r?.submissionId}`;
-          if (seen.has(id)) return false;
-          seen.add(id);
-          return true;
-        });
-        setRecords(deduped.filter((r) => isValidStatus(r.status)));
-        const map = {};
-        (userRes.data || []).forEach((u) => {
-          const email = String(u.email || "").trim().toLowerCase();
-          if (email) {
-            map[email] =
-              `${u.firstName || ""} ${u.lastName || ""}`.trim() || u.username || u.email;
-          }
-        });
-        setUserByEmail(map);
-      } catch {
-        if (!cancelled) setRecords([]);
-      } finally {
-        if (!cancelled) setLoading(false);
+  const [refreshing, setRefreshing] = useState(false);
+  const [updatedAt, setUpdatedAt] = useState(null);
+  const cancelledRef = useRef(false);
+
+  // `showSpinner` distinguishes the FIRST load (skeleton) from a live socket-driven
+  // refresh (small spinner on the reload button), so incoming submissions never
+  // blank the charts out from under whoever is reading them.
+  const load = useCallback(async ({ showSpinner = false } = {}) => {
+    if (showSpinner) setRefreshing(true);
+    try {
+      const [recRes, userRes] = await Promise.all([
+        api.get("/data-slf", { params: { mode: "list" } }),
+        api.get("/portal-users").catch(() => ({ data: [] })),
+      ]);
+      if (cancelledRef.current) return;
+      const data = recRes.data;
+      const rows = Array.isArray(data?.data) ? data.data : Array.isArray(data) ? data : [];
+      // Dedupe by _id so a repeated row can never inflate a chart.
+      const seen = new Set();
+      const deduped = rows.filter((r) => {
+        const id = r?._id || `${r?.slfName}-${r?.dateOfDisposal}-${r?.submissionId}`;
+        if (seen.has(id)) return false;
+        seen.add(id);
+        return true;
+      });
+      setRecords(deduped.filter((r) => isValidStatus(r.status)));
+      const map = {};
+      (userRes.data || []).forEach((u) => {
+        const email = String(u.email || "").trim().toLowerCase();
+        if (email) {
+          map[email] =
+            `${u.firstName || ""} ${u.lastName || ""}`.trim() || u.username || u.email;
+        }
+      });
+      setUserByEmail(map);
+      setUpdatedAt(new Date());
+    } catch {
+      // Keep whatever is already on screen: a transient failure during a live
+      // refresh must not wipe charts that were rendering correctly.
+      if (!cancelledRef.current && records.length === 0) setRecords([]);
+    } finally {
+      if (!cancelledRef.current) {
+        setLoading(false);
+        setRefreshing(false);
       }
-    })();
-    return () => {
-      cancelled = true;
-    };
+    }
+    // `records.length` is read only to decide whether a failure may clear state;
+    // including it would rebuild this callback on every load and re-subscribe the
+    // socket listener each time.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  useEffect(() => {
+    cancelledRef.current = false;
+    load();
+    return () => {
+      cancelledRef.current = true;
+    };
+  }, [load]);
+
+  // These three cards used to fetch ONCE on mount with an empty dependency array
+  // and had no socket subscription, so a new or edited submission never showed up
+  // until someone reloaded the whole page — the charts silently went stale. Every
+  // submission mutation server-side emits refreshAdmin(req, "submissions"), which
+  // is the same "data-refresh" event the rest of the admin pages already listen to.
+  useEffect(() => {
+    const socket = getSocket();
+    if (!socket) return undefined;
+    const handler = ({ target } = {}) => {
+      if (!target || target === "submissions" || target === "baselines" || target === "portal-users") {
+        load({ showSpinner: true });
+      }
+    };
+    socket.on("data-refresh", handler);
+    return () => socket.off("data-refresh", handler);
+  }, [load]);
 
   // ── Waste Submission Trends ── (full series; the card shows the last 18 buckets)
   const trendDataAll = useMemo(() => {
@@ -266,6 +303,22 @@ export default function SlfAnalyticsRow({ isDark, period = "monthly" }) {
         extra={
           <Space size={6}>
             {extra}
+            <Tooltip
+              title={
+                updatedAt
+                  ? `Updated ${dayjs(updatedAt).format("HH:mm:ss")} — refreshes automatically when submissions change. Click to refresh now.`
+                  : "Refresh now"
+              }
+            >
+              <Button
+                size="small"
+                type="text"
+                icon={<ReloadOutlined />}
+                loading={refreshing}
+                onClick={() => load({ showSpinner: true })}
+                aria-label="Refresh analytics"
+              />
+            </Tooltip>
             {moreKey && (
               <Button
                 size="small"
