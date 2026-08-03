@@ -167,7 +167,7 @@ function isRetryableAuthError(error) {
   return shouldTryNextClient(error);
 }
 
-async function createDriveFile(drive, fileBuffer, mimeType, originalName, folderId, makePublic = true) {
+async function createDriveFile(drive, mediaBody, mimeType, originalName, folderId, makePublic = true) {
   const response = await drive.files.create({
     requestBody: {
       name: originalName,
@@ -175,7 +175,7 @@ async function createDriveFile(drive, fileBuffer, mimeType, originalName, folder
     },
     media: {
       mimeType,
-      body: Readable.from(fileBuffer),
+      body: mediaBody,
     },
     fields: "id,webViewLink",
     supportsAllDrives: true,
@@ -246,6 +246,14 @@ async function streamDriveFile(fileId, res) {
  * @returns {{ fileId: string, viewUrl: string }}
  */
 async function uploadFileToDrive(fileBuffer, mimeType, originalName, isImage, overrideFolderId, makePublic = true) {
+  return uploadMediaToDrive(() => Readable.from(fileBuffer), mimeType, originalName, isImage, overrideFolderId, makePublic);
+}
+
+async function uploadFilePathToDrive(filePath, mimeType, originalName, isImage, overrideFolderId, makePublic = true) {
+  return uploadMediaToDrive(() => fs.createReadStream(filePath), mimeType, originalName, isImage, overrideFolderId, makePublic);
+}
+
+async function uploadMediaToDrive(createMediaBody, mimeType, originalName, isImage, overrideFolderId, makePublic = true) {
   // Validate folder IDs are still configured in .env
   const missing = ["GDRIVE_IMAGE_FOLDER_ID", "GDRIVE_DOCS_FOLDER_ID"].filter(
     (k) => !hasValue(process.env[k])
@@ -270,7 +278,7 @@ async function uploadFileToDrive(fileBuffer, mimeType, originalName, isImage, ov
   for (let index = 0; index < clients.length; index += 1) {
     const client = clients[index];
     try {
-      return await createDriveFile(client.drive, fileBuffer, mimeType, originalName, folderId, makePublic);
+      return await createDriveFile(client.drive, createMediaBody(), mimeType, originalName, folderId, makePublic);
     } catch (error) {
       lastError = decorateDriveError(error);
       if (error.driveErrorCode === "auth_revoked" && !revokedError) revokedError = error;

@@ -167,6 +167,81 @@ function normalizeCellStatus(status) {
   return value || "Active Cell";
 }
 
+const CELL_INFRA_ARRAYS = [
+  "cellNames", "cellCapacities", "cellCapacityUnits", "cellStatuses",
+  "cellTypes", "cellSubmissionAllowed", "cellNotes", "cellFillValues", "cellFillUnits",
+];
+const PROTECTED_CELL_STATUSES = new Set(["Used/Completed", "Under Construction", "Reserved Area", "Not Existed"]);
+
+function mergeCellInfrastructureUpdate(update, record) {
+  const preserved = [];
+  const touchesCells = CELL_INFRA_ARRAYS.some((key) => Array.isArray(update[key])) || update.numberOfCell !== undefined;
+  if (!touchesCells) return preserved;
+
+  const existingCount = Math.max(
+    Number(record.numberOfCell || 0),
+    ...CELL_INFRA_ARRAYS.map((key) => (Array.isArray(record[key]) ? record[key].length : 0)),
+  );
+  const incomingCount = Number(update.numberOfCell || 0);
+  const targetCount = incomingCount > 0 ? incomingCount : existingCount;
+  if (targetCount > 0) update.numberOfCell = targetCount;
+
+  for (const key of CELL_INFRA_ARRAYS) {
+    if (Array.isArray(update[key]) && update[key].length === 0 && Array.isArray(record[key]) && record[key].length > 0) {
+      delete update[key];
+      preserved.push(key);
+    }
+  }
+
+  const mergeArray = (key, resolver) => {
+    if (!Array.isArray(update[key])) return;
+    const incoming = update[key];
+    const existing = Array.isArray(record[key]) ? record[key] : [];
+    update[key] = Array.from({ length: targetCount }, (_, index) =>
+      resolver(incoming[index], existing[index], index),
+    );
+  };
+
+  mergeArray("cellNames", (next, prev) => {
+    const incoming = String(next ?? "").trim();
+    const existing = String(prev ?? "").trim();
+    if (!incoming && existing) {
+      preserved.push(`cellNames.${preserved.length}`);
+      return existing;
+    }
+    return incoming;
+  });
+  mergeArray("cellStatuses", (next, prev) => {
+    const incoming = normalizeCellStatus(next);
+    const existing = normalizeCellStatus(prev);
+    if (incoming === "Active Cell" && PROTECTED_CELL_STATUSES.has(existing)) {
+      preserved.push(`cellStatuses.${preserved.length}`);
+      return existing;
+    }
+    return incoming;
+  });
+  mergeArray("cellCapacities", (next, prev) => {
+    if ((next === null || next === undefined || next === "") && prev !== null && prev !== undefined && prev !== "") return prev;
+    return next;
+  });
+  mergeArray("cellFillValues", (next, prev) => {
+    if ((next === null || next === undefined || next === "") && prev !== null && prev !== undefined && prev !== "") return prev;
+    return next;
+  });
+  mergeArray("cellSubmissionAllowed", (next, prev, index) => {
+    const status = normalizeCellStatus(update.cellStatuses?.[index] ?? record.cellStatuses?.[index]);
+    if (!isActiveCellStatus(status)) return false;
+    if (next === undefined && prev !== undefined) return prev;
+    return next !== false;
+  });
+  mergeArray("cellTypes", (next, prev) => next || prev || "Residual");
+  mergeArray("cellNotes", (next, prev) => next ?? prev ?? "");
+  mergeArray("cellCapacityUnits", (next, prev) => normalizeUnitStrict(next) || normalizeUnitStrict(prev) || "tons");
+  mergeArray("cellFillUnits", (next, prev) => normalizeUnitStrict(next) || normalizeUnitStrict(prev) || "tons");
+
+  return preserved;
+}
+
 function getDataEntryId(entry) {
   return entry?._id ? String(entry._id) : "";
 }
@@ -708,30 +783,10 @@ router.put("/:id", adminOnly, async (req, res) => {
       });
     });
 
-    // ── Cell Infrastructure wipe guard (defense-in-depth) ─────────────────────
-    // A facility edit must never blank out populated cell infrastructure. If the
-    // client sends an EMPTY array for a cell field while the stored record still
-    // has data (e.g. a modal saved from a tab whose cell inputs were unmounted, or
-    // any partial payload), drop that key so the existing values are preserved
-    // instead of overwritten. A genuine reduction of cells sends a shorter but
-    // non-empty array, which is still applied; only a total wipe-to-[] is blocked.
-    const CELL_INFRA_ARRAYS = [
-      "cellNames", "cellCapacities", "cellCapacityUnits", "cellStatuses",
-      "cellTypes", "cellSubmissionAllowed", "cellNotes", "cellFillValues", "cellFillUnits",
-    ];
-    const preservedCellArrays = [];
-    for (const key of CELL_INFRA_ARRAYS) {
-      if (
-        Array.isArray(update[key]) && update[key].length === 0 &&
-        Array.isArray(record[key]) && record[key].length > 0
-      ) {
-        delete update[key];
-        preservedCellArrays.push(key);
-      }
-    }
+    const preservedCellArrays = mergeCellInfrastructureUpdate(update, record);
     if (preservedCellArrays.length) {
       writeLog("warn", "slfFacility.cell_wipe_prevented", {
-        message: `Ignored empty ${preservedCellArrays.join(", ")} for ${record.lgu || record._id} to preserve existing cell infrastructure`,
+        message: `Preserved ${preservedCellArrays.join(", ")} for ${record.lgu || record._id} during cell infrastructure update`,
         ip: req.ip,
         meta: { facilityId: String(record._id), preserved: preservedCellArrays },
       });
@@ -952,36 +1007,72 @@ router.put("/:id", adminOnly, async (req, res) => {
 });
 
 // Update cell status (admin toggle operational/closed)
-router.patch("/:id/cell-status", async (req, res) => {
+router.patch("/:id/cell-status", adminOnly, async (req, res) => {
   try {
     const { cellIndex, status } = req.body;
+    const idx = Number(cellIndex);
     const normalizedStatus = normalizeCellStatus(status);
-    if (cellIndex == null || !["Active Cell", "Used/Completed", "Under Construction", "Reserved Area", "Not Existed"].includes(normalizedStatus)) {
+    if (!Number.isInteger(idx) || idx < 0 || !["Active Cell", "Used/Completed", "Under Construction", "Reserved Area", "Not Existed"].includes(normalizedStatus)) {
       return res.status(400).json({ message: "cellIndex and valid status required" });
     }
-    const facility = await SlfFacility.findOne({ _id: req.params.id, deletedAt: null });
+    const facility = await SlfFacility.findOne({ _id: req.params.id, deletedAt: null })
+      .select("numberOfCell cellStatuses cellCapacities lgu")
+      .lean();
     if (!facility) return res.status(404).json({ message: "Facility not found" });
+    const cells = Math.max(Number(facility.numberOfCell || 0), facility.cellStatuses?.length || 0, facility.cellCapacities?.length || 0);
+    if (idx >= cells) return res.status(400).json({ message: "cellIndex out of range" });
 
-    // Ensure cellStatuses array is sized correctly
-    const cells = facility.numberOfCell || 0;
-    if (!facility.cellStatuses || facility.cellStatuses.length < cells) {
-      facility.cellStatuses = Array.from({ length: cells }, (_, i) =>
-        normalizeCellStatus(facility.cellStatuses?.[i])
-      );
-    }
-    if (cellIndex >= cells) return res.status(400).json({ message: "cellIndex out of range" });
+    const set = { [`cellStatuses.${idx}`]: normalizedStatus };
+    if (!isActiveCellStatus(normalizedStatus)) set[`cellSubmissionAllowed.${idx}`] = false;
+    const updated = await SlfFacility.findOneAndUpdate(
+      { _id: req.params.id, deletedAt: null },
+      { $set: set },
+      { new: true },
+    );
+    if (!updated) return res.status(404).json({ message: "Facility not found" });
 
-    facility.cellStatuses[cellIndex] = normalizedStatus;
-    facility.markModified("cellStatuses");
-    await facility.save();
-
-    // Reflect the cell change on both sides in real time.
     refreshAdmin(req, "submissions");
-    await refreshAssignedPortalUsers(req, facility._id, "facility");
-
-    res.json(facility);
+    await refreshAssignedPortalUsers(req, updated._id, "facility");
+    res.json(updated);
     writeLog("info", "slfFacility.cellStatus", {
-      message: `Cell ${cellIndex + 1} set to ${normalizedStatus} for ${facility.lgu}`,
+      message: `Cell ${idx + 1} set to ${normalizedStatus} for ${updated.lgu}`,
+      ip: req.ip,
+    });
+  } catch (error) {
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+});
+
+// Update per-cell portal availability without saving the whole facility document.
+router.patch("/:id/cell-submission-allowed", adminOnly, async (req, res) => {
+  try {
+    const { cellIndex, allowed } = req.body || {};
+    const idx = Number(cellIndex);
+    if (!Number.isInteger(idx) || idx < 0 || typeof allowed !== "boolean") {
+      return res.status(400).json({ message: "cellIndex and allowed are required." });
+    }
+    const facility = await SlfFacility.findOne({ _id: req.params.id, deletedAt: null })
+      .select("numberOfCell cellStatuses cellCapacities lgu")
+      .lean();
+    if (!facility) return res.status(404).json({ message: "Facility not found" });
+    const cells = Math.max(Number(facility.numberOfCell || 0), facility.cellStatuses?.length || 0, facility.cellCapacities?.length || 0);
+    if (idx >= cells) return res.status(400).json({ message: "cellIndex out of range" });
+    const status = normalizeCellStatus(facility.cellStatuses?.[idx]);
+    if (allowed && !isActiveCellStatus(status)) {
+      return res.status(400).json({ message: `Only active/open cells can allow portal submissions. Current status: ${status}.` });
+    }
+    const updated = await SlfFacility.findOneAndUpdate(
+      { _id: req.params.id, deletedAt: null },
+      { $set: { [`cellSubmissionAllowed.${idx}`]: allowed } },
+      { new: true },
+    );
+    if (!updated) return res.status(404).json({ message: "Facility not found" });
+
+    refreshAdmin(req, "submissions");
+    await refreshAssignedPortalUsers(req, updated._id, "facility");
+    res.json(updated);
+    writeLog("info", "slfFacility.cellSubmissionAllowed", {
+      message: `Cell ${idx + 1} portal submission ${allowed ? "enabled" : "disabled"} for ${updated.lgu}`,
       ip: req.ip,
     });
   } catch (error) {

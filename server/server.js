@@ -47,8 +47,9 @@ const veraRoutes = require("./routes/vera");
 
 const app = express();
 const server = http.createServer(app);
-server.requestTimeout = 10 * 60 * 1000;
-server.headersTimeout = 11 * 60 * 1000;
+const REQUEST_TIMEOUT_MS = Number(process.env.REQUEST_TIMEOUT_MS || 30 * 60 * 1000);
+server.requestTimeout = REQUEST_TIMEOUT_MS;
+server.headersTimeout = REQUEST_TIMEOUT_MS + 60 * 1000;
 const PORT = process.env.PORT || 5000;
 const MONGODB_URI =
   process.env.MONGODB_URI || "mongodb://127.0.0.1:27017/embr3_eswmp";

@@ -86,6 +86,7 @@ function verifyMediaSignature(ref, sig, expiresAt) {
 
 module.exports = {
   ENCRYPTED_SUFFIX: ".enc",
+  getEncryptionKey,
   encryptBuffer,
   decryptBuffer,
   signMediaRef,

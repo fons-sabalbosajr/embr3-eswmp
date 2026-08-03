@@ -1,7 +1,13 @@
 const crypto = require("crypto");
+const fsSync = require("fs");
 const fs = require("fs/promises");
 const path = require("path");
-const { ENCRYPTED_SUFFIX, encryptBuffer, decryptBuffer } = require("./mediaSecurity");
+const { pipeline } = require("stream/promises");
+const { ENCRYPTED_SUFFIX, getEncryptionKey, encryptBuffer, decryptBuffer } = require("./mediaSecurity");
+
+const ENC_ALGO = "aes-256-gcm";
+const IV_LEN = 12;
+const TAG_LEN = 16;
 
 const DEFAULT_UPLOAD_DIR = path.join(__dirname, "..", "uploads", "files");
 
@@ -45,8 +51,34 @@ async function saveLocalUpload(file, opts = {}) {
   const baseName = `${Date.now()}-${crypto.randomBytes(16).toString("hex")}${getSafeExtension(file.originalname)}`;
   const fileName = encrypt ? `${baseName}${ENCRYPTED_SUFFIX}` : baseName;
   const filePath = path.join(uploadDir, fileName);
-  const data = encrypt ? encryptBuffer(file.buffer) : file.buffer;
-  await fs.writeFile(filePath, data, { flag: "wx" });
+  if (file.path) {
+    if (encrypt) {
+      const iv = crypto.randomBytes(IV_LEN);
+      const cipher = crypto.createCipheriv(ENC_ALGO, getEncryptionKey(), iv);
+      const handle = await fs.open(filePath, "wx");
+      try {
+        await handle.write(iv, 0, IV_LEN, 0);
+        await handle.write(Buffer.alloc(TAG_LEN), 0, TAG_LEN, IV_LEN);
+        const out = fsSync.createWriteStream(filePath, {
+          fd: handle.fd,
+          start: IV_LEN + TAG_LEN,
+          autoClose: false,
+        });
+        await pipeline(fsSync.createReadStream(file.path), cipher, out);
+        await handle.write(cipher.getAuthTag(), 0, TAG_LEN, IV_LEN);
+      } catch (error) {
+        await fs.unlink(filePath).catch(() => {});
+        throw error;
+      } finally {
+        await handle.close().catch(() => {});
+      }
+    } else {
+      await pipeline(fsSync.createReadStream(file.path), fsSync.createWriteStream(filePath, { flags: "wx" }));
+    }
+  } else {
+    const data = encrypt ? encryptBuffer(file.buffer) : file.buffer;
+    await fs.writeFile(filePath, data, { flag: "wx" });
+  }
 
   return {
     fileName,

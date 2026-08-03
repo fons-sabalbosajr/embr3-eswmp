@@ -77,7 +77,10 @@ import {
   GlobalOutlined,
   LinkOutlined,
   EyeOutlined,
+  DownloadOutlined,
   CopyOutlined,
+  ZoomInOutlined,
+  ZoomOutOutlined,
   CheckCircleOutlined,
   CloseCircleOutlined,
   InfoCircleOutlined,
@@ -195,8 +198,32 @@ export default function DashboardContent({ user, isDark, setActiveMenu, onOpenSu
   const [slfFilterStatus, setSlfFilterStatus] = useState(null);
   const [slfDashModal, setSlfDashModal] = useState(null); // { type: dashboard metric key }
   const [preventionPanel, setPreventionPanel] = useState(null); // { facilityId, slfName } | null
+  const [preventiveFileViewer, setPreventiveFileViewer] = useState(null); // { url, fileName, slfName, province } | null
+  const [preventiveFileZoom, setPreventiveFileZoom] = useState(100);
   const [slfCellDrill, setSlfCellDrill] = useState(null); // selected SLF in Cell Infrastructure modal → per-cell cards
   const [cellProvinceExpanded, setCellProvinceExpanded] = useState(null);
+
+  const getPreventiveFileName = (url, fallback = "document") => {
+    const clean = String(url || "").split("?")[0].split("#")[0];
+    try { return decodeURIComponent(clean.split("/").pop() || "") || fallback; }
+    catch { return fallback; }
+  };
+  const getPreventiveFileKind = (fileName, url) => {
+    const value = `${fileName || ""} ${url || ""}`.toLowerCase().split("?")[0].split("#")[0];
+    if (/\.(png|jpe?g|gif|webp|bmp|tiff?)$/i.test(value)) return "image";
+    if (/\.pdf$/i.test(value)) return "pdf";
+    if (/\.(docx?|rtf)$/i.test(value)) return "word";
+    return "file";
+  };
+  const absoluteMediaUrl = (url) => {
+    const resolved = resolveMediaOpenUrl(url);
+    try { return new URL(resolved, window.location.origin).href; }
+    catch { return resolved; }
+  };
+  const openPreventiveFileViewer = (file) => {
+    setPreventiveFileZoom(100);
+    setPreventiveFileViewer(file);
+  };
 
   const mapPts = useMemo(
     () =>
@@ -6090,6 +6117,14 @@ export default function DashboardContent({ user, isDark, setActiveMenu, onOpenSu
     const preventiveFileFacilityCount = slfMgmt.filter(
       (row) => (row.preventiveMeasureFiles?.length || 0) > 0,
     ).length;
+    const preventiveFileFacilities = slfMgmt
+      .filter((row) => (row.preventiveMeasureFiles?.length || 0) > 0)
+      .map((row) => ({
+        id: row._id || row.lgu,
+        lgu: row.lgu || "Unspecified SLF",
+        count: row.preventiveMeasureFiles?.length || 0,
+      }))
+      .sort((a, b) => b.count - a.count || a.lgu.localeCompare(b.lgu));
 
     const SLF_CATEGORY_DESC = {
       "Cat 1": "< 15 TPD",
@@ -6694,78 +6729,42 @@ export default function DashboardContent({ user, isDark, setActiveMenu, onOpenSu
                   <Row gutter={[16, 16]} style={{ marginBottom: 16 }}>
                     <Col xs={24}>
                       <Card
-                        title={<><SafetyCertificateOutlined /> Prevention Measures</>}
+                        title={<><SafetyCertificateOutlined /> Preventive Measures (Fire Prevention and Trash Slide)</>}
                         hoverable
-                        onClick={() => setSlfDashModal({ combo: "prevention" })}
+                        onClick={() => setSlfDashModal({ type: "preventive" })}
                         style={{ borderRadius: 10, cursor: "pointer", borderTop: "3px solid #fa541c" }}
                         loading={loading}
                         styles={{ body: { padding: "12px 16px" } }}
                       >
-                        <Row gutter={[10, 10]}>
-                          <Col xs={24} md={12} lg={6}>
-                            <div style={{ padding: "8px 10px", background: isDark ? "rgba(250,140,22,0.12)" : "#fff7e6", borderRadius: 8, border: "1px solid #ffd591" }}>
-                              <Text strong style={{ fontSize: 12, display: "block", marginBottom: 6 }}>
-                                <WarningOutlined style={{ color: "#fa8c16", marginRight: 4 }} /> Trash Slide Prevention
-                              </Text>
-                              <Row gutter={8}>
-                                <Col span={12}>
-                                  <Text type="secondary" style={{ fontSize: 10, display: "block" }}>Total Measures</Text>
-                                  <Text strong style={{ fontSize: 20, color: "#fa8c16" }}>{(slfOps.totalTrashSlideMeasures || 0).toLocaleString()}</Text>
-                                </Col>
-                                <Col span={12}>
-                                  <Text type="secondary" style={{ fontSize: 10, display: "block" }}>Facilities</Text>
-                                  <Text strong style={{ fontSize: 20, color: "#d46b08" }}>{(slfOps.trashSlideFacilities || 0).toLocaleString()}</Text>
-                                </Col>
-                              </Row>
-                              <div style={{ marginTop: 6 }}>
-                                <Tag color="orange" style={{ margin: 0 }}>
-                                  {(slfOps.totalTrashSlideDocuments || 0).toLocaleString()} document{(slfOps.totalTrashSlideDocuments || 0) === 1 ? "" : "s"}
-                                </Tag>
+                        <Row gutter={[14, 14]} align="stretch">
+                          {/* <Col xs={24} md={7} lg={5}>
+                            <div style={{ padding: "10px 12px", background: isDark ? "rgba(19,194,194,0.12)" : "#e6fffb", borderRadius: 8, border: "1px solid #87e8de", height: "100%" }}>
+                              <Text type="secondary" style={{ fontSize: 10, display: "block" }}>Total Files</Text>
+                              <Text strong style={{ fontSize: 28, lineHeight: 1.1, color: "#08979c" }}>{(slfOps.totalPreventiveMeasureFiles || 0).toLocaleString()}</Text>
+                              <div style={{ marginTop: 8 }}>
+                                <Tag color="cyan" style={{ margin: 0 }}>{preventiveFileFacilityCount.toLocaleString()} SLF{preventiveFileFacilityCount === 1 ? "" : "s"}</Tag>
                               </div>
                             </div>
-                          </Col>
-                          <Col xs={24} md={12} lg={6}>
-                            <div style={{ padding: "8px 10px", background: isDark ? "rgba(255,77,79,0.12)" : "#fff1f0", borderRadius: 8, border: "1px solid #ffa39e" }}>
-                              <Text strong style={{ fontSize: 12, display: "block", marginBottom: 6 }}>
-                                <FireOutlined style={{ color: "#ff4d4f", marginRight: 4 }} /> Fire Prevention
-                              </Text>
-                              <Row gutter={8}>
-                                <Col span={12}>
-                                  <Text type="secondary" style={{ fontSize: 10, display: "block" }}>Total Measures</Text>
-                                  <Text strong style={{ fontSize: 20, color: "#ff4d4f" }}>{(slfOps.totalFirePrevMeasures || 0).toLocaleString()}</Text>
-                                </Col>
-                                <Col span={12}>
-                                  <Text type="secondary" style={{ fontSize: 10, display: "block" }}>Facilities</Text>
-                                  <Text strong style={{ fontSize: 20, color: "#cf1322" }}>{(slfOps.firePreventionFacilities || 0).toLocaleString()}</Text>
-                                </Col>
-                              </Row>
-                              <div style={{ marginTop: 6 }}>
-                                <Tag color="red" style={{ margin: 0 }}>
-                                  {(slfOps.totalFirePrevDocuments || 0).toLocaleString()} document{(slfOps.totalFirePrevDocuments || 0) === 1 ? "" : "s"}
-                                </Tag>
-                              </div>
-                            </div>
-                          </Col>
-                          <Col xs={24} md={12} lg={6}>
-                            <div style={{ padding: "8px 10px", background: isDark ? "rgba(19,194,194,0.12)" : "#e6fffb", borderRadius: 8, border: "1px solid #87e8de", height: "100%" }}>
-                              <Text strong style={{ fontSize: 12, display: "block", marginBottom: 6 }}>
-                                <FileTextOutlined style={{ color: "#13c2c2", marginRight: 4 }} /> Preventive Measure Files
-                              </Text>
-                              <Row gutter={8}>
-                                <Col span={12}>
-                                  <Text type="secondary" style={{ fontSize: 10, display: "block" }}>Total Files</Text>
-                                  <Text strong style={{ fontSize: 20, color: "#08979c" }}>{(slfOps.totalPreventiveMeasureFiles || 0).toLocaleString()}</Text>
-                                </Col>
-                                <Col span={12}>
-                                  <Text type="secondary" style={{ fontSize: 10, display: "block" }}>SLFs</Text>
-                                  <Text strong style={{ fontSize: 20, color: "#13c2c2" }}>{preventiveFileFacilityCount.toLocaleString()}</Text>
-                                </Col>
-                              </Row>
+                          </Col> */}
+                          <Col xs={24} md={17} lg={19}>
+                            <div style={{ minHeight: 86, padding: "10px 12px", background: isDark ? "rgba(255,255,255,0.035)" : "#fff", borderRadius: 8, border: isDark ? "1px solid rgba(255,255,255,0.12)" : "1px solid #f0f0f0" }}>
+                              <Space size={[6, 6]} wrap style={{ width: "100%" }}>
+                                {preventiveFileFacilities.length ? preventiveFileFacilities.map((item) => (
+                                  <Tooltip key={item.id} title={`${item.lgu}: ${item.count} file${item.count === 1 ? "" : "s"}`}>
+                                    <Tag color="orange" style={{ margin: 0, maxWidth: 220, display: "inline-flex", alignItems: "center", gap: 4 }}>
+                                      <Text ellipsis style={{ maxWidth: 150, color: "inherit" }}>{item.lgu}</Text>
+                                      <Text strong style={{ color: "inherit" }}>{item.count}</Text>
+                                    </Tag>
+                                  </Tooltip>
+                                )) : (
+                                  <Text type="secondary" style={{ fontSize: 12 }}>No preventive measure files uploaded yet.</Text>
+                                )}
+                              </Space>
                             </div>
                           </Col>
                         </Row>
                         <div style={{ marginTop: 10, textAlign: "center" }}>
-                          <Text type="secondary" style={{ fontSize: 11 }}>Click to view Trash Slide, Fire Prevention, and Preventive Measure files per SLF</Text>
+                          <Text type="secondary" style={{ fontSize: 11 }}>Click to view preventive measure files per SLF</Text>
                         </div>
                       </Card>
                     </Col>
@@ -6895,21 +6894,19 @@ export default function DashboardContent({ user, isDark, setActiveMenu, onOpenSu
                       // These previously had no dashboard tab, so "Other SLF" files never
                       // surfaced here and could not be opened.
                       preventive: {
-                        title: <Space><SafetyCertificateOutlined style={{ color: "#fa541c" }} /> Preventive Measures — All Files</Space>,
+                        title: <Space><SafetyCertificateOutlined style={{ color: "#fa541c" }} /> Preventive Measures (Fire Prevention and Trash Slide) — Files</Space>,
                         metricLabel: "files",
                         filter: (r) => (r.preventiveMeasureFiles?.length || 0) > 0,
                         flatten: (r) => (r.preventiveMeasureFiles || []).map((url, i) => {
-                          const clean = String(url || "").split("?")[0].split("#")[0];
-                          let fileName = "document";
-                          try { fileName = decodeURIComponent(clean.split("/").pop() || "") || "document"; } catch { /* keep default */ }
-                          return { key: `${r.lgu}_${i}`, facilityId: r._id, slfName: r.lgu, province: r.province, url, fileName };
+                          const fileName = getPreventiveFileName(url, "document");
+                          return { key: `${r.lgu}_${i}`, facilityId: r._id, slfName: r.lgu, province: r.province, url, fileName, kind: getPreventiveFileKind(fileName, url) };
                         }),
                         columns: [
                           slfCol, provCol,
                           { title: "File", dataIndex: "fileName", ellipsis: { showTitle: false }, render: (v) => <Tooltip title={v}><Space size={6}><FileTextOutlined style={{ color: "#fa541c" }} /><Text style={{ fontSize: 12 }}>{v}</Text></Space></Tooltip> },
-                          { title: "Action", dataIndex: "url", width: 150, align: "center", render: (url) => url ? (
+                          { title: "Action", dataIndex: "url", width: 150, align: "center", render: (url, row) => url ? (
                             <Space size={4}>
-                              <Tooltip title="View / preview"><Button size="small" icon={<EyeOutlined />} onClick={() => window.open(resolveMediaOpenUrl(url), "_blank", "noopener,noreferrer")} /></Tooltip>
+                              <Tooltip title="View in modal"><Button size="small" icon={<EyeOutlined />} onClick={() => openPreventiveFileViewer({ url, fileName: row.fileName || getPreventiveFileName(url, "document"), slfName: row.slfName, province: row.province, kind: row.kind })} /></Tooltip>
                               <Tooltip title="Open in new tab"><Button size="small" icon={<LinkOutlined />} onClick={() => window.open(resolveMediaOpenUrl(url), "_blank", "noopener,noreferrer")}>Open</Button></Tooltip>
                             </Space>
                           ) : <Text type="secondary" style={{ fontSize: 11 }}>—</Text> },
@@ -7036,11 +7033,9 @@ export default function DashboardContent({ user, isDark, setActiveMenu, onOpenSu
                           ],
                         },
                         prevention: {
-                          title: <Space><SafetyCertificateOutlined style={{ color: "#fa541c" }} /> Prevention Measures</Space>,
+                          title: <Space><SafetyCertificateOutlined style={{ color: "#fa541c" }} /> Preventive Measures (Fire Prevention and Trash Slide)</Space>,
                           tabs: [
-                            { key: "trashSlide", label: <span><WarningOutlined /> Trash Slide</span> },
-                            { key: "firePrev", label: <span><FireOutlined /> Fire Prevention</span> },
-                            { key: "preventive", label: <span><FileTextOutlined /> Preventive Measures</span> },
+                            { key: "preventive", label: <span><FileTextOutlined /> Files</span> },
                           ],
                         },
                       }[slfDashModal.combo];
@@ -8921,6 +8916,88 @@ export default function DashboardContent({ user, isDark, setActiveMenu, onOpenSu
             // came back on a full page change.
             destroyOnHidden
           />
+        );
+      })()}
+
+      {preventiveFileViewer && (() => {
+        const viewUrl = absoluteMediaUrl(preventiveFileViewer.url);
+        const fileName = preventiveFileViewer.fileName || getPreventiveFileName(preventiveFileViewer.url, "document");
+        const kind = preventiveFileViewer.kind || getPreventiveFileKind(fileName, preventiveFileViewer.url);
+        const pdfUrl = `${viewUrl.split("#")[0]}#zoom=${preventiveFileZoom}`;
+        const officeUrl = `https://view.officeapps.live.com/op/embed.aspx?src=${encodeURIComponent(viewUrl)}`;
+        const previewUrl = kind === "word" ? officeUrl : kind === "pdf" ? pdfUrl : viewUrl;
+        const copyLink = () => navigator.clipboard?.writeText(viewUrl).catch(() => {});
+        const openNewTab = () => window.open(viewUrl, "_blank", "noopener,noreferrer");
+        const downloadFile = () => {
+          const a = document.createElement("a");
+          a.href = viewUrl;
+          a.download = fileName;
+          a.target = "_blank";
+          a.rel = "noopener noreferrer";
+          document.body.appendChild(a);
+          a.click();
+          document.body.removeChild(a);
+        };
+        return (
+          <Modal
+            open
+            title={
+              <Space size={8} wrap>
+                {kind === "pdf" ? <FilePdfOutlined style={{ color: "#fa541c" }} /> : <FileTextOutlined style={{ color: "#fa541c" }} />}
+                <Tooltip title={fileName}>
+                  <Text strong ellipsis style={{ maxWidth: 420 }}>{fileName}</Text>
+                </Tooltip>
+                {preventiveFileViewer.slfName && <Tag color="orange">{preventiveFileViewer.slfName}</Tag>}
+                {preventiveFileViewer.province && <Tag>{preventiveFileViewer.province}</Tag>}
+              </Space>
+            }
+            onCancel={() => setPreventiveFileViewer(null)}
+            footer={<Button onClick={() => setPreventiveFileViewer(null)}>Close</Button>}
+            width={1100}
+            style={{ top: 24, maxWidth: "96vw" }}
+            destroyOnHidden
+            styles={{ body: { padding: 0, overflow: "hidden" } }}
+          >
+            <div style={{ padding: "10px 12px", borderBottom: isDark ? "1px solid #303030" : "1px solid #f0f0f0", display: "flex", gap: 8, justifyContent: "space-between", flexWrap: "wrap", alignItems: "center" }}>
+              <Space size={6} wrap>
+                <Button size="small" icon={<ZoomOutOutlined />} disabled={kind === "word" || preventiveFileZoom <= 50} onClick={() => setPreventiveFileZoom((z) => Math.max(50, z - 10))}>Zoom out</Button>
+                <Button size="small" onClick={() => setPreventiveFileZoom(100)} disabled={kind === "word" || preventiveFileZoom === 100}>Reset {kind === "word" ? "" : `${preventiveFileZoom}%`}</Button>
+                <Button size="small" icon={<ZoomInOutlined />} disabled={kind === "word" || preventiveFileZoom >= 200} onClick={() => setPreventiveFileZoom((z) => Math.min(200, z + 10))}>Zoom in</Button>
+              </Space>
+              <Space size={6} wrap>
+                <Tooltip title="Copy file link"><Button size="small" icon={<CopyOutlined />} onClick={copyLink}>Copy</Button></Tooltip>
+                <Tooltip title="Open in new browser tab"><Button size="small" icon={<LinkOutlined />} onClick={openNewTab}>Open</Button></Tooltip>
+                <Tooltip title="Download file"><Button size="small" icon={<DownloadOutlined />} onClick={downloadFile}>Download</Button></Tooltip>
+              </Space>
+            </div>
+            <div style={{ height: "72vh", background: isDark ? "#101418" : "#f5f7fa", overflow: "auto", display: "flex", alignItems: "stretch", justifyContent: "center" }}>
+              {kind === "image" ? (
+                <div style={{ minWidth: "100%", padding: 18, textAlign: "center" }}>
+                  <img
+                    src={viewUrl}
+                    alt={fileName}
+                    style={{ width: `${preventiveFileZoom}%`, maxWidth: "none", borderRadius: 8, boxShadow: isDark ? "0 8px 28px rgba(0,0,0,0.45)" : "0 8px 28px rgba(0,0,0,0.12)" }}
+                  />
+                </div>
+              ) : kind === "pdf" || kind === "word" ? (
+                <iframe
+                  key={`${kind}-${preventiveFileZoom}-${viewUrl}`}
+                  src={previewUrl}
+                  title={fileName}
+                  style={{ width: "100%", height: "100%", border: 0, background: "#fff" }}
+                />
+              ) : (
+                <div style={{ padding: 32, maxWidth: 560, margin: "auto" }}>
+                  <Alert
+                    type="info"
+                    showIcon
+                    message="Preview is not available for this file type."
+                    description="Use Open or Download from the toolbar to view the file with a compatible application."
+                  />
+                </div>
+              )}
+            </div>
+          </Modal>
         );
       })()}
 

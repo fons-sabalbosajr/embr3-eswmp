@@ -1,18 +1,37 @@
 const express = require("express");
 const multer = require("multer");
+const fs = require("fs/promises");
+const os = require("os");
+const path = require("path");
+const crypto = require("crypto");
 const SlfFacility = require("../models/SlfFacility");
 const { authMiddleware, adminOnly } = require("../middleware/auth");
 const { writeLog } = require("../utils/logger");
-const { validateDriveFile, extractDriveFileId, uploadFileToDrive } = require("../utils/googleDrive");
+const { validateDriveFile, extractDriveFileId, uploadFilePathToDrive } = require("../utils/googleDrive");
 const { saveLocalUpload } = require("../utils/localUploadStorage");
+const { uploadSingle } = require("../utils/uploadErrorHandler");
 
 const router = express.Router();
 
 router.use(authMiddleware, adminOnly);
 
-const MAX_REPLACE_MB = 20;
+const MAX_REPLACE_MB = 200;
+const REPLACE_TMP_DIR = process.env.UPLOAD_TMP_DIR || path.join(os.tmpdir(), "embr3-eswmp-uploads");
 const replaceUpload = multer({
-  storage: multer.memoryStorage(),
+  storage: multer.diskStorage({
+    destination: async (_req, _file, cb) => {
+      try {
+        await fs.mkdir(REPLACE_TMP_DIR, { recursive: true });
+        cb(null, REPLACE_TMP_DIR);
+      } catch (error) {
+        cb(error);
+      }
+    },
+    filename: (_req, file, cb) => {
+      const ext = path.extname(file.originalname || "").toLowerCase().replace(/[^.a-z0-9]/g, "").slice(0, 12);
+      cb(null, `${Date.now()}-${crypto.randomBytes(16).toString("hex")}${ext}`);
+    },
+  }),
   limits: { fileSize: MAX_REPLACE_MB * 1024 * 1024 },
 });
 
@@ -297,7 +316,7 @@ router.post("/mark-legacy", async (req, res) => {
 
 // Replace an inaccessible file with a freshly-uploaded file on the NEW Drive
 // account and relink the SLF record. Old metadata is preserved in the audit log.
-router.post("/replace", replaceUpload.single("file"), async (req, res) => {
+router.post("/replace", uploadSingle(replaceUpload, "file", { maxSizeMb: MAX_REPLACE_MB }), async (req, res) => {
   try {
     const { facilityId, oldUrl } = req.body || {};
     if (!facilityId || !oldUrl) return res.status(400).json({ message: "facilityId and oldUrl are required." });
@@ -310,7 +329,7 @@ router.post("/replace", replaceUpload.single("file"), async (req, res) => {
     let newUrl = "";
     let storage = "drive";
     try {
-      const result = await uploadFileToDrive(req.file.buffer, req.file.mimetype, req.file.originalname, isImage);
+      const result = await uploadFilePathToDrive(req.file.path, req.file.mimetype, req.file.originalname, isImage);
       newUrl = result.viewUrl;
     } catch (driveErr) {
       // Fall back to local storage so the repair can still proceed.
@@ -345,6 +364,8 @@ router.post("/replace", replaceUpload.single("file"), async (req, res) => {
     res.json({ message: "File replaced and SLF record relinked.", url: newUrl, storage });
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });
+  } finally {
+    if (req.file?.path) await fs.unlink(req.file.path).catch(() => {});
   }
 });
 
