@@ -1,7 +1,11 @@
 const express = require("express");
 const multer = require("multer");
 const jwt = require("jsonwebtoken");
-const { uploadFileToDrive, streamDriveFile, extractDriveFileId } = require("../utils/googleDrive");
+const fs = require("fs/promises");
+const os = require("os");
+const path = require("path");
+const crypto = require("crypto");
+const { uploadFilePathToDrive, streamDriveFile, extractDriveFileId } = require("../utils/googleDrive");
 const {
   saveLocalUpload,
   resolveLocalUpload,
@@ -17,8 +21,7 @@ const { writeLog } = require("../utils/logger");
 const router = express.Router();
 const MAX_UPLOAD_MB = 200;
 const MAX_UPLOAD_BYTES = MAX_UPLOAD_MB * 1024 * 1024;
-const DIRECT_LOCAL_UPLOAD_MB = 25;
-const DIRECT_LOCAL_UPLOAD_BYTES = DIRECT_LOCAL_UPLOAD_MB * 1024 * 1024;
+const UPLOAD_TMP_DIR = process.env.UPLOAD_TMP_DIR || path.join(os.tmpdir(), "embr3-eswmp-uploads");
 
 const ADMIN_ROLES = new Set(["admin", "developer"]);
 
@@ -104,7 +107,20 @@ router.get("/secure/drive/:fileId", async (req, res) => {
   }
 });
 
-const storage = multer.memoryStorage();
+const storage = multer.diskStorage({
+  destination: async (_req, _file, cb) => {
+    try {
+      await fs.mkdir(UPLOAD_TMP_DIR, { recursive: true });
+      cb(null, UPLOAD_TMP_DIR);
+    } catch (error) {
+      cb(error);
+    }
+  },
+  filename: (_req, file, cb) => {
+    const ext = path.extname(file.originalname || "").toLowerCase().replace(/[^.a-z0-9]/g, "").slice(0, 12);
+    cb(null, `${Date.now()}-${crypto.randomBytes(16).toString("hex")}${ext}`);
+  },
+});
 const upload = multer({
   storage,
   limits: { fileSize: MAX_UPLOAD_BYTES },
@@ -148,45 +164,33 @@ router.post("/", authMiddleware, requireDriveActive, uploadSingle(upload, "file"
     let storage = "drive";
 
     if (restricted) {
-      // Admin-side media: prefer encrypted local storage; fall back only within
-      // local (never make a public Drive copy for restricted uploads).
-      if (req.file.size >= DIRECT_LOCAL_UPLOAD_BYTES) {
+      try {
+        const driveResult = await uploadFilePathToDrive(
+          req.file.path,
+          req.file.mimetype,
+          req.file.originalname,
+          isImage,
+          undefined,
+          false // makePublic = false → private, served via proxy
+        );
+        fileId = driveResult.fileId;
+        viewUrl = buildSignedMediaUrl("drive", fileId);
+      } catch (driveErr) {
+        console.warn(`Restricted Drive upload failed; storing encrypted locally: ${driveErr.message}`);
+        writeLog("warn", "drive.upload.fallback", {
+          message: `Restricted Drive upload failed; stored encrypted locally: ${driveErr.message}`,
+          user: req.user?.email || req.user?.username || req.user?.id || "",
+          ip: req.ip,
+          meta: { restricted: true, storage: "local", driveErrorCode: driveErr.driveErrorCode || "unknown", retryable: !!driveErr.retryable, size: req.file.size },
+        });
         const localResult = await saveLocalUpload(req.file, { encrypt: true });
         viewUrl = buildSignedMediaUrl("local", localResult.fileName);
         storage = "local";
-      } else {
-        try {
-          const driveResult = await uploadFileToDrive(
-            req.file.buffer,
-            req.file.mimetype,
-            req.file.originalname,
-            isImage,
-            undefined,
-            false // makePublic = false → private, served via proxy
-          );
-          fileId = driveResult.fileId;
-          viewUrl = buildSignedMediaUrl("drive", fileId);
-        } catch (driveErr) {
-          console.warn(`Restricted Drive upload failed; storing encrypted locally: ${driveErr.message}`);
-          writeLog("warn", "drive.upload.fallback", {
-            message: `Restricted Drive upload failed; stored encrypted locally: ${driveErr.message}`,
-            user: req.user?.email || req.user?.username || req.user?.id || "",
-            ip: req.ip,
-            meta: { restricted: true, storage: "local", driveErrorCode: driveErr.driveErrorCode || "unknown", retryable: !!driveErr.retryable },
-          });
-          const localResult = await saveLocalUpload(req.file, { encrypt: true });
-          viewUrl = buildSignedMediaUrl("local", localResult.fileName);
-          storage = "local";
-        }
       }
-    } else if (req.file.size >= DIRECT_LOCAL_UPLOAD_BYTES) {
-      const localResult = await saveLocalUpload(req.file);
-      viewUrl = localResult.url;
-      storage = "local";
     } else {
       try {
-        const driveResult = await uploadFileToDrive(
-          req.file.buffer,
+        const driveResult = await uploadFilePathToDrive(
+          req.file.path,
           req.file.mimetype,
           req.file.originalname,
           isImage
@@ -199,7 +203,7 @@ router.post("/", authMiddleware, requireDriveActive, uploadSingle(upload, "file"
           message: `Drive upload failed; saved attachment locally: ${driveErr.message}`,
           user: req.user?.email || req.user?.username || req.user?.id || "",
           ip: req.ip,
-          meta: { restricted: false, storage: "local", driveErrorCode: driveErr.driveErrorCode || "unknown", retryable: !!driveErr.retryable },
+          meta: { restricted: false, storage: "local", driveErrorCode: driveErr.driveErrorCode || "unknown", retryable: !!driveErr.retryable, size: req.file.size },
         });
         const localResult = await saveLocalUpload(req.file);
         viewUrl = localResult.url;
@@ -226,7 +230,9 @@ router.post("/", authMiddleware, requireDriveActive, uploadSingle(upload, "file"
       ip: req.ip,
       meta: { driveErrorCode: err.driveErrorCode || null, storage: "unknown" },
     });
-    res.status(isConfigError ? 503 : 500).json({ message: err.message });
+    res.status(isConfigError ? 503 : 500).json({ message: isConfigError ? err.message : "Upload failed. Please try again or contact support if the problem continues." });
+  } finally {
+    if (req.file?.path) await fs.unlink(req.file.path).catch(() => {});
   }
 });
 

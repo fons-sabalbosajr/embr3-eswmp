@@ -84,7 +84,9 @@ import {
   CopyOutlined,
   PlayCircleOutlined,
 } from "@ant-design/icons";
-import Swal from "sweetalert2";
+import _Swal from "sweetalert2";
+// All SweetAlert2 popups in this file appear over AntD modals (z-index ≥ 1000).
+const Swal = _Swal.mixin({ customClass: { container: "swal-over-modal" } });
 import api from "../../api";
 import { exportToExcel } from "../../utils/exportExcel";
 import secureStorage from "../../utils/secureStorage";
@@ -369,6 +371,8 @@ export default function SLFMonitoring({
   const [slfSubmissions, setSlfSubmissions] = useState([]);
   const [cellAssignmentModal, setCellAssignmentModal] = useState(null);
   const [cellAssignmentSaving, setCellAssignmentSaving] = useState(false);
+  const [cellActionSaving, setCellActionSaving] = useState({});
+  const cellActionSavingRef = useRef({});
   const [dailySubmissionsModal, setDailySubmissionsModal] = useState({
     open: false,
     cell: null,
@@ -381,6 +385,71 @@ export default function SLFMonitoring({
 
   const normalizeSlfSubmissions = (items = []) =>
     (items || []).map(normalizeSubmissionRecord);
+
+  const updateFacilityLocal = useCallback((facility) => {
+    if (!facility?._id) return;
+    const updatedRecord = { ...facility, ...computeFields(facility) };
+    setRecords((prev) => prev.map((r) => (r._id === facility._id ? updatedRecord : r)));
+    setEditYearRecords((prev) => prev.map((r) => (r._id === facility._id ? updatedRecord : r)));
+    setEditing((prev) => (prev?._id === facility._id ? updatedRecord : prev));
+    setDetailModal((prev) => (prev?._id === facility._id ? updatedRecord : prev));
+    invalidateCache(`${CACHE_KEY}-fast`);
+    invalidateCache(`${CACHE_KEY}-full`);
+    secureStorage.invalidateDashboard();
+  }, []);
+
+  const saveCellStatusNow = useCallback(async (index, nextStatus) => {
+    if (!editing?._id) return;
+    const key = `status-${index}`;
+    if (cellActionSavingRef.current[key]) return;
+    const prevStatuses = [...(form.getFieldValue("cellStatuses") || [])];
+    const prevAllowed = [...(form.getFieldValue("cellSubmissionAllowed") || [])];
+    const nextStatuses = [...prevStatuses];
+    const nextAllowed = [...prevAllowed];
+    nextStatuses[index] = nextStatus;
+    if (!isActiveCellStatus(nextStatus)) nextAllowed[index] = false;
+    form.setFieldsValue({ cellStatuses: nextStatuses, cellSubmissionAllowed: nextAllowed });
+    cellActionSavingRef.current[key] = true;
+    setCellActionSaving((prev) => ({ ...prev, [key]: true }));
+    try {
+      const { data } = await api.patch(`/slf-facilities/${editing._id}/cell-status`, {
+        cellIndex: index,
+        status: nextStatus,
+      });
+      updateFacilityLocal(data);
+    } catch (err) {
+      form.setFieldsValue({ cellStatuses: prevStatuses, cellSubmissionAllowed: prevAllowed });
+      message.error(err.response?.data?.message || "Could not update cell status.");
+    } finally {
+      cellActionSavingRef.current[key] = false;
+      setCellActionSaving((prev) => ({ ...prev, [key]: false }));
+    }
+  }, [editing?._id, form, updateFacilityLocal]);
+
+  const saveCellSubmissionAllowedNow = useCallback(async (index, allowed) => {
+    if (!editing?._id) return;
+    const key = `portal-${index}`;
+    if (cellActionSavingRef.current[key]) return;
+    const prevAllowed = [...(form.getFieldValue("cellSubmissionAllowed") || [])];
+    const nextAllowed = [...prevAllowed];
+    nextAllowed[index] = allowed;
+    form.setFieldsValue({ cellSubmissionAllowed: nextAllowed });
+    cellActionSavingRef.current[key] = true;
+    setCellActionSaving((prev) => ({ ...prev, [key]: true }));
+    try {
+      const { data } = await api.patch(`/slf-facilities/${editing._id}/cell-submission-allowed`, {
+        cellIndex: index,
+        allowed,
+      });
+      updateFacilityLocal(data);
+    } catch (err) {
+      form.setFieldsValue({ cellSubmissionAllowed: prevAllowed });
+      message.error(err.response?.data?.message || "Could not update portal cell availability.");
+    } finally {
+      cellActionSavingRef.current[key] = false;
+      setCellActionSaving((prev) => ({ ...prev, [key]: false }));
+    }
+  }, [editing?._id, form, updateFacilityLocal]);
 
   const fetchRecords = useCallback(async (skipCache = false) => {
     // ── Phase 1: Load facilities + baselines first → render table immediately ──
@@ -5141,22 +5210,15 @@ export default function SLFMonitoring({
                                                         checked={isActiveCellStatus(
                                                           cellStatus,
                                                         )}
+                                                        loading={!!cellActionSaving[`status-${i}`]}
                                                         checkedChildren="ON"
                                                         unCheckedChildren="OFF"
-                                                        onChange={(checked) => {
-                                                          const current =
-                                                            form.getFieldValue(
-                                                              "cellStatuses",
-                                                            ) || [];
-                                                          current[i] = checked
-                                                            ? "Active Cell"
-                                                            : "Used/Completed";
-                                                          form.setFieldsValue({
-                                                            cellStatuses: [
-                                                              ...current,
-                                                            ],
-                                                          });
-                                                        }}
+                                                        onChange={(checked) =>
+                                                          saveCellStatusNow(
+                                                            i,
+                                                            checked ? "Active Cell" : "Used/Completed",
+                                                          )
+                                                        }
                                                       />
                                                     </Form.Item>
                                                   </Col>
@@ -5189,10 +5251,14 @@ export default function SLFMonitoring({
                                                       <Switch
                                                         checkedChildren="Open"
                                                         unCheckedChildren="Off"
+                                                        loading={!!cellActionSaving[`portal-${i}`]}
                                                         disabled={
                                                           !isActiveCellStatus(
                                                             cellStatus,
                                                           )
+                                                        }
+                                                        onChange={(checked) =>
+                                                          saveCellSubmissionAllowedNow(i, checked)
                                                         }
                                                       />
                                                     </Form.Item>
@@ -6479,29 +6545,37 @@ export default function SLFMonitoring({
                                 rowKey="key"
                                 dataSource={fields}
                                 pagination={fields.length > 5 ? { pageSize: 5, size: "small" } : false}
-                                scroll={{ x: 1180 }}
+                                tableLayout="fixed"
+                                scroll={{ x: 820 }}
                                 locale={{ emptyText: <Empty description="No gallery images added" /> }}
                                 columns={[
                                   {
-                                    title: "Preview",
-                                    width: 96,
+                                    title: "File",
+                                    width: 230,
                                     render: (_, field) => {
                                       const value = form.getFieldValue(["galleryItems", field.name, "url"]);
                                       const url = fileUrlFromValue(value);
-                                      return url ? <Image src={resolveMediaUrl(url)} width={54} height={42} style={{ objectFit: "cover", borderRadius: 6 }} /> : <FileImageOutlined style={{ fontSize: 24, color: "#8c8c8c" }} />;
-                                    },
-                                  },
-                                  {
-                                    title: "File Name",
-                                    width: 180,
-                                    render: (_, field) => {
-                                      const value = form.getFieldValue(["galleryItems", field.name, "url"]);
-                                      return <Text ellipsis style={{ maxWidth: 160 }}>{fileNameFromUrl(value, "photo")}</Text>;
+                                      const file = uploadFileFromValue(value);
+                                      const fileName = fileNameFromUrl(value, "photo");
+                                      return (
+                                        <Space size={8} align="start" style={{ width: "100%" }}>
+                                          {url ? <Image src={resolveMediaUrl(url)} width={48} height={38} style={{ objectFit: "cover", borderRadius: 6, flex: "0 0 auto" }} /> : <FileImageOutlined style={{ fontSize: 24, color: "#8c8c8c", marginTop: 6 }} />}
+                                          <div style={{ minWidth: 0, flex: 1 }}>
+                                            <Tooltip title={fileName}>
+                                              <Text ellipsis style={{ display: "block", maxWidth: 150 }}>{fileName}</Text>
+                                            </Tooltip>
+                                            <Space size={4} wrap>
+                                              {file?.size ? <Text type="secondary" style={{ fontSize: 11 }}>{formatFileSize(file.size)}</Text> : null}
+                                              {renderUploadStatusCell(file, url)}
+                                            </Space>
+                                          </div>
+                                        </Space>
+                                      );
                                     },
                                   },
                                   {
                                     title: "Category",
-                                    width: 190,
+                                    width: 170,
                                     render: (_, field) => (
                                       <Form.Item name={[field.name, "component"]} style={{ margin: 0 }}>
                                         <Select allowClear showSearch placeholder="Component" options={GALLERY_COMPONENT_OPTIONS} />
@@ -6509,52 +6583,34 @@ export default function SLFMonitoring({
                                     ),
                                   },
                                   {
-                                    title: "Description",
-                                    width: 220,
+                                    title: "Details",
+                                    width: 260,
                                     render: (_, field) => (
-                                      <Form.Item name={[field.name, "caption"]} style={{ margin: 0 }}>
-                                        <Input placeholder="Photo caption" />
-                                      </Form.Item>
+                                      <Space direction="vertical" size={6} style={{ width: "100%" }}>
+                                        <Form.Item name={[field.name, "caption"]} style={{ margin: 0 }}>
+                                          <Input placeholder="Photo caption" />
+                                        </Form.Item>
+                                        <Form.Item name={[field.name, "folder"]} style={{ margin: 0 }}>
+                                          <Select mode="tags" maxTagCount="responsive" placeholder="Folder" tokenSeparators={[","]} />
+                                        </Form.Item>
+                                      </Space>
                                     ),
                                   },
-                                  {
-                                    title: "Folder",
-                                    width: 180,
-                                    render: (_, field) => (
-                                      <Form.Item name={[field.name, "folder"]} style={{ margin: 0 }}>
-                                        <Select mode="tags" maxTagCount={1} placeholder="Folder" tokenSeparators={[","]} />
-                                      </Form.Item>
-                                    ),
-                                  },
-                                  { title: "Uploaded By", width: 130, render: () => <Text type="secondary">—</Text> },
-                                  { title: "Upload Date", width: 130, render: () => <Text type="secondary">—</Text> },
-                                  {
-                                    title: "File Size",
-                                    width: 100,
-                                    render: (_, field) => {
-                                      const file = uploadFileFromValue(form.getFieldValue(["galleryItems", field.name, "url"]));
-                                      return file?.size ? formatFileSize(file.size) : <Text type="secondary">—</Text>;
-                                    },
-                                  },
-                                  {
-                                    title: "Status",
-                                    width: 100,
-                                    render: (_, field) => {
-                                      const value = form.getFieldValue(["galleryItems", field.name, "url"]);
-                                      return renderUploadStatusCell(uploadFileFromValue(value), fileUrlFromValue(value));
-                                    },
-                                  },
+                                  { title: "Uploaded", width: 90, render: () => <Text type="secondary" style={{ fontSize: 11 }}>—</Text> },
                                   {
                                     title: "Actions",
                                     fixed: "right",
-                                    width: 210,
+                                    width: 150,
                                     render: (_, field) => {
-                                      const url = fileUrlFromValue(form.getFieldValue(["galleryItems", field.name, "url"]));
+                                      const value = form.getFieldValue(["galleryItems", field.name, "url"]);
+                                      const file = uploadFileFromValue(value);
+                                      const uploading = file?.status === "uploading";
+                                      const url = fileUrlFromValue(value);
                                       return (
                                         <Space size={4}>
                                           <Form.Item name={[field.name, "url"]} valuePropName="fileList" getValueFromEvent={uploadEventToFileList} style={{ margin: 0 }}>
-                                            <Upload {...slfUploadProps} maxCount={1} accept="image/*" action={driveDisabled ? undefined : "/eswm-pipeline/api/upload"} disabled={driveDisabled} headers={getUploadHeaders()} showUploadList={false}>
-                                              <Tooltip title={url ? "Replace image" : "Upload image"}><Button size="small" icon={<UploadOutlined />} disabled={driveDisabled} /></Tooltip>
+                                            <Upload {...slfUploadProps} maxCount={1} accept="image/*" action={driveDisabled ? undefined : "/eswm-pipeline/api/upload"} disabled={driveDisabled || uploading} headers={getUploadHeaders()} showUploadList={false}>
+                                              <Tooltip title={uploading ? "Upload in progress" : url ? "Replace image" : "Upload image"}><Button size="small" icon={<UploadOutlined />} loading={uploading} disabled={driveDisabled || uploading} /></Tooltip>
                                             </Upload>
                                           </Form.Item>
                                           <Tooltip title="View / preview"><Button size="small" icon={<EyeOutlined />} disabled={!url} onClick={() => window.open(resolveMediaOpenUrl(url), "_blank", "noopener,noreferrer")} /></Tooltip>
@@ -6623,30 +6679,39 @@ export default function SLFMonitoring({
                                 rowKey="key"
                                 dataSource={fields}
                                 pagination={fields.length > 6 ? { pageSize: 6, size: "small" } : false}
-                                scroll={{ x: 1220 }}
+                                tableLayout="fixed"
+                                scroll={{ x: 860 }}
                                 locale={{ emptyText: <Empty description="No SLF documents added" /> }}
                                 columns={[
                                   {
-                                    title: "File Preview or Type",
-                                    width: 130,
+                                    title: "File",
+                                    width: 260,
                                     render: (_, field) => {
-                                      const url = fileUrlFromValue(form.getFieldValue(["slfDocuments", field.name, "url"]));
+                                      const value = form.getFieldValue(["slfDocuments", field.name, "url"]);
+                                      const url = fileUrlFromValue(value);
+                                      const file = uploadFileFromValue(value);
                                       const kind = getMediaKind(url);
-                                      return <Tag icon={kind === "image" ? <FileImageOutlined /> : <FilePdfOutlined />} color={url ? "purple" : "default"}>{kind || "document"}</Tag>;
+                                      const fileName = fileNameFromUrl(value, "document");
+                                      return (
+                                        <Space direction="vertical" size={6} style={{ width: "100%" }}>
+                                          <Space size={6} wrap>
+                                            <Tag icon={kind === "image" ? <FileImageOutlined /> : <FilePdfOutlined />} color={url ? "purple" : "default"}>{kind || "document"}</Tag>
+                                            {file?.size ? <Text type="secondary" style={{ fontSize: 11 }}>{formatFileSize(file.size)}</Text> : null}
+                                            {renderUploadStatusCell(file, url)}
+                                          </Space>
+                                          <Tooltip title={fileName}>
+                                            <Text ellipsis style={{ maxWidth: 220, fontSize: 11 }}>{fileName}</Text>
+                                          </Tooltip>
+                                          <Form.Item name={[field.name, "title"]} rules={[{ required: true, message: "Title required" }]} style={{ margin: 0 }}>
+                                            <Input placeholder="Document title" />
+                                          </Form.Item>
+                                        </Space>
+                                      );
                                     },
                                   },
                                   {
-                                    title: "File Name",
-                                    width: 190,
-                                    render: (_, field) => (
-                                      <Form.Item name={[field.name, "title"]} rules={[{ required: true, message: "Title required" }]} style={{ margin: 0 }}>
-                                        <Input placeholder="Document title" />
-                                      </Form.Item>
-                                    ),
-                                  },
-                                  {
                                     title: "Category",
-                                    width: 180,
+                                    width: 170,
                                     render: (_, field) => (
                                       <Form.Item name={[field.name, "docType"]} style={{ margin: 0 }}>
                                         <Select allowClear placeholder="Type" options={SLF_DOCUMENT_TYPE_OPTIONS} />
@@ -6662,35 +6727,21 @@ export default function SLFMonitoring({
                                       </Form.Item>
                                     ),
                                   },
-                                  { title: "Uploaded By", width: 130, render: () => <Text type="secondary">—</Text> },
-                                  { title: "Upload Date", width: 130, render: () => <Text type="secondary">—</Text> },
-                                  {
-                                    title: "File Size",
-                                    width: 100,
-                                    render: (_, field) => {
-                                      const file = uploadFileFromValue(form.getFieldValue(["slfDocuments", field.name, "url"]));
-                                      return file?.size ? formatFileSize(file.size) : <Text type="secondary">—</Text>;
-                                    },
-                                  },
-                                  {
-                                    title: "Status",
-                                    width: 100,
-                                    render: (_, field) => {
-                                      const value = form.getFieldValue(["slfDocuments", field.name, "url"]);
-                                      return renderUploadStatusCell(uploadFileFromValue(value), fileUrlFromValue(value));
-                                    },
-                                  },
+                                  { title: "Uploaded", width: 90, render: () => <Text type="secondary" style={{ fontSize: 11 }}>—</Text> },
                                   {
                                     title: "Actions",
                                     fixed: "right",
-                                    width: 230,
+                                    width: 170,
                                     render: (_, field) => {
-                                      const url = fileUrlFromValue(form.getFieldValue(["slfDocuments", field.name, "url"]));
+                                      const value = form.getFieldValue(["slfDocuments", field.name, "url"]);
+                                      const file = uploadFileFromValue(value);
+                                      const uploading = file?.status === "uploading";
+                                      const url = fileUrlFromValue(value);
                                       return (
                                         <Space size={4}>
                                           <Form.Item name={[field.name, "url"]} valuePropName="fileList" getValueFromEvent={uploadEventToFileList} style={{ margin: 0 }}>
-                                            <Upload {...slfUploadProps} maxCount={1} accept=".pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx" action={driveDisabled ? undefined : "/eswm-pipeline/api/upload"} disabled={driveDisabled} headers={getUploadHeaders()} showUploadList={false}>
-                                              <Tooltip title={url ? "Replace file" : "Upload file"}><Button size="small" icon={<UploadOutlined />} disabled={driveDisabled} /></Tooltip>
+                                            <Upload {...slfUploadProps} maxCount={1} accept=".pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.tif,.tiff,image/*" action={driveDisabled ? undefined : "/eswm-pipeline/api/upload"} disabled={driveDisabled || uploading} headers={getUploadHeaders()} showUploadList={false}>
+                                              <Tooltip title={uploading ? "Upload in progress" : url ? "Replace file" : "Upload file"}><Button size="small" icon={<UploadOutlined />} loading={uploading} disabled={driveDisabled || uploading} /></Tooltip>
                                             </Upload>
                                           </Form.Item>
                                           <Tooltip title="View / preview"><Button size="small" icon={<EyeOutlined />} disabled={!url} onClick={() => window.open(resolveMediaOpenUrl(url), "_blank", "noopener,noreferrer")} /></Tooltip>
@@ -7078,7 +7129,7 @@ export default function SLFMonitoring({
         open={!!detailModal}
         onCancel={() => setDetailModal(null)}
         footer={<Button onClick={() => setDetailModal(null)}>Close</Button>}
-        width={1240}
+        width={1400}
       >
         {detailModal && (
           <>

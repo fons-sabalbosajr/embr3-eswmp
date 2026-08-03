@@ -138,21 +138,6 @@ function devWantsDummy(req) {
     String(req.query.includeDummy || "").toLowerCase() === "true";
 }
 
-// Fields to project when populating a submission's `slfGenerator` ref.
-//
-// Un-projected, `.populate("slfGenerator")` inlines the ENTIRE SlfFacility
-// document (galleryItems, slfDocuments, permit arrays, every cell array) into
-// each submission. On a list endpoint that means the same handful of facilities
-// is serialized once per submission — it was 2.4 MB of a 2.6 MB response and the
-// same duplication in browser memory. Consumers only read the id/name/province
-// off the populated ref; the full facility list comes from /slf-facilities.
-// `cellNames` is included because it is the CANONICAL source of a cell's display
-// name — collectCellNames() resolves cellIndex against it rather than trusting the
-// name copied onto the submission at submit time (which goes stale on rename).
-// It is a short string array, so it costs almost nothing.
-// `ownership` is part of an SLF's canonical display name (`lgu (ownership)`), so
-// consumers that render or export the facility name can build it from the
-// populated facility rather than trusting a possibly-stale `slfName` snapshot.
 const SLF_GENERATOR_REF_FIELDS = "_id lgu ownership slfName province dataYear cellNames";
 
 // Province code mapping (mirrors DataSLF model)
@@ -168,6 +153,69 @@ function getProvinceCode(province) {
   if (PSGC_PROVINCE_CODES[raw]) return PSGC_PROVINCE_CODES[raw];
   const key = raw.toLowerCase().replace(/^province of\s+/i, "").replace(/[_-]+/g, " ").trim();
   return PROVINCE_CODES[key] || raw.substring(0, 2).toUpperCase();
+}
+
+function fromBaseM3(value, unit) {
+  return convertVolumeStrict(value, "m³", unit || "m³") ?? value;
+}
+
+async function refreshFacilityCellOccupancy(req, facilityId) {
+  if (!facilityId || !mongoose.Types.ObjectId.isValid(String(facilityId))) return null;
+  const facility = await SlfFacility.findById(facilityId)
+    .select("numberOfCell cellNames cellStatuses cellCapacities cellCapacityUnits cellFillUnits wasteReceivedUnit")
+    .lean();
+  if (!facility) return null;
+  const cellCount = Math.max(
+    Number(facility.numberOfCell || 0),
+    facility.cellNames?.length || 0,
+    facility.cellStatuses?.length || 0,
+    facility.cellCapacities?.length || 0,
+  );
+  if (cellCount <= 0) return null;
+  const totalsM3 = Array.from({ length: cellCount }, () => 0);
+  const entries = await DataSLF.find({
+    slfGenerator: facility._id,
+    deletedAt: null,
+    status: { $nin: ["rejected", "reverted", "revert_requested"] },
+    isDummy: { $ne: true },
+  })
+    .select("baselineUnit trucks.actualVolume trucks.actualVolumeUnit trucks.cellIndex trucks.vehicles.actualVolume trucks.vehicles.actualVolumeUnit trucks.vehicles.cellIndex")
+    .lean();
+  entries.forEach((entry) => {
+    (entry.trucks || []).forEach((truck) => {
+      const vehicles = Array.isArray(truck.vehicles)
+        ? truck.vehicles.filter((vehicle) => vehicle.cellIndex !== null && vehicle.cellIndex !== undefined && vehicle.cellIndex !== "")
+        : [];
+      if (vehicles.length) {
+        vehicles.forEach((vehicle) => {
+          const idx = Number(vehicle.cellIndex);
+          if (!Number.isInteger(idx) || idx < 0 || idx >= totalsM3.length) return;
+          totalsM3[idx] += toBaseM3(vehicle.actualVolume, vehicle.actualVolumeUnit || truck.actualVolumeUnit || entry.baselineUnit || "m³");
+        });
+        return;
+      }
+      const idx = Number(truck.cellIndex);
+      if (!Number.isInteger(idx) || idx < 0 || idx >= totalsM3.length) return;
+      totalsM3[idx] += toBaseM3(truck.actualVolume, truck.actualVolumeUnit || entry.baselineUnit || "m³");
+    });
+  });
+  const fillUnits = Array.from({ length: cellCount }, (_, index) =>
+    facility.cellFillUnits?.[index] || facility.cellCapacityUnits?.[index] || facility.wasteReceivedUnit || "m³",
+  );
+  const cellFillValues = totalsM3.map((value, index) => Math.round(fromBaseM3(value, fillUnits[index]) * 1000) / 1000);
+  const wasteReceivedUnit = facility.wasteReceivedUnit || fillUnits.find(Boolean) || "m³";
+  const actualResidualWasteReceived = Math.round(
+    totalsM3.reduce((sum, value) => sum + fromBaseM3(value, wasteReceivedUnit), 0) * 1000,
+  ) / 1000;
+  const updated = await SlfFacility.findByIdAndUpdate(
+    facility._id,
+    { $set: { cellFillValues, cellFillUnits: fillUnits, actualResidualWasteReceived, wasteReceivedUnit } },
+    { new: true },
+  ).lean();
+  refreshAdmin(req, "facility");
+  const assigned = await UserPortal.find({ assignedSlf: facility._id }).select("email").lean().catch(() => []);
+  assigned.forEach((pu) => pu.email && refreshPortal(req, pu.email, "facility"));
+  return updated;
 }
 
 function getNameVariants(value) {
@@ -210,12 +258,6 @@ function matchesBaselineName(item, requestedName) {
   return requestedKeys.some((key) => itemKeys.includes(key));
 }
 
-// Like matchesBaselineName, but also treats the Bataan Engineered Sanitary
-// Landfill Facility (BESLF) aliases as one identity. The BESLF site was merged
-// from several legacy names ("Bataan Integrated Waste Management Facility", etc.)
-// whose records may still carry an old lguCompanyName/slfName alias. Without this
-// a baseline update requested under one alias would silently miss records saved
-// under another, so the update would appear to "not work". See mergeBataanSlf.js.
 function matchesSlfIdentity(item, requestedName) {
   if (matchesBaselineName(item, requestedName)) return true;
   if (isBataanSlfName(requestedName)) {
@@ -224,36 +266,16 @@ function matchesSlfIdentity(item, requestedName) {
   return false;
 }
 
-// Resolve every DataSLF _id that belongs to an SLF, matching by name variants and
-// (for BESLF) merged legacy aliases. Used by the baseline update/approve/reject
-// routes so merged/legacy data never breaks a baseline update. Optionally restrict
-// to records that actually carry baseline data.
-// A submission is a "resubmission" once it has been resubmitted after a revert —
-// the resubmit flow records the prior idNo in `previousIdNos` (preserving the
-// original reference/version relationship). One predicate so every list consumer
-// flags and orders resubmissions identically, and never double-counts (each doc is
-// still a single row; versioning is intentional per the data model).
 const isResubmissionEntry = (e) =>
   Array.isArray(e?.previousIdNos) && e.previousIdNos.length > 0;
 
-// SLF operational classifier — mirrors the frontend classifySlfStatus so the
-// server and client never disagree. A facility is non-operational only when its
-// statusOfSLF explicitly contains "non" (e.g. "Non-Operational"). Empty/unknown
-// status is NOT treated as non-operational (never block on missing data).
 const isSlfNonOperational = (statusOfSLF) => /non/i.test(String(statusOfSLF || ""));
 
-// #3: two-tier submission priority (lower = higher). 0 = unacknowledged (any
-// submission or resubmission not yet acknowledged), 1 = acknowledged. Shared by
-// the non-paginated list so every consumer orders submissions the same way the
-// server-paginated Submissions tab does.
 const submissionRank = (e) => (String(e?.status || "") === "acknowledged" ? 1 : 0);
 const resubmissionFirst = (a, b) => {
   const ra = submissionRank(a);
   const rb = submissionRank(b);
   if (ra !== rb) return ra - rb;
-  // Within a tier, latest relevant date first: resubmittedAt (updatedAt) for
-  // resubmissions, submittedAt (createdAt) otherwise. Missing/invalid dates fall
-  // back safely to 0 (treated as oldest) so they never jump the order or throw.
   const dateOf = (e) => {
     const raw = isResubmissionEntry(e) ? (e.updatedAt || e.createdAt) : (e.createdAt || e.updatedAt);
     const t = new Date(raw || 0).getTime();
@@ -268,8 +290,6 @@ async function resolveSlfRecordIds(slfName, { requireBaselineData = false, slfGe
 
   const orClauses = [];
   variants.forEach((name) => {
-    // Prefix match so a paren-suffixed canonical name (e.g. "… (BESLF) (Private)")
-    // is still caught by its paren-stripped variant.
     const rx = new RegExp(`^${escapeRegExp(name)}`, "i");
     orClauses.push({ slfName: rx });
     orClauses.push({ lguCompanyName: rx });
@@ -3854,6 +3874,7 @@ router.patch("/:id/portal-cell-assignments", async (req, res) => {
     });
     entry.markModified("trucks");
     await entry.save();
+    await refreshFacilityCellOccupancy(req, entry.slfGenerator);
 
     try {
       await Transaction.create({
@@ -3882,6 +3903,7 @@ router.patch("/:id/portal-cell-assignments", async (req, res) => {
     });
 
     refreshAdmin(req, "submissions");
+    refreshPortal(req, submittedBy, "submissions");
     res.json({ message: "Cell placement saved", data: entry });
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });
@@ -4109,6 +4131,7 @@ router.post("/portal-cell-assignments/bulk", async (req, res) => {
     // endpoint, so downstream metrics/utilization recompute consistently.
     let appliedRows = 0;
     const touchedDocs = [];
+    const touchedFacilityIds = new Set();
     for (const { doc, list } of pendingByDoc.values()) {
       list.forEach(({ truckIndex, vehicleIndex, cellIndex, cellName, cellType }) => {
         const truck = doc.trucks[truckIndex];
@@ -4139,6 +4162,10 @@ router.post("/portal-cell-assignments/bulk", async (req, res) => {
       doc.markModified("trucks");
       await doc.save();
       touchedDocs.push(doc);
+      if (doc.slfGenerator) touchedFacilityIds.add(String(doc.slfGenerator));
+    }
+    for (const facilityId of touchedFacilityIds) {
+      await refreshFacilityCellOccupancy(req, facilityId);
     }
 
     // Audit: one per-submission transaction + one batch record carrying the
@@ -4175,6 +4202,7 @@ router.post("/portal-cell-assignments/bulk", async (req, res) => {
     });
 
     refreshAdmin(req, "submissions");
+    refreshPortal(req, submittedBy, "submissions");
     res.json({ message: `Applied ${appliedRows} placement(s).`, applied: appliedRows, summary, rows: results, batchId: batchId ? String(batchId) : undefined });
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });

@@ -325,6 +325,9 @@ body:has([data-theme="dark"]) .swal2-validation-message {
   max-width: 100%;
 }
 
+/* SweetAlert2 dialogs launched while an AntD Modal is open must sit on top. */
+.swal-over-modal { z-index: 9999 !important; }
+
 /* ── Desktop+ (≥ 1600px) ── */
 @media (min-width: 1600px) {
   .admin-content {
