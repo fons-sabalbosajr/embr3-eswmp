@@ -437,6 +437,8 @@ const BASELINE_PROJECTION = {
   baselineUpdateRequested: 1,
 };
 
+const PORTAL_BASELINE_SELECT = { ...BASELINE_PROJECTION, "trucks.actualVolume": 1 };
+
 function hasTruckVolume(entry) {
   return (entry?.trucks || []).some((truck) => Number(truck?.actualVolume || 0) > 0);
 }
@@ -1592,11 +1594,22 @@ router.get("/baseline/:slfName", async (req, res) => {
       { lguCompanyName: slfName },
     ];
 
-    let candidates = await DataSLF.find({
-      $and: [{ $or: nameOrFilters }, baselineDataMatch],
-    })
+    let candidates = slfObjectId
+      ? await DataSLF.find({
+        $and: [{ slfGenerator: slfObjectId }, baselineDataMatch],
+      })
+        .setOptions({ includeHiddenYears: true })
+        .select(PORTAL_BASELINE_SELECT)
+        .sort({ createdAt: -1 })
+        .limit(50)
+        .lean()
+      : await DataSLF.find({
+        $and: [{ $or: nameOrFilters }, baselineDataMatch],
+      })
       .setOptions({ includeHiddenYears: true })
+      .select(PORTAL_BASELINE_SELECT)
       .sort({ createdAt: -1 })
+      .limit(50)
       .lean();
 
     // Prefer records that match by facility id (most reliable link after a rename).
@@ -1611,10 +1624,12 @@ router.get("/baseline/:slfName", async (req, res) => {
     }
     let latest = chooseBaselineRecord(matchedCandidates);
 
-    if (!latest) {
+    if (!latest && !slfObjectId) {
       candidates = await DataSLF.find(baselineDataMatch)
         .setOptions({ includeHiddenYears: true })
+        .select(PORTAL_BASELINE_SELECT)
         .sort({ createdAt: -1 })
+        .limit(500)
         .lean();
       matchedCandidates = candidates.filter((item) => {
         if (slfObjectId && String(item.slfGenerator || "") === String(slfObjectId))
@@ -5787,11 +5802,16 @@ router.get("/waste-received-summary/:slfName", async (req, res) => {
         ]).filter(Boolean);
     const nameRegexes = [...new Set(identityNames)].map((name) => new RegExp(`^${escapeRegExp(name)}$`, "i"));
 
+    const useFacilityIdMatch = Boolean(slfId && facilityIds.length);
     const match = {
-      $or: [
-        ...nameRegexes.map((regex) => ({ slfName: regex })),
-        ...(facilityIds.length ? [{ slfGenerator: { $in: facilityIds } }] : []),
-      ],
+      ...(useFacilityIdMatch
+        ? { slfGenerator: { $in: facilityIds } }
+        : {
+            $or: [
+              ...nameRegexes.map((regex) => ({ slfName: regex })),
+              ...(facilityIds.length ? [{ slfGenerator: { $in: facilityIds } }] : []),
+            ],
+          }),
       deletedAt: null,
       // Waste Received counts only VALID submitted data: exclude rejected and
       // (still-invalid) reverted / revert-requested records. A resubmission updates
@@ -5802,7 +5822,7 @@ router.get("/waste-received-summary/:slfName", async (req, res) => {
       // dashboard shows only dummy submissions, and vice-versa.
       isDummy: facilityIsDummy ? true : { $ne: true },
     };
-    if (match.$or.length === 0) {
+    if (!useFacilityIdMatch && match.$or.length === 0) {
       match.slfName = { $regex: new RegExp(`^${escapeRegExp(slfName)}`, "i") };
       delete match.$or;
     }
@@ -5813,7 +5833,7 @@ router.get("/waste-received-summary/:slfName", async (req, res) => {
 
     const records = await DataSLF.find(match).select(
       "companyType companyRegion companyProvince companyMunicipality lguCompanyName trucks dateOfDisposal accreditedHaulers baselineUnit totalVolumeAccepted totalVolumeAcceptedUnit activeCellEntries activeCellResidualVolume activeCellResidualUnit activeCellInertVolume activeCellInertUnit activeCellHazardousVolume activeCellHazardousUnit closedCellEntries closedCellResidualVolume closedCellResidualUnit closedCellInertVolume closedCellInertUnit closedCellHazardousVolume closedCellHazardousUnit"
-    ).lean();
+    ).maxTimeMS(20000).lean();
 
     const summary = { lguR3: [], lguOutside: [], privateIndustry: [] };
     const baselineClientMap = new Map();
