@@ -109,6 +109,7 @@ export default function AccountSettings({ isDark }) {
   const [accessModal, setAccessModal] = useState(null);
   const [permEdits, setPermEdits] = useState({});
   const [savingPerms, setSavingPerms] = useState(false);
+  const [busyUserAction, setBusyUserAction] = useState(null);
 
   const currentUser = secureStorage.getJSON("user");
   const isDeveloper = isDeveloperUser(currentUser);
@@ -167,6 +168,7 @@ export default function AccountSettings({ isDark }) {
   };
 
   const handleApprove = async (userId) => {
+    setBusyUserAction(`approve:${userId}`);
     try {
       await api.patch(`/users/${userId}/approve`);
       setUsers((prev) =>
@@ -175,6 +177,8 @@ export default function AccountSettings({ isDark }) {
       Swal.fire({ icon: "success", title: "Account Approved", text: "The user has been notified via email.", timer: 2000, showConfirmButton: false });
     } catch {
       Swal.fire("Error", "Could not approve user", "error");
+    } finally {
+      setBusyUserAction(null);
     }
   };
 
@@ -190,6 +194,7 @@ export default function AccountSettings({ isDark }) {
       cancelButtonText: "Cancel",
     });
     if (!isConfirmed) return;
+    setBusyUserAction(`reject:${userId}`);
     try {
       await api.patch(`/users/${userId}/reject`, { reason: reason || "" });
       setUsers((prev) =>
@@ -198,6 +203,8 @@ export default function AccountSettings({ isDark }) {
       Swal.fire({ icon: "success", title: "Account Rejected", text: "The user has been notified via email.", timer: 2000, showConfirmButton: false });
     } catch {
       Swal.fire("Error", "Could not reject user", "error");
+    } finally {
+      setBusyUserAction(null);
     }
   };
 
@@ -329,12 +336,15 @@ export default function AccountSettings({ isDark }) {
       key: "approval",
       render: (_, r) => {
         if (r.role === "developer") return <Tag icon={<CheckCircleOutlined />} color="purple">Developer</Tag>;
+        const approving = busyUserAction === `approve:${r._id}`;
+        const rejecting = busyUserAction === `reject:${r._id}`;
+        const busy = approving || rejecting;
         if (r.isApproved) return (
           <Space size={4}>
             <Tag icon={<CheckCircleOutlined />} color="green">Approved</Tag>
             {isDeveloper && (
               <Tooltip title="Revoke / Reject">
-                <Button size="small" danger type="text" icon={<CloseCircleOutlined />} onClick={() => handleReject(r._id)} />
+                <Button size="small" danger type="text" icon={<CloseCircleOutlined />} loading={rejecting} disabled={busy} onClick={() => handleReject(r._id)} />
               </Tooltip>
             )}
           </Space>
@@ -345,10 +355,10 @@ export default function AccountSettings({ isDark }) {
             {isDeveloper && (
               <>
                 <Tooltip title="Approve Account">
-                  <Button type="primary" size="small" icon={<CheckCircleOutlined />} onClick={() => handleApprove(r._id)} style={{ fontSize: 11 }}>Approve</Button>
+                  <Button type="primary" size="small" icon={<CheckCircleOutlined />} loading={approving} disabled={busy} onClick={() => handleApprove(r._id)} style={{ fontSize: 11 }}>Approve</Button>
                 </Tooltip>
                 <Tooltip title="Reject">
-                  <Button size="small" danger icon={<CloseCircleOutlined />} onClick={() => handleReject(r._id)} />
+                  <Button size="small" danger icon={<CloseCircleOutlined />} loading={rejecting} disabled={busy} onClick={() => handleReject(r._id)} />
                 </Tooltip>
               </>
             )}

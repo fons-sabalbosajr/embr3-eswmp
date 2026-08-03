@@ -73,8 +73,8 @@ router.get("/status", authMiddleware, developerOnly, async (_req, res) => {
 router.post("/pin", authMiddleware, developerOnly, async (req, res) => {
   try {
     const { pin, currentPassword } = req.body || {};
-    if (!/^\d{4,8}$/.test(String(pin || ""))) {
-      return res.status(400).json({ message: "PIN must be 4 to 8 digits." });
+    if (!/^\d{6}$/.test(String(pin || ""))) {
+      return res.status(400).json({ message: "PIN must be exactly 6 digits." });
     }
     const dev = await User.findById(req.user.id);
     if (!dev || dev.role !== "developer" || !dev.isApproved) {

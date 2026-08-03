@@ -226,9 +226,19 @@ function ensureSummaryTileStyles() {
       border-radius: 12px;
       overflow: hidden;
       position: relative;
+      min-height: 132px;
       animation: summaryTileIn 0.45s cubic-bezier(0.22, 1, 0.36, 1) both;
       transition: transform 0.25s ease, box-shadow 0.25s ease;
       will-change: transform;
+    }
+    .summary-tile .ant-card-head {
+      min-height: 42px;
+      padding: 0 16px;
+    }
+    .summary-tile .ant-card-body {
+      min-height: 88px;
+      display: flex;
+      align-items: center;
     }
     .summary-tile:hover {
       transform: translateY(-4px);
@@ -410,13 +420,10 @@ export default function SubmissionSummary({ isDark }) {
     await fetchWithCache(
       SUMMARY_CACHE_KEY,
       async () => {
-        const [tilesRes, rowsRes] = await Promise.all([
-          api.get("/data-slf/summary-tiles"),
-          api.get("/data-slf/summary-by-slf"),
-        ]);
+        const summaryRes = await api.get("/data-slf/summary-dashboard");
         return {
-          tiles: tilesRes.data || null,
-          rows: Array.isArray(rowsRes.data) ? rowsRes.data : [],
+          tiles: summaryRes.data?.tiles || null,
+          rows: Array.isArray(summaryRes.data?.rows) ? summaryRes.data.rows : [],
         };
       },
       {

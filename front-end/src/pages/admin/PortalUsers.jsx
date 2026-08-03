@@ -975,7 +975,7 @@ export default function PortalUsers({ isDark, canEdit = true, canDelete = true, 
             </Badge>
           )}
         </Space>
-        <Button icon={<ReloadOutlined />} onClick={fetchData}>
+        <Button icon={<ReloadOutlined />} onClick={() => fetchData()} loading={loading} disabled={loading}>
           Refresh
         </Button>
       </div>

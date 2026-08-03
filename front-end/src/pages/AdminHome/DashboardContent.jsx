@@ -93,6 +93,7 @@ import {
 } from "@ant-design/icons";
 import VeraCard from "../admin/VeraCard";
 import PreventionMeasuresPanel from "../admin/PreventionMeasuresPanel";
+import { resolveMediaOpenUrl } from "../admin/slf-monitoring/helpers.jsx";
 import api from "../../api";
 import GaugeMeter, { computeGaugePercent } from "../../components/GaugeMeter";
 import {
@@ -195,6 +196,7 @@ export default function DashboardContent({ user, isDark, setActiveMenu, onOpenSu
   const [slfDashModal, setSlfDashModal] = useState(null); // { type: dashboard metric key }
   const [preventionPanel, setPreventionPanel] = useState(null); // { facilityId, slfName } | null
   const [slfCellDrill, setSlfCellDrill] = useState(null); // selected SLF in Cell Infrastructure modal → per-cell cards
+  const [cellProvinceExpanded, setCellProvinceExpanded] = useState(null);
 
   const mapPts = useMemo(
     () =>
@@ -623,19 +625,19 @@ export default function DashboardContent({ user, isDark, setActiveMenu, onOpenSu
   const DASH_CACHE_KEY = "dashboard-stats-cache";
 
   const applyStats = useCallback((slfData, swmData, mrfData, lguMrfData, trapData, equipData, slfFacData, openDumpData, rcaData, pdsData, techAssistData, tsData, lguDivData) => {
-    setStats((prev) => { const n = slfData; return JSON.stringify(prev) === JSON.stringify(n) ? prev : n; });
-    setSwmStats((prev) => { const n = swmData; return JSON.stringify(prev) === JSON.stringify(n) ? prev : n; });
-    setMrfStats((prev) => { const n = mrfData; return JSON.stringify(prev) === JSON.stringify(n) ? prev : n; });
-    setLguMrfStats((prev) => { const n = lguMrfData; return JSON.stringify(prev) === JSON.stringify(n) ? prev : n; });
-    setTrapStats((prev) => { const n = trapData; return JSON.stringify(prev) === JSON.stringify(n) ? prev : n; });
-    setEquipStats((prev) => { const n = equipData; return JSON.stringify(prev) === JSON.stringify(n) ? prev : n; });
-    setSlfFacStats((prev) => { const n = slfFacData; return JSON.stringify(prev) === JSON.stringify(n) ? prev : n; });
-    setOpenDumpStats((prev) => { const n = openDumpData; return JSON.stringify(prev) === JSON.stringify(n) ? prev : n; });
-    setRcaStats((prev) => { const n = rcaData; return JSON.stringify(prev) === JSON.stringify(n) ? prev : n; });
-    setPdsStats((prev) => { const n = pdsData; return JSON.stringify(prev) === JSON.stringify(n) ? prev : n; });
-    setTechAssistStats((prev) => { const n = techAssistData; return JSON.stringify(prev) === JSON.stringify(n) ? prev : n; });
-    setTsStats((prev) => { const n = tsData; return JSON.stringify(prev) === JSON.stringify(n) ? prev : n; });
-    setLguDivStats((prev) => { const n = lguDivData; return JSON.stringify(prev) === JSON.stringify(n) ? prev : n; });
+    setStats(slfData);
+    setSwmStats(swmData);
+    setMrfStats(mrfData);
+    setLguMrfStats(lguMrfData);
+    setTrapStats(trapData);
+    setEquipStats(equipData);
+    setSlfFacStats(slfFacData);
+    setOpenDumpStats(openDumpData);
+    setRcaStats(rcaData);
+    setPdsStats(pdsData);
+    setTechAssistStats(techAssistData);
+    setTsStats(tsData);
+    setLguDivStats(lguDivData);
   }, []);
 
   const fetchStats = useCallback(async () => {
@@ -647,24 +649,32 @@ export default function DashboardContent({ user, isDark, setActiveMenu, onOpenSu
         applyStats(cached.stats, cached.swmStats, cached.mrfStats, cached.lguMrfStats, cached.trapStats, cached.equipStats, cached.slfFacStats, cached.openDumpStats, cached.rcaStats, cached.pdsStats, cached.techAssistStats, cached.tsStats, cached.lguDivStats);
         setLoading(false);
       }
-      // Always fetch fresh data from all endpoints in parallel
-      const [slfRes, swmRes, mrfRes, lguMrfRes, trapRes, equipRes, slfFacRes, histRes, openDumpRes, rcaRes, pdsRes, techAssistRes, tsRes, lguDivRes] =
-        await Promise.all([
-          api.get("/data-slf/stats"),
-          api.get("/ten-year-swm/stats").catch(() => ({ data: null })),
-          api.get("/funded-mrf/stats").catch(() => ({ data: null })),
-          api.get("/lgu-initiated-mrf/stats").catch(() => ({ data: null })),
-          api.get("/trash-traps/stats").catch(() => ({ data: null })),
-          api.get("/swm-equipment/stats").catch(() => ({ data: null })),
-          api.get("/slf-facilities/stats").catch(() => ({ data: null })),
-          api.get("/data-history/summary").catch(() => ({ data: null })),
-          api.get("/open-dumpsites/stats").catch(() => ({ data: null })),
-          api.get("/residual-containment/stats").catch(() => ({ data: null })),
-          api.get("/project-desc-scoping/stats").catch(() => ({ data: null })),
-          api.get("/technical-assistance/stats").catch(() => ({ data: null })),
-          api.get("/transfer-stations/stats").catch(() => ({ data: null })),
-          api.get("/lgu-assist-diversion/stats").catch(() => ({ data: null })),
-        ]);
+      // Start every endpoint in parallel, but unblock the primary dashboard as
+      // soon as the SLF stats are ready. The slower maintenance modules continue
+      // hydrating their tabs in the background.
+      const slfReq = api.get("/data-slf/stats").catch(() => ({ data: null }));
+      const slfFacReq = api.get("/slf-facilities/stats").catch(() => ({ data: null }));
+      const restReqs = Promise.all([
+        api.get("/ten-year-swm/stats").catch(() => ({ data: null })),
+        api.get("/funded-mrf/stats").catch(() => ({ data: null })),
+        api.get("/lgu-initiated-mrf/stats").catch(() => ({ data: null })),
+        api.get("/trash-traps/stats").catch(() => ({ data: null })),
+        api.get("/swm-equipment/stats").catch(() => ({ data: null })),
+        api.get("/data-history/summary").catch(() => ({ data: null })),
+        api.get("/open-dumpsites/stats").catch(() => ({ data: null })),
+        api.get("/residual-containment/stats").catch(() => ({ data: null })),
+        api.get("/project-desc-scoping/stats").catch(() => ({ data: null })),
+        api.get("/technical-assistance/stats").catch(() => ({ data: null })),
+        api.get("/transfer-stations/stats").catch(() => ({ data: null })),
+        api.get("/lgu-assist-diversion/stats").catch(() => ({ data: null })),
+      ]);
+
+      const [slfRes, slfFacRes] = await Promise.all([slfReq, slfFacReq]);
+      setStats(slfRes.data);
+      setSlfFacStats(slfFacRes.data);
+      setLoading(false);
+
+      const [swmRes, mrfRes, lguMrfRes, trapRes, equipRes, histRes, openDumpRes, rcaRes, pdsRes, techAssistRes, tsRes, lguDivRes] = await restReqs;
       applyStats(slfRes.data, swmRes.data, mrfRes.data, lguMrfRes.data, trapRes.data, equipRes.data, slfFacRes.data, openDumpRes.data, rcaRes.data, pdsRes.data, techAssistRes.data, tsRes.data, lguDivRes.data);
       if (histRes.data) setHistoryData(histRes.data);
       secureStorage.setJSON(cacheKey, {
@@ -711,7 +721,7 @@ export default function DashboardContent({ user, isDark, setActiveMenu, onOpenSu
     const socket = getSocket();
     if (!socket) return undefined;
     const REFRESH_TARGETS = new Set([
-      "submissions", "baselines", "slf-clients", "region3-lgu", "hauler-requests",
+      "submissions", "baselines", "facility", "slf-facilities", "slf-clients", "region3-lgu", "hauler-requests",
     ]);
     const onRefresh = ({ target } = {}) => {
       if (!target || REFRESH_TARGETS.has(target)) fetchStats();
@@ -6077,6 +6087,9 @@ export default function DashboardContent({ user, isDark, setActiveMenu, onOpenSu
       },
       { total: 0, operational: 0, nonOperational: 0, unmonitored: 0 },
     );
+    const preventiveFileFacilityCount = slfMgmt.filter(
+      (row) => (row.preventiveMeasureFiles?.length || 0) > 0,
+    ).length;
 
     const SLF_CATEGORY_DESC = {
       "Cat 1": "< 15 TPD",
@@ -6689,7 +6702,7 @@ export default function DashboardContent({ user, isDark, setActiveMenu, onOpenSu
                         styles={{ body: { padding: "12px 16px" } }}
                       >
                         <Row gutter={[10, 10]}>
-                          <Col xs={24} sm={12}>
+                          <Col xs={24} md={12} lg={6}>
                             <div style={{ padding: "8px 10px", background: isDark ? "rgba(250,140,22,0.12)" : "#fff7e6", borderRadius: 8, border: "1px solid #ffd591" }}>
                               <Text strong style={{ fontSize: 12, display: "block", marginBottom: 6 }}>
                                 <WarningOutlined style={{ color: "#fa8c16", marginRight: 4 }} /> Trash Slide Prevention
@@ -6704,9 +6717,14 @@ export default function DashboardContent({ user, isDark, setActiveMenu, onOpenSu
                                   <Text strong style={{ fontSize: 20, color: "#d46b08" }}>{(slfOps.trashSlideFacilities || 0).toLocaleString()}</Text>
                                 </Col>
                               </Row>
+                              <div style={{ marginTop: 6 }}>
+                                <Tag color="orange" style={{ margin: 0 }}>
+                                  {(slfOps.totalTrashSlideDocuments || 0).toLocaleString()} document{(slfOps.totalTrashSlideDocuments || 0) === 1 ? "" : "s"}
+                                </Tag>
+                              </div>
                             </div>
                           </Col>
-                          <Col xs={24} sm={12}>
+                          <Col xs={24} md={12} lg={6}>
                             <div style={{ padding: "8px 10px", background: isDark ? "rgba(255,77,79,0.12)" : "#fff1f0", borderRadius: 8, border: "1px solid #ffa39e" }}>
                               <Text strong style={{ fontSize: 12, display: "block", marginBottom: 6 }}>
                                 <FireOutlined style={{ color: "#ff4d4f", marginRight: 4 }} /> Fire Prevention
@@ -6721,11 +6739,33 @@ export default function DashboardContent({ user, isDark, setActiveMenu, onOpenSu
                                   <Text strong style={{ fontSize: 20, color: "#cf1322" }}>{(slfOps.firePreventionFacilities || 0).toLocaleString()}</Text>
                                 </Col>
                               </Row>
+                              <div style={{ marginTop: 6 }}>
+                                <Tag color="red" style={{ margin: 0 }}>
+                                  {(slfOps.totalFirePrevDocuments || 0).toLocaleString()} document{(slfOps.totalFirePrevDocuments || 0) === 1 ? "" : "s"}
+                                </Tag>
+                              </div>
+                            </div>
+                          </Col>
+                          <Col xs={24} md={12} lg={6}>
+                            <div style={{ padding: "8px 10px", background: isDark ? "rgba(19,194,194,0.12)" : "#e6fffb", borderRadius: 8, border: "1px solid #87e8de", height: "100%" }}>
+                              <Text strong style={{ fontSize: 12, display: "block", marginBottom: 6 }}>
+                                <FileTextOutlined style={{ color: "#13c2c2", marginRight: 4 }} /> Preventive Measure Files
+                              </Text>
+                              <Row gutter={8}>
+                                <Col span={12}>
+                                  <Text type="secondary" style={{ fontSize: 10, display: "block" }}>Total Files</Text>
+                                  <Text strong style={{ fontSize: 20, color: "#08979c" }}>{(slfOps.totalPreventiveMeasureFiles || 0).toLocaleString()}</Text>
+                                </Col>
+                                <Col span={12}>
+                                  <Text type="secondary" style={{ fontSize: 10, display: "block" }}>SLFs</Text>
+                                  <Text strong style={{ fontSize: 20, color: "#13c2c2" }}>{preventiveFileFacilityCount.toLocaleString()}</Text>
+                                </Col>
+                              </Row>
                             </div>
                           </Col>
                         </Row>
                         <div style={{ marginTop: 10, textAlign: "center" }}>
-                          <Text type="secondary" style={{ fontSize: 11 }}>Click to view Trash Slide &amp; Fire Prevention details per SLF</Text>
+                          <Text type="secondary" style={{ fontSize: 11 }}>Click to view Trash Slide, Fire Prevention, and Preventive Measure files per SLF</Text>
                         </div>
                       </Card>
                     </Col>
@@ -6762,6 +6802,7 @@ export default function DashboardContent({ user, isDark, setActiveMenu, onOpenSu
                       gas: "#52c41a",
                       trashSlide: "#fa8c16",
                       firePrev: "#ff4d4f",
+                      preventive: "#fa541c",
                     };
                     const metricValue = (type, row) => {
                       if (type === "total") return 1;
@@ -6774,6 +6815,7 @@ export default function DashboardContent({ user, isDark, setActiveMenu, onOpenSu
                       if (type === "gas") return row.numberOfGasVents || 0;
                       if (type === "trashSlide") return row.trashSlideMeasures?.length || 0;
                       if (type === "firePrev") return row.firePrevMeasures?.length || 0;
+                      if (type === "preventive") return row.preventiveMeasureFiles?.length || 0;
                       return 0;
                     };
 
@@ -6848,6 +6890,31 @@ export default function DashboardContent({ user, isDark, setActiveMenu, onOpenSu
                           { title: "Documents & Summary", dataIndex: "attachments", width: 180, align: "center", render: (v, row) => (v || []).length ? <Button size="small" icon={<RobotOutlined />} onClick={() => setPreventionPanel({ facilityId: row.facilityId, slfName: row.slfName })}>{v.length} doc{v.length === 1 ? "" : "s"} · Summarize</Button> : <Text type="secondary" style={{ fontSize: 11 }}>—</Text> },
                         ],
                       },
+                      // Flat "Preventive Measures" files uploaded in the SLF Data
+                      // Table's Preventive Measures tab (stored as preventiveMeasureFiles).
+                      // These previously had no dashboard tab, so "Other SLF" files never
+                      // surfaced here and could not be opened.
+                      preventive: {
+                        title: <Space><SafetyCertificateOutlined style={{ color: "#fa541c" }} /> Preventive Measures — All Files</Space>,
+                        metricLabel: "files",
+                        filter: (r) => (r.preventiveMeasureFiles?.length || 0) > 0,
+                        flatten: (r) => (r.preventiveMeasureFiles || []).map((url, i) => {
+                          const clean = String(url || "").split("?")[0].split("#")[0];
+                          let fileName = "document";
+                          try { fileName = decodeURIComponent(clean.split("/").pop() || "") || "document"; } catch { /* keep default */ }
+                          return { key: `${r.lgu}_${i}`, facilityId: r._id, slfName: r.lgu, province: r.province, url, fileName };
+                        }),
+                        columns: [
+                          slfCol, provCol,
+                          { title: "File", dataIndex: "fileName", ellipsis: { showTitle: false }, render: (v) => <Tooltip title={v}><Space size={6}><FileTextOutlined style={{ color: "#fa541c" }} /><Text style={{ fontSize: 12 }}>{v}</Text></Space></Tooltip> },
+                          { title: "Action", dataIndex: "url", width: 150, align: "center", render: (url) => url ? (
+                            <Space size={4}>
+                              <Tooltip title="View / preview"><Button size="small" icon={<EyeOutlined />} onClick={() => window.open(resolveMediaOpenUrl(url), "_blank", "noopener,noreferrer")} /></Tooltip>
+                              <Tooltip title="Open in new tab"><Button size="small" icon={<LinkOutlined />} onClick={() => window.open(resolveMediaOpenUrl(url), "_blank", "noopener,noreferrer")}>Open</Button></Tooltip>
+                            </Space>
+                          ) : <Text type="secondary" style={{ fontSize: 11 }}>—</Text> },
+                        ],
+                      },
                       cells: {
                         title: <Space><ContainerOutlined style={{ color: "#13c2c2" }} /> Cell Infrastructure — All Facilities</Space>,
                         metricLabel: "cells",
@@ -6891,7 +6958,11 @@ export default function DashboardContent({ user, isDark, setActiveMenu, onOpenSu
                               </div>
                             );
                           }},
-                          { title: "Status", dataIndex: "status", width: 150, render: (v) => v && v !== "—" ? <Tag color={v === "Operational" ? "green" : v === "Closed" ? "default" : "orange"}>{v}</Tag> : "—" },
+                          { title: "Status", dataIndex: "status", width: 150, render: (v) => {
+                            if (!v || v === "—") return "—";
+                            const cfgStatus = getCellStatusConfig(v);
+                            return <Tag color={cfgStatus.tag}>{cfgStatus.label || v}</Tag>;
+                          } },
                         ],
                       },
                       capacity: {
@@ -6969,6 +7040,7 @@ export default function DashboardContent({ user, isDark, setActiveMenu, onOpenSu
                           tabs: [
                             { key: "trashSlide", label: <span><WarningOutlined /> Trash Slide</span> },
                             { key: "firePrev", label: <span><FireOutlined /> Fire Prevention</span> },
+                            { key: "preventive", label: <span><FileTextOutlined /> Preventive Measures</span> },
                           ],
                         },
                       }[slfDashModal.combo];
@@ -7168,6 +7240,7 @@ export default function DashboardContent({ user, isDark, setActiveMenu, onOpenSu
                     })();
                     // Selected SLF for the Cell Infrastructure per-cell drill-down.
                     const drillFacility = slfCellDrill ? cellGaugeFacilities.find((f) => f.key === slfCellDrill) : null;
+                    const provinceActiveKeys = cellProvinceExpanded ?? (cellGaugeByProvince.length <= 1 ? cellGaugeByProvince.map(([province]) => province) : []);
 
                     // Per-facility volume-capacity utilization = waste received / volume capacity.
                     // volumeCapacity and actualResidualWasteReceived each carry their
@@ -7293,42 +7366,50 @@ export default function DashboardContent({ user, isDark, setActiveMenu, onOpenSu
                                            body scrolls), grouped by province with a header per
                                            group so operators can scan each province at a glance. */
                                         <>
-                                          {cellGaugeByProvince.map(([province, items]) => (
-                                            <div key={province} style={{ marginBottom: 18 }}>
-                                              <div style={{ display: "flex", alignItems: "center", gap: 8, margin: "2px 0 10px", paddingBottom: 6, borderBottom: `1px solid ${isDark ? "rgba(255,255,255,0.1)" : "rgba(0,0,0,0.08)"}` }}>
-                                                <EnvironmentOutlined style={{ color: "#1677ff" }} />
-                                                <Text strong style={{ fontSize: 13 }}>{province}</Text>
-                                                <Tag color="blue" style={{ marginLeft: 2 }}>{items.length} SLF{items.length === 1 ? "" : "s"}</Tag>
-                                              </div>
-                                              <Row gutter={[12, 12]}>
-                                                {items.map(({ f, idx }) => {
-                                                  // Each SLF keeps its own palette colour below the
-                                                  // warning band; the gauge then escalates to
-                                                  // warning/alarming/critical as it fills.
-                                                  const slfColor = getSlfColor(f.key, idx);
-                                                  const gaugeColor = getSlfCapacityColor(f.percent, {
-                                                    baseColor: slfColor,
-                                                    exists: f.numberOfCell > 0,
-                                                  });
-                                                  return (
-                                                    <Col xs={12} sm={8} md={6} key={f.key}>
-                                                      <Card size="small" hoverable onClick={() => setSlfCellDrill(f.key)} style={{ borderRadius: 8, textAlign: "center", height: "100%", cursor: "pointer", borderTop: `3px solid ${slfColor}` }}>
-                                                        {/* #1: thinner arc, coloured by SLF palette + capacity band */}
-                                                        <GaugeMeter percent={f.percent} size={112} thickness={6} color={gaugeColor} />
-                                                        <div style={{ fontSize: 12, fontWeight: 600, marginTop: 4 }}>{f.name}</div>
-                                                        <Text type="secondary" style={{ fontSize: 11 }}>{f.province}</Text>
-                                                        <div style={{ marginTop: 4 }}>
-                                                          <Tag color="cyan">{f.numberOfCell} cells</Tag>
-                                                          <Tag color="green">{f.opCells} op</Tag>
-                                                        </div>
-                                                        <div style={{ marginTop: 2 }}><Text type="secondary" style={{ fontSize: 10 }}>Click to view cells</Text></div>
-                                                      </Card>
-                                                    </Col>
-                                                  );
-                                                })}
-                                              </Row>
-                                            </div>
-                                          ))}
+                                          <Collapse
+                                            size="small"
+                                            activeKey={provinceActiveKeys}
+                                            onChange={(keys) => setCellProvinceExpanded(Array.isArray(keys) ? keys : [keys].filter(Boolean))}
+                                            items={cellGaugeByProvince.map(([province, items]) => ({
+                                              key: province,
+                                              label: (
+                                                <Space size={8} wrap>
+                                                  <EnvironmentOutlined style={{ color: "#1677ff" }} />
+                                                  <Text strong style={{ fontSize: 13 }}>{province}</Text>
+                                                  <Tag color="blue" style={{ marginLeft: 2 }}>{items.length} SLF{items.length === 1 ? "" : "s"}</Tag>
+                                                </Space>
+                                              ),
+                                              children: (
+                                                <Row gutter={[12, 12]}>
+                                                  {items.map(({ f, idx }) => {
+                                                    // Each SLF keeps its own palette colour below the
+                                                    // warning band; the gauge then escalates to
+                                                    // warning/alarming/critical as it fills.
+                                                    const slfColor = getSlfColor(f.key, idx);
+                                                    const gaugeColor = getSlfCapacityColor(f.percent, {
+                                                      baseColor: slfColor,
+                                                      exists: f.numberOfCell > 0,
+                                                    });
+                                                    return (
+                                                      <Col xs={12} sm={8} md={6} key={f.key}>
+                                                        <Card size="small" hoverable onClick={() => setSlfCellDrill(f.key)} style={{ borderRadius: 8, textAlign: "center", height: "100%", cursor: "pointer", borderTop: `3px solid ${slfColor}` }}>
+                                                          {/* #1: thinner arc, coloured by SLF palette + capacity band */}
+                                                          <GaugeMeter percent={f.percent} size={112} thickness={6} color={gaugeColor} />
+                                                          <div style={{ fontSize: 12, fontWeight: 600, marginTop: 4 }}>{f.name}</div>
+                                                          <Text type="secondary" style={{ fontSize: 11 }}>{f.province}</Text>
+                                                          <div style={{ marginTop: 4 }}>
+                                                            <Tag color="cyan">{f.numberOfCell} cells</Tag>
+                                                            <Tag color="green">{f.opCells} op</Tag>
+                                                          </div>
+                                                          <div style={{ marginTop: 2 }}><Text type="secondary" style={{ fontSize: 10 }}>Click to view cells</Text></div>
+                                                        </Card>
+                                                      </Col>
+                                                    );
+                                                  })}
+                                                </Row>
+                                              ),
+                                            }))}
+                                          />
                                         </>
                                       )}
                                     </Card>
@@ -8237,6 +8318,44 @@ export default function DashboardContent({ user, isDark, setActiveMenu, onOpenSu
 
   return (
     <>
+      <style>{`
+        .ant-modal-body,
+        .ant-modal-body .ant-table-body,
+        .ant-modal-body .ant-table-content,
+        .ant-modal-body [style*="overflow"] {
+          scrollbar-width: thin;
+          scrollbar-color: ${isDark ? "#4b5563 #151b23" : "#b8c2cc transparent"};
+          scroll-behavior: smooth;
+        }
+        .ant-modal-body::-webkit-scrollbar,
+        .ant-modal-body .ant-table-body::-webkit-scrollbar,
+        .ant-modal-body .ant-table-content::-webkit-scrollbar,
+        .ant-modal-body [style*="overflow"]::-webkit-scrollbar {
+          width: 8px;
+          height: 8px;
+        }
+        .ant-modal-body::-webkit-scrollbar-track,
+        .ant-modal-body .ant-table-body::-webkit-scrollbar-track,
+        .ant-modal-body .ant-table-content::-webkit-scrollbar-track,
+        .ant-modal-body [style*="overflow"]::-webkit-scrollbar-track {
+          background: ${isDark ? "#151b23" : "transparent"};
+          border-radius: 999px;
+        }
+        .ant-modal-body::-webkit-scrollbar-thumb,
+        .ant-modal-body .ant-table-body::-webkit-scrollbar-thumb,
+        .ant-modal-body .ant-table-content::-webkit-scrollbar-thumb,
+        .ant-modal-body [style*="overflow"]::-webkit-scrollbar-thumb {
+          background: ${isDark ? "#4b5563" : "#b8c2cc"};
+          border-radius: 999px;
+          border: 2px solid ${isDark ? "#151b23" : "transparent"};
+        }
+        .ant-modal-body::-webkit-scrollbar-thumb:hover,
+        .ant-modal-body .ant-table-body::-webkit-scrollbar-thumb:hover,
+        .ant-modal-body .ant-table-content::-webkit-scrollbar-thumb:hover,
+        .ant-modal-body [style*="overflow"]::-webkit-scrollbar-thumb:hover {
+          background: ${isDark ? "#64748b" : "#8fa1b3"};
+        }
+      `}</style>
       {" "}
       {/* Trash Trap View Modal */}
       <Modal

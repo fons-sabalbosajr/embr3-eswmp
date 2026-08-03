@@ -42,6 +42,31 @@ const fmtTime = (d) => {
 };
 const trim = (v, n = 120) => String(v || "").replace(/[\x00-\x1F\x7F]/g, " ").trim().slice(0, n); // eslint-disable-line no-control-regex
 
+function redactActor(value) {
+  const text = trim(value, 80);
+  if (!text) return "Unknown operator";
+  const email = text.match(/^([^@\s]+)@([^@\s]+)$/);
+  if (!email) return text.length > 6 ? `${text.slice(0, 2)}***${text.slice(-2)}` : "Operator";
+  const [, local, domain] = email;
+  const domainParts = domain.split(".");
+  const org = domainParts.length > 1 ? domainParts.slice(-2).join(".") : domain;
+  return `${local.slice(0, 2)}***@${org}`;
+}
+
+function canViewPermission(userDoc, key) {
+  if (!key) return false;
+  if (userDoc?.role === "developer") return true;
+  const p = userDoc?.permissions?.[key];
+  return p === true || (p && typeof p === "object" && p.view === true);
+}
+
+async function resolveAccess(req) {
+  if (req?.user?.role === "developer") return { developer: true, can: () => true };
+  const user = await User.findById(req?.user?.id).select("role permissions").lean().catch(() => null);
+  const can = (...keys) => keys.some((key) => canViewPermission(user, key));
+  return { developer: false, can };
+}
+
 // Compute the full curated metrics object. Every sub-section is guarded so a
 // single failing query never breaks the whole response.
 async function computeInsights(req) {
@@ -50,17 +75,63 @@ async function computeInsights(req) {
 
   const settings = await AppSettings.findOne().lean().catch(() => null);
   const a = settings?.automationAgent || {};
+  const access = await resolveAccess(req);
+  const allowed = {
+    dashboard: access.can("dashboard", "portalData", "submissions"),
+    submissions: access.can("submissions", "portalData"),
+    portalUsers: access.can("portalUsers"),
+    settings: access.can("developerSettings", "accountSettings"),
+    notifications: access.can("notificationManagement", "dashboard"),
+    logs: access.can("developerSettings", "dashboard"),
+  };
 
   // ── Submission statistics (counts by normalized status) ──
-  const submissions = { total: 0, pending: 0, acknowledged: 0, reverted: 0, rejected: 0, last24h: 0 };
-  try {
-    const rows = await DataSLF.aggregate([{ $group: { _id: "$status", count: { $sum: 1 } } }]);
+  const submissions = { authorized: allowed.submissions, total: 0, pending: 0, acknowledged: 0, reverted: 0, rejected: 0, last24h: 0 };
+  const dashboard = { authorized: allowed.dashboard, wasteReceivedM3: 0, wasteReceivedTons: 0, baselineReports: 0, activeBaselineUpdates: 0, lguSubmissions: 0, privateSubmissions: 0 };
+  let operatorPerformance = [];
+  if (allowed.submissions) try {
+    const rows = await DataSLF.aggregate([{ $match: { deletedAt: null, isDummy: { $ne: true } } }, { $group: { _id: "$status", count: { $sum: 1 } } }]);
     for (const r of rows) {
       submissions.total += r.count;
       const n = normalizeStatus(r._id);
       submissions[n] = (submissions[n] || 0) + r.count;
     }
-    submissions.last24h = await DataSLF.countDocuments({ createdAt: { $gte: dayAgo } });
+    submissions.last24h = await DataSLF.countDocuments({ deletedAt: null, isDummy: { $ne: true }, createdAt: { $gte: dayAgo } });
+  } catch { /* leave zeros */ }
+
+  if (allowed.dashboard) try {
+    const [totals = {}, baselineRows, byCompany, operators] = await Promise.all([
+      DataSLF.aggregate([
+        { $match: { deletedAt: null, isDummy: { $ne: true } } },
+        { $group: { _id: null, wasteReceivedM3: { $sum: { $ifNull: ["$totalVolumeM3", 0] } }, wasteReceivedTons: { $sum: { $ifNull: ["$totalVolumeTons", 0] } } } },
+      ]).then((rows) => rows[0] || {}),
+      DataSLF.aggregate([
+        { $match: { deletedAt: null, isDummy: { $ne: true }, $or: [{ totalVolumeAccepted: { $ne: null } }, { activeCellEntries: { $ne: [] } }, { closedCellEntries: { $ne: [] } }] } },
+        { $group: { _id: null, count: { $sum: 1 }, updateRequests: { $sum: { $cond: [{ $eq: ["$baselineUpdateRequested", true] }, 1, 0] } } } },
+      ]).then((rows) => rows[0] || {}),
+      DataSLF.aggregate([{ $match: { deletedAt: null, isDummy: { $ne: true } } }, { $group: { _id: "$companyType", count: { $sum: 1 } } }]),
+      DataSLF.aggregate([
+        { $match: { deletedAt: null, isDummy: { $ne: true }, submittedBy: { $nin: [null, ""] } } },
+        { $group: { _id: "$submittedBy", submissions: { $sum: 1 }, acknowledged: { $sum: { $cond: [{ $eq: ["$status", "acknowledged"] }, 1, 0] } }, pending: { $sum: { $cond: [{ $eq: ["$status", "pending"] }, 1, 0] } }, lastSubmissionAt: { $max: "$createdAt" } } },
+        { $sort: { submissions: -1, lastSubmissionAt: -1 } },
+        { $limit: 5 },
+      ]),
+    ]);
+    dashboard.wasteReceivedM3 = totals.wasteReceivedM3 || 0;
+    dashboard.wasteReceivedTons = totals.wasteReceivedTons || 0;
+    dashboard.baselineReports = baselineRows.count || 0;
+    dashboard.activeBaselineUpdates = baselineRows.updateRequests || 0;
+    byCompany.forEach((row) => {
+      if (row._id === "LGU") dashboard.lguSubmissions = row.count;
+      if (row._id === "Private") dashboard.privateSubmissions = row.count;
+    });
+    operatorPerformance = operators.map((row) => ({
+      operator: redactActor(row._id),
+      submissions: row.submissions,
+      acknowledged: row.acknowledged,
+      pending: row.pending,
+      lastSubmissionAt: fmtTime(row.lastSubmissionAt),
+    }));
   } catch { /* leave zeros */ }
 
   // ── SLF facilities ──
@@ -90,18 +161,30 @@ async function computeInsights(req) {
   } catch { /* leave zeros */ }
 
   // ── Users ──
-  const users = { portalTotal: 0, portalPending: 0, portalApproved: 0, portalRejected: 0, adminTotal: 0 };
-  try {
-    users.portalTotal = await UserPortal.countDocuments({});
-    users.portalPending = await UserPortal.countDocuments({ status: "pending" });
-    users.portalApproved = await UserPortal.countDocuments({ status: "approved" });
-    users.portalRejected = await UserPortal.countDocuments({ status: "rejected" });
-    users.adminTotal = await User.countDocuments({});
+  const users = { authorized: allowed.portalUsers, portalTotal: 0, portalPending: 0, portalApproved: 0, portalRejected: 0, adminTotal: 0, blocked: 0, selfServiceEnabled: 0, activeLast24h: 0 };
+  if (allowed.portalUsers) try {
+    const [portalStatus, adminTotal, blocked, selfServiceEnabled, activeLast24h] = await Promise.all([
+      UserPortal.aggregate([{ $match: { isDummy: { $ne: true } } }, { $group: { _id: "$status", count: { $sum: 1 } } }]),
+      User.countDocuments({}),
+      UserPortal.countDocuments({ isDummy: { $ne: true }, blocked: true }),
+      UserPortal.countDocuments({ isDummy: { $ne: true }, allowCredentialSelfService: true }),
+      UserPortal.countDocuments({ isDummy: { $ne: true }, lastActiveAt: { $gte: dayAgo } }),
+    ]);
+    users.adminTotal = adminTotal;
+    users.blocked = blocked;
+    users.selfServiceEnabled = selfServiceEnabled;
+    users.activeLast24h = activeLast24h;
+    portalStatus.forEach((row) => {
+      users.portalTotal += row.count;
+      if (row._id === "pending") users.portalPending = row.count;
+      if (row._id === "approved") users.portalApproved = row.count;
+      if (row._id === "rejected") users.portalRejected = row.count;
+    });
   } catch { /* leave zeros */ }
 
   // ── Notifications ──
-  const notifications = { total: 0, unread: 0, adminUnread: 0, last24h: 0 };
-  try {
+  const notifications = { authorized: allowed.notifications, total: 0, unread: 0, adminUnread: 0, last24h: 0 };
+  if (allowed.notifications) try {
     notifications.total = await Notification.countDocuments({});
     notifications.unread = await Notification.countDocuments({ read: false });
     notifications.adminUnread = await Notification.countDocuments({ recipient: "admin", read: false });
@@ -130,23 +213,58 @@ async function computeInsights(req) {
   } catch { /* leave null */ }
 
   // ── Activity + logs ──
-  const activity = { logs24h: 0, errors24h: 0, warns24h: 0 };
-  try {
+  const activity = { authorized: allowed.logs, logs24h: 0, errors24h: 0, warns24h: 0, failedLogins24h: 0, successfulLogins24h: 0 };
+  if (allowed.logs) try {
     activity.logs24h = await AppLog.countDocuments({ createdAt: { $gte: dayAgo } });
     activity.errors24h = await AppLog.countDocuments({ level: "error", createdAt: { $gte: dayAgo } });
     activity.warns24h = await AppLog.countDocuments({ level: "warn", createdAt: { $gte: dayAgo } });
+    activity.failedLogins24h = await AppLog.countDocuments({ createdAt: { $gte: dayAgo }, action: /login/i, level: { $in: ["warn", "error"] } });
+    activity.successfulLogins24h = await AppLog.countDocuments({ createdAt: { $gte: dayAgo }, action: /login/i, level: "info" });
   } catch { /* leave zeros */ }
 
   let latestEvent = null;
-  try {
+  if (allowed.logs) try {
     const ev = await AppLog.findOne().sort({ createdAt: -1 }).select("action message level createdAt").lean();
     if (ev) latestEvent = { action: ev.action, message: trim(ev.message, 140), level: ev.level, at: fmtTime(ev.createdAt) };
   } catch { /* leave null */ }
 
   let recentErrors = [];
-  try {
+  if (allowed.logs) try {
     const errs = await AppLog.find({ level: "error" }).sort({ createdAt: -1 }).limit(5).select("action message createdAt").lean();
     recentErrors = errs.map((e) => ({ action: e.action, message: trim(e.message, 120), at: fmtTime(e.createdAt) }));
+  } catch { /* leave empty */ }
+
+  let recentPortalLogins = [];
+  if (allowed.portalUsers && allowed.logs) try {
+    const loginLogs = await AppLog.find({ action: /^portal\.login/ })
+      .sort({ createdAt: -1 })
+      .limit(10)
+      .select("level action user ip meta createdAt")
+      .lean();
+    const emails = [...new Set(loginLogs.map((log) => String(log.user || "").trim().toLowerCase()).filter(Boolean))];
+    const usersByEmail = new Map();
+    if (emails.length) {
+      const portalUsers = await UserPortal.find({ email: { $in: emails } })
+        .select("firstName lastName username email status")
+        .lean();
+      portalUsers.forEach((u) => usersByEmail.set(String(u.email || "").toLowerCase(), u));
+    }
+    recentPortalLogins = loginLogs.map((log) => {
+      const email = String(log.user || "").trim().toLowerCase();
+      const u = usersByEmail.get(email);
+      const name = u ? ([u.firstName, u.lastName].filter(Boolean).join(" ").trim() || u.username || "Portal User") : "Unknown portal user";
+      return {
+        name: trim(name, 80),
+        email: trim(email, 100),
+        role: "portal_user",
+        status: log.meta?.status || (log.level === "info" ? "success" : "failed"),
+        reason: log.meta?.reason || "",
+        accountStatus: u?.status || "unknown",
+        at: fmtTime(log.createdAt),
+        ip: trim(log.ip, 64) || "not stored",
+        device: trim(log.meta?.userAgent, 120) || "not stored",
+      };
+    });
   } catch { /* leave empty */ }
 
   // ── Service health ──
@@ -183,6 +301,8 @@ async function computeInsights(req) {
       memoryHeapTotalMB: mb(memUsage.heapTotal),
     },
     submissions,
+    dashboard,
+    operatorPerformance,
     slf,
     users: { ...users, activeSessions: socketClients },
     notifications,
@@ -191,6 +311,7 @@ async function computeInsights(req) {
     activity,
     latestEvent,
     recentErrors,
+    recentPortalLogins,
     services: {
       database: READY_STATES[dbState] || "unknown",
       databaseOk: dbState === 1,
@@ -199,6 +320,18 @@ async function computeInsights(req) {
       socketClients,
       apiUp: true, // this handler responded, so the API layer is up
     },
+    settings: {
+      authorized: allowed.settings,
+      portalEnabled: allowed.settings ? settings?.portalEnabled !== false : null,
+      portalMaintenanceMode: allowed.settings ? !!settings?.portalMaintenanceMode : null,
+      globalMaintenanceMode: allowed.settings ? !!settings?.maintenanceMode : null,
+      driveMaintenanceMode: allowed.settings ? !!settings?.driveMaintenanceMode : null,
+      emailMaintenanceMode: allowed.settings ? !!settings?.emailMaintenanceMode : null,
+      emailNotificationsEnabled: allowed.settings ? settings?.emailNotificationsEnabled !== false : null,
+      smtpConfigured: allowed.settings ? !!settings?.smtpConfigured : null,
+      hideHistoricalRecordsEnabled: allowed.settings ? !!settings?.hideHistoricalRecordsEnabled : null,
+    },
+    permissions: allowed,
   };
 }
 
@@ -207,7 +340,7 @@ async function computeInsights(req) {
 // "developer" = full technical detail.
 function insightsToPromptBlock(ins, view = "developer") {
   if (!ins) return "";
-  const { submissions: s, slf, users: u, notifications: n, queue: q, activity: ac, services: sv, system: sy, runtime: rt, syncJob, latestEvent, recentErrors } = ins;
+  const { submissions: s, dashboard: d, operatorPerformance: ops, slf, users: u, notifications: n, queue: q, activity: ac, services: sv, system: sy, runtime: rt, syncJob, latestEvent, recentErrors, recentPortalLogins, settings: st } = ins;
   const dev = view === "developer";
   const lines = [];
   lines.push(
@@ -218,12 +351,31 @@ function insightsToPromptBlock(ins, view = "developer") {
   lines.push(`- System: uptime ${sy.uptime}, environment ${sy.nodeEnv}, VERA ${sy.veraEnabled ? "enabled" : "disabled"}, AI provider ${sy.aiProvider} (${sy.aiOperational ? "operational" : "not configured"}).`);
   lines.push(`- Services: Database ${sv.database} (${sv.databaseOk ? "healthy" : "unhealthy"}), Email ${sv.email}, AI agent ${sv.aiAgent}, Socket Service ${sv.socketClients ?? "n/a"} active connection${sv.socketClients === 1 ? "" : "s"}, API ${sv.apiUp ? "up" : "down"}.`);
   lines.push(`- SLF facilities: ${slf.total} total — ${slf.operational} operational, ${slf.nonOperational} non-operational${slf.notMonitored ? `, ${slf.notMonitored} not yet monitored` : ""}.`);
-  lines.push(`- Submissions: total ${s.total} — pending ${s.pending}, acknowledged ${s.acknowledged}, reverted ${s.reverted}, rejected ${s.rejected}; last 24h ${s.last24h}.`);
-  lines.push(`- Users / sessions: portal ${u.portalTotal} (approved ${u.portalApproved}, pending ${u.portalPending}${dev ? `, rejected ${u.portalRejected}` : ""}); admin ${u.adminTotal}; active sessions ${u.activeSessions ?? "n/a"}.`);
-  lines.push(`- Notifications: ${n.total} total, ${n.unread} unread (${n.adminUnread} admin), ${n.last24h} in last 24h.`);
+  lines.push(s.authorized ? `- Submissions: total ${s.total} — pending ${s.pending}, acknowledged ${s.acknowledged}, reverted ${s.reverted}, rejected ${s.rejected}; last 24h ${s.last24h}.` : "- Submissions: not included because this admin lacks submission/portal-data view permission.");
+  lines.push(d.authorized ? `- Dashboard statistics: Waste Received total ${Math.round(d.wasteReceivedM3 * 100) / 100} m³ / ${Math.round(d.wasteReceivedTons * 100) / 100} tons; baseline reports ${d.baselineReports}; pending baseline updates ${d.activeBaselineUpdates}; LGU submissions ${d.lguSubmissions}; private submissions ${d.privateSubmissions}.` : "- Dashboard statistics: not included because this admin lacks dashboard/portal-data view permission.");
+  lines.push(u.authorized ? `- Users / sessions: portal ${u.portalTotal} (approved ${u.portalApproved}, pending ${u.portalPending}${dev ? `, rejected ${u.portalRejected}` : ""}, blocked ${u.blocked}, active last 24h ${u.activeLast24h}); admin ${u.adminTotal}; active sessions ${u.activeSessions ?? "n/a"}.` : "- Portal users: not included because this admin lacks portal-user view permission.");
+  lines.push(n.authorized ? `- Notifications: ${n.total} total, ${n.unread} unread (${n.adminUnread} admin), ${n.last24h} in last 24h.` : "- Notifications: not included because this admin lacks notification/dashboard view permission.");
   lines.push(`- Queue & jobs: submission queue — draft ${q.draft}, scheduled ${q.scheduled}, submitted ${q.submitted}, failed ${q.failed}, cancelled ${q.cancelled}. ${syncJob ? `Latest sync job (${syncJob.scope}): ${syncJob.status}${syncJob.percent ? ` ${syncJob.percent}%` : ""}${syncJob.error ? ` — error: ${syncJob.error}` : ""}.` : "No sync jobs recorded."}`);
-  lines.push(`- Activity (24h): ${ac.logs24h} log events, ${ac.errors24h} errors, ${ac.warns24h} warnings.`);
+  lines.push(ac.authorized ? `- Activity (24h): ${ac.logs24h} log events, ${ac.errors24h} errors, ${ac.warns24h} warnings, ${ac.successfulLogins24h} successful login log(s), ${ac.failedLogins24h} failed login log(s).` : "- Activity/logs: not included because this admin lacks log/dashboard view permission.");
   if (latestEvent) lines.push(`- Latest system event: ${latestEvent.message || latestEvent.action} (${latestEvent.level}) at ${latestEvent.at}.`);
+  if (Array.isArray(ops) && ops.length) {
+    lines.push("- Operator performance (top by submissions):");
+    ops.forEach((op) => lines.push(`    • ${op.operator}: ${op.submissions} submission(s), ${op.acknowledged} acknowledged, ${op.pending} pending, last ${op.lastSubmissionAt || "n/a"}.`));
+  }
+  if (Array.isArray(recentPortalLogins)) {
+    if (recentPortalLogins.length) {
+      lines.push("- Latest SLF Portal login records (authorized admin data):");
+      recentPortalLogins.forEach((log) => {
+        const outcome = log.status === "success" ? "success" : `${log.status}${log.reason ? ` (${log.reason})` : ""}`;
+        lines.push(`    • ${log.name} | ${log.email || "email not stored"} | role ${log.role} | ${log.at || "time not stored"} | ${outcome} | account ${log.accountStatus} | IP ${log.ip} | device ${log.device}`);
+      });
+    } else if (u.authorized && ac.authorized) {
+      lines.push("- Latest SLF Portal login records: no login records were found in the current app logs.");
+    }
+  }
+  if (st?.authorized) {
+    lines.push(`- Safe settings status: portal ${st.portalEnabled ? "enabled" : "disabled"}, portal maintenance ${st.portalMaintenanceMode ? "on" : "off"}, global maintenance ${st.globalMaintenanceMode ? "on" : "off"}, Drive maintenance ${st.driveMaintenanceMode ? "on" : "off"}, email maintenance ${st.emailMaintenanceMode ? "on" : "off"}, notifications ${st.emailNotificationsEnabled ? "enabled" : "disabled"}, SMTP ${st.smtpConfigured ? "configured" : "not configured"}, historical-record hiding ${st.hideHistoricalRecordsEnabled ? "enabled" : "disabled"}.`);
+  }
 
   if (dev) {
     lines.push(`- Runtime diagnostics: Node ${sy.nodeVersion} on ${sy.platform}, pid ${sy.pid}; memory RSS ${rt.memoryRssMB}MB, heap ${rt.memoryHeapUsedMB}/${rt.memoryHeapTotalMB}MB.`);
@@ -239,7 +391,7 @@ function insightsToPromptBlock(ins, view = "developer") {
 
 // Heuristic: does this message ask for live operational data?
 const INSIGHT_INTENT_RE =
-  /\b(status|health|uptime|statistic|stats|metric|metrics|how many|count|counts|database|db|mongo|service|services|socket|operational|submission|submissions|pending|acknowledg|error|errors|log|logs|users?|session|sessions|activit|diagnostic|diagnostics|running|online|connected|notification|notifications|queue|job|jobs|memory|facilit|slf|report|analytics|api|health\s*check)\b/i;
+  /\b(status|health|uptime|statistic|stats|metric|metrics|how many|count|counts|database|db|mongo|service|services|socket|operational|submission|submissions|pending|approved|rejected|acknowledg|waste received|baseline|breakdown|calendar|operator|performance|approval|account|profile|roles?|permissions?|login|failed logins?|audit|portal usage|email status|configuration|settings|error|errors|log|logs|users?|session|sessions|activit|diagnostic|diagnostics|running|online|connected|notification|notifications|queue|job|jobs|memory|facilit|slf|report|analytics|api|health\s*check)\b/i;
 
 function wantsInsights(message) {
   return INSIGHT_INTENT_RE.test(String(message || ""));

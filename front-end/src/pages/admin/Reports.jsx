@@ -498,7 +498,7 @@ export default function Reports({ canEdit = true, canDelete = true }) {
           </Col>
           <Col>
             <Space>
-              <Button icon={<ReloadOutlined />} onClick={fetchTransactions}>
+              <Button icon={<ReloadOutlined />} onClick={() => fetchTransactions(true)} loading={loading} disabled={loading}>
                 Refresh
               </Button>
               <Button

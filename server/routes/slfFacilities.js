@@ -355,6 +355,8 @@ router.patch("/portal/:id/facility-details", async (req, res) => {
       { returnDocument: "after", select: "leachatePondDetails gasVentDetails trashSlideMeasures firePrevMeasures hasWastewaterTreatmentFacility wastewaterTreatmentFacilityType wastewaterTreatmentFacilityRemarks" }
     );
     if (!facility) return res.status(404).json({ message: "Facility not found" });
+    refreshAdmin(req, "facility");
+    await refreshAssignedPortalUsers(req, existing._id, "facility");
     res.json(facility);
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });
@@ -482,6 +484,57 @@ router.get("/stats", async (req, res) => {
               totalEstimatedVolume: { $sum: { $ifNull: ["$estimatedVolumeWaste", 0] } },
               totalTrashSlideMeasures: { $sum: { $size: { $ifNull: ["$trashSlideMeasures", []] } } },
               totalFirePrevMeasures: { $sum: { $size: { $ifNull: ["$firePrevMeasures", []] } } },
+              totalTrashSlideDocuments: {
+                $sum: {
+                  $reduce: {
+                    input: { $ifNull: ["$trashSlideMeasures", []] },
+                    initialValue: 0,
+                    in: { $add: ["$$value", { $size: { $ifNull: ["$$this.attachments", []] } }] },
+                  },
+                },
+              },
+              totalFirePrevDocuments: {
+                $sum: {
+                  $reduce: {
+                    input: { $ifNull: ["$firePrevMeasures", []] },
+                    initialValue: 0,
+                    in: { $add: ["$$value", { $size: { $ifNull: ["$$this.attachments", []] } }] },
+                  },
+                },
+              },
+              totalPreventiveMeasureFiles: { $sum: { $size: { $ifNull: ["$preventiveMeasureFiles", []] } } },
+              preventionDocumentFacilities: {
+                $sum: {
+                  $cond: [
+                    {
+                      $gt: [
+                        {
+                          $add: [
+                            {
+                              $reduce: {
+                                input: { $ifNull: ["$trashSlideMeasures", []] },
+                                initialValue: 0,
+                                in: { $add: ["$$value", { $size: { $ifNull: ["$$this.attachments", []] } }] },
+                              },
+                            },
+                            {
+                              $reduce: {
+                                input: { $ifNull: ["$firePrevMeasures", []] },
+                                initialValue: 0,
+                                in: { $add: ["$$value", { $size: { $ifNull: ["$$this.attachments", []] } }] },
+                              },
+                            },
+                            { $size: { $ifNull: ["$preventiveMeasureFiles", []] } },
+                          ],
+                        },
+                        0,
+                      ],
+                    },
+                    1,
+                    0,
+                  ],
+                },
+              },
               trashSlideFacilities: { $sum: { $cond: [{ $gt: [{ $size: { $ifNull: ["$trashSlideMeasures", []] } }, 0] }, 1, 0] } },
               firePreventionFacilities: { $sum: { $cond: [{ $gt: [{ $size: { $ifNull: ["$firePrevMeasures", []] } }, 0] }, 1, 0] } },
             },
@@ -497,7 +550,7 @@ router.get("/stats", async (req, res) => {
           noOfLeachatePond: 1, numberOfGasVents: 1,
           numberOfCell: 1, cellCapacities: 1, cellCapacityUnits: 1, cellStatuses: 1, cellTypes: 1, cellFillValues: 1, cellFillUnits: 1,
           leachatePondDetails: 1, gasVentDetails: 1,
-          trashSlideMeasures: 1, firePrevMeasures: 1,
+          trashSlideMeasures: 1, firePrevMeasures: 1, preventiveMeasureFiles: 1,
           noOfLGUServed: 1, actualResidualWasteReceived: 1, ownership: 1, category: 1, volumeCapacity: 1, volumeCapacityUnit: 1, receivingVolumeCapacity: 1, receivingVolumeCapacityUnit: 1,
         }).sort({ province: 1, lgu: 1 }),
       ]);
@@ -518,7 +571,13 @@ router.get("/stats", async (req, res) => {
       byCategory: catMap,
       byOwnership: ownMap,
       byManilaBayArea: mbaMap,
-      operationStats: operationStats[0] || {},
+      operationStats: {
+        ...(operationStats[0] || {}),
+        totalPreventionDocuments:
+          (operationStats[0]?.totalTrashSlideDocuments || 0) +
+          (operationStats[0]?.totalFirePrevDocuments || 0) +
+          (operationStats[0]?.totalPreventiveMeasureFiles || 0),
+      },
       mapData,
       managementData,
     });

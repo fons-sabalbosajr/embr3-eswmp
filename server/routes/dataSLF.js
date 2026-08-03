@@ -2399,14 +2399,13 @@ router.get("/stats", async (req, res) => {
     // Exclude dummy/test entries from all production dashboard tiles. Developers
     // may opt in via ?includeDummy=true (requires a developer token).
     const match = devWantsDummy(req) ? { deletedAt: null } : { deletedAt: null, ...NON_DUMMY_CLAUSE };
-    const [submissions, generators, totalTrucks, byStatus, byCompanyType, wasteByType, monthlyData] =
+    const [submissions, generators, totalTrucks, byStatus, byCompanyType, wasteByType, monthlyData, recentSubmissions] =
       await Promise.all([
         DataSLF.countDocuments(match),
         SLFGenerator.countDocuments(),
         DataSLF.aggregate([
           { $match: match },
-          { $project: { count: { $size: { $ifNull: ["$trucks", []] } } } },
-          { $group: { _id: null, total: { $sum: "$count" } } },
+          { $group: { _id: null, total: { $sum: { $ifNull: ["$truckCount", 0] } } } },
         ]),
         DataSLF.aggregate([{ $match: match }, { $group: { _id: "$status", count: { $sum: 1 } } }]),
         DataSLF.aggregate([{ $match: match }, { $group: { _id: "$companyType", count: { $sum: 1 } } }]),
@@ -2495,6 +2494,11 @@ router.get("/stats", async (req, res) => {
           { $sort: { "_id.year": 1, "_id.month": 1 } },
           { $limit: 12 },
         ]),
+        DataSLF.find(match)
+          .sort({ createdAt: -1 })
+          .limit(5)
+          .select("idNo lguCompanyName companyType status createdAt truckCount")
+          .lean(),
       ]);
 
     const statusMap = {};
@@ -2502,11 +2506,6 @@ router.get("/stats", async (req, res) => {
 
     const companyMap = {};
     byCompanyType.forEach((c) => (companyMap[c._id] = c.count));
-
-    const recentSubmissions = await DataSLF.find(match)
-      .sort({ createdAt: -1 })
-      .limit(5)
-      .select("idNo lguCompanyName companyType status createdAt trucks");
 
     res.json({
       submissions,
@@ -2758,6 +2757,371 @@ router.get("/summary-by-slf", async (req, res) => {
       .sort((a, b) => String(a.slfName).localeCompare(String(b.slfName)));
 
     res.json(payload);
+  } catch (error) {
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+});
+
+// Combined dashboard payload for the Submission Summary page. This keeps the
+// legacy /summary-tiles and /summary-by-slf endpoints intact, but lets the main
+// dashboard fetch both from one aggregate scan instead of two duplicate requests.
+router.get("/summary-dashboard", async (req, res) => {
+  try {
+    const [facet = {}] = await DataSLF.aggregate([
+      { $match: { deletedAt: null, isDummy: { $ne: true } } },
+      {
+        $facet: {
+          tiles: [
+            {
+              $project: {
+                status: 1,
+                companyType: 1,
+                truckCount: { $ifNull: ["$truckCount", { $size: { $ifNull: ["$trucks", []] } }] },
+                totalM3: { $ifNull: ["$totalVolumeM3", 0] },
+                totalTons: { $ifNull: ["$totalVolumeTons", 0] },
+                residualM3: { $ifNull: ["$residualVolumeM3", 0] },
+                residualTons: { $ifNull: ["$residualVolumeTons", 0] },
+                hazardousM3: { $ifNull: ["$hazardousVolumeM3", 0] },
+                hazardousTons: { $ifNull: ["$hazardousVolumeTons", 0] },
+              },
+            },
+            {
+              $group: {
+                _id: null,
+                submissions: { $sum: 1 },
+                trucks: { $sum: "$truckCount" },
+                totalM3: { $sum: "$totalM3" },
+                totalTons: { $sum: "$totalTons" },
+                residualM3: { $sum: "$residualM3" },
+                residualTons: { $sum: "$residualTons" },
+                hazardousM3: { $sum: "$hazardousM3" },
+                hazardousTons: { $sum: "$hazardousTons" },
+                pending: { $sum: { $cond: [{ $eq: ["$status", "pending"] }, 1, 0] } },
+                acknowledged: { $sum: { $cond: [{ $eq: ["$status", "acknowledged"] }, 1, 0] } },
+                rejected: { $sum: { $cond: [{ $eq: ["$status", "rejected"] }, 1, 0] } },
+                reverted: { $sum: { $cond: [{ $eq: ["$status", "reverted"] }, 1, 0] } },
+                revert_requested: { $sum: { $cond: [{ $eq: ["$status", "revert_requested"] }, 1, 0] } },
+                LGU: { $sum: { $cond: [{ $eq: ["$companyType", "LGU"] }, 1, 0] } },
+                Private: { $sum: { $cond: [{ $eq: ["$companyType", "Private"] }, 1, 0] } },
+              },
+            },
+          ],
+          rows: [
+            {
+              $project: {
+                slfGenerator: 1,
+                slfName: 1,
+                lguCompanyName: 1,
+                submittedBy: 1,
+                status: 1,
+                dateOfDisposal: 1,
+                baselineUnit: 1,
+                truckCount: { $ifNull: ["$truckCount", { $size: { $ifNull: ["$trucks", []] } }] },
+                totalM3: { $ifNull: ["$totalVolumeM3", 0] },
+                totalTons: { $ifNull: ["$totalVolumeTons", 0] },
+                residualM3: { $ifNull: ["$residualVolumeM3", 0] },
+                residualTons: { $ifNull: ["$residualVolumeTons", 0] },
+                hazardousM3: { $ifNull: ["$hazardousVolumeM3", 0] },
+                hazardousTons: { $ifNull: ["$hazardousVolumeTons", 0] },
+              },
+            },
+            {
+              $addFields: {
+                _groupKey: {
+                  $cond: [
+                    { $ifNull: ["$slfGenerator", false] },
+                    { $concat: ["id:", { $toString: "$slfGenerator" }] },
+                    { $concat: ["name:", { $ifNull: ["$slfName", "Unassigned SLF"] }] },
+                  ],
+                },
+              },
+            },
+            {
+              $group: {
+                _id: "$_groupKey",
+                slfName: { $first: { $ifNull: ["$slfName", "Unassigned SLF"] } },
+                slfGenerator: { $first: "$slfGenerator" },
+                baselineUnit: { $first: "$baselineUnit" },
+                submissions: { $sum: 1 },
+                trucks: { $sum: "$truckCount" },
+                generators: { $addToSet: "$lguCompanyName" },
+                submitters: { $addToSet: "$submittedBy" },
+                totalM3: { $sum: "$totalM3" },
+                totalTons: { $sum: "$totalTons" },
+                residualM3: { $sum: "$residualM3" },
+                residualTons: { $sum: "$residualTons" },
+                hazardousM3: { $sum: "$hazardousM3" },
+                hazardousTons: { $sum: "$hazardousTons" },
+                pending: { $sum: { $cond: [{ $eq: ["$status", "pending"] }, 1, 0] } },
+                acknowledged: { $sum: { $cond: [{ $eq: ["$status", "acknowledged"] }, 1, 0] } },
+                rejected: { $sum: { $cond: [{ $eq: ["$status", "rejected"] }, 1, 0] } },
+                reverted: { $sum: { $cond: [{ $eq: ["$status", "reverted"] }, 1, 0] } },
+                revert_requested: { $sum: { $cond: [{ $eq: ["$status", "revert_requested"] }, 1, 0] } },
+                lastDisposalDate: { $max: "$dateOfDisposal" },
+              },
+            },
+          ],
+        },
+      },
+    ]).allowDiskUse(true);
+
+    const tileRow = facet.tiles?.[0] || {};
+    const rawRows = facet.rows || [];
+    const facilityIds = [
+      ...new Set(rawRows.map((row) => row.slfGenerator).filter(Boolean).map(String)),
+    ].filter((id) => mongoose.Types.ObjectId.isValid(id));
+    const facilityDocs = facilityIds.length
+      ? await SlfFacility.find({ _id: { $in: facilityIds } }).select("_id lgu ownership").lean()
+      : [];
+    const facilityNameById = new Map(
+      facilityDocs.map((facility) => [
+        String(facility._id),
+        `${facility.lgu || ""}${facility.ownership ? ` (${facility.ownership})` : ""}`.trim(),
+      ]),
+    );
+
+    const rows = rawRows
+      .map((row) => {
+        const genId = row.slfGenerator ? String(row.slfGenerator) : "";
+        const canonicalName = (genId && facilityNameById.get(genId)) || row.slfName || "Unassigned SLF";
+        return {
+          key: row._id,
+          slfName: canonicalName,
+          slfGenerator: row.slfGenerator || null,
+          baselineUnit: row.baselineUnit || "m³",
+          submissions: row.submissions,
+          trucks: row.trucks,
+          generatorCount: (row.generators || []).filter(Boolean).length,
+          submitterCount: (row.submitters || []).filter(Boolean).length,
+          statuses: {
+            pending: row.pending,
+            acknowledged: row.acknowledged,
+            rejected: row.rejected,
+            reverted: row.reverted,
+            revert_requested: row.revert_requested,
+          },
+          totalM3: row.totalM3,
+          totalTons: row.totalTons,
+          residualM3: row.residualM3,
+          residualTons: row.residualTons,
+          hazardousM3: row.hazardousM3,
+          hazardousTons: row.hazardousTons,
+          lastDisposalDate: row.lastDisposalDate,
+        };
+      })
+      .sort((a, b) => String(a.slfName).localeCompare(String(b.slfName)));
+
+    res.json({
+      tiles: {
+        submissions: tileRow.submissions || 0,
+        trucks: tileRow.trucks || 0,
+        totalM3: tileRow.totalM3 || 0,
+        totalTons: tileRow.totalTons || 0,
+        residualM3: tileRow.residualM3 || 0,
+        residualTons: tileRow.residualTons || 0,
+        hazardousM3: tileRow.hazardousM3 || 0,
+        hazardousTons: tileRow.hazardousTons || 0,
+        statuses: {
+          pending: tileRow.pending || 0,
+          acknowledged: tileRow.acknowledged || 0,
+          rejected: tileRow.rejected || 0,
+          reverted: tileRow.reverted || 0,
+          revert_requested: tileRow.revert_requested || 0,
+        },
+        companyTypes: { LGU: tileRow.LGU || 0, Private: tileRow.Private || 0 },
+      },
+      rows,
+    });
+  } catch (error) {
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+});
+
+// Compact analytics payload for the Admin Main Dashboard. The previous frontend
+// implementation fetched every submission plus every portal user, then grouped in
+// React for three small widgets. This endpoint returns only chart-ready aggregate
+// rows so the dashboard avoids large payloads and client-side full-table scans.
+router.get("/analytics-summary", async (req, res) => {
+  try {
+    const match = {
+      deletedAt: null,
+      isDummy: { $ne: true },
+      status: { $nin: ["rejected", "reverted", "revert_requested"] },
+    };
+
+    const [result = {}] = await DataSLF.aggregate([
+      { $match: match },
+      {
+        $facet: {
+          daily: [
+            { $match: { dateOfDisposal: { $ne: null } } },
+            {
+              $group: {
+                _id: { $dateToString: { format: "%Y-%m-%d", date: "$dateOfDisposal", timezone: "Asia/Manila" } },
+                volumeM3: { $sum: { $ifNull: ["$totalVolumeM3", 0] } },
+                submissions: { $sum: 1 },
+              },
+            },
+            { $sort: { _id: 1 } },
+            { $project: { _id: 0, key: "$_id", label: "$_id", volumeM3: 1, submissions: 1 } },
+          ],
+          weekly: [
+            { $match: { dateOfDisposal: { $ne: null } } },
+            {
+              $group: {
+                _id: { y: { $isoWeekYear: "$dateOfDisposal" }, w: { $isoWeek: "$dateOfDisposal" } },
+                volumeM3: { $sum: { $ifNull: ["$totalVolumeM3", 0] } },
+                submissions: { $sum: 1 },
+              },
+            },
+            { $sort: { "_id.y": 1, "_id.w": 1 } },
+            {
+              $project: {
+                _id: 0,
+                key: { $concat: [{ $toString: "$_id.y" }, "-W", { $toString: "$_id.w" }] },
+                label: { $concat: ["W", { $toString: "$_id.w" }, " '", { $substr: [{ $toString: "$_id.y" }, 2, 2] }] },
+                volumeM3: 1,
+                submissions: 1,
+              },
+            },
+          ],
+          monthly: [
+            { $match: { dateOfDisposal: { $ne: null } } },
+            {
+              $group: {
+                _id: { $dateToString: { format: "%Y-%m", date: "$dateOfDisposal", timezone: "Asia/Manila" } },
+                volumeM3: { $sum: { $ifNull: ["$totalVolumeM3", 0] } },
+                submissions: { $sum: 1 },
+              },
+            },
+            { $sort: { _id: 1 } },
+            { $project: { _id: 0, key: "$_id", label: "$_id", volumeM3: 1, submissions: 1 } },
+          ],
+          activeUsers: [
+            { $match: { submittedBy: { $nin: [null, ""] } } },
+            {
+              $group: {
+                _id: { $toLower: { $trim: { input: "$submittedBy" } } },
+                submissions: { $sum: 1 },
+                volumeM3: { $sum: { $ifNull: ["$totalVolumeM3", 0] } },
+                slfCounts: { $push: "$slfName" },
+              },
+            },
+            { $sort: { submissions: -1, volumeM3: -1 } },
+            { $limit: 50 },
+            {
+              $lookup: {
+                from: "user_portal",
+                localField: "_id",
+                foreignField: "email",
+                as: "user",
+                pipeline: [{ $project: { firstName: 1, lastName: 1, username: 1, companyName: 1, assignedSlfName: 1 } }],
+              },
+            },
+            { $addFields: { user: { $arrayElemAt: ["$user", 0] } } },
+            {
+              $project: {
+                _id: 0,
+                companyName: { $ifNull: ["$user.companyName", ""] },
+                organizationName: { $arrayElemAt: [{ $ifNull: ["$user.assignedSlfName", []] }, 0] },
+                userName: {
+                  $trim: { input: { $concat: [{ $ifNull: ["$user.firstName", ""] }, " ", { $ifNull: ["$user.lastName", ""] }] } },
+                },
+                fallbackName: { $ifNull: ["$user.username", "Portal User"] },
+                submissions: 1,
+                volumeM3: 1,
+                slf: { $arrayElemAt: [{ $ifNull: ["$user.assignedSlfName", []] }, 0] },
+              },
+            },
+          ],
+          volumeBySlf: [
+            {
+              $group: {
+                _id: { $ifNull: ["$slfName", "Unassigned SLF"] },
+                volumeM3: { $sum: { $ifNull: ["$totalVolumeM3", 0] } },
+                submissions: { $sum: 1 },
+              },
+            },
+            { $match: { volumeM3: { $gt: 0 } } },
+            { $sort: { volumeM3: -1, submissions: -1 } },
+            { $project: { _id: 0, name: "$_id", volumeM3: 1, submissions: 1 } },
+          ],
+        },
+      },
+    ]).allowDiskUse(true);
+
+    const labelMonth = (row) => {
+      if (!/^\d{4}-\d{2}$/.test(row.key || "")) return row;
+      const [year, month] = row.key.split("-").map(Number);
+      const label = new Date(year, month - 1, 1).toLocaleString("en-US", { month: "short", year: "2-digit" });
+      return { ...row, label };
+    };
+    const labelDay = (row) => {
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(row.key || "")) return row;
+      return { ...row, label: new Date(row.key).toLocaleString("en-US", { month: "short", day: "numeric" }) };
+    };
+
+    res.json({
+      trends: {
+        daily: (result.daily || []).map(labelDay),
+        weekly: result.weekly || [],
+        monthly: (result.monthly || []).map(labelMonth),
+      },
+      activeUsers: (result.activeUsers || []).map((user) => ({
+        name:
+          String(user.companyName || "").trim() ||
+          String(user.organizationName || "").trim() ||
+          String(user.userName || "").trim() ||
+          user.fallbackName ||
+          "Portal User",
+        submissions: user.submissions || 0,
+        volumeM3: user.volumeM3 || 0,
+        slf: user.slf || "",
+      })),
+      volumeBySlf: result.volumeBySlf || [],
+      generatedAt: new Date(),
+      unit: "m³",
+    });
+  } catch (error) {
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+});
+
+// Compact data contract for the Admin SLF Operators Disposal Submission Calendar.
+// Returns only fields used by the calendar/date modal and filter labels. Avoids
+// shipping full trucks[] or full portal-user profiles on initial dashboard load.
+router.get("/disposal-calendar", async (req, res) => {
+  try {
+    const match = {
+      deletedAt: null,
+      isDummy: { $ne: true },
+      dateOfDisposal: { $ne: null },
+      status: { $nin: ["reverted", "revert_requested"] },
+    };
+
+    const records = await DataSLF.find(match)
+      .setOptions({ includeHiddenYears: true })
+      .sort({ dateOfDisposal: -1, createdAt: -1 })
+      .select("_id idNo submissionId previousIdNos dateOfDisposal submittedBy slfName lguCompanyName status baselineUnit totalVolumeM3 totalVolumeTons truckCount companyType createdAt")
+      .lean();
+
+    const emails = [...new Set(records.map((r) => String(r.submittedBy || "").trim().toLowerCase()).filter(Boolean))];
+    const users = emails.length
+      ? await UserPortal.find({ email: { $in: emails } })
+          .select("email firstName lastName username companyName")
+          .lean()
+      : [];
+
+    const userByEmail = Object.fromEntries(users.map((user) => {
+      const email = String(user.email || "").trim().toLowerCase();
+      return [email, {
+        name: [user.firstName, user.lastName].filter(Boolean).join(" ").trim() || user.username || user.companyName || user.email,
+        email: user.email,
+        company: user.companyName || "",
+      }];
+    }));
+
+    res.json({ records, userByEmail, generatedAt: new Date() });
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });
   }

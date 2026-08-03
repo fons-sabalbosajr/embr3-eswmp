@@ -145,7 +145,7 @@ export default function HistoryPanel({
           </Space>
         }
         extra={
-          <Button size="small" icon={<ReloadOutlined />} onClick={onRefresh}>
+          <Button size="small" icon={<ReloadOutlined />} onClick={onRefresh} loading={loadingSubmissions} disabled={loadingSubmissions}>
             Refresh
           </Button>
         }

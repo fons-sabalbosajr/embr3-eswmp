@@ -445,7 +445,7 @@ export default function SupportTab({ isDark, canEdit = true, canDelete = true })
                 <Option value="resolved">Resolved</Option>
                 <Option value="closed">Closed</Option>
               </Select>
-              <Button icon={<ReloadOutlined />} onClick={() => fetchTickets(1, pagination.pageSize)}>
+              <Button icon={<ReloadOutlined />} onClick={() => fetchTickets(1, pagination.pageSize)} loading={loading} disabled={loading}>
                 Search
               </Button>
             </Space>

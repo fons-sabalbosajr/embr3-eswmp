@@ -117,6 +117,21 @@ export default function PortalLogin() {
     if (portalMaintenanceActive) reportVeraAuthIssue("maintenance");
   }, [portalMaintenanceActive]);
 
+  useEffect(() => {
+    if (!credentialModalOpen || !pendingCredentialLogin?.user) return;
+    const user = pendingCredentialLogin.user;
+    credentialForm.setFieldsValue({
+      email: user.email || "",
+      username: user.username || user.email?.split("@")?.[0] || "",
+      password: "",
+      code: "",
+    });
+  }, [credentialForm, credentialModalOpen, pendingCredentialLogin]);
+
+  useEffect(() => {
+    if (devModalOpen && devStage === "pin") devForm.resetFields(["pin"]);
+  }, [devForm, devModalOpen, devStage]);
+
   // Hard guard against duplicate auth requests: a fast double-click, an Enter-key
   // repeat, or a Strict-Mode re-invocation must never fire a second in-flight
   // login (each extra request counts against the auth rate limiter → 429).
@@ -133,12 +148,6 @@ export default function PortalLogin() {
           token: data.token,
           user: data.user,
           needsVerification: data.needsVerification,
-        });
-        credentialForm.setFieldsValue({
-          email: data.user.email || values.email,
-          username: data.user.username || data.user.email?.split("@")?.[0] || "",
-          password: "",
-          code: "",
         });
         setCredentialCodeRequested(false);
         setCredentialModalOpen(true);
@@ -186,7 +195,6 @@ export default function PortalLogin() {
   const tryDeveloperLogin = async ({ email, password }) => {
     try {
       const { data } = await api.post("/dev-portal/override", { email, password });
-      devForm.resetFields();
       setDevStageToken(data.stageToken);
       setDevStage("pin");
       setDevModalOpen(true);
@@ -352,7 +360,7 @@ export default function PortalLogin() {
               type="warning"
               showIcon
               style={{ marginBottom: 14, textAlign: "left" }}
-              message="Portal maintenance in progress"
+              title="Portal maintenance in progress"
               description={portalMaintenanceMessage}
             />
           )}
@@ -484,7 +492,7 @@ export default function PortalLogin() {
           </Space>
         }
         open={credentialModalOpen}
-        maskClosable={!pendingCredentialLogin}
+        mask={{ closable: !pendingCredentialLogin }}
         keyboard={!pendingCredentialLogin}
         onCancel={() => {
           setCredentialModalOpen(false);
@@ -521,7 +529,7 @@ export default function PortalLogin() {
           type="info"
           showIcon
           style={{ marginBottom: 14 }}
-          message="Email verification is required before saving credential changes."
+          title="Email verification is required before saving credential changes."
           description={
             pendingCredentialLogin
               ? "Your administrator enabled credential updating for this account. Please update your username and/or password before entering the portal."
@@ -593,14 +601,57 @@ export default function PortalLogin() {
           type="warning"
           showIcon
           style={{ marginBottom: 14 }}
-          message="Developer-only debug access"
+          title="Developer-only debug access"
           description="Your developer credentials were verified. Enter the Dev Portal PIN to open a selected portal user's session for debugging. Every impersonation is logged."
         />
         <Form form={devForm} layout="vertical" requiredMark={false}>
           {devStage === "pin" && (
-            <Form.Item name="pin" label="Dev Portal PIN" rules={[{ required: true, message: "Enter the PIN" }]}>
-              <Input.Password inputMode="numeric" maxLength={8} placeholder="PIN" autoComplete="off" autoFocus />
-            </Form.Item>
+            <>
+              <div
+                className="dev-pin-intro"
+                style={{
+                  marginBottom: 16,
+                  padding: "14px 16px",
+                  borderRadius: 12,
+                  background: "linear-gradient(135deg, #fff7e6 0%, #fff1f0 100%)",
+                  border: "1px solid #ffd591",
+                }}
+              >
+                <Text strong style={{ display: "block", color: "#ad4e00", marginBottom: 4 }}>
+                  Enter Dev Portal PIN
+                </Text>
+                <Text type="secondary" style={{ fontSize: 12 }}>
+                  Use the 6-digit PIN configured in Developer &gt; App Settings &gt; Dev Portal Credential.
+                </Text>
+              </div>
+              <Form.Item
+                name="pin"
+                label="Dev Portal PIN"
+                rules={[
+                  { required: true, message: "Enter the PIN" },
+                  {
+                    pattern: /^\d{6}$/,
+                    message: "PIN must be exactly 6 digits.",
+                  },
+                ]}
+              >
+                <Input.OTP
+                  className="dev-pin-otp"
+                  autoFocus
+                  autoComplete="off"
+                  inputMode="numeric"
+                  length={6}
+                  mask="•"
+                  formatter={(value) => String(value || "").replace(/\D/g, "")}
+                  separator={(index) => (index === 2 ? <span style={{ width: 10 }} /> : null)}
+                />
+              </Form.Item>
+              <div style={{ textAlign: "center", marginTop: -4, marginBottom: 4 }}>
+                <Text type="secondary" style={{ fontSize: 12 }}>
+                  Enter the full 6-digit PIN.
+                </Text>
+              </div>
+            </>
           )}
           {devStage === "select" && (
             <Form.Item label="Select a portal user to debug">

@@ -12,6 +12,7 @@ const { signMediaRef, verifyMediaSignature } = require("../utils/mediaSecurity")
 const { uploadSingle } = require("../utils/uploadErrorHandler");
 const { authMiddleware } = require("../middleware/auth");
 const { requireDriveActive } = require("../utils/driveMaintenanceGuard");
+const { writeLog } = require("../utils/logger");
 
 const router = express.Router();
 const MAX_UPLOAD_MB = 200;
@@ -167,6 +168,12 @@ router.post("/", authMiddleware, requireDriveActive, uploadSingle(upload, "file"
           viewUrl = buildSignedMediaUrl("drive", fileId);
         } catch (driveErr) {
           console.warn(`Restricted Drive upload failed; storing encrypted locally: ${driveErr.message}`);
+          writeLog("warn", "drive.upload.fallback", {
+            message: `Restricted Drive upload failed; stored encrypted locally: ${driveErr.message}`,
+            user: req.user?.email || req.user?.username || req.user?.id || "",
+            ip: req.ip,
+            meta: { restricted: true, storage: "local", driveErrorCode: driveErr.driveErrorCode || "unknown", retryable: !!driveErr.retryable },
+          });
           const localResult = await saveLocalUpload(req.file, { encrypt: true });
           viewUrl = buildSignedMediaUrl("local", localResult.fileName);
           storage = "local";
@@ -188,6 +195,12 @@ router.post("/", authMiddleware, requireDriveActive, uploadSingle(upload, "file"
         viewUrl = driveResult.viewUrl;
       } catch (driveErr) {
         console.warn(`Drive upload failed; saving attachment locally instead: ${driveErr.message}`);
+        writeLog("warn", "drive.upload.fallback", {
+          message: `Drive upload failed; saved attachment locally: ${driveErr.message}`,
+          user: req.user?.email || req.user?.username || req.user?.id || "",
+          ip: req.ip,
+          meta: { restricted: false, storage: "local", driveErrorCode: driveErr.driveErrorCode || "unknown", retryable: !!driveErr.retryable },
+        });
         const localResult = await saveLocalUpload(req.file);
         viewUrl = localResult.url;
         storage = "local";
@@ -207,6 +220,12 @@ router.post("/", authMiddleware, requireDriveActive, uploadSingle(upload, "file"
     const isConfigError =
       err.message.includes("not configured") ||
       err.message.includes("Missing env vars");
+    writeLog("error", "upload.failed", {
+      message: `Upload failed: ${err.message}`,
+      user: req.user?.email || req.user?.username || req.user?.id || "",
+      ip: req.ip,
+      meta: { driveErrorCode: err.driveErrorCode || null, storage: "unknown" },
+    });
     res.status(isConfigError ? 503 : 500).json({ message: err.message });
   }
 });
