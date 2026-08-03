@@ -2063,10 +2063,10 @@ export default function DeveloperSettings({onSettingsSaved, isDark, isDeveloper 
                   </Form.Item>
                   <Form.Item
                     name="pin"
-                    label={devPortalStatus?.pinSet ? "New PIN (4–8 digits)" : "Set PIN (4–8 digits)"}
-                    rules={[{ required: true, pattern: /^\d{4,8}$/, message: "PIN must be 4 to 8 digits" }]}
+                    label={devPortalStatus?.pinSet ? "New PIN (6 digits)" : "Set PIN (6 digits)"}
+                    rules={[{ required: true, pattern: /^\d{6}$/, message: "PIN must be exactly 6 digits" }]}
                   >
-                    <Input.Password inputMode="numeric" maxLength={8} placeholder="Numeric PIN" />
+                    <Input.Password inputMode="numeric" maxLength={6} placeholder="6-digit PIN" />
                   </Form.Item>
                   <Form.Item
                     name="confirmPin"
@@ -2082,7 +2082,7 @@ export default function DeveloperSettings({onSettingsSaved, isDark, isDeveloper 
                       }),
                     ]}
                   >
-                    <Input.Password inputMode="numeric" maxLength={8} placeholder="Re-enter PIN" />
+                    <Input.Password inputMode="numeric" maxLength={6} placeholder="Re-enter 6-digit PIN" />
                   </Form.Item>
                   <Space wrap>
                     <Button type="primary" htmlType="submit" loading={devPinSaving}>

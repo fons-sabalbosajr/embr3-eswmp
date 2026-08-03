@@ -102,43 +102,15 @@ export default function DisposalActivityCalendar({ isDark, height, onOpenSubmiss
     (async () => {
       setLoading(true);
       try {
-        const [recRes, userRes] = await Promise.all([
-          api.get("/data-slf", {
-            params: {
-              mode: "list",
-              includeTrucks: true,
-              // Reverted / revert-requested submissions are pulled back and must not
-              // appear as active disposal activity. Excluded at the query layer so
-              // refreshing never resurfaces a stale reverted record.
-              excludeStatuses: "reverted,revert_requested",
-            },
-          }),
-          api.get("/portal-users").catch(() => ({ data: [] })),
-        ]);
+        const { data } = await api.get("/data-slf/disposal-calendar");
         if (cancelled) return;
-        const recData = recRes.data;
-        const recs = Array.isArray(recData?.data)
-          ? recData.data
-          : Array.isArray(recData)
-            ? recData
-            : [];
+        const recs = Array.isArray(data?.records) ? data.records : [];
         // Defensive client-side guard mirroring the server exclusion, in case a
         // cached/older response slips through.
         const isReverted = (s) => /revert/i.test(String(s || ""));
         const withDate = recs.filter((r) => r.dateOfDisposal && !isReverted(r.status));
         setRecords(withDate);
-        const map = {};
-        (userRes.data || []).forEach((u) => {
-          const email = String(u.email || "").trim().toLowerCase();
-          if (email) {
-            map[email] = {
-              name: `${u.firstName || ""} ${u.lastName || ""}`.trim() || email,
-              email: u.email,
-              company: u.companyName || "",
-            };
-          }
-        });
-        setUserByEmail(map);
+        setUserByEmail(data?.userByEmail || {});
         // Jump to the most recent disposal so neither view opens on an empty span.
         const latest = withDate.reduce((acc, r) => {
           const d = dayjs(r.dateOfDisposal);
@@ -492,11 +464,6 @@ export default function DisposalActivityCalendar({ isDark, height, onOpenSubmiss
           flexWrap: "wrap",
         }}
       >
-        <Space size={4}>
-          <Button size="small" icon={<LeftOutlined />} onClick={() => setWeekStart((w) => w.subtract(7, "day"))} />
-          <Button size="small" onClick={() => setWeekStart(dayjs().startOf("week"))}>This week</Button>
-          <Button size="small" icon={<RightOutlined />} onClick={() => setWeekStart((w) => w.add(7, "day"))} />
-        </Space>
         <Text type="secondary" style={{ fontSize: 12 }}>
           {weekStart.format("MMM D")} – {weekStart.add(6, "day").format("MMM D, YYYY")}
         </Text>
@@ -548,6 +515,25 @@ export default function DisposalActivityCalendar({ isDark, height, onOpenSubmiss
       </div>
     </div>
   );
+
+  const stepVisiblePeriod = (direction) => {
+    const delta = direction < 0 ? -1 : 1;
+    if (viewMode === "week") setWeekStart((w) => w.add(delta, "week"));
+    else setCursor((c) => c.add(delta, viewMode === "year" ? "year" : "month"));
+  };
+
+  const resetVisiblePeriod = () => {
+    const now = dayjs();
+    setCursor(now);
+    setWeekStart(now.startOf("week"));
+  };
+
+  const visiblePeriodLabel =
+    viewMode === "week"
+      ? `${weekStart.format("MMM D")} - ${weekStart.add(6, "day").format("MMM D, YYYY")}`
+      : viewMode === "year"
+        ? cursor.format("YYYY")
+        : cursor.format("MMMM YYYY");
 
   const selected = selectedDate ? dayData(selectedDate) : null;
 
@@ -815,6 +801,7 @@ export default function DisposalActivityCalendar({ isDark, height, onOpenSubmiss
           </Text>
         </div>
         {!loading && records.length > 0 && (
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flex: "1 1 520px", minWidth: 280, flexWrap: "wrap" }}>
           <Space size={8} wrap>
             <Select
               size="small"
@@ -852,6 +839,8 @@ export default function DisposalActivityCalendar({ isDark, height, onOpenSubmiss
                 Reset
               </Button>
             )}
+          </Space>
+          <Space size={8} wrap style={{ marginLeft: "auto" }}>
             <Segmented
               size="small"
               value={viewMode}
@@ -862,33 +851,28 @@ export default function DisposalActivityCalendar({ isDark, height, onOpenSubmiss
                 { label: "Year", value: "year" },
               ]}
             />
+            <Text strong style={{ fontSize: 13, minWidth: 126, textAlign: "center" }}>{visiblePeriodLabel}</Text>
+            <Tooltip title={viewMode === "week" ? "Previous week" : viewMode === "year" ? "Previous year" : "Previous month"}>
+              <Button
+                size="small"
+                icon={<LeftOutlined />}
+                aria-label={viewMode === "week" ? "Previous week" : viewMode === "year" ? "Previous year" : "Previous month"}
+                onClick={() => stepVisiblePeriod(-1)}
+              />
+            </Tooltip>
+            <Tooltip title={viewMode === "week" ? "Next week" : viewMode === "year" ? "Next year" : "Next month"}>
+              <Button
+                size="small"
+                icon={<RightOutlined />}
+                aria-label={viewMode === "week" ? "Next week" : viewMode === "year" ? "Next year" : "Next month"}
+                onClick={() => stepVisiblePeriod(1)}
+              />
+            </Tooltip>
+            <Button size="small" type="link" onClick={resetVisiblePeriod}>Today</Button>
           </Space>
+          </div>
         )}
       </div>
-
-      {/* Month/Year navigation — upper-left. Prev/Next step the visible period and
-          the active label shows the current month+year (or year). Keyboard-accessible
-          buttons; filters and any selected SLF are preserved. */}
-      {!loading && records.length > 0 && viewMode !== "week" && (
-        <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "0 4px 6px" }}>
-          <Button
-            size="small"
-            icon={<LeftOutlined />}
-            aria-label={viewMode === "year" ? "Previous year" : "Previous month"}
-            onClick={() => setCursor((c) => c.subtract(1, viewMode === "year" ? "year" : "month"))}
-          />
-          <Text strong style={{ fontSize: 13, minWidth: 128, textAlign: "center" }}>
-            {viewMode === "year" ? cursor.format("YYYY") : cursor.format("MMMM YYYY")}
-          </Text>
-          <Button
-            size="small"
-            icon={<RightOutlined />}
-            aria-label={viewMode === "year" ? "Next year" : "Next month"}
-            onClick={() => setCursor((c) => c.add(1, viewMode === "year" ? "year" : "month"))}
-          />
-          <Button size="small" type="link" onClick={() => setCursor(dayjs())}>Today</Button>
-        </div>
-      )}
       {loading ? (
         <div style={{ textAlign: "center", padding: "40px 0" }}>
           <Spin />

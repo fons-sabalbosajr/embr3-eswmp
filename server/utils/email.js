@@ -213,11 +213,33 @@ async function getTransporter() {
 const FROM = () =>
   `"VERA — EMBR3 ESWMP" <${process.env.SMTP_FROM || process.env.EMAIL_USER}>`;
 
+async function resolveFromAddress() {
+  try {
+    const AppSettings = require("../models/AppSettings");
+    const s = await AppSettings.findOne().select("smtpFrom emailFrom smtpUser").lean();
+    const addr = s?.smtpFrom || s?.emailFrom || process.env.SMTP_FROM || s?.smtpUser || process.env.EMAIL_USER;
+    if (addr) return `"VERA — EMBR3 ESWMP" <${addr}>`;
+  } catch {
+    /* fall back to env sender */
+  }
+  return FROM();
+}
+
 // Single choke-point for every send: forces the branded From, records delivery
 // status to AppLog (email.sent / email.failed), and re-throws on failure so
 // callers can react. `ctx.template` labels the log; falls back to the subject.
 async function sendMail(mailOptions = {}, ctx = {}) {
-  const opts = { ...mailOptions, from: FROM() };
+  const from = await resolveFromAddress();
+  const opts = {
+    ...mailOptions,
+    from,
+    replyTo: mailOptions.replyTo || from,
+    headers: {
+      "X-Auto-Response-Suppress": "All",
+      "X-Entity-Ref-ID": `eswmp-${Date.now()}`,
+      ...(mailOptions.headers || {}),
+    },
+  };
   const template = ctx.template || opts.subject || "email";
   let writeLog;
   try { ({ writeLog } = require("./logger")); } catch { writeLog = null; }

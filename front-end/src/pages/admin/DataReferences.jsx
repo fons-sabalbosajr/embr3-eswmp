@@ -449,7 +449,7 @@ export default function DataReferences({canEdit = true, canDelete = true, isDark
           <Tag color="blue">
             {filtered.length} / {refs.length} categories
           </Tag>
-          <Button icon={<ReloadOutlined />} onClick={fetchRefs}>
+          <Button icon={<ReloadOutlined />} onClick={fetchRefs} loading={loading} disabled={loading}>
             Refresh
           </Button>
           {canEdit && <Button icon={<SyncOutlined />} loading={syncingDefaults} onClick={handleSyncAppDefaults}>

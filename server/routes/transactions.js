@@ -135,27 +135,23 @@ router.get("/thread/:submissionId", async (req, res) => {
       .select("_id submissionId idNo previousIdNos")
       .lean();
 
-    const idKeys = uniq([
-      key,
-      getXXAlias(key),
-      entry?.idNo,
-      getXXAlias(entry?.idNo),
-      ...(entry?.previousIdNos || []),
-      ...(entry?.previousIdNos || []).map(getXXAlias),
-    ]);
+    const canonicalKeys = uniq([entry?.submissionId, entry?.idNo, key]);
     const filters = [];
     if (entry?._id) filters.push({ dataEntry: entry._id });
-    if (idKeys.length) {
-      filters.push({ submissionId: { $in: idKeys } });
-      filters.push({ "meta.idNo": { $in: idKeys } });
-      filters.push({ "meta.previousIdNo": { $in: idKeys } });
-      filters.push({ "meta.previousIdNos": { $in: idKeys } });
-      filters.push({ "meta.ids": { $in: idKeys } });
+    if (canonicalKeys.length) {
+      filters.push({ submissionId: { $in: canonicalKeys } });
+      filters.push({ "meta.idNo": { $in: canonicalKeys } });
     }
 
     if (filters.length === 0) return res.json([]);
-    const transactions = await Transaction.find({ $or: filters }).sort({ createdAt: 1 });
-    res.json(transactions);
+    const transactions = await Transaction.find({ $or: filters }).sort({ createdAt: -1, _id: -1 }).lean();
+    const seen = new Set();
+    res.json(transactions.filter((txn) => {
+      const id = String(txn._id || "");
+      if (!id || seen.has(id)) return false;
+      seen.add(id);
+      return true;
+    }));
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });
   }

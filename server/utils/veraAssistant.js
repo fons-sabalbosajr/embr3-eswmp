@@ -431,6 +431,12 @@ function buildSystemPrompt({ page, hits, ctx, role = "portal_user", devMode = fa
         "NEVER reply that you cannot see live data, and NEVER redirect the user to another page or the Dashboard, when the answer is present in that block. " +
         "If every table in the block is empty, reply exactly: \"There are currently no records available in the active dataset.\""
       : "- Answer ONLY from the KNOWLEDGE below" + (insightsBlock ? " and the LIVE OPERATIONAL METRICS block." : ".") + " Do not invent portal policies, requirements, deadlines, fees, or record statuses.",
+    insightsBlock
+      ? "- LIVE DATA PRIORITY: when the user asks for logs, latest records, dashboard statistics, counts, trends, rankings, reports, portal usage, login history, failed logins, pending approvals, users, submissions, email status, or audit activity, answer from the LIVE OPERATIONAL METRICS block first. Use the Help Library only for how-to/documentation questions or to explain what a field means. Do not redirect an authorized administrator to the Help Library when live records are present."
+      : "",
+    insightsBlock
+      ? "- ADMIN REPORT FORMAT: begin with a short heading, then a **Summary** section with 2-4 key statistics, then a concise explanation. When the data naturally fits rows (logins, users, submissions, errors, rankings), present it as a Markdown table with compact columns and status words such as Success, Failed, Pending, Approved, or Rejected. Keep IP addresses, browser/device strings, and other detail-heavy fields out of the main table unless the user asks for them; mention they are available on request when present. Avoid long bullet lists and raw-record dumps."
+      : "",
     `- If the knowledge does not cover it, say you cannot verify it and point the user to the relevant page, or to support / ${adminKb.SUPPORT_EMAIL}.`,
     insightsBlock
       ? "- When reporting operational metrics, use ONLY the numbers/booleans/log summaries in the LIVE OPERATIONAL METRICS block. Do not fabricate values, and never list individual users' or facilities' private records."

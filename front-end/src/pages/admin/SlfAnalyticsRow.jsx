@@ -57,9 +57,14 @@ const num = (v) => {
   return Number.isFinite(n) ? n : 0;
 };
 
+const EMPTY_ANALYTICS = {
+  trends: { daily: [], weekly: [], monthly: [] },
+  activeUsers: [],
+  volumeBySlf: [],
+};
+
 export default function SlfAnalyticsRow({ isDark, period = "monthly" }) {
-  const [records, setRecords] = useState([]);
-  const [userByEmail, setUserByEmail] = useState({});
+  const [analytics, setAnalytics] = useState(EMPTY_ANALYTICS);
   const [loading, setLoading] = useState(true);
   const [trendMode, setTrendMode] = useState(period); // daily | weekly | monthly
   // "See More" detail modal — null | "trends" | "users" | "slf". No extra fetch:
@@ -76,43 +81,25 @@ export default function SlfAnalyticsRow({ isDark, period = "monthly" }) {
   const load = useCallback(async ({ showSpinner = false } = {}) => {
     if (showSpinner) setRefreshing(true);
     try {
-      const [recRes, userRes] = await Promise.all([
-        api.get("/data-slf", { params: { mode: "list" } }),
-        api.get("/portal-users").catch(() => ({ data: [] })),
-      ]);
+      const { data } = await api.get("/data-slf/analytics-summary");
       if (cancelledRef.current) return;
-      const data = recRes.data;
-      const rows = Array.isArray(data?.data) ? data.data : Array.isArray(data) ? data : [];
-      // Dedupe by _id so a repeated row can never inflate a chart.
-      const seen = new Set();
-      const deduped = rows.filter((r) => {
-        const id = r?._id || `${r?.slfName}-${r?.dateOfDisposal}-${r?.submissionId}`;
-        if (seen.has(id)) return false;
-        seen.add(id);
-        return true;
+      setAnalytics({
+        trends: data?.trends || EMPTY_ANALYTICS.trends,
+        activeUsers: Array.isArray(data?.activeUsers) ? data.activeUsers : [],
+        volumeBySlf: Array.isArray(data?.volumeBySlf) ? data.volumeBySlf : [],
       });
-      setRecords(deduped.filter((r) => isValidStatus(r.status)));
-      const map = {};
-      (userRes.data || []).forEach((u) => {
-        const email = String(u.email || "").trim().toLowerCase();
-        if (email) {
-          map[email] =
-            `${u.firstName || ""} ${u.lastName || ""}`.trim() || u.username || u.email;
-        }
-      });
-      setUserByEmail(map);
-      setUpdatedAt(new Date());
+      setUpdatedAt(data?.generatedAt ? new Date(data.generatedAt) : new Date());
     } catch {
       // Keep whatever is already on screen: a transient failure during a live
       // refresh must not wipe charts that were rendering correctly.
-      if (!cancelledRef.current && records.length === 0) setRecords([]);
+      if (!cancelledRef.current && !updatedAt) setAnalytics(EMPTY_ANALYTICS);
     } finally {
       if (!cancelledRef.current) {
         setLoading(false);
         setRefreshing(false);
       }
     }
-    // `records.length` is read only to decide whether a failure may clear state;
+    // `updatedAt` is read only to decide whether a failure may clear state;
     // including it would rebuild this callback on every load and re-subscribe the
     // socket listener each time.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -145,76 +132,32 @@ export default function SlfAnalyticsRow({ isDark, period = "monthly" }) {
 
   // ── Waste Submission Trends ── (full series; the card shows the last 18 buckets)
   const trendDataAll = useMemo(() => {
-    const buckets = new Map();
-    const keyOf = (d) => {
-      const day = dayjs(d);
-      if (!day.isValid()) return null;
-      if (trendMode === "daily") return day.format("YYYY-MM-DD");
-      if (trendMode === "weekly") return day.startOf("week").format("YYYY-MM-DD");
-      return day.format("YYYY-MM");
-    };
-    records.forEach((r) => {
-      const k = keyOf(r.dateOfDisposal);
-      if (!k) return;
-      const b = buckets.get(k) || { key: k, volume: 0, submissions: 0 };
-      b.volume += num(r.totalVolumeM3);
-      b.submissions += 1;
-      buckets.set(k, b);
-    });
-    return [...buckets.values()]
-      .sort((a, b) => a.key.localeCompare(b.key))
-      .map((b) => ({
-        ...b,
-        label:
-          trendMode === "monthly"
-            ? dayjs(b.key + "-01").format("MMM 'YY")
-            : dayjs(b.key).format("MMM D"),
-        volume: toTons(b.volume), // m³ → tons
-      }));
-  }, [records, trendMode]);
+    const rows = analytics.trends?.[trendMode] || [];
+    return rows.map((b) => ({
+      ...b,
+      volume: toTons(b.volumeM3), // m³ → tons
+    }));
+  }, [analytics.trends, trendMode]);
   const trendData = useMemo(() => trendDataAll.slice(-18), [trendDataAll]);
 
   // ── Most Active Portal Users ── (full ranking; the card shows the top 8).
   // Enriched with the user's most-associated SLF / organization for the avatar
   // list. Only portal-account submissions are counted; no email/PII is surfaced.
   const activeUsersAll = useMemo(() => {
-    const map = new Map();
-    records.forEach((r) => {
-      const email = String(r.submittedBy || "").trim().toLowerCase();
-      const name = userByEmail[email] || r.submittedBy || r.lguCompanyName || "Unknown";
-      const key = email || name;
-      const b = map.get(key) || { name, submissions: 0, volume: 0, _slfCounts: {} };
-      b.submissions += 1;
-      b.volume += num(r.totalVolumeM3);
-      const slf = r.slfName || r.lguCompanyName || "";
-      if (slf) b._slfCounts[slf] = (b._slfCounts[slf] || 0) + 1;
-      map.set(key, b);
-    });
-    return [...map.values()]
-      .sort((a, b) => b.submissions - a.submissions)
-      .map((u) => {
-        // Most frequently associated SLF/org for this user.
-        const slf = Object.entries(u._slfCounts).sort((a, b) => b[1] - a[1])[0]?.[0] || "";
-        const { _slfCounts, ...rest } = u;
-        return { ...rest, slf, volume: toTons(u.volume) };
-      });
-  }, [records, userByEmail]);
+    return (analytics.activeUsers || []).map((u) => ({
+      ...u,
+      submissions: num(u.submissions),
+      volume: toTons(u.volumeM3),
+    }));
+  }, [analytics.activeUsers]);
   const activeUsers = useMemo(() => activeUsersAll.slice(0, 8), [activeUsersAll]);
 
   // ── Waste Volume by SLF ── (full ranking; the card shows the top 8)
   const volumeBySlfAll = useMemo(() => {
-    const map = new Map();
-    records.forEach((r) => {
-      const name = r.slfName || r.lguCompanyName || "Unknown";
-      const b = map.get(name) || { name, volume: 0 };
-      b.volume += num(r.totalVolumeM3);
-      map.set(name, b);
-    });
-    return [...map.values()]
-      .filter((s) => s.volume > 0)
-      .sort((a, b) => b.volume - a.volume)
-      .map((s) => ({ ...s, volume: toTons(s.volume) })); // m³ → tons
-  }, [records]);
+    return (analytics.volumeBySlf || [])
+      .filter((s) => num(s.volumeM3) > 0)
+      .map((s) => ({ ...s, volume: toTons(s.volumeM3) })); // m³ → tons
+  }, [analytics.volumeBySlf]);
   // The card now shows ALL SLFs (scrollable, dynamic height) — no silent top-N cut.
   const volumeBySlf = volumeBySlfAll;
 
@@ -249,7 +192,7 @@ export default function SlfAnalyticsRow({ isDark, period = "monthly" }) {
   // avatar (default when no profile image), name, associated SLF/org, and the
   // activity count. Scrolls within the card; no PII (email) is shown.
   const renderActiveUsers = (users, maxHeight = CHART_H) => (
-    <div style={{ maxHeight, overflowY: "auto", paddingRight: 4 }}>
+    <div className="slf-analytics-scroll" style={{ maxHeight, overflowY: "auto", paddingRight: 4, scrollBehavior: "smooth" }}>
       {users.map((u, i) => (
         <div
           key={`${u.name}-${i}`}
@@ -461,6 +404,26 @@ export default function SlfAnalyticsRow({ isDark, period = "monthly" }) {
   };
 
   return (
+    <>
+    <style>{`
+      .slf-analytics-scroll {
+        scrollbar-width: thin;
+        scrollbar-color: ${isDark ? "#4b5563 #151b23" : "#b8c2cc transparent"};
+      }
+      .slf-analytics-scroll::-webkit-scrollbar { width: 8px; height: 8px; }
+      .slf-analytics-scroll::-webkit-scrollbar-track {
+        background: ${isDark ? "#151b23" : "transparent"};
+        border-radius: 999px;
+      }
+      .slf-analytics-scroll::-webkit-scrollbar-thumb {
+        background: ${isDark ? "#4b5563" : "#b8c2cc"};
+        border-radius: 999px;
+        border: 2px solid ${isDark ? "#151b23" : "transparent"};
+      }
+      .slf-analytics-scroll::-webkit-scrollbar-thumb:hover {
+        background: ${isDark ? "#64748b" : "#8fa1b3"};
+      }
+    `}</style>
     <Row gutter={[16, 16]} style={{ marginBottom: 16 }}>
       {chartCard(
         "Waste Submission Trends",
@@ -516,7 +479,7 @@ export default function SlfAnalyticsRow({ isDark, period = "monthly" }) {
         // ALL registered SLFs — no silent top-N cut. Horizontal bars in a scroll
         // container; the chart's height grows with the SLF count (≥26px/bar) so
         // every label stays readable, truncated with a full-name tooltip.
-        <div style={{ maxHeight: CHART_H, overflowY: "auto", overflowX: "hidden", paddingRight: 4 }}>
+        <div className="slf-analytics-scroll" style={{ maxHeight: CHART_H, overflowY: "auto", overflowX: "hidden", paddingRight: 4, scrollBehavior: "smooth" }}>
           <ResponsiveContainer width="100%" height={Math.max(CHART_H, volumeBySlf.length * 26)}>
             <BarChart data={volumeBySlf} layout="vertical" margin={{ top: 4, right: 12, left: 8, bottom: 0 }}>
               <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke={isDark ? "#303030" : "#f0f0f0"} />
@@ -547,5 +510,6 @@ export default function SlfAnalyticsRow({ isDark, period = "monthly" }) {
         {detail && renderDetailBody()}
       </Modal>
     </Row>
+    </>
   );
 }

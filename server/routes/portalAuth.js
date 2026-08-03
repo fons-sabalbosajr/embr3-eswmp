@@ -509,30 +509,66 @@ router.post("/login", async (req, res) => {
 
     const { email, password } = req.body;
     const loginId = String(email || "").trim().toLowerCase();
+    const loginMeta = (status, reason = "") => ({
+      status,
+      reason,
+      role: "portal_user",
+      userAgent: req.get("user-agent") || "",
+    });
 
     const user = await UserPortal.findOne({
       $or: [{ email: loginId }, { username: loginId }],
     });
     if (!user) {
+      writeLog("warn", "portal.login.failed", {
+        message: `Portal login failed: ${loginId} (account not found)`,
+        user: loginId,
+        ip: req.ip,
+        meta: loginMeta("failed", "account_not_found"),
+      });
       return res.status(401).json({ message: "Invalid credentials" });
     }
 
     if (user.status === "pending") {
+      writeLog("warn", "portal.login.denied", {
+        message: `Portal login denied: ${loginId} (pending approval)`,
+        user: loginId,
+        ip: req.ip,
+        meta: loginMeta("denied", "pending_approval"),
+      });
       return res.status(403).json({
         message: "Your account is still pending approval. Please wait for admin approval.",
       });
     }
     if (user.status === "rejected") {
+      writeLog("warn", "portal.login.denied", {
+        message: `Portal login denied: ${loginId} (registration rejected)`,
+        user: loginId,
+        ip: req.ip,
+        meta: loginMeta("denied", "registration_rejected"),
+      });
       return res.status(403).json({
         message: "Your account registration has been rejected. Please contact the administrator.",
       });
     }
     if (user.blocked) {
+      writeLog("warn", "portal.login.denied", {
+        message: `Portal login denied: ${loginId} (blocked)`,
+        user: loginId,
+        ip: req.ip,
+        meta: loginMeta("denied", "blocked"),
+      });
       return res.status(403).json({
         message: user.blockedReason || "Your portal account is blocked. Please contact the administrator.",
       });
     }
     if (user.maintenanceMode) {
+      writeLog("warn", "portal.login.denied", {
+        message: `Portal login denied: ${loginId} (account maintenance)`,
+        user: loginId,
+        ip: req.ip,
+        meta: loginMeta("denied", "account_maintenance"),
+      });
       return res.status(403).json({
         message: user.maintenanceReason || "Your portal account is temporarily under maintenance. Please contact the administrator.",
       });
@@ -540,6 +576,12 @@ router.post("/login", async (req, res) => {
 
     const isMatch = await user.comparePassword(password);
     if (!isMatch) {
+      writeLog("warn", "portal.login.failed", {
+        message: `Portal login failed: ${loginId} (invalid password)`,
+        user: loginId,
+        ip: req.ip,
+        meta: loginMeta("failed", "invalid_password"),
+      });
       return res.status(401).json({ message: "Invalid credentials" });
     }
 
@@ -579,6 +621,7 @@ router.post("/login", async (req, res) => {
       message: `Portal login: ${loginId}`,
       user: loginId,
       ip: req.ip,
+      meta: loginMeta("success"),
     });
     UserPortal.updateOne({ _id: user._id }, { lastActiveAt: new Date() }).catch(() => {});
   } catch (error) {
