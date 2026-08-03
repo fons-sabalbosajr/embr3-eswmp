@@ -3277,14 +3277,18 @@ router.get("/", optionalAuth, async (req, res) => {
       const exportAll = String(req.query.all || "").toLowerCase() === "true";
       const placementFilter = String(req.query.cellPlacement || "all").trim();
       // Batch key mirrors the client's getPortalSubmissionGroupKey: group only
-      // when submittedBy (an email), company, and a non-reverted status exist;
-      // everything else stays a standalone row keyed by its _id.
+      // when submittedBy (an email), company, submissionId, and a non-reverted
+      // status exist; everything else stays a standalone row keyed by its _id.
+      // submissionId keeps each distinct submission EVENT as its own grouped row
+      // — without it every submission from a portal user collapsed into one row,
+      // hiding hundreds of submissions (700+ entries showed as only ~3 pages).
       const rowKeyExpr = {
         $let: {
           vars: {
             sb: { $toLower: { $trim: { input: { $ifNull: ["$submittedBy", ""] } } } },
             co: { $toLower: { $trim: { input: { $ifNull: ["$lguCompanyName", ""] } } } },
             st: { $toLower: { $trim: { input: { $ifNull: ["$status", ""] } } } },
+            si: { $toLower: { $trim: { input: { $ifNull: ["$submissionId", ""] } } } },
           },
           in: {
             $cond: [
@@ -3292,11 +3296,12 @@ router.get("/", optionalAuth, async (req, res) => {
                 $and: [
                   { $ne: ["$$sb", ""] },
                   { $ne: ["$$co", ""] },
+                  { $ne: ["$$si", ""] },
                   { $ne: [{ $indexOfBytes: ["$$sb", "@"] }, -1] },
                   { $ne: ["$$st", "reverted"] },
                 ],
               },
-              { $concat: ["$$sb", "::", "$$co", "::", "$$st"] },
+              { $concat: ["$$sb", "::", "$$co", "::", "$$st", "::", "$$si"] },
               { $concat: ["singleton:", { $toString: "$_id" }] },
             ],
           },

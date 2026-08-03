@@ -527,14 +527,22 @@ export default function SubmissionSettings({
     const status = String(record?.status || "")
       .trim()
       .toLowerCase();
+    // Include submissionId so each distinct submission EVENT is its own grouped
+    // row (bundling only the SLF entries from that one submission). Without it,
+    // every submission a portal user ever made collapsed into a single row,
+    // hiding hundreds of submissions behind a handful of grouped rows.
+    const submissionId = String(record?.submissionId || "")
+      .trim()
+      .toLowerCase();
     if (
       !submittedBy ||
       !company ||
+      !submissionId ||
       !submittedBy.includes("@") ||
       status === "reverted"
     )
       return null;
-    return `${submittedBy}::${company}::${status}`;
+    return `${submittedBy}::${company}::${status}::${submissionId}`;
   }, []);
 
   const getGroupedStatus = useCallback((entries) => {
