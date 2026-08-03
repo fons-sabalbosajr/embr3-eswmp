@@ -14,6 +14,7 @@ const mongoose = require("mongoose");
 
 const DataSLF = require("../models/DataSLF");
 const SlfFacility = require("../models/SlfFacility");
+const SLFGenerator = require("../models/SLFGenerator");
 const UserPortal = require("../models/UserPortal");
 const User = require("../models/User");
 const AppLog = require("../models/AppLog");
@@ -67,9 +68,85 @@ async function resolveAccess(req) {
   return { developer: false, can };
 }
 
+// Facility-specific submission lookup. When an admin names a particular SLF
+// facility or company in their question (e.g. "total submission of Pampanga
+// PWS"), match it against the facility/company names that actually appear in
+// the submission data and return that entity's grounded submission totals,
+// waste volume, and accredited hauler-client count. Bounded, safe aggregates
+// only — no raw records. Returns [] when nothing is named or nothing matches.
+const NORM = (s) => String(s || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+
+async function lookupFacilities(message, allowed) {
+  if (!allowed.submissions && !allowed.dashboard) return [];
+  const nMsg = NORM(message);
+  if (!nMsg || nMsg.length < 3) return [];
+
+  const baseFilter = { deletedAt: null, isDummy: { $ne: true } };
+  const [facilityNames, companyNames] = await Promise.all([
+    DataSLF.distinct("slfName", { ...baseFilter, slfName: { $nin: [null, ""] } }).catch(() => []),
+    DataSLF.distinct("lguCompanyName", { ...baseFilter, lguCompanyName: { $nin: [null, ""] } }).catch(() => []),
+  ]);
+
+  // Find named entities: a candidate matches when its normalized name is a
+  // substring of the message, or when all its significant tokens appear in it.
+  const seen = new Set();
+  const candidates = [];
+  for (const raw of [...facilityNames, ...companyNames]) {
+    const key = String(raw).toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const nName = NORM(raw);
+    if (!nName || nName.length < 3) continue;
+    let matched = nMsg.includes(nName);
+    if (!matched) {
+      const tokens = nName.split(" ").filter((t) => t.length >= 3);
+      matched = tokens.length >= 1 && tokens.length <= 6 && tokens.every((t) => nMsg.includes(t));
+    }
+    if (matched) candidates.push({ raw, len: nName.length });
+  }
+  candidates.sort((a, b) => b.len - a.len);
+  const top = candidates.slice(0, 3);
+  if (!top.length) return [];
+
+  const results = [];
+  for (const c of top) {
+    try {
+      const rows = await DataSLF.aggregate([
+        { $match: { ...baseFilter, $or: [{ slfName: c.raw }, { lguCompanyName: c.raw }] } },
+        {
+          $group: {
+            _id: "$status",
+            count: { $sum: 1 },
+            m3: { $sum: { $ifNull: ["$totalVolumeM3", 0] } },
+            tons: { $sum: { $ifNull: ["$totalVolumeTons", 0] } },
+            last: { $max: "$createdAt" },
+          },
+        },
+      ]);
+      if (!rows.length) continue;
+      const agg = { name: c.raw, total: 0, pending: 0, acknowledged: 0, reverted: 0, rejected: 0, m3: 0, tons: 0, last: null };
+      for (const r of rows) {
+        agg.total += r.count;
+        const n = normalizeStatus(r._id);
+        agg[n] = (agg[n] || 0) + r.count;
+        agg.m3 += r.m3 || 0;
+        agg.tons += r.tons || 0;
+        if (r.last && (!agg.last || r.last > agg.last)) agg.last = r.last;
+      }
+      // Accredited hauler clients registered under this facility (Hauler Clients).
+      try {
+        const gen = await SLFGenerator.findOne({ slfName: c.raw }).select("accreditedHaulers").lean();
+        agg.haulerClients = Array.isArray(gen?.accreditedHaulers) ? gen.accreditedHaulers.length : 0;
+      } catch { agg.haulerClients = null; }
+      results.push(agg);
+    } catch { /* skip this candidate */ }
+  }
+  return results;
+}
+
 // Compute the full curated metrics object. Every sub-section is guarded so a
 // single failing query never breaks the whole response.
-async function computeInsights(req) {
+async function computeInsights(req, message = "") {
   const now = new Date();
   const dayAgo = new Date(now - 24 * 60 * 60 * 1000);
 
@@ -98,6 +175,9 @@ async function computeInsights(req) {
     }
     submissions.last24h = await DataSLF.countDocuments({ deletedAt: null, isDummy: { $ne: true }, createdAt: { $gte: dayAgo } });
   } catch { /* leave zeros */ }
+
+  // ── Facility-specific lookup (only when the question names a facility/company) ──
+  const facilityLookup = await lookupFacilities(message, allowed).catch(() => []);
 
   if (allowed.dashboard) try {
     const [totals = {}, baselineRows, byCompany, operators] = await Promise.all([
@@ -301,6 +381,7 @@ async function computeInsights(req) {
       memoryHeapTotalMB: mb(memUsage.heapTotal),
     },
     submissions,
+    facilityLookup,
     dashboard,
     operatorPerformance,
     slf,
@@ -340,7 +421,7 @@ async function computeInsights(req) {
 // "developer" = full technical detail.
 function insightsToPromptBlock(ins, view = "developer") {
   if (!ins) return "";
-  const { submissions: s, dashboard: d, operatorPerformance: ops, slf, users: u, notifications: n, queue: q, activity: ac, services: sv, system: sy, runtime: rt, syncJob, latestEvent, recentErrors, recentPortalLogins, settings: st } = ins;
+  const { submissions: s, dashboard: d, operatorPerformance: ops, slf, users: u, notifications: n, queue: q, activity: ac, services: sv, system: sy, runtime: rt, syncJob, latestEvent, recentErrors, recentPortalLogins, settings: st, facilityLookup: fl } = ins;
   const dev = view === "developer";
   const lines = [];
   lines.push(
@@ -352,6 +433,22 @@ function insightsToPromptBlock(ins, view = "developer") {
   lines.push(`- Services: Database ${sv.database} (${sv.databaseOk ? "healthy" : "unhealthy"}), Email ${sv.email}, AI agent ${sv.aiAgent}, Socket Service ${sv.socketClients ?? "n/a"} active connection${sv.socketClients === 1 ? "" : "s"}, API ${sv.apiUp ? "up" : "down"}.`);
   lines.push(`- SLF facilities: ${slf.total} total — ${slf.operational} operational, ${slf.nonOperational} non-operational${slf.notMonitored ? `, ${slf.notMonitored} not yet monitored` : ""}.`);
   lines.push(s.authorized ? `- Submissions: total ${s.total} — pending ${s.pending}, acknowledged ${s.acknowledged}, reverted ${s.reverted}, rejected ${s.rejected}; last 24h ${s.last24h}.` : "- Submissions: not included because this admin lacks submission/portal-data view permission.");
+  if (Array.isArray(fl) && fl.length) {
+    lines.push("- Named facility/company lookup (grounded totals for the specific entity in the question — use these exact numbers):");
+    fl.forEach((f) => {
+      const parts = [
+        `${f.total} total submission${f.total === 1 ? "" : "s"}`,
+        `pending ${f.pending}`,
+        `acknowledged ${f.acknowledged}`,
+        `reverted ${f.reverted}`,
+        `rejected ${f.rejected}`,
+        `waste ${Math.round(f.m3 * 100) / 100} m³ / ${Math.round(f.tons * 100) / 100} tons`,
+      ];
+      if (typeof f.haulerClients === "number") parts.push(`${f.haulerClients} accredited hauler client${f.haulerClients === 1 ? "" : "s"}`);
+      if (f.last) parts.push(`last submission ${fmtTime(f.last)}`);
+      lines.push(`    • ${f.name}: ${parts.join(", ")}.`);
+    });
+  }
   lines.push(d.authorized ? `- Dashboard statistics: Waste Received total ${Math.round(d.wasteReceivedM3 * 100) / 100} m³ / ${Math.round(d.wasteReceivedTons * 100) / 100} tons; baseline reports ${d.baselineReports}; pending baseline updates ${d.activeBaselineUpdates}; LGU submissions ${d.lguSubmissions}; private submissions ${d.privateSubmissions}.` : "- Dashboard statistics: not included because this admin lacks dashboard/portal-data view permission.");
   lines.push(u.authorized ? `- Users / sessions: portal ${u.portalTotal} (approved ${u.portalApproved}, pending ${u.portalPending}${dev ? `, rejected ${u.portalRejected}` : ""}, blocked ${u.blocked}, active last 24h ${u.activeLast24h}); admin ${u.adminTotal}; active sessions ${u.activeSessions ?? "n/a"}.` : "- Portal users: not included because this admin lacks portal-user view permission.");
   lines.push(n.authorized ? `- Notifications: ${n.total} total, ${n.unread} unread (${n.adminUnread} admin), ${n.last24h} in last 24h.` : "- Notifications: not included because this admin lacks notification/dashboard view permission.");

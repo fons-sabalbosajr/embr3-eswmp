@@ -562,7 +562,7 @@ router.post("/chat", requireAnyAuth, async (req, res) => {
   let insightsBlock = "";
   if (isAdminTier && veraDev.wantsInsights(message)) {
     try {
-      const ins = await veraDev.computeInsights(req);
+      const ins = await veraDev.computeInsights(req, message);
       insightsBlock = veraDev.insightsToPromptBlock(ins, devModeOn ? "developer" : "admin");
     } catch { /* metrics best-effort — never block the answer */ }
   }
