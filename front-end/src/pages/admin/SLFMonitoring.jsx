@@ -250,6 +250,11 @@ const uploadNameFromValue = (value, existing = "") => {
 
 const uploadFileFromValue = (value) => (Array.isArray(value) ? value[0] : null);
 const fileUrlFromValue = (value) => uploadFileFromValue(value)?.url || uploadFileFromValue(value)?.response?.url || (typeof value === "string" ? value : "");
+const fileUrlFromUploadFile = (file) =>
+  typeof file === "string" ? file : file?.response?.url || file?.url || "";
+
+const defaultPreventiveFileDescription = (name) =>
+  `Uploaded preventive measure file: ${name || "supporting document"}`;
 
 function ensureSlfDetailTabStyles() {
   if (typeof document === "undefined") return;
@@ -1100,6 +1105,39 @@ export default function SLFMonitoring({
         : item,
     );
 
+  const toPreventiveFileList = (urls = [], details = []) => {
+    const detailByUrl = new Map(
+      (details || []).filter((d) => d?.url).map((d) => [d.url, d]),
+    );
+    return toFileList(urls).map((file) => {
+      const url = fileUrlFromUploadFile(file);
+      const detail = detailByUrl.get(url) || {};
+      const name = detail.fileName || file.name || fileNameFromUrl(url, "file");
+      return {
+        ...file,
+        name,
+        fileName: name,
+        description: detail.description || file.description || defaultPreventiveFileDescription(name),
+        docType: detail.docType || file.docType || "Preventive Measures",
+      };
+    });
+  };
+
+  const preventiveUploadEventToFileList = (event) => {
+    const list = uploadEventToFileList(event) || [];
+    return list.map((file) => {
+      const url = fileUrlFromUploadFile(file);
+      if (!url || file.description) return file;
+      const name = file.response?.name || file.name || fileNameFromUrl(url, "file");
+      return {
+        ...file,
+        fileName: name,
+        description: defaultPreventiveFileDescription(name),
+        docType: "Preventive Measures",
+      };
+    });
+  };
+
   const populateForm = (record) => {
     const receivingFacilities = record.receivingFacilities?.length
       ? record.receivingFacilities
@@ -1223,7 +1261,10 @@ export default function SLFMonitoring({
       })),
       commitmentFiles: toFileList(record.commitmentFiles || []),
       progressReportFiles: toFileList(record.progressReportFiles || []),
-      preventiveMeasureFiles: toFileList(record.preventiveMeasureFiles || []),
+      preventiveMeasureFiles: toPreventiveFileList(
+        record.preventiveMeasureFiles || [],
+        record.preventiveMeasureFileDetails || [],
+      ),
       scrpDetails: (record.scrpDetails || []).map((row) => ({
         ...row,
         attachments: toFileList(row.attachments),
@@ -1496,7 +1537,7 @@ export default function SLFMonitoring({
     }
   };
 
-  const handleSave = async () => {
+  const handleSave = async ({ refreshAfterSave = true } = {}) => {
     if (!editYear) {
       Swal.fire(
         "Year Required",
@@ -1550,6 +1591,33 @@ export default function SLFMonitoring({
           : storeValues[key] !== undefined
             ? fromFileList(storeValues[key])
             : existingRecord[key] || [];
+      const fileListFieldValue = (key) =>
+        values[key] !== undefined
+          ? values[key]
+          : storeValues[key] !== undefined
+            ? storeValues[key]
+            : toFileList(existingRecord[key] || []);
+      const buildPreventiveMeasureFileDetails = (list) => {
+        const existingDetails = new Map(
+          (existingRecord.preventiveMeasureFileDetails || [])
+            .filter((d) => d?.url)
+            .map((d) => [d.url, d]),
+        );
+        return (list || [])
+          .map((file) => {
+            const url = fileUrlFromUploadFile(file);
+            if (!url) return null;
+            const existing = existingDetails.get(url) || {};
+            const fileName = file.response?.name || file.fileName || file.name || existing.fileName || fileNameFromUrl(url, "file");
+            return {
+              url,
+              fileName,
+              description: String(file.description || existing.description || defaultPreventiveFileDescription(fileName)).trim(),
+              docType: file.docType || existing.docType || "Preventive Measures",
+            };
+          })
+          .filter(Boolean);
+      };
       const dateFieldValue = (key) =>
         values[key] !== undefined
           ? (values[key]?.toISOString?.() ?? null)
@@ -1618,6 +1686,7 @@ export default function SLFMonitoring({
       const lguServedList = fieldValue("lguServedList", []);
       const privateCompaniesServed = fieldValue("privateCompaniesServed", []);
       const ownership = fieldValue("ownership", "");
+      const preventiveMeasureFileList = fileListFieldValue("preventiveMeasureFiles");
       // #5/#7: cells follow the facility's single declared baseline unit. The edit
       // cards no longer offer a per-cell unit picker, so stamp every cell's unit to
       // the baseline here (values are already entered/kept in that unit facility-wide
@@ -1702,7 +1771,8 @@ export default function SLFMonitoring({
         permitToOperateStatus: permitToOperatePermits[0]?.status || "",
         commitmentFiles: fileFieldValue("commitmentFiles"),
         progressReportFiles: fileFieldValue("progressReportFiles"),
-        preventiveMeasureFiles: fileFieldValue("preventiveMeasureFiles"),
+        preventiveMeasureFiles: fromFileList(preventiveMeasureFileList),
+        preventiveMeasureFileDetails: buildPreventiveMeasureFileDetails(preventiveMeasureFileList),
         scrpDetails: fieldValue("scrpDetails", [])
           .map((row) => ({
             ...row,
@@ -1815,6 +1885,8 @@ export default function SLFMonitoring({
     }
     setSaving(false);
     if (!saved) return;
+
+    if (!refreshAfterSave) return;
 
     // The server — not the local optimistic state above — is the source of truth
     // for what the table shows. Re-read it so the row reflects exactly what was
@@ -1970,7 +2042,7 @@ export default function SLFMonitoring({
       });
       setUnitToolOpen(false);
       if (editing?._id) {
-        await handleSave();
+        await handleSave({ refreshAfterSave: false });
       } else {
         message.success(`Units set to ${unit}. Save the SLF record to persist the change.`);
       }
@@ -2001,20 +2073,19 @@ export default function SLFMonitoring({
     // changing AND the facility already has values. The tool relabels every unit
     // field but does NOT convert the numbers, so make that explicit before saving.
     // SweetAlert (over-modal) keeps the confirm uniform with the rest of the app.
-    if (currentUnit && currentUnit !== unit && sample !== undefined) {
-      const result = await Swal.fire({
-        icon: "warning",
-        title: `Change unit to ${unit} without converting values?`,
-        html: `This sets the unit on <b>every</b> capacity, fill, receiving and estimated field of this SLF (and all its cells) from <b>${currentUnit}</b> to <b>${unit}</b> — but it does <b>not</b> convert the numbers. For example, <b>${sample} ${currentUnit}</b> will become <b>${sample} ${unit}</b> (not the converted equivalent). Only continue if the stored values are already in ${unit}; otherwise cancel and enter the correct ${unit} values.`,
-        showCancelButton: true,
-        confirmButtonText: `Yes, relabel to ${unit}`,
-        cancelButtonText: "Cancel",
-        confirmButtonColor: "#faad14",
-      });
-      if (result.isConfirmed) await applyUnits();
-      return;
-    }
-    applyUnits();
+    const explanation = currentUnit && currentUnit !== unit && sample !== undefined
+      ? `This sets the unit on <b>every</b> capacity, fill, receiving and estimated field of this SLF (and all its cells) from <b>${currentUnit}</b> to <b>${unit}</b> — but it does <b>not</b> convert the numbers. For example, <b>${sample} ${currentUnit}</b> will become <b>${sample} ${unit}</b> (not the converted equivalent). Only continue if the stored values are already in ${unit}; otherwise cancel and enter the correct ${unit} values.`
+      : `This sets the unit on <b>every</b> capacity, fill, receiving and estimated field of this SLF (and all its cells) to <b>${unit}</b>. It updates labels only and does <b>not</b> convert any numeric values.`;
+    const result = await Swal.fire({
+      icon: "warning",
+      title: `Apply ${unit} to all SLF unit fields?`,
+      html: explanation,
+      showCancelButton: true,
+      confirmButtonText: `Yes, apply ${unit}`,
+      cancelButtonText: "Cancel",
+      confirmButtonColor: "#faad14",
+    });
+    if (result.isConfirmed) await applyUnits();
   };
 
   const copyText = async (value, label = "Value") => {
@@ -6393,7 +6464,7 @@ export default function SLFMonitoring({
                       <Form.Item
                         name="preventiveMeasureFiles"
                         valuePropName="fileList"
-                        getValueFromEvent={uploadEventToFileList}
+                        getValueFromEvent={preventiveUploadEventToFileList}
                       >
                         <Upload
                           {...slfUploadProps}
@@ -6473,16 +6544,14 @@ export default function SLFMonitoring({
                                     if (f.status === "uploading") {
                                       const pct = Math.round(f.percent || 0);
                                       return (
-                                        <Space size={6} align="center">
+                                        <Tooltip title={`Uploading ${f.name || "file"}: ${pct}%`}>
                                           <Progress
                                             percent={pct}
                                             size="small"
-                                            style={{ width: 120 }}
+                                            status="active"
+                                            style={{ width: 150 }}
                                           />
-                                          <Text style={{ fontSize: 11, color: "#1677ff" }}>
-                                            {pct}%
-                                          </Text>
-                                        </Space>
+                                        </Tooltip>
                                       );
                                     }
                                     const url = f.url || f.response?.url;
@@ -6504,6 +6573,28 @@ export default function SLFMonitoring({
                                       </Tag>
                                     );
                                   },
+                                },
+                                {
+                                  title: "Description",
+                                  width: 260,
+                                  render: (_, f) => (
+                                    <Input.TextArea
+                                      autoSize={{ minRows: 1, maxRows: 3 }}
+                                      placeholder="Describe this file"
+                                      value={f.description || ""}
+                                      onChange={(event) => {
+                                        const nextDescription = event.target.value;
+                                        const cur = form.getFieldValue("preventiveMeasureFiles") || [];
+                                        form.setFieldsValue({
+                                          preventiveMeasureFiles: cur.map((item) =>
+                                            (item.uid || item.url || item.response?.url) === (f.uid || f.url || f.response?.url)
+                                              ? { ...item, description: nextDescription }
+                                              : item,
+                                          ),
+                                        });
+                                      }}
+                                    />
+                                  ),
                                 },
                                 {
                                   title: "",
@@ -9381,34 +9472,94 @@ export default function SLFMonitoring({
                         </Divider>
                         {(detailViewRecord.preventiveMeasureFiles || [])
                           .length > 0 ? (
-                          <Space size={[6, 6]} wrap>
-                            {(
-                              detailViewRecord.preventiveMeasureFiles || []
-                            ).map((entry, i) => {
-                              const url = normalizeStoredFileUrl(entry);
-                              const name =
-                                decodeURIComponent(
-                                  String(url || "")
-                                    .split("/")
-                                    .pop() || "",
-                                ).split("?")[0] || `File ${i + 1}`;
-                              return url ? (
-                                <Tag
-                                  key={i}
-                                  color="orange"
-                                  icon={<EyeOutlined />}
-                                  style={{ cursor: "pointer" }}
-                                  onClick={() => openFilePreview(url, name)}
-                                >
-                                  {name}
-                                </Tag>
-                              ) : (
-                                <Tag key={i} color="orange">
-                                  {name}
-                                </Tag>
+                          <Table
+                            size="small"
+                            pagination={false}
+                            rowKey="key"
+                            dataSource={(() => {
+                              const detailByUrl = new Map(
+                                (detailViewRecord.preventiveMeasureFileDetails || [])
+                                  .filter((d) => d?.url)
+                                  .map((d) => [d.url, d]),
                               );
-                            })}
-                          </Space>
+                              return (
+                                detailViewRecord.preventiveMeasureFiles || []
+                              ).map((entry, i) => {
+                                const url = normalizeStoredFileUrl(entry);
+                                const detail =
+                                  detailByUrl.get(entry) ||
+                                  detailByUrl.get(url) ||
+                                  {};
+                                const name =
+                                  detail.fileName ||
+                                  decodeURIComponent(
+                                    String(url || "").split("/").pop() || "",
+                                  ).split("?")[0] ||
+                                  `File ${i + 1}`;
+                                return {
+                                  key: i,
+                                  url,
+                                  name,
+                                  description: detail.description || "",
+                                  docType: detail.docType || "Preventive Measures",
+                                  kind: getMediaKind(url || name || ""),
+                                };
+                              });
+                            })()}
+                            columns={[
+                              {
+                                title: "File",
+                                dataIndex: "name",
+                                render: (v, r) => (
+                                  <Space size={6}>
+                                    {r.kind === "pdf" ? (
+                                      <FilePdfOutlined style={{ color: "#ff4d4f" }} />
+                                    ) : r.kind === "image" ? (
+                                      <FileImageOutlined style={{ color: "#1677ff" }} />
+                                    ) : (
+                                      <FileTextOutlined style={{ color: "#8c8c8c" }} />
+                                    )}
+                                    <Text style={{ fontSize: 12 }}>{v}</Text>
+                                  </Space>
+                                ),
+                              },
+                              {
+                                title: "Description",
+                                dataIndex: "description",
+                                render: (v) =>
+                                  v ? (
+                                    <Text style={{ fontSize: 12 }}>{v}</Text>
+                                  ) : (
+                                    <Text type="secondary">—</Text>
+                                  ),
+                              },
+                              {
+                                title: "Type",
+                                dataIndex: "docType",
+                                width: 170,
+                                render: (v) => <Tag color="orange">{v}</Tag>,
+                              },
+                              {
+                                title: "Action",
+                                width: 90,
+                                align: "center",
+                                render: (_, r) =>
+                                  r.url ? (
+                                    <Tooltip title="Preview">
+                                      <Button
+                                        size="small"
+                                        icon={<EyeOutlined />}
+                                        onClick={() =>
+                                          openFilePreview(r.url, r.name)
+                                        }
+                                      />
+                                    </Tooltip>
+                                  ) : (
+                                    <Text type="secondary">—</Text>
+                                  ),
+                              },
+                            ]}
+                          />
                         ) : (
                           <Empty
                             image={Empty.PRESENTED_IMAGE_SIMPLE}

@@ -197,6 +197,7 @@ export default function DashboardContent({ user, isDark, setActiveMenu, onOpenSu
   const [slfFilterProvince, setSlfFilterProvince] = useState(null);
   const [slfFilterStatus, setSlfFilterStatus] = useState(null);
   const [slfDashModal, setSlfDashModal] = useState(null); // { type: dashboard metric key }
+  const [preventiveSlfModal, setPreventiveSlfModal] = useState(null); // { _id, lgu, province, files, details } | null
   const [preventionPanel, setPreventionPanel] = useState(null); // { facilityId, slfName } | null
   const [preventiveFileViewer, setPreventiveFileViewer] = useState(null); // { url, fileName, slfName, province } | null
   const [preventiveFileZoom, setPreventiveFileZoom] = useState(100);
@@ -6121,8 +6122,12 @@ export default function DashboardContent({ user, isDark, setActiveMenu, onOpenSu
       .filter((row) => (row.preventiveMeasureFiles?.length || 0) > 0)
       .map((row) => ({
         id: row._id || row.lgu,
+        _id: row._id,
         lgu: row.lgu || "Unspecified SLF",
+        province: row.province || "",
         count: row.preventiveMeasureFiles?.length || 0,
+        files: row.preventiveMeasureFiles || [],
+        details: row.preventiveMeasureFileDetails || [],
       }))
       .sort((a, b) => b.count - a.count || a.lgu.localeCompare(b.lgu));
 
@@ -6730,41 +6735,31 @@ export default function DashboardContent({ user, isDark, setActiveMenu, onOpenSu
                     <Col xs={24}>
                       <Card
                         title={<><SafetyCertificateOutlined /> Preventive Measures (Fire Prevention and Trash Slide)</>}
-                        hoverable
-                        onClick={() => setSlfDashModal({ type: "preventive" })}
-                        style={{ borderRadius: 10, cursor: "pointer", borderTop: "3px solid #fa541c" }}
+                        style={{ borderRadius: 10, borderTop: "3px solid #fa541c" }}
                         loading={loading}
                         styles={{ body: { padding: "12px 16px" } }}
                       >
-                        <Row gutter={[14, 14]} align="stretch">
-                          {/* <Col xs={24} md={7} lg={5}>
-                            <div style={{ padding: "10px 12px", background: isDark ? "rgba(19,194,194,0.12)" : "#e6fffb", borderRadius: 8, border: "1px solid #87e8de", height: "100%" }}>
-                              <Text type="secondary" style={{ fontSize: 10, display: "block" }}>Total Files</Text>
-                              <Text strong style={{ fontSize: 28, lineHeight: 1.1, color: "#08979c" }}>{(slfOps.totalPreventiveMeasureFiles || 0).toLocaleString()}</Text>
-                              <div style={{ marginTop: 8 }}>
-                                <Tag color="cyan" style={{ margin: 0 }}>{preventiveFileFacilityCount.toLocaleString()} SLF{preventiveFileFacilityCount === 1 ? "" : "s"}</Tag>
-                              </div>
-                            </div>
-                          </Col> */}
-                          <Col xs={24} md={17} lg={19}>
-                            <div style={{ minHeight: 86, padding: "10px 12px", background: isDark ? "rgba(255,255,255,0.035)" : "#fff", borderRadius: 8, border: isDark ? "1px solid rgba(255,255,255,0.12)" : "1px solid #f0f0f0" }}>
-                              <Space size={[6, 6]} wrap style={{ width: "100%" }}>
-                                {preventiveFileFacilities.length ? preventiveFileFacilities.map((item) => (
-                                  <Tooltip key={item.id} title={`${item.lgu}: ${item.count} file${item.count === 1 ? "" : "s"}`}>
-                                    <Tag color="orange" style={{ margin: 0, maxWidth: 220, display: "inline-flex", alignItems: "center", gap: 4 }}>
-                                      <Text ellipsis style={{ maxWidth: 150, color: "inherit" }}>{item.lgu}</Text>
-                                      <Text strong style={{ color: "inherit" }}>{item.count}</Text>
-                                    </Tag>
-                                  </Tooltip>
-                                )) : (
-                                  <Text type="secondary" style={{ fontSize: 12 }}>No preventive measure files uploaded yet.</Text>
-                                )}
-                              </Space>
-                            </div>
-                          </Col>
-                        </Row>
-                        <div style={{ marginTop: 10, textAlign: "center" }}>
-                          <Text type="secondary" style={{ fontSize: 11 }}>Click to view preventive measure files per SLF</Text>
+                        <div style={{ padding: "10px 12px", background: isDark ? "rgba(255,255,255,0.035)" : "#fff", borderRadius: 8, border: isDark ? "1px solid rgba(255,255,255,0.12)" : "1px solid #f0f0f0" }}>
+                          <Space size={[8, 8]} wrap style={{ width: "100%" }}>
+                            {preventiveFileFacilities.length ? preventiveFileFacilities.map((item) => (
+                              <Tooltip key={item.id} title={`View ${item.lgu} — ${item.count} file${item.count === 1 ? "" : "s"}`}>
+                                <Tag
+                                  color="orange"
+                                  onClick={() => setPreventiveSlfModal(item)}
+                                  style={{ margin: 0, cursor: "pointer", maxWidth: "100%", display: "inline-flex", alignItems: "center", gap: 6, whiteSpace: "normal", lineHeight: 1.3, padding: "4px 9px", borderRadius: 6 }}
+                                >
+                                  <SafetyCertificateOutlined />
+                                  <span style={{ overflowWrap: "anywhere" }}>{item.lgu}</span>
+                                  <Text strong style={{ color: "inherit" }}>{item.count}</Text>
+                                </Tag>
+                              </Tooltip>
+                            )) : (
+                              <Text type="secondary" style={{ fontSize: 12 }}>No preventive measure files uploaded yet.</Text>
+                            )}
+                          </Space>
+                        </div>
+                        <div style={{ marginTop: 10 }}>
+                          <Text type="secondary" style={{ fontSize: 11 }}>Click an SLF to view its preventive measure details and files.</Text>
                         </div>
                       </Card>
                     </Col>
@@ -8997,6 +8992,125 @@ export default function DashboardContent({ user, isDark, setActiveMenu, onOpenSu
                 </div>
               )}
             </div>
+          </Modal>
+        );
+      })()}
+
+      {/* Per-SLF Preventive Measures — files + descriptions for one facility. */}
+      {preventiveSlfModal && (() => {
+        const detailByUrl = new Map(
+          (preventiveSlfModal.details || [])
+            .filter((d) => d?.url)
+            .map((d) => [d.url, d]),
+        );
+        const rows = (preventiveSlfModal.files || []).map((url, i) => {
+          const detail = detailByUrl.get(url) || {};
+          const fileName = detail.fileName || getPreventiveFileName(url, "document");
+          return {
+            key: `${i}`,
+            url,
+            fileName,
+            description: detail.description || "",
+            docType: detail.docType || "Preventive Measures",
+            kind: getPreventiveFileKind(fileName, url),
+          };
+        });
+        return (
+          <Modal
+            open
+            title={
+              <Space size={8} wrap>
+                <SafetyCertificateOutlined style={{ color: "#fa541c" }} />
+                <Text strong>{preventiveSlfModal.lgu}</Text>
+                {preventiveSlfModal.province && <Tag>{preventiveSlfModal.province}</Tag>}
+                <Tag color="orange">{rows.length} file{rows.length === 1 ? "" : "s"}</Tag>
+              </Space>
+            }
+            onCancel={() => setPreventiveSlfModal(null)}
+            footer={<Button onClick={() => setPreventiveSlfModal(null)}>Close</Button>}
+            width={860}
+            style={{ top: 32, maxWidth: "96vw" }}
+            styles={{ body: { maxHeight: "calc(100vh - 220px)", overflowY: "auto" } }}
+            destroyOnHidden
+          >
+            {rows.length === 0 ? (
+              <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No preventive measure files for this SLF." />
+            ) : (
+              <Table
+                size="small"
+                pagination={false}
+                rowKey="key"
+                dataSource={rows}
+                columns={[
+                  {
+                    title: "File",
+                    dataIndex: "fileName",
+                    ellipsis: { showTitle: false },
+                    render: (v, r) => (
+                      <Tooltip title={v}>
+                        <Space size={6}>
+                          <FileTextOutlined style={{ color: "#fa541c" }} />
+                          <Text style={{ fontSize: 12 }}>{v}</Text>
+                        </Space>
+                      </Tooltip>
+                    ),
+                  },
+                  {
+                    title: "Description",
+                    dataIndex: "description",
+                    render: (v) =>
+                      v ? (
+                        <Text style={{ fontSize: 12 }}>{v}</Text>
+                      ) : (
+                        <Text type="secondary">—</Text>
+                      ),
+                  },
+                  {
+                    title: "Type",
+                    dataIndex: "docType",
+                    width: 160,
+                    render: (v) => <Tag color="orange">{v}</Tag>,
+                  },
+                  {
+                    title: "Action",
+                    dataIndex: "url",
+                    width: 150,
+                    align: "center",
+                    render: (url, row) =>
+                      url ? (
+                        <Space size={4}>
+                          <Tooltip title="View in modal">
+                            <Button
+                              size="small"
+                              icon={<EyeOutlined />}
+                              onClick={() =>
+                                openPreventiveFileViewer({
+                                  url,
+                                  fileName: row.fileName,
+                                  slfName: preventiveSlfModal.lgu,
+                                  province: preventiveSlfModal.province,
+                                  kind: row.kind,
+                                })
+                              }
+                            />
+                          </Tooltip>
+                          <Tooltip title="Open in new tab">
+                            <Button
+                              size="small"
+                              icon={<LinkOutlined />}
+                              onClick={() => window.open(resolveMediaOpenUrl(url), "_blank", "noopener,noreferrer")}
+                            >
+                              Open
+                            </Button>
+                          </Tooltip>
+                        </Space>
+                      ) : (
+                        <Text type="secondary" style={{ fontSize: 11 }}>—</Text>
+                      ),
+                  },
+                ]}
+              />
+            )}
           </Modal>
         );
       })()}

@@ -168,6 +168,12 @@ const slfFacilitySchema = new mongoose.Schema(
 
     // Preventive Measures / Closure Plan
     preventiveMeasureFiles: [{ type: String, trim: true }],
+    preventiveMeasureFileDetails: [{
+      url: { type: String, trim: true },
+      fileName: { type: String, trim: true },
+      description: { type: String, trim: true },
+      docType: { type: String, trim: true, default: "Preventive Measures" },
+    }],
     scrpDetails: [{
       planTitle: { type: String, trim: true },
       status: { type: String, trim: true },

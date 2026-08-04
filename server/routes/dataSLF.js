@@ -565,6 +565,70 @@ function computeCellPlacementSummary(entry) {
   return { placed, total: trucks.length, known: true };
 }
 
+function isValidPortalCellRef(entry, cellIndex) {
+  if (cellIndex === null || cellIndex === undefined || cellIndex === "") return false;
+  const idx = Number(cellIndex);
+  if (!Number.isInteger(idx) || idx < 0) return false;
+  const facility = entry?.slfGenerator && typeof entry.slfGenerator === "object" ? entry.slfGenerator : null;
+  const names = facility?.cellNames || [];
+  const statuses = facility?.cellStatuses || [];
+  const count = Math.max(Array.isArray(names) ? names.length : 0, Array.isArray(statuses) ? statuses.length : 0);
+  if (count > 0 && idx >= count) return false;
+  if (statuses?.[idx] && /not\s*exist/i.test(String(statuses[idx]))) return false;
+  return true;
+}
+
+function summarizePortalOrganizeNeed(entry) {
+  let unplacedCount = 0;
+  let missingCapacityCount = 0;
+  const isPositive = (value) => Number.isFinite(Number(value)) && Number(value) > 0;
+  for (const truck of Array.isArray(entry?.trucks) ? entry.trucks : []) {
+    const vehicles = (Array.isArray(truck?.vehicles) ? truck.vehicles : []).filter((v) => Number(v?.actualVolume || 0) > 0);
+    if (vehicles.length) {
+      for (const vehicle of vehicles) {
+        if (!isValidPortalCellRef(entry, vehicle?.cellIndex)) unplacedCount += 1;
+        if (!isPositive(vehicle?.capacity) && !isPositive(truck?.truckCapacity)) missingCapacityCount += 1;
+      }
+    } else if (Number(truck?.actualVolume || 0) > 0) {
+      if (!isValidPortalCellRef(entry, truck?.cellIndex)) unplacedCount += 1;
+      if (!isPositive(truck?.truckCapacity)) missingCapacityCount += 1;
+    }
+  }
+  return { unplacedCount, missingCapacityCount };
+}
+
+async function assertNoUnorganizedPortalSubmissions(submittedBy) {
+  const email = String(submittedBy || "").trim();
+  if (!email) return;
+  const prior = await DataSLF.find({
+    deletedAt: null,
+    hiddenFromPortal: { $ne: true },
+    submittedBy: new RegExp(`^${escapeRegExp(email)}$`, "i"),
+    status: { $nin: ["reverted", "rejected"] },
+  })
+    .select("idNo submissionId dateOfDisposal status trucks truckCount submittedBy slfGenerator")
+    .populate({ path: "slfGenerator", select: "cellNames cellStatuses" })
+    .lean();
+  const blockers = prior
+    .map((entry) => ({ entry, summary: summarizePortalOrganizeNeed(entry) }))
+    .filter(({ summary }) => summary.unplacedCount > 0 || summary.missingCapacityCount > 0);
+  if (!blockers.length) return;
+  const listed = blockers
+    .slice(0, 5)
+    .map(({ entry, summary }) => {
+      const parts = [];
+      if (summary.unplacedCount > 0) parts.push(`${summary.unplacedCount} unassigned waste entr${summary.unplacedCount === 1 ? "y" : "ies"}`);
+      if (summary.missingCapacityCount > 0) parts.push(`${summary.missingCapacityCount} missing truck capacit${summary.missingCapacityCount === 1 ? "y" : "ies"}`);
+      return `${entry.idNo || entry.submissionId || "Submission"}: ${parts.join(", ")}`;
+    })
+    .join(" | ");
+  const more = blockers.length > 5 ? ` (+${blockers.length - 5} more)` : "";
+  const error = new Error(`Organize Cells must be completed before submitting a new transaction. ${listed}${more}`);
+  error.statusCode = 409;
+  error.code = "ORGANIZE_CELLS_REQUIRED";
+  throw error;
+}
+
 // Collect the distinct cell names a submission's waste was placed into. The list
 // query already selects trucks.cellName / trucks.vehicles.cellName, so this adds
 // the assigned-cell labels to the admin list without shipping full trucks.
@@ -793,6 +857,14 @@ function sanitizeSubmissionEntry(item, errors) {
   });
   return cleaned;
 }
+
+const isMissingRequiredText = (value) =>
+  value === null || value === undefined || String(value).trim() === "";
+
+const hasPositiveRequiredNumber = (value) => {
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0;
+};
 
 function sanitizeClient(client) {
   if (typeof client === "string") {
@@ -1052,6 +1124,7 @@ async function submitEntries({ entries, submittedBy, req, idempotencyKey = null 
   }
   const portalAccount = await ensurePortalAccountCanSubmit(submittedBy);
   await assertNoUnresolvedRevert(submittedBy);
+  await assertNoUnorganizedPortalSubmissions(submittedBy);
   const submitterIsDummy = Boolean(portalAccount?.isDummy);
   const items = Array.isArray(entries) ? entries : entries ? [entries] : [];
   if (items.length === 0) {
@@ -1088,6 +1161,28 @@ async function submitEntries({ entries, submittedBy, req, idempotencyKey = null 
     const error = new Error(uploadClientIssues.slice(0, 8).join(" | ") + (uploadClientIssues.length > 8 ? ` (+${uploadClientIssues.length - 8} more)` : ""));
     error.statusCode = 400;
     error.validationIssues = uploadClientIssues.map((message) => ({ tab: "waste-generation-information", field: "client", message }));
+    throw error;
+  }
+
+  const requiredSubmissionIssues = [];
+  sanitizedItems.forEach((item, idx) => {
+    const entryPrefix = sanitizedItems.length > 1 ? `Entry ${idx + 1}: ` : "";
+    const missingGeneral = [];
+    if (isMissingRequiredText(item?.lguCompanyName)) missingGeneral.push("Company Name");
+    if (isMissingRequiredText(item?.companyRegion)) missingGeneral.push("Region");
+    if (isMissingRequiredText(item?.companyProvince)) missingGeneral.push("Province");
+    if (isMissingRequiredText(item?.companyMunicipality)) missingGeneral.push("City/Municipality");
+    if (missingGeneral.length) {
+      requiredSubmissionIssues.push(`${entryPrefix}General Information is incomplete — ${missingGeneral.join(", ")} required.`);
+    }
+    if (!hasPositiveRequiredNumber(item?.totalVolumeAccepted)) {
+      requiredSubmissionIssues.push(`${entryPrefix}Baseline Data is incomplete — Total Volume Accepted is required.`);
+    }
+  });
+  if (requiredSubmissionIssues.length) {
+    const error = new Error(requiredSubmissionIssues.join(" | "));
+    error.statusCode = 400;
+    error.validationIssues = requiredSubmissionIssues.map((message) => ({ tab: "required-submission-data", message }));
     throw error;
   }
 
