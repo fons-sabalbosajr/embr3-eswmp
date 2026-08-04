@@ -397,7 +397,7 @@ router.get("/portal/:id", async (req, res) => {
       "volumeCapacity volumeCapacityUnit receivingVolumeCapacity receivingVolumeCapacityUnit numberOfCell cellNames cellCapacities cellCapacityUnits cellStatuses cellTypes cellSubmissionAllowed cellNotes cellFillValues cellFillUnits estimatedVolumeWaste estimatedVolumeWasteUnit actualResidualWasteReceived wasteReceivedUnit " +
       "noOfLeachatePond numberOfGasVents mrfEstablished yearStartedOperation " +
       "eccNo dischargePermit dischargePermitValidity dischargePermitStatus dischargePermits permitToOperate permitToOperateValidity permitToOperateStatus permitToOperatePermits focalPerson " +
-      "receivingFacilities hasWastewaterTreatmentFacility wastewaterTreatmentFacilityType wastewaterTreatmentFacilityRemarks leachatePondDetails gasVentDetails trashSlideMeasures firePrevMeasures galleryPhotos galleryItems slfDocuments preventiveMeasureFiles scrpDetails";
+      "receivingFacilities hasWastewaterTreatmentFacility wastewaterTreatmentFacilityType wastewaterTreatmentFacilityRemarks leachatePondDetails gasVentDetails trashSlideMeasures firePrevMeasures galleryPhotos galleryItems slfDocuments preventiveMeasureFiles preventiveMeasureFileDetails scrpDetails";
 
     const facility = await findPortalFacility(req.params.id, req.query.slfName, selectFields);
 
@@ -1262,8 +1262,19 @@ function collectPreventionDocs(facility) {
     });
   pushNested(facility.firePrevMeasures, "Fire Prevention");
   pushNested(facility.trashSlideMeasures, "Trash Slide Measures");
+  const detailByUrl = new Map(
+    (Array.isArray(facility.preventiveMeasureFileDetails) ? facility.preventiveMeasureFileDetails : [])
+      .filter((d) => d?.url)
+      .map((d) => [d.url, d]),
+  );
   (Array.isArray(facility.preventiveMeasureFiles) ? facility.preventiveMeasureFiles : []).forEach((url) => {
-    if (url) docs.push({ url, fileName: fileNameOf(url), docType: "Preventive Measures", narrative: "" });
+    const detail = detailByUrl.get(url) || {};
+    if (url) docs.push({
+      url,
+      fileName: detail.fileName || fileNameOf(url),
+      docType: detail.docType || "Preventive Measures",
+      narrative: detail.description || "",
+    });
   });
   return docs;
 }
@@ -1289,7 +1300,7 @@ router.get("/:id/prevention-measures", adminOnly, async (req, res) => {
   try {
     if (!mongoose.isValidObjectId(req.params.id)) return res.status(400).json({ message: "Invalid id" });
     const facility = await SlfFacility.findById(req.params.id)
-      .select("lgu slfName firePrevMeasures trashSlideMeasures preventiveMeasureFiles preventionSummaries")
+      .select("lgu slfName firePrevMeasures trashSlideMeasures preventiveMeasureFiles preventiveMeasureFileDetails preventionSummaries")
       .lean();
     if (!facility) return res.status(404).json({ message: "Facility not found" });
 

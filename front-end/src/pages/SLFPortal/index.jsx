@@ -423,6 +423,10 @@ export default function SLFPortal() {
     "totalVolumeAccepted",
     baselineForm,
   );
+  const watchedCompanyName = Form.useWatch("lguCompanyName", companyForm);
+  const watchedCompanyRegion = Form.useWatch("companyRegion", companyForm);
+  const watchedCompanyProvince = Form.useWatch("companyProvince", companyForm);
+  const watchedCompanyMunicipality = Form.useWatch("companyMunicipality", companyForm);
   const isTreatedHazardousWaste = (value) =>
     String(value || "")
       .trim()
@@ -501,8 +505,13 @@ export default function SLFPortal() {
   }, [haulers]);
 
   const missingBaselineInfo =
-    !baselineSaved &&
-    (watchedTotalVolumeAccepted == null || watchedTotalVolumeAccepted === "");
+    watchedTotalVolumeAccepted == null || watchedTotalVolumeAccepted === "";
+  const missingGeneralInfo = [
+    watchedCompanyName,
+    watchedCompanyRegion,
+    watchedCompanyProvince,
+    watchedCompanyMunicipality,
+  ].some((value) => value == null || String(value).trim() === "");
   // Every Waste Generation Information field (incl. Truck Capacity) is required
   // for FINAL submission. Reuses the same rule set the backend enforces, so the
   // tab's required-dot and the submit block can never disagree with the server.
@@ -510,12 +519,8 @@ export default function SLFPortal() {
   const wasteGenValidationIssues = validateWasteGeneration(trucks);
   const missingDisposalInfo =
     !watchedDisposalDate || trucks.length === 0 || wasteGenValidationIssues.length > 0;
-  // General/Basic (Company) Information is pre-populated from the assigned SLF and
-  // is intentionally EXCLUDED from submission-completion rules (Issue 3): it already
-  // holds saved data and must never block a submission or be counted as an
-  // "incomplete section". It stays fully viewable/editable — it just no longer
-  // gates submission eligibility. Only the real Data Entry sections do.
   const hasReviewMissing =
+    missingGeneralInfo ||
     missingBaselineInfo ||
     missingDisposalInfo ||
     missingHazardousCodeTrucks.length > 0;
@@ -4245,11 +4250,17 @@ export default function SLFPortal() {
   // ── Review & Submit handlers ──
 
   const handleReviewOpen = async () => {
-    // Issue 3: General/Basic (Company) Information must NOT block a submission. It
-    // is pre-populated saved data, so we validate it only to surface inline field
-    // highlights — we never abort the review/submit flow on it. buildSubmissionEntry
-    // guarantees a valid company name via the assigned-facility fallback.
-    companyForm.validateFields().catch(() => {});
+    try {
+      await companyForm.validateFields();
+    } catch {
+      showError({
+        type: "warning",
+        title: "Incomplete General Information",
+        message: "Please complete the required General Information fields first.",
+      });
+      setActiveTab("basic-info");
+      return;
+    }
     if (!baselineSaved) {
       try {
         await baselineForm.validateFields();
@@ -4284,8 +4295,6 @@ export default function SLFPortal() {
       setActiveTab("disposal");
       return;
     }
-    // Issue 3: no hard block on Company Name here — buildSubmissionEntry falls back
-    // to the assigned SLF name, so General Information can never stall a submission.
     if (missingHazardousCodeTrucks.length > 0) {
       const list = missingHazardousCodeTrucks
         .map(
@@ -4344,10 +4353,6 @@ export default function SLFPortal() {
     return {
       ...disposalValues,
       ...companyValues,
-      // Company/General Information is no longer a submission blocker (Issue 3), so
-      // guarantee a non-empty company name here (backend requires it) by falling
-      // back to the assigned facility name — the user is never forced back to the
-      // Basic Information tab just to satisfy a required field.
       lguCompanyName:
         companyValues.lguCompanyName ||
         disposalValues.lguCompanyName ||
@@ -4511,8 +4516,9 @@ export default function SLFPortal() {
   const submitBlockers = useMemo(() => {
     const list = [];
     if (slfNonOperational) list.push(NON_OPERATIONAL_MESSAGE);
-    // NOTE: Basic/Company ("General") Information is intentionally NOT a blocker
-    // (Issue 3) — it is pre-populated saved data and must not gate submissions.
+    if (missingGeneralInfo) {
+      list.push("General Information is incomplete — enter Company Name, Region, Province, and City/Municipality before submitting.");
+    }
     if (missingBaselineInfo) {
       // Name the exact missing baseline field(s) instead of a vague "complete the
       // baseline" (Issue 2). Total Volume Accepted is the one hard requirement.
@@ -4543,6 +4549,7 @@ export default function SLFPortal() {
     return list;
   }, [
     slfNonOperational,
+    missingGeneralInfo,
     missingBaselineInfo,
     watchedDisposalDate,
     trucks,
@@ -4655,6 +4662,30 @@ export default function SLFPortal() {
           "Your account is not permitted to submit disposal entries. Please contact EMB Region III.",
       });
       return;
+    }
+    try {
+      await companyForm.validateFields();
+    } catch {
+      setActiveTab("basic-info");
+      showError({
+        type: "error",
+        title: "General Information Incomplete",
+        message: "Complete Company Name, Region, Province, and City/Municipality before submitting.",
+      });
+      return;
+    }
+    if (!baselineSaved) {
+      try {
+        await baselineForm.validateFields();
+      } catch {
+        setActiveTab("baseline");
+        showError({
+          type: "error",
+          title: "Baseline Data Incomplete",
+          message: "Complete Total Volume Accepted in Baseline Data before submitting.",
+        });
+        return;
+      }
     }
     // Hard-block when every cell is full / completed / out-of-service / closed.
     if (allCellsUnavailable) {
@@ -6444,9 +6475,7 @@ export default function SLFPortal() {
                       <span>
                         <InfoCircleOutlined />{" "}
                         {isMobile ? "Basic Info" : "Basic Information"}
-                        {/* Issue 3: General/Basic Information is excluded from
-                            submission-completion rules — no "required" dot so it is
-                            never flagged as blocking an otherwise-complete submission. */}
+                        <RequiredDot show={missingGeneralInfo} />
                       </span>
                     ),
                     children: (
