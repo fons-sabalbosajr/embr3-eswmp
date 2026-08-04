@@ -598,6 +598,7 @@ async function validateDriveFile(urlOrId) {
 
 module.exports = {
   uploadFileToDrive,
+  uploadFilePathToDrive,
   streamDriveFile,
   verifyDriveAccess,
   getDriveConfigStatus,

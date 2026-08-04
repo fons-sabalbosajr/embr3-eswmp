@@ -122,7 +122,7 @@ export default function SlfAnalyticsRow({ isDark, period = "monthly" }) {
     const socket = getSocket();
     if (!socket) return undefined;
     const handler = ({ target } = {}) => {
-      if (!target || target === "submissions" || target === "baselines" || target === "portal-users") {
+      if (!target || target === "submissions" || target === "baselines" || target === "portal-users" || target === "facility") {
         load({ showSpinner: true });
       }
     };
