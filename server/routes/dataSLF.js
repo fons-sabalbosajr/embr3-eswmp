@@ -5860,7 +5860,8 @@ router.get("/waste-received-summary/:slfName", async (req, res) => {
     }
 
     const records = await DataSLF.find(match).select(
-      "companyType companyRegion companyProvince companyMunicipality lguCompanyName trucks dateOfDisposal accreditedHaulers baselineUnit totalVolumeAccepted totalVolumeAcceptedUnit activeCellEntries activeCellResidualVolume activeCellResidualUnit activeCellInertVolume activeCellInertUnit activeCellHazardousVolume activeCellHazardousUnit closedCellEntries closedCellResidualVolume closedCellResidualUnit closedCellInertVolume closedCellInertUnit closedCellHazardousVolume closedCellHazardousUnit"
+      "companyType companyRegion companyProvince companyMunicipality lguCompanyName dateOfDisposal accreditedHaulers baselineUnit totalVolumeAccepted totalVolumeAcceptedUnit activeCellEntries activeCellResidualVolume activeCellResidualUnit activeCellInertVolume activeCellInertUnit activeCellHazardousVolume activeCellHazardousUnit closedCellEntries closedCellResidualVolume closedCellResidualUnit closedCellInertVolume closedCellInertUnit closedCellHazardousVolume closedCellHazardousUnit " +
+      "trucks.actualVolume trucks.actualVolumeUnit trucks.selectedClients trucks.lguCompanyName trucks.companyType trucks.vehicles.selectedClients"
     ).maxTimeMS(20000).lean();
 
     const summary = { lguR3: [], lguOutside: [], privateIndustry: [] };
