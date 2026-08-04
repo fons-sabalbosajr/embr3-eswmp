@@ -487,7 +487,7 @@ export default function PortalLogin() {
                 ) : (
                   <Link to="/slfportal/forgot-password" className="auth-forgot-link">Forgot password?</Link>
                 )}
-                <Button
+                {/* <Button
                   type="link"
                   size="small"
                   icon={<SafetyCertificateOutlined />}
@@ -498,7 +498,7 @@ export default function PortalLogin() {
                   onClick={startDeveloperAccessFromForm}
                 >
                   Developer Portal Access
-                </Button>
+                </Button> */}
               </div>
             </Form>
 
