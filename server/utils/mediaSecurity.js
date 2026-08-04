@@ -62,15 +62,38 @@ function getUrlSecret() {
   return process.env.MEDIA_URL_SECRET || process.env.JWT_SECRET || "eswmp-media-url-secret";
 }
 
+// Every secret accepted when VERIFYING a signature (signing always uses the
+// primary getUrlSecret). Signed media URLs are persisted in the database, so a
+// deployment that rotates JWT_SECRET — or shares one database across
+// environments whose JWT_SECRET differs (dev + prod on the same Atlas cluster) —
+// would otherwise 403 on every previously-signed URL. Set a stable, shared
+// MEDIA_URL_SECRET on every environment that shares the DB; list any retired
+// secrets (comma-separated) in MEDIA_URL_SECRET_PREVIOUS to keep old URLs valid.
+function getCandidateSecrets() {
+  const previous = String(process.env.MEDIA_URL_SECRET_PREVIOUS || "")
+    .split(",")
+    .map((s) => s.trim());
+  return [
+    ...new Set(
+      [
+        process.env.MEDIA_URL_SECRET,
+        process.env.JWT_SECRET,
+        ...previous,
+        "eswmp-media-url-secret",
+      ].filter(Boolean),
+    ),
+  ];
+}
+
 /**
  * Sign a media reference. `ref` uniquely identifies the file, e.g.
  * "drive:<fileId>" or "local:<fileName>". Returns a base64url signature.
  * expiresAt (ms epoch, optional) binds the signature to a lifetime.
  */
-function signMediaRef(ref, expiresAt) {
+function signMediaRef(ref, expiresAt, secret) {
   const payload = expiresAt ? `${ref}|${expiresAt}` : ref;
   return crypto
-    .createHmac("sha256", getUrlSecret())
+    .createHmac("sha256", secret || getUrlSecret())
     .update(payload)
     .digest("base64url");
 }
@@ -78,10 +101,17 @@ function signMediaRef(ref, expiresAt) {
 function verifyMediaSignature(ref, sig, expiresAt) {
   if (!sig) return false;
   if (expiresAt && Date.now() > Number(expiresAt)) return false;
-  const expected = signMediaRef(ref, expiresAt);
-  const a = Buffer.from(String(sig));
-  const b = Buffer.from(expected);
-  return a.length === b.length && crypto.timingSafeEqual(a, b);
+  const provided = Buffer.from(String(sig));
+  for (const secret of getCandidateSecrets()) {
+    const expected = Buffer.from(signMediaRef(ref, expiresAt, secret));
+    if (
+      provided.length === expected.length &&
+      crypto.timingSafeEqual(provided, expected)
+    ) {
+      return true;
+    }
+  }
+  return false;
 }
 
 module.exports = {

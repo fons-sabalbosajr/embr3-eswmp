@@ -213,39 +213,46 @@ const SLF_DOCUMENT_TYPE_OPTIONS = [
 ];
 
 const fileNameFromUrl = (value, fallback = "file") => {
-  const raw = Array.isArray(value) ? value[0]?.url || value[0]?.name : value;
-  if (!raw) return fallback;
+  const first = Array.isArray(value) ? value[0] : null;
+  const raw = first?.url || (typeof value === "string" ? value : "");
+  // Our secure proxy + Google Drive URLs end in an OPAQUE file ID, never a
+  // human filename — surfacing that as the name is the "random name" bug. Prefer
+  // the fileList item's own name; otherwise use the caller's fallback.
+  if (
+    /\/upload\/secure\/(drive|local)\//.test(raw) ||
+    /drive\.google\.com|googleusercontent/.test(raw)
+  ) {
+    return first?.name || fallback;
+  }
+  const src = raw || first?.name || "";
+  if (!src) return fallback;
   try {
-    const pathname = new URL(raw, window.location.origin).pathname;
+    const pathname = new URL(src, window.location.origin).pathname;
     return decodeURIComponent(pathname.split("/").pop() || fallback);
   } catch {
-    return String(raw).split("/").pop() || fallback;
+    return String(src).split("/").pop() || fallback;
   }
 };
 
 // The upload response returns the ORIGINAL filename (server sends
-// `name: req.file.originalname`); AntD also keeps it on `file.name` for a
-// freshly selected file. `fileNameFromUrl` alone would show the opaque storage
-// name (e.g. "1785...enc") because restricted media is stored under a random
-// filename. Prefer the original name from the upload event, then the persisted
-// `fileName`, then fall back to the storage-derived name.
+// `name: req.file.originalname`); AntD also keeps it on `file.name` for the life
+// of the fileList item. Prefer the fresh response name, then the persisted
+// `fileName`, then AntD's own item name — only then derive from the URL (which
+// for restricted Drive/local media is an opaque id, never a real filename).
 const resolveUploadName = (value, persistedName, fallback = "file") => {
   const file = Array.isArray(value) ? value[0] : null;
-  const freshName = file?.response?.name || (file && !file.url ? file.name : "");
-  return freshName || persistedName || fileNameFromUrl(value, fallback);
+  const freshName = file?.response?.name || "";
+  return (
+    freshName || persistedName || file?.name || fileNameFromUrl(value, fallback)
+  );
 };
 
 // Extract the original filename to PERSIST on save. Freshly uploaded rows expose
-// it via the server response (or the selected file's name); already-saved rows
-// keep the previously stored `fileName`.
+// it via the server response; already-saved rows keep the previously stored
+// `fileName`; AntD's item name is the last resort. The opaque URL id is never used.
 const uploadNameFromValue = (value, existing = "") => {
   const file = Array.isArray(value) ? value[0] : null;
-  return (
-    file?.response?.name ||
-    (file && !file.url ? file.name : "") ||
-    existing ||
-    ""
-  );
+  return file?.response?.name || existing || file?.name || "";
 };
 
 const uploadFileFromValue = (value) => (Array.isArray(value) ? value[0] : null);
@@ -1277,7 +1284,7 @@ export default function SLFMonitoring({
           ? [
               {
                 uid: `gallery-${i}`,
-                name: item.fileName || item.url.split("/").pop() || "photo",
+                name: item.fileName || "photo",
                 status: "done",
                 url: item.url,
               },
@@ -1290,7 +1297,7 @@ export default function SLFMonitoring({
           ? [
               {
                 uid: `doc-${d.url}`,
-                name: d.fileName || d.url.split("/").pop() || d.title || "file",
+                name: d.fileName || d.title || "document",
                 status: "done",
                 url: d.url,
               },
