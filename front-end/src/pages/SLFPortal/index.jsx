@@ -1050,11 +1050,6 @@ export default function SLFPortal() {
   });
   const cellLabelFor = (index) => baselineCellNameByIndex[index] || resolveCellName(slfInfo, index);
 
-  // Every EXISTING cell as a placement option. Available cells are selectable;
-  // unavailable ones (full / completed / out-of-service / closed / restricted)
-  // are kept for context but flagged `disabled` with a reason label. The single
-  // availability rule lives in cellVisuals#getCellAcceptance so the selectors,
-  // validation, and admin displays never disagree.
   const cellPlacementOptions = (() => {
     // Per-user cell access restriction (admin Manage Access). Empty => no restriction.
     const allowedCells = Array.isArray(portalUser?.portalAccess?.allowedCells)
@@ -1066,10 +1061,6 @@ export default function SLFPortal() {
       const rawStatus = slfInfo?.cellStatuses?.[index];
       if (isNonExistentCell(rawStatus)) return null; // cell does not exist
       const status = normalizeCellStatus(rawStatus);
-
-      // Capacity and fill carry their OWN declared units and may disagree
-      // (e.g. capacity in tons, fill in m³). Normalize both to m³ before the
-      // availability check so a unit mismatch never mis-classifies a cell.
       const capUnit = resolveCellUnit(slfInfo, index, "capacity");
       const fillUnit = resolveCellUnit(slfInfo, index, "fill");
       const capacityM3 = convertVolume(slfInfo?.cellCapacities?.[index], capUnit, "m³") ?? 0;
@@ -1131,13 +1122,8 @@ export default function SLFPortal() {
     }).filter(Boolean);
   })();
 
-  // Selectable subset — available cells only. Kept as the SAME shape/name so all
-  // existing consumers (validation, counts, cell picker) are unaffected.
   const activeCellOptions = cellPlacementOptions.filter((o) => o.available);
 
-  // All cells from the facility's cell infrastructure (regardless of the
-  // disposal-submission restriction) — used to anchor baseline Cell Entry names
-  // to real cells in the cell infra so they stay consistent with the admin side.
   const baselineCellOptions = (() => {
     return Array.from({ length: slfCellCount }, (_, index) => {
       const rawStatus = slfInfo?.cellStatuses?.[index];
@@ -1147,11 +1133,6 @@ export default function SLFPortal() {
       const baseLabel = cellLabelFor(index);
       return {
         label: `${baseLabel} - ${type}${status ? ` (${status})` : ""}`,
-        // The option's VALUE is the cell's declared name from the facility's cell
-        // infrastructure — it used to be the positional `Cell N`. Picking the cell
-        // shown as "Cell 1A" therefore wrote the string "Cell 1" into the baseline
-        // entry, so the Baseline Data table never showed the cell the user had
-        // actually chosen. `cellIndex` below stays the relationship key.
         value: resolveCellName(slfInfo, index),
         cellType: type,
         cellIndex: index,
@@ -1178,33 +1159,14 @@ export default function SLFPortal() {
   // Pagination for the Organize Cell Placement modal (bulk submissions).
   const [cellOrganizerPage, setCellOrganizerPage] = useState(1);
   const [cellOrganizerPageSize, setCellOrganizerPageSize] = useState(5);
-  // Re-entry guard so rapid re-opens (auto-prompt + menu click, or repeated modal
-  // toggling) can't fire overlapping /my-submissions/batch requests. State updates
-  // are async, so a ref is used to short-circuit synchronously.
   const cellOrganizerLoadingRef = useRef(false);
-  // Bulk (file-upload) cell organization — an additional workflow layered on top of
-  // the manual organizer. Reuses the already-loaded cellOrganizerData.
   const [bulkOrganizeOpen, setBulkOrganizeOpen] = useState(false);
-  // Collapsible state for the Cell Infra Overview card inside the organizer.
-  // Collapsed by default — the organizer opens focused on the placement list,
-  // not the (secondary) infra chart.
   const [cellInfraCollapsed, setCellInfraCollapsed] = useState(true);
-
-  // NB: "does this submission still have unplaced waste?" is now answered SERVER-side
-  // (portalAuth#summarizeCellAssignment → `unplacedCount`), because the history list
-  // no longer ships trucks[] for the browser to walk. The old client-side
-  // submissionHasUnplaced() helper was removed with it.
-
-  // Admin-configurable allowance: how far a truck's actual waste volume may
-  // exceed its stated capacity before a submission is blocked. Falls back to 10%.
   const capacityAllowancePct = (() => {
     const pct = Number(portalSettings?.truckCapacityAllowancePercent);
     return Number.isFinite(pct) && pct >= 0 ? pct : 10;
   })();
 
-  // Compare an entered waste volume against a truck/vehicle capacity, honoring the
-  // configured allowance. Returns whether it exceeds the allowed threshold and the
-  // computed maximum. Units are normalized to the capacity's unit before comparing.
   const evaluateCapacity = useCallback(
     (actualVolume, actualVolumeUnit, capacity, capacityUnit) => {
       const cap = Number(capacity || 0);
@@ -1238,10 +1200,6 @@ export default function SLFPortal() {
     [],
   );
 
-  // Declared (registered) capacity for a plate, read from the accredited haulers.
-  // Drives the strict +10% truck-capacity elevation cap. Searches the named hauler
-  // first, then any hauler carrying that plate (plates are unique per SLF). Returns
-  // null when unknown, so an unregistered plate is not blocked by this rule.
   const getDeclaredVehicleCapacity = useCallback(
     (haulerName, plateNumber) => {
       const plate = String(plateNumber || "").trim().toLowerCase();
@@ -1261,28 +1219,16 @@ export default function SLFPortal() {
 
   const unplacedSubmissions = useMemo(() => {
     if (activeCellOptions.length === 0) return [];
-    // Centralized rule (organizeCellsValidation#submissionNeedsOrganize): include
-    // ANY submission — approved/acknowledged/pending — that still has waste not
-    // placed into a cell OR a historical truck missing its Truck Capacity. Only
-    // reverted/rejected entries are excluded (they are locked and re-encoded
-    // through the edit flow instead). Both counts are computed SERVER-side.
     return getUnplacedSubmissions(submissions);
   }, [submissions, activeCellOptions.length]);
 
   const openCellOrganizer = async () => {
     if (!ORGANIZE_CELLS_ENABLED) return;
-    // Prevent overlapping loads: the organizer can be opened from the auto-prompt
-    // AND a menu click near-simultaneously. Without this guard each open fired its
-    // own /my-submissions/batch, contributing to the request storm.
     if (cellOrganizerLoadingRef.current) {
       setCellOrganizerOpen(true);
       return;
     }
     cellOrganizerLoadingRef.current = true;
-
-    // Open the modal FIRST, with a loading state. Previously this awaited the fetch
-    // before calling setCellOrganizerOpen(true), so clicking the menu left the app
-    // sitting there with nothing on screen — it looked frozen.
     setCellOrganizerData([]);
     setCellOrganizerExpanded([]);
     setCellOrganizerSelected([]);
@@ -1293,10 +1239,6 @@ export default function SLFPortal() {
     setCellOrganizerOpen(true);
 
     try {
-      // ONE request for all of them, and `unassignedOnly` makes the server send back
-      // ONLY the placements that still need a cell — a submission with 20 trucks of
-      // which 1 is unassigned now ships 1 placement, not 20. Truck/vehicle INDICES
-      // are preserved so saving still targets the right slot.
       const { data: full } = await api.post("/portal-auth/my-submissions/batch", {
         ids: unplacedSubmissions.map((s) => s._id),
         unassignedOnly: true,
@@ -1558,12 +1500,6 @@ export default function SLFPortal() {
       .catch(() => {})
       .finally(() => setSlfInfoLoading(false));
     return () => ac.abort();
-    // Depend on the resolved SLF id/name (stable primitives) — NOT the whole
-    // portalUser object. portalUser changes reference several times on mount
-    // (localStorage load → /me refresh, doubled by StrictMode); depending on it
-    // aborted the in-flight cell-infra fetch every time, so slfInfo (and thus the
-    // baseline cell picker) came up empty.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeSlfId, activeSlfName, slfInfoRefresh]);
 
   // Fetch existing baseline when user is loaded (with retry)
@@ -1940,11 +1876,6 @@ export default function SLFPortal() {
     setPortalMessages((prev) => prev.filter((m) => m._id !== id));
   };
 
-  // Item #4: display unread admin messages with SweetAlert2, ONE at a time (queued,
-  // never overlapping). A ref guard prevents the same message reopening across
-  // rerenders; content is HTML-escaped before rendering. Dismiss / Do Not Show
-  // Again persist through the existing message-status API (dismissPortalMessage),
-  // which removes the message from the queue → the effect shows the next one.
   const msgShowingRef = useRef(false);
   useEffect(() => {
     if (isDeveloperContext || msgShowingRef.current) return;
@@ -1980,17 +1911,11 @@ export default function SLFPortal() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [portalMessages, isDeveloperContext]);
 
-  // Reflect admin-side SLF Data Table edits in real time. When the server emits
-  // a facility/submissions/baseline data-refresh, re-pull the facility info and
-  // submission history so the portal always mirrors the latest admin changes.
   useEffect(() => {
     if (!portalUser?.email) return undefined;
     const sock = connectSocket("portal", portalUser.email);
     const onFacilityRefresh = (payload) => {
       const target = payload?.target;
-      // Developer toggled the SLF sensitive-value masking flag (or another app
-      // setting changed) — re-pull settings live so the portal re-masks/unmasks
-      // without a page reload. Bypass the cache so the fresh flag wins.
       if (target === "app-settings") {
         invalidateCache(PORTAL_SETTINGS_CACHE_KEY);
         api

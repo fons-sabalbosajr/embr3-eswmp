@@ -222,6 +222,31 @@ const fileNameFromUrl = (value, fallback = "file") => {
   }
 };
 
+// The upload response returns the ORIGINAL filename (server sends
+// `name: req.file.originalname`); AntD also keeps it on `file.name` for a
+// freshly selected file. `fileNameFromUrl` alone would show the opaque storage
+// name (e.g. "1785...enc") because restricted media is stored under a random
+// filename. Prefer the original name from the upload event, then the persisted
+// `fileName`, then fall back to the storage-derived name.
+const resolveUploadName = (value, persistedName, fallback = "file") => {
+  const file = Array.isArray(value) ? value[0] : null;
+  const freshName = file?.response?.name || (file && !file.url ? file.name : "");
+  return freshName || persistedName || fileNameFromUrl(value, fallback);
+};
+
+// Extract the original filename to PERSIST on save. Freshly uploaded rows expose
+// it via the server response (or the selected file's name); already-saved rows
+// keep the previously stored `fileName`.
+const uploadNameFromValue = (value, existing = "") => {
+  const file = Array.isArray(value) ? value[0] : null;
+  return (
+    file?.response?.name ||
+    (file && !file.url ? file.name : "") ||
+    existing ||
+    ""
+  );
+};
+
 const uploadFileFromValue = (value) => (Array.isArray(value) ? value[0] : null);
 const fileUrlFromValue = (value) => uploadFileFromValue(value)?.url || uploadFileFromValue(value)?.response?.url || (typeof value === "string" ? value : "");
 
@@ -1203,7 +1228,7 @@ export default function SLFMonitoring({
           ? [
               {
                 uid: `gallery-${i}`,
-                name: item.url.split("/").pop() || "photo",
+                name: item.fileName || item.url.split("/").pop() || "photo",
                 status: "done",
                 url: item.url,
               },
@@ -1216,7 +1241,7 @@ export default function SLFMonitoring({
           ? [
               {
                 uid: `doc-${d.url}`,
-                name: d.url.split("/").pop() || d.title || "file",
+                name: d.fileName || d.url.split("/").pop() || d.title || "file",
                 status: "done",
                 url: d.url,
               },
@@ -1685,6 +1710,7 @@ export default function SLFMonitoring({
             url: Array.isArray(item.url)
               ? fromFileList(item.url)[0] || ""
               : item.url || "",
+            fileName: uploadNameFromValue(item.url, item.fileName),
             folder: Array.isArray(item.folder)
               ? item.folder[0] || ""
               : item.folder || "",
@@ -1698,6 +1724,7 @@ export default function SLFMonitoring({
             url: Array.isArray(d.url)
               ? fromFileList(d.url)[0] || ""
               : d.url || "",
+            fileName: uploadNameFromValue(d.url, d.fileName),
           }))
           .filter((d) => d.title || d.url || d.description || d.docType),
       };
@@ -6556,7 +6583,8 @@ export default function SLFMonitoring({
                                       const value = form.getFieldValue(["galleryItems", field.name, "url"]);
                                       const url = fileUrlFromValue(value);
                                       const file = uploadFileFromValue(value);
-                                      const fileName = fileNameFromUrl(value, "photo");
+                                      const persistedName = form.getFieldValue(["galleryItems", field.name, "fileName"]);
+                                      const fileName = resolveUploadName(value, persistedName, "photo");
                                       return (
                                         <Space size={8} align="start" style={{ width: "100%" }}>
                                           {url ? <Image src={resolveMediaUrl(url)} width={48} height={38} style={{ objectFit: "cover", borderRadius: 6, flex: "0 0 auto" }} /> : <FileImageOutlined style={{ fontSize: 24, color: "#8c8c8c", marginTop: 6 }} />}
@@ -6691,7 +6719,8 @@ export default function SLFMonitoring({
                                       const url = fileUrlFromValue(value);
                                       const file = uploadFileFromValue(value);
                                       const kind = getMediaKind(url);
-                                      const fileName = fileNameFromUrl(value, "document");
+                                      const persistedName = form.getFieldValue(["slfDocuments", field.name, "fileName"]);
+                                      const fileName = resolveUploadName(value, persistedName, "document");
                                       return (
                                         <Space direction="vertical" size={6} style={{ width: "100%" }}>
                                           <Space size={6} wrap>
@@ -6947,7 +6976,7 @@ export default function SLFMonitoring({
                     style={{ width: "100%" }}
                     min={0}
                     step={0.001}
-                    placeholder="0.20"
+                    placeholder="0.50"
                     value={convDensity}
                     onChange={setConvDensity}
                   />
@@ -6988,7 +7017,7 @@ export default function SLFMonitoring({
                   }
                 />
                 <Text type="secondary" style={{ fontSize: 11 }}>
-                  Typical MSW density starts at 0.20 t/m3.
+                  Typical MSW density starts at 0.50 t/m3.
                 </Text>
               </Col>
             </Row>

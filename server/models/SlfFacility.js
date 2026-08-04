@@ -179,6 +179,7 @@ const slfFacilitySchema = new mongoose.Schema(
     galleryPhotos: [{ type: String, trim: true }], // array of photo URLs
     galleryItems: [{
       url: { type: String, trim: true },
+      fileName: { type: String, trim: true }, // original uploaded filename (display)
       caption: { type: String, trim: true },
       folder: { type: String, trim: true },
       component: { type: String, trim: true },
@@ -186,6 +187,7 @@ const slfFacilitySchema = new mongoose.Schema(
     slfDocuments: [{
       title: { type: String, trim: true },
       url: { type: String, trim: true },
+      fileName: { type: String, trim: true }, // original uploaded filename (display)
       description: { type: String, trim: true },
       docType: { type: String, trim: true },
     }],
