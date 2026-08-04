@@ -197,6 +197,7 @@ import {
   isHazardousCellType,
   resolveMediaUrl,
   resolveMediaOpenUrl,
+  resolveMediaPreviewUrl,
   getMediaKind,
   normalizeStoredFileUrl,
 } from "./slf-monitoring/helpers.jsx";
@@ -389,6 +390,13 @@ export default function SLFMonitoring({
   const [convModalOpen, setConvModalOpen] = useState(false);
   const [unitToolOpen, setUnitToolOpen] = useState(false);
   const [unitToolValue, setUnitToolValue] = useState("tons");
+  // In-app file/PDF preview modal (Documents + Preventive Measures viewers).
+  const [filePreview, setFilePreview] = useState({ open: false, url: "", name: "" });
+  const openFilePreview = useCallback((url, name = "") => {
+    const raw = normalizeStoredFileUrl(url) || (typeof url === "string" ? url : "");
+    if (!raw) return;
+    setFilePreview({ open: true, url: raw, name: name || "" });
+  }, []);
   const [saving, setSaving] = useState(false);
   const [capacityAlertModal, setCapacityAlertModal] = useState(null);
   const [capacityAlertSending, setCapacityAlertSending] = useState(false);
@@ -1531,10 +1539,17 @@ export default function SLFMonitoring({
           : storeValues[key] !== undefined
             ? storeValues[key]
             : (existingRecord[key] ?? fallback);
+      // Like `fieldValue`, fall back to the live form store before the stored
+      // record: the SLF edit modal's Tabs uses `destroyInactiveTabPane`, so a file
+      // field whose tab (e.g. Preventive Measures) is not the active pane at save
+      // time is unmounted and absent from `validateFields()`. Reading `storeValues`
+      // keeps those just-uploaded files instead of reverting to the old record.
       const fileFieldValue = (key) =>
         values[key] !== undefined
           ? fromFileList(values[key])
-          : existingRecord[key] || [];
+          : storeValues[key] !== undefined
+            ? fromFileList(storeValues[key])
+            : existingRecord[key] || [];
       const dateFieldValue = (key) =>
         values[key] !== undefined
           ? (values[key]?.toISOString?.() ?? null)
@@ -1937,7 +1952,7 @@ export default function SLFMonitoring({
     }
   };
 
-  const applyUnitTool = () => {
+  const applyUnitTool = async () => {
     const unit = normalizeUnit(unitToolValue || "m³");
     const cellCount = Math.max(
       Number(form.getFieldValue("numberOfCell") || 0),
@@ -1985,27 +2000,18 @@ export default function SLFMonitoring({
     // Warn ONLY when this actually reinterprets data: the unit is genuinely
     // changing AND the facility already has values. The tool relabels every unit
     // field but does NOT convert the numbers, so make that explicit before saving.
-    // zIndex sits above this tool's own Modal (1700) so the confirm can't hide
-    // behind it — the modal-layering rule.
+    // SweetAlert (over-modal) keeps the confirm uniform with the rest of the app.
     if (currentUnit && currentUnit !== unit && sample !== undefined) {
-      Modal.confirm({
+      const result = await Swal.fire({
+        icon: "warning",
         title: `Change unit to ${unit} without converting values?`,
-        zIndex: 1800,
-        okText: `Yes, relabel to ${unit}`,
-        cancelText: "Cancel",
-        okButtonProps: { style: { background: "#faad14", borderColor: "#faad14" } },
-        content: (
-          <span>
-            This sets the unit on <b>every</b> capacity, fill, receiving and estimated
-            field of this SLF (and all its cells) from <b>{currentUnit}</b> to{" "}
-            <b>{unit}</b> — but it does <b>not</b> convert the numbers. For example,{" "}
-            <b>{sample} {currentUnit}</b> will become <b>{sample} {unit}</b> (not the
-            converted equivalent). Only continue if the stored values are already in{" "}
-            {unit}; otherwise cancel and enter the correct {unit} values.
-          </span>
-        ),
-        onOk: applyUnits,
+        html: `This sets the unit on <b>every</b> capacity, fill, receiving and estimated field of this SLF (and all its cells) from <b>${currentUnit}</b> to <b>${unit}</b> — but it does <b>not</b> convert the numbers. For example, <b>${sample} ${currentUnit}</b> will become <b>${sample} ${unit}</b> (not the converted equivalent). Only continue if the stored values are already in ${unit}; otherwise cancel and enter the correct ${unit} values.`,
+        showCancelButton: true,
+        confirmButtonText: `Yes, relabel to ${unit}`,
+        cancelButtonText: "Cancel",
+        confirmButtonColor: "#faad14",
       });
+      if (result.isConfirmed) await applyUnits();
       return;
     }
     applyUnits();
@@ -6400,11 +6406,148 @@ export default function SLFMonitoring({
                           headers={getUploadHeaders()}
                           multiple
                           accept=".pdf,.doc,.docx,.xls,.xlsx,image/*"
+                          showUploadList={false}
                         >
-                          <Button icon={<UploadOutlined />}>
+                          <Button icon={<UploadOutlined />} disabled={driveDisabled}>
                             Upload Preventive Measure Files (max 200 MB)
                           </Button>
                         </Upload>
+                      </Form.Item>
+                      <Form.Item
+                        noStyle
+                        shouldUpdate={(prev, cur) =>
+                          prev.preventiveMeasureFiles !== cur.preventiveMeasureFiles
+                        }
+                      >
+                        {() => {
+                          const files =
+                            form.getFieldValue("preventiveMeasureFiles") || [];
+                          if (!files.length) return null;
+                          return (
+                            <Table
+                              size="small"
+                              dataSource={files}
+                              rowKey={(f) => f.uid || f.url || f.name}
+                              pagination={false}
+                              style={{ marginTop: 8 }}
+                              columns={[
+                                {
+                                  title: "File",
+                                  render: (_, f) => {
+                                    const url = f.url || f.response?.url;
+                                    const kind = getMediaKind(url || f.name || "");
+                                    return (
+                                      <Space size={6}>
+                                        <Tag
+                                          icon={kind === "pdf" ? <FilePdfOutlined /> : kind === "image" ? <FileImageOutlined /> : <FileTextOutlined />}
+                                          color={url ? "orange" : "default"}
+                                          style={{ margin: 0 }}
+                                        >
+                                          {kind || "file"}
+                                        </Tag>
+                                        <Tooltip title={f.name}>
+                                          <Text ellipsis style={{ maxWidth: 180, fontSize: 11 }}>
+                                            {f.name || "—"}
+                                          </Text>
+                                        </Tooltip>
+                                      </Space>
+                                    );
+                                  },
+                                },
+                                {
+                                  title: "Size",
+                                  width: 80,
+                                  render: (_, f) =>
+                                    f.size ? (
+                                      <Text type="secondary" style={{ fontSize: 11 }}>
+                                        {formatFileSize(f.size)}
+                                      </Text>
+                                    ) : (
+                                      "—"
+                                    ),
+                                },
+                                {
+                                  title: "Progress",
+                                  width: 190,
+                                  render: (_, f) => {
+                                    if (f.status === "uploading") {
+                                      const pct = Math.round(f.percent || 0);
+                                      return (
+                                        <Space size={6} align="center">
+                                          <Progress
+                                            percent={pct}
+                                            size="small"
+                                            style={{ width: 120 }}
+                                          />
+                                          <Text style={{ fontSize: 11, color: "#1677ff" }}>
+                                            {pct}%
+                                          </Text>
+                                        </Space>
+                                      );
+                                    }
+                                    const url = f.url || f.response?.url;
+                                    return (
+                                      <Tag
+                                        color={
+                                          f.status === "error"
+                                            ? "red"
+                                            : url
+                                              ? "green"
+                                              : "default"
+                                        }
+                                      >
+                                        {f.status === "error"
+                                          ? "Error"
+                                          : url
+                                            ? "Ready"
+                                            : "Pending"}
+                                      </Tag>
+                                    );
+                                  },
+                                },
+                                {
+                                  title: "",
+                                  width: 64,
+                                  render: (_, f) => {
+                                    const url = f.url || f.response?.url;
+                                    return (
+                                      <Space size={4}>
+                                        <Tooltip title="Preview">
+                                          <Button
+                                            size="small"
+                                            icon={<EyeOutlined />}
+                                            disabled={!url}
+                                            onClick={() =>
+                                              openFilePreview(url, f.name)
+                                            }
+                                          />
+                                        </Tooltip>
+                                        <Tooltip title="Remove">
+                                          <Button
+                                            size="small"
+                                            danger
+                                            icon={<DeleteOutlined />}
+                                            onClick={() => {
+                                              const cur =
+                                                form.getFieldValue(
+                                                  "preventiveMeasureFiles",
+                                                ) || [];
+                                              form.setFieldsValue({
+                                                preventiveMeasureFiles: cur.filter(
+                                                  (item) => item.uid !== f.uid,
+                                                ),
+                                              });
+                                            }}
+                                          />
+                                        </Tooltip>
+                                      </Space>
+                                    );
+                                  },
+                                },
+                              ]}
+                            />
+                          );
+                        }}
                       </Form.Item>
                       <Divider
                         orientation="left"
@@ -6478,34 +6621,194 @@ export default function SLFMonitoring({
                                 },
                                 {
                                   title: "Upload",
-                                  width: 230,
+                                  width: 270,
                                   render: (_, field) => (
-                                    <Form.Item
-                                      name={[field.name, "attachments"]}
-                                      valuePropName="fileList"
-                                      getValueFromEvent={uploadEventToFileList}
-                                      style={{ margin: 0 }}
-                                    >
-                                      <Upload
-                                        {...slfUploadProps}
-                                        action={
-                                          driveDisabled
-                                            ? undefined
-                                            : "/eswm-pipeline/api/upload"
-                                        }
-                                        disabled={driveDisabled}
-                                        headers={getUploadHeaders()}
-                                        multiple
-                                        accept=".pdf,.doc,.docx,.xls,.xlsx,image/*"
+                                    <Space direction="vertical" size={4} style={{ width: "100%" }}>
+                                      <Form.Item
+                                        name={[field.name, "attachments"]}
+                                        valuePropName="fileList"
+                                        getValueFromEvent={uploadEventToFileList}
+                                        style={{ margin: 0 }}
                                       >
-                                        <Button
-                                          size="small"
-                                          icon={<UploadOutlined />}
+                                        <Upload
+                                          {...slfUploadProps}
+                                          action={
+                                            driveDisabled
+                                              ? undefined
+                                              : "/eswm-pipeline/api/upload"
+                                          }
+                                          disabled={driveDisabled}
+                                          headers={getUploadHeaders()}
+                                          multiple
+                                          accept=".pdf,.doc,.docx,.xls,.xlsx,image/*"
+                                          showUploadList={false}
                                         >
-                                          Upload (max 200 MB)
-                                        </Button>
-                                      </Upload>
-                                    </Form.Item>
+                                          <Button size="small" icon={<UploadOutlined />}>
+                                            Upload (max 200 MB)
+                                          </Button>
+                                        </Upload>
+                                      </Form.Item>
+                                      <Form.Item
+                                        noStyle
+                                        shouldUpdate={(prev, cur) =>
+                                          prev.scrpDetails !== cur.scrpDetails
+                                        }
+                                      >
+                                        {() => {
+                                          const files =
+                                            form.getFieldValue([
+                                              "scrpDetails",
+                                              field.name,
+                                              "attachments",
+                                            ]) || [];
+                                          if (!files.length) return null;
+                                          return (
+                                            <Space
+                                              direction="vertical"
+                                              size={2}
+                                              style={{ width: "100%" }}
+                                            >
+                                              {files.map((f, fi) => {
+                                                const url =
+                                                  f.url || f.response?.url;
+                                                const pct = Math.round(
+                                                  f.percent || 0,
+                                                );
+                                                return (
+                                                  <div
+                                                    key={f.uid || fi}
+                                                    style={{
+                                                      display: "flex",
+                                                      alignItems: "center",
+                                                      gap: 4,
+                                                      background: "#fafafa",
+                                                      borderRadius: 4,
+                                                      padding: "2px 6px",
+                                                    }}
+                                                  >
+                                                    <Tooltip title={f.name}>
+                                                      <Text
+                                                        ellipsis
+                                                        style={{
+                                                          maxWidth: 80,
+                                                          fontSize: 11,
+                                                          flex: 1,
+                                                        }}
+                                                      >
+                                                        {f.name ||
+                                                          `File ${fi + 1}`}
+                                                      </Text>
+                                                    </Tooltip>
+                                                    {f.status ===
+                                                    "uploading" ? (
+                                                      <>
+                                                        <Progress
+                                                          percent={pct}
+                                                          size="small"
+                                                          showInfo={false}
+                                                          style={{
+                                                            flex: 1,
+                                                            minWidth: 50,
+                                                          }}
+                                                        />
+                                                        <Text
+                                                          style={{
+                                                            fontSize: 10,
+                                                            color: "#1677ff",
+                                                            whiteSpace:
+                                                              "nowrap",
+                                                          }}
+                                                        >
+                                                          {pct}%
+                                                        </Text>
+                                                      </>
+                                                    ) : (
+                                                      <Tag
+                                                        color={
+                                                          f.status === "error"
+                                                            ? "red"
+                                                            : url
+                                                              ? "green"
+                                                              : "default"
+                                                        }
+                                                        style={{
+                                                          fontSize: 10,
+                                                          padding: "0 4px",
+                                                          margin: 0,
+                                                        }}
+                                                      >
+                                                        {f.status === "error"
+                                                          ? "Err"
+                                                          : url
+                                                            ? "OK"
+                                                            : "?"}
+                                                      </Tag>
+                                                    )}
+                                                    {url && (
+                                                      <Button
+                                                        size="small"
+                                                        type="text"
+                                                        icon={<EyeOutlined />}
+                                                        style={{
+                                                          padding: 0,
+                                                          height: 18,
+                                                          width: 18,
+                                                        }}
+                                                        onClick={() =>
+                                                          openFilePreview(
+                                                            url,
+                                                            f.name,
+                                                          )
+                                                        }
+                                                      />
+                                                    )}
+                                                    <Button
+                                                      size="small"
+                                                      type="text"
+                                                      danger
+                                                      icon={<DeleteOutlined />}
+                                                      style={{
+                                                        padding: 0,
+                                                        height: 18,
+                                                        width: 18,
+                                                      }}
+                                                      onClick={() => {
+                                                        const scrpDetails = [
+                                                          ...(form.getFieldValue(
+                                                            "scrpDetails",
+                                                          ) || []),
+                                                        ];
+                                                        const row =
+                                                          scrpDetails[
+                                                            field.name
+                                                          ]
+                                                            ? {
+                                                                ...scrpDetails[
+                                                                  field.name
+                                                                ],
+                                                              }
+                                                            : {};
+                                                        row.attachments = (
+                                                          row.attachments || []
+                                                        ).filter(
+                                                          (_, i) => i !== fi,
+                                                        );
+                                                        scrpDetails[
+                                                          field.name
+                                                        ] = row;
+                                                        form.setFieldsValue({
+                                                          scrpDetails,
+                                                        });
+                                                      }}
+                                                    />
+                                                  </div>
+                                                );
+                                              })}
+                                            </Space>
+                                          );
+                                        }}
+                                      </Form.Item>
+                                    </Space>
                                   ),
                                 },
                                 {
@@ -6548,12 +6851,12 @@ export default function SLFMonitoring({
                   ),
                   children: (
                     <>
-                      <Alert
+                      {/* <Alert
                         type="info"
                         showIcon
                         style={{ marginBottom: 12 }}
                         message="Gallery images are managed in a table. Upload or replace a photo from the Actions column, then save the SLF record."
-                      />
+                      /> */}
                       <Form.List name="galleryItems">
                         {(fields, { add, remove }) => (
                           <>
@@ -6654,14 +6957,41 @@ export default function SLFMonitoring({
                               />
                               )}
                             </Form.Item>
-                            <Button
-                              type="dashed"
-                              onClick={() => add({})}
-                              block
-                              icon={<PlusOutlined />}
-                            >
-                              Add Gallery Item
-                            </Button>
+                            <Space style={{ width: "100%", marginTop: 4 }} direction="vertical" size={8}>
+                              <Upload
+                                {...slfUploadProps}
+                                action={driveDisabled ? undefined : "/eswm-pipeline/api/upload"}
+                                headers={getUploadHeaders()}
+                                multiple
+                                showUploadList={false}
+                                accept="image/*"
+                                disabled={driveDisabled}
+                                onChange={({ file }) => {
+                                  if (file.status === "done") {
+                                    const url = file.response?.url || file.url;
+                                    if (url)
+                                      add({
+                                        fileName: file.name,
+                                        url: [{ uid: file.uid, name: file.name, status: "done", url, response: file.response }],
+                                      });
+                                  } else if (file.status === "error") {
+                                    message.error(`${file.name} failed to upload.`);
+                                  }
+                                }}
+                              >
+                                <Button type="primary" ghost icon={<UploadOutlined />} block disabled={driveDisabled}>
+                                  Upload Multiple Images
+                                </Button>
+                              </Upload>
+                              <Button
+                                type="dashed"
+                                onClick={() => add({})}
+                                block
+                                icon={<PlusOutlined />}
+                              >
+                                Add Gallery Item
+                              </Button>
+                            </Space>
                           </>
                         )}
                       </Form.List>
@@ -6683,20 +7013,15 @@ export default function SLFMonitoring({
                   ),
                   children: (
                     <>
-                      <Alert
+                      {/* <Alert
                         type="info"
                         showIcon
                         style={{ marginBottom: 12 }}
                         message="Documents are managed in a table. Edit metadata inline, upload or replace a file from the Actions column, then save the SLF record."
-                      />
+                      /> */}
                       <Form.List name="slfDocuments">
                         {(fields, { add, remove }) => (
                           <>
-                            {/* Form.List skips re-rendering its children for value updates, so
-                                these cells (preview, file name, size, status, action buttons) read a
-                                STALE form store and kept showing "Missing" with View/Download
-                                disabled after a file had uploaded fine. shouldUpdate re-renders the
-                                table whenever the list value changes. */}
                             <Form.Item
                               noStyle
                               shouldUpdate={(prev, cur) => prev.slfDocuments !== cur.slfDocuments}
@@ -6766,6 +7091,8 @@ export default function SLFMonitoring({
                                       const file = uploadFileFromValue(value);
                                       const uploading = file?.status === "uploading";
                                       const url = fileUrlFromValue(value);
+                                      const docTitle = form.getFieldValue(["slfDocuments", field.name, "title"]);
+                                      const previewName = resolveUploadName(value, form.getFieldValue(["slfDocuments", field.name, "fileName"]), docTitle || "document");
                                       return (
                                         <Space size={4}>
                                           <Form.Item name={[field.name, "url"]} valuePropName="fileList" getValueFromEvent={uploadEventToFileList} style={{ margin: 0 }}>
@@ -6773,7 +7100,7 @@ export default function SLFMonitoring({
                                               <Tooltip title={uploading ? "Upload in progress" : url ? "Replace file" : "Upload file"}><Button size="small" icon={<UploadOutlined />} loading={uploading} disabled={driveDisabled || uploading} /></Tooltip>
                                             </Upload>
                                           </Form.Item>
-                                          <Tooltip title="View / preview"><Button size="small" icon={<EyeOutlined />} disabled={!url} onClick={() => window.open(resolveMediaOpenUrl(url), "_blank", "noopener,noreferrer")} /></Tooltip>
+                                          <Tooltip title="View / preview"><Button size="small" icon={<EyeOutlined />} disabled={!url} onClick={() => openFilePreview(url, previewName)} /></Tooltip>
                                           <Tooltip title="Open in new tab"><Button size="small" icon={<LinkOutlined />} disabled={!url} onClick={() => window.open(resolveMediaOpenUrl(url), "_blank", "noopener,noreferrer")} /></Tooltip>
                                           <Tooltip title="Download"><Button size="small" icon={<DownloadOutlined />} disabled={!url} onClick={() => window.open(resolveMediaOpenUrl(url), "_blank", "noopener,noreferrer")} /></Tooltip>
                                           <Popconfirm title="Delete this document?" okText="Delete" okButtonProps={{ danger: true }} onConfirm={() => remove(field.name)}>
@@ -6787,16 +7114,45 @@ export default function SLFMonitoring({
                               />
                               )}
                             </Form.Item>
-                            <Button
-                              type="dashed"
-                              onClick={() =>
-                                add({ docType: "Monitoring Report" })
-                              }
-                              block
-                              icon={<PlusOutlined />}
-                            >
-                              Add Document
-                            </Button>
+                            <Space style={{ width: "100%", marginTop: 4 }} direction="vertical" size={8}>
+                              <Upload
+                                {...slfUploadProps}
+                                action={driveDisabled ? undefined : "/eswm-pipeline/api/upload"}
+                                headers={getUploadHeaders()}
+                                multiple
+                                showUploadList={false}
+                                accept=".pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.tif,.tiff,image/*"
+                                disabled={driveDisabled}
+                                onChange={({ file }) => {
+                                  if (file.status === "done") {
+                                    const url = file.response?.url || file.url;
+                                    if (url)
+                                      add({
+                                        docType: "Monitoring Report",
+                                        title: String(file.name || "").replace(/\.[^.]+$/, ""),
+                                        fileName: file.name,
+                                        url: [{ uid: file.uid, name: file.name, status: "done", url, response: file.response }],
+                                      });
+                                  } else if (file.status === "error") {
+                                    message.error(`${file.name} failed to upload.`);
+                                  }
+                                }}
+                              >
+                                <Button type="primary" ghost icon={<UploadOutlined />} block disabled={driveDisabled}>
+                                  Upload Multiple Documents
+                                </Button>
+                              </Upload>
+                              <Button
+                                type="dashed"
+                                onClick={() =>
+                                  add({ docType: "Monitoring Report" })
+                                }
+                                block
+                                icon={<PlusOutlined />}
+                              >
+                                Add Document
+                              </Button>
+                            </Space>
                           </>
                         )}
                       </Form.List>
@@ -6857,6 +7213,70 @@ export default function SLFMonitoring({
             />
           </div>
         )}
+      </Modal>
+
+      {/* -- File / PDF Preview Modal -- */}
+      <Modal
+        title={
+          <Space>
+            <FilePdfOutlined style={{ color: "#cf1322" }} />
+            <span style={{ maxWidth: 520, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              {filePreview.name || "File Preview"}
+            </span>
+          </Space>
+        }
+        open={filePreview.open}
+        onCancel={() => setFilePreview({ open: false, url: "", name: "" })}
+        footer={[
+          <Button
+            key="open"
+            icon={<LinkOutlined />}
+            onClick={() => window.open(resolveMediaOpenUrl(filePreview.url), "_blank", "noopener,noreferrer")}
+          >
+            Open in new tab
+          </Button>,
+          <Button key="close" type="primary" onClick={() => setFilePreview({ open: false, url: "", name: "" })}>
+            Close
+          </Button>,
+        ]}
+        width={920}
+        zIndex={1900}
+        styles={{ body: { padding: 0, height: "72vh", background: "#525659" } }}
+        destroyOnHidden
+      >
+        {(() => {
+          if (!filePreview.url) return null;
+          const kind = getMediaKind(filePreview.url);
+          if (kind === "image") {
+            return (
+              <div style={{ height: "100%", display: "flex", alignItems: "center", justifyContent: "center", overflow: "auto" }}>
+                <Image
+                  src={resolveMediaUrl(filePreview.url)}
+                  style={{ maxHeight: "72vh", objectFit: "contain" }}
+                  preview={false}
+                />
+              </div>
+            );
+          }
+          if (kind === "video") {
+            return (
+              <video
+                src={filePreview.url}
+                controls
+                style={{ width: "100%", height: "100%", background: "#000" }}
+              />
+            );
+          }
+          // pdf / doc / drive (extension-less) — embed the viewer inline.
+          return (
+            <iframe
+              title={filePreview.name || "File preview"}
+              src={resolveMediaPreviewUrl(filePreview.url)}
+              style={{ width: "100%", height: "100%", border: "none" }}
+              allow="autoplay"
+            />
+          );
+        })()}
       </Modal>
 
       {/* -- Capacity Converter Modal -- */}
@@ -8973,20 +9393,15 @@ export default function SLFMonitoring({
                                     .pop() || "",
                                 ).split("?")[0] || `File ${i + 1}`;
                               return url ? (
-                                <a
+                                <Tag
                                   key={i}
-                                  href={resolveMediaOpenUrl(url)}
-                                  target="_blank"
-                                  rel="noopener noreferrer"
+                                  color="orange"
+                                  icon={<EyeOutlined />}
+                                  style={{ cursor: "pointer" }}
+                                  onClick={() => openFilePreview(url, name)}
                                 >
-                                  <Tag
-                                    color="orange"
-                                    icon={<LinkOutlined />}
-                                    style={{ cursor: "pointer" }}
-                                  >
-                                    {name}
-                                  </Tag>
-                                </a>
+                                  {name}
+                                </Tag>
                               ) : (
                                 <Tag key={i} color="orange">
                                   {name}
@@ -9038,20 +9453,15 @@ export default function SLFMonitoring({
                                         const url = normalizeStoredFileUrl(att);
                                         if (!url) return null;
                                         return (
-                                          <a
+                                          <Tag
                                             key={ai}
-                                            href={resolveMediaOpenUrl(url)}
-                                            target="_blank"
-                                            rel="noopener noreferrer"
+                                            color="purple"
+                                            icon={<EyeOutlined />}
+                                            style={{ cursor: "pointer" }}
+                                            onClick={() => openFilePreview(url, `SCRP File ${ai + 1}`)}
                                           >
-                                            <Tag
-                                              color="purple"
-                                              icon={<LinkOutlined />}
-                                              style={{ cursor: "pointer" }}
-                                            >
-                                              File {ai + 1}
-                                            </Tag>
-                                          </a>
+                                            File {ai + 1}
+                                          </Tag>
                                         );
                                       })}
                                     </Space>
@@ -9453,11 +9863,9 @@ export default function SLFMonitoring({
                                         <EyeOutlined />
                                       )
                                     }
-                                    href={resolveMediaOpenUrl(raw)}
-                                    target="_blank"
-                                    rel="noopener noreferrer"
+                                    onClick={() => openFilePreview(raw, doc?.title || doc?.fileName)}
                                   >
-                                    Open
+                                    View
                                   </Button>
                                 );
                               },

@@ -316,6 +316,19 @@ const resolveMediaOpenUrl = (url) => {
   return s;
 };
 
+// Resolve a URL that EMBEDS a stored file inside an <iframe> for in-app preview.
+// Drive files use their `/preview` embed page, which renders pdf/doc/image inline
+// without a download; everything else embeds by its direct URL.
+const resolveMediaPreviewUrl = (url) => {
+  const s = String(url || "");
+  if (!s) return "";
+  if (isDriveUrl(s)) {
+    const id = extractDriveId(s);
+    if (id) return `https://drive.google.com/file/d/${id}/preview`;
+  }
+  return s;
+};
+
 // Coarse media-type detection from a URL/extension, for choosing how to render
 // a stored file (inline image vs. video vs. pdf vs. generic download).
 const getMediaKind = (url) => {
@@ -373,6 +386,7 @@ export {
   isDriveUrl,
   resolveMediaUrl,
   resolveMediaOpenUrl,
+  resolveMediaPreviewUrl,
   getMediaKind,
   normalizeStoredFileUrl,
 };

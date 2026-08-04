@@ -225,13 +225,14 @@ function OverviewPanel({
     );
   };
 
-  // ── Cell utilization overview (active baseline cells only) ──
+  // ── Cell utilization overview (active submission-enabled baseline cells only) ──
   // Cells come straight from the logged-in portal user's assigned facility
   // baseline (slfInfo.cell* arrays, editable under Data Entry → Baseline Data),
   // so no cell names/counts are hardcoded and Baseline Data edits flow through
-  // live. Only cells whose status is ACTIVE/operational are shown — inactive,
-  // closed, completed, reserved, under-construction and non-existent cells are
-  // excluded (isOperationalCellStatus is the single shared active-cell rule).
+  // live. Only cells whose status is ACTIVE/operational and whose admin-side
+  // submission toggle is enabled are shown — inactive, closed, completed,
+  // reserved, under-construction, non-existent and submission-closed cells are
+  // excluded (the same active-cell rule as the placement selectors).
   const cellCount = Math.max(
     Number(slfInfo?.numberOfCell || 0),
     slfInfo?.cellStatuses?.length || 0,
@@ -243,8 +244,10 @@ function OverviewPanel({
   for (let idx = 0; idx < cellCount; idx += 1) {
     const stored = slfInfo?.cellStatuses?.[idx];
     if (isNonExistentCell(stored)) continue;
-    // Active-only: drop any cell that is not currently operational.
+    // Active-only: drop any cell that is not currently operational or is closed
+    // for portal submissions in Admin Cell Infrastructure.
     if (!isOperationalCellStatus(stored)) continue;
+    if (slfInfo?.cellSubmissionAllowed?.[idx] === false) continue;
     const statusConfig = getCellStatusConfig(stored);
     const typeConfig = getCellTypeConfig(slfInfo?.cellTypes?.[idx]);
     const capUnit = resolveCellUnit(slfInfo, idx, "capacity");
@@ -363,7 +366,7 @@ function OverviewPanel({
                 image={Empty.PRESENTED_IMAGE_SIMPLE}
                 description={
                   cellCount > 0
-                    ? "No active cells in Baseline Data. Set a cell's status to Active to see it here."
+                    ? "No active submission-enabled cells in Baseline Data. Set a cell's status to Active and allow submissions to see it here."
                     : "No cells encoded in Baseline Data yet."
                 }
               />

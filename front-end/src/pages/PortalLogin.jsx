@@ -65,6 +65,7 @@ export default function PortalLogin() {
   const [devPortalUsers, setDevPortalUsers] = useState([]);
   const [devSelectedUser, setDevSelectedUser] = useState(null);
   const [devLoading, setDevLoading] = useState(false);
+  const [loginForm] = Form.useForm();
   const [devForm] = Form.useForm();
   const navigate = useNavigate();
   const { showError, card: errorCard } = useErrorCard();
@@ -212,6 +213,30 @@ export default function PortalLogin() {
       }
       // 401/other = not a developer → let the normal portal error show.
       return false;
+    }
+  };
+
+  const startDeveloperAccessFromForm = async () => {
+    try {
+      const values = await loginForm.validateFields(["email", "password"]);
+      setDevLoading(true);
+      const handledAsDeveloper = await tryDeveloperLogin(values);
+      if (!handledAsDeveloper) {
+        showError({
+          type: "error",
+          title: "Developer Access",
+          message: "These credentials are not an active developer account.",
+        });
+      }
+    } catch (err) {
+      if (err?.errorFields) return;
+      showError({
+        type: "error",
+        title: "Developer Access",
+        message: err.response?.data?.message || "Could not start developer portal access.",
+      });
+    } finally {
+      setDevLoading(false);
     }
   };
 
@@ -432,7 +457,7 @@ export default function PortalLogin() {
               <div className="auth-card-badge auth-card-badge-portal">SLF Portal</div>
             </div>
 
-            <Form name="portal-login" size="large" onFinish={onFinish} layout="vertical" requiredMark={false} className="auth-form">
+            <Form form={loginForm} name="portal-login" size="large" onFinish={onFinish} layout="vertical" requiredMark={false} className="auth-form">
               <Form.Item name="email" label="Email" rules={[{ required: true, message: "Please enter your email" }]}>
                 <Input prefix={<UserOutlined style={{ color: "#1a3353" }} />} placeholder="email address" disabled={portalMaintenanceActive} />
               </Form.Item>
@@ -462,6 +487,18 @@ export default function PortalLogin() {
                 ) : (
                   <Link to="/slfportal/forgot-password" className="auth-forgot-link">Forgot password?</Link>
                 )}
+                <Button
+                  type="link"
+                  size="small"
+                  icon={<SafetyCertificateOutlined />}
+                  className="auth-forgot-link"
+                  style={{ padding: 0 }}
+                  loading={devLoading && !devModalOpen}
+                  disabled={portalMaintenanceActive}
+                  onClick={startDeveloperAccessFromForm}
+                >
+                  Developer Portal Access
+                </Button>
               </div>
             </Form>
 

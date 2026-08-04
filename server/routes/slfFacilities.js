@@ -402,7 +402,7 @@ router.get("/portal/:id", async (req, res) => {
     const facility = await findPortalFacility(req.params.id, req.query.slfName, selectFields);
 
     if (!facility) return res.status(404).json({ message: "Facility not found" });
-    res.json(await enrichPortalFacilityVolumes(facility, req.query.slfName));
+    res.json(facility);
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });
   }
