@@ -74,6 +74,7 @@ import {
   UpOutlined,
   QuestionCircleOutlined,
   CustomerServiceOutlined,
+  SearchOutlined,
   UploadOutlined,
   DownloadOutlined,
   FileExcelOutlined,
@@ -241,12 +242,7 @@ export default function SLFPortal() {
   const [slfInfoLoading, setSlfInfoLoading] = useState(false);
   const [baselineLoading, setBaselineLoading] = useState(false);
   const [slfInfoRefresh, setSlfInfoRefresh] = useState(0);
-  // Bumped after a baseline write so the fetch effect below re-runs and the cell
-  // tables are re-seeded from what the server actually PERSISTED — not from the
-  // local draft. Without this, an edited cell name / waste type / volume was only
-  // ever visible as local state and reverted to the stored values on reload.
   const [baselineRefresh, setBaselineRefresh] = useState(0);
-  // Item #4: admin → portal-user messages shown after login.
   const [portalMessages, setPortalMessages] = useState([]);
   const [slfCardExpanded, setSlfCardExpanded] = useState(false);
   const [selectedSlfIdx, setSelectedSlfIdx] = useState(0); // for multi-SLF users
@@ -339,6 +335,16 @@ export default function SLFPortal() {
   const [supportSubmitting, setSupportSubmitting] = useState(false);
   const [supportDetailModal, setSupportDetailModal] = useState(null);
   const [supportReplyText, setSupportReplyText] = useState("");
+  const [supportTicketPagination, setSupportTicketPagination] = useState({
+    current: 1,
+    pageSize: 10,
+    total: 0,
+  });
+  const [supportTicketSearch, setSupportTicketSearch] = useState("");
+  const [supportTicketSorter, setSupportTicketSorter] = useState({
+    field: "createdAt",
+    order: "descend",
+  });
   const [portalNotifications, setPortalNotifications] = useState([]);
   const [portalUnreadCount, setPortalUnreadCount] = useState(0);
   const [notificationPanelOpen, setNotificationPanelOpen] = useState(false);
@@ -347,6 +353,9 @@ export default function SLFPortal() {
   // (no extra fetch, no second store).
   const [previousNotifOpen, setPreviousNotifOpen] = useState(false);
   const [notifDetail, setNotifDetail] = useState(null);
+  const [previousNotifSearch, setPreviousNotifSearch] = useState("");
+  const [previousNotifStatus, setPreviousNotifStatus] = useState("all");
+  const [previousNotifDateRange, setPreviousNotifDateRange] = useState(null);
   const [portalSettings, setPortalSettings] = useState(null);
   const [portalAnnouncement, setPortalAnnouncement] = useState(null);
   const [announcementDismissed, setAnnouncementDismissed] = useState(false);
@@ -390,15 +399,6 @@ export default function SLFPortal() {
   // before React has flushed the `savingDraft` / `schedulingSubmit` state.
   const queueActionRef = useRef(false);
 
-  // Portal-exit cleanup. Releases the TEMPORARY page datasets — the submission
-  // history list, the request log and the cell-organizer working set — when the
-  // Portal unmounts (logout / leaving the portal).
-  //
-  // Deliberately does NOT touch draft/submission state the user is editing
-  // (trucks, haulers, the antd form stores, the queue records). Those are
-  // persistent work, not render caches, and clearing them would destroy data the
-  // user has typed. Temporary derived data and persistent draft data are separate
-  // concerns here and are treated as such.
   useEffect(() => {
     return () => {
       setSubmissions([]);
@@ -438,11 +438,6 @@ export default function SLFPortal() {
       isTreatedHazardousWaste(truck.wasteType) &&
       !hasHazardousWasteCode(truck.hazWasteCode),
   );
-  // ── Data Entry tab loading ────────────────────────────────────────────────
-  // Which fetch each Data Entry tab actually depends on. A tab whose source data
-  // has not arrived shows a LOCALIZED spinner over just that pane — the tab bar
-  // stays usable and the rest of the Portal is untouched. Nothing is cleared, so
-  // anything already typed survives (the form store lives above the tabs).
   const TAB_DEPENDENCIES = {
     // Cell options + the declared unit come from the facility; the baseline drives
     // the unit and the saved cell entries.
@@ -475,17 +470,7 @@ export default function SLFPortal() {
       };
     });
 
-  // Developer Portal Mode: the session token is the DEVELOPER's, carrying an
-  // explicit portal context. It is READ-ONLY — the backend refuses every portal
-  // write from such a token (see utils/portalContext → assertPortalWriteAllowed).
-  // Hiding the buttons here is only so a developer isn't led into a guaranteed
-  // 403; it is not what makes the session safe.
   const isDeveloperContext = !!(portalUser?.developerContext || portalUser?.devImpersonation);
-
-  // Accredited-hauler vehicles missing a capacity. Vehicle Capacity is required —
-  // it is what the over-capacity check measures a load against — but records
-  // encoded before that rule can still be missing it, so the user is told exactly
-  // which vehicles to fix rather than being stopped with a vague error at submit.
   const haulerVehiclesMissingCapacity = useMemo(() => {
     const issues = [];
     (haulers || []).forEach((h) => {
@@ -1029,6 +1014,34 @@ export default function SLFPortal() {
   // admin changes the SLF unit (slfInfo re-fetches on the "facility" data-refresh).
   // Never hard-code tons/m³ for the current unit — use this instead.
   const slfUnit = resolveFacilityUnit(slfInfo);
+
+  const baselineCalcUnit = baselineUnit || slfUnit;
+  const hasCellVolumeEntries = activeCellEntries.length > 0 || closedCellEntries.length > 0;
+  const sumBaselineEntryVolume = useCallback(
+    (entries = []) =>
+      entries.reduce((sum, entry) => {
+        const converted = convertVolume(
+          entry?.volume,
+          entry?.unit || baselineCalcUnit,
+          baselineCalcUnit,
+        );
+        return sum + Number(converted || 0);
+      }, 0),
+    [baselineCalcUnit],
+  );
+  const computedTotalVolumeAccepted = useMemo(() => {
+    const activeVolume = sumBaselineEntryVolume(activeCellEntries);
+    const closedVolume = sumBaselineEntryVolume(closedCellEntries);
+    return Math.max(0, Number((activeVolume + closedVolume).toFixed(2)));
+  }, [activeCellEntries, closedCellEntries, sumBaselineEntryVolume]);
+
+  useEffect(() => {
+    if (!hasCellVolumeEntries) return;
+    baselineForm.setFieldsValue({
+      totalVolumeAccepted: computedTotalVolumeAccepted,
+      totalVolumeAcceptedUnit: baselineCalcUnit,
+    });
+  }, [baselineCalcUnit, baselineForm, computedTotalVolumeAccepted, hasCellVolumeEntries]);
 
   const slfCellCount = Number(
     Math.max(
@@ -1716,11 +1729,14 @@ export default function SLFPortal() {
     if (!portalUser?.email || !activeSlfName) return;
     const sock = connectSocket("portal", portalUser.email);
     const handler = (payload) => {
-      if (
+      // Accepts either shape: a bell notification ({ type }) or a data-refresh
+      // ({ target }). The admin baseline endpoints emit both.
+      const isBaselineEvent =
         payload?.type === "baseline_update_approved" ||
         payload?.type === "baseline_update_rejected" ||
-        payload?.type === "baseline_locked"
-      ) {
+        payload?.type === "baseline_locked" ||
+        payload?.target === "baselines";
+      if (isBaselineEvent) {
         api
           .get(`/data-slf/baseline/${encodeURIComponent(activeSlfName)}?slfId=${encodeURIComponent(activeSlfId || "")}`)
           .then(({ data }) => {
@@ -1738,10 +1754,18 @@ export default function SLFPortal() {
       }
     };
     sock.on("notification", handler);
+    // Also listen on data-refresh: the admin approve/lock/reject endpoints now emit
+    // BOTH (the bell notification and a "baselines" refresh), and only the latter
+    // reaches a portal tab whose notification stream was missed.
+    sock.on("data-refresh", handler);
     return () => {
       sock.off("notification", handler);
+      sock.off("data-refresh", handler);
     };
-  }, [portalUser, activeSlfName]);
+    // activeSlfId was read inside the handler but missing from the deps, so after
+    // switching assigned SLFs the listener kept refetching the PREVIOUS facility's
+    // baseline.
+  }, [portalUser, activeSlfName, activeSlfId]);
 
   // Fetch submission history
   const pollingRef = useRef(null);
@@ -1933,6 +1957,14 @@ export default function SLFPortal() {
         setSlfInfoRefresh((n) => n + 1);
         invalidateCache(`${PORTAL_SUBMISSIONS_CACHE_KEY}-${portalUser?.email || ""}`);
         fetchSubmissions(true);
+      }
+      // The baseline record itself (and with it the approval / lock state the Data
+      // Entry form gates on) was NOT reloaded here — only slfInfo and the submission
+      // list were. So an admin approving a baseline update left the portal showing
+      // "Pending" until the page was reloaded by hand. Re-run the baseline fetch on
+      // any baseline-affecting refresh.
+      if (!target || ["baselines", "facility"].includes(target)) {
+        setBaselineRefresh((n) => n + 1);
       }
     };
     sock.on("data-refresh", onFacilityRefresh);
@@ -2705,7 +2737,7 @@ export default function SLFPortal() {
   // ── Export Hauler Data (client-side, scoped to THIS portal user's loaded
   //    baseline) → one flat row per hauler-client relationship. CSV with UTF-8
   //    BOM (preserves PH characters) and formula-injection-safe cells. ──
-  const HAULER_EXPORT_HEADERS = ["Hauler Name", "Hauler Office Address", "Client Ref", "Client Name", "Client Type", "Region", "Province", "City/Municipality"];
+  const HAULER_EXPORT_HEADERS = ["Hauler Name", "Hauler Office Address", "Client Ref", "Client Name", "Client Type", "Client Address", "Region", "Province", "City/Municipality"];
   const csvCell = (v) => {
     let s = v == null ? "" : String(v);
     if (/^[=+\-@\t\r]/.test(s)) s = `'${s}`; // neutralize spreadsheet formulas
@@ -2724,9 +2756,9 @@ export default function SLFPortal() {
     const rows = [HAULER_EXPORT_HEADERS];
     (haulers || []).forEach((h) => {
       const clients = h.privateSectorClients || [];
-      if (!clients.length) { rows.push([h.haulerName || "", h.officeAddress || "", "", "", "", "", "", ""]); return; }
+      if (!clients.length) { rows.push([h.haulerName || "", h.officeAddress || "", "", "", "", "", "", "", ""]); return; }
       clients.forEach((c) => rows.push([
-        h.haulerName || "", h.officeAddress || "", c.key || "", c.clientName || "", c.clientType || "",
+        h.haulerName || "", h.officeAddress || "", c.key || "", c.clientName || "", c.clientType || "", c.clientAddress || c.address || [c.municipalityName || c.municipality, c.provinceName || c.province, c.regionName || c.region].filter(Boolean).join(", "),
         c.regionName || c.region || "", c.provinceName || c.province || "", c.municipalityName || c.municipality || "",
       ]));
     });
@@ -2967,6 +2999,9 @@ export default function SLFPortal() {
         baselineForm.validateFields(),
         companyForm.validateFields(),
       ]);
+      const resolvedTotalVolumeAccepted = hasCellVolumeEntries
+        ? computedTotalVolumeAccepted
+        : baselineValues.totalVolumeAccepted;
       const disposalValues = entryForm.getFieldsValue();
       const addressParts = [
         barangays.find((b) => b.code === companyValues.companyBarangay)?.name,
@@ -3035,7 +3070,7 @@ export default function SLFPortal() {
           // explicit unit yet — never an empty/stale unit (Item #3: store the unit
           // on every record so historical values stay accurate).
           baselineUnit: baselineUnit || slfUnit,
-          totalVolumeAccepted: baselineValues.totalVolumeAccepted,
+          totalVolumeAccepted: resolvedTotalVolumeAccepted,
           totalVolumeAcceptedUnit: baselineUnit || slfUnit,
           activeCellResidualVolume,
           activeCellResidualUnit: baselineUnit || slfUnit,
@@ -3234,22 +3269,43 @@ export default function SLFPortal() {
   }, [activeMenu, activeSlfId, activeSlfName]);
 
   // ── Support Ticket Functions ──
-  const fetchSupportTickets = useCallback(async () => {
+  const fetchSupportTickets = useCallback(async (options = {}) => {
     if (!portalUser?.email) return;
+    const nextPage = options.page || supportTicketPagination.current;
+    const nextPageSize = options.pageSize || supportTicketPagination.pageSize;
+    const nextSearch = options.search ?? supportTicketSearch;
+    const nextSorter = options.sorter || supportTicketSorter;
     setSupportLoading(true);
     try {
       const { data } = await api.get(
         `/support-tickets/my-tickets/${encodeURIComponent(portalUser.email)}`,
+        {
+          params: {
+            page: nextPage,
+            limit: nextPageSize,
+            search: nextSearch || undefined,
+            sortField: nextSorter.field || "createdAt",
+            sortOrder: nextSorter.order || "descend",
+          },
+        },
       );
+      const rows = Array.isArray(data) ? data : data.tickets || [];
       setSupportTickets(
-        (data || []).filter((ticket) => !isTestAdminNotice(ticket)),
+        rows.filter((ticket) => !isTestAdminNotice(ticket)),
       );
+      setSupportTicketPagination({
+        current: Array.isArray(data) ? nextPage : data.page || nextPage,
+        pageSize: Array.isArray(data) ? nextPageSize : data.limit || nextPageSize,
+        total: Array.isArray(data) ? rows.length : data.total || rows.length,
+      });
+      setSupportTicketSearch(nextSearch);
+      setSupportTicketSorter(nextSorter);
     } catch {
       /* silent */
     } finally {
       setSupportLoading(false);
     }
-  }, [portalUser?.email]);
+  }, [portalUser?.email, supportTicketPagination.current, supportTicketPagination.pageSize, supportTicketSearch, supportTicketSorter]);
 
   const fetchPortalNotifications = useCallback(async () => {
     if (!portalUser?.email) return;
@@ -3296,6 +3352,84 @@ export default function SLFPortal() {
   const isSupportNotification = (notification = {}) =>
     notification.type === "support_ticket_reply" &&
     !isMessageNotification(notification);
+
+  const getPortalNotificationMeta = (notification = {}) => {
+    if (isMessageNotification(notification)) {
+      return {
+        label: "Admin Message",
+        color: "blue",
+        icon: <MessageOutlined />,
+        action: "messages",
+      };
+    }
+    if (isSupportNotification(notification)) {
+      return {
+        label: "Support Ticket",
+        color: "purple",
+        icon: <CustomerServiceOutlined />,
+        action: "support",
+      };
+    }
+    if (
+      [
+        "reverted",
+        "status_change",
+        "submission_edit_approved",
+        "submission_edit_rejected",
+      ].includes(notification.type)
+    ) {
+      const rejected = /rejected|reverted/i.test(
+        `${notification.type} ${notification.title || ""}`,
+      );
+      return {
+        label: rejected ? "Submission Update" : "Submission Status",
+        color: rejected ? "red" : "green",
+        icon: rejected ? <CloseCircleOutlined /> : <HistoryOutlined />,
+        action: "history",
+      };
+    }
+    if (
+      ["baseline_update_approved", "baseline_update_rejected"].includes(
+        notification.type,
+      )
+    ) {
+      return {
+        label: "Request Update",
+        color: "geekblue",
+        icon: <AuditOutlined />,
+        action: "requests",
+      };
+    }
+    return {
+      label: "Admin Update",
+      color: "default",
+      icon: <BellOutlined />,
+      action: "none",
+    };
+  };
+
+  const filteredPreviousNotifications = useMemo(() => {
+    const q = previousNotifSearch.trim().toLowerCase();
+    return portalNotifications.filter((notification) => {
+      if (previousNotifStatus === "read" && !notification.read) return false;
+      if (previousNotifStatus === "unread" && notification.read) return false;
+      if (previousNotifDateRange?.[0] && previousNotifDateRange?.[1]) {
+        const created = dayjs(notification.createdAt);
+        if (!created.isValid()) return false;
+        if (
+          created.isBefore(previousNotifDateRange[0], "day") ||
+          created.isAfter(previousNotifDateRange[1], "day")
+        ) {
+          return false;
+        }
+      }
+      if (!q) return true;
+      const meta = getPortalNotificationMeta(notification);
+      return [notification.title, notification.message, notification.type, meta.label].some((value) =>
+        String(value || "").toLowerCase().includes(q),
+      );
+    });
+  }, [portalNotifications, previousNotifDateRange, previousNotifSearch, previousNotifStatus]);
 
   const markPortalNotificationsRead = useCallback(
     async (category) => {
@@ -3563,6 +3697,10 @@ export default function SLFPortal() {
                 normalized.capacityUnit = normalizeUnit(
                   value || baselineUnit || slfUnit,
                 );
+              else if (k.includes("client") && k.includes("type"))
+                normalized.clientType = cleanUploadText(value);
+              else if (k.includes("client") && k.includes("address"))
+                normalized.clientAddress = cleanUploadText(value);
               else if (isClientsHeader(k))
                 normalized.privateSectorClients = cleanUploadText(value)
                   .split(",")
@@ -3697,6 +3835,8 @@ export default function SLFPortal() {
                   ? val.join(", ")
                   : <Text type="secondary" style={{ fontSize: 11 }}>—</Text>,
             },
+                { title: "Client Type", dataIndex: "clientType", key: "clientType", width: 120 },
+                { title: "Client Address", dataIndex: "clientAddress", key: "clientAddress", width: 220 },
             {
               title: "Validation",
               key: "validation",
@@ -3844,7 +3984,20 @@ export default function SLFPortal() {
               },
             ]
           : [],
-        privateSectorClients: d.privateSectorClients || [],
+        privateSectorClients: (d.privateSectorClients || []).map((client, index) =>
+          typeof client === "string"
+            ? {
+                key: `${d.key}-client-${index}`,
+                clientName: client,
+                clientType: d.clientType || "Private",
+                clientAddress: d.clientAddress || "",
+              }
+            : {
+                ...client,
+                clientType: client.clientType || d.clientType || "Private",
+                clientAddress: client.clientAddress || d.clientAddress || "",
+              },
+        ),
       }));
       setHaulers((prev) =>
         mergeHaulersByName([...prev, ...newHaulers], baselineUnit || slfUnit),
@@ -4120,6 +4273,9 @@ export default function SLFPortal() {
       const companyValues = companyForm.getFieldsValue();
       const disposalValues = entryForm.getFieldsValue();
       const baselineValues = baselineForm.getFieldsValue();
+      const resolvedTotalVolumeAccepted = hasCellVolumeEntries
+        ? computedTotalVolumeAccepted
+        : baselineValues.totalVolumeAccepted;
       const entry = {
         ...disposalValues,
         ...companyValues,
@@ -4138,7 +4294,7 @@ export default function SLFPortal() {
           ? disposalValues.dateOfDisposal.format("YYYY-MM-DD")
           : null,
         baselineUnit,
-        totalVolumeAccepted: baselineValues.totalVolumeAccepted,
+        totalVolumeAccepted: resolvedTotalVolumeAccepted,
         totalVolumeAcceptedUnit: baselineUnit,
         activeCellResidualVolume: baselineValues.activeCellResidualVolume,
         activeCellResidualUnit: baselineUnit,
@@ -4350,6 +4506,9 @@ export default function SLFPortal() {
     const companyValues = companyForm.getFieldsValue();
     const disposalValues = entryForm.getFieldsValue();
     const baselineValues = baselineForm.getFieldsValue();
+    const resolvedTotalVolumeAccepted = hasCellVolumeEntries
+      ? computedTotalVolumeAccepted
+      : baselineValues.totalVolumeAccepted;
     return {
       ...disposalValues,
       ...companyValues,
@@ -4372,7 +4531,7 @@ export default function SLFPortal() {
         ? disposalValues.dateOfDisposal.format("YYYY-MM-DD")
         : null,
       trucks: trucks.map(cleanTruckForSubmit),
-      totalVolumeAccepted: baselineValues.totalVolumeAccepted,
+      totalVolumeAccepted: resolvedTotalVolumeAccepted,
       totalVolumeAcceptedUnit: baselineUnit,
       activeCellResidualVolume: baselineValues.activeCellResidualVolume,
       activeCellResidualUnit: baselineUnit,
@@ -5212,6 +5371,7 @@ export default function SLFPortal() {
       title: "Clients",
       dataIndex: "privateSectorClients",
       key: "privateSectorClients",
+      width: 220,
       render: (v) => {
         const arr = Array.isArray(v) ? v : v ? [v] : [];
         if (arr.length === 0) return "—";
@@ -5232,6 +5392,60 @@ export default function SLFPortal() {
             </div>
           );
         });
+      },
+    },
+    {
+      title: "Client Type",
+      key: "clientType",
+      width: 130,
+      render: (_, h) => {
+        const arr = Array.isArray(h.privateSectorClients)
+          ? h.privateSectorClients
+          : h.privateSectorClients
+            ? [h.privateSectorClients]
+            : [];
+        const types = [
+          ...new Set(
+            arr.map((c) => (typeof c === "string" ? "Private" : c.clientType || "Private")),
+          ),
+        ];
+        return types.length
+          ? types.map((type) => (
+              <Tag key={type} color={type === "LGU" ? "blue" : "green"}>
+                {type}
+              </Tag>
+            ))
+          : "—";
+      },
+    },
+    {
+      title: "Client Address",
+      key: "clientAddress",
+      width: 240,
+      render: (_, h) => {
+        const arr = Array.isArray(h.privateSectorClients)
+          ? h.privateSectorClients
+          : h.privateSectorClients
+            ? [h.privateSectorClients]
+            : [];
+        const addresses = arr
+          .map((c) =>
+            typeof c === "string"
+              ? ""
+              : c.clientAddress ||
+                c.address ||
+                [c.municipalityName || c.municipality, c.provinceName || c.province, c.regionName || c.region]
+                  .filter(Boolean)
+                  .join(", "),
+          )
+          .filter(Boolean);
+        return addresses.length
+          ? addresses.map((address, index) => (
+              <div key={`${address}-${index}`} style={{ fontSize: 12, lineHeight: "18px" }}>
+                {address}
+              </div>
+            ))
+          : "—";
       },
     },
     {
@@ -5718,61 +5932,6 @@ export default function SLFPortal() {
     ).length,
   };
   const historyBadgeCount = revertedCount + portalNotificationCounts.history;
-  const getPortalNotificationMeta = (notification = {}) => {
-    if (isMessageNotification(notification)) {
-      return {
-        label: "Admin Message",
-        color: "blue",
-        icon: <MessageOutlined />,
-        action: "messages",
-      };
-    }
-    if (isSupportNotification(notification)) {
-      return {
-        label: "Support Ticket",
-        color: "purple",
-        icon: <CustomerServiceOutlined />,
-        action: "support",
-      };
-    }
-    if (
-      [
-        "reverted",
-        "status_change",
-        "submission_edit_approved",
-        "submission_edit_rejected",
-      ].includes(notification.type)
-    ) {
-      const rejected = /rejected|reverted/i.test(
-        `${notification.type} ${notification.title || ""}`,
-      );
-      return {
-        label: rejected ? "Submission Update" : "Submission Status",
-        color: rejected ? "red" : "green",
-        icon: rejected ? <CloseCircleOutlined /> : <HistoryOutlined />,
-        action: "history",
-      };
-    }
-    if (
-      ["baseline_update_approved", "baseline_update_rejected"].includes(
-        notification.type,
-      )
-    ) {
-      return {
-        label: "Request Update",
-        color: "geekblue",
-        icon: <AuditOutlined />,
-        action: "requests",
-      };
-    }
-    return {
-      label: "Admin Update",
-      color: "default",
-      icon: <BellOutlined />,
-      action: "none",
-    };
-  };
-
   const openPortalNotification = async (notification) => {
     const meta = getPortalNotificationMeta(notification);
     if (meta.action === "messages") {
@@ -5923,13 +6082,13 @@ export default function SLFPortal() {
     <Modal
       open={previousNotifOpen}
       onCancel={() => setPreviousNotifOpen(false)}
-      width={860}
+      width={isMobile ? "96vw" : 1200}
       title={
         <Space>
           <HistoryOutlined style={{ color: "#1a3353" }} />
           <span>Previous Notifications</span>
-          {portalNotifications.length > 0 && (
-            <Tag>{portalNotifications.length} total</Tag>
+          {filteredPreviousNotifications.length > 0 && (
+            <Tag>{filteredPreviousNotifications.length} shown</Tag>
           )}
         </Space>
       }
@@ -5945,17 +6104,48 @@ export default function SLFPortal() {
           </Button>
         </Space>
       }
-      styles={{ body: { maxHeight: "70vh", overflowY: "auto" } }}
+      styles={{ body: { maxHeight: "72vh", overflowY: "auto", paddingTop: 12 } }}
     >
+      <Space wrap style={{ marginBottom: 12, width: "100%", justifyContent: "space-between" }}>
+        <Space wrap>
+          <Input
+            allowClear
+            placeholder="Search notifications"
+            prefix={<SearchOutlined />}
+            value={previousNotifSearch}
+            onChange={(event) => setPreviousNotifSearch(event.target.value)}
+            style={{ width: 240 }}
+          />
+          <Select
+            value={previousNotifStatus}
+            onChange={setPreviousNotifStatus}
+            style={{ width: 140 }}
+            options={[
+              { label: "All Status", value: "all" },
+              { label: "Unread", value: "unread" },
+              { label: "Read", value: "read" },
+            ]}
+          />
+          <DatePicker.RangePicker
+            value={previousNotifDateRange}
+            onChange={setPreviousNotifDateRange}
+            allowClear
+          />
+        </Space>
+        <Text type="secondary" style={{ fontSize: 12 }}>
+          {portalNotifications.length} loaded
+        </Text>
+      </Space>
       <Table
         size="small"
         rowKey={(n) => n._id}
-        dataSource={portalNotifications}
+        dataSource={filteredPreviousNotifications}
         className="portal-user-wrap-table"
+        scroll={{ x: 980 }}
         pagination={{
           defaultPageSize: 10,
           showSizeChanger: true,
-          pageSizeOptions: [10, 20, 50, 100],
+          pageSizeOptions: ["10", "20", "50", "100"],
           showTotal: (total) => `${total} notification(s)`,
         }}
         columns={[
@@ -6490,6 +6680,7 @@ export default function SLFPortal() {
                         fetchProvinces={fetchProvinces}
                         fetchMunicipalities={fetchMunicipalities}
                         fetchBarangays={fetchBarangays}
+                        addressLocked={baselineSaved}
                       />
                     ),
                   },
@@ -6707,6 +6898,7 @@ export default function SLFPortal() {
                                       min={0}
                                       step={0.01}
                                       precision={2}
+                                      disabled
                                       addonAfter={
                                         (baselineUnit || slfUnit) === "m³" ? "m³" : "tons"
                                       }
@@ -6731,6 +6923,9 @@ export default function SLFPortal() {
                                       }}
                                     />
                                   </Form.Item>
+                                  <Text type="secondary" style={{ fontSize: 11 }}>
+                                    Auto-calculated from Active Cell Volume plus Closed / Used-Completed Cell Volume.
+                                  </Text>
                                 </Col>
                               </Row>
                             </div>
@@ -7156,8 +7351,13 @@ export default function SLFPortal() {
                                       columns={haulerColumns}
                                       rowKey="key"
                                       size="small"
-                                      pagination={false}
-                                      scroll={{ x: 700 }}
+                                      pagination={{
+                                        defaultPageSize: 10,
+                                        showSizeChanger: true,
+                                        pageSizeOptions: ["10", "20", "50", "100"],
+                                        showTotal: (total) => `${total} hauler(s)`,
+                                      }}
+                                      scroll={{ x: 980 }}
                                       locale={{
                                         emptyText: (
                                           <Text
@@ -8214,9 +8414,6 @@ export default function SLFPortal() {
                 onClick={() => setMobileDrawer(true)}
               />
             )}
-            <Text strong style={{ color: "#1a3353", fontSize: 16 }}>
-              SLF Generators Portal
-            </Text>
           </Space>
           <Space size={8}>
             <Popover
@@ -9368,6 +9565,9 @@ export default function SLFPortal() {
           supportTab={supportTab}
           setSupportTab={setSupportTab}
           supportTickets={supportTickets}
+          supportTicketPagination={supportTicketPagination}
+          supportTicketSearch={supportTicketSearch}
+          supportTicketSorter={supportTicketSorter}
           portalNotificationCounts={portalNotificationCounts}
           markPortalNotificationsRead={markPortalNotificationsRead}
           supportLoading={supportLoading}

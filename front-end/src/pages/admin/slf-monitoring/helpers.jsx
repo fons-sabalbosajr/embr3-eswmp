@@ -75,10 +75,20 @@ const CELL_STATUS_COLORS = {
     tag: "default",
   },
 };
+// "Not Required" marks a permit that legitimately does not apply to this facility.
+// It is deliberately NOT a validity state: everything downstream must skip the
+// expiry math for it rather than computing "Expired" from a missing date, which is
+// what made not-applicable permits show alarming red tags. See isPermitNotRequired.
 const PERMIT_STATUS_OPTIONS = [
   { label: "New", value: "New" },
   { label: "Renewal", value: "Renewal" },
+  { label: "Not Required", value: "Not Required" },
 ];
+
+// Single source of truth for the check, so the admin and portal renderers cannot
+// drift. Tolerant of stored casing/spacing variants ("not required", "N/A").
+const isPermitNotRequired = (status) =>
+  /^(not[\s_-]*required|n\/?a)$/i.test(String(status || "").trim());
 const DP_TYPE_OPTIONS = [
   { label: "Domestic", value: "Domestic" },
   { label: "Industrial", value: "Industrial" },
@@ -363,6 +373,7 @@ export {
   CELL_STATUS_OPTIONS,
   CELL_STATUS_COLORS,
   PERMIT_STATUS_OPTIONS,
+  isPermitNotRequired,
   DP_TYPE_OPTIONS,
   WWTF_TYPE_OPTIONS,
   RECEIVING_FACILITY_TYPE_OPTIONS,

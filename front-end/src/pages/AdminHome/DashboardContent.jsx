@@ -153,8 +153,15 @@ const { useBreakpoint } = Grid;
 // Lazy-loaded panels embedded inside dashboard tabs (Suspense-wrapped at each use).
 const DisposalActivityCalendar = lazy(() => import("../admin/DisposalActivityCalendar"));
 const HaulerClientsPanel = lazy(() => import("../admin/HaulerClientsPanel"));
+const ClientServedSummary = lazy(() => import("../admin/ClientServedSummary"));
+const SlfManagementBySlf = lazy(() => import("../admin/SlfManagementBySlf"));
+const PreventiveMeasuresBySlf = lazy(() => import("../admin/PreventiveMeasuresBySlf"));
 const SlfAnalyticsRow = lazy(() => import("../admin/SlfAnalyticsRow"));
 const ClientRelationshipView = lazy(() => import("../admin/ClientRelationshipView"));
+
+// Poll cadence shared by the stats fan-out and the served-clients tile, so the two
+// stay in step. Module scope keeps it out of effect dependency lists.
+const STATS_POLL_MS = 60000;
 
 export default function DashboardContent({ user, isDark, setActiveMenu, onOpenSubmissions, canOpenSubmissions }) {
   const screens = useBreakpoint();
@@ -198,6 +205,7 @@ export default function DashboardContent({ user, isDark, setActiveMenu, onOpenSu
   const [slfFilterStatus, setSlfFilterStatus] = useState(null);
   const [slfDashModal, setSlfDashModal] = useState(null); // { type: dashboard metric key }
   const [preventiveSlfModal, setPreventiveSlfModal] = useState(null); // { _id, lgu, province, files, details } | null
+  const [preventiveDashModal, setPreventiveDashModal] = useState(false);
   const [preventionPanel, setPreventionPanel] = useState(null); // { facilityId, slfName } | null
   const [preventiveFileViewer, setPreventiveFileViewer] = useState(null); // { url, fileName, slfName, province } | null
   const [preventiveFileZoom, setPreventiveFileZoom] = useState(100);
@@ -600,11 +608,6 @@ export default function DashboardContent({ user, isDark, setActiveMenu, onOpenSu
     });
   };
 
-  // Marker for the SLF map keyed to the classified submission status for the
-  // selected day (shared rule): submitted→blue pulse ✓, pending→yellow pulse ◷,
-  // reverted→orange ↺, rejected→red ✕, no-submission→gray ○, unknown→gray ?.
-  // Non-operational SLFs with no submission keep the explicit inactive marker.
-  // Distinguished by icon shape + label + tooltip, not colour alone.
   const staticMarker = (color, glyph) => L.divIcon({
     className: "",
     html: `<div style="width:20px;height:20px;border-radius:50%;background:${color};border:2px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,.35);display:flex;align-items:center;justify-content:center;color:#fff;font-size:11px;font-weight:bold">${glyph}</div>`,
@@ -668,7 +671,14 @@ export default function DashboardContent({ user, isDark, setActiveMenu, onOpenSu
     setLguDivStats(lguDivData);
   }, []);
 
-  const fetchStats = useCallback(async () => {
+  // One dashboard refresh fans out to 15 endpoints, so two overlapping runs mean 30
+  // in-flight requests competing for the same connection. Coalesce concurrent
+  // callers onto the run already in progress, and remember when it finished so the
+  // visibility-aware poll below can tell whether a catch-up fetch is actually due.
+  const statsInFlightRef = useRef(null);
+  const lastStatsFetchRef = useRef(0);
+
+  const runFetchStats = useCallback(async () => {
     try {
       // Show cached data immediately for instant rendering
       const cacheKey = `${DASH_CACHE_KEY}-all`;
@@ -728,6 +738,21 @@ export default function DashboardContent({ user, isDark, setActiveMenu, onOpenSu
     }
   }, [applyStats]);
 
+  // Public entry point: coalesces concurrent callers (poll tick, socket burst,
+  // mount) onto a single in-flight run rather than stacking fan-outs.
+  const fetchStats = useCallback(async () => {
+    if (statsInFlightRef.current) return statsInFlightRef.current;
+    const run = runFetchStats();
+    statsInFlightRef.current = run;
+    try {
+      await run;
+    } finally {
+      statsInFlightRef.current = null;
+      lastStatsFetchRef.current = Date.now();
+    }
+    return undefined;
+  }, [runFetchStats]);
+
   useEffect(() => {
     setLoading(true);
     fetchStats();
@@ -735,33 +760,45 @@ export default function DashboardContent({ user, isDark, setActiveMenu, onOpenSu
     api.get("/settings/app").then(({ data }) => {
       setDashboardTabSettings(data.dashboardTabs && typeof data.dashboardTabs === "object" ? data.dashboardTabs : {});
     }).catch(() => { setDashboardTabSettings({}); });
-    const interval = setInterval(() => fetchStats(), 60000);
-    return () => clearInterval(interval);
+
+    const tick = () => {
+      if (typeof document !== "undefined" && document.hidden) return;
+      fetchStats();
+    };
+    const interval = setInterval(tick, STATS_POLL_MS);
+    const onVisibility = () => {
+      if (document.hidden) return;
+      if (Date.now() - lastStatsFetchRef.current >= STATS_POLL_MS) fetchStats();
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      clearInterval(interval);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
   }, [fetchStats]);
 
-  // The stat cards had only the 60s poll above — no socket — so approving a
-  // submission or editing an SLF record left every tile showing the old number for
-  // up to a minute, which reads as "the dashboard isn't updating". The map and the
-  // served-client tiles already subscribed to this event; the main tiles now do too.
-  // `fetchStats` reuses its cache-then-fetch path, so this is an in-place update
-  // rather than a visible reload.
   useEffect(() => {
     const socket = getSocket();
     if (!socket) return undefined;
     const REFRESH_TARGETS = new Set([
       "submissions", "baselines", "facility", "slf-facilities", "slf-clients", "region3-lgu", "hauler-requests",
     ]);
+    let refreshTimer = null;
     const onRefresh = ({ target } = {}) => {
-      if (!target || REFRESH_TARGETS.has(target)) fetchStats();
+      if (target && !REFRESH_TARGETS.has(target)) return;
+      if (refreshTimer) clearTimeout(refreshTimer);
+      refreshTimer = setTimeout(() => {
+        refreshTimer = null;
+        fetchStats();
+      }, 800);
     };
     socket.on("data-refresh", onRefresh);
-    return () => socket.off("data-refresh", onRefresh);
+    return () => {
+      if (refreshTimer) clearTimeout(refreshTimer);
+      socket.off("data-refresh", onRefresh);
+    };
   }, [fetchStats]);
 
-  // DB-driven unique LGU / Private-sector client counts for the served tiles,
-  // sourced from the managed SLF Clients collection. Refreshed on mount and on
-  // the same 60s cadence as the rest of the dashboard so the tiles reflect
-  // client record changes.
   const fetchClientSummary = useCallback(async () => {
     try {
       const { data } = await api.get("/slf-clients/summary");
@@ -779,19 +816,29 @@ export default function DashboardContent({ user, isDark, setActiveMenu, onOpenSu
 
   useEffect(() => {
     fetchClientSummary();
-    const interval = setInterval(() => fetchClientSummary(), 60000);
+    // Same visibility rule as the main stats poll — no point refreshing a tile
+    // nobody is looking at.
+    const interval = setInterval(() => {
+      if (typeof document !== "undefined" && document.hidden) return;
+      fetchClientSummary();
+    }, STATS_POLL_MS);
     return () => clearInterval(interval);
   }, [fetchClientSummary]);
 
-  // Refresh the served tiles immediately when a client is added/edited/
-  // deactivated/deleted or a baseline sync runs (server emits data-refresh
-  // "slf-clients"), rather than waiting for the 60s poll.
   useEffect(() => {
     const socket = getSocket();
     if (!socket) return undefined;
-    const onRefresh = ({ target } = {}) => { if (target === "slf-clients") fetchClientSummary(); };
+    let timer = null;
+    const onRefresh = ({ target } = {}) => {
+      if (target !== "slf-clients") return;
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(() => { timer = null; fetchClientSummary(); }, 800);
+    };
     socket.on("data-refresh", onRefresh);
-    return () => socket.off("data-refresh", onRefresh);
+    return () => {
+      if (timer) clearTimeout(timer);
+      socket.off("data-refresh", onRefresh);
+    };
   }, [fetchClientSummary]);
 
   const statusColors = {
@@ -6118,18 +6165,6 @@ export default function DashboardContent({ user, isDark, setActiveMenu, onOpenSu
     const preventiveFileFacilityCount = slfMgmt.filter(
       (row) => (row.preventiveMeasureFiles?.length || 0) > 0,
     ).length;
-    const preventiveFileFacilities = slfMgmt
-      .filter((row) => (row.preventiveMeasureFiles?.length || 0) > 0)
-      .map((row) => ({
-        id: row._id || row.lgu,
-        _id: row._id,
-        lgu: row.lgu || "Unspecified SLF",
-        province: row.province || "",
-        count: row.preventiveMeasureFiles?.length || 0,
-        files: row.preventiveMeasureFiles || [],
-        details: row.preventiveMeasureFileDetails || [],
-      }))
-      .sort((a, b) => b.count - a.count || a.lgu.localeCompare(b.lgu));
 
     const SLF_CATEGORY_DESC = {
       "Cat 1": "< 15 TPD",
@@ -6285,6 +6320,22 @@ export default function DashboardContent({ user, isDark, setActiveMenu, onOpenSu
                           prefix={<SafetyCertificateOutlined style={{ color: "#52c41a" }} />}
                         />
                         <Text type="secondary" style={{ fontSize: 11 }}>Click to view gas management</Text>
+                      </Card>
+                    </Col>
+                    <Col xs={12} sm={12} lg={4}>
+                      <Card
+                        hoverable
+                        onClick={() => setPreventiveDashModal(true)}
+                        style={{ borderRadius: 10, height: 110, borderLeft: "4px solid #fa541c", cursor: "pointer" }}
+                        loading={loading}
+                        styles={{ body: { padding: "10px 14px" } }}
+                      >
+                        <Statistic
+                          title="Preventive Measures"
+                          value={slfOps.totalPreventionDocuments || 0}
+                          prefix={<SafetyCertificateOutlined style={{ color: "#fa541c" }} />}
+                        />
+                        <Text type="secondary" style={{ fontSize: 11 }}>Fire Prevention &amp; Trash Slide — click to view</Text>
                       </Card>
                     </Col>
                   </Row>
@@ -6730,40 +6781,8 @@ export default function DashboardContent({ user, isDark, setActiveMenu, onOpenSu
                     </Suspense>
                   </div>
 
-                  {/* ── Preventive Measures — directly below the analytics row ── */}
-                  <Row gutter={[16, 16]} style={{ marginBottom: 16 }}>
-                    <Col xs={24}>
-                      <Card
-                        title={<><SafetyCertificateOutlined /> Preventive Measures (Fire Prevention and Trash Slide)</>}
-                        style={{ borderRadius: 10, borderTop: "3px solid #fa541c" }}
-                        loading={loading}
-                        styles={{ body: { padding: "12px 16px" } }}
-                      >
-                        <div style={{ padding: "10px 12px", background: isDark ? "rgba(255,255,255,0.035)" : "#fff", borderRadius: 8, border: isDark ? "1px solid rgba(255,255,255,0.12)" : "1px solid #f0f0f0" }}>
-                          <Space size={[8, 8]} wrap style={{ width: "100%" }}>
-                            {preventiveFileFacilities.length ? preventiveFileFacilities.map((item) => (
-                              <Tooltip key={item.id} title={`View ${item.lgu} — ${item.count} file${item.count === 1 ? "" : "s"}`}>
-                                <Tag
-                                  color="orange"
-                                  onClick={() => setPreventiveSlfModal(item)}
-                                  style={{ margin: 0, cursor: "pointer", maxWidth: "100%", display: "inline-flex", alignItems: "center", gap: 6, whiteSpace: "normal", lineHeight: 1.3, padding: "4px 9px", borderRadius: 6 }}
-                                >
-                                  <SafetyCertificateOutlined />
-                                  <span style={{ overflowWrap: "anywhere" }}>{item.lgu}</span>
-                                  <Text strong style={{ color: "inherit" }}>{item.count}</Text>
-                                </Tag>
-                              </Tooltip>
-                            )) : (
-                              <Text type="secondary" style={{ fontSize: 12 }}>No preventive measure files uploaded yet.</Text>
-                            )}
-                          </Space>
-                        </div>
-                        <div style={{ marginTop: 10 }}>
-                          <Text type="secondary" style={{ fontSize: 11 }}>Click an SLF to view its preventive measure details and files.</Text>
-                        </div>
-                      </Card>
-                    </Col>
-                  </Row>
+                  {/* Preventive Measures moved to a compact summary tile beside Gas
+                      Management (opens the grouped-by-SLF modal). */}
 
                   {/* ── SLF Dashboard Drill-Down Modals ── */}
                   {slfDashModal && (() => {
@@ -7019,12 +7038,9 @@ export default function DashboardContent({ user, isDark, setActiveMenu, onOpenSu
                         served: {
                           title: <Space><TeamOutlined style={{ color: "#fa8c16" }} /> LGUs &amp; Private Sectors Served</Space>,
                           tabs: [
+                            { key: "summary", label: <span><BarChartOutlined /> Summary</span>, custom: "summary" },
                             { key: "lgu", label: <span><TeamOutlined /> LGUs Served</span> },
                             { key: "private", label: <span><BankOutlined /> Private Sectors Served</span> },
-                            // Distinct clients from Portal Baseline → Haulers → Clients,
-                            // grouped with their portal user(s). Custom-rendered (not a
-                            // filter/flatten config) — see the `custom` branch below.
-                            { key: "clients", label: <span><TeamOutlined /> Clients (Haulers)</span>, custom: "clients" },
                           ],
                         },
                         prevention: {
@@ -7048,7 +7064,7 @@ export default function DashboardContent({ user, isDark, setActiveMenu, onOpenSu
                               </Button>
                             </div>
                           }
-                          width={1300}
+                          width={1400}
                           style={{ top: 24, maxWidth: "96vw" }}
                           destroyOnHidden
                           styles={{ body: { maxHeight: "calc(100vh - 200px)", overflowY: "auto", overflowX: "hidden" } }}
@@ -7056,6 +7072,19 @@ export default function DashboardContent({ user, isDark, setActiveMenu, onOpenSu
                           <Tabs
                             defaultActiveKey={comboMeta.tabs[0].key}
                             items={comboMeta.tabs.map((t) => {
+                              // Overview tab: tiles + charts derived from the same
+                              // relationship-map endpoint the LGU/Private tabs use.
+                              if (t.custom === "summary") {
+                                return {
+                                  key: t.key,
+                                  label: t.label,
+                                  children: (
+                                    <Suspense fallback={<div style={{ padding: 24, textAlign: "center" }}><Spin /></div>}>
+                                      <ClientServedSummary />
+                                    </Suspense>
+                                  ),
+                                };
+                              }
                               // Custom-rendered tabs (e.g. Clients from Haulers) do not
                               // use the filter/flatten/columns config.
                               if (t.custom === "clients") {
@@ -7286,7 +7315,11 @@ export default function DashboardContent({ user, isDark, setActiveMenu, onOpenSu
                               {
                                 key: "dashboard",
                                 label: <span><PieChartOutlined /> Dashboard</span>,
-                                children: slfDashModal.type === "cells" ? (
+                                children: (slfDashModal.type === "leachate" || slfDashModal.type === "gas") ? (
+                                  <Suspense fallback={<div style={{ padding: 24, textAlign: "center" }}><Spin /></div>}>
+                                    <SlfManagementBySlf facilities={sourceRows} kind={slfDashModal.type} />
+                                  </Suspense>
+                                ) : slfDashModal.type === "cells" ? (
                                   <>
                                     {/* #1: summary tiles removed — the modal now shows
                                         the facility/cell gauges directly. */}
@@ -8856,9 +8889,7 @@ export default function DashboardContent({ user, isDark, setActiveMenu, onOpenSu
           />
         )}
       </Modal>
-      {/* Compact Main Dashboard header — tight title/subtitle spacing; the tip card
-          flex-grows into the free width and wraps below the title on narrow screens. */}
-      <div style={{ marginBottom: 6, display: "flex", alignItems: "center", justifyContent: "flex-end", flexWrap: "wrap", gap: 10 }}>
+     <div style={{ marginBottom: 6, display: "flex", alignItems: "center", justifyContent: "flex-end", flexWrap: "wrap", gap: 10 }}>
         <div style={{ marginRight: "auto", minWidth: 180 }}>
           <Title level={3} style={{ margin: 0, color: textColor, lineHeight: 1.15 }}>Dashboard</Title>
           <Text type="secondary" style={{ fontSize: 12 }}>System overview, monitoring summaries, and current portal activity.</Text>
@@ -8867,8 +8898,7 @@ export default function DashboardContent({ user, isDark, setActiveMenu, onOpenSu
         {/* VERA assistant card — opens the shared VeraChat via the `vera:open` event. */}
         <VeraCard isDark={isDark} />
       </div>
-      {/* Filter tabs by dashboard visibility settings, wrap maintenance tabs */}
-      {dashboardTabSettings === null ? (
+     {dashboardTabSettings === null ? (
         <div style={{ textAlign: "center", padding: "60px 0" }}><Spin /></div>
       ) : (() => {
         const filteredTabs = tabItems
@@ -9114,6 +9144,35 @@ export default function DashboardContent({ user, isDark, setActiveMenu, onOpenSu
           </Modal>
         );
       })()}
+
+      {/* Preventive Measures — grouped by SLF (tiles, category pie, thumbnail grid). */}
+      <Modal
+        open={preventiveDashModal}
+        title={<Space><SafetyCertificateOutlined style={{ color: "#fa541c" }} /> <Text strong>Preventive Measures (Fire Prevention and Trash Slide)</Text></Space>}
+        onCancel={() => setPreventiveDashModal(false)}
+        footer={
+          <div style={{ display: "flex", justifyContent: "space-between" }}>
+            <Button onClick={() => setPreventiveDashModal(false)}>Close</Button>
+            <Button type="primary" icon={<TableOutlined />} onClick={() => { setPreventiveDashModal(false); setActiveMenu("slf-monitoring"); }}>View in SLF Monitoring</Button>
+          </div>
+        }
+        width={1160}
+        style={{ top: 24, maxWidth: "96vw" }}
+        styles={{ body: { maxHeight: "calc(100vh - 160px)", overflowY: "auto", overflowX: "hidden" } }}
+        destroyOnHidden
+      >
+        {preventiveDashModal && (
+          <Suspense fallback={<div style={{ padding: 24, textAlign: "center" }}><Spin /></div>}>
+            <PreventiveMeasuresBySlf
+              facilities={slfFacStats?.managementData || []}
+              getFileName={getPreventiveFileName}
+              getKind={getPreventiveFileKind}
+              resolveThumbUrl={resolveMediaOpenUrl}
+              onOpenFile={(entry) => openPreventiveFileViewer({ url: entry.url, fileName: entry.fileName, slfName: entry.slfName, province: entry.province, kind: entry.kind })}
+            />
+          </Suspense>
+        )}
+      </Modal>
 
       {/* Per-SLF Prevention Measures — official narrative + VERA document summaries. */}
       <PreventionMeasuresPanel

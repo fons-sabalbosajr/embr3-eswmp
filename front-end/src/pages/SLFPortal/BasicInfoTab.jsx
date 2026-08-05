@@ -19,6 +19,7 @@ export default function BasicInfoTab({
   fetchProvinces,
   fetchMunicipalities,
   fetchBarangays,
+  addressLocked = false,
 }) {
   return (
                       <Form
@@ -85,7 +86,8 @@ export default function BasicInfoTab({
                                 placeholder="Select Region"
                                 showSearch
                                 optionFilterProp="children"
-                                onChange={(val) => fetchProvinces(val)}
+                                onChange={(val) => !addressLocked && fetchProvinces(val)}
+                                disabled={addressLocked}
                               >
                                 {regions.map((r) => (
                                   <Option key={r.code} value={r.code}>
@@ -105,8 +107,9 @@ export default function BasicInfoTab({
                                 placeholder="Select Province"
                                 showSearch
                                 optionFilterProp="children"
-                                onChange={(val) => fetchMunicipalities(val)}
+                                onChange={(val) => !addressLocked && fetchMunicipalities(val)}
                                 disabled={
+                                  addressLocked ||
                                   provinces.length === 0 &&
                                   loadingAddress !== "province"
                                 }
@@ -135,8 +138,9 @@ export default function BasicInfoTab({
                                 placeholder="Select City/Municipality"
                                 showSearch
                                 optionFilterProp="children"
-                                onChange={(val) => fetchBarangays(val)}
+                                onChange={(val) => !addressLocked && fetchBarangays(val)}
                                 disabled={
+                                  addressLocked ||
                                   municipalities.length === 0 &&
                                   loadingAddress !== "municipality"
                                 }
@@ -162,6 +166,7 @@ export default function BasicInfoTab({
                                 showSearch
                                 optionFilterProp="children"
                                 disabled={
+                                  addressLocked ||
                                   barangays.length === 0 &&
                                   loadingAddress !== "barangay"
                                 }

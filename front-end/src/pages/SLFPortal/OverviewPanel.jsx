@@ -39,7 +39,14 @@ import {
   Tooltip as RTooltip,
   Legend,
   ResponsiveContainer,
+  BarChart,
+  Bar,
+  CartesianGrid,
+  XAxis,
+  YAxis,
 } from "recharts";
+import { isHazardousWasteType } from "../../utils/wasteCategories";
+import { isPermitNotRequired } from "../admin/slf-monitoring/helpers.jsx";
 
 const { Text } = Typography;
 
@@ -82,9 +89,11 @@ function OverviewPanel({
   const isRevertStatus = (s) => /revert/i.test(String(s || ""));
   const statusCounts = ownSubmissions.reduce(
     (acc, r) => {
+      if (r.deletedAt || r.hiddenFromPortal) return acc;
       const s = String(r.status || "").toLowerCase();
       if (s === "pending") acc.pending += 1;
       else if (s === "acknowledged") acc.approved += 1;
+      else if (s === "approved") acc.approved += 1;
       else if (isRevertStatus(s)) acc.reverted += 1;
       else if (s === "rejected") acc.rejected += 1;
       return acc;
@@ -123,10 +132,25 @@ function OverviewPanel({
       ? `${recordedVolume.toLocaleString(undefined, { maximumFractionDigits: 2 })} ${baselineUnit}`
       : `0 ${baselineUnit}`;
   const statusColors = ["#1677ff", "#52c41a", "#faad14", "#ff4d4f", "#722ed1", "#13c2c2"];
-  const cellData = [
-    { name: "Active Cells", value: activeCellEntries.length || Number(slfInfo?.activeCells || 0) || 0 },
-    { name: "Closed Cells", value: closedCellEntries.length || Number(slfInfo?.closedCells || 0) || 0 },
-  ].filter((item) => item.value > 0);
+  const cellStatusCounts = (() => {
+    const statuses = Array.isArray(slfInfo?.cellStatuses) ? slfInfo.cellStatuses : [];
+    const declaredCount = Math.max(
+      Number(slfInfo?.numberOfCell || 0),
+      statuses.length,
+      slfInfo?.cellCapacities?.length || 0,
+      slfInfo?.cellNames?.length || 0,
+    );
+    const counts = { total: 0, active: 0, reserved: 0, completed: 0 };
+    for (let index = 0; index < declaredCount; index += 1) {
+      const status = statuses[index] || "Active Cell";
+      if (isNonExistentCell(status)) continue;
+      counts.total += 1;
+      if (isOperationalCellStatus(status)) counts.active += 1;
+      else if (/reserved/i.test(String(status || ""))) counts.reserved += 1;
+      else if (/used|completed|closed/i.test(String(status || ""))) counts.completed += 1;
+    }
+    return counts;
+  })();
   const legacySubmissionRows = [
     ...(wasteReceivedData.lguR3 || []).map((row) => ({ ...row, clientType: "LGU", region: row.region })),
     ...(wasteReceivedData.lguOutside || []).map((row) => ({ ...row, clientType: "LGU", region: row.region })),
@@ -158,6 +182,27 @@ function OverviewPanel({
     "Private Industry": "#52c41a",
     "Baseline Utilization": "#fa8c16",
   };
+  const clientIdentityKey = (row = {}) => [
+    row.clientName || row.company || "",
+    row.clientType || row.companyType || "Private",
+    row.region || row.companyRegion || "",
+    row.province || row.companyProvince || "",
+    row.municipality || row.companyMunicipality || "",
+  ].map((value) => String(value || "").trim().toLowerCase()).join("|");
+  const combinedClientMap = new Map();
+  [...baselineBreakdownRows, ...submissionBreakdownRows].forEach((row) => {
+    if (!row || /baseline/i.test(String(row.clientType || row.companyType || ""))) return;
+    const key = clientIdentityKey(row);
+    if (key.replace(/\|/g, "")) combinedClientMap.set(key, row);
+  });
+  const combinedClients = Array.from(combinedClientMap.values());
+  const haulerCount = new Set(
+    (haulers || [])
+      .map((hauler) => String(hauler?.haulerName || "").trim().toLowerCase())
+      .filter(Boolean),
+  ).size;
+  const lguClientCount = combinedClients.filter((row) => /lgu/i.test(String(row.clientType || row.companyType || ""))).length;
+  const privateClientCount = combinedClients.filter((row) => !/lgu/i.test(String(row.clientType || row.companyType || ""))).length;
   const wasteFilledM3 = Number(wasteReceivedData.baselineTotals?.m3 || 0) + Number(wasteReceivedData.totals?.m3 || 0);
   const wasteFilledTons = Number(wasteReceivedData.baselineTotals?.tons || 0) + Number(wasteReceivedData.totals?.tons || 0);
   // #5: show the total in the facility's SINGLE declared baseline unit (m³ and tons
@@ -170,6 +215,60 @@ function OverviewPanel({
     const value = unit === "tons" ? wasteFilledTons : wasteFilledM3;
     return `${Number(value || 0).toLocaleString(undefined, { maximumFractionDigits: 2 })} ${unit}`;
   };
+  const rowVolumeForUnit = (row = {}) => {
+    const unit = normalizeUnit(baselineUnit);
+    return unit === "tons" ? Number(row.totalTons || 0) : Number(row.totalM3 || row.totalVolume || 0);
+  };
+  const sumByWasteCategory = (rows = []) => rows.reduce(
+    (acc, row) => {
+      const key = isHazardousWasteType(row.wasteType || row.type || row.clientType) ? "hazardous" : "residual";
+      acc[key] += rowVolumeForUnit(row);
+      return acc;
+    },
+    { residual: 0, hazardous: 0 },
+  );
+  const baselineVolumes = sumByWasteCategory(wasteReceivedData.baselineCellBreakdown || []);
+  const submittedVolumes = sumByWasteCategory(submissionBreakdownRows);
+  const groupedVolumeData = [
+    { category: "Residual", baseline: baselineVolumes.residual, submitted: submittedVolumes.residual },
+    { category: "Hazardous", baseline: baselineVolumes.hazardous, submitted: submittedVolumes.hazardous },
+  ];
+  const submissionStatusData = [
+    { name: "Pending", value: statusCounts.pending, color: "#faad14" },
+    { name: "Approved", value: statusCounts.approved, color: "#52c41a" },
+    { name: "Reverted", value: statusCounts.reverted, color: "#ff4d4f" },
+  ];
+  const recordedSubmissionVolume = normalizeUnit(baselineUnit) === "tons" ? Number(wasteReceivedData.totals?.tons || 0) : Number(wasteReceivedData.totals?.m3 || 0);
+  const netRecordedVolume = Math.max(0, (normalizeUnit(baselineUnit) === "tons" ? Number(wasteReceivedData.baselineTotals?.tons || 0) : Number(wasteReceivedData.baselineTotals?.m3 || 0)) - recordedSubmissionVolume);
+  const formatUnitValue = (value) => masked ? MASK_PLACEHOLDER : `${Number(value || 0).toLocaleString(undefined, { maximumFractionDigits: 2 })} ${normalizeUnit(baselineUnit)}`;
+  const latestPermit = (items = [], numberField = "permitNo") => {
+    const list = (Array.isArray(items) ? items : []).filter((item) => item?.[numberField] || item?.validity || item?.status);
+    return list.sort((a, b) => new Date(b.validity || 0) - new Date(a.validity || 0))[0] || null;
+  };
+  const permitStatus = (validity, statusText) => {
+    // A permit marked "Not Required" does not apply to this facility, so none of the
+    // validity states below are meaningful for it. Previously it fell through to the
+    // `!validity` branch and rendered whatever text was stored — or, once a stale
+    // date existed, an alarming red "Expired" tag for a permit that was never needed.
+    // Show a neutral, explicitly non-status indicator instead.
+    if (isPermitNotRequired(statusText)) {
+      return { label: "Not Required", color: "default", notRequired: true };
+    }
+    if (!validity) return { label: statusText || "New / Complied", color: "blue" };
+    const expiry = new Date(validity);
+    if (Number.isNaN(expiry.getTime())) return { label: statusText || "New / Complied", color: "blue" };
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const days = Math.ceil((expiry - today) / 86400000);
+    if (days < 0) return { label: "Expired", color: "red" };
+    if (days <= 30) return { label: "Expiring Within 30 Days", color: "orange" };
+    if (/renew/i.test(String(statusText || ""))) return { label: "Renewed", color: "green" };
+    return { label: "New / Complied", color: "blue" };
+  };
+  const ptoPermit = latestPermit(slfInfo?.permitToOperatePermits);
+  const dpPermit = latestPermit(slfInfo?.dischargePermits);
+  const ptoStatus = permitStatus(ptoPermit?.validity || slfInfo?.permitToOperateValidity, ptoPermit?.status || slfInfo?.permitToOperateStatus);
+  const dpStatus = permitStatus(dpPermit?.validity || slfInfo?.dischargePermitValidity, dpPermit?.status || slfInfo?.dischargePermitStatus);
   // #4: on-slice label with count + percentage; tiny slices are left unlabeled to
   // avoid overlap (the tooltip still shows their full value).
   const renderPieLabel = ({ cx, cy, midAngle, innerRadius, outerRadius, percent, value }) => {
@@ -339,7 +438,7 @@ function OverviewPanel({
           </Card>
         </Col>
         <Col xs={12} md={6} xl={3}><Card size="small" loading={kpisLoading} style={{ borderRadius: 8 }}><Statistic title="Truck Entries" value={ownSubmissions.reduce((sum, item) => sum + Number(item.truckCount || 0), 0)} valueStyle={{ fontSize: 20 }} /></Card></Col>
-        <Col xs={12} md={6} xl={3}><Card size="small" loading={kpisLoading} style={{ borderRadius: 8 }}><Statistic title="Recorded Volume" value={recordedVolumeLabel} valueStyle={{ fontSize: 20, color: "#52c41a" }} /></Card></Col>
+        <Col xs={12} md={6} xl={3}><Card size="small" loading={kpisLoading} style={{ borderRadius: 8 }}><Statistic title="Submitted Vol." value={formatUnitValue(netRecordedVolume)} valueStyle={{ fontSize: 20, color: "#52c41a" }} /></Card></Col>
       </Row>
 
       {/* Cell utilization overview — capacity, band, and status per open cell. */}
@@ -423,35 +522,82 @@ function OverviewPanel({
             style={{ borderRadius: 8 }}
             bodyStyle={{ padding: 12, overflowX: "auto" }}
           >
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(8, minmax(130px, 1fr))", gap: 8, minWidth: 1080 }}>
-              {[["Facility", activeSlfName], ["Province", slfInfo?.province], ["Municipality", slfInfo?.municipality || slfInfo?.city], ["Classification", slfInfo?.category || slfInfo?.classification], ["Status", slfInfo?.operationalStatus || slfInfo?.status], ["Ownership", slfInfo?.ownership], ["ECC No.", slfInfo?.eccNo], ["Permit to Operate", slfInfo?.permitToOperate]].map(([label, value]) => (
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(4, minmax(180px, 1fr))", gap: 8, minWidth: 900 }}>
+              {[
+                ["Facility", activeSlfName],
+                ["Status", slfInfo?.statusOfSLF || slfInfo?.operationalStatus || slfInfo?.status],
+                ["Municipality", slfInfo?.municipality || slfInfo?.city || slfInfo?.lgu],
+                ["Province", slfInfo?.province],
+                ["Region", slfInfo?.region || slfInfo?.regionName || "Region III"],
+                ["ECC", slfInfo?.eccNo],
+                ["Hazardous Waste Generator ID", slfInfo?.hazwasteGenerationId],
+              ].map(([label, value]) => (
                 <div key={label} style={{ padding: "8px 10px", border: "1px solid #eef2f7", borderRadius: 8, minHeight: 58 }}>
                   <Text type="secondary" style={{ fontSize: 10, textTransform: "uppercase", letterSpacing: 0.3 }}>{label}</Text>
                   <div style={{ fontSize: 12, fontWeight: 600, color: "#1a3353", overflowWrap: "anywhere", lineHeight: 1.25 }}>{value || "Not encoded"}</div>
+                </div>
+              ))}
+              {[
+                ["Permit to Operate", ptoPermit?.permitNo || slfInfo?.permitToOperate, ptoStatus],
+                ["Discharge Permit", dpPermit?.permitNo || slfInfo?.dischargePermit, dpStatus],
+              ].map(([label, value, meta]) => (
+                <div key={label} style={{ padding: "8px 10px", border: "1px solid #eef2f7", borderRadius: 8, minHeight: 58 }}>
+                  <Text type="secondary" style={{ fontSize: 10, textTransform: "uppercase", letterSpacing: 0.3 }}>{label}</Text>
+                  <div style={{ fontSize: 12, fontWeight: 600, color: "#1a3353", overflowWrap: "anywhere", lineHeight: 1.25 }}>{value || "Not encoded"}</div>
+                  <Tag color={meta.color} style={{ marginTop: 4, marginInlineEnd: 0 }}>{meta.label}</Tag>
                 </div>
               ))}
             </div>
           </Card>
         </Col>
         <Col xs={24} md={12} xl={6}>
-          <Card title={<Text strong style={{ fontSize: 14 }}>Landfill Cells</Text>} style={{ borderRadius: 8, height: "100%" }} bodyStyle={{ height: 250 }}>
-            {cellData.length ? <ResponsiveContainer width="100%" height="100%"><PieChart><Pie data={cellData} dataKey="value" nameKey="name" innerRadius={48} outerRadius={78} isAnimationActive={false} label={renderPieLabel} labelLine={false}>{cellData.map((_, index) => <RCell key={index} fill={index === 0 ? "#52c41a" : "#8c8c8c"} />)}</Pie><RTooltip formatter={pieTooltipFormatter} /><Legend /></PieChart></ResponsiveContainer> : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No cell data encoded" />}
-          </Card>
-        </Col>
-        <Col xs={24} md={12} xl={6}>
-          <Card title={<Text strong style={{ fontSize: 14 }}>Waste Received Totals</Text>} loading={wasteReceivedLoading} style={{ borderRadius: 8, height: "100%" }} bodyStyle={{ minHeight: 250, display: "flex", alignItems: "center" }}>
-            <Row gutter={[12, 14]} style={{ width: "100%" }}>
-              <Col xs={24}><Statistic title="Total Waste Filled" value={formatWasteTotal()} valueStyle={{ fontSize: 16, color: "#52c41a" }} /></Col>
-              <Col xs={12}><Statistic title="Baseline Categories" value={baselineBreakdownRows.length} valueStyle={{ color: "#1a3353" }} /></Col>
-              <Col xs={12}><Statistic title="Submission Groups" value={submissionBreakdownRows.length} valueStyle={{ color: "#fa8c16" }} /></Col>
+          <Card title={<Text strong style={{ fontSize: 14 }}>Landfill Cells Status</Text>} loading={slfInfoLoading} style={{ borderRadius: 8, height: "100%" }} bodyStyle={{ minHeight: 250 }}>
+            <Row gutter={[12, 16]}>
+              <Col span={12}><Statistic title="Total Cells" value={cellStatusCounts.total} valueStyle={{ color: "#1a3353" }} /></Col>
+              <Col span={12}><Statistic title="Active" value={cellStatusCounts.active} valueStyle={{ color: "#52c41a" }} /></Col>
+              <Col span={12}><Statistic title="Reserved" value={cellStatusCounts.reserved} valueStyle={{ color: "#fa8c16" }} /></Col>
+              <Col span={12}><Statistic title="Used / Completed" value={cellStatusCounts.completed} valueStyle={{ color: "#8c8c8c" }} /></Col>
             </Row>
           </Card>
         </Col>
         <Col xs={24} md={12} xl={6}>
-          {renderBreakdownChart("Baseline Breakdown", baselineCategoryData, baselineBreakdownRows.length)}
+          <Card title={<Text strong style={{ fontSize: 14 }}>Haulers and Clients</Text>} loading={wasteReceivedLoading} style={{ borderRadius: 8, height: "100%" }} bodyStyle={{ minHeight: 250, display: "flex", alignItems: "center" }}>
+            <Row gutter={[12, 14]} style={{ width: "100%" }}>
+              <Col xs={24}><Statistic title="Total Accredited Haulers" value={haulerCount} valueStyle={{ fontSize: 18, color: "#1a3353" }} /></Col>
+              <Col xs={12}><Statistic title="LGU Clients" value={lguClientCount} valueStyle={{ color: "#1677ff" }} /></Col>
+              <Col xs={12}><Statistic title="Private Clients" value={privateClientCount} valueStyle={{ color: "#52c41a" }} /></Col>
+            </Row>
+          </Card>
         </Col>
         <Col xs={24} md={12} xl={6}>
-          {renderBreakdownChart("Submission Breakdown", submissionCategoryData, submissionBreakdownRows.length)}
+          <Card title={<Text strong style={{ fontSize: 14 }}>Baseline Breakdown</Text>} loading={wasteReceivedLoading} style={{ borderRadius: 8, height: "100%" }} bodyStyle={{ height: 250 }}>
+            <ResponsiveContainer width="100%" height="100%">
+              <BarChart data={groupedVolumeData} margin={{ top: 8, right: 8, left: -16, bottom: 0 }}>
+                <CartesianGrid strokeDasharray="3 3" vertical={false} />
+                <XAxis dataKey="category" tick={{ fontSize: 11 }} />
+                <YAxis tick={{ fontSize: 11 }} />
+                <RTooltip formatter={(value, name) => [formatUnitValue(value), name === "baseline" ? "Baseline Volume" : "Submitted Volume"]} />
+                <Legend />
+                <Bar dataKey="baseline" name="Baseline Volume" fill="#1677ff" radius={[4, 4, 0, 0]} isAnimationActive={false} />
+                <Bar dataKey="submitted" name="Submitted Volume" fill="#52c41a" radius={[4, 4, 0, 0]} isAnimationActive={false} />
+              </BarChart>
+            </ResponsiveContainer>
+          </Card>
+        </Col>
+        <Col xs={24} md={12} xl={6}>
+          <Card title={<Text strong style={{ fontSize: 14 }}>Submission Breakdown</Text>} loading={loadingSubmissions} style={{ borderRadius: 8, height: "100%" }} bodyStyle={{ height: 250 }}>
+            <ResponsiveContainer width="100%" height="100%">
+              <BarChart data={submissionStatusData} margin={{ top: 8, right: 8, left: -16, bottom: 0 }}>
+                <CartesianGrid strokeDasharray="3 3" vertical={false} />
+                <XAxis dataKey="name" tick={{ fontSize: 11 }} />
+                <YAxis allowDecimals={false} tick={{ fontSize: 11 }} />
+                <RTooltip formatter={(value) => [`${Number(value).toLocaleString()} submission(s)`, "Status"]} />
+                <Bar dataKey="value" name="Submissions" radius={[4, 4, 0, 0]} isAnimationActive={false}>
+                  {submissionStatusData.map((entry) => <RCell key={entry.name} fill={entry.color} />)}
+                </Bar>
+              </BarChart>
+            </ResponsiveContainer>
+          </Card>
         </Col>
       </Row>
     </div>

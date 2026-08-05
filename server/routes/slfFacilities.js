@@ -142,6 +142,29 @@ function normalizeUnit(unit) {
   return String(unit || "m³").replace("m3", "m³");
 }
 
+function normalizeThreeDecimalNumber(value, fieldName) {
+  if (value === null || value === undefined || value === "") return null;
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric) || numeric < 0) {
+    const error = new Error(`${fieldName} must be a non-negative number.`);
+    error.statusCode = 400;
+    throw error;
+  }
+  return Math.round(numeric * 1000) / 1000;
+}
+
+function normalizeCellInfrastructureNumbers(payload) {
+  ["cellCapacities", "cellFillValues"].forEach((key) => {
+    if (!Array.isArray(payload[key])) return;
+    payload[key] = payload[key].map((value, index) =>
+      normalizeThreeDecimalNumber(value, `${key}[${index}]`),
+    );
+  });
+  ["actualResidualWasteReceived", "estimatedVolumeWaste", "volumeCapacity", "receivingVolumeCapacity"].forEach((key) => {
+    if (payload[key] !== undefined) payload[key] = normalizeThreeDecimalNumber(payload[key], key);
+  });
+}
+
 function parseCellIndex(cellName) {
   const match = String(cellName || "").match(/(?:cell\s*)?(\d+)/i);
   return match ? Number(match[1]) - 1 : null;
@@ -673,12 +696,14 @@ router.post("/", validateBody({
   noOfLGUServed: { type: "number", min: 0 },
 }), async (req, res) => {
   try {
+    const createBody = { ...(req.body || {}) };
+    normalizeCellInfrastructureNumbers(createBody);
     // Block an accidental second facility row for a site that already exists in
     // this data year under a differently-worded name (see findDuplicateSiteFacility).
     // `?allowDuplicate=true` is the deliberate override for two genuinely separate
     // facilities that happen to normalize alike.
     if (req.query.allowDuplicate !== "true") {
-      const duplicate = await findDuplicateSiteFacility(req.body);
+      const duplicate = await findDuplicateSiteFacility(createBody);
       if (duplicate) {
         return res.status(409).json({
           message: `"${facilityDisplayName(duplicate)}" already exists for ${duplicate.dataYear} and appears to be the same SLF. Edit that record instead, or resubmit with allowDuplicate=true if these are genuinely different facilities.`,
@@ -689,7 +714,7 @@ router.post("/", validateBody({
         });
       }
     }
-    const record = await SlfFacility.create(req.body);
+    const record = await SlfFacility.create(createBody);
     // Same as the update path: tell every admin view to reload from the server so
     // a newly created facility is never left living only in one client's state.
     refreshAdmin(req, "submissions");
@@ -697,6 +722,7 @@ router.post("/", validateBody({
     res.status(201).json(record);
     writeLog("info", "slfFacility.create", { message: `Created SLF: ${record.lgu}`, ip: req.ip });
   } catch (error) {
+    if (error.statusCode) return res.status(error.statusCode).json({ message: error.message });
     res.status(500).json({ message: "Server error", error: error.message });
   }
 });
@@ -709,6 +735,7 @@ router.put("/:id", adminOnly, async (req, res) => {
     Object.keys(update).forEach((key) => {
       if (key.startsWith("_")) delete update[key];
     });
+    normalizeCellInfrastructureNumbers(update);
     const record = await SlfFacility.findOne({ _id: req.params.id, deletedAt: null });
     if (!record) return res.status(404).json({ message: "Record not found" });
 
@@ -1039,6 +1066,7 @@ router.patch("/:id/cell-status", adminOnly, async (req, res) => {
       ip: req.ip,
     });
   } catch (error) {
+    if (error.statusCode) return res.status(error.statusCode).json({ message: error.message });
     res.status(500).json({ message: "Server error", error: error.message });
   }
 });

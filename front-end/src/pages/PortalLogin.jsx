@@ -634,13 +634,13 @@ export default function PortalLogin() {
         destroyOnHidden
         width={900}
       >
-        <Alert
+        {/* <Alert
           type="warning"
           showIcon
           style={{ marginBottom: 14 }}
           title="Developer-only debug access"
           description="Your developer credentials were verified. Enter the Dev Portal PIN to open a selected portal user's session for debugging. Every impersonation is logged."
-        />
+        /> */}
         <Form form={devForm} layout="vertical" requiredMark={false}>
           {devStage === "pin" && (
             <>
@@ -663,7 +663,7 @@ export default function PortalLogin() {
               </div>
               <Form.Item
                 name="pin"
-                label="Dev Portal PIN"
+                // label="Dev Portal PIN"
                 rules={[
                   { required: true, message: "Enter the PIN" },
                   {
@@ -672,15 +672,25 @@ export default function PortalLogin() {
                   },
                 ]}
               >
-                <Input.OTP
-                  className="dev-pin-otp"
+                <Input.Password
+                  className="dev-pin-input"
                   autoFocus
-                  autoComplete="off"
+                  autoComplete="new-password"
                   inputMode="numeric"
-                  length={6}
-                  mask="•"
-                  formatter={(value) => String(value || "").replace(/\D/g, "")}
-                  separator={(index) => (index === 2 ? <span style={{ width: 10 }} /> : null)}
+                  maxLength={6}
+                  placeholder="Enter PIN"
+                  visibilityToggle={false}
+                  onPaste={(event) => event.preventDefault()}
+                  onCopy={(event) => event.preventDefault()}
+                  onCut={(event) => event.preventDefault()}
+                  onDrop={(event) => event.preventDefault()}
+                  onDragStart={(event) => event.preventDefault()}
+                  onChange={(event) => {
+                    const digits = event.target.value.replace(/\D/g, "").slice(0, 6);
+                    if (digits !== event.target.value) {
+                      devForm.setFieldValue("pin", digits);
+                    }
+                  }}
                 />
               </Form.Item>
               <div style={{ textAlign: "center", marginTop: -4, marginBottom: 4 }}>

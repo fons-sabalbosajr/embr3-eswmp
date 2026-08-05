@@ -60,6 +60,17 @@ function requireAdminOrDeveloper(req, res) {
   return true;
 }
 
+function portalSafePageContext(ctx) {
+  if (!ctx) return null;
+  const blocked = /\b(admin|developer|settings|users?|logs?|backlogs?|raw|database|security|credentials?|permissions?|system)\b/i;
+  const safe = { ...ctx };
+  if (blocked.test(`${safe.label || ""} ${safe.modalTitle || ""}`)) return null;
+  safe.tables = (safe.tables || []).filter((table) => !blocked.test(String(table.label || "")));
+  safe.stats = (safe.stats || []).filter((stat) => !blocked.test(String(stat.label || "")));
+  safe.filters = (safe.filters || []).filter((filter) => !blocked.test(String(filter || "")));
+  return safe.tables.length || safe.stats.length ? safe : null;
+}
+
 function escapeRegex(value) {
   return String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
@@ -572,7 +583,8 @@ router.post("/chat", requireAnyAuth, async (req, res) => {
   // the prompt when the question is actually about that data, so ordinary chat stays
   // cheap. An empty dataset answers with the exact prescribed line — no model call.
   let pageDataBlock = null;
-  const pageCtx = veraPageData.sanitizePageContext(req.body?.pageContext);
+  const sanitizedPageCtx = veraPageData.sanitizePageContext(req.body?.pageContext);
+  const pageCtx = req.user?.role === "portal_user" ? portalSafePageContext(sanitizedPageCtx) : sanitizedPageCtx;
   if (pageCtx && veraPageData.wantsPageData(message)) {
     if (veraPageData.isEmptyDataset(pageCtx)) {
       return res.json({ ok: true, answer: veraPageData.NO_RECORDS_REPLY, source: "guard" });

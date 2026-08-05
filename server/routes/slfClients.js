@@ -113,6 +113,64 @@ router.get("/", requirePermission(PERM, "view"), async (req, res) => {
   }
 });
 
+// ── Hauler Clients for ONE facility (SLF Data Table → Edit Modal → Hauler Clients).
+//
+// Replaces the removed "Reconcile Unlinked" module with a scoped, server-paginated
+// CRUD surface. A client is associated with an SLF through the portal accounts
+// assigned to that facility (UserPortal.assignedSlf), which is exactly how
+// syncBaselineClients builds portalUserRelationships in the first place — so this
+// stays consistent with the relationship map rather than inventing a second rule.
+//
+// Server-side search + pagination on purpose: GET / returns every canonical client
+// as a full document, and this modal must not pay that cost per facility.
+router.get("/by-slf/:slfId", requirePermission(PERM, "view"), async (req, res) => {
+  try {
+    const { slfId } = req.params;
+    if (!mongoose.isValidObjectId(slfId)) {
+      return res.status(400).json({ message: "A valid SLF id is required." });
+    }
+    const UserPortal = require("../models/UserPortal");
+    const assigned = await UserPortal.find({ assignedSlf: slfId }).select("_id email").lean();
+    const userIds = assigned.map((u) => u._id);
+    const emails = assigned.map((u) => String(u.email || "").trim().toLowerCase()).filter(Boolean);
+
+    const filter = {
+      deletedAt: null,
+      isCanonical: true,
+      mergedInto: null,
+      $or: [
+        { portalUserRelationships: { $elemMatch: { portalUser: { $in: userIds } } } },
+        { portalUserRelationships: { $elemMatch: { portalUserEmail: { $in: emails } } } },
+        { portalUser: { $in: userIds } },
+      ],
+    };
+
+    const search = String(req.query.search || "").trim();
+    if (search) {
+      const rx = new RegExp(search.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
+      // $and so the search clause cannot clobber the association $or above.
+      filter.$and = [{ $or: [{ name: rx }, { hauler: rx }, { municipalityCity: rx }, { province: rx }, { location: rx }] }];
+    }
+    const type = String(req.query.type || "").trim();
+    if (type === "LGU" || type === "Private Sector") filter.type = type;
+
+    const page = Math.max(1, Number(req.query.page) || 1);
+    const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 10));
+    const [rows, total] = await Promise.all([
+      SlfClient.find(filter)
+        .select("name type hauler province municipalityCity location status source multiPortalStatus updatedAt")
+        .sort({ name: 1 })
+        .skip((page - 1) * limit)
+        .limit(limit)
+        .lean(),
+      SlfClient.countDocuments(filter),
+    ]);
+    res.json({ rows, total, page, limit, portalUsers: assigned.length });
+  } catch (error) {
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+});
+
 // ── Deduped unique-client counts for the SLF dashboard tiles + the four
 //    Region 3 breakdown tiles. Single authoritative source (recalcCounts reads
 //    the PERSISTED collection, deduped by normalized name+type). ──
@@ -140,12 +198,55 @@ router.get("/relationship-map", requirePermission(PERM, "view"), async (req, res
     const cached = _relMapCache.get(type);
     if (cached && cached.expires > Date.now()) return res.json(cached.data);
 
-    const clients = await SlfClient.find({
-      deletedAt: null, isCanonical: true, mergedInto: null, status: "Active",
-      isDummy: { $ne: true }, type,
-    })
-      .select("name normalizedName clientTypeLabel province municipalityCity address hauler portalUserName portalUser haulerRelationships portalUserRelationships")
-      .lean();
+    // `portalUserRelationships` is ~92% of a client document and this route only
+    // ever collapses it to a DISTINCT set of haulers/SLFs. Pulling the raw array
+    // moved ~4.9MB over the wire to produce ~25KB of usable data — and because the
+    // sync appends one entry per baseline (see relKeyOf in syncBaselineClients),
+    // that array is ~63x larger than the distinct data it represents.
+    //
+    // So do the DISTINCT in the database and ship only the collapsed values. The
+    // JS helpers below still run, over tiny arrays, so the final semantics are
+    // unchanged: $setUnion is equivalent to their Map-keyed dedupe here because no
+    // hauler name has two casings and no portal user has two name spellings (both
+    // verified against the live collection).
+    const clients = await SlfClient.aggregate([
+      {
+        $match: {
+          deletedAt: null, isCanonical: true, mergedInto: null, status: "Active",
+          isDummy: { $ne: true }, type,
+        },
+      },
+      {
+        $project: {
+          name: 1, normalizedName: 1, clientTypeLabel: 1, province: 1,
+          municipalityCity: 1, address: 1, hauler: 1, portalUser: 1, portalUserName: 1,
+          haulerRelationships: {
+            $map: {
+              input: {
+                $setUnion: [
+                  { $map: { input: { $ifNull: ["$haulerRelationships", []] }, as: "r", in: "$$r.hauler" } },
+                  { $map: { input: { $ifNull: ["$portalUserRelationships", []] }, as: "r", in: "$$r.hauler" } },
+                ],
+              },
+              as: "h",
+              in: { hauler: "$$h" },
+            },
+          },
+          portalUserRelationships: {
+            $setUnion: [
+              {
+                $map: {
+                  input: { $ifNull: ["$portalUserRelationships", []] },
+                  as: "r",
+                  in: { portalUser: "$$r.portalUser", portalUserName: "$$r.portalUserName" },
+                },
+              },
+              [],
+            ],
+          },
+        },
+      },
+    ]);
 
     // Distinct by NORMALIZED value (ids where available) so the same hauler/SLF is
     // never double-counted across relationship entries.
@@ -467,7 +568,10 @@ router.get("/lgu-reconciliation", requirePermission(PERM, "view"), async (req, r
     const clients = await SlfClient.find({
       deletedAt: null, isCanonical: true, mergedInto: null, status: "Active",
       isDummy: { $ne: true }, type: "LGU",
-    }).select("name municipalityCity province address hauler haulerRelationships portalUserRelationships").lean();
+      // Same reasoning as /relationship-map: hasHauler() only ever tests `.hauler`
+      // on these two arrays, so projecting that one sub-field avoids dragging the
+      // full relationship history across the wire for a boolean.
+    }).select("name municipalityCity province address hauler haulerRelationships.hauler portalUserRelationships.hauler").lean();
 
     const deriveBarangay = (address) => {
       const m = String(address || "").match(/(?:brgy\.?|barangay)\s+([^,;]+)/i);
