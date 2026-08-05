@@ -10,6 +10,8 @@ const Transaction = require("../models/Transaction");
 const Notification = require("../models/Notification");
 const UserPortal = require("../models/UserPortal");
 const { notifyAdmin, notifyPortal, refreshAdmin, refreshPortal } = require("../utils/socketEmit");
+const serverCache = require("../utils/serverCache");
+const { SUMMARY_BY_SLF_CACHE_KEY, STATS_CACHE_PREFIX, CELL_USAGE_CACHE_PREFIX } = require("../utils/cacheKeys");
 const { isBataanSlfName } = require("../utils/mergeBataanSlf");
 const {
   isOperationalStatus,
@@ -1780,6 +1782,30 @@ router.get("/baseline/:slfName", async (req, res) => {
       matchedCandidates.find((item) => item?.accreditedHaulers?.length > 0) ||
       latest;
 
+    // Resolve the approval/request flags ACROSS every candidate for this SLF, not
+    // off the single record chooseBaselineRecord happens to pick.
+    //
+    // This is the "admin approved but the portal still says Pending" bug. The three
+    // sides disagreed on scope:
+    //   • admin WRITE  (baseline-update-approve) → updateMany over every record with
+    //                    baseline data
+    //   • admin READ   (GET /baselines)          → $max of the flags across all of an
+    //                    SLF's records ("any record approved" wins)
+    //   • portal READ  (here)                    → flags off ONE chosen record
+    // So whenever the chosen record wasn't among the ones the write touched, the
+    // admin list showed Approved while the portal kept showing Pending — with no way
+    // to clear it. Verified in production data: three SLFs currently hold records
+    // that disagree with each other on baselineUpdateApproved.
+    //
+    // Matching the admin's $max here makes both sides agree by construction, and is
+    // the safe direction: an approval that reached ANY record unlocks the portal,
+    // rather than being silently swallowed.
+    const anyFlag = (field) => matchedCandidates.some((item) => !!item?.[field]);
+    const baselineUpdateApproved = anyFlag("baselineUpdateApproved");
+    // An approval supersedes a pending request — otherwise a record still carrying
+    // the old requested flag would re-show "Pending" next to an unlocked form.
+    const baselineUpdateRequested = !baselineUpdateApproved && anyFlag("baselineUpdateRequested");
+
     res.json({
       baselineUnit,
       lguCompanyName: latest.lguCompanyName,
@@ -1807,8 +1833,8 @@ router.get("/baseline/:slfName", async (req, res) => {
       activeCellEntries: latest.activeCellEntries || [],
       closedCellEntries: latest.closedCellEntries || [],
       accreditedHaulers: haulerSource.accreditedHaulers || [],
-      baselineUpdateApproved: latest.baselineUpdateApproved || false,
-      baselineUpdateRequested: latest.baselineUpdateRequested || false,
+      baselineUpdateApproved,
+      baselineUpdateRequested,
       savedAt: latest.updatedAt || latest.createdAt,
     });
   } catch (error) {
@@ -1930,6 +1956,284 @@ router.get("/baselines", optionalAuth, async (req, res) => {
     res.json(results);
   } catch (error) {
     if (error.statusCode) return res.status(error.statusCode).json({ message: error.message });
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+});
+
+// ── Hauler Clients CRUD (SLF Data Table → Edit Modal → Hauler Clients) ──────────
+//
+// Admins maintain the clients that live INSIDE the portal user's baseline
+// (accreditedHaulers[].privateSectorClients / .clients), because portal users
+// routinely leave Client Type and address blank. Writing here — rather than to the
+// canonical slf_clients collection — is what makes the correction visible to the
+// portal user in their own baseline, and it flows into slf_clients on the next sync.
+//
+// Records are matched BY VALUE (hauler name + client name), never by array index:
+// an SLF's accreditedHaulers array is duplicated across every one of its baseline
+// documents and those copies are not identically ordered, so an index-based write
+// would edit the wrong client in some of them.
+//
+// Every mutation writes to ALL of the SLF's records that carry accreditedHaulers.
+// That is deliberate: the portal read path (GET /baseline/:slfName → haulerSource),
+// the admin list, and syncBaselineClients each select a record by different rules,
+// and a partial write is exactly how "the edit reverted on reload" bugs happen.
+const normalizeKey = (value) => String(value || "").trim().toLowerCase();
+
+// Client entry as stored (see clientSchema): display names plus PSGC codes.
+function buildClientEntry(body, existing = {}) {
+  const next = { ...existing };
+  const assign = (key, value) => {
+    if (value !== undefined) next[key] = typeof value === "string" ? value.trim() : value;
+  };
+  assign("clientName", body.clientName);
+  assign("clientType", body.clientType);
+  assign("region", body.region);
+  assign("regionName", body.regionName);
+  assign("province", body.province);
+  assign("provinceName", body.provinceName);
+  assign("municipality", body.municipality);
+  assign("municipalityName", body.municipalityName);
+  return next;
+}
+
+// Resolve every baseline record for a facility that carries accreditedHaulers.
+// Returns the QUERY (not a promise) so callers can either await it for documents or
+// keep chaining .select()/.lean() for the read-only list.
+function findHaulerClientRecords(slfGeneratorId) {
+  return DataSLF.find({
+    slfGenerator: slfGeneratorId,
+    deletedAt: null,
+    "accreditedHaulers.0": { $exists: true },
+  }).setOptions({ includeHiddenYears: true });
+}
+
+// Push the change out to admin views AND to every portal account that submitted for
+// this SLF, so the portal user's baseline reflects the correction without a reload.
+async function announceHaulerClientChange(req, records) {
+  refreshAdmin(req, "baselines");
+  const emails = new Set();
+  records.forEach((r) => {
+    const email = String(r.submittedBy || "").trim();
+    if (email) emails.add(email);
+  });
+  for (const email of emails) {
+    refreshPortal(req, email, "baselines");
+    notifyPortal(req, email, {
+      type: "baseline_clients_updated",
+      title: "Baseline Clients Updated",
+      message: "An administrator updated the client details in your baseline data.",
+    });
+  }
+}
+
+// LIST — flattened hauler→client rows for one facility, searchable + paginated.
+router.get("/hauler-clients/:slfGeneratorId", adminOnly, async (req, res) => {
+  try {
+    const { slfGeneratorId } = req.params;
+    if (!mongoose.isValidObjectId(slfGeneratorId)) {
+      return res.status(400).json({ message: "A valid SLF id is required." });
+    }
+    const records = await findHaulerClientRecords(slfGeneratorId).select(
+      "accreditedHaulers slfName lguCompanyName submittedBy updatedAt",
+    ).sort({ createdAt: -1 }).lean();
+
+    // Collapse the duplicated copies into one distinct list per (hauler, client).
+    const byKey = new Map();
+    records.forEach((record) => {
+      (record.accreditedHaulers || []).forEach((hauler) => {
+        const haulerName = String(hauler?.haulerName || "").trim();
+        const list = [
+          ...(Array.isArray(hauler?.privateSectorClients) ? hauler.privateSectorClients : []),
+          ...(Array.isArray(hauler?.clients) ? hauler.clients : []),
+        ];
+        list.forEach((raw) => {
+          const client = typeof raw === "string" ? { clientName: raw } : raw || {};
+          const clientName = String(client.clientName || "").trim();
+          if (!clientName) return;
+          const key = `${normalizeKey(haulerName)}|${normalizeKey(clientName)}`;
+          if (byKey.has(key)) return;
+          byKey.set(key, {
+            key,
+            haulerName,
+            haulerAddress: hauler?.officeAddress || "",
+            clientName,
+            clientType: client.clientType || "",
+            regionName: client.regionName || "",
+            provinceName: client.provinceName || "",
+            municipalityName: client.municipalityName || "",
+            region: client.region || "",
+            province: client.province || "",
+            municipality: client.municipality || "",
+            // Surfaced so the UI can highlight exactly what the portal user omitted.
+            incomplete: !client.clientType || !client.provinceName || !client.municipalityName,
+          });
+        });
+      });
+    });
+
+    let rows = [...byKey.values()];
+    const search = String(req.query.search || "").trim().toLowerCase();
+    if (search) {
+      rows = rows.filter((r) =>
+        [r.clientName, r.haulerName, r.provinceName, r.municipalityName, r.clientType]
+          .some((v) => String(v || "").toLowerCase().includes(search)),
+      );
+    }
+    const type = String(req.query.type || "").trim();
+    if (type) rows = rows.filter((r) => String(r.clientType || "") === type);
+    if (String(req.query.incompleteOnly || "") === "true") rows = rows.filter((r) => r.incomplete);
+
+    rows.sort((a, b) => a.haulerName.localeCompare(b.haulerName) || a.clientName.localeCompare(b.clientName));
+    const total = rows.length;
+    const page = Math.max(1, Number(req.query.page) || 1);
+    const limit = Math.min(200, Math.max(1, Number(req.query.limit) || 10));
+    const paged = rows.slice((page - 1) * limit, page * limit);
+
+    const haulers = [...new Set(rows.map((r) => r.haulerName).filter(Boolean))].sort();
+    res.json({ rows: paged, total, page, limit, haulers, incompleteCount: rows.filter((r) => r.incomplete).length });
+  } catch (error) {
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+});
+
+// CREATE — add a client under a named hauler, across every baseline record.
+router.post("/hauler-clients/:slfGeneratorId", adminOnly, async (req, res) => {
+  try {
+    const { slfGeneratorId } = req.params;
+    if (!mongoose.isValidObjectId(slfGeneratorId)) {
+      return res.status(400).json({ message: "A valid SLF id is required." });
+    }
+    const haulerName = String(req.body?.haulerName || "").trim();
+    const clientName = String(req.body?.clientName || "").trim();
+    if (!haulerName) return res.status(400).json({ message: "Hauler is required." });
+    if (!clientName) return res.status(400).json({ message: "Client name is required." });
+
+    const records = await findHaulerClientRecords(slfGeneratorId);
+    if (!records.length) return res.status(404).json({ message: "No baseline record with accredited haulers for this SLF." });
+
+    const entry = buildClientEntry({ ...req.body, clientName });
+    let added = 0;
+    for (const record of records) {
+      const hauler = (record.accreditedHaulers || []).find(
+        (h) => normalizeKey(h?.haulerName) === normalizeKey(haulerName),
+      );
+      if (!hauler) continue;
+      const exists = [
+        ...(hauler.privateSectorClients || []),
+        ...(hauler.clients || []),
+      ].some((c) => normalizeKey(typeof c === "string" ? c : c?.clientName) === normalizeKey(clientName));
+      if (exists) continue;
+      hauler.privateSectorClients = [...(hauler.privateSectorClients || []), entry];
+      record.markModified("accreditedHaulers");
+      await record.save();
+      added += 1;
+    }
+    if (!added) return res.status(409).json({ message: `"${clientName}" already exists under ${haulerName}.` });
+
+    await announceHaulerClientChange(req, records);
+    writeLog("info", "hauler-client.create", {
+      message: `Added client "${clientName}" under hauler "${haulerName}"`,
+      user: getRequestActor(req), ip: req.ip, meta: { slfGeneratorId, recordsUpdated: added },
+    });
+    res.status(201).json({ message: "Client added", recordsUpdated: added });
+  } catch (error) {
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+});
+
+// UPDATE — the primary use case: filling in Client Type / address the portal user
+// left blank. Matched by (hauler, original client name) across every record.
+router.put("/hauler-clients/:slfGeneratorId", adminOnly, async (req, res) => {
+  try {
+    const { slfGeneratorId } = req.params;
+    if (!mongoose.isValidObjectId(slfGeneratorId)) {
+      return res.status(400).json({ message: "A valid SLF id is required." });
+    }
+    const haulerName = String(req.body?.haulerName || "").trim();
+    const originalClientName = String(req.body?.originalClientName || req.body?.clientName || "").trim();
+    if (!haulerName || !originalClientName) {
+      return res.status(400).json({ message: "Hauler and client name are required." });
+    }
+    const records = await findHaulerClientRecords(slfGeneratorId);
+    let updated = 0;
+    for (const record of records) {
+      let touched = false;
+      (record.accreditedHaulers || []).forEach((hauler) => {
+        if (normalizeKey(hauler?.haulerName) !== normalizeKey(haulerName)) return;
+        ["privateSectorClients", "clients"].forEach((field) => {
+          const list = hauler[field];
+          if (!Array.isArray(list)) return;
+          hauler[field] = list.map((raw) => {
+            const client = typeof raw === "string" ? { clientName: raw } : raw || {};
+            if (normalizeKey(client.clientName) !== normalizeKey(originalClientName)) return raw;
+            touched = true;
+            return buildClientEntry(req.body, client);
+          });
+        });
+      });
+      if (!touched) continue;
+      record.markModified("accreditedHaulers");
+      await record.save();
+      updated += 1;
+    }
+    if (!updated) return res.status(404).json({ message: "That client was not found under this hauler." });
+
+    await announceHaulerClientChange(req, records);
+    writeLog("info", "hauler-client.update", {
+      message: `Updated client "${originalClientName}" under hauler "${haulerName}"`,
+      user: getRequestActor(req), ip: req.ip, meta: { slfGeneratorId, recordsUpdated: updated },
+    });
+    res.json({ message: "Client updated", recordsUpdated: updated });
+  } catch (error) {
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+});
+
+// DELETE — remove a client from its hauler across every baseline record.
+router.delete("/hauler-clients/:slfGeneratorId", adminOnly, async (req, res) => {
+  try {
+    const { slfGeneratorId } = req.params;
+    if (!mongoose.isValidObjectId(slfGeneratorId)) {
+      return res.status(400).json({ message: "A valid SLF id is required." });
+    }
+    const haulerName = String(req.query.haulerName || req.body?.haulerName || "").trim();
+    const clientName = String(req.query.clientName || req.body?.clientName || "").trim();
+    if (!haulerName || !clientName) {
+      return res.status(400).json({ message: "Hauler and client name are required." });
+    }
+    const records = await findHaulerClientRecords(slfGeneratorId);
+    let removed = 0;
+    for (const record of records) {
+      let touched = false;
+      (record.accreditedHaulers || []).forEach((hauler) => {
+        if (normalizeKey(hauler?.haulerName) !== normalizeKey(haulerName)) return;
+        ["privateSectorClients", "clients"].forEach((field) => {
+          const list = hauler[field];
+          if (!Array.isArray(list)) return;
+          const next = list.filter((raw) => {
+            const name = typeof raw === "string" ? raw : raw?.clientName;
+            return normalizeKey(name) !== normalizeKey(clientName);
+          });
+          if (next.length !== list.length) {
+            hauler[field] = next;
+            touched = true;
+          }
+        });
+      });
+      if (!touched) continue;
+      record.markModified("accreditedHaulers");
+      await record.save();
+      removed += 1;
+    }
+    if (!removed) return res.status(404).json({ message: "That client was not found under this hauler." });
+
+    await announceHaulerClientChange(req, records);
+    writeLog("warn", "hauler-client.delete", {
+      message: `Deleted client "${clientName}" from hauler "${haulerName}"`,
+      user: getRequestActor(req), ip: req.ip, meta: { slfGeneratorId, recordsUpdated: removed },
+    });
+    res.json({ message: "Client deleted", recordsUpdated: removed });
+  } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });
   }
 });
@@ -2074,6 +2378,26 @@ router.delete("/baselines/:id", async (req, res) => {
 });
 
 // Admin approve baseline update request
+// Every distinct portal account that has submitted for this SLF, so a baseline
+// approval/lock/rejection reaches all of them rather than only the owner of the
+// newest record. Falls back to the latest record's submitter so a single-user SLF
+// behaves exactly as before.
+async function baselineNotifyRecipients(filter, latest) {
+  const emails = new Set();
+  try {
+    const submitters = await DataSLF.find(filter)
+      .setOptions({ includeHiddenYears: true })
+      .distinct("submittedBy");
+    submitters.forEach((email) => {
+      const trimmed = String(email || "").trim();
+      if (trimmed) emails.add(trimmed);
+    });
+  } catch { /* fall back to the single submitter below */ }
+  const fallback = String(latest?.submittedBy || "").trim();
+  if (fallback) emails.add(fallback);
+  return [...emails];
+}
+
 router.patch("/baseline-update-approve/:slfName", async (req, res) => {
   try {
     const slfName = req.params.slfName;
@@ -2098,17 +2422,29 @@ router.patch("/baseline-update-approve/:slfName", async (req, res) => {
       : null;
     if (!latest) return res.status(404).json({ message: "Baseline not found" });
 
-    // Notify the portal user
-    try {
-      await Notification.create({
-        recipient: latest.submittedBy,
-        type: "baseline_update_approved",
-        title: "Baseline Update Approved",
-        message: `Your baseline update request for ${slfName} has been approved. You may now update your baseline data.`,
-        meta: { slfName },
-      });
-    } catch { /* silent */ }
-    notifyPortal(req, latest.submittedBy, { type: "baseline_update_approved", title: "Baseline Update Approved" });
+    // Notify EVERY portal user who submitted for this SLF, not just whoever owns the
+    // most recent record. An SLF can be worked by several portal accounts, and the
+    // requester is not necessarily `latest.submittedBy` — addressing only that one
+    // left the actual requester's portal sitting on "Pending".
+    const recipients = await baselineNotifyRecipients(filter, latest);
+    for (const email of recipients) {
+      try {
+        await Notification.create({
+          recipient: email,
+          type: "baseline_update_approved",
+          title: "Baseline Update Approved",
+          message: `Your baseline update request for ${slfName} has been approved. You may now update your baseline data.`,
+          meta: { slfName },
+        });
+      } catch { /* silent */ }
+      notifyPortal(req, email, { type: "baseline_update_approved", title: "Baseline Update Approved" });
+      // The portal's baseline/dashboard views reload on `data-refresh`, NOT on the
+      // bell notification. Without this the lock state and dashboard values stayed
+      // stale until a manual page refresh.
+      refreshPortal(req, email, "baselines");
+    }
+    // Keep the admin's own baseline list/tiles in step (and bust the server caches).
+    refreshAdmin(req, "baselines");
 
     // Log transaction
     try {
@@ -2152,19 +2488,23 @@ router.patch("/baseline-update-lock/:slfName", async (req, res) => {
 
     const latest = await DataSLF.findOne(filter).setOptions({ includeHiddenYears: true }).sort({ createdAt: -1 });
 
-    // Notify the portal user in real time
-    if (latest?.submittedBy) {
+    // Notify every portal user for this SLF in real time, and push a data-refresh so
+    // the re-lock takes effect in the portal without a manual reload.
+    const lockRecipients = await baselineNotifyRecipients(filter, latest);
+    for (const email of lockRecipients) {
       try {
         await Notification.create({
-          recipient: latest.submittedBy,
+          recipient: email,
           type: "baseline_locked",
           title: "Baseline Locked",
           message: `Your baseline data for ${slfName} has been locked by an admin.`,
           meta: { slfName },
         });
       } catch { /* silent */ }
-      notifyPortal(req, latest.submittedBy, { type: "baseline_locked", title: "Baseline Locked" });
+      notifyPortal(req, email, { type: "baseline_locked", title: "Baseline Locked" });
+      refreshPortal(req, email, "baselines");
     }
+    refreshAdmin(req, "baselines");
 
     // Log transaction
     try {
@@ -2210,17 +2550,23 @@ router.patch("/baseline-update-reject/:slfName", async (req, res) => {
       : null;
     if (!latest) return res.status(404).json({ message: "Baseline not found" });
 
-    // Notify the portal user
-    try {
-      await Notification.create({
-        recipient: latest.submittedBy,
-        type: "baseline_update_rejected",
-        title: "Baseline Update Request Rejected",
-        message: `Your baseline update request for ${slfName} has been rejected.${reason ? " Reason: " + reason : ""}`,
-        meta: { slfName, reason },
-      });
-    } catch { /* silent */ }
-    notifyPortal(req, latest.submittedBy, { type: "baseline_update_rejected", title: "Baseline Update Rejected" });
+    // Notify every portal user for this SLF, and push a data-refresh so the cleared
+    // request state reaches the portal without a manual reload.
+    const rejectRecipients = await baselineNotifyRecipients(filter, latest);
+    for (const email of rejectRecipients) {
+      try {
+        await Notification.create({
+          recipient: email,
+          type: "baseline_update_rejected",
+          title: "Baseline Update Request Rejected",
+          message: `Your baseline update request for ${slfName} has been rejected.${reason ? " Reason: " + reason : ""}`,
+          meta: { slfName, reason },
+        });
+      } catch { /* silent */ }
+      notifyPortal(req, email, { type: "baseline_update_rejected", title: "Baseline Update Rejected" });
+      refreshPortal(req, email, "baselines");
+    }
+    refreshAdmin(req, "baselines");
 
     // Log transaction
     try {
@@ -2528,7 +2874,11 @@ router.get("/stats", async (req, res) => {
   try {
     // Exclude dummy/test entries from all production dashboard tiles. Developers
     // may opt in via ?includeDummy=true (requires a developer token).
-    const match = devWantsDummy(req) ? { deletedAt: null } : { deletedAt: null, ...NON_DUMMY_CLAUSE };
+    const includeDummy = devWantsDummy(req);
+    const cacheKey = `${STATS_CACHE_PREFIX}:${includeDummy ? "dummy" : "default"}`;
+    const cachedStats = serverCache.get(cacheKey);
+    if (cachedStats) return res.json(cachedStats);
+    const match = includeDummy ? { deletedAt: null } : { deletedAt: null, ...NON_DUMMY_CLAUSE };
     const [submissions, generators, totalTrucks, byStatus, byCompanyType, wasteByType, monthlyData, recentSubmissions] =
       await Promise.all([
         DataSLF.countDocuments(match),
@@ -2637,7 +2987,7 @@ router.get("/stats", async (req, res) => {
     const companyMap = {};
     byCompanyType.forEach((c) => (companyMap[c._id] = c.count));
 
-    res.json({
+    const statsPayload = {
       submissions,
       generators,
       totalTrucks: totalTrucks[0]?.total || 0,
@@ -2646,7 +2996,11 @@ router.get("/stats", async (req, res) => {
       wasteByType,
       monthlyData,
       recentSubmissions,
-    });
+    };
+    // 60s TTL is a safety net; refreshAdmin() busts this on every submission/
+    // baseline/facility write so the tiles are never stale after a CRUD op.
+    serverCache.set(cacheKey, statsPayload, 60000);
+    res.json(statsPayload);
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });
   }
@@ -2768,6 +3122,8 @@ router.get("/summary-tiles", async (req, res) => {
 // previous "load all records + group in React" approach. Compact rows only.
 router.get("/summary-by-slf", async (req, res) => {
   try {
+    const cached = serverCache.get(SUMMARY_BY_SLF_CACHE_KEY);
+    if (cached) return res.json(cached);
     const rows = await DataSLF.aggregate([
       { $match: { deletedAt: null, isDummy: { $ne: true } } },
       {
@@ -2886,7 +3242,160 @@ router.get("/summary-by-slf", async (req, res) => {
       })
       .sort((a, b) => String(a.slfName).localeCompare(String(b.slfName)));
 
+    // 60s TTL is only a safety net — the real freshness comes from refreshAdmin()
+    // busting this key on every submission/baseline/facility write.
+    serverCache.set(SUMMARY_BY_SLF_CACHE_KEY, payload, 60000);
     res.json(payload);
+  } catch (error) {
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+});
+
+// Per-cell waste volumes for the SLF Data Table, pre-collapsed in the database.
+//
+// The admin SLF Monitoring page used to load EVERY submission (mode=list&
+// cellUsage=true, unpaginated) purely so buildFacilityCellUsage could sum truck
+// volumes per cell — ~3.2MB and ~39s on the wire, of which the cell math needs
+// almost nothing. buildFacilityCellUsage adds each truck's volume to a cell chosen
+// from (wasteType, cellIndex/cellName) and the unit, so trucks sharing all four
+// values are interchangeable: summing them here is arithmetically identical to
+// summing them in the browser. Measured on live data, 18,991 trucks collapse to
+// 788 distinct tuples — the same numbers in ~1/13th the bytes.
+//
+// The collapse is an ORDER-PRESERVING $reduce, not a $group, because
+// getPortalVolumeUnit picks the unit of the FIRST positive-volume truck; a
+// reordered array could silently change a facility's display unit.
+//
+// This deliberately drops trucks[].vehicles — the cell rollup never reads it. The
+// cell-ASSIGNMENT editor does, and it keeps its own per-facility fetch (which needs
+// real truck/vehicle indices to write placements back).
+router.get("/cell-usage", async (req, res) => {
+  try {
+    const includeDummy = devWantsDummy(req);
+    const cacheKey = `${CELL_USAGE_CACHE_PREFIX}:${includeDummy ? "dummy" : "default"}`;
+    const cached = serverCache.get(cacheKey);
+    if (cached) return res.json(cached);
+
+    const match = includeDummy ? { deletedAt: null } : { deletedAt: null, ...NON_DUMMY_CLAUSE };
+    // Identity of a cell bucket: everything findBestCellIndex + addVolumeToCell read.
+    const bucketKey = {
+      $concat: [
+        { $ifNull: [{ $toString: "$$t.cellIndex" }, ""] }, "|",
+        { $ifNull: ["$$t.cellName", ""] }, "|",
+        { $ifNull: ["$$t.wasteType", ""] }, "|",
+        { $ifNull: ["$$t.actualVolumeUnit", ""] },
+      ],
+    };
+
+    const rows = await DataSLF.aggregate([
+      { $match: match },
+      {
+        $project: {
+          slfName: 1, slfGenerator: 1, status: 1, dateOfDisposal: 1, createdAt: 1,
+          _trucks: {
+            $filter: {
+              input: {
+                $map: {
+                  input: { $ifNull: ["$trucks", []] },
+                  as: "t",
+                  in: {
+                    _k: bucketKey,
+                    cellIndex: "$$t.cellIndex",
+                    cellName: "$$t.cellName",
+                    wasteType: "$$t.wasteType",
+                    actualVolume: { $ifNull: ["$$t.actualVolume", 0] },
+                    actualVolumeUnit: "$$t.actualVolumeUnit",
+                  },
+                },
+              },
+              as: "x",
+              // A zero/negative truck is discarded by addVolumeToCell anyway, and
+              // hasTruckVolume() treats a submission with none as non-contributing.
+              cond: { $gt: ["$$x.actualVolume", 0] },
+            },
+          },
+        },
+      },
+      { $match: { "_trucks.0": { $exists: true } } },
+      {
+        $project: {
+          slfName: 1, slfGenerator: 1, status: 1, dateOfDisposal: 1, createdAt: 1,
+          trucks: {
+            $reduce: {
+              input: "$_trucks",
+              initialValue: [],
+              // Append an unseen bucket, or add into the existing one IN PLACE. The
+              // in-place branch is a $map rather than $slice surgery because $cond
+              // evaluates both branches, and a $slice count of 0 (first element, or
+              // an empty accumulator) is a hard error rather than an empty result.
+              // `cur` aliases the reduce's $$this so the inner $map can rebind it.
+              in: {
+                $let: {
+                  vars: { cur: "$$this" },
+                  in: {
+                    $cond: [
+                      { $eq: [{ $indexOfArray: ["$$value._k", "$$cur._k"] }, -1] },
+                      { $concatArrays: ["$$value", ["$$cur"]] },
+                      {
+                        $map: {
+                          input: "$$value",
+                          as: "v",
+                          in: {
+                            $cond: [
+                              { $eq: ["$$v._k", "$$cur._k"] },
+                              {
+                                $mergeObjects: [
+                                  "$$v",
+                                  { actualVolume: { $add: ["$$v.actualVolume", "$$cur.actualVolume"] } },
+                                ],
+                              },
+                              "$$v",
+                            ],
+                          },
+                        },
+                      },
+                    ],
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+      // getSubmissionSlfNames() reads slfGenerator.slfName, so the facility name has
+      // to travel with the row exactly as .populate() used to supply it.
+      {
+        $lookup: {
+          from: "slf_facilities",
+          localField: "slfGenerator",
+          foreignField: "_id",
+          as: "_gen",
+          pipeline: [{ $project: { slfName: 1 } }],
+        },
+      },
+      {
+        $project: {
+          slfName: 1, status: 1, dateOfDisposal: 1, createdAt: 1,
+          trucks: { $map: { input: "$trucks", as: "t", in: {
+            cellIndex: "$$t.cellIndex", cellName: "$$t.cellName", wasteType: "$$t.wasteType",
+            actualVolume: "$$t.actualVolume", actualVolumeUnit: "$$t.actualVolumeUnit",
+          } } },
+          slfGenerator: {
+            $cond: [
+              { $gt: [{ $size: "$_gen" }, 0] },
+              { $arrayElemAt: ["$_gen", 0] },
+              "$slfGenerator",
+            ],
+          },
+        },
+      },
+      { $sort: { createdAt: -1 } },
+    ]).allowDiskUse(true);
+
+    // Same freshness contract as /summary-by-slf: bounded TTL as a safety net, with
+    // refreshAdmin() busting the key on every submission/baseline/facility write.
+    serverCache.set(cacheKey, rows, 60000);
+    res.json(rows);
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });
   }

@@ -224,12 +224,27 @@ router.post("/", authMiddleware, requireDriveActive, uploadSingle(upload, "file"
     const isConfigError =
       err.message.includes("not configured") ||
       err.message.includes("Missing env vars");
+    // A non-writable upload directory is an OPERATOR problem, not a transient one:
+    // "please try again" is actively misleading because no number of retries can
+    // fix directory ownership. Say what is actually wrong so it can be repaired.
+    const isStorageError = err.code === "UPLOAD_DIR_NOT_WRITABLE";
     writeLog("error", "upload.failed", {
       message: `Upload failed: ${err.message}`,
       user: req.user?.email || req.user?.username || req.user?.id || "",
       ip: req.ip,
-      meta: { driveErrorCode: err.driveErrorCode || null, storage: "unknown" },
+      meta: {
+        driveErrorCode: err.driveErrorCode || null,
+        storage: isStorageError ? "local-unwritable" : "unknown",
+        uploadDir: err.uploadDir || undefined,
+      },
     });
+    if (isStorageError) {
+      return res.status(500).json({
+        message:
+          "Upload failed: the server's file storage is not writable. This needs an administrator to fix — retrying will not help.",
+        code: "UPLOAD_DIR_NOT_WRITABLE",
+      });
+    }
     res.status(isConfigError ? 503 : 500).json({ message: isConfigError ? err.message : "Upload failed. Please try again or contact support if the problem continues." });
   } finally {
     if (req.file?.path) await fs.unlink(req.file.path).catch(() => {});

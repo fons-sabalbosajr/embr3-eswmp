@@ -14,6 +14,7 @@ import {
   PlusOutlined, ProfileOutlined, SaveOutlined, SendOutlined,
   TeamOutlined, UndoOutlined, UploadOutlined, UserOutlined, WifiOutlined,
   ClockCircleOutlined,
+  SearchOutlined,
 } from "@ant-design/icons";
 import { EMPTY_VEHICLE } from "./constants";
 import { UPLOAD_COLUMNS } from "./uploadHelpers";
@@ -211,6 +212,9 @@ export default function SLFPortalModals({
   messageDrawerOpen, setMessageDrawerOpen,
   supportTab, setSupportTab,
   supportTickets,
+  supportTicketPagination = { current: 1, pageSize: 10, total: 0 },
+  supportTicketSearch = "",
+  supportTicketSorter = { field: "createdAt", order: "descend" },
   portalNotificationCounts = {},
   markPortalNotificationsRead = () => {},
   supportLoading,
@@ -418,6 +422,60 @@ export default function SLFPortalModals({
   );
   const messageUnreadCount = portalNotificationCounts.messages || 0;
   const supportUnreadCount = portalNotificationCounts.support || 0;
+  const supportTicketColumns = [
+    {
+      title: "Ticket",
+      dataIndex: "ticketNo",
+      key: "ticketNo",
+      sorter: true,
+      width: 130,
+      render: (value) => <Text strong>{value || "—"}</Text>,
+    },
+    {
+      title: "Subject",
+      dataIndex: "subject",
+      key: "subject",
+      sorter: true,
+      render: (value, ticket) => (
+        <Button type="link" size="small" onClick={() => setSupportDetailModal(ticket)} style={{ padding: 0, whiteSpace: "normal", height: "auto", textAlign: "left" }}>
+          {value || "—"}
+        </Button>
+      ),
+    },
+    {
+      title: "Status",
+      dataIndex: "status",
+      key: "status",
+      sorter: true,
+      width: 130,
+      render: (value) => <Tag color={getSupportStatusColor(value)}>{String(value || "open").replace("_", " ").toUpperCase()}</Tag>,
+    },
+    {
+      title: "Priority",
+      dataIndex: "priority",
+      key: "priority",
+      sorter: true,
+      width: 110,
+      render: (value) => <Tag color={getSupportPriorityColor(value)}>{value || "Medium"}</Tag>,
+    },
+    {
+      title: "Category",
+      dataIndex: "category",
+      key: "category",
+      sorter: true,
+      width: 170,
+      render: (value) => value || "—",
+    },
+    {
+      title: "Created",
+      dataIndex: "createdAt",
+      key: "createdAt",
+      sorter: true,
+      defaultSortOrder: supportTicketSorter.field === "createdAt" ? supportTicketSorter.order : undefined,
+      width: 170,
+      render: (value) => value ? dayjs(value).format("MMM D, YYYY h:mm A") : "—",
+    },
+  ];
   const resolvedSupportTab = SUPPORT_TAB_KEYS.includes(supportTab)
     ? supportTab
     : "new-ticket";
@@ -3613,7 +3671,7 @@ export default function SLFPortalModals({
         styles={{ body: { padding: 0 } }}
       >
         <div className="slf-support-shell">
-          <div className="slf-support-hero">
+          {/* <div className="slf-support-hero">
             <div>
               <Text className="slf-support-hero-kicker">EMB Region III Portal Help Desk</Text>
               <div className="slf-support-hero-title">Direct support for filing, updates, and account issues</div>
@@ -3637,7 +3695,7 @@ export default function SLFPortalModals({
                 </div>
               </div>
             </div>
-          </div>
+          </div> */}
           <Tabs
           activeKey={resolvedSupportTab}
           onChange={setSupportTab}
@@ -3789,8 +3847,19 @@ export default function SLFPortalModals({
                       <div className="slf-support-section-title">My Tickets</div>
                       <Text type="secondary">Review status changes, open threads, and admin replies.</Text>
                     </div>
-                    <Tag color="geekblue">{portalSupportTickets.length} total</Tag>
+                    <Tag color="geekblue">{supportTicketPagination.total || portalSupportTickets.length} total</Tag>
                   </div>
+                  <Input
+                    allowClear
+                    prefix={<SearchOutlined />}
+                    placeholder="Search tickets"
+                    defaultValue={supportTicketSearch}
+                    style={{ marginBottom: 12, maxWidth: 320 }}
+                    onPressEnter={(event) => fetchSupportTickets({ page: 1, search: event.currentTarget.value })}
+                    onChange={(event) => {
+                      if (!event.target.value) fetchSupportTickets({ page: 1, search: "" });
+                    }}
+                  />
                   {supportLoading ? (
                     <div style={{ textAlign: "center", padding: 40 }}>
                       <Spin />
@@ -3798,43 +3867,30 @@ export default function SLFPortalModals({
                   ) : portalSupportTickets.length === 0 ? (
                     <Empty description="No support tickets yet" />
                   ) : (
-                    <List
+                    <Table
                       dataSource={portalSupportTickets}
-                      renderItem={(ticket) => (
-                        <List.Item
-                          className="slf-support-ticket-item"
-                          onClick={() => setSupportDetailModal(ticket)}
-                        >
-                          <List.Item.Meta
-                            avatar={
-                              <Avatar
-                                className="slf-support-ticket-avatar"
-                                icon={<MessageOutlined />}
-                              />
-                            }
-                            title={
-                              <div className="slf-support-ticket-title-row">
-                                <Text strong className="slf-support-ticket-title">
-                                  {ticket.subject}
-                                </Text>
-                                <Tag color={getSupportStatusColor(ticket.status)}>
-                                  {ticket.status
-                                    ?.replace("_", " ")
-                                    .toUpperCase()}
-                                </Tag>
-                              </div>
-                            }
-                            description={
-                              <div className="slf-support-ticket-meta">
-                                <Text type="secondary" className="slf-support-ticket-meta-text">
-                                  {ticket.ticketNo} • {ticket.category} • {dayjs(ticket.createdAt).format("MMM D, YYYY h:mm A")}
-                                </Text>
-                                <Tag color={getSupportPriorityColor(ticket.priority)}>{ticket.priority}</Tag>
-                              </div>
-                            }
-                          />
-                        </List.Item>
-                      )}
+                      columns={supportTicketColumns}
+                      rowKey="_id"
+                      size="small"
+                      scroll={{ x: 900 }}
+                      pagination={{
+                        current: supportTicketPagination.current,
+                        pageSize: supportTicketPagination.pageSize,
+                        total: supportTicketPagination.total,
+                        showSizeChanger: true,
+                        pageSizeOptions: ["10", "20", "50", "100"],
+                        showTotal: (total) => `${total} ticket(s)`,
+                      }}
+                      onChange={(pagination, _filters, sorter) => {
+                        fetchSupportTickets({
+                          page: pagination.current,
+                          pageSize: pagination.pageSize,
+                          sorter: {
+                            field: Array.isArray(sorter) ? "createdAt" : sorter.field || "createdAt",
+                            order: Array.isArray(sorter) ? "descend" : sorter.order || "descend",
+                          },
+                        });
+                      }}
                     />
                   )}
                 </div>

@@ -154,7 +154,7 @@ export const DISPOSAL_UPLOAD_COLUMNS = [
   },
   {
     field: "disposalTicketNo",
-    label: "Disposal Ticket No",
+    label: "Ticket Number",
     required: true,
     format: "Unique text or number",
     sample: "DT-2026-0001",
@@ -214,6 +214,8 @@ export const HAULER_UPLOAD_COLUMNS = [
   { field: "capacity", label: "Capacity", required: false, description: "Vehicle capacity in the selected unit.", sample: "15" },
   { field: "capacityUnit", label: "Capacity Unit", required: false, description: "tons, m3, or m³.", sample: "tons" },
   { field: "privateSectorClients", label: "Clients", required: false, description: "Comma-separated client names served by this hauler.", sample: "ABC Manufacturing, DEF Foods", matches: isClientsHeader },
+  { field: "clientType", label: "Client Type", required: false, description: "LGU or Private for the listed client.", sample: "Private" },
+  { field: "clientAddress", label: "Client Address", required: false, description: "Client address or service location.", sample: "San Fernando, Pampanga" },
 ];
 
 export const UPLOAD_COLUMNS = {

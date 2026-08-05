@@ -35,6 +35,9 @@ region3LguSchema.pre("save", function () {
 // is added here (duplicate prevention is handled in the route/import logic).
 region3LguSchema.index({ psgcCode: 1 });
 region3LguSchema.index({ normalizedName: 1, normalizedProvince: 1, lguType: 1 });
+// Backs the masterlist query used on every reconciliation / relationship-map load:
+// { status: "Active", lguType: { $in: ["Municipality", "City"] } }.
+region3LguSchema.index({ status: 1, lguType: 1 });
 
 region3LguSchema.statics.LGU_TYPES = LGU_TYPES;
 region3LguSchema.statics.normalize = normalizeName;

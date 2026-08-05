@@ -158,6 +158,7 @@ import SlfDashboardTab, {
 import WasteBaselineInfo from "./slf-monitoring/WasteBaselineInfo";
 import PortalGenerators from "./slf-monitoring/PortalGenerators";
 import HaulerClientsTab from "./slf-monitoring/HaulerClientsTab";
+import HaulerClientsEditor from "./slf-monitoring/HaulerClientsEditor";
 import {
   resolveCellName,
   getCellTypeConfig,
@@ -259,6 +260,23 @@ const uploadFileFromValue = (value) => (Array.isArray(value) ? value[0] : null);
 const fileUrlFromValue = (value) => uploadFileFromValue(value)?.url || uploadFileFromValue(value)?.response?.url || (typeof value === "string" ? value : "");
 const fileUrlFromUploadFile = (file) =>
   typeof file === "string" ? file : file?.response?.url || file?.url || "";
+const THREE_DECIMAL_STEP = 0.001;
+const formatThreeDecimalInput = (value) =>
+  value === "" || value === null || value === undefined
+    ? ""
+    : Number(value).toLocaleString(undefined, { maximumFractionDigits: 3 });
+const parseDecimalInput = (value) => {
+  const cleaned = String(value ?? "").replace(/,/g, "");
+  return cleaned === "" ? null : cleaned;
+};
+const getServedClientCount = (record = {}) => {
+  const lguList = Array.isArray(record.lguServedList) ? record.lguServedList.filter(Boolean) : [];
+  const privateList = Array.isArray(record.privateCompaniesServed) ? record.privateCompaniesServed.filter(Boolean) : [];
+  if (/private/i.test(record.ownership || "")) {
+    return privateList.length || Number(record.noOfLGUServed || 0);
+  }
+  return lguList.length || Number(record.noOfLGUServed || 0);
+};
 
 const defaultPreventiveFileDescription = (name) =>
   `Uploaded preventive measure file: ${name || "supporting document"}`;
@@ -415,6 +433,9 @@ export default function SLFMonitoring({
   const [mapPreview, setMapPreview] = useState(null);
   const [slfSubmissions, setSlfSubmissions] = useState([]);
   const [cellAssignmentModal, setCellAssignmentModal] = useState(null);
+  // The placement editor now fetches its facility's real submissions on open, so
+  // its trigger needs a pending state to stop a second click firing a second fetch.
+  const [cellAssignmentLoading, setCellAssignmentLoading] = useState(false);
   const [cellAssignmentSaving, setCellAssignmentSaving] = useState(false);
   const [cellActionSaving, setCellActionSaving] = useState({});
   const cellActionSavingRef = useRef({});
@@ -575,14 +596,17 @@ export default function SLFMonitoring({
       await fetchWithCache(
         FULL_CACHE_KEY,
         async () => {
-          // Only the heavy submissions list is fetched here; facilities and
-          // baselines are reused from Phase 1 to avoid duplicate requests.
-          // cellUsage=true returns a lean projection (no company/id/address) —
-          // ~80% smaller payload + far less memory. Full per-facility data is
-          // loaded on demand when a detail modal opens.
-          const calls = [
-            api.get("/data-slf", { params: { mode: "list", cellUsage: true } }),
-          ];
+          // Only the cell-volume rollup is fetched here; facilities and baselines
+          // are reused from Phase 1 to avoid duplicate requests.
+          //
+          // This used to be `/data-slf?mode=list&cellUsage=true` — an UNPAGINATED
+          // read of every submission (measured: 3.2MB / ~39s against the live DB)
+          // whose only job was to let buildFacilityCellUsage sum truck volumes per
+          // cell. /data-slf/cell-usage does that collapse in the database and
+          // returns the same totals in ~285KB / ~3s. Anything needing real per-truck
+          // rows (the detail modal, the cell-assignment editor) fetches its own
+          // facility's full records on demand.
+          const calls = [api.get("/data-slf/cell-usage")];
           if (!facilitiesCache) calls.push(api.get("/slf-facilities"));
           if (!baselineMapCache) calls.push(api.get("/data-slf/baselines"));
           const res = await Promise.all(calls);
@@ -691,16 +715,29 @@ export default function SLFMonitoring({
   useEffect(() => {
     const socket = getSocket();
     if (!socket) return undefined;
+    // Debounce: a burst of submissions/baseline events (e.g. a bulk portal upload)
+    // otherwise fires one full heavy refetch PER event. Collapse them into a single
+    // refresh, and clear the pending timer on unmount so it never fires into a dead
+    // component.
+    let refreshTimer = null;
     const handler = ({ target } = {}) => {
       if (!target || target === "submissions" || target === "baselines") {
-        invalidateCache(`${CACHE_KEY}-fast`);
-        invalidateCache(`${CACHE_KEY}-full`);
-        fetchRecords(true);
-        fetchGenerators();
+        if (refreshTimer) clearTimeout(refreshTimer);
+        refreshTimer = setTimeout(() => {
+          refreshTimer = null;
+          if (!aliveRef.current) return;
+          invalidateCache(`${CACHE_KEY}-fast`);
+          invalidateCache(`${CACHE_KEY}-full`);
+          fetchRecords(true);
+          fetchGenerators();
+        }, 800);
       }
     };
     socket.on("data-refresh", handler);
-    return () => socket.off("data-refresh", handler);
+    return () => {
+      if (refreshTimer) clearTimeout(refreshTimer);
+      socket.off("data-refresh", handler);
+    };
   }, [fetchRecords, fetchGenerators]);
 
   // Fetch baseline + submission data when the detail modal opens for a facility.
@@ -1432,23 +1469,68 @@ export default function SLFMonitoring({
     }).filter((cell) => isActiveCellStatus(cell.status));
   };
 
-  const getEditingSubmissions = () => {
-    const record = editing || {};
-    return (slfSubmissions || [])
+  // Real, per-truck submissions for the facility being edited.
+  //
+  // This MUST NOT read the page-wide `slfSubmissions`: that array now holds the
+  // database-collapsed cell-usage rollup, whose `trucks` entries are merged buckets
+  // rather than actual trucks. The placement editor writes back by truckIndex /
+  // vehicleIndex, so feeding it collapsed rows would assign cells to the wrong
+  // trucks. Fetch the facility's own records instead — the same on-demand pattern
+  // the detail modal already uses, and scoped server-side by slfGenerator so it
+  // stays a small request.
+  const fetchEditingSubmissions = useCallback(async (record) => {
+    const generatorId =
+      record?.slfGenerator && typeof record.slfGenerator === "object"
+        ? record.slfGenerator._id
+        : record?.slfGenerator || record?._id;
+    if (!generatorId) return [];
+    // Page through rather than taking a single capped page: the endpoint's limit is
+    // clamped to 100 server-side, and a facility quietly exceeding that would drop
+    // submissions out of the placement editor instead of erroring.
+    const PAGE_SIZE = 100;
+    const rows = [];
+    for (let page = 1; ; page += 1) {
+      const { data } = await api.get("/data-slf", {
+        params: {
+          mode: "list",
+          slfGenerator: generatorId,
+          includeTrucks: true,
+          limit: PAGE_SIZE,
+          page,
+        },
+      });
+      const batch = Array.isArray(data) ? data : data?.data || [];
+      rows.push(...batch);
+      const total = Array.isArray(data) ? batch.length : Number(data?.total || 0);
+      if (batch.length < PAGE_SIZE || rows.length >= total) break;
+    }
+    return rows
+      .map(normalizeSubmissionRecord)
       .filter(
         (submission) =>
-          submissionMatchesFacility(record, submission) &&
+          submissionMatchesFacility(record || {}, submission) &&
           hasTruckVolume(submission),
       )
       .sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0));
-  };
+  }, []);
 
-  const openCellAssignmentModal = () => {
-    const submissions = getEditingSubmissions();
-    setCellAssignmentModal({
-      submissions,
-      selectedId: submissions[0]?._id || null,
-    });
+  const openCellAssignmentModal = async () => {
+    setCellAssignmentLoading(true);
+    try {
+      const submissions = await fetchEditingSubmissions(editing || {});
+      setCellAssignmentModal({
+        submissions,
+        selectedId: submissions[0]?._id || null,
+      });
+    } catch {
+      Swal.fire({
+        icon: "error",
+        title: "Could not load submissions",
+        text: "The cell assignment data could not be loaded. Please try again.",
+      });
+    } finally {
+      setCellAssignmentLoading(false);
+    }
   };
 
   const updateCellAssignmentLocal = (
@@ -2193,7 +2275,7 @@ export default function SLFMonitoring({
       data = data.filter((r) => Number(r.numberOfCell || 0) > 0);
     }
     if (quickFilter === "withLGUs") {
-      data = data.filter((r) => Number(r.noOfLGUServed || 0) > 0);
+      data = data.filter((r) => getServedClientCount(r) > 0);
     }
     if (quickFilter === "private") {
       data = data.filter((r) => /private/i.test(r.ownership || ""));
@@ -2304,7 +2386,8 @@ export default function SLFMonitoring({
       if (/operational/i.test(status) && !/non/i.test(status)) opCount++;
       if (/non/i.test(status)) nonOpCount++;
       totalCapacity += r.volumeCapacity || 0;
-      totalLGUs += r.noOfLGUServed || 0;
+      const servedCount = getServedClientCount(r);
+      totalLGUs += servedCount;
       totalCells += r.numberOfCell || 0;
       totalLeachate += r.noOfLeachatePond || 0;
       totalGasVents += r.numberOfGasVents || 0;
@@ -2314,7 +2397,7 @@ export default function SLFMonitoring({
         privateSectorCount++;
       }
       if (r.numberOfCell > 0) cellsWithData++;
-      if (r.noOfLGUServed > 0) lgusWithData++;
+      if (servedCount > 0) lgusWithData++;
       if (r.volumeCapacity > 0) capacityWithData++;
       if (r.actualResidualWasteReceived > 0) wasteWithData++;
       if (r.noOfLeachatePond > 0) leachateWithData++;
@@ -2322,7 +2405,7 @@ export default function SLFMonitoring({
       privateClientsTotal += (r.privateCompaniesServed || []).length;
       receivingCapacityTotal += r.receivingVolumeCapacity || 0;
       if (R3_PROVINCES.includes(r.province))
-        region3LguServed += r.noOfLGUServed || 0;
+        region3LguServed += servedCount;
       const u = normalizeUnit(r.wasteReceivedUnit);
       if (u === "tons") hasTons = true;
       if (u === "m³") hasM3 = true;
@@ -2448,7 +2531,7 @@ export default function SLFMonitoring({
     );
     const lguData = topMetric(
       filtered,
-      (r) => r.noOfLGUServed || 0,
+      getServedClientCount,
       "LGUs served",
     );
     const cellData = topMetric(filtered, (r) => r.numberOfCell || 0, "cells");
@@ -2671,6 +2754,152 @@ export default function SLFMonitoring({
     const config = insightConfig[slfInsightModal];
     if (!config) return null;
     const maxBar = Math.max(...config.chartData.map((item) => item.value), 1);
+    if (slfInsightModal === "cells") {
+      const statusBucket = (status, fill, capacity) => {
+        const raw = normalizeCellStatus(status);
+        const lower = String(raw || "").toLowerCase();
+        if (/reserved/.test(lower)) return "Reserved";
+        if (/used|completed|closed/.test(lower)) return "Used / Completed";
+        if (Number(fill || 0) > 0 && Number(capacity || 0) > Number(fill || 0)) return "In Use";
+        if (isActiveCellStatus(raw)) return "Active";
+        return raw || "Unspecified";
+      };
+      const facilityCellSummary = (record) => {
+        const count = Math.max(
+          Number(record.numberOfCell || 0),
+          record.cellStatuses?.length || 0,
+          record.cellCapacities?.length || 0,
+          record.cellTypes?.length || 0,
+          record.cellNames?.length || 0,
+        );
+        const summary = { total: 0, residual: 0, hazardous: 0, statuses: {} };
+        for (let index = 0; index < count; index += 1) {
+          const status = record.cellStatuses?.[index] || "Active Cell";
+          if (isNonExistentCell(status)) continue;
+          const type = record.cellTypes?.[index] || "Residual";
+          const capacity = Number(record.cellCapacities?.[index] || 0);
+          const fill = Number(record.cellFillValues?.[index] || 0);
+          summary.total += 1;
+          if (isHazardousCellType(type)) summary.hazardous += 1;
+          else summary.residual += 1;
+          const bucket = statusBucket(status, fill, capacity);
+          summary.statuses[bucket] = (summary.statuses[bucket] || 0) + 1;
+        }
+        return summary;
+      };
+      const provinceGroups = Object.entries(
+        filtered.reduce((groups, record) => {
+          const province = record.province || "Unspecified Province";
+          if (!groups[province]) groups[province] = [];
+          groups[province].push(record);
+          return groups;
+        }, {}),
+      )
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([province, facilities]) => ({
+          province,
+          facilities: facilities
+            .map((record) => ({ record, summary: facilityCellSummary(record) }))
+            .filter(({ summary }) => summary.total > 0)
+            .sort((a, b) => String(a.record.lgu || "").localeCompare(String(b.record.lgu || ""))),
+        }))
+        .filter((group) => group.facilities.length > 0);
+      return (
+        <Modal
+          open={!!slfInsightModal}
+          onCancel={() => setSlfInsightModal(null)}
+          title={
+            <Space>
+              {config.icon}
+              <Text strong>Cell Infrastructure - All Facilities</Text>
+              <Tag color="cyan">{provinceGroups.length} province(s)</Tag>
+            </Space>
+          }
+          footer={<Button onClick={() => setSlfInsightModal(null)}>Close</Button>}
+          width={1280}
+          destroyOnHidden
+          styles={{ body: { maxHeight: "74vh", overflowY: "auto" } }}
+        >
+          <Row gutter={[12, 12]} style={{ marginBottom: 16 }}>
+            <Col xs={24} md={6}>
+              <InsightStat title="Total Cells" value={totalCells} color={config.color} />
+            </Col>
+            <Col xs={24} md={6}>
+              <InsightStat title="Facilities with Cells" value={cellsWithData} color={config.color} />
+            </Col>
+            <Col xs={24} md={6}>
+              <InsightStat title="Operational SLFs" value={opCount} color={config.color} />
+            </Col>
+            <Col xs={24} md={6}>
+              <InsightStat title="Avg Cells / SLF" value={cellsWithData ? (totalCells / cellsWithData).toFixed(1) : 0} color={config.color} />
+            </Col>
+          </Row>
+          {provinceGroups.length === 0 ? (
+            <Empty description="No SLF cell infrastructure is encoded in the current table view." />
+          ) : (
+            <Space direction="vertical" size={12} style={{ width: "100%" }}>
+              {provinceGroups.map(({ province, facilities }) => (
+                <Card
+                  key={province}
+                  size="small"
+                  title={
+                    <Space wrap>
+                      <EnvironmentOutlined style={{ color: config.color }} />
+                      <Text strong>{province}</Text>
+                      <Tag color="blue">{facilities.length} SLF(s)</Tag>
+                    </Space>
+                  }
+                  style={{ borderRadius: 10 }}
+                >
+                  <Row gutter={[12, 12]}>
+                    {facilities.map(({ record, summary }) => (
+                      <Col xs={24} md={12} xl={8} key={record._id}>
+                        <Card
+                          size="small"
+                          hoverable
+                          onClick={() => {
+                            setSlfInsightModal(null);
+                            setDetailModal(record);
+                          }}
+                          style={{ borderRadius: 10, height: "100%", borderLeft: `4px solid ${config.color}` }}
+                        >
+                          <Space direction="vertical" size={8} style={{ width: "100%" }}>
+                            <div>
+                              <Text strong style={{ fontSize: 14, color: ACCENT }}>
+                                {`${record.province || province} LGU ${record.lgu || "Unnamed SLF"} Sanitary Landfill Facility`}
+                              </Text>
+                              <div><Text type="secondary">{record.province || province}</Text></div>
+                            </div>
+                            <Tag color="geekblue" style={{ width: "fit-content" }}>
+                              {summary.total} Cell{summary.total === 1 ? "" : "s"}
+                            </Tag>
+                            <Row gutter={[8, 8]}>
+                              <Col span={12}><Tag color="blue">{summary.residual} Residual</Tag></Col>
+                              <Col span={12}><Tag color="red">{summary.hazardous} Hazardous</Tag></Col>
+                            </Row>
+                            <Divider plain style={{ margin: "4px 0" }}>Status Summary</Divider>
+                            <Space size={[4, 4]} wrap>
+                              {["Active", "Reserved", "In Use", "Used / Completed"].map((label) => (
+                                <Tag key={label} color={label === "Active" ? "green" : label === "Reserved" ? "gold" : label === "In Use" ? "blue" : "default"}>
+                                  {label}: {summary.statuses[label] || 0}
+                                </Tag>
+                              ))}
+                            </Space>
+                            <Button type="link" size="small" icon={<EyeOutlined />} style={{ padding: 0, alignSelf: "flex-start" }}>
+                              Click to View Cells
+                            </Button>
+                          </Space>
+                        </Card>
+                      </Col>
+                    ))}
+                  </Row>
+                </Card>
+              ))}
+            </Space>
+          )}
+        </Modal>
+      );
+    }
     return (
       <Modal
         open={!!slfInsightModal}
@@ -2971,7 +3200,8 @@ export default function SLFMonitoring({
       dataIndex: "noOfLGUServed",
       width: 80,
       align: "center",
-      sorter: (a, b) => (a.noOfLGUServed || 0) - (b.noOfLGUServed || 0),
+      sorter: (a, b) => getServedClientCount(a) - getServedClientCount(b),
+      render: (_, record) => getServedClientCount(record) || "—",
     },
     {
       title: "Cells",
@@ -3165,40 +3395,40 @@ export default function SLFMonitoring({
           "—"
         ),
     },
-    {
-      title: "Target Month",
-      dataIndex: "targetMonth",
-      key: "targetMonth",
-      width: 150,
-      align: "center",
-      ellipsis: false,
-      filters: buildFilters(records, "targetMonth"),
-      onFilter: (v, r) => matchesFilter(r.targetMonth, v),
-      render: (v) =>
-        v ? (
-          <div
-            style={{
-              whiteSpace: "normal",
-              wordBreak: "break-word",
-              lineHeight: 1.25,
-            }}
-          >
-            <Tag
-              variant="filled"
-              color="cyan"
-              style={{
-                whiteSpace: "normal",
-                wordBreak: "break-word",
-                lineHeight: 1.3,
-              }}
-            >
-              {v.replace(/^\d+\./, "")}
-            </Tag>
-          </div>
-        ) : (
-          "—"
-        ),
-    },
+    // {
+    //   title: "Target Month",
+    //   dataIndex: "targetMonth",
+    //   key: "targetMonth",
+    //   width: 150,
+    //   align: "center",
+    //   ellipsis: false,
+    //   filters: buildFilters(records, "targetMonth"),
+    //   onFilter: (v, r) => matchesFilter(r.targetMonth, v),
+    //   render: (v) =>
+    //     v ? (
+    //       <div
+    //         style={{
+    //           whiteSpace: "normal",
+    //           wordBreak: "break-word",
+    //           lineHeight: 1.25,
+    //         }}
+    //       >
+    //         <Tag
+    //           variant="filled"
+    //           color="cyan"
+    //           style={{
+    //             whiteSpace: "normal",
+    //             wordBreak: "break-word",
+    //             lineHeight: 1.3,
+    //           }}
+    //         >
+    //           {v.replace(/^\d+\./, "")}
+    //         </Tag>
+    //       </div>
+    //     ) : (
+    //       "—"
+    //     ),
+    // },
     {
       title: "Personnel",
       key: "personnel",
@@ -3293,7 +3523,7 @@ export default function SLFMonitoring({
           ? r.receivingVolumeCapacityUnit || r.volumeCapacityUnit || "m³"
           : r.volumeCapacityUnit || "m³",
       ),
-      "LGUs Served": r.noOfLGUServed,
+      "LGUs Served": getServedClientCount(r),
       Cells: r.numberOfCell,
       "Leachate & Gas": `Leachate: ${r.noOfLeachatePond || 0}; Gas: ${r.numberOfGasVents || 0}`,
       "Waste Received": r.actualResidualWasteReceived,
@@ -3547,6 +3777,13 @@ export default function SLFMonitoring({
               Filters
             </Button>
           </Badge>
+          <Button
+            size="small"
+            icon={<ContainerOutlined />}
+            onClick={() => setSlfInsightModal("cells")}
+          >
+            Cell Infrastructure
+          </Button>
           {canEdit && (
             <Button
               size="small"
@@ -3810,6 +4047,25 @@ export default function SLFMonitoring({
                 padding: "8px 0",
               }}
               items={[
+                {
+                  // Replaces the removed "Reconcile Unlinked" module. Edits here write
+                  // straight into the portal user's baseline (accreditedHaulers), which
+                  // is what makes an admin's correction visible to that portal user —
+                  // the common case being a client submitted with no type or address.
+                  key: "hauler-clients",
+                  label: (
+                    <span style={{ color: "#13c2c2" }}>
+                      <TeamOutlined /> Hauler Clients
+                    </span>
+                  ),
+                  children: (
+                    <HaulerClientsEditor
+                      slfGeneratorId={editing?._id}
+                      slfLabel={editing?.lgu || editing?.slfName}
+                      canEdit={canEdit}
+                    />
+                  ),
+                },
                 {
                   key: "location",
                   label: (
@@ -5054,23 +5310,12 @@ export default function SLFMonitoring({
                                   <InputNumber
                                     style={{ width: "100%" }}
                                     min={0}
-                                    step={0.01}
-                                    placeholder="0.00"
+                                    step={THREE_DECIMAL_STEP}
+                                    precision={3}
+                                    placeholder="0.000"
                                     addonAfter={wrUnit}
-                                    formatter={(v) =>
-                                      v === "" || v === null || v === undefined
-                                        ? ""
-                                        : Number(v).toLocaleString(undefined, {
-                                            maximumFractionDigits: 2,
-                                          })
-                                    }
-                                    parser={(v) => {
-                                      const cleaned = String(v ?? "").replace(
-                                        /,/g,
-                                        "",
-                                      );
-                                      return cleaned === "" ? null : cleaned;
-                                    }}
+                                    formatter={formatThreeDecimalInput}
+                                    parser={parseDecimalInput}
                                   />
                                 </Form.Item>
                               );
@@ -5226,11 +5471,14 @@ export default function SLFMonitoring({
                                                           width: "100%",
                                                         }}
                                                         min={0}
-                                                        step={0.01}
+                                                        step={THREE_DECIMAL_STEP}
+                                                        precision={3}
                                                         placeholder="Capacity"
                                                         addonAfter={
                                                           cellBaselineUnit
                                                         }
+                                                        formatter={formatThreeDecimalInput}
+                                                        parser={parseDecimalInput}
                                                       />
                                                     </Form.Item>
                                                   </Col>
@@ -5250,11 +5498,14 @@ export default function SLFMonitoring({
                                                           width: "100%",
                                                         }}
                                                         min={0}
-                                                        step={0.01}
+                                                        step={THREE_DECIMAL_STEP}
+                                                        precision={3}
                                                         placeholder="Deposited"
                                                         addonAfter={
                                                           cellBaselineUnit
                                                         }
+                                                        formatter={formatThreeDecimalInput}
+                                                        parser={parseDecimalInput}
                                                         onChange={(value) =>
                                                           handleCellFillValueChange(
                                                             i,
@@ -6261,202 +6512,6 @@ export default function SLFMonitoring({
                   ),
                 },
                 {
-                  key: "personnel-monitoring",
-                  label: (
-                    <span style={{ color: "#52c41a" }}>
-                      <TeamOutlined /> Personnel &amp; Monitoring
-                    </span>
-                  ),
-                  children: (
-                    <>
-                      <Row gutter={12}>
-                        <Col span={8}>
-                          <Form.Item name="targetMonth" label="Target Month">
-                            <Select
-                              options={monthOptions}
-                              placeholder="Select"
-                              allowClear
-                            />
-                          </Form.Item>
-                        </Col>
-                        <Col span={8}>
-                          <Form.Item name="enmo" label="ENMO">
-                            <Select
-                              options={enmoOptions}
-                              allowClear
-                              showSearch
-                              placeholder="Select ENMO"
-                            />
-                          </Form.Item>
-                        </Col>
-                        <Col span={8}>
-                          <Form.Item
-                            name="focalPerson"
-                            label="ESWM Focal Person"
-                          >
-                            <Select
-                              options={focalOptions}
-                              allowClear
-                              showSearch
-                              placeholder="Select ESWM focal person"
-                            />
-                          </Form.Item>
-                        </Col>
-                        <Col span={8}>
-                          <Form.Item name="iisNumber" label="IIS Number">
-                            <Input />
-                          </Form.Item>
-                        </Col>
-                      </Row>
-                      <Divider
-                        plain
-                        orientation="left"
-                        style={{ fontSize: 12, margin: "4px 0 12px" }}
-                      >
-                        <CalendarOutlined /> Monitoring Dates
-                      </Divider>
-                      <Row gutter={12}>
-                        <Col span={8}>
-                          <Form.Item name="dateOfMonitoring" label="Monitoring">
-                            <DatePicker
-                              format="MM/DD/YYYY"
-                              style={{ width: "100%" }}
-                            />
-                          </Form.Item>
-                        </Col>
-                        <Col span={8}>
-                          <Form.Item
-                            name="dateReportPrepared"
-                            label="Report Prepared"
-                          >
-                            <DatePicker
-                              format="MM/DD/YYYY"
-                              style={{ width: "100%" }}
-                            />
-                          </Form.Item>
-                        </Col>
-                        <Col span={8}>
-                          <Form.Item
-                            name="dateReportReviewedStaff"
-                            label="Reviewed By Staff"
-                          >
-                            <DatePicker
-                              format="MM/DD/YYYY"
-                              style={{ width: "100%" }}
-                            />
-                          </Form.Item>
-                        </Col>
-                        <Col span={8}>
-                          <Form.Item
-                            name="dateReportReviewedFocal"
-                            label="Reviewed By ESWM Focal Person"
-                          >
-                            <DatePicker
-                              format="MM/DD/YYYY"
-                              style={{ width: "100%" }}
-                            />
-                          </Form.Item>
-                        </Col>
-                        <Col span={8}>
-                          <Form.Item name="dateReportApproved" label="Approved">
-                            <DatePicker
-                              format="MM/DD/YYYY"
-                              style={{ width: "100%" }}
-                            />
-                          </Form.Item>
-                        </Col>
-                      </Row>
-                    </>
-                  ),
-                },
-                {
-                  key: "compliance",
-                  label: (
-                    <span style={{ color: "#eb2f96" }}>
-                      <FileTextOutlined /> Compliance
-                    </span>
-                  ),
-                  children: (
-                    <Row gutter={12}>
-                      <Col span={12}>
-                        <Form.Item
-                          name="findings"
-                          label="Other Findings and Observations"
-                        >
-                          <Input.TextArea rows={3} />
-                        </Form.Item>
-                      </Col>
-                      <Col span={12}>
-                        <Form.Item
-                          name="remarksAndRecommendation"
-                          label="Remarks and Recommendation"
-                        >
-                          <Input.TextArea rows={3} />
-                        </Form.Item>
-                      </Col>
-                      <Col span={24}>
-                        <Form.Item
-                          name="technicalConferenceConducted"
-                          valuePropName="checked"
-                          style={{ marginBottom: 8 }}
-                        >
-                          <Checkbox>Technical Conference conducted</Checkbox>
-                        </Form.Item>
-                      </Col>
-                      <Col span={12}>
-                        <Form.Item
-                          name="commitmentFiles"
-                          label="Commitment File"
-                          valuePropName="fileList"
-                          getValueFromEvent={uploadEventToFileList}
-                        >
-                          <Upload
-                            {...slfUploadProps}
-                            action={
-                              driveDisabled
-                                ? undefined
-                                : "/eswm-pipeline/api/upload"
-                            }
-                            disabled={driveDisabled}
-                            headers={getUploadHeaders()}
-                            multiple
-                            accept=".pdf,.doc,.docx,.xls,.xlsx,image/*"
-                          >
-                            <Button icon={<UploadOutlined />}>
-                              Upload Commitment File (max 200 MB)
-                            </Button>
-                          </Upload>
-                        </Form.Item>
-                      </Col>
-                      <Col span={12}>
-                        <Form.Item
-                          name="progressReportFiles"
-                          label="Progress Report"
-                          valuePropName="fileList"
-                          getValueFromEvent={uploadEventToFileList}
-                        >
-                          <Upload
-                            {...slfUploadProps}
-                            action={
-                              driveDisabled
-                                ? undefined
-                                : "/eswm-pipeline/api/upload"
-                            }
-                            disabled={driveDisabled}
-                            headers={getUploadHeaders()}
-                            multiple
-                            accept=".pdf,.doc,.docx,.xls,.xlsx,image/*"
-                          >
-                            <Button icon={<UploadOutlined />}>
-                              Upload Progress Report (max 200 MB)
-                            </Button>
-                          </Upload>
-                        </Form.Item>
-                      </Col>
-                    </Row>
-                  ),
-                },
-                {
                   key: "preventive",
                   label: (
                     <span style={{ color: "#fa8c16" }}>
@@ -6507,24 +6562,27 @@ export default function SLFMonitoring({
                               dataSource={files}
                               rowKey={(f) => f.uid || f.url || f.name}
                               pagination={false}
+                              tableLayout="fixed"
+                              scroll={{ x: 760 }}
                               style={{ marginTop: 8 }}
                               columns={[
                                 {
                                   title: "File",
+                                  width: 260,
                                   render: (_, f) => {
                                     const url = f.url || f.response?.url;
                                     const kind = getMediaKind(url || f.name || "");
                                     return (
-                                      <Space size={6}>
+                                      <Space size={6} style={{ width: "100%" }}>
                                         <Tag
                                           icon={kind === "pdf" ? <FilePdfOutlined /> : kind === "image" ? <FileImageOutlined /> : <FileTextOutlined />}
                                           color={url ? "orange" : "default"}
-                                          style={{ margin: 0 }}
+                                          style={{ margin: 0, flex: "0 0 auto" }}
                                         >
                                           {kind || "file"}
                                         </Tag>
                                         <Tooltip title={f.name}>
-                                          <Text ellipsis style={{ maxWidth: 180, fontSize: 11 }}>
+                                          <Text ellipsis style={{ display: "block", maxWidth: 180, fontSize: 11, whiteSpace: "nowrap" }}>
                                             {f.name || "—"}
                                           </Text>
                                         </Tooltip>
@@ -6972,9 +7030,9 @@ export default function SLFMonitoring({
                                 size="small"
                                 rowKey="key"
                                 dataSource={fields}
-                                pagination={fields.length > 5 ? { pageSize: 5, size: "small" } : false}
+                                pagination={false}
                                 tableLayout="fixed"
-                                scroll={{ x: 820 }}
+                                scroll={{ x: 820, y: fields.length > 5 ? 420 : undefined }}
                                 locale={{ emptyText: <Empty description="No gallery images added" /> }}
                                 columns={[
                                   {
@@ -7129,9 +7187,9 @@ export default function SLFMonitoring({
                                 size="small"
                                 rowKey="key"
                                 dataSource={fields}
-                                pagination={fields.length > 6 ? { pageSize: 6, size: "small" } : false}
+                                pagination={false}
                                 tableLayout="fixed"
-                                scroll={{ x: 860 }}
+                                scroll={{ x: 860, y: fields.length > 6 ? 460 : undefined }}
                                 locale={{ emptyText: <Empty description="No SLF documents added" /> }}
                                 columns={[
                                   {
@@ -7764,7 +7822,7 @@ export default function SLFMonitoring({
                               : "—"}
                           </Descriptions.Item>
                           <Descriptions.Item label="LGUs Served">
-                            {detailViewRecord.noOfLGUServed || "—"}
+                            {getServedClientCount(detailViewRecord) || "—"}
                           </Descriptions.Item>
                           <Descriptions.Item label="WWTF">
                             {detailViewRecord.hasWastewaterTreatmentFacility ? (
@@ -9332,135 +9390,6 @@ export default function SLFMonitoring({
                               </>
                             ),
                           },
-                          {
-                            key: "personnel",
-                            label: (
-                              <span>
-                                <TeamOutlined style={{ color: "#52c41a" }} />{" "}
-                                Personnel &amp; Monitoring
-                              </span>
-                            ),
-                            children: (
-                              <Descriptions column={2} size="small" bordered>
-                                <Descriptions.Item label="Target Month">
-                                  {detailViewRecord.targetMonth || "—"}
-                                </Descriptions.Item>
-                                <Descriptions.Item label="ENMO">
-                                  {detailViewRecord.enmo || "—"}
-                                </Descriptions.Item>
-                                <Descriptions.Item label="ESWM Focal Person">
-                                  {detailViewRecord.focalPerson || "—"}
-                                </Descriptions.Item>
-                                <Descriptions.Item label="IIS Number">
-                                  {detailViewRecord.iisNumber || "—"}
-                                </Descriptions.Item>
-                                <Descriptions.Item label="Date of Monitoring">
-                                  {detailViewRecord.dateOfMonitoring
-                                    ? dayjs(
-                                        detailViewRecord.dateOfMonitoring,
-                                      ).format("MM/DD/YYYY")
-                                    : "—"}
-                                </Descriptions.Item>
-                                <Descriptions.Item label="Report Prepared">
-                                  {detailViewRecord.dateReportPrepared
-                                    ? dayjs(
-                                        detailViewRecord.dateReportPrepared,
-                                      ).format("MM/DD/YYYY")
-                                    : "—"}
-                                </Descriptions.Item>
-                                <Descriptions.Item label="Reviewed By (Staff)">
-                                  {detailViewRecord.dateReportReviewedStaff ||
-                                    "—"}
-                                </Descriptions.Item>
-                                <Descriptions.Item label="Reviewed By (Focal)">
-                                  {detailViewRecord.dateReportReviewedFocal ||
-                                    "—"}
-                                </Descriptions.Item>
-                                <Descriptions.Item label="Approved">
-                                  {detailViewRecord.dateReportApproved
-                                    ? dayjs(
-                                        detailViewRecord.dateReportApproved,
-                                      ).format("MM/DD/YYYY")
-                                    : "—"}
-                                </Descriptions.Item>
-                                <Descriptions.Item label="Days to Prepare">
-                                  {detailViewRecord.totalDaysReportPrepared ??
-                                    "—"}
-                                </Descriptions.Item>
-                                <Descriptions.Item label="Days Staff Review">
-                                  {detailViewRecord.totalDaysReviewedStaff ??
-                                    "—"}
-                                </Descriptions.Item>
-                                <Descriptions.Item label="Days Focal Review">
-                                  {detailViewRecord.totalDaysReviewedFocal ??
-                                    "—"}
-                                </Descriptions.Item>
-                              </Descriptions>
-                            ),
-                          },
-                          {
-                            key: "compliance",
-                            label: (
-                              <span>
-                                <FileTextOutlined
-                                  style={{ color: "#eb2f96" }}
-                                />{" "}
-                                Compliance
-                              </span>
-                            ),
-                            children: (
-                              <Descriptions column={2} size="small" bordered>
-                                <Descriptions.Item
-                                  label="Other Findings and Observations"
-                                  span={2}
-                                >
-                                  {detailViewRecord.findings || "—"}
-                                </Descriptions.Item>
-                                <Descriptions.Item
-                                  label="Remarks and Recommendation"
-                                  span={2}
-                                >
-                                  {detailViewRecord.remarksAndRecommendation ||
-                                    "—"}
-                                </Descriptions.Item>
-                                <Descriptions.Item label="Technical Conference">
-                                  {detailViewRecord.technicalConferenceConducted ? (
-                                    <Tag color="success">Yes</Tag>
-                                  ) : (
-                                    <Tag>No</Tag>
-                                  )}
-                                </Descriptions.Item>
-                                <Descriptions.Item label="Commitment File">
-                                  {(detailViewRecord.commitmentFiles || [])
-                                    .length ? (
-                                    <Tag color="blue">
-                                      {detailViewRecord.commitmentFiles.length}{" "}
-                                      file(s)
-                                    </Tag>
-                                  ) : (
-                                    "—"
-                                  )}
-                                </Descriptions.Item>
-                                <Descriptions.Item
-                                  label="Progress Report"
-                                  span={2}
-                                >
-                                  {(detailViewRecord.progressReportFiles || [])
-                                    .length ? (
-                                    <Tag color="geekblue">
-                                      {
-                                        detailViewRecord.progressReportFiles
-                                          .length
-                                      }{" "}
-                                      file(s)
-                                    </Tag>
-                                  ) : (
-                                    "—"
-                                  )}
-                                </Descriptions.Item>
-                              </Descriptions>
-                            ),
-                          },
                         ]}
                       />
                     ),
@@ -9533,9 +9462,10 @@ export default function SLFMonitoring({
                               {
                                 title: "Description",
                                 dataIndex: "description",
+                                width: 200,
                                 render: (v) =>
                                   v ? (
-                                    <Text style={{ fontSize: 12 }}>{v}</Text>
+                                    <Text style={{ fontSize: 10 }}>{v}</Text>
                                   ) : (
                                     <Text type="secondary">—</Text>
                                   ),
@@ -10487,18 +10417,18 @@ export default function SLFMonitoring({
       >
         {(() => {
           const lguData = records.filter(
-            (r) => Number(r.noOfLGUServed || 0) > 0,
+            (r) => getServedClientCount(r) > 0,
           );
           const inR3 = lguData.filter((r) => R3_PROVINCES.includes(r.province));
           const outR3 = lguData.filter(
             (r) => !R3_PROVINCES.includes(r.province),
           );
           const totalInR3 = inR3.reduce(
-            (s, r) => s + (r.noOfLGUServed || 0),
+            (s, r) => s + getServedClientCount(r),
             0,
           );
           const totalOutR3 = outR3.reduce(
-            (s, r) => s + (r.noOfLGUServed || 0),
+            (s, r) => s + getServedClientCount(r),
             0,
           );
           const cols = [
@@ -10534,9 +10464,9 @@ export default function SLFMonitoring({
               key: "noOfLGUServed",
               width: 140,
               align: "center",
-              render: (v) => (
+              render: (_, record) => (
                 <Badge
-                  count={v}
+                  count={getServedClientCount(record)}
                   color="#fa8c16"
                   overflowCount={999}
                   style={{ fontWeight: 700 }}
@@ -10567,7 +10497,7 @@ export default function SLFMonitoring({
             },
           ];
           const summary = (data) => {
-            const tot = data.reduce((s, r) => s + (r.noOfLGUServed || 0), 0);
+            const tot = data.reduce((s, r) => s + getServedClientCount(r), 0);
             return (
               <Table.Summary.Row>
                 <Table.Summary.Cell colSpan={2} index={0}>

@@ -157,11 +157,39 @@ router.get("/my-tickets/:email", async (req, res) => {
     // Case-insensitive exact match so a mixed-case stored email still resolves
     // the portal user's own tickets (they otherwise come up empty).
     const email = String(req.params.email || "").trim();
+    if (
+      req.user?.role === "portal_user" &&
+      String(req.user?.email || "").trim().toLowerCase() !== email.toLowerCase()
+    ) {
+      return res.status(403).json({ message: "You can only view your own support tickets." });
+    }
     const escaped = email.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    const tickets = await SupportTicket.find({
+    const { page = 1, limit = 10, search = "", status = "all", sortField = "createdAt", sortOrder = "descend" } = req.query;
+    const filter = {
       portalUserEmail: new RegExp(`^${escaped}$`, "i"),
-    }).sort({ createdAt: -1 });
-    res.json(tickets);
+    };
+    if (status && status !== "all") filter.status = status;
+    if (search) {
+      const pattern = { $regex: String(search).trim(), $options: "i" };
+      filter.$or = [
+        { ticketNo: pattern },
+        { subject: pattern },
+        { category: pattern },
+        { priority: pattern },
+        { message: pattern },
+      ];
+    }
+    const allowedSortFields = new Set(["createdAt", "updatedAt", "ticketNo", "subject", "status", "priority", "category"]);
+    const safeSortField = allowedSortFields.has(String(sortField)) ? String(sortField) : "createdAt";
+    const sortDirection = String(sortOrder).toLowerCase() === "ascend" || String(sortOrder).toLowerCase() === "asc" ? 1 : -1;
+    const safePage = Math.max(1, Number(page) || 1);
+    const safeLimit = Math.min(100, Math.max(1, Number(limit) || 10));
+    const skip = (safePage - 1) * safeLimit;
+    const [tickets, total] = await Promise.all([
+      SupportTicket.find(filter).sort({ [safeSortField]: sortDirection }).skip(skip).limit(safeLimit),
+      SupportTicket.countDocuments(filter),
+    ]);
+    res.json({ tickets, total, page: safePage, limit: safeLimit });
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });
   }

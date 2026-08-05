@@ -1,6 +1,27 @@
 const mongoose = require("mongoose");
 const { dataYearVisibilityPlugin } = require("../utils/yearVisibility");
 
+const roundThreeDecimals = (value) => {
+  if (value === null || value === undefined || value === "") return value;
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? Math.round(numeric * 1000) / 1000 : value;
+};
+
+const isThreeDecimalNonNegative = (value) => {
+  if (value === null || value === undefined || value === "") return true;
+  const numeric = Number(value);
+  return Number.isFinite(numeric) && numeric >= 0 && Math.round(numeric * 1000) === numeric * 1000;
+};
+
+const threeDecimalNumber = {
+  type: Number,
+  set: roundThreeDecimals,
+  validate: {
+    validator: isThreeDecimalNonNegative,
+    message: "{PATH} must be a non-negative number with no more than 3 decimal places.",
+  },
+};
+
 const slfFacilitySchema = new mongoose.Schema(
   {
     dataYear: { type: Number, default: () => new Date().getFullYear(), index: true },
@@ -77,14 +98,14 @@ const slfFacilitySchema = new mongoose.Schema(
     // Operations
     statusOfSLF: { type: String, trim: true },
     remainingLifeSpan: { type: String, trim: true },
-    actualResidualWasteReceived: { type: Number },
+    actualResidualWasteReceived: threeDecimalNumber,
     wasteReceivedUnit: { type: String, trim: true, default: 'tons' },
     estimatedVolumeWasteUnit: { type: String, trim: true, default: 'tons' },
     numberOfCell: { type: Number },
     // Optional per-cell custom display names. Index-aligned with the other cell
     // arrays. Empty/missing entry => fall back to the derived "Cell N" label.
     cellNames: [{ type: String, trim: true }],
-    cellCapacities: [{ type: Number }],
+    cellCapacities: [threeDecimalNumber],
     cellCapacityUnits: [{ type: String, enum: ["m³", "tons", "m3"], default: "tons" }],
     cellStatuses: [{ type: String, enum: ["Active Cell", "Used/Completed", "Under Construction", "Reserved Area", "Not Existed", "Operational", "Closed", "Reserved Cell"], default: "Active Cell" }],
     cellTypes: [{ type: String, trim: true, default: "Residual" }], // per-cell: "Residual" or "Treated Haz Waste"
@@ -92,9 +113,9 @@ const slfFacilitySchema = new mongoose.Schema(
     // Empty/undefined => fall back to active cell status. Explicit false => disallow.
     cellSubmissionAllowed: [{ type: Boolean }],
     cellNotes: [{ type: String, trim: true }], // per-cell notes (used for Under Construction / Reserved Cell status)
-    cellFillValues: [{ type: Number }],
+    cellFillValues: [threeDecimalNumber],
     cellFillUnits: [{ type: String, enum: ["m³", "tons", "m3"], default: "tons" }],
-    estimatedVolumeWaste: { type: Number },
+    estimatedVolumeWaste: threeDecimalNumber,
     noOfLeachatePond: { type: Number },
     numberOfGasVents: { type: Number },
     mrfEstablished: { type: String, trim: true }, // legacy — kept for backward compat
@@ -224,6 +245,16 @@ const slfFacilitySchema = new mongoose.Schema(
   },
   { timestamps: true }
 );
+
+// Back the query shapes hit on every dashboard/table/modal load: the list filter
+// (deletedAt [+dataYear]), the province/lgu sort + duplicate-site detection, the
+// portal linkage join, and trash/restore. Without these, each read was a full
+// collection scan.
+slfFacilitySchema.index({ deletedAt: 1, dataYear: 1 });
+slfFacilitySchema.index({ deletedAt: 1, province: 1, lgu: 1 });
+slfFacilitySchema.index({ deletedAt: 1, isDummy: 1, dataYear: 1 });
+slfFacilitySchema.index({ slfGenerator: 1 });
+slfFacilitySchema.index({ deletedAt: 1 });
 
 slfFacilitySchema.plugin(dataYearVisibilityPlugin);
 

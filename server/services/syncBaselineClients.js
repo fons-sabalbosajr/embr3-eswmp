@@ -69,7 +69,18 @@ function classifyType(rawType, companyTypeFallback) {
   return null;
 }
 
-const relKeyOf = (r) => `${String(r.portalUser || r.portalUserEmail || "")}|${r.normalizedHauler || ""}|${String(r.baselineRef || "")}`;
+// Identity of a relationship is (portal user, hauler) — NOT the baseline that
+// happened to evidence it.
+//
+// This key used to include baselineRef, which made every baseline document mint a
+// NEW relationship entry instead of refreshing the existing one. Because the sync
+// seeds prior entries back in (seedWorking below) and never prunes, the arrays grew
+// without bound: measured on live data, 23,626 stored entries represented only 373
+// distinct (portal user, hauler) pairs — 63x bloat, with one document already at
+// 499KB. The set of baselines a client came from is not lost; it is what the
+// document-level `baselineReferences` array is for. The per-relationship
+// `baselineRef` now means "most recent baseline that evidenced this relationship".
+const relKeyOf = (r) => `${String(r.portalUser || r.portalUserEmail || "")}|${r.normalizedHauler || ""}`;
 
 async function runBaselineClientSync({ actor = "baseline-sync", jobId = null, onProgress = () => {} } = {}) {
   const DataSLF = require("../models/DataSLF");
@@ -136,13 +147,24 @@ async function runBaselineClientSync({ actor = "baseline-sync", jobId = null, on
     // else: a pre-existing duplicate row for this key — left for cleanup migration.
   });
 
+  // Project only the three hauler sub-fields this sync reads. `accreditedHaulers`
+  // is ~44% of the data-slf collection's bytes, and `vehicles` alone is ~68% of
+  // each hauler entry — none of which this service touches (it walks haulerName,
+  // privateSectorClients and clients). Pulling whole hauler entries made this read
+  // ~16.5MB / ~197s against the live cluster, which is byte-rate bound.
   const baselines = await DataSLF.find({ deletedAt: null, "accreditedHaulers.0": { $exists: true } })
-    .select("accreditedHaulers slfName lguCompanyName companyType submittedBy slfGenerator isDummy createdAt")
+    .select(
+      "accreditedHaulers.haulerName accreditedHaulers.privateSectorClients accreditedHaulers.clients" +
+        " slfName lguCompanyName companyType submittedBy slfGenerator isDummy createdAt",
+    )
     .sort({ createdAt: -1 }).lean();
   summary.baselinesScanned = baselines.length;
   report(0, 1); report(1, 1);
 
   // ── Stage 3: process clients → accumulate into canonical map ──
+  // Tracks "<canonicalKey>::<relKey>" pairs whose baselineRef this run has already
+  // pinned to the newest baseline, so later (older) baselines don't walk it back.
+  const relBaselineClaimed = new Set();
   const typesByName = new Map(); // normalizedName → Set(type)
   counts.total = baselines.reduce((n, b) => n + (b.accreditedHaulers || []).reduce((m, h) =>
     m + (Array.isArray(h?.privateSectorClients) ? h.privateSectorClients.length : 0) + (Array.isArray(h?.clients) ? h.clients.length : 0), 0), 0);
@@ -188,8 +210,25 @@ async function runBaselineClientSync({ actor = "baseline-sync", jobId = null, on
           hauler: haulerName, normalizedHauler: normHauler, baselineRef: b._id, status: "active",
           firstSyncedAt: new Date(), lastSyncedAt: new Date() };
         const rk = relKeyOf(rel);
-        if (w.rels.has(rk)) { w.rels.get(rk).lastSyncedAt = new Date(); }
-        else { w.rels.set(rk, rel); summary.relationshipsAdded += 1; }
+        const existingRel = w.rels.get(rk);
+        if (existingRel) {
+          existingRel.lastSyncedAt = new Date();
+          // `baselines` is iterated newest-first, so the FIRST baseline this run sees
+          // for a key is the most recent one. Adopt it once (replacing whatever stale
+          // ref was seeded from the stored document), then leave it alone.
+          if (!relBaselineClaimed.has(`${key}::${rk}`)) {
+            existingRel.baselineRef = b._id;
+            relBaselineClaimed.add(`${key}::${rk}`);
+          }
+          // A seeded entry keeps its original firstSyncedAt; a name that was blank
+          // when first synced can still be filled in later.
+          if (!existingRel.portalUserName && owner?.name) existingRel.portalUserName = owner.name;
+          if (!existingRel.portalUser && owner?.id) existingRel.portalUser = owner.id;
+        } else {
+          relBaselineClaimed.add(`${key}::${rk}`);
+          w.rels.set(rk, rel);
+          summary.relationshipsAdded += 1;
+        }
         if (normHauler) w.haulers.set(normHauler, { hauler: haulerName, normalizedHauler: normHauler });
         w.baselines.add(String(b._id));
       }

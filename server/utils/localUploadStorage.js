@@ -43,9 +43,48 @@ function getLocalUploadUrl(fileName) {
  *   `url` is only returned for public (unencrypted) files; encrypted files are
  *   served exclusively through the authenticated /media route (caller builds it).
  */
+/**
+ * Fail fast, and legibly, when the upload directory exists but the Node process
+ * cannot write to it.
+ *
+ * This is the SECOND half of a real production outage: Drive upload throws, the
+ * code falls back to local storage, and the local write then dies with a raw
+ * `EACCES: permission denied, open '.../uploads/files/...'`. That surfaced to
+ * admins as a generic "Upload failed. Please try again." — advice that can never
+ * work, because retrying cannot change directory ownership. Every gallery,
+ * document, SCRP and preventive-measure upload failed this way with no indication
+ * of the cause. mkdir(recursive) does NOT catch it: the directory already exists,
+ * it is simply owned by another user.
+ */
+async function assertUploadDirWritable(uploadDir) {
+  try {
+    await fs.access(uploadDir, fsSync.constants.W_OK | fsSync.constants.X_OK);
+  } catch (error) {
+    const err = new Error(
+      `Upload directory "${uploadDir}" is not writable by this process (${error.code || "EACCES"}). ` +
+        "Grant the Node process write access to it (e.g. chown it to the service user), " +
+        "or point FILE_UPLOAD_DIR at a writable location.",
+    );
+    err.code = "UPLOAD_DIR_NOT_WRITABLE";
+    err.uploadDir = uploadDir;
+    err.statusCode = 500;
+    throw err;
+  }
+}
+
 async function saveLocalUpload(file, opts = {}) {
   const uploadDir = getUploadDir();
-  await fs.mkdir(uploadDir, { recursive: true });
+  try {
+    await fs.mkdir(uploadDir, { recursive: true });
+  } catch (error) {
+    // A create failure is the same operator problem as an unwritable directory —
+    // report it the same actionable way rather than as a bare errno.
+    if (error.code === "EACCES" || error.code === "EPERM") {
+      await assertUploadDirWritable(uploadDir);
+    }
+    throw error;
+  }
+  await assertUploadDirWritable(uploadDir);
 
   const encrypt = Boolean(opts.encrypt);
   const baseName = `${Date.now()}-${crypto.randomBytes(16).toString("hex")}${getSafeExtension(file.originalname)}`;

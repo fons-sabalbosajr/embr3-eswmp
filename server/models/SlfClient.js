@@ -72,7 +72,10 @@ const slfClientSchema = new mongoose.Schema(
     multiPortalStatus: { type: String, default: "Unassigned", index: true },
 
     // Per-portal-user relationship (a valid client may belong to several portal
-    // users; that is NOT a duplicate). De-duplicated by (portalUser|hauler|baseline).
+    // users; that is NOT a duplicate). De-duplicated by (portalUser|hauler) — see
+    // relKeyOf in services/syncBaselineClients.js. `baselineRef` here is the MOST
+    // RECENT baseline that evidenced the relationship, not a per-baseline row; the
+    // full set of contributing baselines lives in `baselineReferences` below.
     portalUserRelationships: [{
       portalUser: { type: mongoose.Schema.Types.ObjectId, ref: "UserPortal", default: null },
       portalUserEmail: { type: String, trim: true, lowercase: true, default: "" },
@@ -182,5 +185,9 @@ slfClientSchema.index({ syncKey: 1 }, { unique: true, sparse: true });
 // Canonical lookup (non-unique — pre-existing unclean data may still have dups
 // until the cleanup migration runs; the sync/cleanup collapse them safely).
 slfClientSchema.index({ canonicalKey: 1, isCanonical: 1, deletedAt: 1 });
+// Backs the relationship-map + LGU-reconciliation scan (canonical Active clients
+// of one type), which previously matched these five equality predicates with only
+// single-field indexes and fell back to a collection scan.
+slfClientSchema.index({ deletedAt: 1, mergedInto: 1, isCanonical: 1, status: 1, type: 1 });
 
 module.exports = mongoose.model("SlfClient", slfClientSchema);

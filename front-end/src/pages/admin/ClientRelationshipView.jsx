@@ -1,8 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Table, Tag, Card, Statistic, Space, Typography, Input, Alert, Spin, Empty, Tooltip, Select, Button } from "antd";
-import { TeamOutlined, InfoCircleOutlined, LinkOutlined } from "@ant-design/icons";
+import { Table, Tag, Card, Statistic, Space, Typography, Input, Alert, Spin, Empty, Tooltip, Select, Button, Segmented, Collapse } from "antd";
+import { TeamOutlined, InfoCircleOutlined, AppstoreOutlined, UnorderedListOutlined, EnvironmentOutlined, DatabaseOutlined } from "@ant-design/icons";
 import api from "../../api";
-import LguReconciliationPanel from "./LguReconciliationPanel";
 
 const { Text } = Typography;
 
@@ -23,7 +22,7 @@ export default function ClientRelationshipView({ type = "LGU" }) {
   const [fMuni, setFMuni] = useState(null);
   const [fHauler, setFHauler] = useState(null);
   const [fSlf, setFSlf] = useState(null);
-  const [reconOpen, setReconOpen] = useState(false);
+  const [viewMode, setViewMode] = useState("cards");
 
   const fetchData = useCallback(() => {
     setLoading(true);
@@ -70,6 +69,55 @@ export default function ClientRelationshipView({ type = "LGU" }) {
     });
   }, [rows, q, fProvince, fMuni, fHauler, fSlf]);
 
+  // Per-SLF grouping for the card view. One card per assigned SLF; a client that
+  // serves multiple SLFs appears under each. Everything is derived from the same
+  // filtered rows, so the cards can never disagree with the table.
+  const slfGroups = useMemo(() => {
+    const map = new Map();
+    filtered.forEach((r) => {
+      const slfs = Array.isArray(r.slfs) && r.slfs.length ? r.slfs : ["Unassigned SLF"];
+      slfs.forEach((slf) => {
+        let g = map.get(slf);
+        if (!g) { g = { slf, clients: [] }; map.set(slf, g); }
+        g.clients.push(r);
+      });
+    });
+    return [...map.values()]
+      .map((g) => {
+        const provinceCounts = new Map();
+        const muniCounts = new Map();
+        const servedMunis = new Set();
+        g.clients.forEach((c) => {
+          const prov = c.province || "Unspecified";
+          provinceCounts.set(prov, (provinceCounts.get(prov) || 0) + 1);
+          const muni = c.municipalityCity || c.name || "Unspecified";
+          muniCounts.set(muni, (muniCounts.get(muni) || 0) + 1);
+          if (c.serviceStatus === "Served" && (c.municipalityId || c.municipalityCity)) {
+            servedMunis.add(c.municipalityId || c.municipalityCity);
+          }
+        });
+        const provinces = [...provinceCounts.keys()].filter((p) => p !== "Unspecified");
+        return {
+          slf: g.slf,
+          // Group the client table by Client Address (municipality) then name.
+          clients: [...g.clients].sort(
+            (a, b) =>
+              String(a.municipalityCity || a.name).localeCompare(String(b.municipalityCity || b.name)) ||
+              String(a.name).localeCompare(String(b.name)),
+          ),
+          totalClients: g.clients.length,
+          totalLgusServed: servedMunis.size,
+          provinceLabel:
+            (provinces.slice(0, 2).join(", ") + (provinces.length > 2 ? ` +${provinces.length - 2}` : "")) || "—",
+          provinceCount: provinces.length,
+          muniCount: muniCounts.size,
+          provinceCounts: [...provinceCounts.entries()].filter(([p]) => p !== "Unspecified").sort((a, b) => b[1] - a[1]),
+          muniCounts: [...muniCounts.entries()].filter(([m]) => m !== "Unspecified").sort((a, b) => b[1] - a[1]),
+        };
+      })
+      .sort((a, b) => b.totalClients - a.totalClients || a.slf.localeCompare(b.slf));
+  }, [filtered]);
+
   const chipList = (items, emptyLabel, color = "default") =>
     !items || items.length === 0 ? (
       <Tag color="error" bordered={false} style={{ fontSize: 11 }}>{emptyLabel}</Tag>
@@ -111,6 +159,14 @@ export default function ClientRelationshipView({ type = "LGU" }) {
     { title: "Hauler", dataIndex: "haulers", width: 160, render: (v) => chipList(v, "No hauler", "blue") },
     { title: "Assigned SLF", dataIndex: "slfs", width: 200, render: (v) => chipList(v, "No SLF", "geekblue") },
     { title: "Remarks", key: "remarks", width: 180, render: (_, r) => remarksCell(r) },
+  ];
+
+  const cardClientColumns = [
+    { title: "Client Name", dataIndex: "name", ellipsis: true, render: (v) => <Text strong style={{ fontSize: 12 }}>{v}</Text> },
+    { title: "Municipality", dataIndex: "municipalityCity", ellipsis: true, render: (v, r) => v || r.name || "—" },
+    { title: "Province", dataIndex: "province", width: 130, ellipsis: true, render: (v) => v || "—" },
+    { title: "Client Type", dataIndex: "clientType", width: 130, render: (v) => v || (isLgu ? "LGU" : "Private Sector") },
+    { title: "Hauler", dataIndex: "haulers", width: 170, render: (v) => chipList(v, "No hauler", "blue") },
   ];
 
   // Equal-width tile that fills the row on desktop and keeps a readable min-width
@@ -161,45 +217,110 @@ export default function ClientRelationshipView({ type = "LGU" }) {
 
       {/* Filters */}
       <Space size={[8, 8]} wrap style={{ marginBottom: 10 }}>
+        <Segmented
+          value={viewMode}
+          onChange={setViewMode}
+          options={[
+            { label: "By SLF", value: "cards", icon: <AppstoreOutlined /> },
+            { label: "All Clients", value: "table", icon: <UnorderedListOutlined /> },
+          ]}
+        />
         <Input.Search allowClear placeholder="Search municipality, barangay, hauler or SLF" value={q} onChange={(e) => setQ(e.target.value)} style={{ width: 260 }} />
         {isLgu && <Select allowClear showSearch placeholder="Province" value={fProvince} onChange={setFProvince} options={opts.provinces} style={{ minWidth: 150 }} optionFilterProp="label" />}
         <Select allowClear showSearch placeholder={isLgu ? "Municipality" : "Municipality / Address"} value={fMuni} onChange={setFMuni} options={opts.munis} style={{ minWidth: 160 }} optionFilterProp="label" />
         <Select allowClear showSearch placeholder="Hauler" value={fHauler} onChange={setFHauler} options={opts.haulers} style={{ minWidth: 150 }} optionFilterProp="label" />
         <Select allowClear showSearch placeholder="Assigned SLF" value={fSlf} onChange={setFSlf} options={opts.slfs} style={{ minWidth: 160 }} optionFilterProp="label" />
-        {isLgu && (summary?.unlinkedClients ?? 0) > 0 && (
-          <Button icon={<LinkOutlined />} danger onClick={() => setReconOpen(true)}>
-            Reconcile unlinked ({summary.unlinkedClients})
-          </Button>
-        )}
       </Space>
 
-      <Table
-        size="small"
-        rowKey="_id"
-        dataSource={filtered}
-        columns={isLgu ? lguColumns : privateColumns}
-        scroll={{ x: 1000, y: 380 }}
-        pagination={{ pageSize: 10, size: "small", showSizeChanger: true, showTotal: (t) => `${t} ${isLgu ? "municipality client" : "private client"}${t === 1 ? "" : "s"}` }}
-        locale={{ emptyText: <Empty description={`No ${isLgu ? "LGU" : "private-sector"} clients recorded yet`} /> }}
-        // Expandable detail for rows whose grouped info is large.
-        expandable={{
-          rowExpandable: (r) => (r.haulers?.length || 0) > 2 || (r.slfs?.length || 0) > 2,
-          expandedRowRender: (r) => (
-            <Space direction="vertical" size={6} style={{ padding: "4px 8px" }}>
-              <div><Text strong style={{ fontSize: 11 }}>All haulers: </Text>{chipList(r.haulers, "None", "blue")}</div>
-              <div><Text strong style={{ fontSize: 11 }}>All assigned SLFs: </Text>{chipList(r.slfs, "None", "geekblue")}</div>
-              {isLgu && r.psgc && <div><Text type="secondary" style={{ fontSize: 11 }}>PSGC: {r.psgc}</Text></div>}
-            </Space>
-          ),
-        }}
-      />
+      {viewMode === "cards" ? (
+        slfGroups.length === 0 ? (
+          <Empty description={`No ${isLgu ? "LGU" : "private-sector"} clients recorded yet`} />
+        ) : (
+          <Collapse
+            defaultActiveKey={slfGroups.slice(0, 1).map((g) => g.slf)}
+            items={slfGroups.map((g) => ({
+              key: g.slf,
+              label: (
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                  <Space size={8} wrap>
+                    <DatabaseOutlined style={{ color: "#722ed1" }} />
+                    <Text strong style={{ fontSize: 13 }}>{g.slf}</Text>
+                    {g.provinceLabel !== "—" && (
+                      <Tag color="geekblue" bordered={false} style={{ whiteSpace: "normal" }}>
+                        <EnvironmentOutlined /> {g.provinceLabel}
+                      </Tag>
+                    )}
+                  </Space>
+                  <Space size={6} wrap>
+                    {isLgu && <Tag color="green">{g.totalLgusServed} LGUs Served</Tag>}
+                    <Tag color="blue">{g.totalClients} Clients</Tag>
+                    <Tag color="orange">{g.muniCount} Municipalities</Tag>
+                    {!isLgu && <Tag color="purple">{g.provinceCount} Provinces</Tag>}
+                  </Space>
+                </div>
+              ),
+              children: (
+                <>
+                  <Table
+                    size="small"
+                    rowKey={(r) => `${g.slf}-${r._id}`}
+                    dataSource={g.clients}
+                    columns={cardClientColumns}
+                    scroll={{ x: 720 }}
+                    pagination={g.clients.length > 5 ? { pageSize: 5, size: "small", showTotal: (t) => `${t} client(s)` } : false}
+                  />
+                  {g.muniCounts.length > 0 && (
+                    <div style={{ marginTop: 8 }}>
+                      <Text strong style={{ fontSize: 11 }}>Per Municipality: </Text>
+                      <Space size={[4, 4]} wrap>
+                        {g.muniCounts.slice(0, 12).map(([m, c]) => (
+                          <Tag key={m} bordered={false} style={{ fontSize: 10, whiteSpace: "normal" }}>{m} ({c})</Tag>
+                        ))}
+                        {g.muniCounts.length > 12 && <Tag bordered={false}>+{g.muniCounts.length - 12} more</Tag>}
+                      </Space>
+                    </div>
+                  )}
+                  {g.provinceCounts.length > 0 && (
+                    <div style={{ marginTop: 6 }}>
+                      <Text strong style={{ fontSize: 11 }}>Per Province: </Text>
+                      <Space size={[4, 4]} wrap>
+                        {g.provinceCounts.map(([p, c]) => (
+                          <Tag key={p} color="geekblue" bordered={false} style={{ fontSize: 10, whiteSpace: "normal" }}>{p} ({c})</Tag>
+                        ))}
+                      </Space>
+                    </div>
+                  )}
+                </>
+              ),
+            }))}
+          />
+        )
+      ) : (
+        <Table
+          size="small"
+          rowKey="_id"
+          dataSource={filtered}
+          columns={isLgu ? lguColumns : privateColumns}
+          scroll={{ x: 1000, y: 380 }}
+          pagination={{ pageSize: 10, size: "small", showSizeChanger: true, showTotal: (t) => `${t} ${isLgu ? "municipality client" : "private client"}${t === 1 ? "" : "s"}` }}
+          locale={{ emptyText: <Empty description={`No ${isLgu ? "LGU" : "private-sector"} clients recorded yet`} /> }}
+          // Expandable detail for rows whose grouped info is large.
+          expandable={{
+            rowExpandable: (r) => (r.haulers?.length || 0) > 2 || (r.slfs?.length || 0) > 2,
+            expandedRowRender: (r) => (
+              <Space direction="vertical" size={6} style={{ padding: "4px 8px" }}>
+                <div><Text strong style={{ fontSize: 11 }}>All haulers: </Text>{chipList(r.haulers, "None", "blue")}</div>
+                <div><Text strong style={{ fontSize: 11 }}>All assigned SLFs: </Text>{chipList(r.slfs, "None", "geekblue")}</div>
+                {isLgu && r.psgc && <div><Text type="secondary" style={{ fontSize: 11 }}>PSGC: {r.psgc}</Text></div>}
+              </Space>
+            ),
+          }}
+        />
+      )}
       {isLgu && (
         <Text type="secondary" style={{ fontSize: 11, display: "block", marginTop: 6 }}>
           <TeamOutlined /> Served = unique municipality (masterlist id). Barangays and duplicate client records never increase the count.
         </Text>
-      )}
-      {isLgu && (
-        <LguReconciliationPanel open={reconOpen} onClose={() => setReconOpen(false)} onChanged={fetchData} />
       )}
     </div>
   );

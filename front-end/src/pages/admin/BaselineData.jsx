@@ -1,4 +1,4 @@
-import { useCallback, useState, useEffect, useMemo, useDeferredValue } from "react";
+import { useCallback, useState, useEffect, useMemo, useRef, useDeferredValue } from "react";
 import {
   Table,
   Tag,
@@ -512,6 +512,13 @@ export default function BaselineData({
     }
   };
 
+  // Which baseline row currently has an unlock/re-lock in flight, so its button can
+  // show a spinner and refuse a second click. The ref is the actual guard (it is
+  // set synchronously, before any await); the state exists only to drive the UI.
+  const [baselineAction, setBaselineAction] = useState(null);
+  const baselineActionRef = useRef({});
+  const isBaselineActionBusy = (slfName) => baselineAction?.slfName === slfName;
+
   const handleApproveBaselineUpdate = async (slfName, { isOverride = false } = {}) => {
     const result = await Swal.fire({
       title: isOverride ? "Unlock Baseline?" : "Approve Baseline Update?",
@@ -524,6 +531,12 @@ export default function BaselineData({
       confirmButtonColor: "#52c41a",
     });
     if (!result.isConfirmed) return;
+    // Guard against a second click while the PATCH is in flight. The request fans
+    // out to updateMany + notifications for every portal user on the SLF, so a
+    // double-click fired the whole thing twice and raced two approval states.
+    if (baselineActionRef.current[slfName]) return;
+    baselineActionRef.current[slfName] = true;
+    setBaselineAction({ slfName, type: isOverride ? "unlock" : "approve" });
     try {
       await api.patch(
         `/data-slf/baseline-update-approve/${encodeURIComponent(slfName)}`,
@@ -543,6 +556,9 @@ export default function BaselineData({
         err?.response?.data?.message || "Could not approve baseline update",
         "error",
       );
+    } finally {
+      delete baselineActionRef.current[slfName];
+      setBaselineAction(null);
     }
   };
 
@@ -556,6 +572,9 @@ export default function BaselineData({
       confirmButtonColor: "#fa8c16",
     });
     if (!result.isConfirmed) return;
+    if (baselineActionRef.current[slfName]) return;
+    baselineActionRef.current[slfName] = true;
+    setBaselineAction({ slfName, type: "lock" });
     try {
       await api.patch(
         `/data-slf/baseline-update-lock/${encodeURIComponent(slfName)}`,
@@ -574,6 +593,9 @@ export default function BaselineData({
         err?.response?.data?.message || "Could not lock baseline",
         "error",
       );
+    } finally {
+      delete baselineActionRef.current[slfName];
+      setBaselineAction(null);
     }
   };
 
@@ -833,6 +855,8 @@ export default function BaselineData({
                   type="text"
                   icon={<CheckCircleOutlined />}
                   style={{ color: GREEN }}
+                  loading={isBaselineActionBusy(r.slfName)}
+                  disabled={isBaselineActionBusy(r.slfName)}
                   onClick={() => handleApproveBaselineUpdate(r.slfName)}
                 />
               </Tooltip>
@@ -842,6 +866,7 @@ export default function BaselineData({
                   type="text"
                   danger
                   icon={<CloseCircleOutlined />}
+                  disabled={isBaselineActionBusy(r.slfName)}
                   onClick={() => handleRejectBaselineUpdate(r.slfName)}
                 />
               </Tooltip>
@@ -854,6 +879,8 @@ export default function BaselineData({
                 type="text"
                 icon={<UnlockOutlined />}
                 style={{ color: GREEN }}
+                loading={isBaselineActionBusy(r.slfName)}
+                disabled={isBaselineActionBusy(r.slfName)}
                 onClick={() =>
                   handleApproveBaselineUpdate(r.slfName, { isOverride: true })
                 }
@@ -867,6 +894,8 @@ export default function BaselineData({
                 type="text"
                 icon={<LockOutlined />}
                 style={{ color: ORANGE }}
+                loading={isBaselineActionBusy(r.slfName)}
+                disabled={isBaselineActionBusy(r.slfName)}
                 onClick={() => handleLockBaseline(r.slfName)}
               />
             </Tooltip>

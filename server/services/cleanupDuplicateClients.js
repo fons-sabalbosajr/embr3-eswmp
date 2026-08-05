@@ -10,7 +10,10 @@ const SlfClient = require("../models/SlfClient");
 const SlfDataIssue = require("../models/SlfDataIssue");
 
 const normalize = SlfClient.normalize;
-const relKeyOf = (r) => `${String(r.portalUser || r.portalUserEmail || "")}|${r.normalizedHauler || normalize(r.hauler)}|${String(r.baselineRef || "")}`;
+// Must match relKeyOf in syncBaselineClients.js — a relationship is identified by
+// (portal user, hauler), not by the baseline that evidenced it. Keeping baselineRef
+// in this key would let a merge re-expand arrays the sync had just collapsed.
+const relKeyOf = (r) => `${String(r.portalUser || r.portalUserEmail || "")}|${r.normalizedHauler || normalize(r.hauler)}`;
 
 function completeness(c) {
   return [c.province, c.municipalityCity, c.location, c.address, c.contactPerson, c.contactNumber, c.contactEmail, c.notes]

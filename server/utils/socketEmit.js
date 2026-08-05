@@ -23,6 +23,20 @@ function notifyPortal(req, email, payload) {
 }
 
 function refreshAdmin(req, target) {
+  // The SLF summary aggregation is cached in-process; bust it the moment its
+  // source data changes so admins never see stale totals after a CRUD op. Every
+  // submission/baseline/facility mutation already routes through here.
+  if (target === "submissions" || target === "baselines" || target === "facility") {
+    try {
+      const cache = require("./serverCache");
+      const keys = require("./cacheKeys");
+      cache.invalidate(keys.SUMMARY_BY_SLF_CACHE_KEY);
+      cache.invalidate(keys.STATS_CACHE_PREFIX);
+      cache.invalidate(keys.CELL_USAGE_CACHE_PREFIX);
+    } catch {
+      /* cache is best-effort — never break the refresh emit */
+    }
+  }
   emitToRoom(req, "admin-room", "data-refresh", { target });
 }
 
