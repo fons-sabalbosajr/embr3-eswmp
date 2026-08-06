@@ -924,7 +924,14 @@ router.put("/:id", adminOnly, async (req, res) => {
     // user so Portal Submissions + the portal facility view update immediately.
     refreshAdmin(req, "submissions");
     refreshAdmin(req, "baselines");
+    // "facility" was missing: admin views keyed on that target (analytics row,
+    // cell dashboards) never refreshed after a cell rename, so their labels stayed
+    // stale until a manual reload.
+    refreshAdmin(req, "facility");
     await refreshAssignedPortalUsers(req, record._id, "facility");
+    // The portal's submission tables render cell names too, so they must re-pull
+    // as well — a facility refresh alone does not reload their submission lists.
+    await refreshAssignedPortalUsers(req, record._id, "submissions");
 
     res.json(record);
     writeLog("info", "slfFacility.update", {

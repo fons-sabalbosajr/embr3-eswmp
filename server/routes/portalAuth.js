@@ -6,6 +6,11 @@ const multer = require("multer");
 const AppSettings = require("../models/AppSettings");
 const UserPortal = require("../models/UserPortal");
 const { writeLog } = require("../utils/logger");
+const {
+  resolveCellName,
+  applyResolvedCellNames,
+  applyResolvedCellNamesToAll,
+} = require("../utils/cellNaming");
 const { uploadFileToDrive } = require("../utils/googleDrive");
 const {
   saveVerificationFile,
@@ -62,19 +67,9 @@ const PORTAL_SUBMISSION_LIST_FIELDS = [
 // cell can be detected and treated as unassigned (see isValidCellRef).
 const PORTAL_SLF_REF_FIELDS = "_id lgu slfName province cellNames cellStatuses";
 
-// Resolve the CURRENT display name of a cell from its canonical index, exactly as
-// the admin side does (see routes/dataSLF.js#resolveCellName). NB: Number(null) is
-// 0, so the empty values must be rejected before coercing or a truck with NO cell
-// would resolve to cell 0 and appear assigned.
-function resolvePortalCellName(facilityCellNames, cellIndex, storedName) {
-  const hasIndex = cellIndex !== null && cellIndex !== undefined && cellIndex !== "";
-  const idx = hasIndex ? Number(cellIndex) : NaN;
-  if (Number.isInteger(idx) && idx >= 0) {
-    const current = facilityCellNames?.[idx];
-    return current ? String(current).trim() : `Cell ${idx + 1}`;
-  }
-  return storedName ? String(storedName).trim() : "";
-}
+// Cell naming comes from the SHARED resolver so the Portal and the admin side can
+// never disagree about what a cell is called. See utils/cellNaming.js.
+const resolvePortalCellName = resolveCellName;
 
 // A waste record counts as ASSIGNED only when it carries a VALID cell IDENTIFIER
 // (cellIndex) — the schema's required key — that references an existing, non-deleted
@@ -842,7 +837,14 @@ router.post("/my-submissions/batch", async (req, res) => {
     const submissions = await query.lean();
 
     if (!unassignedOnly) {
-      return res.json(submissions.map((s) => ({ ...s, ...summarizeCellAssignment(s) })));
+      // Resolve the denormalized cell-name copies to the facility's CURRENT
+      // labels before responding — the Portal renders truck.cellName directly.
+      return res.json(
+        submissions.map((entry) => {
+          const resolved = applyResolvedCellNames(entry);
+          return { ...resolved, ...summarizeCellAssignment(resolved) };
+        }),
+      );
     }
 
     // Flatten to the INCOMPLETE placements only — those that still need a cell OR
@@ -879,7 +881,7 @@ router.post("/my-submissions/batch", async (req, res) => {
               actualVolumeUnit: v.actualVolumeUnit || truck.actualVolumeUnit || "",
               capacity: effectiveCapacity,
               capacityUnit: v.capacityUnit || truck.truckCapacityUnit || "",
-              cellName: v.cellName || "",
+              cellName: resolvePortalCellName(facilityCellNames, v.cellIndex, v.cellName),
               cellIndex: Number.isInteger(Number(v.cellIndex)) ? Number(v.cellIndex) : null,
               cellType: v.cellType || "",
               needsCell,
@@ -903,7 +905,7 @@ router.post("/my-submissions/batch", async (req, res) => {
           actualVolumeUnit: truck.actualVolumeUnit || "",
           capacity: truck.truckCapacity ?? null,
           capacityUnit: truck.truckCapacityUnit || "",
-          cellName: truck.cellName || "",
+          cellName: resolvePortalCellName(facilityCellNames, truck.cellIndex, truck.cellName),
           cellIndex: Number.isInteger(Number(truck.cellIndex)) ? Number(truck.cellIndex) : null,
           cellType: truck.cellType || "",
           needsCell,
