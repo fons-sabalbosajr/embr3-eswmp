@@ -2847,6 +2847,8 @@ export default function SLFMonitoring({
   };
 
   const columns = makeMonitoringColumns({
+    canEdit,
+    canDelete,
     records,
     style,
     CATEGORY_DESC,
@@ -3102,6 +3104,9 @@ export default function SLFMonitoring({
 
       {/* Add/Edit Modal */}
       <SlfEditModal
+        isDark={isDark}
+        canEdit={canEdit}
+        driveDisabled={driveDisabled}
         modalOpen={modalOpen}
         setModalOpen={setModalOpen}
         editing={editing}
@@ -3164,6 +3169,7 @@ export default function SLFMonitoring({
 
       {/* Detail Modal */}
       <SlfDetailModal
+        isDark={isDark}
         detailModal={detailModal}
         setDetailModal={setDetailModal}
         detailViewRecord={detailViewRecord}
@@ -3205,6 +3211,7 @@ export default function SLFMonitoring({
         setDailySubmissionsModal={setDailySubmissionsModal}
       />
       <CellAssignmentModal
+        isDark={isDark}
         cellAssignmentModal={cellAssignmentModal}
         setCellAssignmentModal={setCellAssignmentModal}
         cellAssignmentSaving={cellAssignmentSaving}

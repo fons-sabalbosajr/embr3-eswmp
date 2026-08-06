@@ -10,6 +10,8 @@ import { Button, Space, Tag, Tooltip } from "antd";
 // modal and the delete-review flow, and several read the loaded record set for
 // cross-row context. Those are explicit parameters so nothing is closed over.
 export function makeMonitoringColumns({
+  canEdit,
+  canDelete,
   records,
   style,
   CATEGORY_DESC,

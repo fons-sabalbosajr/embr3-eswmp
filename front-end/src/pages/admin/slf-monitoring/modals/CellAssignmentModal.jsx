@@ -6,6 +6,7 @@ import dayjs from "dayjs";
 
 // Assign submitted waste volumes to specific landfill cells.
 export default function CellAssignmentModal({
+  isDark,
   cellAssignmentModal,
   setCellAssignmentModal,
   cellAssignmentSaving,

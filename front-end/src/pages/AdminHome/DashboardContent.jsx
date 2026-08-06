@@ -155,7 +155,7 @@ import {
 import { ProvinceBoundary, FitBounds } from "./MapPrimitives";
 import DashboardSkeleton from "./DashboardSkeleton";
 import SummaryTile from "../admin/shared/SummaryTile";
-import { BASELINE_SEGMENT_COLOR, cellVolumeSegments } from "./dashboard/gaugeSegments";
+import { BASELINE_SEGMENT_COLOR, cellVolumeSegments, VOLUME_METRICS } from "./dashboard/gaugeSegments";
 import { pushSmallStatTabs } from "./dashboard/SmallStatTabs";
 import { pushDataHistoryTab } from "./dashboard/DataHistoryTab";
 import { pushSwmEquipmentTab } from "./dashboard/SwmEquipmentTab";
@@ -1792,7 +1792,7 @@ export default function DashboardContent({ user, isDark, setActiveMenu, onOpenSu
                         const facilityBaseline = cells.reduce((sum, c) => sum + c.baselineFill, 0);
                         const volumeSegments = [
                           ...(facilityBaseline > 0
-                            ? [{ key: "baseline", label: "Baseline Volume", value: facilityBaseline, color: BASELINE_SEGMENT_COLOR }]
+                            ? [{ ...VOLUME_METRICS.baseline, value: facilityBaseline }]
                             : []),
                           ...cells
                             .filter((c) => c.submittedFill > 0)
@@ -1967,7 +1967,7 @@ export default function DashboardContent({ user, isDark, setActiveMenu, onOpenSu
                                                     segments={cellVolumeSegments(c)}
                                                     segmentTotal={c.capacity}
                                                   />
-                                                  <GaugeLegend segments={cellVolumeSegments(c)} unit={c.unit} compact isDark={isDark} />
+                                                  <GaugeLegend segments={cellVolumeSegments(c)} unit={c.unit} capacity={c.capacity} compact isDark={isDark} />
                                                   <div style={{ fontSize: 11, marginTop: 6 }}>
                                                     <div><Text type="secondary">Type: </Text><Tag color={c.typeConfig.tag} style={{ margin: 0, fontSize: 10 }}>{c.type}</Tag></div>
                                                     <div>
@@ -2029,7 +2029,7 @@ export default function DashboardContent({ user, isDark, setActiveMenu, onOpenSu
                                                             segments={f.volumeSegments}
                                                             segmentTotal={f.totalCap}
                                                           />
-                                                          <GaugeLegend segments={f.volumeSegments} unit="m³" compact isDark={isDark} />
+                                                          <GaugeLegend segments={f.volumeSegments} unit="m³" capacity={f.totalCap} compact isDark={isDark} />
                                                           <div style={{ fontSize: 12, fontWeight: 600, marginTop: 4 }}>{f.name}</div>
                                                           <Text type="secondary" style={{ fontSize: 11 }}>{f.province}</Text>
                                                           {/* Full status mix, not just "n cells / m operational". */}
