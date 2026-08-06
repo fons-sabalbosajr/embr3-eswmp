@@ -2,6 +2,7 @@ import HaulerClientsEditor from "../../slf-monitoring/HaulerClientsEditor";
 import { ACCENT, CELL_STATUS_COLORS, CELL_STATUS_OPTIONS, DP_TYPE_OPTIONS, PERMIT_STATUS_OPTIONS, RECEIVING_FACILITY_TYPE_OPTIONS, UNIT_OPTIONS, WWTF_TYPE_OPTIONS, convertVolume, formatFileSize, getMediaKind, getUploadHeaders, isActiveCellStatus, isCompletedCellStatus, normalizeCellStatus, normalizeUnit, renderUploadStatusCell, resolveMediaOpenUrl, uploadEventToFileList } from "../../slf-monitoring/helpers.jsx";
 import { AlertOutlined, BankOutlined, BarChartOutlined, CalculatorOutlined, DatabaseOutlined, DeleteOutlined, DownloadOutlined, EditOutlined, EnvironmentOutlined, ExperimentOutlined, EyeOutlined, FileImageOutlined, FilePdfOutlined, InfoCircleOutlined, LinkOutlined, PlusOutlined, SafetyCertificateOutlined, TeamOutlined, UploadOutlined, WarningOutlined } from "@ant-design/icons";
 import { Button, Card, Checkbox, Col, Collapse, DatePicker, Divider, Empty, Form, Input, InputNumber, Modal, Popconfirm, Progress, Row, Select, Space, Spin, Switch, Table, Tabs, Tag, Tooltip, Upload, message } from "antd";
+import CellGaugeLegend from "../CellGaugeLegend";
 import { Cell as RCell, Pie, PieChart, Tooltip as RTooltip } from "recharts";
 
 // Add / edit facility form — the SLF Data Table's write path.
@@ -25,6 +26,9 @@ const CELL_ARRAY_FIELDS = [
 ];
 
 export default function SlfEditModal({
+  isDark,
+  canEdit,
+  driveDisabled,
   modalOpen,
   setModalOpen,
   editing,
@@ -2225,6 +2229,13 @@ export default function SlfEditModal({
                                 })()}
                               </Col>
                             </Row>
+
+                            {/* Colour key for the gauges above. Until this existed
+                                the arcs carried no explanation of what green/amber/
+                                red meant, nor what volume the percentage was made
+                                of. Colours come from the shared palette so they
+                                match every other gauge in the app. */}
+                            <CellGaugeLegend isDark={isDark} />
 
                             {/* Per-cell donut breakdown — grouped by cell type */}
                             {cellCount >= 2 &&

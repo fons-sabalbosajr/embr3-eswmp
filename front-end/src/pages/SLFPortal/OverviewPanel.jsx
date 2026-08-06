@@ -47,6 +47,7 @@ import {
 } from "recharts";
 import { isHazardousWasteType } from "../../utils/wasteCategories";
 import { isPermitNotRequired } from "../admin/slf-monitoring/helpers.jsx";
+import { VOLUME_METRICS } from "../../utils/volumeMetrics";
 
 const { Text } = Typography;
 
@@ -803,8 +804,8 @@ function OverviewPanel({
                 <YAxis tick={{ fontSize: 11 }} />
                 <RTooltip formatter={(value, name) => [formatUnitValue(value), name === "baseline" ? "Baseline Volume" : "Submitted Volume"]} />
                 <Legend />
-                <Bar dataKey="baseline" name="Baseline Volume" fill="#1677ff" radius={[4, 4, 0, 0]} isAnimationActive={false} />
-                <Bar dataKey="submitted" name="Submitted Volume" fill="#52c41a" radius={[4, 4, 0, 0]} isAnimationActive={false} />
+                <Bar dataKey="baseline" name="Baseline Volume" fill={VOLUME_METRICS.baseline.color} radius={[4, 4, 0, 0]} isAnimationActive={false} />
+                <Bar dataKey="submitted" name="Submitted Volume" fill={VOLUME_METRICS.submitted.color} radius={[4, 4, 0, 0]} isAnimationActive={false} />
               </BarChart>
             </ResponsiveContainer>
           </Card>

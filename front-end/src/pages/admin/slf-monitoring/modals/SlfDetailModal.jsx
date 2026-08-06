@@ -14,6 +14,7 @@ import { Bar, BarChart, CartesianGrid, Cell as RCell, Legend, Pie, PieChart, Res
 // The largest single region of the container. All fetching stays there; this
 // component only renders what it is given.
 export default function SlfDetailModal({
+  isDark,
   detailModal,
   setDetailModal,
   detailViewRecord,
