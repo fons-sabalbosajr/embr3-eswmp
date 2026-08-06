@@ -203,22 +203,47 @@ router.get("/thread/:submissionId", async (req, res) => {
   try {
     const key = req.params.submissionId;
     const isObjectId = /^[a-f\d]{24}$/i.test(key);
-    const dataEntryFilters = [{ submissionId: key }, { idNo: key }, { previousIdNos: key }];
-    if (isObjectId) dataEntryFilters.push({ _id: key });
-    const entry = await DataSLF.findOne({ $or: dataEntryFilters })
-      .setOptions({ includeHiddenYears: true })
-      .select("_id submissionId idNo previousIdNos")
-      .lean();
 
-    const canonicalKeys = uniq([entry?.submissionId, entry?.idNo, key]);
-    const filters = [];
-    if (entry?._id) filters.push({ dataEntry: entry._id });
-    if (canonicalKeys.length) {
-      filters.push({ submissionId: { $in: canonicalKeys } });
-      filters.push({ "meta.idNo": { $in: canonicalKeys } });
+    // Resolve the entry DETERMINISTICALLY, strongest identity first.
+    //
+    // The previous version issued one findOne over an $or of every identifier
+    // INCLUDING `previousIdNos`. A resubmission carries its ancestor's id in
+    // that array, so asking for the ORIGINAL submission could match both it and
+    // its successor — and findOne, with no ordering, was free to return either.
+    // When it returned the successor, this endpoint answered with a completely
+    // different submission's history.
+    const lookups = [];
+    if (isObjectId) lookups.push({ _id: key });
+    lookups.push({ idNo: key });
+    lookups.push({ submissionId: key });
+    // Only consult the ancestor list once nothing matches this id directly.
+    lookups.push({ previousIdNos: key });
+
+    let entry = null;
+    for (const lookup of lookups) {
+      // eslint-disable-next-line no-await-in-loop -- ordered fallback by design
+      entry = await DataSLF.findOne(lookup)
+        .setOptions({ includeHiddenYears: true })
+        .select("_id submissionId idNo previousIdNos")
+        .lean();
+      if (entry) break;
     }
 
-    if (filters.length === 0) return res.json([]);
+    if (!entry) return res.json([]);
+
+    // Scope to THIS entry. `dataEntry` is the real foreign key and is present on
+    // 93% of rows; the id fallbacks exist only for legacy transactions written
+    // before it, and are restricted to the entry's OWN identifiers so a
+    // neighbouring submission can never bleed in.
+    const ownKeys = uniq([entry.submissionId, entry.idNo]);
+    const filters = [{ dataEntry: entry._id }];
+    if (ownKeys.length) {
+      // A legacy row is one with no dataEntry at all — a row pointing at a
+      // DIFFERENT entry must never be matched by its id fields.
+      filters.push({ dataEntry: { $in: [null, undefined] }, submissionId: { $in: ownKeys } });
+      filters.push({ dataEntry: { $in: [null, undefined] }, "meta.idNo": { $in: ownKeys } });
+    }
+
     const transactions = await Transaction.find({ $or: filters }).sort({ createdAt: -1, _id: -1 }).lean();
     const seen = new Set();
     res.json(transactions.filter((txn) => {

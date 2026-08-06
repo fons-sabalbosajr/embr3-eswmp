@@ -281,17 +281,18 @@ const isResubmissionEntry = (e) =>
 
 const isSlfNonOperational = (statusOfSLF) => /non/i.test(String(statusOfSLF || ""));
 
-const submissionRank = (e) => (String(e?.status || "") === "acknowledged" ? 1 : 0);
-const resubmissionFirst = (a, b) => {
-  const ra = submissionRank(a);
-  const rb = submissionRank(b);
-  if (ra !== rb) return ra - rb;
-  const dateOf = (e) => {
-    const raw = isResubmissionEntry(e) ? (e.updatedAt || e.createdAt) : (e.createdAt || e.updatedAt);
-    const t = new Date(raw || 0).getTime();
-    return Number.isFinite(t) ? t : 0;
-  };
-  return dateOf(b) - dateOf(a);
+// STRICT chronological order: newest submission first.
+//
+// Replaces `resubmissionFirst`, which ranked unacknowledged records ahead of
+// acknowledged ones and compared updatedAt for resubmissions against createdAt
+// for everything else. That made the list non-chronological AND made a row move
+// when it was approved. `_id` breaks ties deterministically (ObjectIds are
+// monotonic), so the order is identical across refreshes and pages.
+const chronologicalNewestFirst = (a, b) => {
+  const at = new Date(a?.createdAt || a?.updatedAt || 0).getTime() || 0;
+  const bt = new Date(b?.createdAt || b?.updatedAt || 0).getTime() || 0;
+  if (at !== bt) return bt - at;
+  return String(b?._id || "").localeCompare(String(a?._id || ""));
 };
 
 async function resolveSlfRecordIds(slfName, { requireBaselineData = false, slfGenerator = null } = {}) {
@@ -3982,6 +3983,12 @@ router.get("/", optionalAuth, async (req, res) => {
             _id: "$_rowKey",
             entryIds: { $push: "$_id" },
             sortDate: { $max: "$createdAt" },
+            // Deterministic tiebreak. Bulk imports insert many rows in the same
+            // millisecond, and with only a date to sort by Mongo's order among
+            // ties is unspecified — so a row could appear on two pages, or none,
+            // between refreshes. ObjectIds increase monotonically, so the newest
+            // entry id orders ties stably and chronologically.
+            maxEntryId: { $max: "$_id" },
             count: { $sum: 1 },
             gPlaced: { $sum: "$_placed" },
             gTotal: { $sum: "$_etotal" },
@@ -4010,11 +4017,19 @@ router.get("/", optionalAuth, async (req, res) => {
         });
         pipeline.push({ $match: { _cat: placementFilter } });
       }
-      // #3: unacknowledged submissions and resubmissions first, then acknowledged.
-      // Within each tier, the most-recent relevant timestamp first (gSort = max of
-      // resubmittedAt/updatedAt for resubmissions, submittedAt/createdAt otherwise).
-      // Applied at the DB level so the order holds across the whole paginated set.
-      pipeline.push({ $sort: { gRank: 1, gSort: -1, sortDate: -1 } });
+      // STRICT chronological order: newest submission first, oldest last.
+      //
+      // This previously sorted by `gRank` first — unacknowledged submissions
+      // ahead of acknowledged ones — so the list was not chronological, and
+      // approving a submission flipped its rank and made the row JUMP to a
+      // different part of the table. It also sorted on `gSort`, which mixed
+      // updatedAt (for resubmissions) with createdAt (for everything else), so
+      // the values being compared were not the same measurement.
+      //
+      // Ordering is now purely by submission time with a stable id tiebreak.
+      // The `isResubmission` flag is still returned, so the table can highlight
+      // resubmissions without them overriding the order.
+      pipeline.push({ $sort: { sortDate: -1, maxEntryId: -1 } });
       pipeline.push({
         $facet: {
           // exportAll → no skip/limit (every group). Otherwise the current page.
@@ -4084,7 +4099,11 @@ router.get("/", optionalAuth, async (req, res) => {
         (g.entryIds || [])
           .map((id) => byId.get(String(id)))
           .filter(Boolean)
-          .sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0))
+          .sort(
+            (a, b) =>
+              new Date(b.createdAt || 0) - new Date(a.createdAt || 0) ||
+              String(b._id).localeCompare(String(a._id)),
+          )
           .forEach((e) => rows.push(enrich(e)));
       });
 
@@ -4093,7 +4112,10 @@ router.get("/", optionalAuth, async (req, res) => {
 
     let query = DataSLF.find(filter)
       .populate("slfGenerator", SLF_GENERATOR_REF_FIELDS)
-      .sort({ createdAt: -1 });
+      // `_id` tiebreak: bulk imports share a createdAt millisecond, and without
+      // it the order among ties is unspecified — rows could repeat or vanish
+      // across pages.
+      .sort({ createdAt: -1, _id: -1 });
     if (listMode) {
       // cellUsage=true → lean projection used only for SLF Data Table cell-fill
       // enrichment. Returns just the fields buildFacilityCellUsage needs, slashing
@@ -4175,7 +4197,7 @@ router.get("/", optionalAuth, async (req, res) => {
                 trucks: [],
               }),
         }))
-        .sort(resubmissionFirst);
+        .sort(chronologicalNewestFirst);
       res.json(decorated);
       return;
     }
