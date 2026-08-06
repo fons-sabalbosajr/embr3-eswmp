@@ -68,6 +68,30 @@ function readQueryParam(url, key) {
 }
 
 /**
+ * The ORIGINAL filename embedded in a signed URL (`?name=`), or the stored local
+ * file name with its `.enc` envelope stripped. Returns "" when the URL carries
+ * no real name.
+ *
+ * Unlike getMediaFileName this never falls back to the last path segment, which
+ * for restricted media is an opaque storage id — callers that would rather show
+ * a generic label than an id use this.
+ */
+export function getEmbeddedMediaName(url) {
+  const embedded = readQueryParam(url, "name");
+  if (embedded) return embedded;
+
+  const localMatch = String(url || "").match(SECURE_LOCAL_PATH);
+  if (localMatch) {
+    try {
+      return decodeURIComponent(localMatch[1]).replace(/\.enc$/i, "");
+    } catch {
+      return localMatch[1].replace(/\.enc$/i, "");
+    }
+  }
+  return "";
+}
+
+/**
  * Best-known display name for a stored file.
  * @param {string} url
  * @param {string} [knownName] a name the caller already has (always wins)
