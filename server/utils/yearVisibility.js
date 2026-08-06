@@ -141,7 +141,23 @@ function createYearVisibilityPlugin({
       if (!hasCutoff && !hasHiddenYears) return;
 
       const filter = buildFindFilter(config);
-      if (filter) this.where(filter);
+      // `.and([filter])`, NOT `.where(filter)`.
+      //
+      // The year filter is itself a top-level `$or`. Mongoose MERGES `$or`
+      // arrays, so `.where()` appended these clauses to any `$or` the caller had
+      // already set — turning the year rule into an ALTERNATIVE instead of a
+      // restriction. A query like
+      //     find({ $or: [{ idNo: key }, { submissionId: key }] })
+      // silently became
+      //     find({ $or: [{ idNo: key }, { submissionId: key },
+      //                  { dataYear: { $exists: false } }, ...] })
+      // which matches essentially every record, so findOne returned an arbitrary
+      // document and find returned the whole collection. Two call sites had
+      // already worked around this by hand-wrapping their own `$or` in `$and`.
+      //
+      // `$and` composition always narrows and can never interact with a caller's
+      // `$or`, so every existing and future query is protected here instead.
+      if (filter) this.and([filter]);
     }
 
     [
