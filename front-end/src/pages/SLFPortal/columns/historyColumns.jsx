@@ -1,0 +1,285 @@
+import { getCellTypeConfig } from "../../../utils/cellVisuals";
+import { MASK_PLACEHOLDER } from "../../../utils/sensitiveMask";
+import { formatStatusSummary } from "../submissionGrouping";
+import { CheckCircleOutlined, CloseCircleOutlined, DeleteOutlined, EditOutlined, EyeOutlined, SyncOutlined, UndoOutlined } from "@ant-design/icons";
+import { Button, Space, Tag, Tooltip } from "antd";
+import dayjs from "dayjs";
+
+// Column definitions for the Submission History table.
+//
+// `maskSensitive` mirrors the portal setting that hides volumes/capacity; the
+// four callbacks open the detail modal, raise a revert request, edit a reverted
+// row, and hide an entry from the portal user’s own history.
+export function makeHistoryColumns({
+  submissions,
+  trucks,
+  maskSensitive,
+  openHistoryDetail,
+  openRevertModal,
+  handleEditRevertedRow,
+  handleHideSubmission,
+}) {
+  return [
+      { title: "#", key: "index", width: 50, render: (_, __, i) => i + 1 },
+      {
+        title: "ID No.",
+        dataIndex: "idNo",
+        key: "idNo",
+        // A group row shows the batch identifier + how many submissions it holds.
+        render: (v, r) =>
+          r.isGroup ? (
+            <Space direction="vertical" size={0}>
+              <Text strong style={{ fontSize: 13 }}>
+                {r.groupId || "Submission group"}
+              </Text>
+              <Tag color="geekblue" style={{ fontSize: 11 }}>
+                {r.count} submissions
+              </Tag>
+            </Space>
+          ) : (
+            v || "—"
+          ),
+      },
+      {
+        title: "Date of Disposal",
+        dataIndex: "dateOfDisposal",
+        key: "dateOfDisposal",
+        // For a group, show the reporting period its children actually span.
+        render: (v, r) => {
+          if (!r.isGroup) return v ? dayjs(v).format("MM/DD/YYYY") : "—";
+          if (!r.periodStart) return "—";
+          const from = dayjs(r.periodStart).format("MM/DD/YYYY");
+          const to = dayjs(r.periodEnd).format("MM/DD/YYYY");
+          return from === to ? from : `${from} – ${to}`;
+        },
+      },
+      {
+        title: "Company / Address",
+        key: "companyAddr",
+        render: (_, r) => (
+          <div>
+            <Text strong style={{ fontSize: 13 }}>
+              {r.lguCompanyName}
+            </Text>
+            {r.address && (
+              <div style={{ fontSize: 12, color: "#888" }}>
+                {maskSensitive ? MASK_PLACEHOLDER : r.address}
+              </div>
+            )}
+          </div>
+        ),
+      },
+      {
+        title: "Type",
+        dataIndex: "companyType",
+        key: "companyType",
+        render: (v) => <Tag color={v === "LGU" ? "blue" : "green"}>{v}</Tag>,
+      },
+      {
+        title: "Entries",
+        key: "truckCount",
+        width: 70,
+        // Denormalized on the record; the list no longer ships trucks[].
+        render: (_, r) => Number(r.truckCount || 0),
+      },
+      {
+        title: "Cell Assigned",
+        key: "cellsAssigned",
+        width: 200,
+        // Which cells this submission's waste was actually placed into. Resolved
+        // SERVER-side from each truck/vehicle's canonical cellIndex, so a cell an
+        // admin has since renamed shows its CURRENT name, not the copy frozen at
+        // submit time. A group row unions its children's cells.
+        render: (_, r) => {
+          const cells = r.isGroup
+            ? Object.values(
+                (r.children || []).reduce((acc, child) => {
+                  (child.cellsAssigned || []).forEach((c) => {
+                    if (acc[c.cellName]) acc[c.cellName].count += c.count;
+                    else acc[c.cellName] = { ...c };
+                  });
+                  return acc;
+                }, {}),
+              )
+            : r.cellsAssigned || [];
+          const unplaced = r.isGroup
+            ? (r.children || []).reduce((n, c) => n + Number(c.unplacedCount || 0), 0)
+            : Number(r.unplacedCount || 0);
+
+          if (!cells.length && !unplaced) {
+            return <Text type="secondary" style={{ fontSize: 12 }}>—</Text>;
+          }
+          return (
+            <Space size={4} wrap>
+              {cells.map((c) => (
+                <Tag
+                  key={c.cellName}
+                  color={getCellTypeConfig(c.cellType).tag}
+                  style={{ marginInlineEnd: 0, fontSize: 11 }}
+                >
+                  {c.cellName}
+                  {c.count > 1 ? ` ×${c.count}` : ""}
+                </Tag>
+              ))}
+              {unplaced > 0 && (
+                <Tooltip title="Waste in this submission has not been assigned to a cell yet.">
+                  <Tag color="warning" style={{ marginInlineEnd: 0, fontSize: 11 }}>
+                    {unplaced} unassigned
+                  </Tag>
+                </Tooltip>
+              )}
+            </Space>
+          );
+        },
+      },
+      {
+        title: "Status",
+        dataIndex: "status",
+        key: "status",
+        filters: [
+          { text: "Pending", value: "pending" },
+          { text: "Approved", value: "acknowledged" },
+          { text: "Rejected", value: "rejected" },
+          { text: "Reverted", value: "reverted" },
+        ],
+        onFilter: (value, record) =>
+          // A group matches the filter when ANY child has that status, so filtering
+          // never hides a group that genuinely contains the status you asked for.
+          record.isGroup
+            ? Object.keys(record.statusCounts || {}).includes(value)
+            : record.status === value,
+        render: (v, r) => {
+          // Mixed-status group: list each status with its count rather than
+          // stamping the whole group with one child's status.
+          if (r.isGroup) {
+            return (
+              <Space direction="vertical" size={2}>
+                {formatStatusSummary(r.statusCounts).map((line) => (
+                  <Tag key={line} color={r.isMixedStatus ? "default" : "blue"} style={{ fontSize: 11 }}>
+                    {line.toUpperCase()}
+                  </Tag>
+                ))}
+              </Space>
+            );
+          }
+          if (v === "acknowledged") {
+            return (
+              <Space direction="vertical" size={2}>
+                <Tag icon={<CheckCircleOutlined />} color="success">
+                  APPROVED
+                </Tag>
+                {r.revertRequested && (
+                  <Tag color="orange" style={{ fontSize: 11 }}>
+                    Revert Requested
+                  </Tag>
+                )}
+              </Space>
+            );
+          }
+          if (v === "rejected") {
+            return (
+              <Tag icon={<CloseCircleOutlined />} color="error">
+                REJECTED
+              </Tag>
+            );
+          }
+          if (v === "reverted" || v === "editApproved") {
+            return (
+              <Space direction="vertical" size={2}>
+                <Tag icon={<UndoOutlined />} color="volcano">
+                  REVERTED — NEEDS EDIT
+                </Tag>
+                {r.revertReason && (
+                  <Text type="secondary" style={{ fontSize: 10 }}>
+                    {r.revertReason}
+                  </Text>
+                )}
+              </Space>
+            );
+          }
+          if (v === "revert_requested") {
+            return (
+              <Tag icon={<SyncOutlined />} color="orange">
+                REVERT REQUESTED
+              </Tag>
+            );
+          }
+          return (
+            <Tag
+              icon={<SyncOutlined spin />}
+              color="warning"
+              className="status-pending"
+            >
+              PENDING REVIEW
+            </Tag>
+          );
+        },
+      },
+      {
+        title: "Submitted",
+        dataIndex: "createdAt",
+        key: "createdAt",
+        render: (v) => dayjs(v).format("MMM D, YYYY h:mm A"),
+      },
+      {
+        title: "Actions",
+        key: "actions",
+        width: 150,
+        render: (_, r) => (
+          <Space size="small">
+            <Tooltip title="View Details">
+              <Button
+                type="text"
+                size="small"
+                icon={<EyeOutlined />}
+                onClick={() => openHistoryDetail(r)}
+                style={{ color: "#1a3353" }}
+              />
+            </Tooltip>
+            {r.status === "acknowledged" &&
+              !r.revertRequested &&
+              !r.editRequested && (
+                <Tooltip title="Request Edit">
+                  <Button
+                    type="text"
+                    size="small"
+                    icon={<UndoOutlined />}
+                    onClick={() => openRevertModal(r)}
+                    style={{ color: "#fa8c16" }}
+                  />
+                </Tooltip>
+              )}
+            {r.editRequested &&
+              r.status !== "reverted" &&
+              r.status !== "editApproved" && (
+                <Tag color="processing" style={{ fontSize: 11 }}>
+                  Edit Pending
+                </Tag>
+              )}
+            {(r.status === "reverted" || r.status === "editApproved") && (
+              <Tooltip title="Edit & Resubmit">
+                <Button
+                  type="primary"
+                  size="small"
+                  icon={<EditOutlined />}
+                  onClick={() => handleEditRevertedRow(r)}
+                  style={{ background: "#fa541c", borderColor: "#fa541c" }}
+                >
+                  Edit
+                </Button>
+              </Tooltip>
+            )}
+            <Tooltip title="Remove from my history (admin keeps a record)">
+              <Button
+                type="text"
+                size="small"
+                danger
+                icon={<DeleteOutlined />}
+                onClick={() => handleHideSubmission(r)}
+              />
+            </Tooltip>
+          </Space>
+        ),
+      },
+  ];
+}
