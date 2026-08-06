@@ -491,6 +491,39 @@ function extractDriveFileId(value) {
  * @returns {Promise<{ accessible: boolean, reason: string, message: string,
  *   fileId: string|null, meta: object|null }>}
  */
+/**
+ * Fetch just the display metadata for a Drive file (name / MIME type / size).
+ *
+ * Lighter than validateDriveFile: no trash/permission reporting, no error
+ * classification — it is used to label restricted media whose proxy URL carries
+ * an opaque file id with no extension, so the UI can tell a PDF from an image.
+ * Returns null when the file is unreachable; callers degrade gracefully.
+ */
+async function getDriveFileMeta(fileId) {
+  if (!fileId) return null;
+  let clients;
+  try {
+    clients = getDriveClients();
+  } catch {
+    return null;
+  }
+
+  for (const client of clients) {
+    try {
+      const response = await client.drive.files.get({
+        fileId,
+        fields: "id,name,mimeType,size",
+        supportsAllDrives: true,
+      });
+      const data = response.data || {};
+      return { fileName: data.name || "", mimeType: data.mimeType || "", size: Number(data.size) || 0 };
+    } catch (error) {
+      if (!shouldTryNextClient(error)) return null;
+    }
+  }
+  return null;
+}
+
 async function validateDriveFile(urlOrId) {
   const fileId = extractDriveFileId(urlOrId);
   if (!fileId) {
@@ -604,6 +637,7 @@ module.exports = {
   getDriveConfigStatus,
   extractDriveFileId,
   validateDriveFile,
+  getDriveFileMeta,
   getDriveClients,
   classifyDriveError,
   decorateDriveError,

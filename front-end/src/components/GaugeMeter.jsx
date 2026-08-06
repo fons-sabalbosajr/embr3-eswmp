@@ -31,6 +31,29 @@ export function computeGaugePercent({ usedCapacity, totalCapacity, remainingCapa
   return Math.min(100, Math.max(0, pct));
 }
 
+/**
+ * Normalise a contribution list into drawable arc segments.
+ *
+ * Each segment keeps its OWN colour so a reader can tell at a glance which
+ * volume came from where (baseline vs. individual cells) instead of seeing one
+ * undifferentiated bar. Zero/negative/non-finite contributions are dropped so
+ * they cannot produce invisible-but-present arcs.
+ *
+ * @param {Array<{key?:string,label:string,value:number,color:string}>} segments
+ * @param {number|null} total denominator; defaults to the sum of contributions
+ * @returns {{ items: Array, total: number, used: number }}
+ */
+export function normalizeGaugeSegments(segments, total = null) {
+  const items = (segments || [])
+    .map((segment) => ({ ...segment, value: Number(segment?.value) }))
+    .filter((segment) => Number.isFinite(segment.value) && segment.value > 0);
+
+  const used = items.reduce((sum, segment) => sum + segment.value, 0);
+  const denominator = Number.isFinite(Number(total)) && Number(total) > 0 ? Number(total) : used;
+
+  return { items, total: denominator, used };
+}
+
 export default function GaugeMeter({
   percent,
   label,
@@ -40,6 +63,14 @@ export default function GaugeMeter({
   size = 132,
   thickness = 12,
   noDataText = "No capacity data available",
+  // ── Multi-contribution mode ──
+  // `segments` = [{ key, label, value, color }]. When supplied (and non-empty)
+  // the arc is drawn as one coloured band per contribution instead of a single
+  // solid arc, and `segmentTotal` becomes the denominator (defaults to the sum).
+  // `percent` is then derived from the segments, so callers do not have to keep
+  // the two in sync.
+  segments = null,
+  segmentTotal = null,
   // Font sizes are configurable so the same gauge works both full-size and as a
   // compact in-table chart without oversized text.
   percentFontSize = 20,
@@ -52,8 +83,16 @@ export default function GaugeMeter({
   fillStyle = "solid",
   fillOpacity = 1,
 }) {
-  const hasData = percent != null && Number.isFinite(Number(percent));
-  const pct = hasData ? Math.min(100, Math.max(0, Number(percent))) : 0;
+  const segmentData = normalizeGaugeSegments(segments, segmentTotal);
+  const hasSegments = segmentData.items.length > 0 && segmentData.total > 0;
+  // Segment mode owns the percentage so the arc and the centre label can never
+  // disagree with each other.
+  const effectivePercent = hasSegments
+    ? Math.min(100, (segmentData.used / segmentData.total) * 100)
+    : percent;
+
+  const hasData = effectivePercent != null && Number.isFinite(Number(effectivePercent));
+  const pct = hasData ? Math.min(100, Math.max(0, Number(effectivePercent))) : 0;
   // Max 2 decimals, without trailing ".00" noise.
   const pctLabel = hasData ? `${parseFloat(pct.toFixed(2))}%` : null;
 
@@ -88,7 +127,42 @@ export default function GaugeMeter({
             strokeLinecap="round"
             strokeDasharray={fillStyle === "dashed" || fillStyle === "none" ? "3 3" : undefined}
           />
-          {showArc && (
+          {showArc && hasSegments && (
+            <g opacity={fillOpacity}>
+              {/* One arc band per contribution. Each band is positioned with a
+                  negative dash offset (its start along the arc) and sized by its
+                  own dash length, so the bands abut without overlapping. */}
+              {(() => {
+                let consumed = 0;
+                return segmentData.items.map((segment, index) => {
+                  const startFraction = Math.min(1, consumed / segmentData.total);
+                  consumed += segment.value;
+                  const endFraction = Math.min(1, consumed / segmentData.total);
+                  const bandLength = (endFraction - startFraction) * arcLength;
+                  if (bandLength <= 0) return null;
+                  return (
+                    <path
+                      key={segment.key || `${segment.label}-${index}`}
+                      d={arcPath}
+                      fill="none"
+                      stroke={segment.color}
+                      strokeWidth={thickness}
+                      strokeLinecap="butt"
+                      strokeDasharray={`${bandLength} ${arcLength}`}
+                      strokeDashoffset={-startFraction * arcLength}
+                    >
+                      <title>
+                        {`${segment.label}: ${Number(segment.value).toLocaleString()} (${parseFloat(
+                          ((segment.value / segmentData.total) * 100).toFixed(2),
+                        )}%)`}
+                      </title>
+                    </path>
+                  );
+                });
+              })()}
+            </g>
+          )}
+          {showArc && !hasSegments && (
             <g opacity={fillOpacity}>
               {/* Length-limited to `pct` by the dashoffset trick, then optionally
                   re-dashed for the "dashed" state via a stroke on a clipped copy. */}
@@ -139,7 +213,9 @@ export default function GaugeMeter({
             bottom: 0,
             fontSize: hasData ? percentFontSize : noDataFontSize,
             fontWeight: hasData ? 700 : 500,
-            color: hasData ? color : "#8c8c8c",
+            // In segment mode no single colour represents the whole arc, so the
+            // readout stays neutral instead of borrowing one contribution's hue.
+            color: !hasData ? "#8c8c8c" : hasSegments ? "#434343" : color,
             lineHeight: 1.15,
             padding: "0 6px",
           }}

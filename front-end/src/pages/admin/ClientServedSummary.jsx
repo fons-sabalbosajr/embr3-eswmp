@@ -1,10 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Row, Col, Card, Statistic, Typography, Spin, Alert, Empty, Table, Tag, Space } from "antd";
+import { Row, Col, Card, Statistic, Typography, Skeleton, Alert, Empty, Table, Tag, Space } from "antd";
 import { TeamOutlined, BankOutlined, EnvironmentOutlined, ApartmentOutlined, DatabaseOutlined } from "@ant-design/icons";
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip as RTooltip, ResponsiveContainer, Cell as RCell,
 } from "recharts";
-import api from "../../api";
+import { loadRelationshipMap, peekRelationshipMap } from "../../utils/relationshipMapCache";
 
 const { Text } = Typography;
 
@@ -25,17 +25,25 @@ export default function ClientServedSummary() {
 
   useEffect(() => {
     aliveRef.current = true;
-    const controller = new AbortController();
-    setLoading(true);
+
+    // Served through the shared loader so the LGU / Private tabs reuse these
+    // exact payloads instead of re-fetching them (see relationshipMapCache).
+    const cachedLgu = peekRelationshipMap("LGU");
+    const cachedPriv = peekRelationshipMap("Private Sector");
+    if (cachedLgu && cachedPriv) {
+      setLgu(cachedLgu);
+      setPriv(cachedPriv);
+      setLoading(false);
+    } else {
+      setLoading(true);
+    }
     setError(false);
-    Promise.all([
-      api.get("/slf-clients/relationship-map", { params: { type: "LGU" }, signal: controller.signal }),
-      api.get("/slf-clients/relationship-map", { params: { type: "Private Sector" }, signal: controller.signal }),
-    ])
-      .then(([lguRes, privRes]) => {
+
+    Promise.all([loadRelationshipMap("LGU"), loadRelationshipMap("Private Sector")])
+      .then(([lguData, privData]) => {
         if (!aliveRef.current) return;
-        setLgu(lguRes.data || null);
-        setPriv(privRes.data || null);
+        setLgu(lguData);
+        setPriv(privData);
       })
       .catch((err) => {
         if (err?.code === "ERR_CANCELED" || err?.name === "CanceledError") return;
@@ -46,7 +54,6 @@ export default function ClientServedSummary() {
       });
     return () => {
       aliveRef.current = false;
-      controller.abort();
     };
   }, []);
 
@@ -110,7 +117,27 @@ export default function ClientServedSummary() {
     };
   }, [lgu, priv]);
 
-  if (loading) return <div style={{ textAlign: "center", padding: "48px 0" }}><Spin /></div>;
+  // Skeletons rather than a bare spinner: the layout is stable while loading, so
+  // the panel does not jump when the (large) payload lands.
+  if (loading) {
+    return (
+      <div>
+        <Row gutter={[10, 10]} style={{ marginBottom: 12 }}>
+          {[0, 1, 2, 3, 4].map((index) => (
+            <Col xs={12} md={8} xl={4} key={index} style={{ flex: "1 1 0", minWidth: 150 }}>
+              <Card size="small" style={{ borderRadius: 8 }} styles={{ body: { padding: "10px 12px" } }}>
+                <Skeleton active paragraph={{ rows: 1, width: "60%" }} title={{ width: "80%" }} />
+              </Card>
+            </Col>
+          ))}
+        </Row>
+        <Row gutter={[12, 12]}>
+          <Col xs={24} lg={12}><Card size="small" style={{ borderRadius: 10 }} styles={{ body: { height: 300 } }}><Skeleton active paragraph={{ rows: 6 }} /></Card></Col>
+          <Col xs={24} lg={12}><Card size="small" style={{ borderRadius: 10 }} styles={{ body: { height: 300 } }}><Skeleton active paragraph={{ rows: 6 }} /></Card></Col>
+        </Row>
+      </div>
+    );
+  }
   if (error) return <Alert type="error" showIcon message="Could not load served-client summary" description="Please try again shortly." />;
 
   const tile = (title, value, color, icon, suffix) => (

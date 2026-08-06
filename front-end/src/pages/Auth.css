@@ -225,15 +225,8 @@
   box-shadow: 0 10px 24px rgba(173, 78, 0, 0.08);
 }
 
-.dev-pin-input {
-  width: 100%;
-}
-
-@media (max-width: 640px) {
-  .dev-pin-input {
-    font-size: 16px;
-  }
-}
+/* The single PIN textbox was replaced by the segmented PinInput component,
+   which sizes its own boxes fluidly (see components/PinInput.jsx). */
 
 /* Paired EMB + Bagong Pilipinas brand marks */
 .auth-brand-logos {

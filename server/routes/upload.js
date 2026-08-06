@@ -5,7 +5,13 @@ const fs = require("fs/promises");
 const os = require("os");
 const path = require("path");
 const crypto = require("crypto");
-const { uploadFilePathToDrive, streamDriveFile, extractDriveFileId } = require("../utils/googleDrive");
+const {
+  uploadFilePathToDrive,
+  streamDriveFile,
+  extractDriveFileId,
+  getDriveFileMeta,
+} = require("../utils/googleDrive");
+const cache = require("../utils/serverCache");
 const {
   saveLocalUpload,
   resolveLocalUpload,
@@ -29,15 +35,68 @@ function getPublicApiBasePath() {
   return (process.env.PUBLIC_API_BASE_PATH || "/eswm-pipeline/api").replace(/\/+$/, "");
 }
 
+// Minimal extension → MIME map covering everything `fileFilter` accepts. The
+// restricted-media proxy MUST send a real Content-Type: without one Express
+// falls back to application/octet-stream, which makes browsers download a PDF
+// instead of rendering it, breaking every in-app preview and thumbnail.
+const MIME_BY_EXTENSION = {
+  ".pdf": "application/pdf",
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".gif": "image/gif",
+  ".webp": "image/webp",
+  ".bmp": "image/bmp",
+  ".tif": "image/tiff",
+  ".tiff": "image/tiff",
+  ".svg": "image/svg+xml",
+  ".doc": "application/msword",
+  ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  ".xls": "application/vnd.ms-excel",
+  ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  ".ppt": "application/vnd.ms-powerpoint",
+  ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  ".csv": "text/csv",
+  ".txt": "text/plain",
+};
+
+/**
+ * Content type for a stored local file. Encrypted uploads keep their original
+ * extension before the `.enc` suffix (see localUploadStorage.saveLocalUpload),
+ * so the real type is recoverable without any extra bookkeeping.
+ */
+function mimeForStoredFile(fileName) {
+  const withoutEnvelope = String(fileName || "").replace(/\.enc$/i, "");
+  const extension = path.extname(withoutEnvelope).toLowerCase();
+  return MIME_BY_EXTENSION[extension] || "application/octet-stream";
+}
+
+/** RFC 6266 inline disposition; keeps the original name for downloads. */
+function setInlineDisposition(res, fileName) {
+  const safe = String(fileName || "file").replace(/["\\\r\n]/g, "_");
+  res.setHeader(
+    "Content-Disposition",
+    `inline; filename="${safe}"; filename*=UTF-8''${encodeURIComponent(safe)}`,
+  );
+}
+
 // Build a signed, unguessable URL for restricted (admin-side) media. Browser
 // <img> tags cannot send auth headers, so access is gated by this server-minted
 // signature; the underlying Drive file is NOT public and local files are
 // encrypted at rest. See utils/mediaSecurity.js.
-function buildSignedMediaUrl(kind, id) {
+//
+// `originalName` is appended as a plain `name` query param. It is NOT part of
+// the signed ref (so it cannot weaken or invalidate the signature) and exists
+// purely so the stored URL is self-describing: the client can tell a PDF from
+// an image without a round trip. Drive-backed refs are opaque file ids with no
+// extension, which is exactly why previews used to fall back to "preview not
+// available" for every restricted upload.
+function buildSignedMediaUrl(kind, id, originalName = "") {
   const ref = `${kind}:${id}`;
   const sig = signMediaRef(ref);
   const encodedId = encodeURIComponent(id);
-  return `${getPublicApiBasePath()}/upload/secure/${kind}/${encodedId}?sig=${sig}`;
+  const nameParam = originalName ? `&name=${encodeURIComponent(originalName)}` : "";
+  return `${getPublicApiBasePath()}/upload/secure/${kind}/${encodedId}?sig=${sig}${nameParam}`;
 }
 
 // Authorize access to restricted media: either a valid server-minted signature,
@@ -85,6 +144,10 @@ router.get("/secure/local/:fileName", async (req, res) => {
   try {
     const buffer = await readLocalUpload(req.params.fileName);
     res.setHeader("Cache-Control", "private, max-age=3600");
+    // Without an explicit type the browser downloads PDFs/images instead of
+    // rendering them inline, which broke in-app previews and thumbnails.
+    res.setHeader("Content-Type", mimeForStoredFile(req.params.fileName));
+    setInlineDisposition(res, req.query.name || req.params.fileName.replace(/\.enc$/i, ""));
     res.send(buffer);
   } catch {
     res.status(404).json({ message: "File not found" });
@@ -99,12 +162,75 @@ router.get("/secure/drive/:fileId", async (req, res) => {
   }
   try {
     res.setHeader("Cache-Control", "private, max-age=3600");
+    // streamDriveFile sets Content-Type from Drive metadata; the inline
+    // disposition keeps PDFs rendering in-page rather than downloading.
+    if (req.query.name) setInlineDisposition(res, req.query.name);
     await streamDriveFile(fileId, res);
   } catch (err) {
     if (!res.headersSent) {
       res.status(502).json({ message: `Unable to load file: ${err.message}` });
     }
   }
+});
+
+/**
+ * POST /api/upload/media-meta
+ * Body: { urls: string[] }  →  { results: { [url]: { fileName, mimeType } } }
+ *
+ * Labels restricted media whose URL carries no file extension. New uploads embed
+ * `?name=` (see buildSignedMediaUrl) and need no lookup; this exists for files
+ * stored BEFORE that, where the proxy path is only an opaque Drive id. Resolved
+ * in one batched call instead of one request per thumbnail, and memoised so a
+ * gallery re-render does not re-hit Drive.
+ */
+const MEDIA_META_TTL_MS = 6 * 60 * 60 * 1000; // names/types never change for a stored file
+const MEDIA_META_MAX_URLS = 200;
+
+router.post("/media-meta", authMiddleware, async (req, res) => {
+  const urls = Array.isArray(req.body?.urls) ? req.body.urls.slice(0, MEDIA_META_MAX_URLS) : [];
+  const results = {};
+
+  const pending = [];
+  for (const url of urls) {
+    if (typeof url !== "string" || !url) continue;
+
+    // Local proxy refs already carry their extension in the stored file name.
+    const localMatch = url.match(/\/upload\/secure\/local\/([^/?#]+)/);
+    if (localMatch) {
+      const fileName = decodeURIComponent(localMatch[1]).replace(/\.enc$/i, "");
+      results[url] = { fileName, mimeType: mimeForStoredFile(fileName) };
+      continue;
+    }
+
+    const driveMatch = url.match(/\/upload\/secure\/drive\/([^/?#]+)/);
+    if (!driveMatch) continue;
+    const fileId = decodeURIComponent(driveMatch[1]);
+
+    const cacheKey = `media-meta:${fileId}`;
+    const cached = cache.get(cacheKey);
+    if (cached) {
+      results[url] = cached;
+      continue;
+    }
+    pending.push({ url, fileId, cacheKey });
+  }
+
+  // Bounded concurrency: a large gallery must not open 200 sockets to Drive.
+  const CONCURRENCY = 8;
+  for (let index = 0; index < pending.length; index += CONCURRENCY) {
+    const slice = pending.slice(index, index + CONCURRENCY);
+    // eslint-disable-next-line no-await-in-loop -- deliberate throttling
+    const metas = await Promise.all(slice.map((item) => getDriveFileMeta(item.fileId).catch(() => null)));
+    metas.forEach((meta, offset) => {
+      const item = slice[offset];
+      if (!meta) return;
+      const value = { fileName: meta.fileName, mimeType: meta.mimeType };
+      cache.set(item.cacheKey, value, MEDIA_META_TTL_MS);
+      results[item.url] = value;
+    });
+  }
+
+  res.json({ results });
 });
 
 const storage = multer.diskStorage({
@@ -174,7 +300,7 @@ router.post("/", authMiddleware, requireDriveActive, uploadSingle(upload, "file"
           false // makePublic = false → private, served via proxy
         );
         fileId = driveResult.fileId;
-        viewUrl = buildSignedMediaUrl("drive", fileId);
+        viewUrl = buildSignedMediaUrl("drive", fileId, req.file.originalname);
       } catch (driveErr) {
         console.warn(`Restricted Drive upload failed; storing encrypted locally: ${driveErr.message}`);
         writeLog("warn", "drive.upload.fallback", {
@@ -184,7 +310,7 @@ router.post("/", authMiddleware, requireDriveActive, uploadSingle(upload, "file"
           meta: { restricted: true, storage: "local", driveErrorCode: driveErr.driveErrorCode || "unknown", retryable: !!driveErr.retryable, size: req.file.size },
         });
         const localResult = await saveLocalUpload(req.file, { encrypt: true });
-        viewUrl = buildSignedMediaUrl("local", localResult.fileName);
+        viewUrl = buildSignedMediaUrl("local", localResult.fileName, req.file.originalname);
         storage = "local";
       }
     } else {

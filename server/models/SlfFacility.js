@@ -115,6 +115,15 @@ const slfFacilitySchema = new mongoose.Schema(
     cellNotes: [{ type: String, trim: true }], // per-cell notes (used for Under Construction / Reserved Cell status)
     cellFillValues: [threeDecimalNumber],
     cellFillUnits: [{ type: String, enum: ["m³", "tons", "m3"], default: "tons" }],
+    // Provenance split of cellFillValues, in the SAME unit as cellFillUnits.
+    // Derived — written only by utils/cellOccupancy.js via refreshFacilityCellOccupancy.
+    // These exist so every view (admin dashboard gauges, portal cell utilization,
+    // Baseline Breakdown, Submitted Volume tile) reads ONE set of numbers instead
+    // of each recomputing its own and disagreeing.
+    cellFillBaselineValues: [threeDecimalNumber],
+    cellFillSubmittedValues: [threeDecimalNumber],
+    baselineVolumeTotal: threeDecimalNumber,
+    submittedVolumeTotal: threeDecimalNumber,
     estimatedVolumeWaste: threeDecimalNumber,
     noOfLeachatePond: { type: Number },
     numberOfGasVents: { type: Number },

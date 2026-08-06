@@ -15,6 +15,7 @@ import api from "../../api";
 import { exportToExcel } from "../../utils/exportExcel";
 import { withSizeChanger } from "../../utils/tablePagination";
 import { getSocket } from "../../utils/socket";
+import { invalidateRelationshipMap } from "../../utils/relationshipMapCache";
 
 const { Title, Text } = Typography;
 
@@ -58,8 +59,17 @@ const regionTag = (rc) =>
   : rc === "outside-region-3" ? <Tag color="blue" bordered={false}>Outside R3</Tag>
   : <Tag color="orange" bordered={false}>Unclassified</Tag>;
 
-const portalUserLabel = (u) =>
-  u ? (`${u.firstName || ""} ${u.lastName || ""}`.trim() || u.companyName || u.email || u.username) : "";
+// A client is served by an SLF, not by a person, so this section identifies the
+// linked portal account by its ASSIGNED SLF NAME. The operator name is only a
+// fallback for accounts that have no SLF assigned yet.
+const portalUserLabel = (u) => {
+  if (!u) return "";
+  const slfNames = (Array.isArray(u.assignedSlfName) ? u.assignedSlfName : [])
+    .map((name) => String(name || "").trim())
+    .filter(Boolean);
+  if (slfNames.length) return slfNames.join(", ");
+  return `${u.firstName || ""} ${u.lastName || ""}`.trim() || u.companyName || u.email || u.username || "";
+};
 
 // Format a timestamp in the official application timezone (Asia/Manila) as
 // "July 21, 2026, 1:30 PM". Returns "Never Synced" when absent.
@@ -69,18 +79,20 @@ const MANILA_FMT = new Intl.DateTimeFormat("en-US", {
 });
 const formatManila = (v) => (v ? MANILA_FMT.format(new Date(v)) : "Never Synced");
 
-// Distinct, alphabetically-sorted portal-user display names for a client's
-// relationships (no duplicates). `withEmail` keeps the email as a fallback label.
+// Distinct, alphabetically-sorted SLF names for a client's linked portal
+// accounts (no duplicates). `byId` resolves to the account's assigned SLF name,
+// which is what this section labels — the stored `portalUserName` is a person's
+// name and is only used when the account has no SLF assigned.
 const uniqueUserNames = (r, byId = {}) => {
   const seen = new Map();
   (r.portalUserRelationships || []).forEach((rel) => {
     const id = String(rel.portalUser || rel.portalUserEmail || "");
     if (!id || seen.has(id)) return;
-    seen.set(id, rel.portalUserName || byId[rel.portalUser] || rel.portalUserEmail || "Unknown");
+    seen.set(id, byId[rel.portalUser] || rel.portalUserName || rel.portalUserEmail || "Unknown");
   });
   // Fall back to the legacy single-value field for admin-created clients.
-  if (!seen.size && (r.portalUserName || byId[r.portalUser])) {
-    seen.set("legacy", r.portalUserName || byId[r.portalUser]);
+  if (!seen.size && (byId[r.portalUser] || r.portalUserName)) {
+    seen.set("legacy", byId[r.portalUser] || r.portalUserName);
   }
   return [...seen.values()].sort((a, b) => a.localeCompare(b));
 };
@@ -166,7 +178,13 @@ export default function SlfClients({ isDark, canView = true, canEdit = true, can
   useEffect(() => {
     const socket = getSocket();
     if (!socket) return undefined;
-    const onRefresh = ({ target } = {}) => { if (target === "slf-clients") fetchRecords(false); };
+    const onRefresh = ({ target } = {}) => {
+      if (target !== "slf-clients") return;
+      // The served-clients relationship map is derived from these records, so its
+      // shared cache must not outlive an edit.
+      invalidateRelationshipMap();
+      fetchRecords(false);
+    };
     socket.on("data-refresh", onRefresh);
     return () => socket.off("data-refresh", onRefresh);
   }, [fetchRecords]);
@@ -338,7 +356,7 @@ export default function SlfClients({ isDark, canView = true, canEdit = true, can
     const rows = filtered.map((r) => ({
       "Client Name": r.name,
       Type: r.type,
-      "Portal User": displayUser(r),
+      "SLF Name": displayUser(r),
       Hauler: r.hauler,
       Location: r.location,
       Address: r.address,
@@ -485,7 +503,7 @@ export default function SlfClients({ isDark, canView = true, canEdit = true, can
       ),
     },
     {
-      title: "Portal Users", key: "portalUser", width: 280,
+      title: "SLF Name", key: "portalUser", width: 280,
       sorter: (a, b) => relCount(a) - relCount(b),
       render: (_, r) => {
         const users = uniqueUserNames(r, portalUserById);
@@ -697,7 +715,7 @@ export default function SlfClients({ isDark, canView = true, canEdit = true, can
           <Col flex="auto">
             <Space wrap size={8}>
               <Select placeholder="Type" value={filterType} onChange={setFilterType} allowClear size="small" style={{ minWidth: 140 }} options={TYPE_OPTIONS} />
-              <Select placeholder="Portal User" value={filterPortalUser} onChange={setFilterPortalUser} allowClear showSearch optionFilterProp="label" size="small" style={{ minWidth: 160 }} options={portalUserOptions} />
+              <Select placeholder="SLF Name" value={filterPortalUser} onChange={setFilterPortalUser} allowClear showSearch optionFilterProp="label" size="small" style={{ minWidth: 160 }} options={portalUserOptions} />
               <Select placeholder="Hauler" value={filterHauler} onChange={setFilterHauler} allowClear showSearch size="small" style={{ minWidth: 140 }} options={haulerOptions} />
               <Select placeholder="Status" value={filterStatus} onChange={setFilterStatus} allowClear size="small" style={{ minWidth: 120 }} options={STATUS_OPTIONS} />
               <Select placeholder="Region" value={filterRegion} onChange={setFilterRegion} allowClear size="small" style={{ minWidth: 150 }} options={REGION_OPTIONS} />
@@ -738,7 +756,7 @@ export default function SlfClients({ isDark, canView = true, canEdit = true, can
               <Descriptions.Item label="Type">{typeTag(detail.type)}</Descriptions.Item>
               <Descriptions.Item label="Status">{statusTag(detail.status)}</Descriptions.Item>
               <Descriptions.Item label="Region">{regionTag(detail.regionClass)}</Descriptions.Item>
-              <Descriptions.Item label="Portal Users">
+              <Descriptions.Item label="SLF Names">
                 {isMultiPortal(detail) ? <Tag color="gold">Multiple ({relCount(detail)})</Tag> : <Tag>Single</Tag>}
               </Descriptions.Item>
               <Descriptions.Item label="Province">{detail.province || "—"}</Descriptions.Item>
@@ -751,7 +769,7 @@ export default function SlfClients({ isDark, canView = true, canEdit = true, can
               <Descriptions.Item label="Notes" span={2}>{detail.notes || "—"}</Descriptions.Item>
             </Descriptions>
             <div style={{ marginTop: 12 }}>
-              <Text strong style={{ fontSize: 12 }}><UserOutlined /> Linked Portal Users, Haulers & Baseline Sources</Text>
+              <Text strong style={{ fontSize: 12 }}><UserOutlined /> Linked SLFs, Haulers & Baseline Sources</Text>
               <Table
                 style={{ marginTop: 8 }}
                 size="small"
@@ -760,7 +778,7 @@ export default function SlfClients({ isDark, canView = true, canEdit = true, can
                 pagination={false}
                 locale={{ emptyText: "No portal-user relationships (manually added client)." }}
                 columns={[
-                  { title: "Portal User", dataIndex: "portalUserName", render: (v, x) => v || portalUserById[x.portalUser] || x.portalUserEmail || "—" },
+                  { title: "SLF Name", dataIndex: "portalUserName", render: (v, x) => portalUserById[x.portalUser] || v || x.portalUserEmail || "—" },
                   { title: "Hauler", dataIndex: "hauler", render: (v) => v || "—" },
                   { title: "Baseline", dataIndex: "baselineRef", render: (v) => v ? <Tag color="geekblue">{String(v).slice(-6)}</Tag> : <Tag>Manual</Tag> },
                 ]}
@@ -795,7 +813,7 @@ export default function SlfClients({ isDark, canView = true, canEdit = true, can
               </Form.Item>
             </Col>
             <Col xs={24} sm={12}>
-              <Form.Item name="portalUser" label="Assigned Portal User">
+              <Form.Item name="portalUser" label="Assigned SLF">
                 <Select options={portalUserOptions} allowClear showSearch optionFilterProp="label" placeholder="Select portal user" />
               </Form.Item>
             </Col>
@@ -869,7 +887,7 @@ export default function SlfClients({ isDark, canView = true, canEdit = true, can
           columns={[
             { title: "Type", dataIndex: "flagType", width: 190, render: (v) => <Tag color="volcano">{FLAG_LABELS[v] || v}</Tag> },
             { title: "Description", dataIndex: "description", ellipsis: true, render: (v) => <Text style={{ fontSize: 12 }}>{v || "—"}</Text> },
-            { title: "Portal User", dataIndex: "portalUserEmail", width: 160, render: (v) => <Text type="secondary" style={{ fontSize: 11 }}>{v || "—"}</Text> },
+            { title: "SLF Name", dataIndex: "portalUserEmail", width: 160, render: (v) => <Text type="secondary" style={{ fontSize: 11 }}>{v || "—"}</Text> },
             { title: "Hauler", dataIndex: "hauler", width: 160, render: (v) => <Text type="secondary" style={{ fontSize: 11 }}>{v || "—"}</Text> },
             { title: "Status", dataIndex: "status", width: 100, render: (v) => v === "open" ? <Tag color="red">Open</Tag> : v === "ignored" ? <Tag>Ignored</Tag> : <Tag color="green">Resolved</Tag> },
             {

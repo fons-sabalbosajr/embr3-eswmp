@@ -2,6 +2,7 @@ import { useMemo } from "react";
 import { Row, Col, Card, Space, Tag, Typography, Table, Empty, Collapse, Statistic } from "antd";
 import { PieChart, Pie, Cell as RCell, Tooltip as RTooltip, Legend, ResponsiveContainer } from "recharts";
 import { EnvironmentOutlined, PictureOutlined, AlertOutlined, SafetyCertificateOutlined } from "@ant-design/icons";
+import { resolveMediaImageUrl } from "../../utils/mediaFiles";
 
 const { Text } = Typography;
 
@@ -50,16 +51,19 @@ const KIND = {
 };
 
 // One aerial/preview image for the facility — prefer a gallery item tagged for
-// this module, else any gallery image, else a legacy photo. The stored URL is a
-// signed /secure proxy URL that renders in <img> without an auth header.
+// this module, else any gallery image, else a legacy photo.
+//
+// The stored value is either a signed /secure proxy URL (renders directly in an
+// <img> without an auth header) or a public Google Drive link. A Drive link is
+// a VIEWER PAGE, not an image, so using it raw left the gallery blank; every URL
+// therefore goes through resolveMediaImageUrl, which maps Drive links to their
+// image endpoint and passes proxy URLs through untouched.
 const pickThumb = (facility, matchRe) => {
   const items = Array.isArray(facility.galleryItems) ? facility.galleryItems : [];
   const tagged = items.find((it) => it.url && matchRe.test(`${it.component || ""} ${it.caption || ""}`));
-  if (tagged) return tagged.url;
-  const any = items.find((it) => it.url);
-  if (any) return any.url;
   const photos = Array.isArray(facility.galleryPhotos) ? facility.galleryPhotos : [];
-  return photos.find(Boolean) || "";
+  const raw = tagged?.url || items.find((it) => it.url)?.url || photos.find(Boolean) || "";
+  return raw ? resolveMediaImageUrl(raw, { thumbnail: true }) : "";
 };
 
 export default function SlfManagementBySlf({ facilities = [], kind = "leachate" }) {
@@ -94,7 +98,18 @@ export default function SlfManagementBySlf({ facilities = [], kind = "leachate" 
           statusCounts,
         };
       })
-      .sort((a, b) => b.total - a.total || a.slfName.localeCompare(b.slfName));
+      // Ordered by PROVINCE first so an operator can scan a province's facilities
+      // together; within a province the busiest facility leads, then by name.
+      // Facilities with no province recorded sort last rather than under "—".
+      .sort((a, b) => {
+        const aProvince = a.province === "—" ? "￿" : a.province;
+        const bProvince = b.province === "—" ? "￿" : b.province;
+        return (
+          aProvince.localeCompare(bProvince) ||
+          b.total - a.total ||
+          a.slfName.localeCompare(b.slfName)
+        );
+      });
   }, [facilities, cfg]);
 
   if (!groups.length) return <Empty description={`No ${cfg.nounPlural.toLowerCase()} recorded yet`} />;
@@ -122,21 +137,28 @@ export default function SlfManagementBySlf({ facilities = [], kind = "leachate" 
           <Row gutter={[12, 12]}>
             <Col xs={24} md={8}>
               <Card size="small" style={{ borderRadius: 8 }} styles={{ body: { padding: 10 } }}>
-                {g.thumb ? (
-                  <img
-                    src={g.thumb}
-                    alt={`${g.slfName} ${cfg.noun} area`}
-                    style={{ width: "100%", height: 150, objectFit: "cover", borderRadius: 6, display: "block" }}
-                    onError={(e) => { e.currentTarget.style.display = "none"; }}
-                  />
-                ) : (
-                  <div style={{ height: 150, display: "flex", alignItems: "center", justifyContent: "center", background: "#fafafa", borderRadius: 6 }}>
+                {/* Placeholder sits UNDER the image so a failed load reveals it
+                    rather than collapsing the card to an empty box, and the image
+                    is lazy so a long province list does not fetch every photo up
+                    front. */}
+                <div style={{ position: "relative", height: 150, borderRadius: 6, overflow: "hidden", background: "#fafafa" }}>
+                  <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center" }}>
                     <Space direction="vertical" align="center" size={4}>
                       <PictureOutlined style={{ fontSize: 28, color: "#bfbfbf" }} />
                       <Text type="secondary" style={{ fontSize: 11 }}>No gallery image</Text>
                     </Space>
                   </div>
-                )}
+                  {g.thumb && (
+                    <img
+                      src={g.thumb}
+                      alt={`${g.slfName} ${cfg.noun} area`}
+                      loading="lazy"
+                      decoding="async"
+                      style={{ position: "relative", width: "100%", height: 150, objectFit: "cover", display: "block" }}
+                      onError={(e) => { e.currentTarget.style.display = "none"; }}
+                    />
+                  )}
+                </div>
                 <Row gutter={8} style={{ marginTop: 10 }}>
                   <Col span={12}><Statistic title={`Total ${cfg.nounPlural}`} value={g.total} valueStyle={{ fontSize: 18, color: cfg.accent }} /></Col>
                   <Col span={12}><Statistic title="Active" value={g.active} valueStyle={{ fontSize: 18, color: "#52c41a" }} /></Col>

@@ -22,6 +22,7 @@ const {
 const { authMiddleware, requireAnyAuth, adminOnly, developerOnly } = require("../middleware/auth");
 const { requirePortalRule } = require("../utils/portalPolicy");
 const { resolveTotalVolumeForUpdate } = require("../utils/baselineVolume");
+const { computeCellOccupancy, OCCUPANCY_ENTRY_FIELDS } = require("../utils/cellOccupancy");
 const { todayRange } = require("../utils/appTime");
 const { NON_DUMMY_CLAUSE } = require("../utils/dummyFilter");
 const {
@@ -157,14 +158,26 @@ function getProvinceCode(province) {
   return PROVINCE_CODES[key] || raw.substring(0, 2).toUpperCase();
 }
 
-function fromBaseM3(value, unit) {
-  return convertVolumeStrict(value, "m³", unit || "m³") ?? value;
-}
-
+/**
+ * Recompute and PERSIST a facility's per-cell occupancy.
+ *
+ * The calculation itself lives in utils/cellOccupancy.js and is shared with the
+ * portal facility endpoint. This function previously carried its own copy that
+ * counted portal trucks ONLY — the baseline (totalVolumeAccepted /
+ * activeCell*Volume / activeCellEntries) was never included, and trucks without
+ * an explicit in-range cellIndex were dropped entirely. Because these are the
+ * values written to SlfFacility, every consumer that reads the stored document
+ * (admin dashboard, portal tiles) saw a smaller total than the portal facility
+ * endpoint computed — the "Submitted Volume does not match Baseline Breakdown"
+ * defect. There is now exactly one implementation.
+ */
 async function refreshFacilityCellOccupancy(req, facilityId) {
   if (!facilityId || !mongoose.Types.ObjectId.isValid(String(facilityId))) return null;
   const facility = await SlfFacility.findById(facilityId)
-    .select("numberOfCell cellNames cellStatuses cellCapacities cellCapacityUnits cellFillUnits wasteReceivedUnit")
+    .select(
+      "numberOfCell cellNames cellStatuses cellTypes cellCapacities cellCapacityUnits " +
+      "cellFillUnits wasteReceivedUnit volumeCapacityUnit",
+    )
     .lean();
   if (!facility) return null;
   const cellCount = Math.max(
@@ -174,44 +187,33 @@ async function refreshFacilityCellOccupancy(req, facilityId) {
     facility.cellCapacities?.length || 0,
   );
   if (cellCount <= 0) return null;
-  const totalsM3 = Array.from({ length: cellCount }, () => 0);
+
   const entries = await DataSLF.find({
     slfGenerator: facility._id,
     deletedAt: null,
-    status: { $nin: ["rejected", "reverted", "revert_requested"] },
     isDummy: { $ne: true },
   })
-    .select("baselineUnit trucks.actualVolume trucks.actualVolumeUnit trucks.cellIndex trucks.vehicles.actualVolume trucks.vehicles.actualVolumeUnit trucks.vehicles.cellIndex")
+    .select(OCCUPANCY_ENTRY_FIELDS)
+    .sort({ createdAt: -1 })
     .lean();
-  entries.forEach((entry) => {
-    (entry.trucks || []).forEach((truck) => {
-      const vehicles = Array.isArray(truck.vehicles)
-        ? truck.vehicles.filter((vehicle) => vehicle.cellIndex !== null && vehicle.cellIndex !== undefined && vehicle.cellIndex !== "")
-        : [];
-      if (vehicles.length) {
-        vehicles.forEach((vehicle) => {
-          const idx = Number(vehicle.cellIndex);
-          if (!Number.isInteger(idx) || idx < 0 || idx >= totalsM3.length) return;
-          totalsM3[idx] += toBaseM3(vehicle.actualVolume, vehicle.actualVolumeUnit || truck.actualVolumeUnit || entry.baselineUnit || "m³");
-        });
-        return;
-      }
-      const idx = Number(truck.cellIndex);
-      if (!Number.isInteger(idx) || idx < 0 || idx >= totalsM3.length) return;
-      totalsM3[idx] += toBaseM3(truck.actualVolume, truck.actualVolumeUnit || entry.baselineUnit || "m³");
-    });
-  });
-  const fillUnits = Array.from({ length: cellCount }, (_, index) =>
-    facility.cellFillUnits?.[index] || facility.cellCapacityUnits?.[index] || facility.wasteReceivedUnit || "m³",
-  );
-  const cellFillValues = totalsM3.map((value, index) => Math.round(fromBaseM3(value, fillUnits[index]) * 1000) / 1000);
-  const wasteReceivedUnit = facility.wasteReceivedUnit || fillUnits.find(Boolean) || "m³";
-  const actualResidualWasteReceived = Math.round(
-    totalsM3.reduce((sum, value) => sum + fromBaseM3(value, wasteReceivedUnit), 0) * 1000,
-  ) / 1000;
+
+  const occupancy = computeCellOccupancy(facility, entries);
   const updated = await SlfFacility.findByIdAndUpdate(
     facility._id,
-    { $set: { cellFillValues, cellFillUnits: fillUnits, actualResidualWasteReceived, wasteReceivedUnit } },
+    {
+      $set: {
+        cellFillValues: occupancy.cellFillValues,
+        cellFillUnits: occupancy.cellFillUnits,
+        actualResidualWasteReceived: occupancy.totalVolume,
+        wasteReceivedUnit: occupancy.unit,
+        // Persisted provenance split so the dashboards can colour baseline vs
+        // submitted contributions without re-deriving (and re-diverging).
+        cellFillBaselineValues: occupancy.cellFillBaselineValues,
+        cellFillSubmittedValues: occupancy.cellFillSubmittedValues,
+        baselineVolumeTotal: occupancy.baselineTotal,
+        submittedVolumeTotal: occupancy.submittedTotal,
+      },
+    },
     { new: true },
   ).lean();
   refreshAdmin(req, "facility");

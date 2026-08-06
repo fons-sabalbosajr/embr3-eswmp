@@ -418,15 +418,28 @@ export default function SLFPortal() {
   const [faqActiveKey, setFaqActiveKey] = useState([]);
   // Profile modal
   const [profileModalOpen, setProfileModalOpen] = useState(false);
-  const watchedDisposalDate = Form.useWatch("dateOfDisposal", entryForm);
+  // `preserve: true` is REQUIRED here, not an optimisation.
+  //
+  // The Data Entry tabs render with `destroyOnHidden`, so only the open pane is
+  // mounted. Without this option useWatch reads `getFieldsValue()`, which returns
+  // values for CURRENTLY REGISTERED fields only — so the moment a user leaves the
+  // Basic Information tab, all four company fields read `undefined`, and leaving
+  // the Baseline tab makes Total Volume Accepted read `undefined`. Since exactly
+  // one tab can be open at a time, at least one "incomplete" blocker was ALWAYS
+  // present and Review & Submit could never enable, no matter how much the user
+  // filled in. `preserve: true` reads `getFieldsValue(true)` — the whole store,
+  // including fields whose pane is currently unmounted (antd preserves those
+  // values by default), which is the state the user actually entered.
+  const watchOptions = (form) => ({ form, preserve: true });
+  const watchedDisposalDate = Form.useWatch("dateOfDisposal", watchOptions(entryForm));
   const watchedTotalVolumeAccepted = Form.useWatch(
     "totalVolumeAccepted",
-    baselineForm,
+    watchOptions(baselineForm),
   );
-  const watchedCompanyName = Form.useWatch("lguCompanyName", companyForm);
-  const watchedCompanyRegion = Form.useWatch("companyRegion", companyForm);
-  const watchedCompanyProvince = Form.useWatch("companyProvince", companyForm);
-  const watchedCompanyMunicipality = Form.useWatch("companyMunicipality", companyForm);
+  const watchedCompanyName = Form.useWatch("lguCompanyName", watchOptions(companyForm));
+  const watchedCompanyRegion = Form.useWatch("companyRegion", watchOptions(companyForm));
+  const watchedCompanyProvince = Form.useWatch("companyProvince", watchOptions(companyForm));
+  const watchedCompanyMunicipality = Form.useWatch("companyMunicipality", watchOptions(companyForm));
   const isTreatedHazardousWaste = (value) =>
     String(value || "")
       .trim()
@@ -1035,13 +1048,25 @@ export default function SLFPortal() {
     return Math.max(0, Number((activeVolume + closedVolume).toFixed(2)));
   }, [activeCellEntries, closedCellEntries, sumBaselineEntryVolume]);
 
+  // A cell-entry total only OVERRIDES the user's Total Volume Accepted when the
+  // entries actually carry volumes.
+  //
+  // The presence of an entry row was previously enough: adding a cell row (or
+  // migrating legacy flat fields into rows) with the volume left blank made the
+  // computed total 0, which overwrote a previously-entered Total Volume Accepted
+  // with 0 in the form AND sent that 0 to the server — where it is a valid
+  // number, so the data-loss guard correctly applied it. That is why the value
+  // "disappeared" right after saving.
+  const cellVolumeTotalIsAuthoritative =
+    hasCellVolumeEntries && computedTotalVolumeAccepted > 0;
+
   useEffect(() => {
-    if (!hasCellVolumeEntries) return;
+    if (!cellVolumeTotalIsAuthoritative) return;
     baselineForm.setFieldsValue({
       totalVolumeAccepted: computedTotalVolumeAccepted,
       totalVolumeAcceptedUnit: baselineCalcUnit,
     });
-  }, [baselineCalcUnit, baselineForm, computedTotalVolumeAccepted, hasCellVolumeEntries]);
+  }, [baselineCalcUnit, baselineForm, computedTotalVolumeAccepted, cellVolumeTotalIsAuthoritative]);
 
   const slfCellCount = Number(
     Math.max(
@@ -1054,19 +1079,79 @@ export default function SLFPortal() {
     ),
   );
 
-  // Baseline Data active cells are the AUTHORITATIVE name source. Map the portal
-  // user's encoded active-cell names to their stable cellIndex, so Organize Cells
-  // and every cell selector display the CURRENT baseline cell name (e.g.
-  // "Cell 1 Residual") instead of a generic positional "Cell N" fallback. Matching
-  // is by stable cellIndex only — never by array position — so a cell with no
-  // reliable reference safely falls back to resolveCellName.
+  // Cell naming precedence: the ADMIN's facility configuration is authoritative.
+  //
+  // This used to prefer the name copied into the baseline record, which is a
+  // snapshot taken when the baseline was saved. Any baseline row saved without a
+  // name (legacy flat fields migrated into entries carry neither cellName nor
+  // cellIndex) therefore fell all the way through to the positional "Cell N"
+  // fallback — which is why Active Cell names appeared to "reset to Cell 1"
+  // after a save, and why an admin rename did not show up in the Portal.
+  //
+  // Order: admin's configured cellNames[index] → baseline snapshot → "Cell N".
+  // Matching is by stable cellIndex only, never by array position.
   const baselineCellNameByIndex = {};
   (Array.isArray(activeCellEntries) ? activeCellEntries : []).forEach((e) => {
     if (e && typeof e.cellIndex === "number" && String(e.cellName || "").trim()) {
       baselineCellNameByIndex[e.cellIndex] = String(e.cellName).trim();
     }
   });
-  const cellLabelFor = (index) => baselineCellNameByIndex[index] || resolveCellName(slfInfo, index);
+  const cellLabelFor = (index) => {
+    const adminName = String(slfInfo?.cellNames?.[index] || "").trim();
+    if (adminName) return adminName;
+    return baselineCellNameByIndex[index] || resolveCellName(slfInfo, index);
+  };
+
+  /**
+   * Resolve which configured cell a LEGACY flat baseline volume belongs to.
+   *
+   * Legacy baselines stored one number per waste type with no cell reference. To
+   * migrate them into entry rows without losing identity, each volume is bound
+   * to the first cell of the matching kind (hazardous/inert vs residual) with
+   * the requested operational state — mirroring the server's findBestCellIndex
+   * so the Portal and the backend agree on where a volume landed.
+   *
+   * Returns empty values when the facility declares no suitable cell, which
+   * leaves the row unbound rather than pointing it at the wrong cell.
+   */
+  const matchBaselineCellForWasteType = useCallback(
+    (baselineData, wasteType, { active = true } = {}) => {
+      const empty = { cellIndex: null, cellName: "", cellType: "" };
+      const count = Math.max(
+        Number(slfInfo?.numberOfCell || 0),
+        slfInfo?.cellStatuses?.length || 0,
+        slfInfo?.cellTypes?.length || 0,
+        slfInfo?.cellNames?.length || 0,
+      );
+      if (!count) return empty;
+
+      const wantsHazardous = /haz|inert/i.test(String(wasteType || ""));
+      let fallback = null;
+
+      for (let index = 0; index < count; index += 1) {
+        const status = slfInfo?.cellStatuses?.[index];
+        if (isNonExistentCell(status)) continue;
+        const isActive = getCellStatusConfig(status).key === "active";
+        if (isActive !== active) continue;
+
+        const cellType = slfInfo?.cellTypes?.[index] || "Residual";
+        const candidate = {
+          cellIndex: index,
+          cellName: cellLabelFor(index),
+          cellType,
+        };
+        if (/haz|inert/i.test(String(cellType)) === wantsHazardous) return candidate;
+        if (!fallback) fallback = candidate;
+      }
+
+      return fallback || empty;
+    },
+    // cellLabelFor is derived from slfInfo + activeCellEntries on every render;
+    // depending on slfInfo alone keeps this stable while still reflecting the
+    // admin's current cell configuration.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [slfInfo],
+  );
 
   const cellPlacementOptions = (() => {
     // Per-user cell access restriction (admin Manage Access). Empty => no restriction.
@@ -1634,32 +1719,29 @@ export default function SLFPortal() {
               })),
             );
           } else {
+            // Legacy flat fields migrated into entry rows. Each row is bound to a
+            // REAL cell from the admin's configuration (stable cellIndex + its
+            // configured name) instead of being left with an empty cellName and
+            // no index — rows saved that way lost their identity and every label
+            // fell back to the positional "Cell 1", "Cell 2"… on the next load.
             const entries = [];
             let k = 1;
-            if (data.activeCellResidualVolume)
+            const pushMigrated = (volume, entryUnit, wasteType) => {
+              if (!volume) return;
+              const target = matchBaselineCellForWasteType(data, wasteType);
               entries.push({
                 key: k++,
-                cellName: "",
-                wasteType: "Residual",
-                volume: data.activeCellResidualVolume,
-                unit: data.activeCellResidualUnit || unit,
+                cellName: target.cellName,
+                cellIndex: target.cellIndex,
+                cellType: target.cellType,
+                wasteType,
+                volume,
+                unit: entryUnit || unit,
               });
-            if (data.activeCellInertVolume)
-              entries.push({
-                key: k++,
-                cellName: "",
-                wasteType: "Inert/Hazardous Waste",
-                volume: data.activeCellInertVolume,
-                unit: data.activeCellInertUnit || unit,
-              });
-            if (data.activeCellHazardousVolume)
-              entries.push({
-                key: k++,
-                cellName: "",
-                wasteType: "Inert/Hazardous Waste",
-                volume: data.activeCellHazardousVolume,
-                unit: data.activeCellHazardousUnit || unit,
-              });
+            };
+            pushMigrated(data.activeCellResidualVolume, data.activeCellResidualUnit, "Residual");
+            pushMigrated(data.activeCellInertVolume, data.activeCellInertUnit, "Inert/Hazardous Waste");
+            pushMigrated(data.activeCellHazardousVolume, data.activeCellHazardousUnit, "Inert/Hazardous Waste");
             setActiveCellEntries(entries);
           }
           // Load closedCellEntries from saved data (or migrate from flat fields)
@@ -1672,32 +1754,26 @@ export default function SLFPortal() {
               })),
             );
           } else {
+            // Same migration rule as the active entries above — bind each legacy
+            // flat volume to a real, non-active cell so its identity survives.
             const cEntries = [];
             let ck = 1;
-            if (data.closedCellResidualVolume)
+            const pushMigratedClosed = (volume, entryUnit, wasteType) => {
+              if (!volume) return;
+              const target = matchBaselineCellForWasteType(data, wasteType, { active: false });
               cEntries.push({
                 key: ck++,
-                cellName: "",
-                wasteType: "Residual",
-                volume: data.closedCellResidualVolume,
-                unit: data.closedCellResidualUnit || unit,
+                cellName: target.cellName,
+                cellIndex: target.cellIndex,
+                cellType: target.cellType,
+                wasteType,
+                volume,
+                unit: entryUnit || unit,
               });
-            if (data.closedCellInertVolume)
-              cEntries.push({
-                key: ck++,
-                cellName: "",
-                wasteType: "Inert/Hazardous Waste",
-                volume: data.closedCellInertVolume,
-                unit: data.closedCellInertUnit || unit,
-              });
-            if (data.closedCellHazardousVolume)
-              cEntries.push({
-                key: ck++,
-                cellName: "",
-                wasteType: "Inert/Hazardous Waste",
-                volume: data.closedCellHazardousVolume,
-                unit: data.closedCellHazardousUnit || unit,
-              });
+            };
+            pushMigratedClosed(data.closedCellResidualVolume, data.closedCellResidualUnit, "Residual");
+            pushMigratedClosed(data.closedCellInertVolume, data.closedCellInertUnit, "Inert/Hazardous Waste");
+            pushMigratedClosed(data.closedCellHazardousVolume, data.closedCellHazardousUnit, "Inert/Hazardous Waste");
             setClosedCellEntries(cEntries);
           }
           setBaselineSaved(true);
@@ -1972,62 +2048,54 @@ export default function SLFPortal() {
   }, [portalUser?.email, fetchSubmissions]);
 
   // ── My Requests fetch ──
+  // Requests panel data.
+  //
+  // Reads a PURPOSE-BUILT, index-backed endpoint (GET /transactions/my-requests)
+  // instead of the generic admin search. The old call
+  // (`/transactions?search=<email>&limit=100`) ran a case-insensitive regex over
+  // four unindexed fields — a scan of the whole audit log, executed twice — and
+  // then discarded almost every row client-side, which is why opening Requests
+  // and pressing Refresh were both slow.
+  //
+  // The dependency is the EMAIL, not the portalUser object: depending on the
+  // object made this callback (and therefore the socket effect below) re-create
+  // on every unrelated portalUser re-render, re-subscribing and re-fetching.
+  const portalEmail = portalUser?.email || "";
   const fetchMyRequests = useCallback(async () => {
-    if (!portalUser?.email) return;
+    if (!portalEmail) return;
     setMyRequestsLoading(true);
     try {
-      const { data } = await api.get("/transactions", {
-        params: {
-          search: portalUser.email,
-          type: "",
-          limit: 100,
-        },
+      const { data } = await api.get("/transactions/my-requests", {
+        params: { email: portalEmail },
       });
-      // Filter to request/amendment types from this user
-      const requestTypes = new Set([
-        "baseline_update_request",
-        "baseline_update_approved",
-        "submission_edit_request",
-        "submission_edit_approved",
-        "submission_edit_rejected",
-        "support_ticket",
-        "support_ticket_reply",
-      ]);
-      const myEmail = String(portalUser.email || "").toLowerCase();
-      const eq = (v) => String(v || "").trim().toLowerCase() === myEmail;
-      const filtered = (data.transactions || []).filter(
-        (t) =>
-          requestTypes.has(t.type) &&
-          !/^admin (started|replied to) conversation\b/i.test(
-            t.description || "",
-          ) &&
-          // Case-insensitive match so mixed-case stored emails still resolve.
-          (eq(t.submittedBy) || eq(t.performedBy)) &&
-          // Exclude entries the user dismissed from their own list.
-          !(Array.isArray(t.portalHiddenBy) &&
-            t.portalHiddenBy.includes(myEmail)),
-      );
-      setMyRequests(filtered);
+      setMyRequests(Array.isArray(data?.transactions) ? data.transactions : []);
     } catch {
       /* silent */
     } finally {
       setMyRequestsLoading(false);
     }
-  }, [portalUser]);
+  }, [portalEmail]);
 
   useEffect(() => {
-    if (activeMenu === "requests" && portalUser) {
-      fetchMyRequests();
-      const sock = connectSocket("portal", portalUser.email);
-      const handler = () => fetchMyRequests();
-      sock.on("notification", handler);
-      sock.on("data-refresh", handler);
-      return () => {
-        sock.off("notification", handler);
-        sock.off("data-refresh", handler);
-      };
-    }
-  }, [activeMenu, portalUser, fetchMyRequests]);
+    if (activeMenu !== "requests" || !portalEmail) return undefined;
+    fetchMyRequests();
+
+    const sock = connectSocket("portal", portalEmail);
+    // A single admin action can emit several events in quick succession; without
+    // coalescing, each one fired its own request. One refresh per burst instead.
+    let timer = null;
+    const handler = () => {
+      clearTimeout(timer);
+      timer = setTimeout(fetchMyRequests, 400);
+    };
+    sock.on("notification", handler);
+    sock.on("data-refresh", handler);
+    return () => {
+      clearTimeout(timer);
+      sock.off("notification", handler);
+      sock.off("data-refresh", handler);
+    };
+  }, [activeMenu, portalEmail, fetchMyRequests]);
 
   const handleLogout = () => {
     secureStorage.clearAll();
@@ -2999,9 +3067,15 @@ export default function SLFPortal() {
         baselineForm.validateFields(),
         companyForm.validateFields(),
       ]);
-      const resolvedTotalVolumeAccepted = hasCellVolumeEntries
+      // Cell entries only win when they carry real volumes; otherwise the
+      // user-entered figure is preserved (see cellVolumeTotalIsAuthoritative).
+      // `baselineValues` can also be missing the field when the Baseline pane is
+      // not the open tab (destroyOnHidden unregisters it from validateFields),
+      // so fall back to the form STORE, which keeps preserved values.
+      const resolvedTotalVolumeAccepted = cellVolumeTotalIsAuthoritative
         ? computedTotalVolumeAccepted
-        : baselineValues.totalVolumeAccepted;
+        : (baselineValues.totalVolumeAccepted
+            ?? baselineForm.getFieldValue("totalVolumeAccepted"));
       const disposalValues = entryForm.getFieldsValue();
       const addressParts = [
         barangays.find((b) => b.code === companyValues.companyBarangay)?.name,
@@ -4273,9 +4347,15 @@ export default function SLFPortal() {
       const companyValues = companyForm.getFieldsValue();
       const disposalValues = entryForm.getFieldsValue();
       const baselineValues = baselineForm.getFieldsValue();
-      const resolvedTotalVolumeAccepted = hasCellVolumeEntries
+      // Cell entries only win when they carry real volumes; otherwise the
+      // user-entered figure is preserved (see cellVolumeTotalIsAuthoritative).
+      // `baselineValues` can also be missing the field when the Baseline pane is
+      // not the open tab (destroyOnHidden unregisters it from validateFields),
+      // so fall back to the form STORE, which keeps preserved values.
+      const resolvedTotalVolumeAccepted = cellVolumeTotalIsAuthoritative
         ? computedTotalVolumeAccepted
-        : baselineValues.totalVolumeAccepted;
+        : (baselineValues.totalVolumeAccepted
+            ?? baselineForm.getFieldValue("totalVolumeAccepted"));
       const entry = {
         ...disposalValues,
         ...companyValues,
@@ -4506,9 +4586,12 @@ export default function SLFPortal() {
     const companyValues = companyForm.getFieldsValue();
     const disposalValues = entryForm.getFieldsValue();
     const baselineValues = baselineForm.getFieldsValue();
-    const resolvedTotalVolumeAccepted = hasCellVolumeEntries
+    // See cellVolumeTotalIsAuthoritative — blank cell rows must not overwrite the
+    // user-entered Total Volume Accepted with a derived 0.
+    const resolvedTotalVolumeAccepted = cellVolumeTotalIsAuthoritative
       ? computedTotalVolumeAccepted
-      : baselineValues.totalVolumeAccepted;
+      : (baselineValues.totalVolumeAccepted
+          ?? baselineForm.getFieldValue("totalVolumeAccepted"));
     return {
       ...disposalValues,
       ...companyValues,
