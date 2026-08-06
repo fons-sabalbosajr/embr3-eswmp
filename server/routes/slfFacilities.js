@@ -9,6 +9,7 @@ const { notifyAdmin, notifyPortal, refreshAdmin, refreshPortal } = require("../u
 const { NON_DUMMY_CLAUSE } = require("../utils/dummyFilter");
 const { isSameSlfSite, facilityDisplayName } = require("../utils/slfIdentity");
 const { normalizeUnit: normalizeUnitStrict } = require("../utils/volumeUnits");
+const { displayNameFromUrl, syncFileDetails } = require("../utils/uploadNaming");
 const PortalPolicyAudit = require("../models/PortalPolicyAudit");
 
 const router = express.Router();
@@ -650,6 +651,21 @@ router.put("/:id", adminOnly, async (req, res) => {
     const record = await SlfFacility.findOne({ _id: req.params.id, deletedAt: null });
     if (!record) return res.status(404).json({ message: "Record not found" });
 
+    // ── Document metadata invariant ───────────────────────────────────────────
+    // preventiveMeasureFiles (URLs) and preventiveMeasureFileDetails (names,
+    // descriptions, doc types) are parallel arrays that nothing kept aligned: a
+    // write that set the URLs without the details left those files with no
+    // recorded name, so every view fell back to the opaque storage segment —
+    // the "randomized filename" symptom. Rebuild the details from whichever
+    // sources are available so the two can never drift apart again.
+    if (Array.isArray(update.preventiveMeasureFiles)) {
+      update.preventiveMeasureFileDetails = syncFileDetails(
+        update.preventiveMeasureFiles,
+        update.preventiveMeasureFileDetails,
+        record.preventiveMeasureFileDetails,
+      );
+    }
+
     // ── Global unit lock ──────────────────────────────────────────────────────
     // Once an official global unit is configured for a facility, only an
     // admin/developer caller on this admin-only route may change it. Portal users
@@ -1192,13 +1208,9 @@ router.get("/history/:lgu", async (req, res) => {
 // the summary endpoint refuses any URL not in this list (no cross-SLF leakage).
 function collectPreventionDocs(facility) {
   const docs = [];
-  const fileNameOf = (url) => {
-    try {
-      const clean = String(url || "").split("?")[0].split("#")[0];
-      const seg = decodeURIComponent(clean.split("/").pop() || "");
-      return seg || "document";
-    } catch { return "document"; }
-  };
+  // Shared resolver — reads the original name embedded at upload time instead of
+  // the opaque storage segment. See utils/uploadNaming.js.
+  const fileNameOf = (url) => displayNameFromUrl(url, "document");
   const pushNested = (arr, docType) =>
     (Array.isArray(arr) ? arr : []).forEach((m) => {
       const narrative = [m?.measure, m?.description].filter(Boolean).join(" — ");

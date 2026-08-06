@@ -215,6 +215,7 @@ import {
   getMediaKind,
   normalizeStoredFileUrl,
 } from "./slf-monitoring/helpers.jsx";
+import { getEmbeddedMediaName } from "../../utils/mediaFiles";
 
 const EMPTY_ROWS = [];
 const SLF_DOCUMENT_TYPE_OPTIONS = [
@@ -236,7 +237,10 @@ const fileNameFromUrl = (value, fallback = "file") => {
     /\/upload\/secure\/(drive|local)\//.test(raw) ||
     /drive\.google\.com|googleusercontent/.test(raw)
   ) {
-    return first?.name || fallback;
+    // Newly-minted signed URLs embed the ORIGINAL filename as ?name=; reading it
+    // is what stops a stored file with no fileList entry from falling all the way
+    // through to the generic fallback.
+    return first?.name || getEmbeddedMediaName(raw) || fallback;
   }
   const src = raw || first?.name || "";
   if (!src) return fallback;
