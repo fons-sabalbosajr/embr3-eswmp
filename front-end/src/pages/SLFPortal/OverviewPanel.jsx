@@ -203,6 +203,47 @@ function OverviewPanel({
   ).size;
   const lguClientCount = combinedClients.filter((row) => /lgu/i.test(String(row.clientType || row.companyType || ""))).length;
   const privateClientCount = combinedClients.filter((row) => !/lgu/i.test(String(row.clientType || row.companyType || ""))).length;
+
+  // ── Dashboard chart series ──
+  // Ranked hauler fleet sizes; a long tail is folded into one "Others" bar so
+  // the chart stays readable no matter how many haulers are accredited.
+  const haulerChartData = (() => {
+    const byName = new Map();
+    (haulers || []).forEach((hauler) => {
+      const name = String(hauler?.haulerName || "").trim();
+      if (!name) return;
+      const vehicles = Array.isArray(hauler.vehicles) ? hauler.vehicles.length : 0;
+      const declared = Number(hauler.numberOfTrucks || 0);
+      byName.set(name, Math.max(byName.get(name) || 0, vehicles, declared, 1));
+    });
+    const rows = [...byName.entries()]
+      .map(([name, value]) => ({ name, value }))
+      .sort((a, b) => b.value - a.value);
+    if (rows.length <= 8) return rows;
+    const others = rows.slice(7).reduce((sum, row) => sum + row.value, 0);
+    return [...rows.slice(0, 7), { name: `Others (${rows.length - 7})`, value: others }];
+  })();
+
+  const clientChartData = [
+    { name: "LGU", value: lguClientCount, color: "#1677ff" },
+    { name: "Private", value: privateClientCount, color: "#52c41a" },
+  ].filter((row) => row.value > 0);
+
+  const cellStatusPieData = [
+    { name: "Active", value: cellStatusCounts.active, color: "#52c41a" },
+    { name: "Reserved", value: cellStatusCounts.reserved, color: "#fa8c16" },
+    { name: "Used / Completed", value: cellStatusCounts.completed, color: "#8c8c8c" },
+    {
+      // Whatever the three named buckets did not claim (under construction,
+      // unknown legacy statuses) — so the donut always totals the cell count.
+      name: "Other",
+      value: Math.max(
+        0,
+        cellStatusCounts.total - cellStatusCounts.active - cellStatusCounts.reserved - cellStatusCounts.completed,
+      ),
+      color: "#bfbfbf",
+    },
+  ].filter((row) => row.value > 0);
   const wasteFilledM3 = Number(wasteReceivedData.baselineTotals?.m3 || 0) + Number(wasteReceivedData.totals?.m3 || 0);
   const wasteFilledTons = Number(wasteReceivedData.baselineTotals?.tons || 0) + Number(wasteReceivedData.totals?.tons || 0);
   // #5: show the total in the facility's SINGLE declared baseline unit (m³ and tons
@@ -269,6 +310,51 @@ function OverviewPanel({
   const dpPermit = latestPermit(slfInfo?.dischargePermits);
   const ptoStatus = permitStatus(ptoPermit?.validity || slfInfo?.permitToOperateValidity, ptoPermit?.status || slfInfo?.permitToOperateStatus);
   const dpStatus = permitStatus(dpPermit?.validity || slfInfo?.dischargePermitValidity, dpPermit?.status || slfInfo?.dischargePermitStatus);
+
+  const formatValidity = (value) => {
+    if (!value) return "";
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return String(value);
+    return date.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+  };
+
+  /**
+   * All reference numbers recorded for a permit, each paired with its own
+   * validity date. A facility can hold several (renewals, multiple lines), and
+   * the flat legacy fields are folded in so nothing recorded before the array
+   * existed is dropped.
+   */
+  const permitReferences = (list, legacyNo, legacyValidity) => {
+    const rows = (Array.isArray(list) ? list : [])
+      .filter((item) => item?.permitNo || item?.validity)
+      .map((item) => ({ permitNo: item.permitNo || "", validity: item.validity || "" }));
+    if (!rows.length && (legacyNo || legacyValidity)) {
+      rows.push({ permitNo: legacyNo || "", validity: legacyValidity || "" });
+    }
+    // Newest validity first so the current reference reads first.
+    return rows.sort((a, b) => new Date(b.validity || 0) - new Date(a.validity || 0));
+  };
+
+  const permitCards = [
+    {
+      label: "Permit to Operate",
+      status: ptoStatus,
+      references: permitReferences(
+        slfInfo?.permitToOperatePermits,
+        slfInfo?.permitToOperate,
+        slfInfo?.permitToOperateValidity,
+      ),
+    },
+    {
+      label: "Discharge Permit",
+      status: dpStatus,
+      references: permitReferences(
+        slfInfo?.dischargePermits,
+        slfInfo?.dischargePermit,
+        slfInfo?.dischargePermitValidity,
+      ),
+    },
+  ];
   // #4: on-slice label with count + percentage; tiny slices are left unlabeled to
   // avoid overlap (the tooltip still shows their full value).
   const renderPieLabel = ({ cx, cy, midAngle, innerRadius, outerRadius, percent, value }) => {
@@ -324,14 +410,20 @@ function OverviewPanel({
     );
   };
 
-  // ── Cell utilization overview (active submission-enabled baseline cells only) ──
+  // ── Cell utilization overview (mirrors the ADMIN cell configuration) ──
   // Cells come straight from the logged-in portal user's assigned facility
-  // baseline (slfInfo.cell* arrays, editable under Data Entry → Baseline Data),
-  // so no cell names/counts are hardcoded and Baseline Data edits flow through
-  // live. Only cells whose status is ACTIVE/operational and whose admin-side
-  // submission toggle is enabled are shown — inactive, closed, completed,
-  // reserved, under-construction, non-existent and submission-closed cells are
-  // excluded (the same active-cell rule as the placement selectors).
+  // (slfInfo.cell* arrays, configured by the admin in Cell Infrastructure), so no
+  // cell names/counts are hardcoded and admin edits flow through live.
+  //
+  // EVERY declared cell is listed — only cells the admin marked as not existing
+  // are skipped. Previously non-operational and submission-closed cells were
+  // filtered out entirely, so the Portal showed a different set of cells than the
+  // Admin had configured and an operator could not see their Used/Completed or
+  // Reserved cells at all. Each cell instead carries its own status band and
+  // colour, and cells that cannot receive waste are labelled as such.
+  //
+  // NB: this is the read-only utilization overview. The placement selectors keep
+  // their stricter active-only rule — what you may dispose into is unchanged.
   const cellCount = Math.max(
     Number(slfInfo?.numberOfCell || 0),
     slfInfo?.cellStatuses?.length || 0,
@@ -343,10 +435,8 @@ function OverviewPanel({
   for (let idx = 0; idx < cellCount; idx += 1) {
     const stored = slfInfo?.cellStatuses?.[idx];
     if (isNonExistentCell(stored)) continue;
-    // Active-only: drop any cell that is not currently operational or is closed
-    // for portal submissions in Admin Cell Infrastructure.
-    if (!isOperationalCellStatus(stored)) continue;
-    if (slfInfo?.cellSubmissionAllowed?.[idx] === false) continue;
+    const operational = isOperationalCellStatus(stored);
+    const submissionClosed = slfInfo?.cellSubmissionAllowed?.[idx] === false;
     const statusConfig = getCellStatusConfig(stored);
     const typeConfig = getCellTypeConfig(slfInfo?.cellTypes?.[idx]);
     const capUnit = resolveCellUnit(slfInfo, idx, "capacity");
@@ -355,12 +445,25 @@ function OverviewPanel({
     const fill = convertVolume(slfInfo?.cellFillValues?.[idx], fillUnit, capUnit) ?? 0;
     const pct = capacity > 0 ? Math.min(100, Math.round((fill / capacity) * 100)) : null;
     const statusLabel = String(stored || statusConfig?.label || "").toLowerCase();
-    const nonOperational = /used|complete|closed|inactive|out.?of.?service|decommission|reserved/i.test(statusLabel);
-    let band = "available";
-    if (nonOperational) band = statusLabel.includes("complete") || statusLabel.includes("used") ? "completed" : "outofservice";
-    else if (pct != null && pct >= 100) band = "full";
-    else if (pct != null && pct >= 85) band = "near";
-    else if (pct != null && pct > 0) band = "inuse";
+    // Band precedence: what the admin declared about the cell first, then how
+    // full it actually is. Each band owns a distinct colour (see BAND_META), so
+    // an "Active Cell" and an "In Use" cell never read the same.
+    let band;
+    if (!operational) {
+      if (/complete|used/.test(statusLabel)) band = "completed";
+      else if (/reserved|construction/.test(statusLabel)) band = "reserved";
+      else band = "outofservice";
+    } else if (submissionClosed) {
+      band = "closed";
+    } else if (pct != null && pct >= 100) {
+      band = "full";
+    } else if (pct != null && pct >= 85) {
+      band = "near";
+    } else if (pct != null && pct > 0) {
+      band = "inuse";
+    } else {
+      band = "available";
+    }
     cellUtilization.push({
       idx,
       name: resolveCellName(slfInfo, idx, slfInfo?.cellNames?.[idx]),
@@ -368,6 +471,8 @@ function OverviewPanel({
       typeColor: typeConfig?.color,
       statusColor: statusConfig?.color,
       statusText: statusConfig?.label || stored || "—",
+      operational,
+      submissionClosed,
       capacity,
       fill,
       unit: capUnit,
@@ -379,18 +484,24 @@ function OverviewPanel({
     (acc, c) => {
       if (c.band === "full") acc.full += 1;
       else if (c.band === "near") acc.near += 1;
-      else if (c.band === "completed" || c.band === "outofservice") acc.unavailable += 1;
-      else acc.active += 1;
+      else if (c.band === "inuse") acc.inuse += 1;
+      else if (c.band === "available") acc.active += 1;
+      else acc.unavailable += 1;
       return acc;
     },
-    { active: 0, near: 0, full: 0, unavailable: 0 },
+    { active: 0, inuse: 0, near: 0, full: 0, unavailable: 0 },
   );
+  // One colour per band — an Active Cell (accepting, still empty) and an In Use
+  // cell (accepting, partially filled) are visually distinct, as are the cells
+  // that cannot receive waste at all.
   const BAND_META = {
-    available: { color: "#52c41a", label: "Available" },
-    inuse: { color: "#1677ff", label: "In Use" },
+    available: { color: "#52c41a", label: "Active Cell" },
+    inuse: { color: "#1677ff", label: "In Use Cell" },
     near: { color: "#fa8c16", label: "Near Capacity" },
     full: { color: "#ff4d4f", label: "Full" },
-    completed: { color: "#8c8c8c", label: "Completed" },
+    closed: { color: "#722ed1", label: "Closed for Submission" },
+    reserved: { color: "#faad14", label: "Reserved" },
+    completed: { color: "#8c8c8c", label: "Used / Completed" },
     outofservice: { color: "#8c8c8c", label: "Out of Service" },
   };
 
@@ -450,7 +561,8 @@ function OverviewPanel({
             title={
               <Space wrap>
                 <ContainerOutlined /> <Text strong>Cell Utilization</Text>
-                <Tag color="green">{cellBandCounts.active} available</Tag>
+                <Tag color="green">{cellBandCounts.active} active</Tag>
+                {cellBandCounts.inuse > 0 && <Tag color="blue">{cellBandCounts.inuse} in use</Tag>}
                 {cellBandCounts.near > 0 && <Tag color="orange">{cellBandCounts.near} near capacity</Tag>}
                 {cellBandCounts.full > 0 && <Tag color="red">{cellBandCounts.full} full</Tag>}
                 {cellBandCounts.unavailable > 0 && <Tag>{cellBandCounts.unavailable} unavailable</Tag>}
@@ -537,36 +649,149 @@ function OverviewPanel({
                   <div style={{ fontSize: 12, fontWeight: 600, color: "#1a3353", overflowWrap: "anywhere", lineHeight: 1.25 }}>{value || "Not encoded"}</div>
                 </div>
               ))}
-              {[
-                ["Permit to Operate", ptoPermit?.permitNo || slfInfo?.permitToOperate, ptoStatus],
-                ["Discharge Permit", dpPermit?.permitNo || slfInfo?.dischargePermit, dpStatus],
-              ].map(([label, value, meta]) => (
+              {permitCards.map(({ label, status, references }) => (
                 <div key={label} style={{ padding: "8px 10px", border: "1px solid #eef2f7", borderRadius: 8, minHeight: 58 }}>
                   <Text type="secondary" style={{ fontSize: 10, textTransform: "uppercase", letterSpacing: 0.3 }}>{label}</Text>
-                  <div style={{ fontSize: 12, fontWeight: 600, color: "#1a3353", overflowWrap: "anywhere", lineHeight: 1.25 }}>{value || "Not encoded"}</div>
-                  <Tag color={meta.color} style={{ marginTop: 4, marginInlineEnd: 0 }}>{meta.label}</Tag>
+                  {references.length === 0 ? (
+                    <div style={{ fontSize: 12, fontWeight: 600, color: "#1a3353", lineHeight: 1.25 }}>Not encoded</div>
+                  ) : (
+                    // Each reference number sits beside its OWN validity date, so
+                    // multiple permits (renewals, additional lines) stay readable
+                    // instead of collapsing to a single number with a detached date.
+                    references.map((reference, index) => (
+                      <div
+                        key={`${reference.permitNo}-${reference.validity}-${index}`}
+                        style={{
+                          display: "flex",
+                          alignItems: "baseline",
+                          justifyContent: "space-between",
+                          gap: 8,
+                          marginTop: index === 0 ? 1 : 3,
+                        }}
+                      >
+                        <span style={{ fontSize: 12, fontWeight: 600, color: "#1a3353", overflowWrap: "anywhere", lineHeight: 1.25 }}>
+                          {reference.permitNo || "—"}
+                        </span>
+                        {reference.validity && (
+                          <Text type="secondary" style={{ fontSize: 11, whiteSpace: "nowrap" }}>
+                            valid to {formatValidity(reference.validity)}
+                          </Text>
+                        )}
+                      </div>
+                    ))
+                  )}
+                  {/* A permit marked "Not Required" does not apply to this
+                      facility, so no status is shown for it at all — only the
+                      recorded information. */}
+                  {!status.notRequired && (
+                    <Tag color={status.color} style={{ marginTop: 4, marginInlineEnd: 0 }}>{status.label}</Tag>
+                  )}
                 </div>
               ))}
             </div>
           </Card>
         </Col>
         <Col xs={24} md={12} xl={6}>
-          <Card title={<Text strong style={{ fontSize: 14 }}>Landfill Cells Status</Text>} loading={slfInfoLoading} style={{ borderRadius: 8, height: "100%" }} bodyStyle={{ minHeight: 250 }}>
-            <Row gutter={[12, 16]}>
-              <Col span={12}><Statistic title="Total Cells" value={cellStatusCounts.total} valueStyle={{ color: "#1a3353" }} /></Col>
-              <Col span={12}><Statistic title="Active" value={cellStatusCounts.active} valueStyle={{ color: "#52c41a" }} /></Col>
-              <Col span={12}><Statistic title="Reserved" value={cellStatusCounts.reserved} valueStyle={{ color: "#fa8c16" }} /></Col>
-              <Col span={12}><Statistic title="Used / Completed" value={cellStatusCounts.completed} valueStyle={{ color: "#8c8c8c" }} /></Col>
-            </Row>
+          {/* Landfill cell status as a donut — proportion is the question here
+              ("how much of my capacity is still active?"), which four separate
+              numbers could not answer at a glance. */}
+          <Card
+            title={
+              <Space size={6}>
+                <Text strong style={{ fontSize: 14 }}>Landfill Cell Status</Text>
+                <Tag color="blue" style={{ margin: 0 }}>{cellStatusCounts.total} cells</Tag>
+              </Space>
+            }
+            loading={slfInfoLoading}
+            style={{ borderRadius: 8, height: "100%" }}
+            bodyStyle={{ height: 250 }}
+          >
+            {cellStatusPieData.length ? (
+              <ResponsiveContainer width="100%" height="100%">
+                <PieChart>
+                  <Pie
+                    data={cellStatusPieData}
+                    dataKey="value"
+                    nameKey="name"
+                    innerRadius={48}
+                    outerRadius={78}
+                    paddingAngle={3}
+                    isAnimationActive={false}
+                    label={renderPieLabel}
+                    labelLine={false}
+                  >
+                    {cellStatusPieData.map((entry) => (
+                      <RCell key={entry.name} fill={entry.color} />
+                    ))}
+                  </Pie>
+                  <RTooltip formatter={(value, name) => [`${value} cell(s)`, name]} />
+                  <Legend wrapperStyle={{ fontSize: 11 }} />
+                </PieChart>
+              </ResponsiveContainer>
+            ) : (
+              <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No cells configured yet" />
+            )}
           </Card>
         </Col>
         <Col xs={24} md={12} xl={6}>
-          <Card title={<Text strong style={{ fontSize: 14 }}>Haulers and Clients</Text>} loading={wasteReceivedLoading} style={{ borderRadius: 8, height: "100%" }} bodyStyle={{ minHeight: 250, display: "flex", alignItems: "center" }}>
-            <Row gutter={[12, 14]} style={{ width: "100%" }}>
-              <Col xs={24}><Statistic title="Total Accredited Haulers" value={haulerCount} valueStyle={{ fontSize: 18, color: "#1a3353" }} /></Col>
-              <Col xs={12}><Statistic title="LGU Clients" value={lguClientCount} valueStyle={{ color: "#1677ff" }} /></Col>
-              <Col xs={12}><Statistic title="Private Clients" value={privateClientCount} valueStyle={{ color: "#52c41a" }} /></Col>
-            </Row>
+          {/* Haulers by fleet size — a ranked bar answers "who moves the most
+              waste for us?", which a single total could not. */}
+          <Card
+            title={
+              <Space size={6}>
+                <Text strong style={{ fontSize: 14 }}>Accredited Haulers</Text>
+                <Tag color="geekblue" style={{ margin: 0 }}>{haulerCount}</Tag>
+              </Space>
+            }
+            loading={wasteReceivedLoading}
+            style={{ borderRadius: 8, height: "100%" }}
+            bodyStyle={{ height: 250 }}
+          >
+            {haulerChartData.length ? (
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart data={haulerChartData} layout="vertical" margin={{ top: 4, right: 16, left: 4, bottom: 0 }}>
+                  <CartesianGrid strokeDasharray="3 3" horizontal={false} />
+                  <XAxis type="number" allowDecimals={false} tick={{ fontSize: 11 }} />
+                  <YAxis type="category" dataKey="name" tick={{ fontSize: 10 }} width={110} />
+                  <RTooltip formatter={(value) => [`${value} vehicle(s)`, "Fleet"]} />
+                  <Bar dataKey="value" name="Vehicles" fill="#1677ff" radius={[0, 4, 4, 0]} isAnimationActive={false} />
+                </BarChart>
+              </ResponsiveContainer>
+            ) : (
+              <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No accredited haulers recorded" />
+            )}
+          </Card>
+        </Col>
+        <Col xs={24} md={12} xl={6}>
+          {/* Client mix — LGU vs private, the split operators are asked to report. */}
+          <Card
+            title={
+              <Space size={6}>
+                <Text strong style={{ fontSize: 14 }}>Clients Served</Text>
+                <Tag color="green" style={{ margin: 0 }}>{lguClientCount + privateClientCount}</Tag>
+              </Space>
+            }
+            loading={wasteReceivedLoading}
+            style={{ borderRadius: 8, height: "100%" }}
+            bodyStyle={{ height: 250 }}
+          >
+            {clientChartData.length ? (
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart data={clientChartData} margin={{ top: 8, right: 8, left: -16, bottom: 0 }}>
+                  <CartesianGrid strokeDasharray="3 3" vertical={false} />
+                  <XAxis dataKey="name" tick={{ fontSize: 11 }} />
+                  <YAxis allowDecimals={false} tick={{ fontSize: 11 }} />
+                  <RTooltip formatter={(value) => [`${value} client(s)`, "Clients"]} />
+                  <Bar dataKey="value" name="Clients" radius={[4, 4, 0, 0]} isAnimationActive={false}>
+                    {clientChartData.map((entry) => (
+                      <RCell key={entry.name} fill={entry.color} />
+                    ))}
+                  </Bar>
+                </BarChart>
+              </ResponsiveContainer>
+            ) : (
+              <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No clients recorded yet" />
+            )}
           </Card>
         </Col>
         <Col xs={24} md={12} xl={6}>

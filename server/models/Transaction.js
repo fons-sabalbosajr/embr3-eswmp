@@ -64,5 +64,11 @@ const transactionSchema = new mongoose.Schema(
 transactionSchema.index({ companyName: 1, createdAt: -1 });
 transactionSchema.index({ type: 1, createdAt: -1 });
 transactionSchema.index({ createdAt: -1 });
+// Portal "My Requests": served by GET /transactions/my-requests, which selects a
+// fixed set of request types for ONE portal account. Without these the query fell
+// back to a case-insensitive regex $or across four fields — a collection scan of
+// the whole audit log on every open and on every socket refresh.
+transactionSchema.index({ submittedBy: 1, type: 1, createdAt: -1 });
+transactionSchema.index({ performedBy: 1, type: 1, createdAt: -1 });
 
 module.exports = mongoose.model("Transaction", transactionSchema, "transactions");

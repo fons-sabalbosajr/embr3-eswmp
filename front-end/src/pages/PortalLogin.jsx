@@ -15,6 +15,7 @@ import { useErrorCard } from "../utils/ErrorHandler";
 import api from "../api";
 import secureStorage from "../utils/secureStorage";
 import AuthBrandLogos from "../components/AuthBrandLogos";
+import PinInput from "../components/PinInput";
 import bgEmb from "../assets/bgemb.webp";
 import "./Auth.css";
 import VeraAuthAssistant, { reportVeraAuthIssue } from "../components/VeraAuthAssistant";
@@ -663,7 +664,6 @@ export default function PortalLogin() {
               </div>
               <Form.Item
                 name="pin"
-                // label="Dev Portal PIN"
                 rules={[
                   { required: true, message: "Enter the PIN" },
                   {
@@ -672,30 +672,20 @@ export default function PortalLogin() {
                   },
                 ]}
               >
-                <Input.Password
-                  className="dev-pin-input"
+                {/* Six individual boxes with auto-advance, backspace navigation
+                    and paste support. Form.Item injects value/onChange, so the
+                    joined string is what the field validates and submits. */}
+                <PinInput
+                  length={6}
+                  masked
                   autoFocus
-                  autoComplete="new-password"
-                  inputMode="numeric"
-                  maxLength={6}
-                  placeholder="Enter PIN"
-                  visibilityToggle={false}
-                  onPaste={(event) => event.preventDefault()}
-                  onCopy={(event) => event.preventDefault()}
-                  onCut={(event) => event.preventDefault()}
-                  onDrop={(event) => event.preventDefault()}
-                  onDragStart={(event) => event.preventDefault()}
-                  onChange={(event) => {
-                    const digits = event.target.value.replace(/\D/g, "").slice(0, 6);
-                    if (digits !== event.target.value) {
-                      devForm.setFieldValue("pin", digits);
-                    }
-                  }}
+                  disabled={devLoading}
+                  onComplete={submitDevPin}
                 />
               </Form.Item>
               <div style={{ textAlign: "center", marginTop: -4, marginBottom: 4 }}>
                 <Text type="secondary" style={{ fontSize: 12 }}>
-                  Enter the full 6-digit PIN.
+                  Enter the full 6-digit PIN — it submits automatically.
                 </Text>
               </div>
             </>

@@ -1,9 +1,20 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Table, Tag, Card, Statistic, Space, Typography, Input, Alert, Spin, Empty, Tooltip, Select, Button, Segmented, Collapse } from "antd";
-import { TeamOutlined, InfoCircleOutlined, AppstoreOutlined, UnorderedListOutlined, EnvironmentOutlined, DatabaseOutlined } from "@ant-design/icons";
-import api from "../../api";
+import { Table, Tag, Card, Statistic, Space, Typography, Input, Alert, Skeleton, Empty, Tooltip, Select, Segmented, Collapse, Row, Col } from "antd";
+import { TeamOutlined, InfoCircleOutlined, AppstoreOutlined, UnorderedListOutlined, EnvironmentOutlined, DatabaseOutlined, ApartmentOutlined } from "@ant-design/icons";
+import SummaryTile from "./shared/SummaryTile";
+import { loadRelationshipMap, peekRelationshipMap } from "../../utils/relationshipMapCache";
 
 const { Text } = Typography;
+
+/** "Angeles (12) · Mabalacat (8) +3 more" — a one-line hint for a stat tile. */
+function summarizeCounts(counts, excludeKey, limit = 3) {
+  const entries = [...counts.entries()]
+    .filter(([key]) => key !== excludeKey)
+    .sort((a, b) => b[1] - a[1]);
+  if (!entries.length) return "";
+  const shown = entries.slice(0, limit).map(([key, count]) => `${key} (${count})`).join(" · ");
+  return entries.length > limit ? `${shown} +${entries.length - limit} more` : shown;
+}
 
 // LGUs Served / Private Sectors relationship map. Served LGUs are counted by
 // UNIQUE municipality (stable masterlist id, resolved server-side) — never by
@@ -18,6 +29,7 @@ export default function ClientRelationshipView({ type = "LGU" }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(false);
   const [q, setQ] = useState("");
+  const [debouncedQ, setDebouncedQ] = useState("");
   const [fProvince, setFProvince] = useState(null);
   const [fMuni, setFMuni] = useState(null);
   const [fHauler, setFHauler] = useState(null);
@@ -25,19 +37,35 @@ export default function ClientRelationshipView({ type = "LGU" }) {
   const [viewMode, setViewMode] = useState("cards");
 
   const fetchData = useCallback(() => {
+    // Shared loader: the Summary tab has usually already pulled this exact
+    // payload, so switching tabs paints instantly instead of re-fetching.
+    const cached = peekRelationshipMap(type);
+    if (cached) {
+      setRows(cached.rows);
+      setSummary(cached.summary);
+      setLoading(false);
+      setError(false);
+      return Promise.resolve();
+    }
     setLoading(true);
     setError(false);
-    return api
-      .get("/slf-clients/relationship-map", { params: { type } })
-      .then(({ data }) => {
-        setRows(Array.isArray(data?.rows) ? data.rows : []);
-        setSummary(data?.summary || null);
+    return loadRelationshipMap(type)
+      .then((data) => {
+        setRows(data.rows);
+        setSummary(data.summary);
       })
       .catch(() => setError(true))
       .finally(() => setLoading(false));
   }, [type]);
 
   useEffect(() => { fetchData(); }, [fetchData]);
+
+  // Filtering runs over the full client list, so reacting to every keystroke
+  // re-derived every group and froze the panel while typing. One pass per pause.
+  useEffect(() => {
+    const timer = setTimeout(() => setDebouncedQ(q), 200);
+    return () => clearTimeout(timer);
+  }, [q]);
 
   // Distinct filter options derived from the loaded rows.
   const opts = useMemo(() => {
@@ -51,7 +79,7 @@ export default function ClientRelationshipView({ type = "LGU" }) {
   }, [rows]);
 
   const filtered = useMemo(() => {
-    const needle = q.trim().toLowerCase();
+    const needle = debouncedQ.trim().toLowerCase();
     return rows.filter((r) => {
       if (fProvince && r.province !== fProvince) return false;
       if (fMuni && r.municipalityCity !== fMuni) return false;
@@ -67,7 +95,7 @@ export default function ClientRelationshipView({ type = "LGU" }) {
         (r.slfs || []).some((s) => s.toLowerCase().includes(needle))
       );
     });
-  }, [rows, q, fProvince, fMuni, fHauler, fSlf]);
+  }, [rows, debouncedQ, fProvince, fMuni, fHauler, fSlf]);
 
   // Per-SLF grouping for the card view. One card per assigned SLF; a client that
   // serves multiple SLFs appears under each. Everything is derived from the same
@@ -111,8 +139,10 @@ export default function ClientRelationshipView({ type = "LGU" }) {
             (provinces.slice(0, 2).join(", ") + (provinces.length > 2 ? ` +${provinces.length - 2}` : "")) || "—",
           provinceCount: provinces.length,
           muniCount: muniCounts.size,
-          provinceCounts: [...provinceCounts.entries()].filter(([p]) => p !== "Unspecified").sort((a, b) => b[1] - a[1]),
-          muniCounts: [...muniCounts.entries()].filter(([m]) => m !== "Unspecified").sort((a, b) => b[1] - a[1]),
+          // Busiest few, as tile hints. The full per-municipality / per-province
+          // detail is available in the client table below each group.
+          topMunicipalities: summarizeCounts(muniCounts, "Unspecified"),
+          topProvinces: summarizeCounts(provinceCounts, "Unspecified"),
         };
       })
       .sort((a, b) => b.totalClients - a.totalClients || a.slf.localeCompare(b.slf));
@@ -183,7 +213,22 @@ export default function ClientRelationshipView({ type = "LGU" }) {
     </div>
   );
 
-  if (loading) return <div style={{ textAlign: "center", padding: "48px 0" }}><Spin /></div>;
+  // Skeleton keeps the layout stable while the (large) payload loads, instead of
+  // collapsing to a spinner and then jumping.
+  if (loading) {
+    return (
+      <div>
+        <div style={{ display: "flex", gap: 10, marginBottom: 12 }}>
+          {[0, 1, 2, 3].map((index) => (
+            <Card key={index} size="small" style={{ borderRadius: 8, flex: "1 1 0", minWidth: 150 }} styles={{ body: { padding: "10px 12px" } }}>
+              <Skeleton active paragraph={{ rows: 1, width: "60%" }} title={{ width: "80%" }} />
+            </Card>
+          ))}
+        </div>
+        <Skeleton active paragraph={{ rows: 8 }} />
+      </div>
+    );
+  }
   if (error) return <Alert type="error" showIcon message="Could not load client relationship data" description="Please try again shortly." />;
 
   const totalMaster = summary?.totalMasterMunicipalities ?? summary?.totalMasterLgus ?? 0;
@@ -261,6 +306,59 @@ export default function ClientRelationshipView({ type = "LGU" }) {
               ),
               children: (
                 <>
+                  {/* Coverage headline for this SLF. The question this section
+                      answers is "how many LGUs and municipalities does this SLF
+                      serve?", so those counts lead as tiles instead of being
+                      buried in a run of "Per Municipality: …" tag text. */}
+                  <Row gutter={[10, 10]} style={{ marginBottom: 12 }}>
+                    <Col xs={12} sm={8} lg={6}>
+                      <SummaryTile
+                        accent="#fa8c16"
+                        icon={<ApartmentOutlined />}
+                        title="Municipalities"
+                        titleTooltip="Distinct municipalities / cities this SLF's clients are located in."
+                        value={g.muniCount}
+                        hint={g.topMunicipalities}
+                        height={96}
+                      />
+                    </Col>
+                    <Col xs={12} sm={8} lg={6}>
+                      <SummaryTile
+                        accent="#52c41a"
+                        icon={<TeamOutlined />}
+                        title={isLgu ? "LGUs Served" : "Private Clients"}
+                        titleTooltip={
+                          isLgu
+                            ? "Unique masterlist municipalities verified as served by this SLF."
+                            : "Private-sector client records assigned to this SLF."
+                        }
+                        value={isLgu ? g.totalLgusServed : g.totalClients}
+                        hint={isLgu ? `${g.totalClients} client record(s)` : `${g.muniCount} municipality/-ies`}
+                        height={96}
+                      />
+                    </Col>
+                    <Col xs={12} sm={8} lg={6}>
+                      <SummaryTile
+                        accent="#722ed1"
+                        icon={<EnvironmentOutlined />}
+                        title="Provinces"
+                        titleTooltip="Distinct provinces this SLF's clients span."
+                        value={g.provinceCount}
+                        hint={g.topProvinces}
+                        height={96}
+                      />
+                    </Col>
+                    <Col xs={12} sm={8} lg={6}>
+                      <SummaryTile
+                        accent="#1677ff"
+                        icon={<DatabaseOutlined />}
+                        title="Total Clients"
+                        value={g.totalClients}
+                        hint="All client records assigned to this SLF"
+                        height={96}
+                      />
+                    </Col>
+                  </Row>
                   <Table
                     size="small"
                     rowKey={(r) => `${g.slf}-${r._id}`}
@@ -269,27 +367,6 @@ export default function ClientRelationshipView({ type = "LGU" }) {
                     scroll={{ x: 720 }}
                     pagination={g.clients.length > 5 ? { pageSize: 5, size: "small", showTotal: (t) => `${t} client(s)` } : false}
                   />
-                  {g.muniCounts.length > 0 && (
-                    <div style={{ marginTop: 8 }}>
-                      <Text strong style={{ fontSize: 11 }}>Per Municipality: </Text>
-                      <Space size={[4, 4]} wrap>
-                        {g.muniCounts.slice(0, 12).map(([m, c]) => (
-                          <Tag key={m} bordered={false} style={{ fontSize: 10, whiteSpace: "normal" }}>{m} ({c})</Tag>
-                        ))}
-                        {g.muniCounts.length > 12 && <Tag bordered={false}>+{g.muniCounts.length - 12} more</Tag>}
-                      </Space>
-                    </div>
-                  )}
-                  {g.provinceCounts.length > 0 && (
-                    <div style={{ marginTop: 6 }}>
-                      <Text strong style={{ fontSize: 11 }}>Per Province: </Text>
-                      <Space size={[4, 4]} wrap>
-                        {g.provinceCounts.map(([p, c]) => (
-                          <Tag key={p} color="geekblue" bordered={false} style={{ fontSize: 10, whiteSpace: "normal" }}>{p} ({c})</Tag>
-                        ))}
-                      </Space>
-                    </div>
-                  )}
                 </>
               ),
             }))}

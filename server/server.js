@@ -4,7 +4,6 @@ const dns = require("dns");
 dns.setDefaultResultOrder("ipv4first");
 
 const express = require("express");
-const mongoose = require("mongoose");
 const cors = require("cors");
 const helmet = require("helmet");
 const rateLimit = require("express-rate-limit");
@@ -59,35 +58,7 @@ const MONGODB_DNS_SERVERS = (process.env.MONGODB_DNS_SERVERS || "8.8.8.8,1.1.1.1
   .filter(Boolean);
 const CLIENT_URL = process.env.CLIENT_URL || "http://localhost:5173/eswm-pipeline";
 
-function getMongoSrvHost(uri) {
-  if (!uri.startsWith("mongodb+srv://")) return "";
-  const authority = uri.slice("mongodb+srv://".length).split("/")[0] || "";
-  const host = authority.includes("@") ? authority.split("@").pop() : authority;
-  return (host || "").split("?")[0];
-}
-
-async function configureMongoDns(uri) {
-  const srvHost = getMongoSrvHost(uri);
-  if (!srvHost) return;
-
-  try {
-    await dns.promises.resolveSrv(`_mongodb._tcp.${srvHost}`);
-  } catch (error) {
-    if (!["ECONNREFUSED", "ETIMEOUT", "ENOTFOUND", "ESERVFAIL"].includes(error.code)) {
-      throw error;
-    }
-
-    if (!MONGODB_DNS_SERVERS.length) {
-      throw error;
-    }
-
-    dns.setServers(MONGODB_DNS_SERVERS);
-    console.warn(
-      `MongoDB SRV lookup failed via default DNS (${error.code}). Retrying with fallback DNS servers: ${MONGODB_DNS_SERVERS.join(", ")}`,
-    );
-    await dns.promises.resolveSrv(`_mongodb._tcp.${srvHost}`);
-  }
-}
+const { connectMongo, isMongoReady } = require("./config/mongo");
 
 // Middleware — build allowed CORS origins dynamically
 function getAllowedOrigins() {
@@ -289,47 +260,80 @@ app.use((req, _res, next) => {
   next();
 });
 
-// Connect to MongoDB
-async function connectToMongo() {
-  await configureMongoDns(MONGODB_URI);
+// ── MongoDB ──
+// Startup maintenance runs *after* the connection is reported healthy and is
+// deliberately not awaited by the connect promise: backfills/merges can take
+// seconds on a large database, and the HTTP server must not be held back by
+// them. Each step is isolated so one failure cannot abort the rest.
+async function runStartupMaintenance() {
+  const steps = [
+    [
+      "scheduled submission worker",
+      () => require("./utils/scheduledSubmissionWorker").startScheduledSubmissionWorker(),
+    ],
+    [
+      "transaction backfill",
+      async () => {
+        const { backfillTransactions } = require("./utils/backfillTransactions");
+        const seeded = await backfillTransactions();
+        if (seeded > 0) console.log(`Backfilled ${seeded} transaction records.`);
+      },
+    ],
+    ["Bataan SLF merge", () => require("./utils/mergeBataanSlf").mergeBataanSlf()],
+    ["dummy cell backfill", () => require("./utils/dummyCells").backfillDummyCells()],
+    [
+      "cell occupancy provenance backfill",
+      async () => {
+        const { backfillCellOccupancy } = require("./utils/backfillCellOccupancy");
+        const updated = await backfillCellOccupancy();
+        if (updated > 0) console.log(`Backfilled baseline/submitted split for ${updated} facilities.`);
+      },
+    ],
+  ];
 
-  return mongoose.connect(MONGODB_URI)
-  .then(async () => {
-    console.log("MongoDB connected successfully");
-    // Start the scheduled-submission worker once the DB is available.
+  for (const [label, run] of steps) {
     try {
-      require("./utils/scheduledSubmissionWorker").startScheduledSubmissionWorker();
+      await run();
     } catch (err) {
-      console.error("Scheduled submission worker failed to start:", err.message);
+      console.error(`Startup maintenance — ${label} failed:`, err.message);
     }
-    try {
-      const { backfillTransactions } = require("./utils/backfillTransactions");
-      const seeded = await backfillTransactions();
-      if (seeded > 0) {
-        console.log(`Backfilled ${seeded} transaction records.`);
-      }
-    } catch (err) {
-      console.error("Transaction backfill error:", err.message);
-    }
-    try {
-      await require("./utils/mergeBataanSlf").mergeBataanSlf();
-    } catch (err) {
-      console.error("Bataan SLF merge error:", err.message);
-    }
-    try {
-      await require("./utils/dummyCells").backfillDummyCells();
-    } catch (err) {
-      console.error("Dummy cell backfill error:", err.message);
-    }
-  })
-  .catch((err) => console.error("MongoDB connection error:", err));
+  }
 }
 
-connectToMongo();
+connectMongo(MONGODB_URI, {
+  dnsServers: MONGODB_DNS_SERVERS,
+  onConnected: () => {
+    // Detached on purpose — see runStartupMaintenance().
+    runStartupMaintenance();
+  },
+}).catch(() => {
+  // connectMongo already logged the failure with actionable detail. The HTTP
+  // server stays up so /api/health reports the outage instead of the process
+  // dying silently; the readiness gate below answers 503 until Mongo is back.
+});
+
+// Readiness gate: without it, requests that arrive before the database is up
+// sit in Mongoose's command buffer until it times out (10s each), which looks
+// like a hang. Answer immediately and honestly instead.
+const MONGO_GATE_EXEMPT = /^\/api\/health/;
+app.use("/api", (req, res, next) => {
+  if (isMongoReady() || MONGO_GATE_EXEMPT.test(req.originalUrl)) return next();
+  res.status(503).json({
+    message: "Database is starting up. Please retry in a moment.",
+    code: "DB_UNAVAILABLE",
+  });
+});
 
 // Routes
 app.get("/api/health", (req, res) => {
-  res.json({ status: "ok", message: "Server is running" });
+  // Reports the database separately from the process so a monitor can tell
+  // "server down" apart from "server up, database still connecting".
+  const database = isMongoReady() ? "connected" : "disconnected";
+  res.json({
+    status: database === "connected" ? "ok" : "degraded",
+    message: "Server is running",
+    database,
+  });
 });
 app.get("/api/health/email", async (req, res) => {
   try {

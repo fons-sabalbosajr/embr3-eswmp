@@ -111,6 +111,81 @@ router.get("/", async (req, res) => {
   }
 });
 
+/**
+ * GET /api/transactions/my-requests
+ * The portal's "Requests" panel — every request/amendment raised BY or FOR the
+ * calling portal account.
+ *
+ * Replaces the panel's previous use of the generic admin search
+ * (`/transactions?search=<email>&limit=100`), which was the reason Request
+ * Update and Refresh were slow:
+ *   • `search` builds a case-insensitive $regex $or across four fields, none of
+ *     which an index can serve — a collection scan of the entire audit log, run
+ *     twice (find + countDocuments).
+ *   • buildDummyExclusion additionally read every dummy DataSLF and UserPortal
+ *     document on each call, then bolted a large $nor onto the query.
+ *   • The client then discarded almost every returned row, so the request could
+ *     be both slow AND incomplete once a user had >100 audit entries.
+ *
+ * This filters by an INDEXED (email, type, createdAt) prefix, applies the
+ * dismissal rule server-side, and returns only what the panel renders.
+ */
+const PORTAL_REQUEST_TYPES = [
+  "baseline_update_request",
+  "baseline_update_approved",
+  "submission_edit_request",
+  "submission_edit_approved",
+  "submission_edit_rejected",
+  "support_ticket",
+  "support_ticket_reply",
+];
+// Admin-initiated conversation entries are surfaced under Messages, not Requests.
+const ADMIN_CONVERSATION_RE = /^admin (started|replied to) conversation\b/i;
+
+router.get("/my-requests", async (req, res) => {
+  try {
+    const rawEmail = String(req.query.email || req.user?.email || "").trim();
+    const email = rawEmail.toLowerCase();
+    if (!email) return res.status(400).json({ message: "email is required" });
+
+    const limit = Math.min(Number(req.query.limit) || 200, 500);
+
+    // Two index-backed lookups instead of one unindexed regex scan. Older rows
+    // stored the address with the casing the user typed, so both the normalized
+    // and as-supplied forms are matched — an $in of exact terms still uses the
+    // index, unlike a case-insensitive regex.
+    const emailTerms = [...new Set([email, rawEmail])];
+    const typeFilter = { $in: PORTAL_REQUEST_TYPES };
+
+    const [submitted, performed] = await Promise.all([
+      Transaction.find({ submittedBy: { $in: emailTerms }, type: typeFilter })
+        .sort({ createdAt: -1 })
+        .limit(limit)
+        .lean(),
+      Transaction.find({ performedBy: { $in: emailTerms }, type: typeFilter })
+        .sort({ createdAt: -1 })
+        .limit(limit)
+        .lean(),
+    ]);
+
+    const byId = new Map();
+    [...submitted, ...performed].forEach((row) => {
+      // Dismissed by this user, or an admin conversation entry → not a request.
+      if (Array.isArray(row.portalHiddenBy) && row.portalHiddenBy.includes(email)) return;
+      if (ADMIN_CONVERSATION_RE.test(row.description || "")) return;
+      byId.set(String(row._id), row);
+    });
+
+    const transactions = [...byId.values()]
+      .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
+      .slice(0, limit);
+
+    res.json({ transactions, total: transactions.length });
+  } catch (error) {
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+});
+
 // Get distinct company names for filter dropdown
 router.get("/companies", async (req, res) => {
   try {

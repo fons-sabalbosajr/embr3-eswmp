@@ -96,9 +96,19 @@ import {
 } from "@ant-design/icons";
 import VeraCard from "../admin/VeraCard";
 import PreventionMeasuresPanel from "../admin/PreventionMeasuresPanel";
-import { resolveMediaOpenUrl } from "../admin/slf-monitoring/helpers.jsx";
+import {
+  getMediaFileName,
+  getMediaKind,
+  isDriveUrl,
+  isSecureProxyUrl,
+  resolveMediaOpenUrl,
+  resolveMediaEmbedUrl,
+  resolveMediaImageUrl,
+} from "../../utils/mediaFiles";
+import useMediaMeta from "../../utils/useMediaMeta";
 import api from "../../api";
 import GaugeMeter, { computeGaugePercent } from "../../components/GaugeMeter";
+import GaugeLegend from "../../components/GaugeLegend";
 import {
   resolveCellName,
   getCellStatusConfig,
@@ -144,6 +154,7 @@ import {
 } from "./constants";
 import { ProvinceBoundary, FitBounds } from "./MapPrimitives";
 import DashboardSkeleton from "./DashboardSkeleton";
+import SummaryTile from "../admin/shared/SummaryTile";
 
 dayjs.extend(relativeTime);
 
@@ -162,6 +173,33 @@ const ClientRelationshipView = lazy(() => import("../admin/ClientRelationshipVie
 // Poll cadence shared by the stats fan-out and the served-clients tile, so the two
 // stay in step. Module scope keeps it out of effect dependency lists.
 const STATS_POLL_MS = 60000;
+
+// ── Volume-contribution colours ──
+// A gauge is drawn as one coloured band per contribution so a reader can tell
+// which volume came from where. Baseline (the facility's declared opening
+// volume) and Submitted (portal truck entries) are fixed, semantic colours;
+// per-cell bands use the SLF identity palette (getSlfColor).
+const BASELINE_SEGMENT_COLOR = "#2f54eb"; // geekblue — declared baseline
+const SUBMITTED_SEGMENT_COLOR = "#13c2c2"; // cyan — portal submissions
+
+/**
+ * Baseline / Submitted split for ONE cell, ready for GaugeMeter `segments`.
+ * Falls back to a single un-split band for legacy records saved before the
+ * provenance split existed, so an older facility still renders a filled arc.
+ */
+function cellVolumeSegments(cell) {
+  const segments = [];
+  if (cell.baselineFill > 0) {
+    segments.push({ key: "baseline", label: "Baseline", value: cell.baselineFill, color: BASELINE_SEGMENT_COLOR });
+  }
+  if (cell.submittedFill > 0) {
+    segments.push({ key: "submitted", label: "Submitted", value: cell.submittedFill, color: SUBMITTED_SEGMENT_COLOR });
+  }
+  if (!segments.length && Number(cell.fill) > 0) {
+    segments.push({ key: "recorded", label: "Recorded", value: Number(cell.fill), color: BASELINE_SEGMENT_COLOR });
+  }
+  return segments;
+}
 
 export default function DashboardContent({ user, isDark, setActiveMenu, onOpenSubmissions, canOpenSubmissions }) {
   const screens = useBreakpoint();
@@ -212,20 +250,21 @@ export default function DashboardContent({ user, isDark, setActiveMenu, onOpenSu
   const [slfCellDrill, setSlfCellDrill] = useState(null); // selected SLF in Cell Infrastructure modal → per-cell cards
   const [cellProvinceExpanded, setCellProvinceExpanded] = useState(null);
 
-  const getPreventiveFileName = (url, fallback = "document") => {
-    const clean = String(url || "").split("?")[0].split("#")[0];
-    try { return decodeURIComponent(clean.split("/").pop() || "") || fallback; }
-    catch { return fallback; }
-  };
-  const getPreventiveFileKind = (fileName, url) => {
-    const value = `${fileName || ""} ${url || ""}`.toLowerCase().split("?")[0].split("#")[0];
-    if (/\.(png|jpe?g|gif|webp|bmp|tiff?)$/i.test(value)) return "image";
-    if (/\.pdf$/i.test(value)) return "pdf";
-    if (/\.(docx?|rtf)$/i.test(value)) return "word";
-    return "file";
-  };
+  // File name / kind resolution lives in utils/mediaFiles.js — restricted uploads
+  // are served through a signed proxy whose path is an opaque Drive id or an
+  // `.enc` envelope, so plain extension sniffing (what this used to do) reported
+  // "file" for every PDF and killed the preview.
+  const getPreventiveFileName = (url, fallback = "document") =>
+    getMediaFileName(url) || fallback;
+  const getPreventiveFileKind = (fileName, url) => getMediaKind(url, fileName);
   const absoluteMediaUrl = (url) => {
     const resolved = resolveMediaOpenUrl(url);
+    try { return new URL(resolved, window.location.origin).href; }
+    catch { return resolved; }
+  };
+  // Same-origin embeddable URL (Drive `/preview`, proxy URLs as-is).
+  const embedMediaUrl = (url) => {
+    const resolved = resolveMediaEmbedUrl(url);
     try { return new URL(resolved, window.location.origin).href; }
     catch { return resolved; }
   };
@@ -233,6 +272,16 @@ export default function DashboardContent({ user, isDark, setActiveMenu, onOpenSu
     setPreventiveFileZoom(100);
     setPreventiveFileViewer(file);
   };
+  // Files uploaded before signed URLs embedded their name carry no extension at
+  // all. Resolve the real name/type from the server for whichever file is open
+  // so the viewer picks the right renderer instead of falling back to
+  // "preview not available". No-ops for URLs that are already self-describing.
+  const viewerMediaMeta = useMediaMeta(
+    useMemo(
+      () => (preventiveFileViewer?.url ? [preventiveFileViewer.url] : []),
+      [preventiveFileViewer?.url],
+    ),
+  );
 
   const mapPts = useMemo(
     () =>
@@ -6191,152 +6240,111 @@ export default function DashboardContent({ user, isDark, setActiveMenu, onOpenSu
         // #2: single-tab wrapper removed — only "SLF Monitoring General Dashboard"
         // existed, so its content is rendered directly (no nested Tabs).
         <>
-                  {/* Row 1: Total SLF | Total Cells | LGUs Served | Private Sectors Served */}
-                  <Row gutter={[16, 16]} style={{ marginBottom: 16 }}>
-                    <Col xs={12} sm={8} lg={4}>
-                      <Card
-                        hoverable
-                        style={{ borderRadius: 10, height: 110, borderLeft: "4px solid #2f54eb", cursor: "pointer" }}
+                  {/* Summary tiles — six equal columns so the whole set sits on ONE
+                      row from `lg` up (6 × span 4 = 24). Previously the "served"
+                      tile took span 8, making the row total 28 and forcing a wrap
+                      onto a second line. Below `lg` the grid steps down 3-up then
+                      2-up, so the tiles reflow instead of scrolling sideways. */}
+                  <Row gutter={[12, 12]} style={{ marginBottom: 16 }}>
+                    <Col xs={12} sm={8} md={8} lg={4}>
+                      <SummaryTile
+                        isDark={isDark}
                         loading={loading}
-                        styles={{ body: { padding: "10px 14px" } }}
+                        accent="#2f54eb"
+                        icon={<BankOutlined />}
+                        title="Operational SLFs"
+                        titleTooltip="Counts SLFs whose official facility status is classified Operational (same definition used on the map, Cell Infrastructure and reports). A non-operational facility is never counted as operational even if it still submits data. Excludes deleted and test records."
+                        value={slfCounts.operational}
+                        hint={
+                          <>
+                            {slfCounts.total} registered ·{" "}
+                            <span style={{ color: "#ff4d4f" }}>{slfCounts.nonOperational} non-operational</span>
+                            {slfCounts.unmonitored > 0 && <> · {slfCounts.unmonitored} unmonitored</>}
+                          </>
+                        }
                         onClick={() => setSlfDashModal({ type: "total" })}
-                      >
-                        <Statistic
-                          title={
-                            <Tooltip title="Counts SLFs whose official facility status is classified Operational (same definition used on the map, Cell Infrastructure and reports). A non-operational facility is never counted as operational even if it still submits data. Excludes deleted and test records.">
-                              <span>Operational SLFs <InfoCircleOutlined style={{ color: "#8c8c8c", fontSize: 12 }} /></span>
-                            </Tooltip>
-                          }
-                          value={slfCounts.operational}
-                          prefix={<BankOutlined style={{ color: "#2f54eb" }} />}
-                        />
-                        <Text type="secondary" style={{ fontSize: 11 }}>
-                          {slfCounts.total} total registered
-                          <CloseCircleOutlined style={{ color: "#ff4d4f", margin: "0 3px 0 6px" }} />
-                          {slfCounts.nonOperational} non-operational
-                          {slfCounts.unmonitored > 0 && (
-                            <span> · {slfCounts.unmonitored} not yet monitored</span>
-                          )}
-                        </Text>
-                      </Card>
+                      />
                     </Col>
-                    <Col xs={12} sm={8} lg={4}>
-                      <Card
-                        hoverable
-                        style={{ borderRadius: 10, height: 110, borderLeft: "4px solid #13c2c2", cursor: "pointer" }}
+                    <Col xs={12} sm={8} md={8} lg={4}>
+                      <SummaryTile
+                        isDark={isDark}
                         loading={loading}
-                        styles={{ body: { padding: "10px 14px" } }}
+                        accent="#13c2c2"
+                        icon={<ContainerOutlined />}
+                        title="Total Cells"
+                        value={slfOps.totalCells || 0}
+                        hint={`across ${slfFacStats.totalRecords} facilities`}
                         onClick={() => setSlfDashModal({ type: "cells" })}
-                      >
-                        <Statistic
-                          title="Total Cells"
-                          value={slfOps.totalCells || 0}
-                          prefix={<ContainerOutlined style={{ color: "#13c2c2" }} />}
-                        />
-                        <Text type="secondary" style={{ fontSize: 11 }}>across {slfFacStats.totalRecords} facilities</Text>
-                      </Card>
+                      />
                     </Col>
-                    {/* Combined: LGUs Served + Private Sectors Served — one tile,
-                        tabbed modal (see combo: "served"). */}
-                    <Col xs={24} sm={24} lg={8}>
-                      <Card
-                        hoverable
-                        style={{ borderRadius: 10, height: 110, borderLeft: "4px solid #fa8c16", cursor: "pointer" }}
+                    {/* LGUs + Private Sectors served — one tile, tabbed modal
+                        (see combo: "served"). The headline number is the combined
+                        client count; the split lives in the hint so the tile fits
+                        the same span-4 column as its siblings. */}
+                    <Col xs={12} sm={8} md={8} lg={4}>
+                      <SummaryTile
+                        isDark={isDark}
                         loading={loading || slfClientSummary.loading}
-                        styles={{ body: { padding: "10px 14px" } }}
-                        onClick={() => setSlfDashModal({ combo: "served" })}
-                      >
-                        {/* DB-driven unique-client counts from the managed SLF Clients
-                            collection. On a fetch error, fall back to the facility-derived
-                            counts so the tile is never blank. */}
-                        <Row gutter={16} align="middle">
-                          <Col span={12}>
-                            <Statistic
-                              title="LGUs Served"
-                              value={slfClientSummary.error ? (slfOps.totalLGUsServed || 0) : slfClientSummary.lgu}
-                              prefix={<TeamOutlined style={{ color: "#fa8c16" }} />}
-                            />
-                          </Col>
-                          <Col span={12}>
-                            <Statistic
-                              title="Private Sectors Served"
-                              value={slfClientSummary.error ? slfPrivateCount : slfClientSummary.private}
-                              prefix={<BankOutlined style={{ color: "#722ed1" }} />}
-                            />
-                          </Col>
-                        </Row>
-                        <Text type="secondary" style={{ fontSize: 11 }}>
-                          {slfClientSummary.error ? (
-                            <Text type="warning" style={{ fontSize: 11 }}>Live count unavailable — showing facility estimate</Text>
+                        accent="#fa8c16"
+                        icon={<TeamOutlined />}
+                        title="Clients Served"
+                        titleTooltip="Unique LGU and private-sector clients served across all SLFs. Click to open the LGUs & Private Sectors Served breakdown."
+                        value={
+                          slfClientSummary.error
+                            ? (slfOps.totalLGUsServed || 0) + slfPrivateCount
+                            : slfClientSummary.lgu + slfClientSummary.private
+                        }
+                        hint={
+                          slfClientSummary.error ? (
+                            <span style={{ color: "#faad14" }}>Live count unavailable — facility estimate</span>
                           ) : slfClientSummary.total === 0 ? (
-                            <Text type="secondary" style={{ fontSize: 11 }}>No clients recorded yet — click to manage</Text>
+                            "No clients recorded yet — click to manage"
                           ) : (
                             <>
-                              Unique clients:{" "}
-                              <Text style={{ fontSize: 11, color: "#1677ff", fontWeight: 600 }}>
-                                {slfClientSummary.lgu} LGU
-                              </Text>{" "}
-                              ·{" "}
-                              <Text style={{ fontSize: 11, color: "#722ed1", fontWeight: 600 }}>
-                                {slfClientSummary.private} Private
-                              </Text>{" "}
-                              — click for details
+                              <span style={{ color: "#1677ff", fontWeight: 600 }}>{slfClientSummary.lgu} LGU</span>
+                              {" · "}
+                              <span style={{ color: "#722ed1", fontWeight: 600 }}>{slfClientSummary.private} Private</span>
                             </>
-                          )}
-                        </Text>
-                      </Card>
+                          )
+                        }
+                        onClick={() => setSlfDashModal({ combo: "served" })}
+                      />
                     </Col>
-                    {/* #3: Leachate + Gas merged into the same top row so all summary
-                        tiles sit on ONE horizontal row on desktop (they wrap on
-                        smaller screens). Total Capacity + Waste Received tiles remain
-                        folded into the Total Cells modal. */}
-                    <Col xs={12} sm={12} lg={4}>
-                      <Card
-                        hoverable
+                    <Col xs={12} sm={8} md={8} lg={4}>
+                      <SummaryTile
+                        isDark={isDark}
+                        loading={loading}
+                        accent="#1890ff"
+                        icon={<AlertOutlined />}
+                        title="Leachate Management"
+                        value={slfOps.totalLeachatePonds || 0}
+                        hint="Leachate treatment ponds — click to view"
                         onClick={() => setSlfDashModal({ type: "leachate" })}
-                        style={{ borderRadius: 10, height: 110, borderLeft: "4px solid #1890ff", cursor: "pointer" }}
-                        loading={loading}
-                        styles={{ body: { padding: "10px 14px" } }}
-                      >
-                        <Statistic
-                          title="Leachate Management"
-                          value={slfOps.totalLeachatePonds || 0}
-                          prefix={<AlertOutlined style={{ color: "#1890ff" }} />}
-                        />
-                        <Text type="secondary" style={{ fontSize: 11 }}>Click to view Leachate Treatment Plant</Text>
-                      </Card>
+                      />
                     </Col>
-                    <Col xs={12} sm={12} lg={4}>
-                      <Card
-                        hoverable
+                    <Col xs={12} sm={8} md={8} lg={4}>
+                      <SummaryTile
+                        isDark={isDark}
+                        loading={loading}
+                        accent="#52c41a"
+                        icon={<SafetyCertificateOutlined />}
+                        title="Gas Management"
+                        value={slfOps.totalGasVents || 0}
+                        hint="Gas vents — click to view"
                         onClick={() => setSlfDashModal({ type: "gas" })}
-                        style={{ borderRadius: 10, height: 110, borderLeft: "4px solid #52c41a", cursor: "pointer" }}
-                        loading={loading}
-                        styles={{ body: { padding: "10px 14px" } }}
-                      >
-                        <Statistic
-                          title="Gas Management"
-                          value={slfOps.totalGasVents || 0}
-                          prefix={<SafetyCertificateOutlined style={{ color: "#52c41a" }} />}
-                        />
-                        <Text type="secondary" style={{ fontSize: 11 }}>Click to view gas management</Text>
-                      </Card>
+                      />
                     </Col>
-                    <Col xs={12} sm={12} lg={4}>
-                      <Card
-                        hoverable
-                        onClick={() => setPreventiveDashModal(true)}
-                        style={{ borderRadius: 10, height: 110, borderLeft: "4px solid #fa541c", cursor: "pointer" }}
+                    <Col xs={12} sm={8} md={8} lg={4}>
+                      <SummaryTile
+                        isDark={isDark}
                         loading={loading}
-                        styles={{ body: { padding: "10px 14px" } }}
-                      >
-                        <Statistic
-                          title="Preventive Measures"
-                          value={slfOps.totalPreventionDocuments || 0}
-                          prefix={<SafetyCertificateOutlined style={{ color: "#fa541c" }} />}
-                        />
-                        <Text type="secondary" style={{ fontSize: 11 }}>Fire Prevention &amp; Trash Slide — click to view</Text>
-                      </Card>
+                        accent="#fa541c"
+                        icon={<SafetyCertificateOutlined />}
+                        title="Preventive Measures"
+                        value={slfOps.totalPreventionDocuments || 0}
+                        hint={`Fire Prevention & Trash Slide · ${preventiveFileFacilityCount} facilities`}
+                        onClick={() => setPreventiveDashModal(true)}
+                      />
                     </Col>
                   </Row>
 
@@ -7197,21 +7205,41 @@ export default function DashboardContent({ user, isDark, setActiveMenu, onOpenSu
                       .map((r) => {
                         const caps = r.cellCapacities || [];
                         const fills = r.cellFillValues || [];
+                        const baselineFills = r.cellFillBaselineValues || [];
+                        const submittedFills = r.cellFillSubmittedValues || [];
                         const statuses = r.cellStatuses || [];
                         const types = r.cellTypes || [];
                         const n = r.numberOfCell || 0;
                         let totalCap = 0, totalFill = 0, opCells = 0;
                         const cells = [];
+                        // Per-status tally so the tile can report the full mix
+                        // (Operational / Completed / Closed / Under Construction /
+                        // Reserved …) instead of only "n cells, m operational".
+                        const statusBreakdown = new Map();
                         for (let i = 0; i < n; i++) {
                           const status = statuses[i] || "";
                           // Same rule as the Cell Infra Overview: a cell that does
                           // not exist is neither listed nor counted.
                           if (isNonExistentCell(status)) continue;
                           const statusConfig = getCellStatusConfig(status);
+                          const bucket = statusBreakdown.get(statusConfig.label) || {
+                            label: statusConfig.label,
+                            color: statusConfig.color,
+                            tag: statusConfig.tag,
+                            badge: statusConfig.badge,
+                            count: 0,
+                          };
+                          bucket.count += 1;
+                          statusBreakdown.set(statusConfig.label, bucket);
                           const capUnit = resolveCellUnit(r, i, "capacity");
                           const fillUnit = resolveCellUnit(r, i, "fill");
                           const cap = toM3(caps[i], capUnit) ?? 0;
                           const fill = toM3(fills[i], fillUnit);
+                          // Provenance split, computed server-side by the ONE shared
+                          // occupancy calculator (utils/cellOccupancy.js) and stored
+                          // in the same unit as cellFillValues. Never re-derived here.
+                          const baselineFill = toM3(baselineFills[i], fillUnit);
+                          const submittedFill = toM3(submittedFills[i], fillUnit);
                           if (cap > 0) { totalCap += cap; totalFill += Number(fill || 0); }
                           if (statusConfig.key === "active") opCells++;
                           cells.push({
@@ -7224,14 +7252,49 @@ export default function DashboardContent({ user, isDark, setActiveMenu, onOpenSu
                             typeConfig: getCellTypeConfig(types[i]),
                             capacity: cap > 0 ? cap : null,
                             fill: Number.isFinite(fill) ? fill : null,
+                            baselineFill: Number.isFinite(baselineFill) ? baselineFill : 0,
+                            submittedFill: Number.isFinite(submittedFill) ? submittedFill : 0,
                             remaining: cap > 0 && Number.isFinite(fill) ? Math.max(0, cap - fill) : null,
                             unit: "m³", // normalized
                             percent: computeGaugePercent({ usedCapacity: fill, totalCapacity: cap }),
                           });
                         }
+                        // Volume contributions that make up the facility gauge, one
+                        // colour per source: the declared baseline first, then each
+                        // cell's submitted volume. Segments sum to the facility's
+                        // total fill, so the arc can never disagree with the
+                        // headline percentage.
+                        const facilityBaseline = cells.reduce((sum, c) => sum + c.baselineFill, 0);
+                        const volumeSegments = [
+                          ...(facilityBaseline > 0
+                            ? [{ key: "baseline", label: "Baseline Volume", value: facilityBaseline, color: BASELINE_SEGMENT_COLOR }]
+                            : []),
+                          ...cells
+                            .filter((c) => c.submittedFill > 0)
+                            .map((c, cellIdx) => ({
+                              key: `cell-${c.index}`,
+                              label: c.name,
+                              value: c.submittedFill,
+                              color: getSlfColor(`${r._id || r.lgu}-${c.index}`, cellIdx),
+                            })),
+                        ];
+                        // Legacy records predate the provenance split (both arrays
+                        // empty). Fall back to a single un-split contribution rather
+                        // than showing an empty gauge.
+                        if (volumeSegments.length === 0 && totalFill > 0) {
+                          volumeSegments.push({
+                            key: "recorded",
+                            label: "Recorded Volume",
+                            value: totalFill,
+                            color: BASELINE_SEGMENT_COLOR,
+                          });
+                        }
+
                         return {
                           key: r._id || r.lgu, name: r.lgu, province: r.province,
                           status: r.statusOfSLF, numberOfCell: cells.length, opCells, totalCap, totalFill, cells,
+                          statusBreakdown: [...statusBreakdown.values()].sort((a, b) => b.count - a.count),
+                          volumeSegments,
                           percent: computeGaugePercent({ usedCapacity: totalFill, totalCapacity: totalCap }),
                         };
                       })
@@ -7342,10 +7405,16 @@ export default function DashboardContent({ user, isDark, setActiveMenu, onOpenSu
                                         <Empty description="No cell infrastructure data available." />
                                       ) : drillFacility ? (
                                         <>
-                                          <div style={{ marginBottom: 12 }}>
+                                          <div style={{ marginBottom: 12, display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
                                             <Text type="secondary" style={{ fontSize: 12 }}>
-                                              {drillFacility.province} • {drillFacility.numberOfCell} cells • {drillFacility.opCells} operational
+                                              {drillFacility.province} • {drillFacility.numberOfCell} cells
                                             </Text>
+                                            {/* Full status mix rather than a single "n operational". */}
+                                            {drillFacility.statusBreakdown.map((bucket) => (
+                                              <Tag key={bucket.label} color={bucket.tag} style={{ margin: 0 }}>
+                                                {bucket.count} {bucket.label}
+                                              </Tag>
+                                            ))}
                                           </div>
                                           <Row gutter={[12, 12]}>
                                             {drillFacility.cells.map((c) => (
@@ -7359,6 +7428,10 @@ export default function DashboardContent({ user, isDark, setActiveMenu, onOpenSu
                                                     <Text strong style={{ fontSize: 12 }}>{c.name}</Text>
                                                     <Badge status={c.statusConfig.badge} text={<span style={{ fontSize: 10 }}>{c.status}</span>} />
                                                   </div>
+                                                  {/* Same visual concept as the facility gauge:
+                                                      the declared BASELINE and the SUBMITTED
+                                                      volume each get their own colour so the
+                                                      reader can see what made up the fill. */}
                                                   <GaugeMeter
                                                     percent={c.percent}
                                                     size={96}
@@ -7366,7 +7439,10 @@ export default function DashboardContent({ user, isDark, setActiveMenu, onOpenSu
                                                     color={c.typeConfig.color}
                                                     fillStyle={c.statusConfig.fill}
                                                     fillOpacity={c.statusConfig.opacity}
+                                                    segments={cellVolumeSegments(c)}
+                                                    segmentTotal={c.capacity}
                                                   />
+                                                  <GaugeLegend segments={cellVolumeSegments(c)} unit={c.unit} compact isDark={isDark} />
                                                   <div style={{ fontSize: 11, marginTop: 6 }}>
                                                     <div><Text type="secondary">Type: </Text><Tag color={c.typeConfig.tag} style={{ margin: 0, fontSize: 10 }}>{c.type}</Tag></div>
                                                     <div>
@@ -7416,13 +7492,31 @@ export default function DashboardContent({ user, isDark, setActiveMenu, onOpenSu
                                                     return (
                                                       <Col xs={12} sm={8} md={6} key={f.key}>
                                                         <Card size="small" hoverable onClick={() => setSlfCellDrill(f.key)} style={{ borderRadius: 8, textAlign: "center", height: "100%", cursor: "pointer", borderTop: `3px solid ${slfColor}` }}>
-                                                          {/* #1: thinner arc, coloured by SLF palette + capacity band */}
-                                                          <GaugeMeter percent={f.percent} size={112} thickness={6} color={gaugeColor} />
+                                                          {/* Segmented arc: one colour per volume source (baseline +
+                                                              each cell) so the reader can see which cell contributed
+                                                              what. Falls back to the single capacity-band colour when
+                                                              no per-cell volumes are recorded. */}
+                                                          <GaugeMeter
+                                                            percent={f.percent}
+                                                            size={112}
+                                                            thickness={6}
+                                                            color={gaugeColor}
+                                                            segments={f.volumeSegments}
+                                                            segmentTotal={f.totalCap}
+                                                          />
+                                                          <GaugeLegend segments={f.volumeSegments} unit="m³" compact isDark={isDark} />
                                                           <div style={{ fontSize: 12, fontWeight: 600, marginTop: 4 }}>{f.name}</div>
                                                           <Text type="secondary" style={{ fontSize: 11 }}>{f.province}</Text>
-                                                          <div style={{ marginTop: 4 }}>
-                                                            <Tag color="cyan">{f.numberOfCell} cells</Tag>
-                                                            <Tag color="green">{f.opCells} op</Tag>
+                                                          {/* Full status mix, not just "n cells / m operational". */}
+                                                          <div style={{ marginTop: 4, display: "flex", flexWrap: "wrap", gap: 4, justifyContent: "center" }}>
+                                                            <Tag color="cyan" style={{ margin: 0 }}>{f.numberOfCell} cells</Tag>
+                                                            {f.statusBreakdown.map((bucket) => (
+                                                              <Tooltip key={bucket.label} title={`${bucket.count} × ${bucket.label}`}>
+                                                                <Tag color={bucket.tag} style={{ margin: 0 }}>
+                                                                  {bucket.count} {bucket.label}
+                                                                </Tag>
+                                                              </Tooltip>
+                                                            ))}
                                                           </div>
                                                           <div style={{ marginTop: 2 }}><Text type="secondary" style={{ fontSize: 10 }}>Click to view cells</Text></div>
                                                         </Card>
@@ -8946,11 +9040,32 @@ export default function DashboardContent({ user, isDark, setActiveMenu, onOpenSu
 
       {preventiveFileViewer && (() => {
         const viewUrl = absoluteMediaUrl(preventiveFileViewer.url);
-        const fileName = preventiveFileViewer.fileName || getPreventiveFileName(preventiveFileViewer.url, "document");
-        const kind = preventiveFileViewer.kind || getPreventiveFileKind(fileName, preventiveFileViewer.url);
-        const pdfUrl = `${viewUrl.split("#")[0]}#zoom=${preventiveFileZoom}`;
-        const officeUrl = `https://view.officeapps.live.com/op/embed.aspx?src=${encodeURIComponent(viewUrl)}`;
-        const previewUrl = kind === "word" ? officeUrl : kind === "pdf" ? pdfUrl : viewUrl;
+        const serverMeta = viewerMediaMeta[preventiveFileViewer.url] || {};
+        const fileName =
+          preventiveFileViewer.fileName ||
+          getMediaFileName(preventiveFileViewer.url, serverMeta.fileName) ||
+          "document";
+        // The caller's kind is only trusted when it actually identified the file;
+        // a stale "file" must not block a preview the server can now describe.
+        const resolvedKind = getMediaKind(preventiveFileViewer.url, fileName, serverMeta.mimeType);
+        const kind =
+          preventiveFileViewer.kind && preventiveFileViewer.kind !== "file"
+            ? preventiveFileViewer.kind
+            : resolvedKind;
+        // Iframes must use the EMBED url: Drive's /view page refuses to be framed
+        // (X-Frame-Options), which rendered a blank panel for every Drive file.
+        const embedUrl = embedMediaUrl(preventiveFileViewer.url);
+        const pdfUrl = `${embedUrl.split("#")[0]}#zoom=${preventiveFileZoom}`;
+        // Office Web Viewer can only reach PUBLIC urls. A signed same-origin proxy
+        // url is unreachable from Microsoft's servers, so embedding it there shows
+        // a permanent error — fall back to the browser's own handling instead.
+        const officeEmbeddable = /^https?:\/\//i.test(embedUrl) && !isSecureProxyUrl(preventiveFileViewer.url);
+        const officeUrl = `https://view.officeapps.live.com/op/embed.aspx?src=${encodeURIComponent(embedUrl)}`;
+        const isOfficeDoc = kind === "word" || kind === "sheet" || kind === "slide";
+        const canEmbed = kind === "pdf" || (isOfficeDoc && (officeEmbeddable || isDriveUrl(preventiveFileViewer.url)));
+        const previewUrl = isOfficeDoc
+          ? (isDriveUrl(preventiveFileViewer.url) ? embedUrl : officeUrl)
+          : pdfUrl;
         const copyLink = () => navigator.clipboard?.writeText(viewUrl).catch(() => {});
         const openNewTab = () => window.open(viewUrl, "_blank", "noopener,noreferrer");
         const downloadFile = () => {
@@ -8985,9 +9100,20 @@ export default function DashboardContent({ user, isDark, setActiveMenu, onOpenSu
           >
             <div style={{ padding: "10px 12px", borderBottom: isDark ? "1px solid #303030" : "1px solid #f0f0f0", display: "flex", gap: 8, justifyContent: "space-between", flexWrap: "wrap", alignItems: "center" }}>
               <Space size={6} wrap>
-                <Button size="small" icon={<ZoomOutOutlined />} disabled={kind === "word" || preventiveFileZoom <= 50} onClick={() => setPreventiveFileZoom((z) => Math.max(50, z - 10))}>Zoom out</Button>
-                <Button size="small" onClick={() => setPreventiveFileZoom(100)} disabled={kind === "word" || preventiveFileZoom === 100}>Reset {kind === "word" ? "" : `${preventiveFileZoom}%`}</Button>
-                <Button size="small" icon={<ZoomInOutlined />} disabled={kind === "word" || preventiveFileZoom >= 200} onClick={() => setPreventiveFileZoom((z) => Math.min(200, z + 10))}>Zoom in</Button>
+                {/* Zoom applies to images and PDFs. Office documents are scaled by
+                    their own embedded viewer, so the controls are hidden rather
+                    than shown permanently disabled. */}
+                {(() => {
+                  const zoomable = kind === "image" || kind === "pdf";
+                  if (!zoomable) return <Text type="secondary" style={{ fontSize: 12 }}>{kind.toUpperCase()} document</Text>;
+                  return (
+                    <>
+                      <Button size="small" icon={<ZoomOutOutlined />} disabled={preventiveFileZoom <= 50} onClick={() => setPreventiveFileZoom((z) => Math.max(50, z - 10))}>Zoom out</Button>
+                      <Button size="small" onClick={() => setPreventiveFileZoom(100)} disabled={preventiveFileZoom === 100}>Reset {preventiveFileZoom}%</Button>
+                      <Button size="small" icon={<ZoomInOutlined />} disabled={preventiveFileZoom >= 200} onClick={() => setPreventiveFileZoom((z) => Math.min(200, z + 10))}>Zoom in</Button>
+                    </>
+                  );
+                })()}
               </Space>
               <Space size={6} wrap>
                 <Tooltip title="Copy file link"><Button size="small" icon={<CopyOutlined />} onClick={copyLink}>Copy</Button></Tooltip>
@@ -8999,14 +9125,18 @@ export default function DashboardContent({ user, isDark, setActiveMenu, onOpenSu
               {kind === "image" ? (
                 <div style={{ minWidth: "100%", padding: 18, textAlign: "center" }}>
                   <img
-                    src={viewUrl}
+                    // Drive's /view page is an HTML document, not an image source.
+                    src={resolveMediaImageUrl(preventiveFileViewer.url)}
                     alt={fileName}
                     style={{ width: `${preventiveFileZoom}%`, maxWidth: "none", borderRadius: 8, boxShadow: isDark ? "0 8px 28px rgba(0,0,0,0.45)" : "0 8px 28px rgba(0,0,0,0.12)" }}
                   />
                 </div>
-              ) : kind === "pdf" || kind === "word" ? (
+              ) : canEmbed ? (
                 <iframe
-                  key={`${kind}-${preventiveFileZoom}-${viewUrl}`}
+                  // Keyed on the FILE only. It used to include the zoom level, so
+                  // every 10% step tore down the viewer and re-downloaded the whole
+                  // PDF; the `#zoom` fragment alone is enough to rescale in place.
+                  key={`${kind}-${previewUrl.split("#")[0]}`}
                   src={previewUrl}
                   title={fileName}
                   style={{ width: "100%", height: "100%", border: 0, background: "#fff" }}
@@ -9016,7 +9146,7 @@ export default function DashboardContent({ user, isDark, setActiveMenu, onOpenSu
                   <Alert
                     type="info"
                     showIcon
-                    message="Preview is not available for this file type."
+                    message={`In-app preview is not available for ${kind === "file" ? "this file type" : `${kind.toUpperCase()} files`}.`}
                     description="Use Open or Download from the toolbar to view the file with a compatible application."
                   />
                 </div>
@@ -9145,7 +9275,8 @@ export default function DashboardContent({ user, isDark, setActiveMenu, onOpenSu
         );
       })()}
 
-      {/* Preventive Measures — grouped by SLF (tiles, category pie, thumbnail grid). */}
+      {/* Preventive Measures — collapsible per PROVINCE, each holding a sortable,
+          searchable table of its facilities; expanding a row reveals thumbnails. */}
       <Modal
         open={preventiveDashModal}
         title={<Space><SafetyCertificateOutlined style={{ color: "#fa541c" }} /> <Text strong>Preventive Measures (Fire Prevention and Trash Slide)</Text></Space>}
@@ -9165,9 +9296,7 @@ export default function DashboardContent({ user, isDark, setActiveMenu, onOpenSu
           <Suspense fallback={<div style={{ padding: 24, textAlign: "center" }}><Spin /></div>}>
             <PreventiveMeasuresBySlf
               facilities={slfFacStats?.managementData || []}
-              getFileName={getPreventiveFileName}
-              getKind={getPreventiveFileKind}
-              resolveThumbUrl={resolveMediaOpenUrl}
+              isDark={isDark}
               onOpenFile={(entry) => openPreventiveFileViewer({ url: entry.url, fileName: entry.fileName, slfName: entry.slfName, province: entry.province, kind: entry.kind })}
             />
           </Suspense>

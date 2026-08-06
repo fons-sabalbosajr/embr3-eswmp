@@ -129,7 +129,10 @@ async function findPortalFacility(id, slfName, selectFields) {
   return facility;
 }
 
-const ACTIVE_VOLUME_STATUSES = new Set(["pending", "acknowledged", "revert_requested"]);
+const {
+  computeCellOccupancy,
+  OCCUPANCY_ENTRY_FIELDS,
+} = require("../utils/cellOccupancy");
 
 // Conversion comes from the shared module. The local copy this replaced defaulted
 // a MISSING source unit to "tons", while every other copy in the app defaulted to
@@ -165,18 +168,10 @@ function normalizeCellInfrastructureNumbers(payload) {
   });
 }
 
-function parseCellIndex(cellName) {
-  const match = String(cellName || "").match(/(?:cell\s*)?(\d+)/i);
-  return match ? Number(match[1]) - 1 : null;
-}
-
-function isHazardousWaste(wasteType) {
-  return /haz|inert/i.test(String(wasteType || ""));
-}
-
-function isHazardousCell(cellType) {
-  return /haz|inert/i.test(String(cellType || ""));
-}
+// parseCellIndex / isHazardousWaste / isHazardousCell / findBestCellIndex /
+// addVolume / getPortalVolumeUnit and the baseline-vs-submission partitioning
+// now live in utils/cellOccupancy.js, so this route and dataSLF.js can no longer
+// drift apart on how a cell's fill is computed.
 
 function isActiveCellStatus(status) {
   return ["Active Cell", "Operational", "Active"].includes(String(status || ""));
@@ -265,60 +260,6 @@ function mergeCellInfrastructureUpdate(update, record) {
   return preserved;
 }
 
-function getDataEntryId(entry) {
-  return entry?._id ? String(entry._id) : "";
-}
-
-function isSameDataEntry(left, right) {
-  const leftId = getDataEntryId(left);
-  const rightId = getDataEntryId(right);
-  return !!leftId && !!rightId && leftId === rightId;
-}
-
-function hasTruckVolume(entry) {
-  return (entry?.trucks || []).some((truck) => Number(truck?.actualVolume || 0) > 0);
-}
-
-function getPortalVolumeUnit(baseline, submissions, facility) {
-  return normalizeUnit(
-    submissions
-      .flatMap((entry) => entry.trucks || [])
-      .find((truck) => Number(truck?.actualVolume || 0) > 0 && truck.actualVolumeUnit)?.actualVolumeUnit ||
-    (baseline?.activeCellEntries || []).find((entry) => Number(entry?.volume || 0) > 0 && entry.unit)?.unit ||
-    baseline?.baselineUnit ||
-    baseline?.activeCellResidualUnit ||
-    baseline?.totalVolumeAcceptedUnit ||
-    facility?.wasteReceivedUnit ||
-    facility?.cellFillUnits?.find(Boolean) ||
-    facility?.cellCapacityUnits?.find(Boolean) ||
-    facility?.volumeCapacityUnit ||
-    "m³"
-  );
-}
-
-function findBestCellIndex(rows, wasteType, preferredIndex = null) {
-  if (preferredIndex != null && rows[preferredIndex] && isActiveCellStatus(rows[preferredIndex].status)) return preferredIndex;
-  const hazardous = isHazardousWaste(wasteType);
-  const matchIndex = rows.findIndex((row) => isActiveCellStatus(row.status) && row.hazardous === hazardous);
-  if (matchIndex >= 0) return matchIndex;
-  const operationalIndex = rows.findIndex((row) => isActiveCellStatus(row.status));
-  return operationalIndex >= 0 ? operationalIndex : 0;
-}
-
-function addVolume(rows, index, value, fromUnit, targetUnit) {
-  const row = rows[index] || rows[0];
-  if (!row) return;
-  const converted = convertVolume(value, fromUnit, targetUnit);
-  if (converted === null) {
-    // Unit missing or unconvertible: EXCLUDE it from the capacity total rather
-    // than guessing a unit (`total += null` would also have produced NaN). The
-    // count is surfaced so the record can be flagged instead of silently dropped.
-    row.unconvertible = (row.unconvertible || 0) + 1;
-    return;
-  }
-  row.total += converted;
-}
-
 async function enrichPortalFacilityVolumes(facilityDoc, requestedSlfName) {
   const facility = facilityDoc.toObject ? facilityDoc.toObject() : { ...facilityDoc };
   const names = [...new Set([requestedSlfName, facility.lgu].filter(Boolean))];
@@ -334,65 +275,28 @@ async function enrichPortalFacilityVolumes(facilityDoc, requestedSlfName) {
   // otherwise CLOBBER the $or scope and make this query return every SLF's
   // records (slow + wrong cell fills).
   const entries = await DataSLF.find({ deletedAt: null, $and: [{ $or: filters }] })
-    .select(
-      "slfGenerator slfName status createdAt totalVolumeAccepted totalVolumeAcceptedUnit " +
-      "baselineUnit activeCellResidualVolume activeCellResidualUnit activeCellInertVolume " +
-      "activeCellInertUnit activeCellHazardousVolume activeCellHazardousUnit activeCellEntries " +
-      "trucks.actualVolume trucks.actualVolumeUnit trucks.wasteType trucks.cellIndex trucks.cellName",
-    )
+    .select(OCCUPANCY_ENTRY_FIELDS)
     .sort({ createdAt: -1 })
     .lean();
 
-  const baseline = entries.find((entry) =>
-    entry.totalVolumeAccepted != null ||
-    entry.activeCellResidualVolume != null ||
-    entry.activeCellInertVolume != null ||
-    entry.activeCellHazardousVolume != null ||
-    entry.activeCellEntries?.length
-  );
-  const matchingSubmissions = entries.filter((entry) =>
-    ACTIVE_VOLUME_STATUSES.has(entry.status || "pending") &&
-    !isSameDataEntry(entry, baseline) &&
-    hasTruckVolume(entry)
-  );
-  const targetUnit = getPortalVolumeUnit(baseline, matchingSubmissions, facility);
-  const cellCount = Math.max(Number(facility.numberOfCell || 0), facility.cellCapacities?.length || 0, 1);
-  const rows = Array.from({ length: cellCount }, (_, index) => ({
-    total: 0,
-    status: normalizeCellStatus(facility.cellStatuses?.[index]),
-    hazardous: isHazardousCell(facility.cellTypes?.[index] || "Residual"),
-  }));
-
-  if (baseline?.activeCellEntries?.length) {
-    baseline.activeCellEntries.forEach((entry, orderIndex) => {
-      const parsedIndex = parseCellIndex(entry.cellName);
-      const targetIndex = findBestCellIndex(rows, entry.wasteType, parsedIndex != null && parsedIndex >= 0 ? parsedIndex : orderIndex);
-      addVolume(rows, targetIndex, entry.volume, entry.unit || baseline.baselineUnit || targetUnit, targetUnit);
-    });
-  } else if (baseline) {
-    [
-      { value: baseline.activeCellResidualVolume, unit: baseline.activeCellResidualUnit, wasteType: "Residual" },
-      { value: baseline.activeCellInertVolume, unit: baseline.activeCellInertUnit, wasteType: "Treated Hazardous Waste" },
-      { value: baseline.activeCellHazardousVolume, unit: baseline.activeCellHazardousUnit, wasteType: "Hazardous Waste" },
-    ].forEach((item) => addVolume(rows, findBestCellIndex(rows, item.wasteType), item.value, item.unit || baseline.baselineUnit || targetUnit, targetUnit));
-  }
-
-  matchingSubmissions.forEach((entry) => {
-      (entry.trucks || []).forEach((truck) => {
-        const explicitIndex = Number.isInteger(truck.cellIndex) ? truck.cellIndex : parseCellIndex(truck.cellName);
-        addVolume(rows, findBestCellIndex(rows, truck.wasteType, explicitIndex), truck.actualVolume, truck.actualVolumeUnit || "tons", targetUnit);
-      });
-    });
-
-  const total = rows.reduce((sum, row) => sum + row.total, 0);
-  if (total <= 0) return facility;
+  // ONE shared calculator (utils/cellOccupancy.js) — see that file for why this
+  // must not be reimplemented here.
+  const occupancy = computeCellOccupancy(facility, entries);
+  if (!occupancy.hasVolume) return facility;
 
   return {
     ...facility,
-    actualResidualWasteReceived: total,
-    wasteReceivedUnit: targetUnit,
-    cellFillValues: rows.map((row) => row.total),
-    cellFillUnits: rows.map(() => targetUnit),
+    actualResidualWasteReceived: occupancy.totalVolume,
+    wasteReceivedUnit: occupancy.unit,
+    cellFillValues: occupancy.cellFillValues,
+    cellFillUnits: occupancy.cellFillUnits,
+    // Provenance split, in the SAME unit as cellFillValues. Consumers must use
+    // these rather than recomputing their own totals — that divergence is what
+    // let the Submitted Volume tile disagree with the Baseline Breakdown.
+    cellFillBaselineValues: occupancy.cellFillBaselineValues,
+    cellFillSubmittedValues: occupancy.cellFillSubmittedValues,
+    baselineVolumeTotal: occupancy.baselineTotal,
+    submittedVolumeTotal: occupancy.submittedTotal,
   };
 }
 
@@ -646,10 +550,17 @@ router.get("/stats", async (req, res) => {
         SlfFacility.find(scopedFilter, {
           province: 1, lgu: 1, statusOfSLF: 1, dataYear: 1,
           noOfLeachatePond: 1, numberOfGasVents: 1,
-          numberOfCell: 1, cellCapacities: 1, cellCapacityUnits: 1, cellStatuses: 1, cellTypes: 1, cellFillValues: 1, cellFillUnits: 1,
+          // cellNames was missing, so resolveCellName() on the client always fell
+          // back to "Cell N" and admin-configured cell names never appeared in the
+          // dashboard gauges/legends.
+          numberOfCell: 1, cellNames: 1, cellCapacities: 1, cellCapacityUnits: 1, cellStatuses: 1, cellTypes: 1, cellFillValues: 1, cellFillUnits: 1,
+          cellFillBaselineValues: 1, cellFillSubmittedValues: 1, baselineVolumeTotal: 1, submittedVolumeTotal: 1,
           leachatePondDetails: 1, gasVentDetails: 1,
-          trashSlideMeasures: 1, firePrevMeasures: 1, preventiveMeasureFiles: 1,
-          noOfLGUServed: 1, actualResidualWasteReceived: 1, ownership: 1, category: 1, volumeCapacity: 1, volumeCapacityUnit: 1, receivingVolumeCapacity: 1, receivingVolumeCapacityUnit: 1,
+          // preventiveMeasureFileDetails carries each document's ORIGINAL file name;
+          // without it the Preventive Measures panel could only show opaque storage ids.
+          trashSlideMeasures: 1, firePrevMeasures: 1, preventiveMeasureFiles: 1, preventiveMeasureFileDetails: 1,
+          galleryPhotos: 1, galleryItems: 1,
+          noOfLGUServed: 1, actualResidualWasteReceived: 1, wasteReceivedUnit: 1, ownership: 1, category: 1, volumeCapacity: 1, volumeCapacityUnit: 1, receivingVolumeCapacity: 1, receivingVolumeCapacityUnit: 1,
         }).sort({ province: 1, lgu: 1 }),
       ]);
 
