@@ -129,8 +129,6 @@ import { getAdminDisplayName, isDeveloper as isDeveloperUser } from "../../utils
 import secureStorage from "../../utils/secureStorage";
 import { DataRefProvider } from "../../utils/dataRef";
 import GaugeMeter, { computeGaugePercent } from "../../components/GaugeMeter";
-// Centralized cell + unit logic — shared with Cell Infra Overview and SLF Monitoring
-// so the General Dashboard cannot drift into its own formulas.
 import {
   resolveCellName,
   getCellStatusConfig,

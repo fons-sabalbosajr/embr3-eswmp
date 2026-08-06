@@ -418,6 +418,11 @@ dataSLFSchema.pre("save", async function () {
 });
 
 dataSLFSchema.index({ deletedAt: 1, createdAt: -1 });
+// The submissions list sorts strictly newest-first with an `_id` tiebreak (see
+// routes/dataSLF.js). Without `_id` in the index the tiebreak forced an
+// in-memory SORT and a full collection scan — 755 documents examined to return
+// a 25-row page. With it the sort is served entirely from the index.
+dataSLFSchema.index({ deletedAt: 1, createdAt: -1, _id: -1 });
 dataSLFSchema.index({ deletedAt: 1, status: 1, createdAt: -1 });
 dataSLFSchema.index({ deletedAt: 1, idNo: 1 });
 // Standalone idNo index. The compound index above is keyed on `deletedAt` first,
