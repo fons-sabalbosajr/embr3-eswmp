@@ -157,6 +157,11 @@ import SlfDashboardTab, {
 } from "./slf-monitoring/SlfDashboardTab";
 import WasteBaselineInfo from "./slf-monitoring/WasteBaselineInfo";
 import { makeMonitoringColumns } from "./slf-monitoring/monitoringColumns";
+import MapPreviewModal from "./slf-monitoring/modals/MapPreviewModal";
+import FilePreviewModal from "./slf-monitoring/modals/FilePreviewModal";
+import UnitToolModal from "./slf-monitoring/modals/UnitToolModal";
+import SlfWasteModal from "./slf-monitoring/modals/SlfWasteModal";
+import DailySubmissionsModal from "./slf-monitoring/modals/DailySubmissionsModal";
 import PortalGenerators from "./slf-monitoring/PortalGenerators";
 import HaulerClientsTab from "./slf-monitoring/HaulerClientsTab";
 import HaulerClientsEditor from "./slf-monitoring/HaulerClientsEditor";
@@ -6697,119 +6702,10 @@ export default function SLFMonitoring({
         </Spin>
       </Modal>
 
-      <Modal
-        title={
-          <Space>
-            <EnvironmentOutlined />
-            <span>{mapPreview?.label || "SLF Location"}</span>
-          </Space>
-        }
-        open={!!mapPreview}
-        onCancel={() => setMapPreview(null)}
-        footer={
-          <Space>
-            {mapPreview && (
-              <Button
-                icon={<LinkOutlined />}
-                href={`https://www.google.com/maps/search/?api=1&query=${mapPreview.latitude},${mapPreview.longitude}`}
-                target="_blank"
-                rel="noreferrer"
-              >
-                Open Google Maps
-              </Button>
-            )}
-            <Button onClick={() => setMapPreview(null)}>Close</Button>
-          </Space>
-        }
-        width={820}
-        destroyOnHidden
-      >
-        {mapPreview && (
-          <div>
-            <Text
-              type="secondary"
-              style={{ display: "block", marginBottom: 8 }}
-            >
-              {mapPreview.latitude}, {mapPreview.longitude}
-            </Text>
-            <iframe
-              title="SLF map preview"
-              src={`https://maps.google.com/maps?q=${mapPreview.latitude},${mapPreview.longitude}&z=16&output=embed`}
-              style={{
-                width: "100%",
-                height: 420,
-                border: 0,
-                borderRadius: 8,
-              }}
-              loading="lazy"
-            />
-          </div>
-        )}
-      </Modal>
+      <MapPreviewModal mapPreview={mapPreview} setMapPreview={setMapPreview} />
 
       {/* -- File / PDF Preview Modal -- */}
-      <Modal
-        title={
-          <Space>
-            <FilePdfOutlined style={{ color: "#cf1322" }} />
-            <span style={{ maxWidth: 520, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-              {filePreview.name || "File Preview"}
-            </span>
-          </Space>
-        }
-        open={filePreview.open}
-        onCancel={() => setFilePreview({ open: false, url: "", name: "" })}
-        footer={[
-          <Button
-            key="open"
-            icon={<LinkOutlined />}
-            onClick={() => window.open(resolveMediaOpenUrl(filePreview.url), "_blank", "noopener,noreferrer")}
-          >
-            Open in new tab
-          </Button>,
-          <Button key="close" type="primary" onClick={() => setFilePreview({ open: false, url: "", name: "" })}>
-            Close
-          </Button>,
-        ]}
-        width={920}
-        zIndex={1900}
-        styles={{ body: { padding: 0, height: "72vh", background: "#525659" } }}
-        destroyOnHidden
-      >
-        {(() => {
-          if (!filePreview.url) return null;
-          const kind = getMediaKind(filePreview.url);
-          if (kind === "image") {
-            return (
-              <div style={{ height: "100%", display: "flex", alignItems: "center", justifyContent: "center", overflow: "auto" }}>
-                <Image
-                  src={resolveMediaUrl(filePreview.url)}
-                  style={{ maxHeight: "72vh", objectFit: "contain" }}
-                  preview={false}
-                />
-              </div>
-            );
-          }
-          if (kind === "video") {
-            return (
-              <video
-                src={filePreview.url}
-                controls
-                style={{ width: "100%", height: "100%", background: "#000" }}
-              />
-            );
-          }
-          // pdf / doc / drive (extension-less) — embed the viewer inline.
-          return (
-            <iframe
-              title={filePreview.name || "File preview"}
-              src={resolveMediaPreviewUrl(filePreview.url)}
-              style={{ width: "100%", height: "100%", border: "none" }}
-              allow="autoplay"
-            />
-          );
-        })()}
-      </Modal>
+      <FilePreviewModal filePreview={filePreview} setFilePreview={setFilePreview} />
 
       {/* -- Capacity Converter Modal -- */}
       <Modal
@@ -7049,34 +6945,13 @@ export default function SLFMonitoring({
           </Card>
         </Space>
       </Modal>
-      <Modal
-        title={
-          <Space>
-            <DatabaseOutlined />
-            <span>Set Field Units</span>
-          </Space>
-        }
-        open={unitToolOpen}
-        onCancel={() => setUnitToolOpen(false)}
-        onOk={applyUnitTool}
-        okText="Apply Units"
-        width={460}
-        zIndex={1700}
-        destroyOnHidden={false}
-      >
-        <Space direction="vertical" size={12} style={{ width: "100%" }}>
-          <Text type="secondary">
-            Apply one unit to the SLF capacity, receiving capacity, waste
-            received, estimated waste, and all cell capacity/fill unit fields.
-          </Text>
-          <Select
-            value={unitToolValue}
-            onChange={setUnitToolValue}
-            options={UNIT_OPTIONS}
-            style={{ width: "100%" }}
-          />
-        </Space>
-      </Modal>
+      <UnitToolModal
+        unitToolOpen={unitToolOpen}
+        setUnitToolOpen={setUnitToolOpen}
+        unitToolValue={unitToolValue}
+        setUnitToolValue={setUnitToolValue}
+        applyUnitTool={applyUnitTool}
+      />
 
       {/* Detail Modal */}
       <Modal
@@ -10071,336 +9946,15 @@ export default function SLFMonitoring({
       </Modal>
 
       {/* -- Waste Received Drill-Down Modal -- */}
-      <Modal
-        open={slfWasteModal}
-        onCancel={() => setSlfWasteModal(false)}
-        title={
-          <Space>
-            <BarChartOutlined style={{ color: "#ff4d4f" }} />
-            <Text strong>Waste Received — SLF Details</Text>
-          </Space>
-        }
-        footer={
-          <div style={{ display: "flex", justifyContent: "space-between" }}>
-            <Button onClick={() => setSlfWasteModal(false)}>Close</Button>
-            <Button
-              type="primary"
-              icon={<TableOutlined />}
-              onClick={() => setSlfWasteModal(false)}
-            >
-              See More Details in Table
-            </Button>
-          </div>
-        }
-        width={1100}
-        destroyOnHidden
-      >
-        {(() => {
-          const wasteData = records.filter(
-            (r) => Number(r.actualResidualWasteReceived || 0) > 0,
-          );
-          const r3Lgus = wasteData.filter(
-            (r) =>
-              R3_PROVINCES.includes(r.province) &&
-              !/private/i.test(r.ownership || ""),
-          );
-          const outLgus = wasteData.filter(
-            (r) =>
-              !R3_PROVINCES.includes(r.province) &&
-              !/private/i.test(r.ownership || ""),
-          );
-          const privates = wasteData.filter((r) =>
-            /private/i.test(r.ownership || ""),
-          );
-          const toBarData = (arr) =>
-            arr
-              .map((r) => ({
-                name: r.lgu || r.province || "Unknown",
-                waste: r.actualResidualWasteReceived || 0,
-                province: r.province || "—",
-                status: r.statusOfSLF || "—",
-              }))
-              .sort((a, b) => b.waste - a.waste);
-          const WasteSection = ({ data, color, label }) => {
-            const barData = toBarData(data);
-            const total = barData.reduce((s, d) => s + d.waste, 0);
-            if (barData.length === 0)
-              return (
-                <Empty
-                  description={`No ${label} waste data available`}
-                  style={{ padding: 24 }}
-                />
-              );
-            return (
-              <div style={{ marginBottom: 20 }}>
-                <Row gutter={12} style={{ marginBottom: 10 }}>
-                  <Col span={8}>
-                    <Card
-                      size="small"
-                      style={{
-                        borderRadius: 8,
-                        background: `${color}0d`,
-                        border: `1px solid ${color}40`,
-                      }}
-                    >
-                      <Statistic
-                        title="SLF Facilities"
-                        value={barData.length}
-                        styles={{ content: { color, fontSize: 20 } }}
-                      />
-                    </Card>
-                  </Col>
-                  <Col span={8}>
-                    <Card
-                      size="small"
-                      style={{
-                        borderRadius: 8,
-                        background: `${color}0d`,
-                        border: `1px solid ${color}40`,
-                      }}
-                    >
-                      <Statistic
-                        title="Total Waste Received"
-                        value={total.toLocaleString()}
-                        styles={{ content: { color, fontSize: 20 } }}
-                      />
-                    </Card>
-                  </Col>
-                  <Col span={8}>
-                    <Card
-                      size="small"
-                      style={{
-                        borderRadius: 8,
-                        background: `${color}0d`,
-                        border: `1px solid ${color}40`,
-                      }}
-                    >
-                      <Statistic
-                        title="Avg/Facility"
-                        value={(total / barData.length).toLocaleString(
-                          undefined,
-                          { maximumFractionDigits: 0 },
-                        )}
-                        styles={{ content: { color, fontSize: 20 } }}
-                      />
-                    </Card>
-                  </Col>
-                </Row>
-                <ResponsiveContainer
-                  width="100%"
-                  height={Math.max(160, barData.length * 30)}
-                >
-                  <BarChart
-                    data={barData}
-                    layout="vertical"
-                    margin={{ top: 4, right: 40, bottom: 4, left: 10 }}
-                  >
-                    <CartesianGrid strokeDasharray="3 3" horizontal={false} />
-                    <XAxis
-                      type="number"
-                      tick={{ fontSize: 11 }}
-                      tickFormatter={(v) =>
-                        v >= 1000 ? `${(v / 1000).toFixed(1)}k` : v
-                      }
-                    />
-                    <YAxis
-                      type="category"
-                      dataKey="name"
-                      width={130}
-                      tick={{ fontSize: 11 }}
-                    />
-                    <RTooltip
-                      formatter={(v) => [
-                        `${Number(v).toLocaleString()} tons`,
-                        "Waste Received",
-                      ]}
-                    />
-                    <Bar
-                      dataKey="waste"
-                      fill={color}
-                      radius={[0, 4, 4, 0]}
-                      isAnimationActive={false}
-                      label={{
-                        position: "right",
-                        fontSize: 10,
-                        formatter: (v) =>
-                          v >= 1000 ? `${(v / 1000).toFixed(1)}k` : v,
-                      }}
-                    />
-                  </BarChart>
-                </ResponsiveContainer>
-              </div>
-            );
-          };
-          return (
-            <Tabs
-              defaultActiveKey="r3"
-              items={[
-                {
-                  key: "r3",
-                  label: (
-                    <span>
-                      <EnvironmentOutlined /> Region 3 LGUs ({r3Lgus.length})
-                    </span>
-                  ),
-                  children: (
-                    <WasteSection
-                      data={r3Lgus}
-                      color="#52c41a"
-                      label="Region 3 LGU"
-                    />
-                  ),
-                },
-                {
-                  key: "out",
-                  label: (
-                    <span>
-                      <EnvironmentOutlined /> Outside Region 3 ({outLgus.length}
-                      )
-                    </span>
-                  ),
-                  children: (
-                    <WasteSection
-                      data={outLgus}
-                      color="#1890ff"
-                      label="outside Region 3 LGU"
-                    />
-                  ),
-                },
-                {
-                  key: "private",
-                  label: (
-                    <span>
-                      <BankOutlined /> Private Industries ({privates.length})
-                    </span>
-                  ),
-                  children: (
-                    <WasteSection
-                      data={privates}
-                      color="#722ed1"
-                      label="private industry"
-                    />
-                  ),
-                },
-              ]}
-            />
-          );
-        })()}
-      </Modal>
-      <Modal
-        title={
-          <Space>
-            <DatabaseOutlined />
-            Daily Submissions - {dailySubmissionsModal.cell?.cellName || "Cell"}
-          </Space>
-        }
-        open={dailySubmissionsModal.open}
-        onCancel={() =>
-          setDailySubmissionsModal({ open: false, cell: null, rows: [] })
-        }
-        footer={
-          <Button
-            onClick={() =>
-              setDailySubmissionsModal({ open: false, cell: null, rows: [] })
-            }
-          >
-            Close
-          </Button>
-        }
-        width={980}
-        destroyOnHidden
-      >
-        <Table
-          className="portal-user-wrap-table"
-          size="small"
-          rowKey="key"
-          dataSource={dailySubmissionsModal.rows}
-          pagination={{ pageSize: 8, size: "small" }}
-          scroll={{ x: 900 }}
-          locale={{
-            emptyText: "No daily portal submissions found for this cell",
-          }}
-          columns={[
-            {
-              title: "Date Submitted",
-              width: 150,
-              render: (_, row) =>
-                row.submission?.createdAt
-                  ? dayjs(row.submission.createdAt).format("MM/DD/YYYY h:mm A")
-                  : "—",
-            },
-            {
-              title: "Submission ID",
-              width: 160,
-              render: (_, row) => (
-                <Text strong style={{ fontSize: 12 }}>
-                  {row.submission?.idNo || row.submission?.submissionId || "—"}
-                </Text>
-              ),
-            },
-            {
-              title: "Waste Generator",
-              width: 190,
-              render: (_, row) => (
-                <Text
-                  style={{
-                    fontSize: 12,
-                    whiteSpace: "normal",
-                    wordBreak: "break-word",
-                  }}
-                >
-                  {row.submission?.lguCompanyName ||
-                    row.submission?.companyName ||
-                    "—"}
-                </Text>
-              ),
-            },
-            {
-              title: "Truck / Ticket",
-              width: 160,
-              render: (_, row) => (
-                <Space direction="vertical" size={0}>
-                  <Text style={{ fontSize: 12 }}>
-                    {row.truck?.plateNumber || "No plate"}
-                  </Text>
-                  <Text type="secondary" style={{ fontSize: 11 }}>
-                    {row.truck?.disposalTicketNo ||
-                      row.truck?.ticketNo ||
-                      "No ticket"}
-                  </Text>
-                </Space>
-              ),
-            },
-            {
-              title: "Waste Type",
-              width: 160,
-              render: (_, row) => (
-                <Tag
-                  color={
-                    isHazardousCellType(row.truck?.wasteType) ? "red" : "blue"
-                  }
-                >
-                  {row.truck?.wasteType || "Residual"}
-                </Tag>
-              ),
-            },
-            {
-              title: "Volume",
-              width: 130,
-              align: "right",
-              render: (_, row) =>
-                `${Number(row.truck?.actualVolume || 0).toLocaleString(undefined, { maximumFractionDigits: 3 })} ${normalizeUnit(row.truck?.actualVolumeUnit || dailySubmissionsModal.cell?.unit || "tons")}`,
-            },
-            {
-              title: "Status",
-              width: 120,
-              render: (_, row) => (
-                <Tag>{row.submission?.status || "pending"}</Tag>
-              ),
-            },
-          ]}
-        />
-      </Modal>
+      <SlfWasteModal
+        slfWasteModal={slfWasteModal}
+        setSlfWasteModal={setSlfWasteModal}
+        records={records}
+      />
+      <DailySubmissionsModal
+        dailySubmissionsModal={dailySubmissionsModal}
+        setDailySubmissionsModal={setDailySubmissionsModal}
+      />
       <Modal
         title={
           <Space>
