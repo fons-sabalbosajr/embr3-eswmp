@@ -113,6 +113,8 @@ import SLFPortalModals from "./SLFPortalModals";
 import { makeTruckColumns } from "./columns/truckColumns";
 import { makeHaulerColumns } from "./columns/haulerColumns";
 import { makeHistoryColumns } from "./columns/historyColumns";
+import PortalNotificationPanel from "./PortalNotificationPanel";
+import PreviousNotificationsModal from "./PreviousNotificationsModal";
 import VeraChat from "./Vera/VeraChat";
 import VeraOnboarding from "../../components/VeraOnboarding";
 import DraftsScheduledPanel from "./DraftsScheduledPanel";
@@ -356,9 +358,6 @@ export default function SLFPortal() {
   // (no extra fetch, no second store).
   const [previousNotifOpen, setPreviousNotifOpen] = useState(false);
   const [notifDetail, setNotifDetail] = useState(null);
-  const [previousNotifSearch, setPreviousNotifSearch] = useState("");
-  const [previousNotifStatus, setPreviousNotifStatus] = useState("all");
-  const [previousNotifDateRange, setPreviousNotifDateRange] = useState(null);
   const [portalSettings, setPortalSettings] = useState(null);
   const [portalAnnouncement, setPortalAnnouncement] = useState(null);
   const [announcementDismissed, setAnnouncementDismissed] = useState(false);
@@ -3485,28 +3484,6 @@ export default function SLFPortal() {
     };
   };
 
-  const filteredPreviousNotifications = useMemo(() => {
-    const q = previousNotifSearch.trim().toLowerCase();
-    return portalNotifications.filter((notification) => {
-      if (previousNotifStatus === "read" && !notification.read) return false;
-      if (previousNotifStatus === "unread" && notification.read) return false;
-      if (previousNotifDateRange?.[0] && previousNotifDateRange?.[1]) {
-        const created = dayjs(notification.createdAt);
-        if (!created.isValid()) return false;
-        if (
-          created.isBefore(previousNotifDateRange[0], "day") ||
-          created.isAfter(previousNotifDateRange[1], "day")
-        ) {
-          return false;
-        }
-      }
-      if (!q) return true;
-      const meta = getPortalNotificationMeta(notification);
-      return [notification.title, notification.message, notification.type, meta.label].some((value) =>
-        String(value || "").toLowerCase().includes(q),
-      );
-    });
-  }, [portalNotifications, previousNotifDateRange, previousNotifSearch, previousNotifStatus]);
 
   const markPortalNotificationsRead = useCallback(
     async (category) => {
@@ -5539,299 +5516,11 @@ export default function SLFPortal() {
     setNotificationPanelOpen(false);
   };
 
-  const portalNotificationPanel = (
-    <div
-      style={{ width: isMobile ? 300 : 380, maxWidth: "calc(100vw - 32px)" }}
-    >
-      <Space
-        style={{
-          width: "100%",
-          justifyContent: "space-between",
-          marginBottom: 8,
-        }}
-      >
-        <Space size={6}>
-          <BellOutlined style={{ color: "#1677ff" }} />
-          <Text strong>Recent Notifications</Text>
-          {portalNotificationCounts.total > 0 && (
-            <Badge count={portalNotificationCounts.total} size="small" />
-          )}
-        </Space>
-        {portalNotificationCounts.total > 0 && (
-          <Button
-            size="small"
-            type="link"
-            onClick={() => markPortalNotificationsRead("all")}
-          >
-            Mark all read
-          </Button>
-        )}
-      </Space>
-      {portalNotifications.length === 0 ? (
-        <Empty
-          image={Empty.PRESENTED_IMAGE_SIMPLE}
-          description="No notifications yet"
-        />
-      ) : (
-        <List
-          size="small"
-          dataSource={portalNotifications.slice(0, 6)}
-          style={{ maxHeight: 420, overflowY: "auto" }}
-          renderItem={(notification) => {
-            const meta = getPortalNotificationMeta(notification);
-            return (
-              <List.Item
-                onClick={() => openPortalNotification(notification)}
-                style={{
-                  cursor: "pointer",
-                  padding: "10px 8px",
-                  borderRadius: 8,
-                  background: notification.read ? "#fff" : "#f0f7ff",
-                  marginBottom: 4,
-                }}
-              >
-                <List.Item.Meta
-                  avatar={
-                    <Badge dot={!notification.read}>
-                      <Avatar
-                        size="small"
-                        style={{
-                          background: notification.read ? "#f0f0f0" : "#e6f4ff",
-                          color: "#1677ff",
-                        }}
-                        icon={meta.icon}
-                      />
-                    </Badge>
-                  }
-                  title={
-                    <Space size={6} wrap>
-                      <Text strong style={{ fontSize: 13 }}>
-                        {notification.title || meta.label}
-                      </Text>
-                      <Tag
-                        color={meta.color}
-                        bordered={false}
-                        style={{ marginInlineEnd: 0 }}
-                      >
-                        {meta.label}
-                      </Tag>
-                    </Space>
-                  }
-                  description={
-                    <div>
-                      <Text
-                        type="secondary"
-                        style={{ fontSize: 12, whiteSpace: "normal" }}
-                      >
-                        {notification.message ||
-                          "Open this update for more details."}
-                      </Text>
-                      <div>
-                        <Text type="secondary" style={{ fontSize: 11 }}>
-                          {notification.createdAt
-                            ? dayjs(notification.createdAt).fromNow()
-                            : ""}
-                        </Text>
-                      </div>
-                    </div>
-                  }
-                />
-              </List.Item>
-            );
-          }}
-        />
-      )}
-      {portalNotifications.length > 0 && (
-        <Button
-          type="link"
-          block
-          icon={<HistoryOutlined />}
-          style={{ marginTop: 4 }}
-          onClick={() => {
-            setNotificationPanelOpen(false);
-            setPreviousNotifOpen(true);
-          }}
-        >
-          View all previous notifications ({portalNotifications.length})
-        </Button>
-      )}
-    </div>
-  );
 
   // ── Previous Notifications (full history) ──
   // Table view of every notification already loaded in portalNotifications — the
   // popover only shows the most recent few. Reuses getPortalNotificationMeta and
   // openPortalNotification; no new data source.
-  const previousNotificationsModal = (
-    <Modal
-      open={previousNotifOpen}
-      onCancel={() => setPreviousNotifOpen(false)}
-      width={isMobile ? "96vw" : 1200}
-      title={
-        <Space>
-          <HistoryOutlined style={{ color: "#1a3353" }} />
-          <span>Previous Notifications</span>
-          {filteredPreviousNotifications.length > 0 && (
-            <Tag>{filteredPreviousNotifications.length} shown</Tag>
-          )}
-        </Space>
-      }
-      footer={
-        <Space>
-          {portalNotificationCounts.total > 0 && (
-            <Button onClick={() => markPortalNotificationsRead("all")}>
-              Mark all read
-            </Button>
-          )}
-          <Button type="primary" onClick={() => setPreviousNotifOpen(false)}>
-            Close
-          </Button>
-        </Space>
-      }
-      styles={{ body: { maxHeight: "72vh", overflowY: "auto", paddingTop: 12 } }}
-    >
-      <Space wrap style={{ marginBottom: 12, width: "100%", justifyContent: "space-between" }}>
-        <Space wrap>
-          <Input
-            allowClear
-            placeholder="Search notifications"
-            prefix={<SearchOutlined />}
-            value={previousNotifSearch}
-            onChange={(event) => setPreviousNotifSearch(event.target.value)}
-            style={{ width: 240 }}
-          />
-          <Select
-            value={previousNotifStatus}
-            onChange={setPreviousNotifStatus}
-            style={{ width: 140 }}
-            options={[
-              { label: "All Status", value: "all" },
-              { label: "Unread", value: "unread" },
-              { label: "Read", value: "read" },
-            ]}
-          />
-          <DatePicker.RangePicker
-            value={previousNotifDateRange}
-            onChange={setPreviousNotifDateRange}
-            allowClear
-          />
-        </Space>
-        <Text type="secondary" style={{ fontSize: 12 }}>
-          {portalNotifications.length} loaded
-        </Text>
-      </Space>
-      <Table
-        size="small"
-        rowKey={(n) => n._id}
-        dataSource={filteredPreviousNotifications}
-        className="portal-user-wrap-table"
-        scroll={{ x: 980 }}
-        pagination={{
-          defaultPageSize: 10,
-          showSizeChanger: true,
-          pageSizeOptions: ["10", "20", "50", "100"],
-          showTotal: (total) => `${total} notification(s)`,
-        }}
-        columns={[
-          {
-            title: "Date / Time",
-            dataIndex: "createdAt",
-            key: "createdAt",
-            width: 160,
-            sorter: (a, b) => new Date(a.createdAt) - new Date(b.createdAt),
-            defaultSortOrder: "descend",
-            render: (v) =>
-              v
-                ? dayjs(v).format("MMM D, YYYY h:mm A")
-                : "—",
-          },
-          {
-            title: "Type",
-            key: "type",
-            width: 170,
-            filters: [
-              "Admin Message",
-              "Support Ticket",
-              "Submission Update",
-              "Submission Status",
-              "Request Update",
-              "Admin Update",
-            ].map((label) => ({ text: label, value: label })),
-            onFilter: (value, record) =>
-              getPortalNotificationMeta(record).label === value,
-            render: (_, record) => {
-              const meta = getPortalNotificationMeta(record);
-              return (
-                <Tag color={meta.color} icon={meta.icon}>
-                  {meta.label}
-                </Tag>
-              );
-            },
-          },
-          {
-            title: "Title / Message",
-            key: "message",
-            render: (_, record) => {
-              const meta = getPortalNotificationMeta(record);
-              return (
-                <div style={{ whiteSpace: "normal", wordBreak: "break-word" }}>
-                  <Text strong style={{ fontSize: 13 }}>
-                    {record.title || meta.label}
-                  </Text>
-                  <div>
-                    <Text
-                      type="secondary"
-                      style={{
-                        fontSize: 12,
-                        whiteSpace: "normal",
-                        overflowWrap: "anywhere",
-                      }}
-                    >
-                      {record.message || "—"}
-                    </Text>
-                  </div>
-                </div>
-              );
-            },
-          },
-          {
-            title: "Status",
-            dataIndex: "read",
-            key: "read",
-            width: 100,
-            align: "center",
-            filters: [
-              { text: "Unread", value: false },
-              { text: "Read", value: true },
-            ],
-            onFilter: (value, record) => !!record.read === value,
-            render: (read) =>
-              read ? (
-                <Tag color="default">Read</Tag>
-              ) : (
-                <Tag color="blue">Unread</Tag>
-              ),
-          },
-          {
-            title: "Action",
-            key: "action",
-            width: 90,
-            align: "center",
-            render: (_, record) => (
-              <Button
-                type="link"
-                size="small"
-                icon={<EyeOutlined />}
-                onClick={() => setNotifDetail(record)}
-              >
-                View
-              </Button>
-            ),
-          },
-        ]}
-      />
-    </Modal>
-  );
 
   // Full message + jump-to-context for a single notification opened from the
   // Previous Notifications table.
@@ -8005,7 +7694,18 @@ export default function SLFPortal() {
               placement="bottomRight"
               open={notificationPanelOpen}
               onOpenChange={setNotificationPanelOpen}
-              content={portalNotificationPanel}
+              content={
+                <PortalNotificationPanel
+                  isMobile={isMobile}
+                  portalNotifications={portalNotifications}
+                  portalNotificationCounts={portalNotificationCounts}
+                  getPortalNotificationMeta={getPortalNotificationMeta}
+                  openPortalNotification={openPortalNotification}
+                  markPortalNotificationsRead={markPortalNotificationsRead}
+                  setNotificationPanelOpen={setNotificationPanelOpen}
+                  setPreviousNotifOpen={setPreviousNotifOpen}
+                />
+              }
             >
               <Badge count={portalNotificationCounts.total} size="small">
                 <Button
@@ -9078,7 +8778,16 @@ export default function SLFPortal() {
           />
         )}
 
-        {previousNotificationsModal}
+        <PreviousNotificationsModal
+          open={previousNotifOpen}
+          onClose={() => setPreviousNotifOpen(false)}
+          isMobile={isMobile}
+          portalNotifications={portalNotifications}
+          portalNotificationCounts={portalNotificationCounts}
+          getPortalNotificationMeta={getPortalNotificationMeta}
+          markPortalNotificationsRead={markPortalNotificationsRead}
+          setNotifDetail={setNotifDetail}
+        />
         {notificationDetailModal}
 
         <SLFPortalModals
