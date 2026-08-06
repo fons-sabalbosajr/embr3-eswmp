@@ -10,6 +10,20 @@ import { Cell as RCell, Pie, PieChart, Tooltip as RTooltip } from "recharts";
 // infrastructure, permits, gallery, documents and preventive measures, each
 // with its own option list and save handler. 28 explicit props is a lot, but
 // nothing is closed over, so nothing can go stale.
+// Every per-cell array on the facility form. The Cell Infrastructure panel
+// re-renders when any of their references change (see shouldUpdate below).
+const CELL_ARRAY_FIELDS = [
+  "cellNames",
+  "cellCapacities",
+  "cellStatuses",
+  "cellTypes",
+  "cellSubmissionAllowed",
+  "cellNotes",
+  "cellFillValues",
+  "cellCapacityUnits",
+  "cellFillUnits",
+];
+
 export default function SlfEditModal({
   modalOpen,
   setModalOpen,
@@ -532,9 +546,18 @@ export default function SlfEditModal({
                 children: (
                   <>
                     {/* Counts summary — auto-synced from form list entries */}
+                    {/* shouldUpdate, NOT dependencies. A render-prop Form.Item with
+                        `dependencies` and no `name` only re-renders on an EXACT
+                        name-path match, but editing a row inside these lists emits
+                        ["leachatePondDetails", i, field] — which never matches
+                        ["leachatePondDetails"] — so the counts silently froze.
+                        Comparing the array reference catches every nested edit. */}
                     <Form.Item
                       noStyle
-                      dependencies={["leachatePondDetails", "gasVentDetails"]}
+                      shouldUpdate={(prev, cur) =>
+                        prev.leachatePondDetails !== cur.leachatePondDetails ||
+                        prev.gasVentDetails !== cur.gasVentDetails
+                      }
                     >
                       {() => {
                         const ponds =
@@ -1419,20 +1442,23 @@ export default function SlfEditModal({
                       </Col>
                     </Row>
 
+                    {/* THE cell-rename bug lived here.
+                        `dependencies` on a render-prop Form.Item (no `name`) only
+                        re-renders when a changed field's name path matches EXACTLY.
+                        Renaming a cell writes ["cellNames", i], which never matches
+                        the declared ["cellNames"], so this whole panel — headers,
+                        gauges, capacity readouts — kept rendering the previous
+                        value until some unrelated top-level field happened to
+                        change. That is why renames appeared to apply inconsistently.
+                        shouldUpdate is consulted on every store change; the cell
+                        arrays are replaced immutably on write, so a reference
+                        comparison catches every per-cell edit. */}
                     <Form.Item
                       noStyle
-                      dependencies={[
-                        "numberOfCell",
-                        "cellNames",
-                        "cellCapacities",
-                        "cellStatuses",
-                        "cellTypes",
-                        "cellSubmissionAllowed",
-                        "cellNotes",
-                        "cellFillValues",
-                        "cellCapacityUnits",
-                        "cellFillUnits",
-                      ]}
+                      shouldUpdate={(prev, cur) =>
+                        prev.numberOfCell !== cur.numberOfCell ||
+                        CELL_ARRAY_FIELDS.some((field) => prev[field] !== cur[field])
+                      }
                     >
                       {() => {
                         const cellCount =

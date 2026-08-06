@@ -23,6 +23,12 @@ const { authMiddleware, requireAnyAuth, adminOnly, developerOnly } = require("..
 const { requirePortalRule } = require("../utils/portalPolicy");
 const { resolveTotalVolumeForUpdate } = require("../utils/baselineVolume");
 const { computeCellOccupancy, OCCUPANCY_ENTRY_FIELDS } = require("../utils/cellOccupancy");
+const {
+  resolveCellName,
+  collectCellNames,
+  applyResolvedCellNames,
+  applyResolvedCellNamesToAll,
+} = require("../utils/cellNaming");
 const { todayRange } = require("../utils/appTime");
 const { NON_DUMMY_CLAUSE } = require("../utils/dummyFilter");
 const {
@@ -636,8 +642,6 @@ async function assertNoUnorganizedPortalSubmissions(submittedBy) {
 // Collect the distinct cell names a submission's waste was placed into. The list
 // query already selects trucks.cellName / trucks.vehicles.cellName, so this adds
 // the assigned-cell labels to the admin list without shipping full trucks.
-// Resolve the CURRENT display name of a cell.
-//
 // A submission stores both `cellIndex` (the canonical relationship to the
 // facility's cell infrastructure) and `cellName` (a copy of the label as it read
 // at submit time). Rendering the copy is what made renamed cells show stale names
@@ -646,36 +650,6 @@ async function assertNoUnorganizedPortalSubmissions(submittedBy) {
 //
 // Legacy rows that only ever stored a name (no cellIndex) keep working: they fall
 // back to the stored copy, so historical relationships stay intact.
-function resolveCellName(facilityCellNames, cellIndex, storedName) {
-  // NB: Number(null) === 0, so a legacy row with cellIndex: null would otherwise
-  // resolve to cell 0 and report a different cell's name. Reject empties first.
-  const hasIndex = cellIndex !== null && cellIndex !== undefined && cellIndex !== "";
-  const idx = hasIndex ? Number(cellIndex) : NaN;
-  if (Number.isInteger(idx) && idx >= 0) {
-    const current = facilityCellNames?.[idx];
-    if (current) return String(current).trim();
-    return `Cell ${idx + 1}`; // facility declares no custom name for this cell
-  }
-  return storedName ? String(storedName).trim() : "";
-}
-
-function collectCellNames(entry) {
-  const trucks = Array.isArray(entry?.trucks) ? entry.trucks : [];
-  // slfGenerator is populated with `cellNames` (see SLF_GENERATOR_REF_FIELDS), so
-  // this is a lookup against already-loaded data — no per-cell query, no N+1.
-  const facilityCellNames = entry?.slfGenerator?.cellNames;
-  const names = new Set();
-  for (const truck of trucks) {
-    const name = resolveCellName(facilityCellNames, truck?.cellIndex, truck?.cellName);
-    if (name) names.add(name);
-    for (const vehicle of Array.isArray(truck?.vehicles) ? truck.vehicles : []) {
-      const vName = resolveCellName(facilityCellNames, vehicle?.cellIndex, vehicle?.cellName);
-      if (vName) names.add(vName);
-    }
-  }
-  return [...names].filter(Boolean);
-}
-
 // Compute admin-review "remarks" for a submission from existing fields (never
 // stored — always derived so they can't go stale). Covers truck-capacity and
 // cell-placement attention flags. Cell near-full/full are cell-level and require
@@ -4087,15 +4061,20 @@ router.get("/", optionalAuth, async (req, res) => {
         }
       } catch { /* fall back to 10% */ }
 
-      const enrich = (entry) => ({
-        ...entry,
-        isResubmission: isResubmissionEntry(entry),
-        truckCount: entry.truckCount ?? (Array.isArray(entry.trucks) ? entry.trucks.length : 0),
-        cellPlacement: computeCellPlacementSummary(entry),
-        cellNames: collectCellNames(entry),
-        remarks: computeSubmissionRemarks(entry, allowancePct),
-        trucks: includeTrucks ? entry.trucks : [],
-      });
+      // Cell names are resolved to the facility's CURRENT labels before the entry
+      // leaves the server, so no consumer can render a name frozen at submit time.
+      const enrich = (raw) => {
+        const entry = applyResolvedCellNames(raw);
+        return {
+          ...entry,
+          isResubmission: isResubmissionEntry(entry),
+          truckCount: entry.truckCount ?? (Array.isArray(entry.trucks) ? entry.trucks.length : 0),
+          cellPlacement: computeCellPlacementSummary(entry),
+          cellNames: collectCellNames(entry),
+          remarks: computeSubmissionRemarks(entry, allowancePct),
+          trucks: includeTrucks ? entry.trucks : [],
+        };
+      };
       // Return the RAW entries for this page's groups (every group is returned
       // whole, so no batch is split across pages). The admin table regroups them
       // client-side exactly as before — keeping all existing grouped-row actions
@@ -4159,15 +4138,18 @@ router.get("/", optionalAuth, async (req, res) => {
     } catch { /* fall back to 10% */ }
     if (paginated) {
       res.json({
-        data: entries.map((entry) => ({
-          ...entry,
-          isResubmission: isResubmissionEntry(entry),
-          truckCount: entry.truckCount ?? (Array.isArray(entry.trucks) ? entry.trucks.length : 0),
-          cellPlacement: computeCellPlacementSummary(entry),
-          cellNames: collectCellNames(entry),
-          remarks: computeSubmissionRemarks(entry, allowancePct),
-          trucks: includeTrucks ? entry.trucks : [],
-        })),
+        data: entries.map((raw) => {
+          const entry = applyResolvedCellNames(raw);
+          return {
+            ...entry,
+            isResubmission: isResubmissionEntry(entry),
+            truckCount: entry.truckCount ?? (Array.isArray(entry.trucks) ? entry.trucks.length : 0),
+            cellPlacement: computeCellPlacementSummary(entry),
+            cellNames: collectCellNames(entry),
+            remarks: computeSubmissionRemarks(entry, allowancePct),
+            trucks: includeTrucks ? entry.trucks : [],
+          };
+        }),
         total,
         page,
         limit,
@@ -4180,6 +4162,7 @@ router.get("/", optionalAuth, async (req, res) => {
       // Submissions tab consumes this non-paginated list and groups client-side, so
       // ordering here drives the table's resubmission-priority ordering.
       const decorated = entries
+        .map((raw) => applyResolvedCellNames(raw))
         .map((entry) => ({
           ...entry,
           isResubmission: isResubmissionEntry(entry),
@@ -4196,7 +4179,7 @@ router.get("/", optionalAuth, async (req, res) => {
       res.json(decorated);
       return;
     }
-    res.json(entries);
+    res.json(applyResolvedCellNamesToAll(entries));
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });
   }
@@ -4632,6 +4615,9 @@ router.post("/portal-cell-assignments/bulk", async (req, res) => {
         submissionId: r.submissionId || r.idNo || "",
         truckIndex: r.truckIndex,
         vehicleIndex: r.vehicleIndex ?? null,
+        // Echo of the uploaded target. Once the facility is resolved further down
+        // this is overwritten with the cell's LIVE name (see below), so validated
+        // rows never report a stale label.
         targetCell: r.cellName || (r.cellIndex != null ? `Cell ${Number(r.cellIndex) + 1}` : ""),
       };
 
@@ -4681,7 +4667,11 @@ router.post("/portal-cell-assignments/bulk", async (req, res) => {
       if (facility) {
         acc = evaluateFacilityCellAcceptance(facility, cellIndex, planned + vol, doc.baselineUnit || "m³");
       }
-      const cellName = r.cellName || facility?.cellNames?.[cellIndex] || `Cell ${cellIndex + 1}`;
+      // The facility's LIVE name wins over the snapshot stored on the row; the
+      // snapshot is only a fallback for legacy rows with no usable cellIndex.
+      const cellName = resolveCellName(facility?.cellNames, cellIndex, r.cellName);
+      // The facility is known now — report the cell's current name for this row.
+      base.targetCell = cellName;
       const cellType = r.cellType || facility?.cellTypes?.[cellIndex] || truck?.wasteType || "";
 
       if (!acc.ok) {
@@ -5780,8 +5770,9 @@ router.get("/trash/list", async (req, res) => {
     const entries = await DataSLF.find({ deletedAt: { $ne: null } })
       .setOptions({ includeHiddenYears: true })
       .populate("slfGenerator", SLF_GENERATOR_REF_FIELDS)
-      .sort({ deletedAt: -1 });
-    res.json(entries);
+      .sort({ deletedAt: -1 })
+      .lean();
+    res.json(applyResolvedCellNamesToAll(entries));
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });
   }
@@ -6393,7 +6384,7 @@ router.get("/waste-received-summary/:slfName", async (req, res) => {
     let facilityIsDummy = false;
     if (slfId && mongoose.isValidObjectId(slfId)) {
       const selectedFacility = await SlfFacility.findOne({ _id: slfId, deletedAt: null })
-        .select("_id lgu province isDummy")
+        .select("_id lgu province isDummy cellNames")
         .lean();
       if (selectedFacility) {
         facilities = [selectedFacility];
@@ -6404,13 +6395,13 @@ router.get("/waste-received-summary/:slfName", async (req, res) => {
       facilities = await SlfFacility.find({
         deletedAt: null,
         lgu: { $in: requestedRegexes },
-      }).select("_id lgu province").lean();
+      }).select("_id lgu province cellNames").lean();
     }
     if (!facilities.length && requestedRegexes.length) {
       facilities = await SlfFacility.find({
         deletedAt: null,
         province: { $in: requestedRegexes },
-      }).select("_id lgu province").lean();
+      }).select("_id lgu province cellNames").lean();
     }
     const facilityIds = facilities.map((facility) => facility._id);
     const facilityNameKeys = new Set(
@@ -6555,11 +6546,20 @@ router.get("/waste-received-summary/:slfName", async (req, res) => {
       else baselineTotals.m3 += amount;
     };
 
+    // Live cell names for the facility this summary is scoped to. Baseline entries
+    // store a name copied at save time; the labels below resolve through this so a
+    // renamed cell shows its CURRENT name in the Baseline Breakdown.
+    const facilityCellNames =
+      facilities.find((f) => Array.isArray(f?.cellNames) && f.cellNames.length)?.cellNames || [];
+
     const baseline = chooseBaselineRecord(records.filter(hasBaselineData));
     if (baseline?.activeCellEntries?.length) {
       baseline.activeCellEntries.forEach((entry, index) => {
         addBaselineVolume(
-          entry.cellName || `Active Cell ${index + 1}`,
+          // The facility's LIVE cell name, not the copy frozen when the baseline
+          // was saved; falls back to the snapshot only for legacy index-less rows.
+          resolveCellName(facilityCellNames, entry.cellIndex, entry.cellName) ||
+            `Active Cell ${index + 1}`,
           entry.volume,
           entry.unit || baseline.baselineUnit || baseline.activeCellResidualUnit || "m³",
           entry.wasteType || "Residual",
