@@ -130,6 +130,12 @@
 
 .slf-support-shell {
   padding: 0 18px 18px;
+  /* A long ticket list used to grow the modal past the viewport, pushing the
+     close button off screen. Capping the shell keeps the whole dialog on
+     screen and confines any scrolling to the content itself. The header is
+     roughly 120px, so this leaves the modal inside a 90vh envelope. */
+  max-height: calc(90vh - 120px);
+  overflow-y: auto;
 }
 
 .slf-support-hero {

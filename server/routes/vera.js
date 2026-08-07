@@ -32,6 +32,7 @@ const veraDev = require("../utils/veraDevInsights");
 const portalReadiness = require("../utils/portalReadiness");
 const { SUPPORT_EMAIL: PUBLIC_SUPPORT_EMAIL } = require("../utils/veraAuthKnowledge");
 const veraPageData = require("../utils/veraPageData");
+const veraPortalFacts = require("../utils/veraPortalFacts");
 const { isDeveloper } = require("../utils/developerIdentity");
 const { sanitizeError } = require("../utils/aiErrors");
 const { ASSISTANT_NAME, ASSISTANT_FULL_NAME } = require("../utils/veraKnowledge");
@@ -600,18 +601,37 @@ router.post("/chat", requireAnyAuth, async (req, res) => {
   // and the action for each instead of reciting the generic checklist. Always the
   // caller's own account — never another user's.
   let readinessBlock = "";
-  if (req.user?.role === "portal_user" && portalReadiness.wantsReadiness(message)) {
-    try {
-      const UserPortal = require("../models/UserPortal");
-      const pu = await UserPortal.findById(req.user.id)
-        .select("email status verificationRequired verificationSubmitted portalAccess assignedSlf assignedSlfName")
-        .lean();
-      if (pu) {
-        readinessBlock = portalReadiness.readinessToPromptBlock(
-          await portalReadiness.getPortalReadiness(pu),
-        );
-      }
-    } catch { /* readiness is best-effort — never block the answer */ }
+  let portalFactsBlock = "";
+  if (req.user?.role === "portal_user") {
+    const needsReadiness = portalReadiness.wantsReadiness(message);
+    const needsFacts = veraPortalFacts.wantsPortalFacts(message);
+    if (needsReadiness || needsFacts) {
+      try {
+        const UserPortal = require("../models/UserPortal");
+        // One account load shared by both providers — this used to be fetched
+        // solely for readiness, and adding a second query for facts would have
+        // doubled the cost of the common "what's outstanding?" question.
+        const pu = await UserPortal.findById(req.user.id)
+          .select("email status verificationRequired verificationSubmitted portalAccess assignedSlf assignedSlfName")
+          .lean();
+        if (pu) {
+          if (needsReadiness) {
+            readinessBlock = portalReadiness.readinessToPromptBlock(
+              await portalReadiness.getPortalReadiness(pu),
+            );
+          }
+          // Grounded snapshot of THIS user's own facility (permits, cell
+          // utilization, submission/ticket/notification status) so VERA answers
+          // from real state instead of a generic help article. Scoped, masked
+          // for demo sessions and cached inside the provider.
+          if (needsFacts) {
+            portalFactsBlock = veraPortalFacts.factsToPromptBlock(
+              await veraPortalFacts.getPortalFacts(pu),
+            );
+          }
+        }
+      } catch { /* best-effort — never block the answer */ }
+    }
   }
 
   // Abort budget slightly above the provider timeout so a request can't hang.
@@ -628,7 +648,10 @@ router.post("/chat", requireAnyAuth, async (req, res) => {
       role: req.user?.role, // portal_user | admin | developer — selects KB + RBAC
       devMode: devModeOn,
       insights: insightsBlock,
-      readiness: readinessBlock,
+      // Readiness and facts are complementary: readiness says what still blocks a
+      // submission, facts describe the facility's current state. Joined so the
+      // assistant layer needs no new parameter.
+      readiness: [readinessBlock, portalFactsBlock].filter(Boolean).join("\n\n"),
       pageData: pageDataBlock,
     });
     clearTimeout(abortTimer);

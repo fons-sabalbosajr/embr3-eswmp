@@ -206,6 +206,63 @@ const { Header, Sider, Content } = Layout;
 const { useBreakpoint } = Grid;
 const { TextArea } = Input;
 
+/**
+ * Resolve Total Volume Accepted for a save payload.
+ *
+ * Returns `undefined` when this edit did not actually supply the figure, so the
+ * server's Total Volume guard preserves whatever is already stored. Returning a
+ * number — including a deliberate 0 — writes it.
+ *
+ * Shared by all three save paths (Save Baseline, Edit & Resubmit, and
+ * buildSubmissionEntry, which backs the Drafts/Scheduled queue) so the rule
+ * cannot drift between them.
+ *
+ * The distinction that matters: `??` does not fall through on 0, so a stale or
+ * default 0 sitting in the form STORE used to be sent and would overwrite a
+ * real saved total with zero. A 0 that is genuinely on screen is honoured; a 0
+ * that exists only because the store had a default is treated as "not provided".
+ *
+ * @param {boolean} authoritative  cell entries recompute the total (wins outright)
+ * @param {number}  computed       the recomputed total
+ * @param {*}       mountedValue   value from the RENDERED field, or undefined when
+ *                                 its pane is closed/unmounted
+ * @param {*}       storeValue     value from the full form store
+ */
+function resolveTotalVolumeForSave({ authoritative, computed, mountedValue, storeValue }) {
+  const candidate = authoritative ? computed : (mountedValue ?? storeValue);
+  const explicitlyOnScreen =
+    mountedValue !== undefined && mountedValue !== null && mountedValue !== "" && Number(mountedValue) > 0;
+  const meaningful = authoritative || explicitlyOnScreen || Number(candidate) > 0;
+  return meaningful ? candidate : undefined;
+}
+
+/**
+ * Lock state for the Company Information + Baseline tabs.
+ *
+ * BUSINESS RULE: clicking "Save Baseline Update" locks both tabs IMMEDIATELY and
+ * they stay locked — editing them again requires a fresh update request that an
+ * admin approves. The lock is a data-security control, so it must not depend on
+ * what the record happens to contain.
+ *
+ * That is why this reads the RECORD, not its payload. The lock used to be decided
+ * by hasBaselinePayload(), which only tests for volumes, cell entries and
+ * haulers — so a baseline saved with COMPANY INFORMATION ONLY looked "empty",
+ * fell through to the not-saved branch and silently unlocked itself a moment
+ * after saving.
+ *
+ * hasBaselinePayload() is still the right test for whether to POPULATE the form;
+ * it was only ever wrong as the lock signal.
+ *
+ * @param {object|null} data GET /data-slf/baseline response (null = no record)
+ */
+function resolveBaselineLock(data) {
+  // No baseline record at all — first-time entry, tabs open.
+  if (!data) return { locked: false, updatePending: false };
+  // An approved update request is the ONLY thing that reopens the tabs.
+  if (data.baselineUpdateApproved) return { locked: false, updatePending: false };
+  return { locked: true, updatePending: !!data.baselineUpdateRequested };
+}
+
 export default function SLFPortal() {
   const navigate = useNavigate();
   const screens = useBreakpoint();
@@ -249,6 +306,9 @@ export default function SLFPortal() {
   const [baselineLoading, setBaselineLoading] = useState(false);
   const [slfInfoRefresh, setSlfInfoRefresh] = useState(0);
   const [baselineRefresh, setBaselineRefresh] = useState(0);
+  // "region|province|municipality" the loaded address option lists belong to, so a
+  // baseline refresh can skip re-fetching lists it already holds.
+  const addressListsKeyRef = useRef("");
   const [portalMessages, setPortalMessages] = useState([]);
   const [slfCardExpanded, setSlfCardExpanded] = useState(false);
   const [selectedSlfIdx, setSelectedSlfIdx] = useState(0); // for multi-SLF users
@@ -1323,10 +1383,40 @@ export default function SLFPortal() {
     [haulers],
   );
 
-  const unplacedSubmissions = useMemo(() => {
-    if (activeCellOptions.length === 0) return [];
-    return getUnplacedSubmissions(submissions);
-  }, [submissions, activeCellOptions.length]);
+  // Submissions with unassigned waste, INDEPENDENT of whether a cell can accept
+  // it right now.
+  //
+  // This used to short-circuit to [] when no cell was available. The effect was
+  // that the moment the active cell hit 100%, every approved-but-unassigned
+  // submission silently disappeared from Organize Cells, the warning banner and
+  // the pre-submit gate — the operator saw an empty organizer and no explanation,
+  // and the work simply went untracked.
+  //
+  // Availability is an ASSIGNMENT-TIME constraint, not a visibility one: the rows
+  // are always listed, and `activeCellOptions` still governs which cells may be
+  // chosen, so a full cell can never be selected. See cellCapacityNotice below
+  // for the warning shown in place of the old silent empty state.
+  const unplacedSubmissions = useMemo(
+    () => getUnplacedSubmissions(submissions),
+    [submissions],
+  );
+
+  /**
+   * Why waste cannot currently be placed, if that is the case.
+   *
+   * Drives the organizer's warning banner. `null` when at least one cell can
+   * accept waste — the normal path, where no banner is shown at all.
+   */
+  const cellCapacityNotice = useMemo(() => {
+    if (activeCellOptions.length > 0) return null;
+    const blocked = cellPlacementOptions.filter((o) => !o.available);
+    if (!blocked.length) return { kind: "no-cells", cells: [] };
+    const full = blocked.filter((o) => /full|capacity/i.test(String(o.disabledReason || "")));
+    return {
+      kind: full.length ? "at-capacity" : "unavailable",
+      cells: blocked.map((o) => ({ label: o.value, reason: o.disabledReason || "Unavailable" })),
+    };
+  }, [activeCellOptions.length, cellPlacementOptions]);
 
   const openCellOrganizer = async () => {
     if (!ORGANIZE_CELLS_ENABLED) return;
@@ -1622,6 +1712,12 @@ export default function SLFPortal() {
       { retries: 3, signal: ac.signal },
     )
       .then(({ data }) => {
+        // Lock is decided FIRST and independently of the payload check below —
+        // a baseline saved with company information only still locks.
+        const lock = resolveBaselineLock(data);
+        setBaselineSaved(lock.locked);
+        setBaselineUpdatePending(lock.updatePending);
+
         if (hasBaselinePayload(data)) {
           const unit =
             data.baselineUnit || data.totalVolumeAcceptedUnit || slfUnit;
@@ -1645,15 +1741,29 @@ export default function SLFPortal() {
             closedCellHazardousUnit: data.closedCellHazardousUnit || unit,
             acceptsHazardousWaste: data.acceptsHazardousWaste || false,
           });
+          // Every field falls back to what the form already holds.
+          //
+          // `lguCompanyName` always had this guard; the four address fields did
+          // not — they were assigned straight from `data`. When the refetched
+          // baseline did not carry them the values were `undefined`, and
+          // setFieldsValue({ companyRegion: undefined }) CLEARS the control
+          // rather than leaving it alone. This object is re-applied after each of
+          // the chained address-list fetches too, which is why a just-saved
+          // address vanished a few seconds later rather than immediately.
+          //
+          // `||` (not `??`) on purpose: a blank code from the server means "not
+          // recorded", never "clear what the user is looking at".
+          const keepCurrent = (incoming, field) =>
+            incoming || companyForm.getFieldValue(field) || undefined;
           const savedCompanyValues = {
             lguCompanyName:
               data.lguCompanyName ||
               companyForm.getFieldValue("lguCompanyName") ||
               "",
-            companyRegion: data.companyRegion,
-            companyProvince: data.companyProvince,
-            companyMunicipality: data.companyMunicipality,
-            companyBarangay: data.companyBarangay,
+            companyRegion: keepCurrent(data.companyRegion, "companyRegion"),
+            companyProvince: keepCurrent(data.companyProvince, "companyProvince"),
+            companyMunicipality: keepCurrent(data.companyMunicipality, "companyMunicipality"),
+            companyBarangay: keepCurrent(data.companyBarangay, "companyBarangay"),
           };
           companyForm.setFieldsValue(savedCompanyValues);
           entryForm.setFieldsValue({
@@ -1665,7 +1775,35 @@ export default function SLFPortal() {
                 : "LGU"),
             address: data.address || entryForm.getFieldValue("address"),
           });
-          if (data.companyRegion) {
+          // Address option lists are re-fetched ONLY when the codes they are keyed
+          // by actually changed.
+          //
+          // This effect re-runs on every `baselineRefresh` bump — i.e. after every
+          // baseline save — and used to fire three chained withRetry() lookups
+          // (provinces → municipalities → barangays) every time, each with its own
+          // retry/backoff, re-applying setFieldsValue after each one. On a normal
+          // save none of the codes have changed, so all three round-trips
+          // reproduced lists already in state while the form stayed locked behind
+          // them. That is the save-time stall.
+          //
+          // Re-fetch stays automatic whenever a code genuinely differs (or a list
+          // is empty), so switching facility or editing the address still loads.
+          const listLoadedFor = addressListsKeyRef.current;
+          const addressKey = [
+            data.companyRegion || "",
+            data.companyProvince || "",
+            data.companyMunicipality || "",
+          ].join("|");
+          const addressListsFresh =
+            listLoadedFor === addressKey &&
+            provinces.length > 0 &&
+            municipalities.length > 0 &&
+            barangays.length > 0;
+          if (addressListsFresh) {
+            // Lists in state already describe these codes — nothing to load.
+            companyForm.setFieldsValue(savedCompanyValues);
+          } else if (data.companyRegion) {
+            addressListsKeyRef.current = addressKey;
             withRetry(
               () =>
                 api.get(`/settings/address/provinces/${data.companyRegion}`, {
@@ -1779,17 +1917,8 @@ export default function SLFPortal() {
             pushMigratedClosed(data.closedCellHazardousVolume, data.closedCellHazardousUnit, "Inert/Hazardous Waste");
             setClosedCellEntries(cEntries);
           }
-          setBaselineSaved(true);
-          setBaselineUpdatePending(!!data.baselineUpdateRequested);
-          // If baseline update was approved, allow editing
-          if (data.baselineUpdateApproved) {
-            setBaselineSaved(false);
-            setBaselineUpdatePending(false);
-          }
           setActiveTab("disposal");
         } else {
-          setBaselineSaved(false);
-          setBaselineUpdatePending(false);
           setHaulers([]);
           setActiveCellEntries([]);
           setClosedCellEntries([]);
@@ -1814,19 +1943,33 @@ export default function SLFPortal() {
         payload?.type === "baseline_update_approved" ||
         payload?.type === "baseline_update_rejected" ||
         payload?.type === "baseline_locked" ||
-        payload?.target === "baselines";
+        payload?.target === "baselines" ||
+        // An admin completing a client's Type/Province/Municipality from the SLF
+        // Data Table emits this. Without it the portal kept showing "N incomplete
+        // hauler-client records" for details that had already been fixed, until
+        // the user happened to reload.
+        payload?.target === "hauler-clients";
       if (isBaselineEvent) {
         api
           .get(`/data-slf/baseline/${encodeURIComponent(activeSlfName)}?slfId=${encodeURIComponent(activeSlfId || "")}`)
           .then(({ data }) => {
+            // Same rule as the loader: the record decides the lock, not whether
+            // it carries volumes.
+            const lock = resolveBaselineLock(data);
+            setBaselineSaved(lock.locked);
+            setBaselineUpdatePending(lock.updatePending);
+
             if (hasBaselinePayload(data)) {
-              if (data.baselineUpdateApproved) {
-                setBaselineSaved(false);
-                setBaselineUpdatePending(false);
-              } else {
-                setBaselineSaved(true);
-                setBaselineUpdatePending(!!data.baselineUpdateRequested);
-              }
+              // The response already carries the clients — the handler used to
+              // read only the status flags and throw them away, which is why an
+              // admin-side correction never reached the incomplete-records
+              // warning (it is derived from this state).
+              setHaulers(
+                mergeHaulersByName(
+                  data.accreditedHaulers || [],
+                  data.baselineUnit || resolveFacilityUnit(data) || "m³",
+                ),
+              );
             }
           })
           .catch(() => {});
@@ -3008,10 +3151,14 @@ export default function SLFPortal() {
       const { data } = await api.get(
         `/data-slf/baseline/${encodeURIComponent(activeSlfName)}?slfId=${encodeURIComponent(activeSlfId || "")}`,
       );
-      if (hasBaselinePayload(data)) {
-        if (data.baselineUpdateApproved) {
-          setBaselineSaved(false);
-          setBaselineUpdatePending(false);
+      // Record-driven, same as the loader and socket handler — a company-info-only
+      // baseline is still a saved baseline and must report as locked here too.
+      const lock = resolveBaselineLock(data);
+      setBaselineSaved(lock.locked);
+      setBaselineUpdatePending(lock.updatePending);
+
+      if (data) {
+        if (!lock.locked) {
           Swal.fire({
             icon: "success",
             title: "Baseline Editing Unlocked",
@@ -3019,11 +3166,9 @@ export default function SLFPortal() {
             showConfirmButton: false,
           });
         } else {
-          setBaselineSaved(true);
-          setBaselineUpdatePending(!!data.baselineUpdateRequested);
           Swal.fire({
             icon: "info",
-            title: data.baselineUpdateRequested
+            title: lock.updatePending
               ? "Still Awaiting Approval"
               : "Baseline Still Locked",
             timer: 1400,
@@ -3066,20 +3211,47 @@ export default function SLFPortal() {
 
     setBaselineSavingLoading(true);
     try {
-      const [baselineValues, companyValues] = await Promise.all([
+      // validateFields() resolves with ONLY the fields currently mounted, exactly
+      // like a bare getFieldsValue(). Using its result as the payload meant that
+      // saving the baseline while a pane was collapsed or on another tab silently
+      // dropped every field in that pane — which is how baseline values came back
+      // blank or reset after a save.
+      //
+      // Validation still runs (so errors are still reported and the save still
+      // aborts on invalid input); the validated values are then layered OVER the
+      // complete form store, so nothing unmounted is lost.
+      const [validatedBaseline, validatedCompany] = await Promise.all([
         baselineForm.validateFields(),
         companyForm.validateFields(),
       ]);
+      const baselineValues = { ...baselineForm.getFieldsValue(true), ...validatedBaseline };
+      const companyValues = { ...companyForm.getFieldsValue(true), ...validatedCompany };
       // Cell entries only win when they carry real volumes; otherwise the
       // user-entered figure is preserved (see cellVolumeTotalIsAuthoritative).
-      // `baselineValues` can also be missing the field when the Baseline pane is
-      // not the open tab (destroyOnHidden unregisters it from validateFields),
-      // so fall back to the form STORE, which keeps preserved values.
-      const resolvedTotalVolumeAccepted = cellVolumeTotalIsAuthoritative
-        ? computedTotalVolumeAccepted
-        : (baselineValues.totalVolumeAccepted
-            ?? baselineForm.getFieldValue("totalVolumeAccepted"));
-      const disposalValues = entryForm.getFieldsValue();
+      // Total Volume Accepted.
+      //
+      // `??` only falls through on null/undefined, and 0 is neither. While
+      // validateFields() supplied this object, a closed Baseline pane simply
+      // OMITTED the field, so the fallback ran. Reading the whole store now
+      // always supplies it — including a default/stale 0 the user never typed —
+      // which was then sent and overwrote the saved figure with 0.
+      //
+      // A blank or zero here means "this edit did not provide it". Treating it as
+      // absent lets the server's own Total Volume guard preserve what is stored.
+      // A REAL zero still saves: it reaches this point through
+      // `cellVolumeTotalIsAuthoritative` (recomputed from cell entries) or as an
+      // explicitly validated on-screen value, both of which are kept below.
+      const resolvedTotalVolumeAccepted = resolveTotalVolumeForSave({
+        authoritative: cellVolumeTotalIsAuthoritative,
+        computed: computedTotalVolumeAccepted,
+        // validateFields() resolves only with fields that are actually rendered,
+        // which is exactly the "on screen" signal the helper needs.
+        mountedValue: validatedBaseline.totalVolumeAccepted,
+        storeValue:
+          baselineValues.totalVolumeAccepted
+          ?? baselineForm.getFieldValue("totalVolumeAccepted"),
+      });
+      const disposalValues = entryForm.getFieldsValue(true);
       const addressParts = [
         barangays.find((b) => b.code === companyValues.companyBarangay)?.name,
         municipalities.find((m) => m.code === companyValues.companyMunicipality)
@@ -3087,10 +3259,14 @@ export default function SLFPortal() {
         provinces.find((p) => p.code === companyValues.companyProvince)?.name,
         regions.find((r) => r.code === companyValues.companyRegion)?.name,
       ].filter(Boolean);
+      // The freshly-selected address wins.
+      //
+      // The old order put the STORED `address` string ahead of the parts just
+      // picked in the selects, so editing the address and saving re-sent the old
+      // value and the edit appeared to do nothing.
+      const composedAddress = addressParts.join(", ");
       const resolvedAddress =
-        disposalValues.address ||
-        companyValues.address ||
-        addressParts.join(", ");
+        composedAddress || disposalValues.address || companyValues.address || "";
       // Compute legacy totals from entries for backward compat
       const wasteTypeOf = (entry) => String(entry?.wasteType || "").trim().toLowerCase();
       const isLegacyInertHazard = (entry) => wasteTypeOf(entry) === "inert/hazardous waste";
@@ -3138,11 +3314,22 @@ export default function SLFPortal() {
             ((slfInfo?.ownership || "").toLowerCase().includes("private")
               ? "Private"
               : "LGU"),
-          address: resolvedAddress,
-          companyRegion: companyValues.companyRegion,
-          companyProvince: companyValues.companyProvince,
-          companyMunicipality: companyValues.companyMunicipality,
-          companyBarangay: companyValues.companyBarangay,
+          // Address fields are OMITTED when empty rather than sent blank.
+          //
+          // The server applies any key whose value is not `undefined`, so an
+          // empty string is a positive instruction to clear the column. The
+          // address is derived from lookups against the cascading option arrays
+          // (region → province → municipality → barangay); if any of those lists
+          // has not loaded, the lookup misses, the part is dropped, and the whole
+          // string collapses to "" — which then WIPED the stored address on save.
+          //
+          // Empty here means "this edit did not supply it", never "clear it" —
+          // the same rule the Total Volume guard already applies server-side.
+          ...(resolvedAddress ? { address: resolvedAddress } : {}),
+          ...(companyValues.companyRegion ? { companyRegion: companyValues.companyRegion } : {}),
+          ...(companyValues.companyProvince ? { companyProvince: companyValues.companyProvince } : {}),
+          ...(companyValues.companyMunicipality ? { companyMunicipality: companyValues.companyMunicipality } : {}),
+          ...(companyValues.companyBarangay ? { companyBarangay: companyValues.companyBarangay } : {}),
           // Persist the assigned SLF's current unit when the baseline has no
           // explicit unit yet — never an empty/stale unit (Item #3: store the unit
           // on every record so historical values stay accurate).
@@ -4325,18 +4512,30 @@ export default function SLFPortal() {
     }
     setLoading(true);
     try {
-      const companyValues = companyForm.getFieldsValue();
-      const disposalValues = entryForm.getFieldsValue();
-      const baselineValues = baselineForm.getFieldsValue();
+      // `true` = read the WHOLE form store, not just currently-rendered fields.
+      // Company Information lives inside a Collapse, so while that panel is
+      // closed its inputs are unmounted and a plain getFieldsValue() omits
+      // them — the values loaded by setFieldsValue were then dropped from the
+      // payload and the stored address was wiped on every baseline edit.
+      const companyValues = companyForm.getFieldsValue(true);
+      // Same `true` for the disposal and baseline forms. Only ONE baseline field
+      // (totalVolumeAccepted) had a store fallback below; every other one —
+      // per-cell active/closed volumes and their units — was silently dropped
+      // whenever its pane was not the open tab, which is what reset baseline
+      // values to blank on save. Reading the whole store fixes the class of bug,
+      // not just the one field someone noticed.
+      const disposalValues = entryForm.getFieldsValue(true);
+      const baselineValues = baselineForm.getFieldsValue(true);
       // Cell entries only win when they carry real volumes; otherwise the
-      // user-entered figure is preserved (see cellVolumeTotalIsAuthoritative).
-      // `baselineValues` can also be missing the field when the Baseline pane is
-      // not the open tab (destroyOnHidden unregisters it from validateFields),
-      // so fall back to the form STORE, which keeps preserved values.
-      const resolvedTotalVolumeAccepted = cellVolumeTotalIsAuthoritative
-        ? computedTotalVolumeAccepted
-        : (baselineValues.totalVolumeAccepted
-            ?? baselineForm.getFieldValue("totalVolumeAccepted"));
+      // user-entered figure is preserved (see resolveTotalVolumeForSave).
+      const resolvedTotalVolumeAccepted = resolveTotalVolumeForSave({
+        authoritative: cellVolumeTotalIsAuthoritative,
+        computed: computedTotalVolumeAccepted,
+        // No validateFields() on this path, so the mounted-only read of the form
+        // provides the same "is it actually on screen" signal.
+        mountedValue: baselineForm.getFieldsValue().totalVolumeAccepted,
+        storeValue: baselineValues.totalVolumeAccepted,
+      });
       const entry = {
         ...disposalValues,
         ...companyValues,
@@ -4564,15 +4763,23 @@ export default function SLFPortal() {
   // Build the submission entry payload from the current forms + state. Shared by
   // final submit and the Drafts/Scheduled queue so a draft replays identically.
   const buildSubmissionEntry = () => {
-    const companyValues = companyForm.getFieldsValue();
-    const disposalValues = entryForm.getFieldsValue();
-    const baselineValues = baselineForm.getFieldsValue();
-    // See cellVolumeTotalIsAuthoritative — blank cell rows must not overwrite the
-    // user-entered Total Volume Accepted with a derived 0.
-    const resolvedTotalVolumeAccepted = cellVolumeTotalIsAuthoritative
-      ? computedTotalVolumeAccepted
-      : (baselineValues.totalVolumeAccepted
-          ?? baselineForm.getFieldValue("totalVolumeAccepted"));
+    // Same reason as the edit path: read the full store so a collapsed Company
+    // Information panel cannot silently drop the address from the payload.
+    // Full store for all three forms — a pane that is not the open tab is
+    // unmounted, and a plain getFieldsValue() would omit its fields and blank
+    // them on save. This path also backs the Drafts/Scheduled queue, so a draft
+    // replayed from a different tab must carry the same values it was built with.
+    const companyValues = companyForm.getFieldsValue(true);
+    const disposalValues = entryForm.getFieldsValue(true);
+    const baselineValues = baselineForm.getFieldsValue(true);
+    // Blank cell rows must not overwrite the user-entered Total Volume Accepted
+    // with a derived 0 — see resolveTotalVolumeForSave.
+    const resolvedTotalVolumeAccepted = resolveTotalVolumeForSave({
+      authoritative: cellVolumeTotalIsAuthoritative,
+      computed: computedTotalVolumeAccepted,
+      mountedValue: baselineForm.getFieldsValue().totalVolumeAccepted,
+      storeValue: baselineValues.totalVolumeAccepted,
+    });
     return {
       ...disposalValues,
       ...companyValues,
@@ -6172,7 +6379,13 @@ export default function SLFPortal() {
                                       min={0}
                                       step={0.01}
                                       precision={2}
-                                      disabled
+                                      // Editable only when cell entries aren't
+                                      // driving the total; a facility declaring a
+                                      // lump baseline (no cell rows) must be able to
+                                      // type it, or it stays 0. `baselineSaved` is
+                                      // kept so the explicit prop doesn't override
+                                      // the Form-level lock.
+                                      disabled={baselineSaved || cellVolumeTotalIsAuthoritative}
                                       addonAfter={
                                         (baselineUnit || slfUnit) === "m³" ? "m³" : "tons"
                                       }
@@ -6198,7 +6411,9 @@ export default function SLFPortal() {
                                     />
                                   </Form.Item>
                                   <Text type="secondary" style={{ fontSize: 11 }}>
-                                    Auto-calculated from Active Cell Volume plus Closed / Used-Completed Cell Volume.
+                                    {cellVolumeTotalIsAuthoritative
+                                      ? "Auto-calculated from Active Cell Volume plus Closed / Used-Completed Cell Volume."
+                                      : "Enter the total volume accepted, or add Active / Closed cell entries below to calculate it automatically."}
                                   </Text>
                                 </Col>
                               </Row>
@@ -7393,11 +7608,65 @@ export default function SLFPortal() {
             }}
             width={960}
             okText="Save Placement"
-            okButtonProps={{ icon: <SaveOutlined />, loading: cellOrganizerSaving }}
+            okButtonProps={{
+              icon: <SaveOutlined />,
+              loading: cellOrganizerSaving,
+              // No cell can accept waste, so every placement would be invalid.
+              // Disabling here is what keeps the warning above honest and stops a
+              // partially-valid save from writing an assignment to a full cell.
+              disabled: Boolean(cellCapacityNotice),
+              title: cellCapacityNotice
+                ? "No disposal cell can currently accept waste"
+                : undefined,
+            }}
             onOk={saveCellOrganizer}
             destroyOnHidden
             styles={{ body: { maxHeight: "72vh", overflowY: "auto", padding: "12px 16px" } }}
           >
+            {/* Capacity warning. Shown INSTEAD of the old behaviour, where a full
+                cell made the whole organizer render empty with no explanation.
+                The rows below still list normally — only the cell dropdowns are
+                gated — so the operator can see exactly what is outstanding and
+                what has to happen before it can be placed. */}
+            {cellCapacityNotice && (
+              <Alert
+                type="warning"
+                showIcon
+                style={{ marginBottom: 12 }}
+                message={
+                  cellCapacityNotice.kind === "at-capacity"
+                    ? "Your operational cell is already at 100% capacity"
+                    : cellCapacityNotice.kind === "no-cells"
+                      ? "No disposal cells are configured"
+                      : "No disposal cell can currently accept waste"
+                }
+                description={
+                  <div style={{ fontSize: 12 }}>
+                    <div style={{ marginBottom: 6 }}>
+                      The entries below still need a disposal cell, but no cell is
+                      currently able to accept them. They remain outstanding and are
+                      listed here so nothing is lost.
+                    </div>
+                    {cellCapacityNotice.cells.length > 0 && (
+                      <ul style={{ margin: "0 0 6px", paddingLeft: 18 }}>
+                        {cellCapacityNotice.cells.map((c) => (
+                          <li key={c.label}>
+                            <b>{c.label}</b> — {c.reason}
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                    <div>
+                      <b>What to do:</b> assign these entries to another cell once one
+                      becomes available, or contact the EMB Region III administrator to
+                      open or reopen a disposal cell for this facility. Saving is
+                      disabled until a cell can accept the waste, so no invalid
+                      placement can be recorded.
+                    </div>
+                  </div>
+                }
+              />
+            )}
             {/* The modal opens instantly; the unassigned placements stream in behind
                 this. It used to await the fetch BEFORE opening, so clicking the menu
                 left the app sitting with nothing on screen and feeling frozen. */}

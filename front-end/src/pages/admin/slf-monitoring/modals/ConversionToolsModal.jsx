@@ -1,6 +1,8 @@
 import { ACCENT } from "../../slf-monitoring/helpers.jsx";
 import { CalculatorOutlined, CopyOutlined } from "@ant-design/icons";
-import { Button, Card, Col, Divider, Input, InputNumber, Modal, Row, Space, Tooltip } from "antd";
+import { Button, Card, Col, Divider, Input, InputNumber, Modal, Row, Space, Tooltip, Typography } from "antd";
+
+const { Text } = Typography;
 
 // Volume conversion helpers (area×depth → m³, m³ ↔ tons).
 //

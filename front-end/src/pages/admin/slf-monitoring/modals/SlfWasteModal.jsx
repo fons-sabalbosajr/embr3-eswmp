@@ -1,7 +1,9 @@
 import { R3_PROVINCES } from "../../slf-monitoring/SlfDashboardTab";
 import { BankOutlined, BarChartOutlined, EnvironmentOutlined, TableOutlined } from "@ant-design/icons";
-import { Button, Card, Col, Empty, Modal, Row, Space, Statistic, Table, Tabs } from "antd";
+import { Button, Card, Col, Empty, Modal, Row, Space, Statistic, Table, Tabs, Typography } from "antd";
 import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip as RTooltip, XAxis, YAxis } from "recharts";
+
+const { Text } = Typography;
 
 // Waste-received insight modal: per-facility totals derived from the loaded records.
 export default function SlfWasteModal({

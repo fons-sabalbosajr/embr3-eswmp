@@ -14,7 +14,10 @@ router.use(authMiddleware, developerOnly);
 // Get all users (developer)
 router.get("/", async (req, res) => {
   try {
-    const users = await User.find().select("-password").sort({ createdAt: -1 });
+    // The demo admin is excluded so it never appears in Account Management.
+    const users = await User.find({ isDemo: { $ne: true } })
+      .select("-password")
+      .sort({ createdAt: -1 });
     res.json(users);
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });

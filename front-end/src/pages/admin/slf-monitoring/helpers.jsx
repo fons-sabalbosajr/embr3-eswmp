@@ -2,6 +2,7 @@ import dayjs from 'dayjs';
 import { Tag, Typography, Upload, message, Progress, Tooltip } from 'antd';
 import { CheckCircleOutlined, CloseCircleOutlined, SyncOutlined } from '@ant-design/icons';
 import secureStorage from '../../../utils/secureStorage';
+import { getEmbeddedMediaName } from '../../../utils/mediaFiles';
 import { getAdminDisplayName } from '../../../utils/adminIdentity';
 // Volume conversion lives in ONE place — see utils/volumeUnits.js. These are
 // re-exported below so the existing `from './helpers'` imports keep working.
@@ -116,7 +117,7 @@ const RECEIVING_FACILITY_TYPE_OPTIONS = [
   "Transfer Station",
   "RCA",
 ].map((value) => ({ label: value, value }));
-const GALLERY_COMPONENT_OPTIONS = [
+export const GALLERY_COMPONENT_OPTIONS = [
   "Entrance / Weighbridge",
   "Active Cell",
   "Completed Cell",
@@ -255,7 +256,7 @@ const uploadEventToFileList = (e) => {
   return e?.fileList;
 };
 
-const slfUploadProps = {
+export const slfUploadProps = {
   beforeUpload: validateSlfUpload,
   itemRender: renderSlfUploadItem,
   progress: { showInfo: true },
@@ -298,7 +299,7 @@ const isDriveUrl = (url) =>
 // previews broken); the `thumbnail` endpoint renders reliably as an <img> at any
 // size, so it is used for both grid thumbnails (w800) and the full preview
 // (w1600).
-const resolveMediaUrl = (url, { thumbnail = false } = {}) => {
+export const resolveMediaUrl = (url, { thumbnail = false } = {}) => {
   const s = String(url || "");
   if (!s) return "";
   if (isDriveUrl(s)) {
@@ -359,6 +360,79 @@ const normalizeStoredFileUrl = (value) => {
   return value;
 };
 
+export const SLF_DOCUMENT_TYPE_OPTIONS = [
+  { label: "ECC", value: "ECC" },
+  { label: "Permit", value: "Permit" },
+  { label: "Monitoring Report", value: "Monitoring Report" },
+  { label: "Compliance Certificate", value: "Compliance Certificate" },
+  { label: "Site Plan", value: "Site Plan" },
+  { label: "Other", value: "Other" },
+];
+
+export const fileNameFromUrl = (value, fallback = "file") => {
+  const first = Array.isArray(value) ? value[0] : null;
+  const raw = first?.url || (typeof value === "string" ? value : "");
+  // Our secure proxy + Google Drive URLs end in an OPAQUE file ID, never a
+  // human filename — surfacing that as the name is the "random name" bug. Prefer
+  // the fileList item's own name; otherwise use the caller's fallback.
+  if (
+    /\/upload\/secure\/(drive|local)\//.test(raw) ||
+    /drive\.google\.com|googleusercontent/.test(raw)
+  ) {
+    // Newly-minted signed URLs embed the ORIGINAL filename as ?name=; reading it
+    // is what stops a stored file with no fileList entry from falling all the way
+    // through to the generic fallback.
+    return first?.name || getEmbeddedMediaName(raw) || fallback;
+  }
+  const src = raw || first?.name || "";
+  if (!src) return fallback;
+  try {
+    const pathname = new URL(src, window.location.origin).pathname;
+    return decodeURIComponent(pathname.split("/").pop() || fallback);
+  } catch {
+    return String(src).split("/").pop() || fallback;
+  }
+};
+
+// The upload response returns the ORIGINAL filename (server sends
+// `name: req.file.originalname`); AntD also keeps it on `file.name` for the life
+// of the fileList item. Prefer the fresh response name, then the persisted
+// `fileName`, then AntD's own item name — only then derive from the URL (which
+// for restricted Drive/local media is an opaque id, never a real filename).
+export const resolveUploadName = (value, persistedName, fallback = "file") => {
+  const file = Array.isArray(value) ? value[0] : null;
+  const freshName = file?.response?.name || "";
+  return (
+    freshName || persistedName || file?.name || fileNameFromUrl(value, fallback)
+  );
+};
+
+export const uploadFileFromValue = (value) =>
+  Array.isArray(value) ? value[0] : null;
+export const fileUrlFromValue = (value) =>
+  uploadFileFromValue(value)?.url ||
+  uploadFileFromValue(value)?.response?.url ||
+  (typeof value === "string" ? value : "");
+
+export const THREE_DECIMAL_STEP = 0.001;
+export const formatThreeDecimalInput = (value) =>
+  value === "" || value === null || value === undefined
+    ? ""
+    : Number(value).toLocaleString(undefined, { maximumFractionDigits: 3 });
+export const parseDecimalInput = (value) => {
+  const cleaned = String(value ?? "").replace(/,/g, "");
+  return cleaned === "" ? null : cleaned;
+};
+
+export const getServedClientCount = (record = {}) => {
+  const lguList = Array.isArray(record.lguServedList) ? record.lguServedList.filter(Boolean) : [];
+  const privateList = Array.isArray(record.privateCompaniesServed) ? record.privateCompaniesServed.filter(Boolean) : [];
+  if (/private/i.test(record.ownership || "")) {
+    return privateList.length || Number(record.noOfLGUServed || 0);
+  }
+  return lguList.length || Number(record.noOfLGUServed || 0);
+};
+
 export {
   managementStatusSummary,
   asStringArray,
@@ -377,14 +451,12 @@ export {
   DP_TYPE_OPTIONS,
   WWTF_TYPE_OPTIONS,
   RECEIVING_FACILITY_TYPE_OPTIONS,
-  GALLERY_COMPONENT_OPTIONS,
   getUploadHeaders,
   formatFileSize,
   getUploadFileSize,
   validateSlfUpload,
   renderSlfUploadItem,
   renderUploadStatusCell,
-  slfUploadProps,
   uploadEventToFileList,
   convertVolume,
   convertVolumeSafe,
@@ -395,7 +467,6 @@ export {
   isHazardousCellType,
   extractDriveId,
   isDriveUrl,
-  resolveMediaUrl,
   resolveMediaOpenUrl,
   resolveMediaPreviewUrl,
   getMediaKind,

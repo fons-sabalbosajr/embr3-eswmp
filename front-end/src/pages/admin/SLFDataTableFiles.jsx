@@ -32,6 +32,7 @@ import {
   SwapOutlined,
 } from "@ant-design/icons";
 import Swal from "sweetalert2";
+import LazyDocumentFrame from "../../components/LazyDocumentFrame";
 import api from "../../api";
 import ResponsiveTable from "./shared/ResponsiveTable";
 
@@ -470,11 +471,13 @@ export default function SLFDataTableFiles({ isDark }) {
               </div>
             )}
             {status?.accessible && isPdf && preview.file?.driveFileId && (
-              <iframe
-                title="pdf-preview"
-                src={`https://drive.google.com/file/d/${preview.file.driveFileId}/preview`}
-                style={{ width: "100%", height: 420, border: "none", borderRadius: 8 }}
-              />
+              <div style={{ height: 420 }}>
+                <LazyDocumentFrame
+                  title="pdf-preview"
+                  src={`https://drive.google.com/file/d/${preview.file.driveFileId}/preview`}
+                  style={{ borderRadius: 8, overflow: "hidden" }}
+                />
+              </div>
             )}
           </>
         )}

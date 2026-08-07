@@ -1,10 +1,13 @@
 import { useState, useMemo } from "react";
 import { FitBounds, ProvinceBoundary } from "../MapPrimitives";
 import { AppstoreOutlined, BankOutlined, BarChartOutlined, CalendarOutlined, CheckCircleOutlined, ClockCircleOutlined, CloseCircleOutlined, EnvironmentOutlined, FundOutlined, GlobalOutlined, PieChartOutlined, RiseOutlined, SafetyCertificateOutlined, TeamOutlined, UserOutlined } from "@ant-design/icons";
-import { Button, Card, Col, Progress, Row, Select, Space, Statistic, Tag, Tooltip } from "antd";
+import { Button, Card, Col, Progress, Row, Select, Space, Statistic, Tag, Tooltip, Typography } from "antd";
 import { MapContainer, Marker, Popup, TileLayer } from "react-leaflet";
 
+import { TILE_LAYERS } from "../constants";
 import { mrfStatusIcon } from "./mapMarkers";
+
+const { Text } = Typography;
 
 // Funded MRF dashboard tab.
 //
@@ -13,6 +16,7 @@ import { mrfStatusIcon } from "./mapMarkers";
 // from dashboard/mapMarkers.js rather than being duplicated.
 export default function FundedMrfTab({ mrfStats, loading, isDark, setActiveMenu }) {
   const [mrfTileKey, setMrfTileKey] = useState("street");
+  const mrfTile = TILE_LAYERS[mrfTileKey];
   const [mrfFilterProvince, setMrfFilterProvince] = useState(null);
   const [mrfFilterStatus, setMrfFilterStatus] = useState(null);
 

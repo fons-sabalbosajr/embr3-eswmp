@@ -1,9 +1,15 @@
 import HaulerClientsEditor from "../../slf-monitoring/HaulerClientsEditor";
-import { ACCENT, CELL_STATUS_COLORS, CELL_STATUS_OPTIONS, DP_TYPE_OPTIONS, PERMIT_STATUS_OPTIONS, RECEIVING_FACILITY_TYPE_OPTIONS, UNIT_OPTIONS, WWTF_TYPE_OPTIONS, convertVolume, formatFileSize, getMediaKind, getUploadHeaders, isActiveCellStatus, isCompletedCellStatus, normalizeCellStatus, normalizeUnit, renderUploadStatusCell, resolveMediaOpenUrl, uploadEventToFileList } from "../../slf-monitoring/helpers.jsx";
-import { AlertOutlined, BankOutlined, BarChartOutlined, CalculatorOutlined, DatabaseOutlined, DeleteOutlined, DownloadOutlined, EditOutlined, EnvironmentOutlined, ExperimentOutlined, EyeOutlined, FileImageOutlined, FilePdfOutlined, InfoCircleOutlined, LinkOutlined, PlusOutlined, SafetyCertificateOutlined, TeamOutlined, UploadOutlined, WarningOutlined } from "@ant-design/icons";
-import { Button, Card, Checkbox, Col, Collapse, DatePicker, Divider, Empty, Form, Input, InputNumber, Modal, Popconfirm, Progress, Row, Select, Space, Spin, Switch, Table, Tabs, Tag, Tooltip, Upload, message } from "antd";
+import { ACCENT, CELL_STATUS_COLORS, CELL_STATUS_OPTIONS, DP_TYPE_OPTIONS, GALLERY_COMPONENT_OPTIONS, PERMIT_STATUS_OPTIONS, RECEIVING_FACILITY_TYPE_OPTIONS, SLF_DOCUMENT_TYPE_OPTIONS, THREE_DECIMAL_STEP, UNIT_OPTIONS, WWTF_TYPE_OPTIONS, convertVolume, fileUrlFromValue, formatFileSize, formatThreeDecimalInput, getMediaKind, getUploadHeaders, isActiveCellStatus, isCompletedCellStatus, normalizeCellStatus, normalizeUnit, parseDecimalInput, renderUploadStatusCell, resolveMediaOpenUrl, resolveMediaUrl, resolveUploadName, slfUploadProps, uploadEventToFileList, uploadFileFromValue } from "../../slf-monitoring/helpers.jsx";
+import { AlertOutlined, BankOutlined, BarChartOutlined, CalculatorOutlined, DatabaseOutlined, DeleteOutlined, DownloadOutlined, EditOutlined, EnvironmentOutlined, ExperimentOutlined, EyeOutlined, FileImageOutlined, FilePdfOutlined, FileTextOutlined, FolderOutlined, InfoCircleOutlined, LinkOutlined, PlusOutlined, SafetyCertificateOutlined, TeamOutlined, UploadOutlined, WarningOutlined } from "@ant-design/icons";
+// `Image` MUST be imported from antd. Without it, JSX <Image> resolves to the
+// browser's global Image constructor and React throws "Please use the 'new'
+// operator, this DOM object constructor cannot be called as a function".
+// eslint's no-undef cannot catch this — window.Image is a legitimate global.
+import { Button, Card, Checkbox, Col, Collapse, DatePicker, Divider, Empty, Form, Image, Input, InputNumber, Modal, Popconfirm, Progress, Row, Select, Space, Spin, Switch, Table, Tabs, Tag, Tooltip, Typography, Upload, message } from "antd";
 import CellGaugeLegend from "../CellGaugeLegend";
 import { Cell as RCell, Pie, PieChart, Tooltip as RTooltip } from "recharts";
+
+const { Text } = Typography;
 
 // Add / edit facility form — the SLF Data Table's write path.
 //
@@ -171,11 +177,20 @@ export default function SlfEditModal({
                     <TeamOutlined /> Hauler Clients
                   </span>
                 ),
-                children: (
+                children: editing?._id ? (
                   <HaulerClientsEditor
                     slfGeneratorId={editing?._id}
                     slfLabel={editing?.lgu || editing?.slfName}
                     canEdit={canEdit}
+                  />
+                ) : (
+                  // Hauler/client rows hang off the saved facility's baseline
+                  // records, so there is nothing to attach them to until the
+                  // record exists. The editor previously bailed out silently
+                  // here and rendered an empty pane with no explanation.
+                  <Empty
+                    image={Empty.PRESENTED_IMAGE_SIMPLE}
+                    description="Save this facility first — haulers and clients attach to a saved record."
                   />
                 ),
               },
@@ -1933,6 +1948,15 @@ export default function SlfEditModal({
                             }
                             return {
                               index: i,
+                              // Resolved from the SAME live form value the cell
+                              // Card header uses, so a renamed cell reads
+                              // identically in the card and on its gauge. The
+                              // gauge previously hardcoded `Cell {index + 1}` and
+                              // silently ignored the custom name.
+                              name:
+                                String(
+                                  form.getFieldValue(["cellNames", i]) || "",
+                                ).trim() || `Cell ${i + 1}`,
                               capacity: cap,
                               capacityUnit: capUnit,
                               fillUnit,
@@ -2120,7 +2144,7 @@ export default function SlfEditModal({
                                                 marginTop: 2,
                                               }}
                                             >
-                                              Cell {cell.index + 1}
+                                              {cell.name}
                                             </div>
                                             <Tag
                                               color={tagColor}
@@ -2311,7 +2335,10 @@ export default function SlfEditModal({
                                               fontWeight: 600,
                                             }}
                                           >
-                                            Cell {cell.index + 1}
+                                            {/* Same resolved name as the cell card
+                                                and the gauge — this pie carried the
+                                                positional label too. */}
+                                            {cell.name}
                                           </Text>
                                           <PieChart width={110} height={88}>
                                             <Pie

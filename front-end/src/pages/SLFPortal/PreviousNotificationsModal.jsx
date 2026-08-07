@@ -1,7 +1,9 @@
 import { useMemo, useState } from "react";
 import { EyeOutlined, HistoryOutlined, SearchOutlined } from "@ant-design/icons";
-import { Button, DatePicker, Input, Modal, Select, Space, Table, Tag } from "antd";
+import { Button, DatePicker, Input, Modal, Select, Space, Table, Tag, Typography } from "antd";
 import dayjs from "dayjs";
+
+const { Text } = Typography;
 
 // Full notification history modal: search, read/unread filter, date range, and a
 // paged table of every notification the portal user has received.

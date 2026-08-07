@@ -2,6 +2,12 @@ const mongoose = require("mongoose");
 
 const transactionSchema = new mongoose.Schema(
   {
+    // Isolates demonstration/dummy activity from production transaction history,
+    // matching the flag every other collection uses. Without it, a transaction
+    // written during a demo would be indistinguishable from a real one, since
+    // the demo write guard can only stamp models that expose this field.
+    isDummy: { type: Boolean, default: false, index: true },
+
     // Links to the original submission
     submissionId: { type: String, trim: true, index: true },
     dataEntry: { type: mongoose.Schema.Types.ObjectId, ref: "DataSLF" },

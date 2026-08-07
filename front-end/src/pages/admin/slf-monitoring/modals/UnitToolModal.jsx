@@ -1,6 +1,8 @@
 import { UNIT_OPTIONS } from "../../slf-monitoring/helpers.jsx";
 import { DatabaseOutlined } from "@ant-design/icons";
-import { Modal, Select, Space } from "antd";
+import { Modal, Select, Space, Typography } from "antd";
+
+const { Text } = Typography;
 
 // "Set Field Units" tool — applies one volume unit across the facility's fields.
 export default function UnitToolModal({

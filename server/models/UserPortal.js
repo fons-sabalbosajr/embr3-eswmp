@@ -25,6 +25,12 @@ const userPortalSchema = new mongoose.Schema(
     // Marks demo/test accounts created via Developer Settings > Dummy Data
     // Configuration so they can be filtered separately from real portal users.
     isDummy: { type: Boolean, default: false, index: true },
+    // Marks the sealed portal demonstration account. Distinct from `isDummy`:
+    // `isDummy` isolates DATA from analytics/reports (already enforced across
+    // dataSLF.js), while `isDemo` marks the ACCOUNT so it is hidden from Portal
+    // User Management and its session renders masked values. The demo account
+    // carries BOTH — see utils/demoMode.js.
+    isDemo: { type: Boolean, default: false, index: true },
     // Assigned SLF (set by admin during approval) — supports multiple
     assignedSlf: [
       {

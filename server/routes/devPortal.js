@@ -219,14 +219,27 @@ router.get("/portal-users", async (req, res) => {
       isDummy: { $ne: true },
       blocked: { $ne: true },
     })
-      .select("firstName lastName email companyName assignedSlfName status isDummy")
+      .select("firstName lastName email companyName assignedSlf assignedSlfName status isDummy")
+      // The picker identifies an account by its landfill + province, and province
+      // lives on the facility, not on the portal user — so it is resolved here
+      // rather than making the client fetch facilities just to draw a label.
+      .populate("assignedSlf", "province lgu")
       .lean();
+
+    const withProvince = users.map((u) => {
+      const facilities = Array.isArray(u.assignedSlf) ? u.assignedSlf : [];
+      const provinces = [
+        ...new Set(facilities.map((f) => f?.province).filter(Boolean)),
+      ];
+      return { ...u, province: provinces.join(", ") };
+    });
+
     // Sort by primary landfill name, then account name — clearer than createdAt.
     const label = (u) =>
       (Array.isArray(u.assignedSlfName) ? u.assignedSlfName[0] : u.assignedSlfName) ||
       u.companyName || `${u.firstName || ""} ${u.lastName || ""}`.trim() || u.email || "";
-    users.sort((a, b) => label(a).localeCompare(label(b)));
-    res.json(users);
+    withProvince.sort((a, b) => label(a).localeCompare(label(b)));
+    res.json(withProvince);
   } catch (e) {
     res.status(500).json({ message: "Server error", error: e.message });
   }

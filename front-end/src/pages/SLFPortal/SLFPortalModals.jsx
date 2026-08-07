@@ -6,6 +6,12 @@ import {
   Modal, Progress, Radio, Row, Select, Space, Spin, Table, Tabs, Tag, Upload,
   Typography, Card, Alert, Skeleton
 } from "antd";
+
+// `Option` is used as <Option> below. Without this destructure it resolves to the
+// browser's global Option constructor (HTMLOptionElement), and React throws
+// "Please use the 'new' operator, this DOM object constructor cannot be called as
+// a function". eslint's no-undef cannot flag it — window.Option is a real global.
+const { Option } = Select;
 import {
   AuditOutlined, BankOutlined, BarChartOutlined, CarOutlined, CheckCircleOutlined,
   CloseCircleOutlined, ContainerOutlined, DatabaseOutlined, DeleteOutlined,
@@ -3137,13 +3143,32 @@ export default function SLFPortalModals({
               ),
               children: (
                 <Row gutter={[12, 8]}>
-                  {[
-                    { label: "Company Name", value: companyForm.getFieldValue("lguCompanyName") },
-                    { label: "Region", value: regions.find((r) => r.code === companyForm.getFieldValue("companyRegion"))?.name },
-                    { label: "Province", value: provinces.find((p) => p.code === companyForm.getFieldValue("companyProvince"))?.name },
-                    { label: "City/Municipality", value: municipalities.find((m) => m.code === companyForm.getFieldValue("companyMunicipality"))?.name },
-                    { label: "Barangay", value: barangays.find((b) => b.code === companyForm.getFieldValue("companyBarangay"))?.name },
-                  ].map(({ label, value }) => (
+                  {(() => {
+                    // These names are resolved by looking a stored PSGC CODE up in
+                    // the cascading option arrays. Those arrays are repopulated as
+                    // the user picks region → province → municipality, so after a
+                    // baseline edit they can be empty and every lookup returns
+                    // undefined — which rendered "—" even though the values were
+                    // still in the form. Fall back to the stored value so an
+                    // already-recorded address always shows something real.
+                    const resolve = (list, field) => {
+                      const stored = companyForm.getFieldValue(field);
+                      if (!stored) return "";
+                      const hit = (Array.isArray(list) ? list : []).find(
+                        (item) => item.code === stored,
+                      );
+                      // A stored value that is not a numeric PSGC code is already
+                      // a readable name (older records stored names directly).
+                      return hit?.name || (/^\d+$/.test(String(stored)) ? "" : stored);
+                    };
+                    return [
+                      { label: "Company Name", value: companyForm.getFieldValue("lguCompanyName") },
+                      { label: "Region", value: resolve(regions, "companyRegion") },
+                      { label: "Province", value: resolve(provinces, "companyProvince") },
+                      { label: "City/Municipality", value: resolve(municipalities, "companyMunicipality") },
+                      { label: "Barangay", value: resolve(barangays, "companyBarangay") },
+                    ];
+                  })().map(({ label, value }) => (
                     <Col xs={24} sm={12} key={label}>
                       <div style={{ marginBottom: 2 }}>
                         <Text type="secondary" style={{ fontSize: 11, display: "block", marginBottom: 3 }}>{label}</Text>
@@ -3667,7 +3692,11 @@ export default function SLFPortalModals({
         onCancel={() => setSupportDrawerOpen(false)}
         footer={null}
         centered
-        width={isMobile ? "96%" : 760}
+        // 760px forced the ticket table into a horizontal scroll on every
+        // desktop width. `min()` takes the available viewport when the screen is
+        // smaller than the cap, so the modal grows into the space it has without
+        // ever overflowing — and the mobile branch is unchanged.
+        width={isMobile ? "96%" : "min(1180px, 94vw)"}
         styles={{ body: { padding: 0 } }}
       >
         <div className="slf-support-shell">

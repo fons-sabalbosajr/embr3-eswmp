@@ -178,7 +178,9 @@ export default function HaulerClientsEditor({ slfGeneratorId, slfLabel, canEdit 
         </Space>
       ),
     },
-    { title: "Type", dataIndex: "clientType", width: 110, render: typeTag },
+    // Tag/action columns are centred; free-text columns stay left-aligned so the
+    // eye still has a single reading edge for names.
+    { title: "Type", dataIndex: "clientType", width: 100, align: "center", render: typeTag },
     {
       title: "Hauler", dataIndex: "haulerName", width: 190, ellipsis: true,
       render: (v) => <Tooltip title={v}><Tag color="blue" bordered={false}>{v || "—"}</Tag></Tooltip>,
@@ -191,10 +193,22 @@ export default function HaulerClientsEditor({ slfGeneratorId, slfLabel, canEdit 
       title: "Province", dataIndex: "provinceName", width: 130, ellipsis: true,
       render: (v) => v || <Text type="danger" style={{ fontSize: 11 }}>Not set</Text>,
     },
+    {
+      // Resolved server-side against the Region III masterlist (utils/region3),
+      // not by comparing strings here — so this column agrees with the LGU
+      // dashboard's served/unserved counts by construction.
+      title: "Region", dataIndex: "regionClass", width: 120, align: "center",
+      // Values come from region3.REGION_CLASS.
+      render: (v) => {
+        if (v === "within-region-3") return <Tag color="green" bordered={false}>Region III</Tag>;
+        if (v === "outside-region-3") return <Tag color="orange" bordered={false}>Outside R3</Tag>;
+        return <Text type="secondary" style={{ fontSize: 11 }}>Unclassified</Text>;
+      },
+    },
     ...(canEdit ? [{
-      title: "Actions", width: 84, fixed: "right",
+      title: "Actions", width: 78, fixed: "right", align: "center",
       render: (_, row) => (
-        <Space size={2}>
+        <Space size={0}>
           <Tooltip title="Edit client">
             <Button size="small" type="text" icon={<EditOutlined />} onClick={() => openEdit(row)} />
           </Tooltip>
@@ -262,12 +276,13 @@ export default function HaulerClientsEditor({ slfGeneratorId, slfLabel, canEdit 
 
       <Table
         size="small"
+        className="eswmp-table-dense"
         rowKey="key"
         loading={loading}
         dataSource={rows}
         columns={columns}
         tableLayout="fixed"
-        scroll={{ x: 880 }}
+        scroll={{ x: 1000 }}
         locale={{ emptyText: <Empty description={`No hauler clients recorded for ${slfLabel || "this SLF"}`} /> }}
         pagination={{
           current: page,

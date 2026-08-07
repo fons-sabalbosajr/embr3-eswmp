@@ -91,9 +91,14 @@ router.post("/login", async (req, res) => {
       return res.status(401).json({ message: "Invalid credentials" });
     }
 
-    const token = jwt.sign({ id: user._id, role: user.role }, process.env.JWT_SECRET, {
-      expiresIn: "7d",
-    });
+    // `isDemo` rides in the token so every downstream request can tell it is a
+    // demonstration session without a second DB lookup — that is what the
+    // server-side masking middleware keys off.
+    const token = jwt.sign(
+      { id: user._id, role: user.role, isDemo: Boolean(user.isDemo) },
+      process.env.JWT_SECRET,
+      { expiresIn: "7d" },
+    );
 
     res.json({
       message: "Login successful",
@@ -105,6 +110,7 @@ router.post("/login", async (req, res) => {
         username: user.username,
         email: user.email,
         role: user.role,
+        isDemo: Boolean(user.isDemo),
         position: user.position,
         designation: user.designation,
         permissions: user.permissions,

@@ -1,6 +1,8 @@
 import { BellOutlined, HistoryOutlined } from "@ant-design/icons";
-import { Avatar, Badge, Button, Empty, List, Space, Tag } from "antd";
+import { Avatar, Badge, Button, Empty, List, Space, Tag, Typography } from "antd";
 import dayjs from "dayjs";
+
+const { Text } = Typography;
 
 // Bell dropdown for portal notifications: unread counts by category, a short
 // list of the most recent items, and a link into the full history modal.

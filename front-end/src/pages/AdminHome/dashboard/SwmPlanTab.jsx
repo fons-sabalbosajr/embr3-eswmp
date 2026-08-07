@@ -1,10 +1,12 @@
 import { useState, useMemo } from "react";
 import api from "../../../api";
 import { FitBounds, ProvinceBoundary } from "../MapPrimitives";
-import { getPlanStatus, planStatusIcon } from "../constants";
-import { AlertOutlined, AppstoreOutlined, AuditOutlined, BarChartOutlined, ClockCircleOutlined, ContainerOutlined, CopyOutlined, DeleteOutlined, EnvironmentOutlined, ExperimentOutlined, EyeOutlined, FileDoneOutlined, FundOutlined, GlobalOutlined, LinkOutlined, PieChartOutlined, RiseOutlined, SafetyCertificateOutlined, TeamOutlined, UserOutlined } from "@ant-design/icons";
-import { Button, Card, Col, Progress, Row, Select, Space, Statistic, Tag, Tooltip } from "antd";
+import { getPlanStatus, planStatusIcon, TILE_LAYERS } from "../constants";
+import { AlertOutlined, AppstoreOutlined, AuditOutlined, BarChartOutlined, ClockCircleOutlined, ContainerOutlined, CopyOutlined, DeleteOutlined, EnvironmentOutlined, ExperimentOutlined, EyeOutlined, FileDoneOutlined, FundOutlined, FundProjectionScreenOutlined, GlobalOutlined, LinkOutlined, PieChartOutlined, RiseOutlined, SafetyCertificateOutlined, TeamOutlined, UserOutlined } from "@ant-design/icons";
+import { Button, Card, Col, Progress, Row, Select, Space, Statistic, Tag, Tooltip, Typography } from "antd";
 import { MapContainer, Marker, Popup, TileLayer } from "react-leaflet";
+
+const { Text } = Typography;
 
 // 10-Year SWM Plan dashboard tab.
 //
@@ -13,6 +15,7 @@ import { MapContainer, Marker, Popup, TileLayer } from "react-leaflet";
 // opens is rendered by the container, outside the tab set.
 export default function SwmPlanTab({ swmStats, loading, isDark, setMapViewRecord }) {
   const [tileKey, setTileKey] = useState("street");
+  const tile = TILE_LAYERS[tileKey];
   const [mapFilterProvince, setMapFilterProvince] = useState(null);
   const [mapFilterStatus, setMapFilterStatus] = useState(null);
 

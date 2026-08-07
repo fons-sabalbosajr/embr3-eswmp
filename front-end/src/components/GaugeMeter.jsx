@@ -1,4 +1,5 @@
 import { useId } from "react";
+import { VOLUME_METRICS, GAUGE_TRACK_COLOR } from "../utils/volumeMetrics";
 
 // Lightweight, dependency-free SVG semicircular gauge.
 //
@@ -58,8 +59,8 @@ export default function GaugeMeter({
   percent,
   label,
   valueText,
-  color = "#2f54eb",
-  trackColor = "#eef0f4",
+  color = VOLUME_METRICS.baseline.color,
+  trackColor = GAUGE_TRACK_COLOR,
   size = 132,
   thickness = 12,
   noDataText = "No capacity data available",

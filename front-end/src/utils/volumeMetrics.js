@@ -22,33 +22,46 @@
  * readable rather than just a colour key.
  */
 
+/**
+ * ── THE standard gauge palette ───────────────────────────────────────────────
+ *
+ *   Blue          Baseline Volume
+ *   Golden Yellow Submitted Volume
+ *   Green         Waste Currently Stored in Cell (actual cell volume)
+ *   Red           Remaining / Critical Capacity, and the overflow indicator
+ *
+ * These four hues are the ONLY colours any gauge, legend or volume chart may
+ * use for these four concepts, on every screen. Nothing downstream re-declares
+ * a hex — call sites read from here (or from the aliases below) so a colour can
+ * never mean one thing on the dashboard and something else in a modal.
+ */
 export const VOLUME_METRICS = {
   baseline: {
     key: "baseline",
     label: "Baseline Volume",
     short: "Baseline",
-    color: "#2f54eb", // geekblue
+    color: "#1677ff", // blue
     description: "Volume already in the cell when the baseline was declared.",
   },
   submitted: {
     key: "submitted",
     label: "Submitted Volume",
     short: "Submitted",
-    color: "#13c2c2", // cyan
+    color: "#faad14", // golden yellow
     description: "Volume recorded through Portal truck submissions.",
   },
   stored: {
     key: "stored",
     label: "Waste Currently Stored in Cell",
     short: "Stored",
-    color: "#722ed1", // purple — the derived total, never a gauge segment
+    color: "#52c41a", // green — the derived total, never a gauge segment
     description: "Baseline Volume + Submitted Volume — the cell's current fill.",
   },
   remaining: {
     key: "remaining",
     label: "Remaining Capacity",
     short: "Remaining",
-    color: "#d9d9d9", // matches the gauge track
+    color: "#ff4d4f", // red — headroom left, and the critical/overflow signal
     description: "Cell Capacity − Waste Currently Stored in Cell.",
   },
   /** Legacy records saved before baseline/submitted were tracked separately. */
@@ -56,10 +69,18 @@ export const VOLUME_METRICS = {
     key: "recorded",
     label: "Recorded Volume",
     short: "Recorded",
-    color: "#2f54eb",
+    color: "#1677ff",
     description: "Volume recorded before baseline and submitted totals were split.",
   },
 };
+
+/**
+ * Neutral track behind a gauge arc. This is deliberately NOT `remaining.color`:
+ * the unfilled arc is chrome, whereas Remaining Capacity is a named metric that
+ * the legend reports in red. Keeping them separate is what lets the track stay
+ * visually quiet without weakening the red signal.
+ */
+export const GAUGE_TRACK_COLOR = "#eef0f4";
 
 // Convenience aliases so call sites never re-declare a hex value.
 export const BASELINE_COLOR = VOLUME_METRICS.baseline.color;

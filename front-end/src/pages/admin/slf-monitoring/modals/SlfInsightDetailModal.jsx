@@ -1,12 +1,16 @@
 import { InsightStat } from "../../slf-monitoring/SlfDashboardTab";
 import { CHART_COLORS } from "../../slf-monitoring/helpers.jsx";
-import { Alert, Button, Card, Col, Empty, Modal, Progress, Row, Space, Tag } from "antd";
+import { Alert, Button, Card, Col, Empty, Modal, Progress, Row, Space, Tag, Typography } from "antd";
 import { Cell as RCell, Legend, Pie, PieChart, ResponsiveContainer, Tooltip as RTooltip } from "recharts";
+
+const { Text } = Typography;
 
 // Expanded breakdown behind a summary-tile drill-down.
 export default function SlfInsightDetailModal({
   slfInsightModal,
   setSlfInsightModal,
+  config,
+  maxBar,
 }) {
   return (
     <Modal

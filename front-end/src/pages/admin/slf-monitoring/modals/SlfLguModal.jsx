@@ -1,6 +1,9 @@
 import { R3_PROVINCES, getStatusTag } from "../../slf-monitoring/SlfDashboardTab";
+import { getServedClientCount } from "../../slf-monitoring/helpers.jsx";
 import { BellOutlined, EnvironmentOutlined, TableOutlined, TeamOutlined } from "@ant-design/icons";
-import { Alert, Badge, Button, Card, Col, Empty, Input, Modal, Row, Space, Statistic, Table, Tabs, Tag, message } from "antd";
+import { Alert, Badge, Button, Card, Col, Empty, Input, Modal, Row, Space, Statistic, Table, Tabs, Tag, Typography, message } from "antd";
+
+const { Text } = Typography;
 
 // LGUs-served insight, with the nested capacity-alert dialog it launches.
 export default function SlfLguModal({

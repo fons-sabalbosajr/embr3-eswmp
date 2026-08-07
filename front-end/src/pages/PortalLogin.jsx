@@ -685,7 +685,7 @@ export default function PortalLogin() {
               </Form.Item>
               <div style={{ textAlign: "center", marginTop: -4, marginBottom: 4 }}>
                 <Text type="secondary" style={{ fontSize: 12 }}>
-                  Enter the full 6-digit PIN — it submits automatically.
+                  Enter the full 6-digit PIN.
                 </Text>
               </div>
             </>
@@ -699,11 +699,19 @@ export default function PortalLogin() {
                 onChange={setDevSelectedUser}
                 optionFilterProp="label"
                 options={devPortalUsers.map((u) => {
-                  const slf = Array.isArray(u.assignedSlfName) ? u.assignedSlfName.filter(Boolean).join(", ") : u.assignedSlfName;
-                  const name = `${u.firstName || ""} ${u.lastName || ""}`.trim() || u.companyName || u.email;
+                  const slf = Array.isArray(u.assignedSlfName)
+                    ? u.assignedSlfName.filter(Boolean).join(", ")
+                    : u.assignedSlfName;
+                  // SLF name + province only. The account holder's name and
+                  // e-mail were noise here — the developer picks the FACILITY to
+                  // debug, and two accounts on the same landfill are told apart
+                  // by province, not by whose login it is.
+                  const label = [slf, u.province].filter(Boolean).join(" — ");
                   return {
                     value: u._id,
-                    label: `${slf ? `${slf} — ` : ""}${name} · ${u.email}`.trim(),
+                    // Fall back to something selectable if a user has no facility
+                    // assigned yet, otherwise the row would render blank.
+                    label: label || u.companyName || u.email,
                   };
                 })}
                 style={{ width: "100%" }}

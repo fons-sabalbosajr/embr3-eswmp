@@ -1,5 +1,7 @@
 import { EnvironmentOutlined, LinkOutlined } from "@ant-design/icons";
-import { Button, Modal, Space } from "antd";
+import { Button, Modal, Space, Typography } from "antd";
+
+const { Text } = Typography;
 
 // Read-only Google Maps preview for a facility's plotted coordinates.
 export default function MapPreviewModal({

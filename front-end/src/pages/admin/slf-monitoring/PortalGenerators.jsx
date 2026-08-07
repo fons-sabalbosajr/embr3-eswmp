@@ -8,7 +8,9 @@ import { buildFilters, matchesFilter, rowMatchesSearch } from '../shared/tableFi
 import { getSubmissionVolumeSummary, getTruckCapacityText, getTruckPlateText, normalizeSubmissionRecord } from '../shared/submissionRecords';
 import ResponsiveTable from '../shared/ResponsiveTable';
 import { getSocket } from '../../../utils/socket';
-import { ACCENT, CHART_COLORS, normalizeUnit, isHazardousCellType } from './helpers.jsx';
+import Swal from 'sweetalert2';
+import { ACCENT, CHART_COLORS, normalizeUnit, isHazardousCellType, formatVolume } from './helpers.jsx';
+import { buildFacilityCellUsage } from './SlfDashboardTab';
 import {
   getRecordIds,
   expandSlfNames,
