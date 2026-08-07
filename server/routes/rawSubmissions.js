@@ -520,7 +520,7 @@ router.put("/:id", async (req, res) => {
       update.$addToSet = { previousIdNos: before.idNo };
     }
 
-    const after = await DataSLF.findByIdAndUpdate(req.params.id, update, { new: true })
+    const after = await DataSLF.findByIdAndUpdate(req.params.id, update, { returnDocument: "after" })
       .setOptions({ includeHiddenYears: true })
       .lean();
 

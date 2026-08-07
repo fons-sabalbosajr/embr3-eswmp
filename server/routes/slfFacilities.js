@@ -988,7 +988,7 @@ router.patch("/:id/cell-status", adminOnly, async (req, res) => {
     const updated = await SlfFacility.findOneAndUpdate(
       { _id: req.params.id, deletedAt: null },
       { $set: set },
-      { new: true },
+      { returnDocument: "after" },
     );
     if (!updated) return res.status(404).json({ message: "Facility not found" });
 
@@ -1026,7 +1026,7 @@ router.patch("/:id/cell-submission-allowed", adminOnly, async (req, res) => {
     const updated = await SlfFacility.findOneAndUpdate(
       { _id: req.params.id, deletedAt: null },
       { $set: { [`cellSubmissionAllowed.${idx}`]: allowed } },
-      { new: true },
+      { returnDocument: "after" },
     );
     if (!updated) return res.status(404).json({ message: "Facility not found" });
 

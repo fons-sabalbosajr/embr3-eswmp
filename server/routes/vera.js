@@ -342,7 +342,7 @@ router.put("/onboarding", requireAnyAuth, async (req, res) => {
     const updated = await Model.findByIdAndUpdate(
       req.user?.id,
       { veraOnboardingDismissedAt: dismissed ? new Date() : null },
-      { new: true, select: "veraOnboardingDismissedAt" },
+      { returnDocument: "after", select: "veraOnboardingDismissedAt" },
     ).lean();
     if (!updated) return res.status(404).json({ message: "User not found." });
     res.json({
@@ -495,7 +495,7 @@ router.patch("/backlogs/:id/resolve", requireAnyAuth, async (req, res) => {
       resolvedBy: req.user?.email || req.user?.username || req.user?.id || "admin",
       resolvedAt: status === "resolved" ? new Date() : null,
     };
-    const item = await VeraBacklogInvestigation.findByIdAndUpdate(req.params.id, { $set: update }, { new: true }).lean();
+    const item = await VeraBacklogInvestigation.findByIdAndUpdate(req.params.id, { $set: update }, { returnDocument: "after" }).lean();
     if (!item) return res.status(404).json({ message: "VERA backlog log not found" });
     res.json({ item: backlogToLog(item) });
   } catch (e) {

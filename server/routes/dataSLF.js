@@ -226,7 +226,7 @@ async function refreshFacilityCellOccupancy(req, facilityId) {
         submittedVolumeTotal: occupancy.submittedTotal,
       },
     },
-    { new: true },
+    { returnDocument: "after" },
   ).lean();
   refreshAdmin(req, "facility");
   const assigned = await UserPortal.find({ assignedSlf: facility._id }).select("email").lean().catch(() => []);
