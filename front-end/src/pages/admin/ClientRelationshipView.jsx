@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Table, Tag, Card, Statistic, Space, Typography, Input, Alert, Skeleton, Empty, Tooltip, Select, Segmented, Collapse, Row, Col } from "antd";
-import { TeamOutlined, InfoCircleOutlined, AppstoreOutlined, UnorderedListOutlined, EnvironmentOutlined, DatabaseOutlined, ApartmentOutlined } from "@ant-design/icons";
+import { TeamOutlined, InfoCircleOutlined, AppstoreOutlined, UnorderedListOutlined, EnvironmentOutlined, DatabaseOutlined, ApartmentOutlined, WarningOutlined } from "@ant-design/icons";
 import SummaryTile from "./shared/SummaryTile";
 import { loadRelationshipMap, peekRelationshipMap } from "../../utils/relationshipMapCache";
 
@@ -26,6 +26,7 @@ export default function ClientRelationshipView({ type = "LGU" }) {
   const isLgu = type === "LGU";
   const [rows, setRows] = useState([]);
   const [summary, setSummary] = useState(null);
+  const [unservedList, setUnservedList] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(false);
   const [q, setQ] = useState("");
@@ -43,6 +44,7 @@ export default function ClientRelationshipView({ type = "LGU" }) {
     if (cached) {
       setRows(cached.rows);
       setSummary(cached.summary);
+      setUnservedList(cached.unserved || []);
       setLoading(false);
       setError(false);
       return Promise.resolve();
@@ -53,6 +55,10 @@ export default function ClientRelationshipView({ type = "LGU" }) {
       .then((data) => {
         setRows(data.rows);
         setSummary(data.summary);
+        // The endpoint already derives this (masterlist minus verified served),
+        // so the list stays in step with the count tile automatically — no
+        // second request and no risk of the two disagreeing.
+        setUnservedList(data.unserved || []);
       })
       .catch(() => setError(true))
       .finally(() => setLoading(false));
@@ -251,6 +257,7 @@ export default function ClientRelationshipView({ type = "LGU" }) {
             {tile("Coverage %", `${coverage}%`, "#1677ff", "Verified unique served LGUs ÷ total active masterlist municipality LGUs × 100 (0 when the masterlist is empty).")}
           </>
         ) : (
+
           <>
             {tile("Private-Sector Clients", rows.length, "#722ed1", "Active canonical private-sector client records.")}
             {tile("Multiple Haulers", summary?.multiHauler ?? 0, "#fa8c16")}
@@ -259,6 +266,62 @@ export default function ClientRelationshipView({ type = "LGU" }) {
           </>
         )}
       </div>
+
+      {/* Unserved LGUs — the masterlist municipalities no registered SLF serves.
+          Collapsed by default: it is a gap report, not the primary view, and on a
+          low-coverage dataset it can run to a hundred names. Grouped by province
+          so it reads as "where is the gap", which a flat alphabetical list of 130
+          municipalities cannot answer. Derived from the same payload as the count
+          tile above, so the two can never disagree. */}
+      {isLgu && unservedList.length > 0 && (
+        <Collapse
+          size="small"
+          style={{ marginBottom: 12 }}
+          items={[
+            {
+              key: "unserved",
+              label: (
+                <Space size={8} wrap>
+                  <WarningOutlined style={{ color: "#ff4d4f" }} />
+                  <Text strong style={{ fontSize: 13 }}>Unserved LGUs</Text>
+                  <Tag color="red" bordered={false}>{unservedList.length}</Tag>
+                  <Text type="secondary" style={{ fontSize: 11 }}>
+                    Masterlist municipalities with no verified served relationship
+                  </Text>
+                </Space>
+              ),
+              children: (
+                <Space direction="vertical" size={10} style={{ width: "100%" }}>
+                  {Object.entries(
+                    unservedList.reduce((acc, m) => {
+                      const key = m.province || "Unspecified Province";
+                      (acc[key] = acc[key] || []).push(m);
+                      return acc;
+                    }, {}),
+                  )
+                    .sort(([a], [b]) => a.localeCompare(b))
+                    .map(([province, munis]) => (
+                      <div key={province}>
+                        <Space size={6} style={{ marginBottom: 4 }}>
+                          <Text strong style={{ fontSize: 12 }}>{province}</Text>
+                          <Tag bordered={false}>{munis.length}</Tag>
+                        </Space>
+                        <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                          {munis.map((m) => (
+                            <Tag key={m._id} color="red" bordered={false} style={{ marginInlineEnd: 0 }}>
+                              {m.name}
+                              {m.lguType === "City" ? " (City)" : ""}
+                            </Tag>
+                          ))}
+                        </div>
+                      </div>
+                    ))}
+                </Space>
+              ),
+            },
+          ]}
+        />
+      )}
 
       {/* Filters */}
       <Space size={[8, 8]} wrap style={{ marginBottom: 10 }}>

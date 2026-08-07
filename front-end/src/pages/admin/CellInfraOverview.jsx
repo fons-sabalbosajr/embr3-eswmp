@@ -31,6 +31,7 @@ import {
   UserOutlined,
 } from "@ant-design/icons";
 import GaugeMeter, { computeGaugePercent } from "../../components/GaugeMeter";
+import CellGaugeLegend from "./slf-monitoring/CellGaugeLegend";
 import { withSizeChanger } from "../../utils/tablePagination";
 import {
   getCellTypeConfig,
@@ -565,14 +566,20 @@ export default function CellInfraOverview({
                   pagination={false}
                 />
               ) : overviewRows.length ? (
-                <Table
-                  size="small"
-                  rowKey="key"
-                  columns={columns}
-                  dataSource={overviewRows}
-                  scroll={{ x: 1140 }}
-                  pagination={withSizeChanger({ pageSize: 20, size: "small", showTotal: (t) => `${t} SLF` })}
-                />
+                <>
+                  <Table
+                    size="small"
+                    rowKey="key"
+                    columns={columns}
+                    dataSource={overviewRows}
+                    scroll={{ x: 1140 }}
+                    pagination={withSizeChanger({ pageSize: 20, size: "small", showTotal: (t) => `${t} SLF` })}
+                  />
+                  {/* The "Available Cells" column is a wall of coloured gauges; without
+                      a key the colours are unreadable. Same shared legend as every
+                      other cell gauge in the app. */}
+                  <CellGaugeLegend isDark={isDark} />
+                </>
               ) : (
                 <Empty description="No SLF cell infrastructure to show yet" />
               )

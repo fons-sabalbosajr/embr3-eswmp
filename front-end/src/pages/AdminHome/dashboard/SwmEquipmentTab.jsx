@@ -2,9 +2,11 @@ import { useState, useMemo } from "react";
 import { FitBounds, ProvinceBoundary } from "../MapPrimitives";
 import { TILE_LAYERS } from "../constants";
 import { AppstoreOutlined, BarChartOutlined, CarOutlined, EnvironmentOutlined, FileTextOutlined, FundOutlined, GlobalOutlined, SafetyCertificateOutlined, TeamOutlined, UserOutlined } from "@ant-design/icons";
-import { Button, Card, Col, Progress, Row, Select, Space, Statistic, Tag, Tooltip } from "antd";
+import { Button, Card, Col, Progress, Row, Select, Space, Statistic, Tag, Tooltip, Typography } from "antd";
 import L from "leaflet";
 import { MapContainer, Marker, Popup, TileLayer } from "react-leaflet";
+
+const { Text } = Typography;
 
 // SWM Equipment dashboard tab.
 //

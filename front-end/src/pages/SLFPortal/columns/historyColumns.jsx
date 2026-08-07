@@ -2,8 +2,10 @@ import { getCellTypeConfig } from "../../../utils/cellVisuals";
 import { MASK_PLACEHOLDER } from "../../../utils/sensitiveMask";
 import { formatStatusSummary } from "../submissionGrouping";
 import { CheckCircleOutlined, CloseCircleOutlined, DeleteOutlined, EditOutlined, EyeOutlined, SyncOutlined, UndoOutlined } from "@ant-design/icons";
-import { Button, Space, Tag, Tooltip } from "antd";
+import { Button, Space, Tag, Tooltip, Typography } from "antd";
 import dayjs from "dayjs";
+
+const { Text } = Typography;
 
 // Column definitions for the Submission History table.
 //
@@ -219,7 +221,22 @@ export function makeHistoryColumns({
         title: "Submitted",
         dataIndex: "createdAt",
         key: "createdAt",
-        render: (v) => dayjs(v).format("MMM D, YYYY h:mm A"),
+        // Newest first by default — the most recent submission is what an
+        // operator opens this tab to check. Still togglable, and `sorter` makes
+        // the header show the direction rather than sorting invisibly.
+        defaultSortOrder: "descend",
+        sorter: (a, b) => {
+          // Missing/invalid dates sort to the bottom instead of being treated
+          // as the epoch, which would park them above real submissions when the
+          // order is flipped to ascending.
+          const at = a?.createdAt ? new Date(a.createdAt).getTime() : NaN;
+          const bt = b?.createdAt ? new Date(b.createdAt).getTime() : NaN;
+          if (Number.isNaN(at) && Number.isNaN(bt)) return 0;
+          if (Number.isNaN(at)) return -1;
+          if (Number.isNaN(bt)) return 1;
+          return at - bt;
+        },
+        render: (v) => (v ? dayjs(v).format("MMM D, YYYY h:mm A") : "—"),
       },
       {
         title: "Actions",

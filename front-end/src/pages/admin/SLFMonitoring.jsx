@@ -214,56 +214,11 @@ import {
   resolveMediaPreviewUrl,
   getMediaKind,
   normalizeStoredFileUrl,
+  fileNameFromUrl,
+  getServedClientCount,
 } from "./slf-monitoring/helpers.jsx";
-import { getEmbeddedMediaName } from "../../utils/mediaFiles";
 
 const EMPTY_ROWS = [];
-const SLF_DOCUMENT_TYPE_OPTIONS = [
-  { label: "ECC", value: "ECC" },
-  { label: "Permit", value: "Permit" },
-  { label: "Monitoring Report", value: "Monitoring Report" },
-  { label: "Compliance Certificate", value: "Compliance Certificate" },
-  { label: "Site Plan", value: "Site Plan" },
-  { label: "Other", value: "Other" },
-];
-
-const fileNameFromUrl = (value, fallback = "file") => {
-  const first = Array.isArray(value) ? value[0] : null;
-  const raw = first?.url || (typeof value === "string" ? value : "");
-  // Our secure proxy + Google Drive URLs end in an OPAQUE file ID, never a
-  // human filename — surfacing that as the name is the "random name" bug. Prefer
-  // the fileList item's own name; otherwise use the caller's fallback.
-  if (
-    /\/upload\/secure\/(drive|local)\//.test(raw) ||
-    /drive\.google\.com|googleusercontent/.test(raw)
-  ) {
-    // Newly-minted signed URLs embed the ORIGINAL filename as ?name=; reading it
-    // is what stops a stored file with no fileList entry from falling all the way
-    // through to the generic fallback.
-    return first?.name || getEmbeddedMediaName(raw) || fallback;
-  }
-  const src = raw || first?.name || "";
-  if (!src) return fallback;
-  try {
-    const pathname = new URL(src, window.location.origin).pathname;
-    return decodeURIComponent(pathname.split("/").pop() || fallback);
-  } catch {
-    return String(src).split("/").pop() || fallback;
-  }
-};
-
-// The upload response returns the ORIGINAL filename (server sends
-// `name: req.file.originalname`); AntD also keeps it on `file.name` for the life
-// of the fileList item. Prefer the fresh response name, then the persisted
-// `fileName`, then AntD's own item name — only then derive from the URL (which
-// for restricted Drive/local media is an opaque id, never a real filename).
-const resolveUploadName = (value, persistedName, fallback = "file") => {
-  const file = Array.isArray(value) ? value[0] : null;
-  const freshName = file?.response?.name || "";
-  return (
-    freshName || persistedName || file?.name || fileNameFromUrl(value, fallback)
-  );
-};
 
 // Extract the original filename to PERSIST on save. Freshly uploaded rows expose
 // it via the server response; already-saved rows keep the previously stored
@@ -273,27 +228,8 @@ const uploadNameFromValue = (value, existing = "") => {
   return file?.response?.name || existing || file?.name || "";
 };
 
-const uploadFileFromValue = (value) => (Array.isArray(value) ? value[0] : null);
-const fileUrlFromValue = (value) => uploadFileFromValue(value)?.url || uploadFileFromValue(value)?.response?.url || (typeof value === "string" ? value : "");
 const fileUrlFromUploadFile = (file) =>
   typeof file === "string" ? file : file?.response?.url || file?.url || "";
-const THREE_DECIMAL_STEP = 0.001;
-const formatThreeDecimalInput = (value) =>
-  value === "" || value === null || value === undefined
-    ? ""
-    : Number(value).toLocaleString(undefined, { maximumFractionDigits: 3 });
-const parseDecimalInput = (value) => {
-  const cleaned = String(value ?? "").replace(/,/g, "");
-  return cleaned === "" ? null : cleaned;
-};
-const getServedClientCount = (record = {}) => {
-  const lguList = Array.isArray(record.lguServedList) ? record.lguServedList.filter(Boolean) : [];
-  const privateList = Array.isArray(record.privateCompaniesServed) ? record.privateCompaniesServed.filter(Boolean) : [];
-  if (/private/i.test(record.ownership || "")) {
-    return privateList.length || Number(record.noOfLGUServed || 0);
-  }
-  return lguList.length || Number(record.noOfLGUServed || 0);
-};
 
 const defaultPreventiveFileDescription = (name) =>
   `Uploaded preventive measure file: ${name || "supporting document"}`;
@@ -2826,6 +2762,11 @@ export default function SLFMonitoring({
           slfInsightModal={slfInsightModal}
           setSlfInsightModal={setSlfInsightModal}
           setDetailModal={setDetailModal}
+          config={config}
+          provinceGroups={provinceGroups}
+          totalCells={totalCells}
+          cellsWithData={cellsWithData}
+          opCount={opCount}
         />
       );
     }
@@ -2833,6 +2774,8 @@ export default function SLFMonitoring({
       <SlfInsightDetailModal
         slfInsightModal={slfInsightModal}
         setSlfInsightModal={setSlfInsightModal}
+        config={config}
+        maxBar={maxBar}
       />
     );
   };
@@ -2854,7 +2797,6 @@ export default function SLFMonitoring({
     canEdit,
     canDelete,
     records,
-    style,
     CATEGORY_DESC,
     getCategoryLabel,
     openEdit,

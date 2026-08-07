@@ -2,17 +2,19 @@ import { useState, useMemo } from "react";
 import api from "../../../api";
 import { FitBounds, ProvinceBoundary } from "../MapPrimitives";
 import { TILE_LAYERS } from "../constants";
-import { AppstoreOutlined, BarChartOutlined, CalendarOutlined, CheckCircleOutlined, ClockCircleOutlined, CloseCircleOutlined, CopyOutlined, EnvironmentOutlined, ExperimentOutlined, EyeOutlined, FileTextOutlined, FundOutlined, GlobalOutlined, PieChartOutlined, RiseOutlined, SafetyCertificateOutlined, TeamOutlined, ToolOutlined, UserOutlined } from "@ant-design/icons";
-import { Button, Card, Col, Progress, Row, Select, Space, Statistic, Tag, Tooltip } from "antd";
+import { AppstoreOutlined, BarChartOutlined, CalendarOutlined, CheckCircleOutlined, ClockCircleOutlined, CloseCircleOutlined, CopyOutlined, DeleteOutlined, EnvironmentOutlined, ExperimentOutlined, EyeOutlined, FileTextOutlined, FundOutlined, GlobalOutlined, PieChartOutlined, RiseOutlined, SafetyCertificateOutlined, TeamOutlined, ToolOutlined, UserOutlined } from "@ant-design/icons";
+import { Button, Card, Col, Progress, Row, Select, Space, Statistic, Tag, Tooltip, Typography } from "antd";
 import dayjs from "dayjs";
 import L from "leaflet";
 import { MapContainer, Marker, Popup, TileLayer } from "react-leaflet";
+
+const { Text } = Typography;
 
 // Trash Traps dashboard tab.
 //
 // Owns its own map state (tile layer, province/status filters), the derived map
 // points and its marker-icon builder — nothing outside this tab reads them.
-export default function TrashTrapsTab({ trapStats, loading, isDark, setActiveMenu }) {
+export default function TrashTrapsTab({ trapStats, loading, isDark, setActiveMenu, setTrapViewRecord }) {
   const [trapTileKey, setTrapTileKey] = useState("street");
   const [trapFilterProvince, setTrapFilterProvince] = useState(null);
   const [trapFilterStatus, setTrapFilterStatus] = useState(null);

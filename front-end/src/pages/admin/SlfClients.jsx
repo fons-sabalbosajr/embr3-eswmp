@@ -135,6 +135,8 @@ export default function SlfClients({ isDark, canView = true, canEdit = true, can
   const [syncJob, setSyncJob] = useState(null);
   const [syncModalOpen, setSyncModalOpen] = useState(false);
   const pollRef = useRef(null);
+  // Timestamp of the last socket progress frame — drives the adaptive poll.
+  const lastSocketAtRef = useRef(0);
   // Data-issue flags (baseline records that could not be synced safely).
   const [issuesOpen, setIssuesOpen] = useState(false);
   const [issues, setIssues] = useState([]);
@@ -384,11 +386,34 @@ export default function SlfClients({ isDark, canView = true, canEdit = true, can
 
   const isTerminal = (s) => ["completed", "completed_with_issues", "failed"].includes(s);
 
-  // Poll the job status as an SSE-independent fallback (socket is the primary
+  /**
+   * How long a socket frame vouches for the connection.
+   *
+   * Must exceed the longest normal gap between progress frames — the worker
+   * reports every 25 records but a slow stage can be quieter than that — or the
+   * poll would fire during a perfectly healthy sync and defeat the point. Six
+   * seconds is three poll ticks, so a genuinely dead socket is picked up within
+   * about two seconds of the window lapsing.
+   */
+  const SOCKET_ALIVE_MS = 6000;
+
+  // Poll the job status as a socket-independent fallback (socket is the primary
   // channel; polling guarantees progress even if the socket drops).
+  //
+  // ADAPTIVE: the tick is skipped while the socket is demonstrably alive. A long
+  // sync previously issued a status request every 2s for its whole duration —
+  // each one a DB read plus a full setSyncJob() re-render — on top of the socket
+  // stream already delivering the same payload. The interval keeps running, so
+  // the moment the socket goes quiet for longer than the grace window the poll
+  // takes over on the very next tick and the fallback guarantee is unchanged.
   const startPolling = useCallback((jobId) => {
     stopPolling();
+    // Clear any liveness left over from a previous run, so if the socket never
+    // connects at all the very first tick polls instead of trusting a stale mark.
+    lastSocketAtRef.current = 0;
     pollRef.current = setInterval(async () => {
+      const sinceSocket = Date.now() - (lastSocketAtRef.current || 0);
+      if (sinceSocket < SOCKET_ALIVE_MS) return;
       try {
         const { data } = await api.get(`/slf-clients/sync/${jobId}`);
         setSyncJob((prev) => ({
@@ -407,6 +432,8 @@ export default function SlfClients({ isDark, canView = true, canEdit = true, can
     const socket = getSocket();
     if (!socket) return undefined;
     const onProgress = (payload) => {
+      // Liveness marker read by the adaptive poll above.
+      lastSocketAtRef.current = Date.now();
       setSyncJob((prev) => {
         if (!prev?.jobId || String(payload.jobId) !== String(prev.jobId)) return prev;
         return { ...prev, ...payload };

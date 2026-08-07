@@ -1170,7 +1170,7 @@ const addVolumeToCell = (row, volume, source, wasteType, unit) => {
   row.byWasteType[kind] = (row.byWasteType[kind] || 0) + converted;
 };
 
-const buildFacilityCellUsage = (record, baseline, submissions = []) => {
+export const buildFacilityCellUsage = (record, baseline, submissions = []) => {
   const cellCount = Math.max(
     Number(record?.numberOfCell || 0),
     Array.isArray(record?.cellCapacities) ? record.cellCapacities.length : 0,

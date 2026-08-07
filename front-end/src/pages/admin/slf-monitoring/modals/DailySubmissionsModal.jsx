@@ -1,7 +1,9 @@
 import { isHazardousCellType, normalizeUnit } from "../../slf-monitoring/helpers.jsx";
 import { DatabaseOutlined } from "@ant-design/icons";
-import { Button, Modal, Space, Table, Tag } from "antd";
+import { Button, Modal, Space, Table, Tag, Typography } from "antd";
 import dayjs from "dayjs";
+
+const { Text } = Typography;
 
 // Portal submissions recorded for one facility on one disposal date.
 export default function DailySubmissionsModal({

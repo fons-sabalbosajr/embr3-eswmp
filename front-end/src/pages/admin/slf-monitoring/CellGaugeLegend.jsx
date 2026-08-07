@@ -22,6 +22,26 @@ export const UTILIZATION_BANDS = [
   { key: "inactive", label: "Inactive", color: "#bfbfbf", description: "Closed, completed, reserved or under construction." },
 ];
 
+// Two DIFFERENT things are keyed in this legend, and since the standard palette
+// reuses green/amber/red for both axes the swatch SHAPE is what tells them apart:
+//
+//   arc glyph  → how the gauge ARC is tinted (utilization band)
+//   square     → a named VOLUME metric (baseline / submitted / stored / remaining)
+//
+// Without this, "green" reads ambiguously as both "under 70% full" and "waste
+// stored in cell" in the very same key.
+const arcGlyph = (color) => (
+  <svg width={14} height={9} viewBox="0 0 14 9" aria-hidden style={{ flex: "0 0 auto" }}>
+    <path
+      d="M 2 8 A 5 5 0 0 1 12 8"
+      fill="none"
+      stroke={color}
+      strokeWidth={2.5}
+      strokeLinecap="round"
+    />
+  </svg>
+);
+
 const swatch = (color, dashed = false) => (
   <span
     aria-hidden
@@ -40,6 +60,15 @@ const item = ({ key, label, color, description }, dashed) => (
   <Tooltip key={key} title={description}>
     <span style={{ display: "inline-flex", alignItems: "center", gap: 5 }}>
       {swatch(color, dashed)}
+      <Text style={{ fontSize: 11 }}>{label}</Text>
+    </span>
+  </Tooltip>
+);
+
+const bandItem = ({ key, label, color, description }) => (
+  <Tooltip key={key} title={description}>
+    <span style={{ display: "inline-flex", alignItems: "center", gap: 5 }}>
+      {arcGlyph(color)}
       <Text style={{ fontSize: 11 }}>{label}</Text>
     </span>
   </Tooltip>
@@ -65,7 +94,7 @@ export default function CellGaugeLegend({ isDark = false, showVolumeComposition 
           Gauge fill
         </Text>
         <Space size={14} wrap>
-          {UTILIZATION_BANDS.map((band) => item(band))}
+          {UTILIZATION_BANDS.map((band) => bandItem(band))}
         </Space>
       </div>
 
@@ -94,7 +123,8 @@ export default function CellGaugeLegend({ isDark = false, showVolumeComposition 
           >
             {VOLUME_METRICS.stored.label} = {VOLUME_METRICS.baseline.label} +{" "}
             {VOLUME_METRICS.submitted.label}. The percentage on each gauge is that
-            total against the cell&apos;s capacity.
+            total against the cell&apos;s capacity. Arc-shaped keys above describe
+            how the gauge arc is tinted; square keys describe a volume figure.
           </Text>
         </div>
       )}

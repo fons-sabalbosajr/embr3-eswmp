@@ -48,6 +48,12 @@ const userSchema = new mongoose.Schema(
     },
     isVerified: { type: Boolean, default: false },
     isApproved: { type: Boolean, default: false },
+    // Marks the sealed demonstration account used for stakeholder presentations.
+    // This flags the ACCOUNT, not data: it hides the account from user-management
+    // lists and switches the session into masked (demo) mode. The demo account's
+    // DATA is isolated separately via the existing `isDummy` flag, which every
+    // analytics/report/dashboard query already excludes — see utils/demoMode.js.
+    isDemo: { type: Boolean, default: false, index: true },
     resetToken: { type: String },
     resetTokenExpiry: { type: Date },
     // "Do not show again" for the VERA introduction. Stored server-side because

@@ -629,3 +629,73 @@ code {
     min-height: 30px;
   }
 }
+
+/* Five-across responsive card grid.
+ *
+ * Ant Design's 24-column grid cannot divide into five evenly, and inline styles
+ * cannot carry media queries — so the breakpoints live here once and every
+ * five-across row reuses them. `minmax(0, 1fr)` (not `auto`) is what stops a
+ * long unbroken value from widening a column and pushing the row into a
+ * horizontal scroll, which is why the grids using this class need no
+ * `min-width` or `overflow-x`. */
+.eswmp-grid-5 {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+@media (min-width: 576px) {
+  .eswmp-grid-5 {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+@media (min-width: 992px) {
+  .eswmp-grid-5 {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+}
+@media (min-width: 1200px) {
+  .eswmp-grid-5 {
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+  }
+}
+
+/* Five-across for Ant Design <Col> rows.
+ *
+ * Ant's grid is 24 columns, so five equal cards are not expressible with `span`
+ * (24/5 = 4.8) — xl={6} yields four per row and orphans the fifth. Overriding
+ * the flex basis at the xl breakpoint keeps Ant's gutters and the existing
+ * xs/md spans intact while making the top row of five land as one row. */
+@media (min-width: 1200px) {
+  .ant-col.eswmp-col-5 {
+    flex: 0 0 20%;
+    max-width: 20%;
+  }
+}
+
+/* Dense data table.
+ *
+ * Ant's `size="small"` still pads cells for touch targets, which on a
+ * reference table (hauler clients, masterlists) wastes most of the vertical
+ * space and pushes rows off screen. This tightens padding and line-height only
+ * — column widths, sorting, filtering and pagination are untouched, and the
+ * horizontal scroll container still governs responsive behaviour. */
+.eswmp-table-dense .ant-table-thead > tr > th,
+.eswmp-table-dense .ant-table-tbody > tr > td {
+  padding: 4px 8px !important;
+  line-height: 1.35;
+}
+.eswmp-table-dense .ant-table-tbody > tr > td {
+  font-size: 12px;
+}
+/* Tags carry their own margin, which re-introduces the row height the padding
+   change just removed. */
+.eswmp-table-dense .ant-table-tbody > tr > td .ant-tag {
+  margin-inline-end: 0;
+  line-height: 18px;
+}
+/* Keep icon-only row actions from stretching the row on touch-target rules. */
+.eswmp-table-dense .ant-table-tbody > tr > td .ant-btn-sm {
+  height: 22px;
+  min-width: 22px;
+  padding-inline: 4px;
+}

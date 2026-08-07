@@ -11,6 +11,11 @@ const os = require("os");
 const http = require("http");
 require("dotenv").config();
 
+// Demo write isolation must be registered BEFORE any model is compiled — the
+// route requires below pull in the models, and mongoose.plugin() only applies
+// to schemas created after the call. Moving this lower silently disarms it.
+require("./utils/demoMode").installDemoWriteGuard(require("mongoose"));
+
 const authRoutes = require("./routes/auth");
 const slfGeneratorRoutes = require("./routes/slfGenerators");
 const dataSLFRoutes = require("./routes/dataSLF");
@@ -324,6 +329,11 @@ app.use("/api", (req, res, next) => {
   });
 });
 
+// Demonstration sessions get confidential numerics masked on the way OUT, for
+// every /api route including any added later. Mounted before the route table so
+// there is no window in which a new endpoint returns raw figures to a demo user.
+app.use("/api", require("./utils/demoMode").demoMaskingMiddleware);
+
 // Routes
 app.get("/api/health", (req, res) => {
   // Reports the database separately from the process so a monitor can tell
@@ -424,6 +434,19 @@ app.use((err, req, res, _next) => {
   res.status(err.status || 500).json({
     message: "Server error",
     ...(isProd ? {} : { error: err.message }),
+  });
+});
+
+// Error handler. Mounted after the routes so anything a route forwards with
+// next(err) — notably the demo write guard's DEMO_WRITE_BLOCKED — surfaces with
+// its intended status instead of collapsing into a generic 500.
+// eslint-disable-next-line no-unused-vars
+app.use("/api", (err, req, res, next) => {
+  const status = err?.status || 500;
+  if (status >= 500) console.error("[api]", err);
+  res.status(status).json({
+    message: status >= 500 ? "Internal server error" : err.message,
+    ...(err?.code ? { code: err.code } : {}),
   });
 });
 

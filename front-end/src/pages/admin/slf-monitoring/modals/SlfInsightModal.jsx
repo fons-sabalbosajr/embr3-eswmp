@@ -1,13 +1,20 @@
 import { InsightStat } from "../../slf-monitoring/SlfDashboardTab";
 import { ACCENT } from "../../slf-monitoring/helpers.jsx";
 import { EnvironmentOutlined, EyeOutlined } from "@ant-design/icons";
-import { Button, Card, Col, Divider, Empty, Modal, Row, Space, Tag } from "antd";
+import { Button, Card, Col, Divider, Empty, Modal, Row, Space, Tag, Typography } from "antd";
+
+const { Text } = Typography;
 
 // Drill-down for a clicked summary tile (cells / capacity / waste / …).
 export default function SlfInsightModal({
   slfInsightModal,
   setSlfInsightModal,
   setDetailModal,
+  config,
+  provinceGroups,
+  totalCells,
+  cellsWithData,
+  opCount,
 }) {
   return (
     <Modal

@@ -97,7 +97,10 @@ export default function GaugeLegend({
           "remaining",
           compact ? VOLUME_METRICS.remaining.short : VOLUME_METRICS.remaining.label,
           remaining,
-          isDark ? "rgba(255,255,255,0.45)" : "#8c8c8c",
+          // Palette red, in both themes. This previously fell back to a muted
+          // gray, which is the one place a legend swatch could disagree with the
+          // standard mapping.
+          VOLUME_METRICS.remaining.color,
           VOLUME_METRICS.remaining.description,
         )}
     </div>

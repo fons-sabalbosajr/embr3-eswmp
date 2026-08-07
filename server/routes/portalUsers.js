@@ -199,8 +199,13 @@ router.get("/", async (req, res) => {
   try {
     // Dummy/test accounts are managed under Developer Settings > Dummy Data
     // Configuration and excluded from the real Portal Users list by default.
+    // The demonstration account is ALWAYS hidden here — unlike dummy accounts it
+    // has no `includeDummy` escape hatch, because it is never something an admin
+    // should administer from the production Portal Users screen.
     const filter =
-      req.query.includeDummy === "true" ? {} : { isDummy: { $ne: true } };
+      req.query.includeDummy === "true"
+        ? { isDemo: { $ne: true } }
+        : { isDummy: { $ne: true }, isDemo: { $ne: true } };
     const users = await UserPortal.find(filter)
       .select("-password")
       .populate("approvedBy", "firstName lastName email")

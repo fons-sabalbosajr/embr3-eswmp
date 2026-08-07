@@ -1,11 +1,15 @@
 import { getCellTypeConfig, getSlfCapacityColor, isNonExistentCell, resolveCellName } from "../../../../utils/cellVisuals";
+import { VOLUME_METRICS } from "../../../../utils/volumeMetrics";
+import CellGaugeLegend from "../../slf-monitoring/CellGaugeLegend";
 import HaulerClientsTab from "../../slf-monitoring/HaulerClientsTab";
 import SlfDashboardTab, { getStatusTag } from "../../slf-monitoring/SlfDashboardTab";
-import { ACCENT, CHART_COLORS, convertVolume, formatStringArray, getMediaKind, isActiveCellStatus, isCompletedCellStatus, isHazardousCellType, normalizeCellStatus, normalizeStoredFileUrl, normalizeUnit, resolveMediaOpenUrl, resolveMediaUrl } from "../../slf-monitoring/helpers.jsx";
+import { ACCENT, CHART_COLORS, convertVolume, formatStringArray, getMediaKind, getServedClientCount, isActiveCellStatus, isCompletedCellStatus, isHazardousCellType, normalizeCellStatus, normalizeStoredFileUrl, normalizeUnit, resolveMediaOpenUrl, resolveMediaUrl } from "../../slf-monitoring/helpers.jsx";
 import { AlertOutlined, AppstoreOutlined, BankOutlined, BarChartOutlined, BellOutlined, DatabaseOutlined, EnvironmentOutlined, ExperimentOutlined, EyeOutlined, FileImageOutlined, FilePdfOutlined, FileTextOutlined, FolderOutlined, LinkOutlined, PlayCircleOutlined, SafetyCertificateOutlined, TeamOutlined, UnorderedListOutlined, WarningOutlined } from "@ant-design/icons";
-import { Alert, Button, Card, Col, Collapse, Descriptions, Divider, Empty, Image, List, Modal, Progress, Row, Segmented, Space, Statistic, Table, Tabs, Tag, Tooltip } from "antd";
+import { Alert, Button, Card, Col, Collapse, Descriptions, Divider, Empty, Image, List, Modal, Progress, Row, Segmented, Space, Statistic, Table, Tabs, Tag, Tooltip, Typography } from "antd";
 import dayjs from "dayjs";
 import { Bar, BarChart, CartesianGrid, Cell as RCell, Legend, Pie, PieChart, ResponsiveContainer, Tooltip as RTooltip, XAxis, YAxis } from "recharts";
+
+const { Text } = Typography;
 
 // Facility detail modal: the read-only profile view for one SLF — overview,
 // dashboard metrics, cell infrastructure, gallery, documents and submission
@@ -793,22 +797,29 @@ export default function SlfDetailModal({
                                               </div>
                                               {remaining != null &&
                                                 !isClosed && (
+                                                  // Remaining Capacity is RED in the standard
+                                                  // palette (it previously rendered green, which
+                                                  // is now reserved for stored volume). Overflow
+                                                  // stays red too, and is distinguished by
+                                                  // wording + weight rather than by hue.
                                                   <div
                                                     style={{
                                                       fontSize: 10,
+                                                      fontWeight:
+                                                        remaining <= 0 ? 700 : 400,
                                                       color:
-                                                        remaining <= 0
-                                                          ? "#ff4d4f"
-                                                          : "#52c41a",
+                                                        VOLUME_METRICS.remaining
+                                                          .color,
                                                     }}
                                                   >
-                                                    {remaining.toLocaleString(
-                                                      undefined,
-                                                      {
-                                                        maximumFractionDigits: 2,
-                                                      },
-                                                    )}{" "}
-                                                    {capUnit} left
+                                                    {remaining <= 0
+                                                      ? "Over capacity"
+                                                      : `${remaining.toLocaleString(
+                                                          undefined,
+                                                          {
+                                                            maximumFractionDigits: 2,
+                                                          },
+                                                        )} ${capUnit} left`}
                                                   </div>
                                                 )}
                                               <div style={{ marginTop: 6 }}>
@@ -829,6 +840,10 @@ export default function SlfDetailModal({
                                           );
                                         })}
                                       </Row>
+                                      {/* Facility Details renders a grid of coloured
+                                          cell gauges; this is the same shared key used
+                                          on Cell Infrastructure and the SLF Data Table. */}
+                                      <CellGaugeLegend isDark={isDark} />
                                     </Card>
                                   </Col>
                                 </Row>

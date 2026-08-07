@@ -258,11 +258,51 @@ router.get("/relationship-map", requirePermission(PERM, "view"), async (req, res
       (c.portalUserRelationships || []).forEach((r) => add(r.hauler));
       return [...m.values()];
     };
+    // This module identifies a client's service provider by SLF FACILITY, not by
+    // the person who holds the portal login. `portalUserName` is a human
+    // name, so using it here made every "SLF" label in the dashboard (SLF cards,
+    // the SLF filter, "Top SLFs by Clients Served") read as a person's name.
+    //
+    // Resolve the account's ASSIGNED SLF instead. One batched query keyed by
+    // portal-user id — doing it per client would be a query per row.
+    const portalUserIds = [
+      ...new Set(
+        clients.flatMap((c) => [
+          c.portalUser,
+          ...(c.portalUserRelationships || []).map((r) => r.portalUser),
+        ]),
+      ),
+    ]
+      .map((id) => (id ? String(id) : ""))
+      .filter(Boolean);
+
+    const slfNameByPortalUser = new Map();
+    if (portalUserIds.length) {
+      // Required here rather than at module scope, matching this file's existing
+      // convention for the portal model.
+      const UserPortal = require("../models/UserPortal");
+      const accounts = await UserPortal.find({ _id: { $in: portalUserIds } })
+        .select("assignedSlfName companyName")
+        .lean();
+      accounts.forEach((account) => {
+        const names = Array.isArray(account.assignedSlfName)
+          ? account.assignedSlfName.filter(Boolean)
+          : [account.assignedSlfName].filter(Boolean);
+        // An account with several assigned facilities contributes all of them,
+        // so a client serving two SLFs still shows under both.
+        if (names.length) slfNameByPortalUser.set(String(account._id), names);
+        else if (account.companyName) slfNameByPortalUser.set(String(account._id), [account.companyName]);
+      });
+    }
+
     const distinctSlfs = (c) => {
       const m = new Map();
-      const add = (id, name) => {
-        const key = String(id || "").trim() || String(name || "").trim().toLowerCase();
-        if (key) m.set(key, String(name || "").trim() || "Unnamed SLF");
+      const add = (id, fallbackName) => {
+        const mapped = slfNameByPortalUser.get(String(id || "").trim());
+        // Fall back to the stored name only when the account has no assigned
+        // facility, so a legacy/admin-created client is still attributable.
+        const names = mapped?.length ? mapped : [String(fallbackName || "").trim()];
+        names.filter(Boolean).forEach((name) => m.set(name.toLowerCase(), name));
       };
       add(c.portalUser, c.portalUserName);
       (c.portalUserRelationships || []).forEach((r) => add(r.portalUser, r.portalUserName));

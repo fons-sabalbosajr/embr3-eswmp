@@ -42,12 +42,21 @@ import {
   BarChart,
   Bar,
   CartesianGrid,
+  LabelList,
   XAxis,
   YAxis,
 } from "recharts";
 import { isHazardousWasteType } from "../../utils/wasteCategories";
 import { isPermitNotRequired } from "../admin/slf-monitoring/helpers.jsx";
 import { VOLUME_METRICS } from "../../utils/volumeMetrics";
+
+/**
+ * One label style for every bar chart on this dashboard, so the on-bar figures
+ * read as a set rather than four slightly different treatments. Kept small and
+ * mid-grey: dark enough for contrast on a white card, light enough that it does
+ * not compete with the axis labels.
+ */
+const CHART_LABEL_STYLE = { fontSize: 10, fill: "#595959", fontWeight: 600 };
 
 const { Text } = Typography;
 
@@ -307,10 +316,79 @@ function OverviewPanel({
     if (/renew/i.test(String(statusText || ""))) return { label: "Renewed", color: "green" };
     return { label: "New / Complied", color: "blue" };
   };
-  const ptoPermit = latestPermit(slfInfo?.permitToOperatePermits);
-  const dpPermit = latestPermit(slfInfo?.dischargePermits);
-  const ptoStatus = permitStatus(ptoPermit?.validity || slfInfo?.permitToOperateValidity, ptoPermit?.status || slfInfo?.permitToOperateStatus);
-  const dpStatus = permitStatus(dpPermit?.validity || slfInfo?.dischargePermitValidity, dpPermit?.status || slfInfo?.dischargePermitStatus);
+  /**
+   * "Not Required" describes the PERMIT TYPE for this facility, not one
+   * reference row. `latestPermit` returns whichever entry has the newest
+   * validity, so a facility carrying both a dated legacy row and a
+   * "Not Required" marking previously resolved to the dated row and still
+   * rendered a New/Complied badge. Checking the flat field AND every array
+   * entry is what makes the marking authoritative wherever it was recorded.
+   */
+  const permitNotRequired = (list, legacyStatus) =>
+    isPermitNotRequired(legacyStatus) ||
+    (Array.isArray(list) && list.some((item) => isPermitNotRequired(item?.status)));
+
+  /**
+   * `hideStatus` blanks the badge area entirely. Two cases need it:
+   *
+   *   1. the permit is marked "Not Required" — it does not apply here
+   *   2. NOTHING is encoded for the permit (no reference number, no validity,
+   *      no status). This was the visible bug: with everything empty,
+   *      permitStatus() fell through to `statusText || "New / Complied"` and
+   *      stamped a confident blue "New / Complied" on a permit that had never
+   *      been recorded at all.
+   *
+   * The surrounding cell still renders, so the grid stays aligned.
+   */
+  const resolvePermitStatus = (list, permit, legacyValidity, legacyStatus, references) => {
+    if (permitNotRequired(list, legacyStatus)) {
+      return { label: "Not Required", color: "default", hideStatus: true };
+    }
+    const hasAnyData =
+      (Array.isArray(references) && references.length > 0) ||
+      Boolean(legacyValidity) ||
+      String(legacyStatus || "").trim() !== "";
+    if (!hasAnyData) return { label: "", color: "default", hideStatus: true };
+
+    return permitStatus(
+      permit?.validity || legacyValidity,
+      permit?.status || legacyStatus,
+    );
+  };
+
+  /**
+   * The city/municipality of the FACILITY ADDRESS.
+   *
+   * There is no `municipality` or `city` field on SlfFacility, and `lgu` holds
+   * the facility's full name ("Aurora - LGU Baler Sanitary Landfill Facility"),
+   * which is why this card previously showed the SLF name. The municipality is
+   * actually the tail of `barangay`, which is stored "Barangay, Municipality"
+   * ("Pingit, Baler" → Baler).
+   *
+   * Order: a real field if one ever exists → the barangay tail → `lgu` with the
+   * province prefix and facility suffix stripped, as a last resort.
+   */
+  const facilityMunicipality = (() => {
+    const explicit = slfInfo?.municipality || slfInfo?.city;
+    if (explicit) return explicit;
+
+    const barangay = String(slfInfo?.barangay || "").trim();
+    if (barangay.includes(",")) {
+      const tail = barangay.split(",").pop().trim();
+      if (tail) return tail;
+    }
+
+    const lgu = String(slfInfo?.lgu || "").trim();
+    if (!lgu) return "";
+    return (
+      lgu
+        // "Aurora - LGU Baler Sanitary Landfill Facility" → "Baler"
+        .replace(new RegExp(`^${String(slfInfo?.province || "").trim()}\\s*-\\s*`, "i"), "")
+        .replace(/^LGU\s+/i, "")
+        .replace(/\s*(sanitary\s+landfill\s+facility|slf)\s*$/i, "")
+        .trim() || lgu
+    );
+  })();
 
   const formatValidity = (value) => {
     if (!value) return "";
@@ -336,24 +414,42 @@ function OverviewPanel({
     return rows.sort((a, b) => new Date(b.validity || 0) - new Date(a.validity || 0));
   };
 
+  // References are resolved BEFORE the status so `resolvePermitStatus` can see
+  // whether anything is encoded at all — that is what distinguishes "no data"
+  // (blank badge) from a genuinely current permit.
+  const ptoReferences = permitReferences(
+    slfInfo?.permitToOperatePermits,
+    slfInfo?.permitToOperate,
+    slfInfo?.permitToOperateValidity,
+  );
+  const dpReferences = permitReferences(
+    slfInfo?.dischargePermits,
+    slfInfo?.dischargePermit,
+    slfInfo?.dischargePermitValidity,
+  );
+
   const permitCards = [
     {
       label: "Permit to Operate",
-      status: ptoStatus,
-      references: permitReferences(
+      status: resolvePermitStatus(
         slfInfo?.permitToOperatePermits,
-        slfInfo?.permitToOperate,
+        latestPermit(slfInfo?.permitToOperatePermits),
         slfInfo?.permitToOperateValidity,
+        slfInfo?.permitToOperateStatus,
+        ptoReferences,
       ),
+      references: ptoReferences,
     },
     {
       label: "Discharge Permit",
-      status: dpStatus,
-      references: permitReferences(
+      status: resolvePermitStatus(
         slfInfo?.dischargePermits,
-        slfInfo?.dischargePermit,
+        latestPermit(slfInfo?.dischargePermits),
         slfInfo?.dischargePermitValidity,
+        slfInfo?.dischargePermitStatus,
+        dpReferences,
       ),
+      references: dpReferences,
     },
   ];
   // #4: on-slice label with count + percentage; tiny slices are left unlabeled to
@@ -436,6 +532,10 @@ function OverviewPanel({
   for (let idx = 0; idx < cellCount; idx += 1) {
     const stored = slfInfo?.cellStatuses?.[idx];
     if (isNonExistentCell(stored)) continue;
+    // A Used/Completed cell is closed and full — it can never receive waste
+    // again, so its utilization bar carries no operational meaning and only
+    // crowds out the cells the operator can still dispose into.
+    if (/used|completed|closed/i.test(String(stored || ""))) continue;
     const operational = isOperationalCellStatus(stored);
     const submissionClosed = slfInfo?.cellSubmissionAllowed?.[idx] === false;
     const statusConfig = getCellStatusConfig(stored);
@@ -633,13 +733,16 @@ function OverviewPanel({
             title={<Space><DashboardOutlined /> <Text strong>SLF Overview</Text></Space>}
             loading={slfInfoLoading}
             style={{ borderRadius: 8 }}
-            bodyStyle={{ padding: 12, overflowX: "auto" }}
+            bodyStyle={{ padding: 12 }}
           >
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(4, minmax(180px, 1fr))", gap: 8, minWidth: 900 }}>
+            {/* Five across on desktop, degrading to 4/3/2 — see .eswmp-grid-5.
+                Dropping the old 900px min-width removes the horizontal scroll
+                and lets the cards use the full width available. */}
+            <div className="eswmp-grid-5">
               {[
                 ["Facility", activeSlfName],
                 ["Status", slfInfo?.statusOfSLF || slfInfo?.operationalStatus || slfInfo?.status],
-                ["Municipality", slfInfo?.municipality || slfInfo?.city || slfInfo?.lgu],
+                ["Municipality", facilityMunicipality],
                 ["Province", slfInfo?.province],
                 ["Region", slfInfo?.region || slfInfo?.regionName || "Region III"],
                 ["ECC", slfInfo?.eccNo],
@@ -684,7 +787,7 @@ function OverviewPanel({
                   {/* A permit marked "Not Required" does not apply to this
                       facility, so no status is shown for it at all — only the
                       recorded information. */}
-                  {!status.notRequired && (
+                  {!status.hideStatus && (
                     <Tag color={status.color} style={{ marginTop: 4, marginInlineEnd: 0 }}>{status.label}</Tag>
                   )}
                 </div>
@@ -692,14 +795,14 @@ function OverviewPanel({
             </div>
           </Card>
         </Col>
-        <Col xs={24} md={12} xl={6}>
+        <Col xs={24} md={12} xl={6} className="eswmp-col-5">
           {/* Landfill cell status as a donut — proportion is the question here
               ("how much of my capacity is still active?"), which four separate
               numbers could not answer at a glance. */}
           <Card
             title={
               <Space size={6}>
-                <Text strong style={{ fontSize: 14 }}>Landfill Cell Status</Text>
+                <Text strong style={{ fontSize: 14 }}>Landfill Cells Infra</Text>
                 <Tag color="blue" style={{ margin: 0 }}>{cellStatusCounts.total} cells</Tag>
               </Space>
             }
@@ -734,7 +837,7 @@ function OverviewPanel({
             )}
           </Card>
         </Col>
-        <Col xs={24} md={12} xl={6}>
+        <Col xs={24} md={12} xl={6} className="eswmp-col-5">
           {/* Haulers by fleet size — a ranked bar answers "who moves the most
               waste for us?", which a single total could not. */}
           <Card
@@ -755,7 +858,11 @@ function OverviewPanel({
                   <XAxis type="number" allowDecimals={false} tick={{ fontSize: 11 }} />
                   <YAxis type="category" dataKey="name" tick={{ fontSize: 10 }} width={110} />
                   <RTooltip formatter={(value) => [`${value} vehicle(s)`, "Fleet"]} />
-                  <Bar dataKey="value" name="Vehicles" fill="#1677ff" radius={[0, 4, 4, 0]} isAnimationActive={false} />
+                  {/* Palette blue rather than a loose hex, so the fleet bars match
+                      Baseline Volume wherever the two appear together. */}
+                  <Bar dataKey="value" name="Vehicles" fill={VOLUME_METRICS.baseline.color} radius={[0, 4, 4, 0]} isAnimationActive={false}>
+                    <LabelList dataKey="value" position="right" style={CHART_LABEL_STYLE} />
+                  </Bar>
                 </BarChart>
               </ResponsiveContainer>
             ) : (
@@ -763,7 +870,7 @@ function OverviewPanel({
             )}
           </Card>
         </Col>
-        <Col xs={24} md={12} xl={6}>
+        <Col xs={24} md={12} xl={6} className="eswmp-col-5">
           {/* Client mix — LGU vs private, the split operators are asked to report. */}
           <Card
             title={
@@ -787,6 +894,7 @@ function OverviewPanel({
                     {clientChartData.map((entry) => (
                       <RCell key={entry.name} fill={entry.color} />
                     ))}
+                    <LabelList dataKey="value" position="top" style={CHART_LABEL_STYLE} />
                   </Bar>
                 </BarChart>
               </ResponsiveContainer>
@@ -795,7 +903,7 @@ function OverviewPanel({
             )}
           </Card>
         </Col>
-        <Col xs={24} md={12} xl={6}>
+        <Col xs={24} md={12} xl={6} className="eswmp-col-5">
           <Card title={<Text strong style={{ fontSize: 14 }}>Baseline Breakdown</Text>} loading={wasteReceivedLoading} style={{ borderRadius: 8, height: "100%" }} bodyStyle={{ height: 250 }}>
             <ResponsiveContainer width="100%" height="100%">
               <BarChart data={groupedVolumeData} margin={{ top: 8, right: 8, left: -16, bottom: 0 }}>
@@ -804,13 +912,20 @@ function OverviewPanel({
                 <YAxis tick={{ fontSize: 11 }} />
                 <RTooltip formatter={(value, name) => [formatUnitValue(value), name === "baseline" ? "Baseline Volume" : "Submitted Volume"]} />
                 <Legend />
-                <Bar dataKey="baseline" name="Baseline Volume" fill={VOLUME_METRICS.baseline.color} radius={[4, 4, 0, 0]} isAnimationActive={false} />
-                <Bar dataKey="submitted" name="Submitted Volume" fill={VOLUME_METRICS.submitted.color} radius={[4, 4, 0, 0]} isAnimationActive={false} />
+                {/* Volumes are masked for demo sessions, so the label reuses the
+                    same formatter as the tooltip instead of printing the raw
+                    number — otherwise a masked chart would still leak its value. */}
+                <Bar dataKey="baseline" name="Baseline Volume" fill={VOLUME_METRICS.baseline.color} radius={[4, 4, 0, 0]} isAnimationActive={false}>
+                  <LabelList dataKey="baseline" position="top" formatter={formatUnitValue} style={CHART_LABEL_STYLE} />
+                </Bar>
+                <Bar dataKey="submitted" name="Submitted Volume" fill={VOLUME_METRICS.submitted.color} radius={[4, 4, 0, 0]} isAnimationActive={false}>
+                  <LabelList dataKey="submitted" position="top" formatter={formatUnitValue} style={CHART_LABEL_STYLE} />
+                </Bar>
               </BarChart>
             </ResponsiveContainer>
           </Card>
         </Col>
-        <Col xs={24} md={12} xl={6}>
+        <Col xs={24} md={12} xl={6} className="eswmp-col-5">
           <Card title={<Text strong style={{ fontSize: 14 }}>Submission Breakdown</Text>} loading={loadingSubmissions} style={{ borderRadius: 8, height: "100%" }} bodyStyle={{ height: 250 }}>
             <ResponsiveContainer width="100%" height="100%">
               <BarChart data={submissionStatusData} margin={{ top: 8, right: 8, left: -16, bottom: 0 }}>
@@ -820,6 +935,7 @@ function OverviewPanel({
                 <RTooltip formatter={(value) => [`${Number(value).toLocaleString()} submission(s)`, "Status"]} />
                 <Bar dataKey="value" name="Submissions" radius={[4, 4, 0, 0]} isAnimationActive={false}>
                   {submissionStatusData.map((entry) => <RCell key={entry.name} fill={entry.color} />)}
+                  <LabelList dataKey="value" position="top" style={CHART_LABEL_STYLE} />
                 </Bar>
               </BarChart>
             </ResponsiveContainer>

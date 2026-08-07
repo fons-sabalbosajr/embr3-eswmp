@@ -109,6 +109,7 @@ import useMediaMeta from "../../utils/useMediaMeta";
 import api from "../../api";
 import GaugeMeter, { computeGaugePercent } from "../../components/GaugeMeter";
 import GaugeLegend from "../../components/GaugeLegend";
+import LazyDocumentFrame from "../../components/LazyDocumentFrame";
 import {
   resolveCellName,
   getCellStatusConfig,
@@ -427,9 +428,6 @@ export default function DashboardContent({ user, isDark, setActiveMenu, onOpenSu
     return staticMarker(m.color, m.glyph);
   };
 
-  const tile = TILE_LAYERS[tileKey];
-  const mrfTile = TILE_LAYERS[mrfTileKey];
-
   const DASH_CACHE_KEY = "dashboard-stats-cache";
 
   const applyStats = useCallback((slfData, swmData, mrfData, lguMrfData, trapData, equipData, slfFacData, openDumpData, rcaData, pdsData, techAssistData, tsData, lguDivData) => {
@@ -707,7 +705,7 @@ export default function DashboardContent({ user, isDark, setActiveMenu, onOpenSu
   pushLguMrfTab(tabItems, { lguMrfStats, loading, isDark, setActiveMenu });
 
   // Trash Traps dashboard tab — see dashboard/TrashTrapsTab.jsx
-  pushTrashTrapsTab(tabItems, { trapStats, loading, isDark, setActiveMenu });
+  pushTrashTrapsTab(tabItems, { trapStats, loading, isDark, setActiveMenu, setTrapViewRecord });
 
   // SWM Equipment dashboard tab — see dashboard/SwmEquipmentTab.jsx
   pushSwmEquipmentTab(tabItems, { equipStats, loading, isDark, setActiveMenu });
@@ -3157,14 +3155,13 @@ export default function DashboardContent({ user, isDark, setActiveMenu, onOpenSu
                   />
                 </div>
               ) : canEmbed ? (
-                <iframe
-                  // Keyed on the FILE only. It used to include the zoom level, so
-                  // every 10% step tore down the viewer and re-downloaded the whole
-                  // PDF; the `#zoom` fragment alone is enough to rescale in place.
-                  key={`${kind}-${previewUrl.split("#")[0]}`}
+                // LazyDocumentFrame keeps the same fragment-only-rescale
+                // behaviour (it keys on the URL minus the `#zoom` fragment) and
+                // adds the loading indicator + retry the bare iframe lacked.
+                <LazyDocumentFrame
                   src={previewUrl}
                   title={fileName}
-                  style={{ width: "100%", height: "100%", border: 0, background: "#fff" }}
+                  style={{ background: "#fff" }}
                 />
               ) : (
                 <div style={{ padding: 32, maxWidth: 560, margin: "auto" }}>

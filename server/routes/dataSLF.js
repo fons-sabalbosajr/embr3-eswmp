@@ -9,6 +9,12 @@ const { writeLog } = require("../utils/logger");
 const Transaction = require("../models/Transaction");
 const Notification = require("../models/Notification");
 const UserPortal = require("../models/UserPortal");
+const Region3Lgu = require("../models/Region3Lgu");
+// Shared municipality/region resolution — the SAME masterlist matcher and
+// Region III classifier the LGU dashboard uses, so a client's municipality is
+// classified identically in both modules.
+const { matchClient } = require("../utils/lguMatch");
+const { getRegion3ProvinceSet, classifyRegion } = require("../utils/region3");
 const { notifyAdmin, notifyPortal, refreshAdmin, refreshPortal } = require("../utils/socketEmit");
 const serverCache = require("../utils/serverCache");
 const { SUMMARY_BY_SLF_CACHE_KEY, STATS_CACHE_PREFIX, CELL_USAGE_CACHE_PREFIX } = require("../utils/cacheKeys");
@@ -2077,7 +2083,51 @@ router.get("/hauler-clients/:slfGeneratorId", adminOnly, async (req, res) => {
       });
     });
 
-    let rows = [...byKey.values()];
+    // ── Municipality resolution + Region III classification ───────────────────
+    //
+    // Client addresses are free text typed by portal users, so raw string
+    // comparison misclassifies anything with different casing, a "City of"
+    // prefix or a known abbreviation. Resolve each one against the SAME
+    // Region III masterlist and matcher the LGU dashboard uses
+    // (utils/lguMatch + Region3Lgu), so a municipality is classified
+    // identically wherever it appears in the system.
+    //
+    // Both lookups are done ONCE per request, not per row.
+    const [region3ProvinceSet, masterMunis] = await Promise.all([
+      getRegion3ProvinceSet(),
+      Region3Lgu.find({ status: "Active", lguType: { $in: ["Municipality", "City"] } })
+        .select("name normalizedName province normalizedProvince psgcCode aliases lguType")
+        .lean(),
+    ]);
+
+    let rows = [...byKey.values()].map((row) => {
+      const match = matchClient(
+        {
+          municipality: row.municipalityName,
+          province: row.provinceName,
+          name: row.clientName,
+        },
+        masterMunis,
+      );
+      // Only an exact or high-confidence match may rewrite the stored text.
+      // "medium"/"multiple" are reported but NOT applied — silently replacing a
+      // municipality on a fuzzy guess would corrupt served-LGU counts, which is
+      // exactly what the matcher's confidence levels exist to prevent.
+      const classification = match?.classification || "none";
+      const confident = classification === "exact" || classification === "high";
+      const suggestion = match?.suggestions?.[0];
+      return {
+        ...row,
+        municipalityName:
+          confident && suggestion?.name ? suggestion.name : row.municipalityName,
+        municipalityMatch: classification,
+        regionClass: classifyRegion(
+          { province: row.provinceName, region: row.regionName },
+          region3ProvinceSet,
+        ),
+      };
+    });
+
     const search = String(req.query.search || "").trim().toLowerCase();
     if (search) {
       rows = rows.filter((r) =>
@@ -2103,6 +2153,39 @@ router.get("/hauler-clients/:slfGeneratorId", adminOnly, async (req, res) => {
 });
 
 // CREATE — add a client under a named hauler, across every baseline record.
+/**
+ * Fan out a hauler/client mutation to every module that reads that data.
+ *
+ * Hauler and client names feed the Portal panes, dashboard summaries, reports
+ * and the submission forms, all of which cache their own copy. Without this the
+ * three CRUD routes below persisted correctly but nothing else noticed until a
+ * manual page reload — the "changes don't propagate" symptom.
+ *
+ * `refreshAdmin("baselines")` also invalidates the summary / cell-usage caches
+ * (see utils/socketEmit), so admin totals recompute rather than serving a stale
+ * aggregate. Portal users assigned to this facility are notified individually,
+ * because their panes are scoped to their own email room.
+ *
+ * Fire-and-forget: a socket problem must never fail an already-committed write.
+ */
+function notifyHaulerClientChange(req, slfGeneratorId) {
+  refreshAdmin(req, "baselines");
+  refreshAdmin(req, "hauler-clients");
+  (async () => {
+    try {
+      const UserPortal = require("../models/UserPortal");
+      const assigned = await UserPortal.find({ assignedSlf: slfGeneratorId })
+        .select("email")
+        .lean();
+      assigned.forEach((user) => {
+        if (user?.email) refreshPortal(req, user.email, "hauler-clients");
+      });
+    } catch {
+      /* best-effort — the write already succeeded */
+    }
+  })();
+}
+
 router.post("/hauler-clients/:slfGeneratorId", adminOnly, async (req, res) => {
   try {
     const { slfGeneratorId } = req.params;
@@ -2141,6 +2224,7 @@ router.post("/hauler-clients/:slfGeneratorId", adminOnly, async (req, res) => {
       message: `Added client "${clientName}" under hauler "${haulerName}"`,
       user: getRequestActor(req), ip: req.ip, meta: { slfGeneratorId, recordsUpdated: added },
     });
+    notifyHaulerClientChange(req, slfGeneratorId);
     res.status(201).json({ message: "Client added", recordsUpdated: added });
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });
@@ -2189,6 +2273,7 @@ router.put("/hauler-clients/:slfGeneratorId", adminOnly, async (req, res) => {
       message: `Updated client "${originalClientName}" under hauler "${haulerName}"`,
       user: getRequestActor(req), ip: req.ip, meta: { slfGeneratorId, recordsUpdated: updated },
     });
+    notifyHaulerClientChange(req, slfGeneratorId);
     res.json({ message: "Client updated", recordsUpdated: updated });
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });
@@ -2238,6 +2323,7 @@ router.delete("/hauler-clients/:slfGeneratorId", adminOnly, async (req, res) => 
       message: `Deleted client "${clientName}" from hauler "${haulerName}"`,
       user: getRequestActor(req), ip: req.ip, meta: { slfGeneratorId, recordsUpdated: removed },
     });
+    notifyHaulerClientChange(req, slfGeneratorId);
     res.json({ message: "Client deleted", recordsUpdated: removed });
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });
@@ -6178,42 +6264,56 @@ router.patch("/portal-save-baseline/:slfName", optionalAuth, requirePortalRule("
     let genId = slfGenerator || null;
     let facilityLgu = lguCompanyName || slfName;
     let facilityType = companyType || "LGU";
+    // Held so the dummy-flag check below can reuse it instead of re-querying.
+    let resolvedFacility = null;
 
     if (!genId) {
       const exactSlfName = new RegExp(`^${escapeRegExp(slfName)}$`, "i");
       const exactCompanyName = lguCompanyName
         ? new RegExp(`^${escapeRegExp(lguCompanyName)}$`, "i")
         : null;
-      const facility = await SlfFacility.findOne({
+      resolvedFacility = await SlfFacility.findOne({
         $or: [
           { lgu: exactSlfName },
           ...(exactCompanyName ? [{ lgu: exactCompanyName }] : []),
         ],
       }).sort({ dataYear: -1 });
-      if (facility) {
-        genId = facility._id;
-        facilityLgu = lguCompanyName || facility.lgu || slfName;
-        facilityType = companyType || ((facility.ownership || "").toLowerCase().includes("private") ? "Private" : "LGU");
+      if (resolvedFacility) {
+        genId = resolvedFacility._id;
+        facilityLgu = lguCompanyName || resolvedFacility.lgu || slfName;
+        facilityType = companyType || ((resolvedFacility.ownership || "").toLowerCase().includes("private") ? "Private" : "LGU");
       }
     }
 
-    const baselineOnlyIds = await findMatchingBaselineOnlyIds({
-      slfName,
-      slfGenerator: genId,
-      lguCompanyName,
-    });
+    // These three reads are INDEPENDENT of one another, so they run together
+    // instead of as three serial round-trips in the save path.
+    //
+    // The facility lookup is also skipped entirely when the block above already
+    // loaded the document — that re-queried the same row purely to read
+    // `isDummy`, which was already in memory.
+    const [baselineOnlyIds, facDummy, submitter] = await Promise.all([
+      findMatchingBaselineOnlyIds({
+        slfName,
+        slfGenerator: genId,
+        lguCompanyName,
+      }),
+      resolvedFacility
+        ? Promise.resolve(resolvedFacility)
+        : genId
+          ? SlfFacility.findById(genId).select("isDummy").lean()
+          : Promise.resolve(null),
+      submittedBy
+        ? UserPortal.findOne({ email: String(submittedBy).trim().toLowerCase() })
+            .select("isDummy")
+            .lean()
+        : Promise.resolve(null),
+    ]);
 
     // Flag baseline records made by dummy accounts / against dummy facilities so
     // they stay out of production admin views (Task: dummy data isolation).
-    let baselineIsDummy = false;
-    if (genId) {
-      const facDummy = await SlfFacility.findById(genId).select("isDummy").lean();
-      baselineIsDummy = Boolean(facDummy?.isDummy);
-    }
-    if (!baselineIsDummy && submittedBy) {
-      const submitter = await UserPortal.findOne({ email: String(submittedBy).trim().toLowerCase() }).select("isDummy").lean();
-      baselineIsDummy = Boolean(submitter?.isDummy);
-    }
+    // Same result as the previous short-circuit — the submitter is now resolved
+    // in parallel rather than only when the facility check came back false.
+    const baselineIsDummy = Boolean(facDummy?.isDummy) || Boolean(submitter?.isDummy);
 
     const updateFields = {
       slfName,
@@ -6315,6 +6415,28 @@ router.patch("/portal-save-baseline/:slfName", optionalAuth, requirePortalRule("
         status: "pending",
       });
       await newDoc.save();
+    }
+
+    // Saving the baseline is the portal-side equivalent of "lock this SLF again".
+    // GET /baseline resolves approval/request flags across every matching SLF
+    // record, not only the baseline-only document updated above. If an older
+    // submission still carried baselineUpdateApproved=true, the next refresh saw
+    // that stale approval and reopened the just-saved baseline. Clear only the
+    // workflow flags across the same identity set; baseline values themselves stay
+    // scoped to baseline-only records.
+    const lockIds = await resolveSlfRecordIds(slfName, { slfGenerator: genId });
+    if (lockIds.length) {
+      await DataSLF.updateMany(
+        { _id: { $in: lockIds } },
+        {
+          $set: {
+            baselineUpdateApproved: false,
+            baselineUpdateRequested: false,
+            baselineUpdateApprovedAt: null,
+            baselineUpdateApprovedBy: null,
+          },
+        },
+      );
     }
 
     const latest = baselineOnlyIds.length > 0

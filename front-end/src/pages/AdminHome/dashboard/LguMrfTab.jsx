@@ -2,10 +2,12 @@ import { useState, useMemo } from "react";
 import { FitBounds, ProvinceBoundary } from "../MapPrimitives";
 import { TILE_LAYERS } from "../constants";
 import { ApartmentOutlined, AppstoreOutlined, BarChartOutlined, CheckCircleOutlined, ClockCircleOutlined, CloseCircleOutlined, EnvironmentOutlined, FundOutlined, GlobalOutlined, PieChartOutlined, RiseOutlined, SafetyCertificateOutlined, TeamOutlined, UserOutlined } from "@ant-design/icons";
-import { Button, Card, Col, Progress, Row, Select, Space, Statistic, Tag, Tooltip } from "antd";
+import { Button, Card, Col, Progress, Row, Select, Space, Statistic, Tag, Tooltip, Typography } from "antd";
 import { MapContainer, Marker, Popup, TileLayer } from "react-leaflet";
 
 import { mrfStatusIcon } from "./mapMarkers";
+
+const { Text } = Typography;
 
 // LGU-Initiated MRF dashboard tab.
 //

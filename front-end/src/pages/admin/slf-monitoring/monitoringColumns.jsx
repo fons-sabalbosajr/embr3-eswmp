@@ -1,8 +1,10 @@
 import { buildFilters, matchesFilter } from "../shared/tableFilters";
 import { formatCompact, getStatusTag } from "../slf-monitoring/SlfDashboardTab";
-import { ACCENT, isHazardousCellType, managementStatusSummary, normalizeUnit } from "../slf-monitoring/helpers.jsx";
+import { ACCENT, getServedClientCount, isHazardousCellType, managementStatusSummary, normalizeUnit } from "../slf-monitoring/helpers.jsx";
 import { AlertOutlined, CalendarOutlined, ContainerOutlined, DeleteOutlined, EditOutlined, ExperimentOutlined, EyeOutlined, SolutionOutlined, UserOutlined, WarningOutlined } from "@ant-design/icons";
-import { Button, Space, Tag, Tooltip } from "antd";
+import { Button, Space, Tag, Tooltip, Typography } from "antd";
+
+const { Text } = Typography;
 
 // Column definitions for the SLF Data Table.
 //
@@ -13,7 +15,6 @@ export function makeMonitoringColumns({
   canEdit,
   canDelete,
   records,
-  style,
   CATEGORY_DESC,
   getCategoryLabel,
   openEdit,

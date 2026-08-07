@@ -1,6 +1,8 @@
 import { isHazardousWasteType } from "../../utils/wasteCategories";
 import { CarOutlined, DeleteOutlined, EditOutlined, PlusOutlined, UploadOutlined } from "@ant-design/icons";
-import { Badge, Button, Checkbox, Col, Collapse, DatePicker, Form, Pagination, Row, Select, Space, Tag } from "antd";
+import { Badge, Button, Checkbox, Col, Collapse, DatePicker, Form, Pagination, Row, Select, Space, Tag, Typography } from "antd";
+
+const { Text } = Typography;
 
 // "Waste Generator Information" pane of the Data Entry tabs: the disposal form,
 // the truck/transport table with its paging and selection, and bulk cell

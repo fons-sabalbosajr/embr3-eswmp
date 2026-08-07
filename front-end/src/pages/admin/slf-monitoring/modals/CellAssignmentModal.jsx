@@ -1,8 +1,10 @@
 import { getTruckCellIndex } from "../../slf-monitoring/SlfDashboardTab";
 import { isHazardousCellType, normalizeUnit } from "../../slf-monitoring/helpers.jsx";
 import { FileTextOutlined, HistoryOutlined } from "@ant-design/icons";
-import { Alert, Avatar, Button, Col, Empty, List, Modal, Row, Select, Space, Table, Tag } from "antd";
+import { Alert, Avatar, Button, Col, Empty, List, Modal, Row, Select, Space, Table, Tag, Typography } from "antd";
 import dayjs from "dayjs";
+
+const { Text } = Typography;
 
 // Assign submitted waste volumes to specific landfill cells.
 export default function CellAssignmentModal({

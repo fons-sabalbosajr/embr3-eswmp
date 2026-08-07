@@ -1,6 +1,7 @@
 import { getMediaKind, resolveMediaOpenUrl, resolveMediaPreviewUrl, resolveMediaUrl } from "../../slf-monitoring/helpers.jsx";
 import { FilePdfOutlined, LinkOutlined } from "@ant-design/icons";
 import { Button, Image, Modal, Space } from "antd";
+import LazyDocumentFrame from "../../../../components/LazyDocumentFrame";
 
 // Inline preview for an uploaded facility document or image.
 export default function FilePreviewModal({
@@ -59,13 +60,13 @@ export default function FilePreviewModal({
             />
           );
         }
-        // pdf / doc / drive (extension-less) — embed the viewer inline.
+        // pdf / doc / drive (extension-less) — embed the viewer inline, behind a
+        // spinner so the modal never shows an empty grey panel while the
+        // document is still being fetched.
         return (
-          <iframe
-            title={filePreview.name || "File preview"}
+          <LazyDocumentFrame
             src={resolveMediaPreviewUrl(filePreview.url)}
-            style={{ width: "100%", height: "100%", border: "none" }}
-            allow="autoplay"
+            title={filePreview.name || "File preview"}
           />
         );
       })()}
