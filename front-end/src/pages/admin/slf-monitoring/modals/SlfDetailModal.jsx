@@ -267,9 +267,27 @@ export default function SlfDetailModal({
                     </span>
                   ),
                   children: (() => {
-                    const cells = detailViewRecord.numberOfCell || 0;
+                    // Count the cells the facility ACTUALLY has, the same way
+                    // Cell Infrastructure counts them: a "Not Existed" cell is a
+                    // deleted one and is not shown or counted there, so reading
+                    // the raw numberOfCell here reported a different figure for
+                    // the same SLF on two admin screens.
+                    const configuredStatuses = detailViewRecord.cellStatuses || [];
+                    const configuredCount = Math.max(
+                      Number(detailViewRecord.numberOfCell || 0),
+                      configuredStatuses.length,
+                    );
+                    const cells = configuredStatuses.length
+                      ? Array.from({ length: configuredCount }).filter(
+                          (_, i) => !isNonExistentCell(configuredStatuses[i] || "Active Cell"),
+                        ).length
+                      : configuredCount;
                     const leachate = detailViewRecord.noOfLeachatePond || 0;
                     const gasVents = detailViewRecord.numberOfGasVents || 0;
+                    // Waste Received is the canonical rollup total (baseline +
+                    // valid submissions, each once) — the same number Cell
+                    // Infrastructure and the portal read. See
+                    // enrichFacilityWithBaseline / GET /data-slf/cell-occupancy.
                     const wasteReceived =
                       detailViewRecord.actualResidualWasteReceived || 0;
                     const wasteReceivedUnit = normalizeUnit(
@@ -1103,20 +1121,48 @@ export default function SlfDetailModal({
                                       key: "dailySubmissions",
                                       width: 150,
                                       align: "center",
-                                      render: (_, row) => (
-                                        <Button
-                                          size="small"
-                                          icon={<EyeOutlined />}
-                                          disabled={
-                                            Number(row.submissions || 0) <= 0
-                                          }
-                                          onClick={() =>
-                                            openDailySubmissionsModal(row)
-                                          }
-                                        >
-                                          View
-                                        </Button>
-                                      ),
+                                      render: (_, row) => {
+                                        // Offered when the authoritative rollup
+                                        // says submissions placed waste in this
+                                        // cell. Keying it off the VOLUME hid the
+                                        // drill-down for a cell whose waste
+                                        // arrives as per-vehicle placements (the
+                                        // truck-level figure is 0 there) and for
+                                        // a cell whose total is an admin
+                                        // override. `submissionCount` is absent
+                                        // on the client-side fallback rows, so
+                                        // those keep the old volume rule.
+                                        const count = row.submissionCount;
+                                        const hasSubmissions =
+                                          count === undefined
+                                            ? Number(row.submissions || 0) > 0
+                                            : count > 0;
+                                        return (
+                                          <Tooltip
+                                            title={
+                                              hasSubmissions
+                                                ? `View the ${count ?? ""} submission${count === 1 ? "" : "s"} placed in ${row.cellName}`.replace(
+                                                    "  ",
+                                                    " ",
+                                                  )
+                                                : row.overridden
+                                                  ? "This cell's volume was set by an admin — there are no submissions to list"
+                                                  : "No submissions have been placed in this cell"
+                                            }
+                                          >
+                                            <Button
+                                              size="small"
+                                              icon={<EyeOutlined />}
+                                              disabled={!hasSubmissions}
+                                              onClick={() =>
+                                                openDailySubmissionsModal(row)
+                                              }
+                                            >
+                                              View
+                                            </Button>
+                                          </Tooltip>
+                                        );
+                                      },
                                     });
 
                                     const totalBaseline = cellRows.reduce(
@@ -1185,6 +1231,26 @@ export default function SlfDetailModal({
                                                     {displayUnit} from
                                                     submissions
                                                   </Tag>
+                                                )}
+                                                {/* Waste the operator has
+                                                    submitted but not yet
+                                                    organized has NO cell, so it
+                                                    is reported here rather than
+                                                    attributed to one. */}
+                                                {Number(
+                                                  detailViewRecord._unplacedVolume || 0,
+                                                ) > 0 && (
+                                                  <Tooltip title="Submitted and counted in this SLF's received total, but the operator has not organized it into a cell yet — so it is not in any cell's Waste in Cell figure.">
+                                                    <Tag color="orange">
+                                                      {Number(
+                                                        detailViewRecord._unplacedVolume,
+                                                      ).toLocaleString(undefined, {
+                                                        maximumFractionDigits: 1,
+                                                      })}{" "}
+                                                      {displayUnit} awaiting
+                                                      placement
+                                                    </Tag>
+                                                  </Tooltip>
                                                 )}
                                               </Space>
                                             ),

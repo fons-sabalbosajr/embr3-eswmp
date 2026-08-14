@@ -109,6 +109,7 @@ import useMediaMeta from "../../utils/useMediaMeta";
 import api from "../../api";
 import GaugeMeter, { computeGaugePercent } from "../../components/GaugeMeter";
 import GaugeLegend from "../../components/GaugeLegend";
+import CellGaugeLegend from "../admin/slf-monitoring/CellGaugeLegend";
 import { compareProvinceNames } from "../../utils/provinceSort";
 import LazyDocumentFrame from "../../components/LazyDocumentFrame";
 import {
@@ -119,7 +120,7 @@ import {
   getSlfColor,
   getSlfCapacityColor,
 } from "../../utils/cellVisuals";
-import { convertVolume, resolveCellUnit } from "../../utils/volumeUnits";
+import { convertVolume, resolveCellUnit, resolveFacilityUnit } from "../../utils/volumeUnits";
 import secureStorage from "../../utils/secureStorage";
 import { getSocket } from "../../utils/socket";
 import {
@@ -216,6 +217,13 @@ export default function DashboardContent({ user, isDark, setActiveMenu, onOpenSu
   const [preventiveFileViewer, setPreventiveFileViewer] = useState(null); // { url, fileName, slfName, province } | null
   const [preventiveFileZoom, setPreventiveFileZoom] = useState(100);
   const [slfCellDrill, setSlfCellDrill] = useState(null); // selected SLF in Cell Infrastructure modal → per-cell cards
+  // facilityId → the canonical per-cell rollup (GET /data-slf/cell-occupancy —
+  // server-side computeCellOccupancy). The facility documents carry a PERSISTED
+  // copy of the same figures, but it is only rewritten when a placement, baseline
+  // or submission is saved, so it lags the live calculation. Reading the rollup
+  // here is what makes this card agree with Cell Infrastructure Overview, SLF
+  // Monitoring and the portal instead of showing the last-written snapshot.
+  const [cellOccupancy, setCellOccupancy] = useState({});
   const [cellProvinceExpanded, setCellProvinceExpanded] = useState(null);
 
   // File name / kind resolution lives in utils/mediaFiles.js — restricted uploads
@@ -616,6 +624,35 @@ export default function DashboardContent({ user, isDark, setActiveMenu, onOpenSu
       socket.off("data-refresh", onRefresh);
     };
   }, [fetchClientSummary]);
+
+  // The canonical per-cell rollup, loaded only when an SLF drill-down is actually
+  // open (the dashboard itself never shows per-cell figures) and refreshed when a
+  // placement, baseline or facility write reports in. One request for every
+  // facility; the response is sized by cells, not by submissions.
+  useEffect(() => {
+    if (!slfDashModal) return undefined;
+    let cancelled = false;
+    let timer = null;
+    const load = () => {
+      api
+        .get("/data-slf/cell-occupancy")
+        .then(({ data }) => { if (!cancelled) setCellOccupancy(data?.byFacility || {}); })
+        .catch(() => { /* non-fatal: the cards fall back to the stored figures */ });
+    };
+    load();
+    const socket = getSocket();
+    const onRefresh = ({ target } = {}) => {
+      if (target && !["submissions", "baselines", "facility"].includes(target)) return;
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(load, 800);
+    };
+    socket?.on("data-refresh", onRefresh);
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+      socket?.off("data-refresh", onRefresh);
+    };
+  }, [slfDashModal]);
 
   const statusColors = {
     pending: "#faad14",
@@ -1731,11 +1768,32 @@ export default function DashboardContent({ user, isDark, setActiveMenu, onOpenSu
                         const fills = r.cellFillValues || [];
                         const baselineFills = r.cellFillBaselineValues || [];
                         const submittedFills = r.cellFillSubmittedValues || [];
+                        // The LIVE rollup for this facility, when it has arrived.
+                        // It supersedes the persisted arrays above, which are only
+                        // rewritten on a placement/baseline/submission save.
+                        const rollup = cellOccupancy[String(r._id)] || null;
+                        const rollupCells = new Map(
+                          (rollup?.cells || []).map((cell) => [cell.index, cell]),
+                        );
                         const statuses = r.cellStatuses || [];
                         const types = r.cellTypes || [];
                         const n = r.numberOfCell || 0;
                         let totalCap = 0, totalFill = 0, opCells = 0;
                         const cells = [];
+                        // ── The unit this facility is REPORTED in ──
+                        //
+                        // Per-cell figures are shown in the SLF's own declared unit,
+                        // exactly as the SLF Data Table and Cell Infrastructure show
+                        // them. Normalising them to m³ for display made a
+                        // tons-reporting facility read double: Prime Waste Solution
+                        // declares 450,000 tons per cell and this modal rendered
+                        // "900,000 m³", which is the same quantity but disagrees
+                        // with every other screen an admin cross-checks against.
+                        //
+                        // Cross-facility TOTALS still normalise to m³ further down —
+                        // tons and m³ cannot be summed — and are labelled as such.
+                        const facilityUnit = resolveFacilityUnit(r) || "m³";
+                        const toFacilityUnit = (value, unit) => convertVolume(value, unit, facilityUnit);
                         // Per-status tally so the tile can report the full mix
                         // (Operational / Completed / Closed / Under Construction /
                         // Reserved …) instead of only "n cells, m operational".
@@ -1757,13 +1815,27 @@ export default function DashboardContent({ user, isDark, setActiveMenu, onOpenSu
                           statusBreakdown.set(statusConfig.label, bucket);
                           const capUnit = resolveCellUnit(r, i, "capacity");
                           const fillUnit = resolveCellUnit(r, i, "fill");
-                          const cap = toM3(caps[i], capUnit) ?? 0;
-                          const fill = toM3(fills[i], fillUnit);
+                          // Capacity and fill carry independent declared units, so
+                          // each is converted into the facility's reporting unit
+                          // before they are compared or displayed.
+                          const cap = toFacilityUnit(caps[i], capUnit) ?? 0;
                           // Provenance split, computed server-side by the ONE shared
-                          // occupancy calculator (utils/cellOccupancy.js) and stored
-                          // in the same unit as cellFillValues. Never re-derived here.
-                          const baselineFill = toM3(baselineFills[i], fillUnit);
-                          const submittedFill = toM3(submittedFills[i], fillUnit);
+                          // occupancy calculator (utils/cellOccupancy.js). Never
+                          // re-derived here — read live from the rollup when it is
+                          // available, otherwise from the persisted copy of the same
+                          // numbers, each converted from its own declared unit.
+                          const live = rollupCells.get(i);
+                          const fill = live
+                            ? toFacilityUnit(live.used, live.unit)
+                            : toFacilityUnit(fills[i], fillUnit);
+                          const baselineFill = live
+                            ? toFacilityUnit(live.baselineUsed, live.unit)
+                            : toFacilityUnit(baselineFills[i], fillUnit);
+                          const submittedFill = live
+                            ? toFacilityUnit(live.submittedUsed, live.unit)
+                            : toFacilityUnit(submittedFills[i], fillUnit);
+                          // Facility subtotals stay in the facility's unit; the
+                          // cross-facility rollup converts them once, below.
                           if (cap > 0) { totalCap += cap; totalFill += Number(fill || 0); }
                           if (statusConfig.key === "active") opCells++;
                           cells.push({
@@ -1779,7 +1851,11 @@ export default function DashboardContent({ user, isDark, setActiveMenu, onOpenSu
                             baselineFill: Number.isFinite(baselineFill) ? baselineFill : 0,
                             submittedFill: Number.isFinite(submittedFill) ? submittedFill : 0,
                             remaining: cap > 0 && Number.isFinite(fill) ? Math.max(0, cap - fill) : null,
-                            unit: "m³", // normalized
+                            unit: facilityUnit, // the SLF's own declared unit
+                            // A hand-entered Waste in Cell replaces the derived
+                            // total, so the legend labels it instead of showing a
+                            // baseline/submitted split that would not add up.
+                            overridden: live ? !!live.overridden : r.cellFillOverridden?.[i] === true,
                             percent: computeGaugePercent({ usedCapacity: fill, totalCapacity: cap }),
                           });
                         }
@@ -1817,14 +1893,27 @@ export default function DashboardContent({ user, isDark, setActiveMenu, onOpenSu
                         return {
                           key: r._id || r.lgu, name: r.lgu, province: r.province,
                           status: r.statusOfSLF, numberOfCell: cells.length, opCells, totalCap, totalFill, cells,
+                          unit: facilityUnit,
+                          // The SAME subtotals in m³, for the only figures that add
+                          // facilities together. Kept beside the declared-unit ones
+                          // rather than replacing them, so nothing has to guess which
+                          // unit a number is in.
+                          totalCapM3: toM3(totalCap, facilityUnit) ?? 0,
+                          totalFillM3: toM3(totalFill, facilityUnit) ?? 0,
                           statusBreakdown: [...statusBreakdown.values()].sort((a, b) => b.count - a.count),
                           volumeSegments,
+                          // Received but not organized into a cell. It is part of
+                          // what the SLF holds but belongs to no cell, so it is
+                          // reported rather than folded into one.
+                          unplaced: toFacilityUnit(rollup?.totals?.unplaced || 0, rollup?.unit || facilityUnit) || 0,
                           percent: computeGaugePercent({ usedCapacity: totalFill, totalCapacity: totalCap }),
                         };
                       })
                       .sort((a, b) => (b.opCells - a.opCells) || (b.numberOfCell - a.numberOfCell));
+                    // Adding facilities together REQUIRES one unit — this is the only
+                    // place the m³ subtotals are used, and the figure is labelled m³.
                     const cellsOverall = cellGaugeFacilities.reduce(
-                      (a, f) => ({ cap: a.cap + f.totalCap, fill: a.fill + f.totalFill, cells: a.cells + f.numberOfCell, op: a.op + f.opCells }),
+                      (a, f) => ({ cap: a.cap + f.totalCapM3, fill: a.fill + f.totalFillM3, cells: a.cells + f.numberOfCell, op: a.op + f.opCells }),
                       { cap: 0, fill: 0, cells: 0, op: 0 },
                     );
                     const cellsOverallPercent = computeGaugePercent({ usedCapacity: cellsOverall.fill, totalCapacity: cellsOverall.cap });
@@ -1860,9 +1949,15 @@ export default function DashboardContent({ user, isDark, setActiveMenu, onOpenSu
                       .map((r) => {
                         const cap = toM3(r.volumeCapacity, r.volumeCapacityUnit) ?? 0;
                         const used = toM3(r.actualResidualWasteReceived, r.wasteReceivedUnit) ?? 0;
+                        // The ratio and the cross-facility sum need one unit (m³),
+                        // but the figure shown ON a facility's own card is its
+                        // DECLARED capacity — the number the SLF Data Table shows.
+                        const declaredUnit = resolveFacilityUnit(r) || "m³";
                         return {
                           key: r._id || r.lgu, name: r.lgu, province: r.province, status: r.statusOfSLF,
                           totalCap: cap, used,
+                          unit: declaredUnit,
+                          declaredCap: convertVolume(r.volumeCapacity, r.volumeCapacityUnit, declaredUnit) ?? 0,
                           percent: computeGaugePercent({ usedCapacity: used, totalCapacity: cap }),
                         };
                       })
@@ -1941,7 +2036,17 @@ export default function DashboardContent({ user, isDark, setActiveMenu, onOpenSu
                                                 {bucket.count} {bucket.label}
                                               </Tag>
                                             ))}
+                                            {drillFacility.unplaced > 0 && (
+                                              <Tooltip title="Submitted and part of this SLF's received total, but the operator has not organized it into a cell yet — so it is not inside any cell gauge below.">
+                                                <Tag color="orange" style={{ margin: 0 }}>
+                                                  {Math.round(drillFacility.unplaced).toLocaleString()} {drillFacility.unit} awaiting placement
+                                                </Tag>
+                                              </Tooltip>
+                                            )}
                                           </div>
+                                          {/* Same key as Cell Infrastructure Overview — a
+                                              colour means the same thing on every gauge. */}
+                                          <CellGaugeLegend isDark={isDark} />
                                           <Row gutter={[12, 12]}>
                                             {drillFacility.cells.map((c) => (
                                               <Col xs={12} sm={8} md={6} key={c.index}>
@@ -1991,6 +2096,10 @@ export default function DashboardContent({ user, isDark, setActiveMenu, onOpenSu
                                            body scrolls), grouped by province with a header per
                                            group so operators can scan each province at a glance. */
                                         <>
+                                          {/* The same gauge key the Cell Infrastructure
+                                              Overview card carries, so a colour reads the
+                                              same on both screens. */}
+                                          <CellGaugeLegend isDark={isDark} />
                                           <Collapse
                                             size="small"
                                             activeKey={provinceActiveKeys}
@@ -2030,7 +2139,7 @@ export default function DashboardContent({ user, isDark, setActiveMenu, onOpenSu
                                                             segments={f.volumeSegments}
                                                             segmentTotal={f.totalCap}
                                                           />
-                                                          <GaugeLegend segments={f.volumeSegments} unit="m³" capacity={f.totalCap} compact isDark={isDark} />
+                                                          <GaugeLegend segments={f.volumeSegments} unit={f.unit} capacity={f.totalCap} compact isDark={isDark} />
                                                           <div style={{ fontSize: 12, fontWeight: 600, marginTop: 4 }}>{f.name}</div>
                                                           <Text type="secondary" style={{ fontSize: 11 }}>{f.province}</Text>
                                                           {/* Full status mix, not just "n cells / m operational". */}
@@ -2106,7 +2215,7 @@ export default function DashboardContent({ user, isDark, setActiveMenu, onOpenSu
                                                   <div style={{ fontSize: 12, fontWeight: 600, marginTop: 4 }}>{f.name}</div>
                                                   <Text type="secondary" style={{ fontSize: 11 }}>{f.province}</Text>
                                                   <div style={{ marginTop: 4 }}>
-                                                    <Tag color="magenta">{Number(f.totalCap).toLocaleString()} m³</Tag>
+                                                    <Tag color="magenta">{Number(f.declaredCap).toLocaleString()} {f.unit}</Tag>
                                                   </div>
                                                 </Card>
                                               </Col>

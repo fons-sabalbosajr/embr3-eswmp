@@ -72,6 +72,19 @@ export const VOLUME_METRICS = {
     color: "#1677ff",
     description: "Volume recorded before baseline and submitted totals were split.",
   },
+  /**
+   * A Waste in Cell figure an admin typed by hand (SLF Table → Edit → Waste in
+   * Cell). It REPLACES the derived total for that cell, so it has no
+   * baseline/submitted split behind it — labelling it as its own contribution is
+   * what stops a hand-entered number from being read as recorded data.
+   */
+  adminSet: {
+    key: "adminSet",
+    label: "Admin-Set Volume",
+    short: "Admin-set",
+    color: "#722ed1", // purple — distinct from every derived metric
+    description: "Entered directly by an admin; replaces the calculated baseline + submitted total for this cell.",
+  },
 };
 
 /**
@@ -97,6 +110,12 @@ export const REMAINING_COLOR = VOLUME_METRICS.remaining.color;
  * @param {{baselineFill?:number, submittedFill?:number, fill?:number}} cell
  */
 export function cellVolumeSegments(cell = {}) {
+  // An admin-declared figure REPLACES the derived total, so it is the whole arc.
+  // Showing the derived baseline/submitted split beside it would present numbers
+  // that do not add up to the value on screen.
+  if (cell.overridden && Number(cell.fill) > 0) {
+    return [{ ...VOLUME_METRICS.adminSet, value: Number(cell.fill) }];
+  }
   const segments = [];
   if (Number(cell.baselineFill) > 0) {
     segments.push({ ...VOLUME_METRICS.baseline, value: Number(cell.baselineFill) });

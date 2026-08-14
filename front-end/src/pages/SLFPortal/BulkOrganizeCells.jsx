@@ -34,8 +34,15 @@ const { Text, Paragraph } = Typography;
 const rowIdOf = (subId, truckIndex, vehicleIndex) =>
   `${subId}|${truckIndex}|${vehicleIndex == null ? "t" : vehicleIndex}`;
 
+// Only what Organize Cell Placement needs: the keys that identify the placement
+// (Row ID is authoritative; Submission Ticket No / Reference No / Plate No are
+// the human-readable ones the operator recognises), the waste being placed, and
+// the two columns the user fills in. Nothing about baseline, capacity, clients or
+// company details belongs here — this file organizes cells, and the extra columns
+// only invited edits that the upload cannot and must not act on.
 const TEMPLATE_HEADERS = [
   "Row ID",
+  "Submission Ticket No",
   "Submission ID",
   "Reference No",
   "Disposal Date",
@@ -44,6 +51,10 @@ const TEMPLATE_HEADERS = [
   "Waste Type",
   "Volume",
   "Unit",
+  // Truck Capacity travels with the row so the operator can SEE which trips are
+  // still missing one — and, where the plate's capacity is already declared on
+  // the baseline, it arrives filled in rather than blank.
+  "Truck Capacity",
   "Current Cell",
   "Target Cell",
   "Remarks",
@@ -65,6 +76,8 @@ const CODE_LABEL = {
   no_cell: "No Target Cell",
   bad_truck: "Bad Reference",
   bad_vehicle: "Bad Reference",
+  bad_ticket: "Ticket Mismatch",
+  bad_capacity: "Bad Truck Capacity",
 };
 
 /**
@@ -98,11 +111,31 @@ export default function BulkOrganizeCells({
     const rows = [];
     (data || []).forEach((sub) => {
       (sub.placements || []).forEach((p) => {
+        // The shared payload also carries placements that only need a Truck
+        // Capacity — they already sit in a valid cell and are nothing to do with
+        // organizing cells. Including them put rows in the template that the
+        // user had no reason to fill in.
+        if (p.needsCell === false) return;
+        // Capacity already on file wins; otherwise the plate's declared capacity
+        // from the baseline (resolved server-side). A trip with neither is left
+        // blank so the operator can see exactly which ones still need entering.
+        const capacity =
+          Number(p.capacity) > 0
+            ? Number(p.capacity)
+            : Number(p.suggestedCapacity) > 0
+              ? Number(p.suggestedCapacity)
+              : "";
         rows.push({
           rowId: rowIdOf(sub._id, p.truckIndex, p.vehicleIndex),
           _id: sub._id,
+          ticketNo: p.disposalTicketNo || "",
+          capacity,
+          capacityFromBaseline:
+            !(Number(p.capacity) > 0) && Number(p.suggestedCapacity) > 0,
+          needsCapacity: !!p.needsCapacity,
           submissionId: sub.submissionId || "",
           idNo: sub.idNo || "",
+          status: sub.status || "",
           date: sub.dateOfDisposal ? dayjs(sub.dateOfDisposal).format("YYYY-MM-DD") : "",
           hauler: p.hauler || "",
           plateNumber: p.plateNumber || "",
@@ -151,6 +184,7 @@ export default function BulkOrganizeCells({
       TEMPLATE_HEADERS,
       ...placementRows.map((r) => [
         r.rowId,
+        r.ticketNo,
         r.submissionId,
         r.idNo,
         r.date,
@@ -159,6 +193,7 @@ export default function BulkOrganizeCells({
         r.wasteType,
         r.volume,
         r.unit,
+        r.capacity,
         r.currentCell,
         "", // Target Cell — user fills this
         "", // Remarks
@@ -208,6 +243,8 @@ export default function BulkOrganizeCells({
           const rowId = String(get("Row ID") || "").trim();
           const targetCellName = String(get("Target Cell") || "").trim();
           const remarks = String(get("Remarks") || "").trim();
+          const ticketNo = String(get("Submission Ticket No") || "").trim();
+          const capacityRaw = String(get("Truck Capacity") ?? "").trim();
           // Blank Target Cell → nothing to assign for that row; skip silently.
           if (!targetCellName) return;
 
@@ -238,6 +275,57 @@ export default function BulkOrganizeCells({
             return;
           }
           seen.add(rowId);
+          // The Row ID is what resolves the placement, so a ticket number that
+          // disagrees with it means the row was edited or pasted from elsewhere —
+          // reject rather than organize a trip the user did not mean to touch.
+          if (
+            ticketNo &&
+            placement.ticketNo &&
+            ticketNo.toLowerCase() !== String(placement.ticketNo).toLowerCase()
+          ) {
+            rows.push({
+              key: `t-${i}`,
+              fileLine,
+              rowId,
+              ticketNo,
+              submissionId: placement.submissionId,
+              targetCell: targetCellName,
+              clientStatus: "invalid",
+              clientMessage: `Submission Ticket No does not match this Row ID (expected ${placement.ticketNo}).`,
+            });
+            return;
+          }
+          // A trip that is missing its Truck Capacity cannot be completed by a
+          // cell alone — the submission would stay blocked. Catch it here rather
+          // than letting the operator discover it after applying the batch.
+          const capacity = capacityRaw === "" ? null : Number(capacityRaw);
+          if (capacityRaw !== "" && (!Number.isFinite(capacity) || capacity <= 0)) {
+            rows.push({
+              key: `cap-${i}`,
+              fileLine,
+              rowId,
+              ticketNo,
+              submissionId: placement.submissionId,
+              targetCell: targetCellName,
+              clientStatus: "invalid",
+              clientMessage: "Truck Capacity must be a number greater than 0.",
+            });
+            return;
+          }
+          if (placement.needsCapacity && !(capacity > 0)) {
+            rows.push({
+              key: `cap-${i}`,
+              fileLine,
+              rowId,
+              ticketNo,
+              submissionId: placement.submissionId,
+              targetCell: targetCellName,
+              clientStatus: "invalid",
+              clientMessage:
+                "This trip is missing its Truck Capacity — fill the Truck Capacity column for this row.",
+            });
+            return;
+          }
           const opt = resolveCell(targetCellName);
           if (!opt) {
             rows.push({
@@ -256,12 +344,15 @@ export default function BulkOrganizeCells({
             fileLine,
             rowId,
             _id: placement._id,
+            ticketNo: placement.ticketNo,
             submissionId: placement.submissionId,
             idNo: placement.idNo,
             truckIndex: placement.truckIndex,
             vehicleIndex: placement.vehicleIndex,
             wasteType: placement.wasteType,
             volume: placement.volume,
+            capacity,
+            needsCapacity: placement.needsCapacity,
             currentCell: placement.currentCell,
             targetCell: opt.value,
             cellIndex: opt.cellIndex,
@@ -294,11 +385,18 @@ export default function BulkOrganizeCells({
           _id: r._id,
           submissionId: r.submissionId,
           idNo: r.idNo,
+          // Re-checked server-side against the resolved truck, so a file that
+          // reaches the API without going through this parser is validated too.
+          disposalTicketNo: r.ticketNo || undefined,
           truckIndex: r.truckIndex,
           vehicleIndex: r.vehicleIndex,
           cellIndex: r.cellIndex,
           cellName: r.cellName,
           cellType: r.cellType,
+          // Sent only when the row actually supplies one, so a bulk upload can
+          // complete a missing Truck Capacity exactly like the manual organizer
+          // — otherwise the cell would be set and the submission stay blocked.
+          ...(Number(r.capacity) > 0 ? { truckCapacity: Number(r.capacity) } : {}),
         })),
     [parsedRows],
   );
@@ -394,6 +492,14 @@ export default function BulkOrganizeCells({
 
   const previewColumns = [
     { title: "Line", dataIndex: "row", width: 60 },
+    { title: "Ticket No", dataIndex: "disposalTicketNo", width: 120, ellipsis: true, render: (v) => v || "—" },
+    {
+      title: "Capacity",
+      dataIndex: "truckCapacity",
+      width: 100,
+      align: "right",
+      render: (v) => (Number(v) > 0 ? Number(v).toLocaleString() : "—"),
+    },
     { title: "Submission", dataIndex: "submissionId", width: 130, ellipsis: true, render: (v) => v || "—" },
     { title: "Target Cell", dataIndex: "targetCell", width: 130, ellipsis: true, render: (v) => v || "—" },
     {
@@ -482,8 +588,9 @@ export default function BulkOrganizeCells({
         message="How bulk organization works"
         description={
           <ol style={{ margin: 0, paddingLeft: 18, lineHeight: 1.6 }}>
-            <li>Download the template — it is pre-filled with every transaction that still needs a cell.</li>
-            <li>Fill the <b>Target Cell</b> column using a cell name from the <b>Available Cells</b> sheet. Leave rows blank to skip them.</li>
+            <li>Download the template — it is pre-filled with every transaction that still needs a cell, identified by its <b>Row ID</b> and <b>Submission Ticket No</b>.</li>
+            <li>Fill the <b>Target Cell</b> column using a cell name from the <b>Available Cells</b> sheet. Leave rows blank to skip them. Do not change <b>Row ID</b> or <b>Submission Ticket No</b> — they identify the trip being organized.</li>
+            <li>Check the <b>Truck Capacity</b> column. It is already filled in where that plate&apos;s capacity is on your <b>Baseline Data</b>; a <b>blank</b> means that trip has no capacity on record and you must enter one, or the row will be rejected.</li>
             <li>Upload the completed file, then <b>Validate</b>. Invalid rows are flagged and can be exported.</li>
             <li>When every row is valid, click <b>Apply Assignments</b> — all rows are saved together (all-or-nothing).</li>
           </ol>
@@ -570,13 +677,20 @@ export default function BulkOrganizeCells({
         <Paragraph style={{ marginBottom: 8 }}>
           <Text strong>What changes:</Text> each selected placement is assigned to the
           Target Cell you specify, and its volume then counts toward that cell&apos;s fill.
-          Nothing else on the submission is modified.
+          Nothing else on the submission is modified — not its volume, not its
+          reference, not its status.
         </Paragraph>
         <Paragraph style={{ marginBottom: 8 }}>
-          <Text strong>Reverted / pending / acknowledged / completed:</Text> pending
-          unorganized placements are eligible; reverted records must be corrected and
-          resubmitted first, and acknowledged/completed cells are closed to new
-          placements — those rows are flagged as failed, not applied.
+          <Text strong>Moving waste that is already placed:</Text> if a placement
+          already sits in a cell — including one on an <b>acknowledged</b> submission —
+          setting a different Target Cell <b>moves</b> that same volume. It is taken out
+          of the old cell and put into the new one; your total submitted volume does not
+          change, only which cell holds it. The move is recorded against the submission.
+        </Paragraph>
+        <Paragraph style={{ marginBottom: 8 }}>
+          <Text strong>Reverted / rejected:</Text> these must be corrected and
+          resubmitted first — those rows are flagged as failed, not applied. Waste can
+          only be placed into a cell that is currently operational and has room.
         </Paragraph>
         <Paragraph style={{ marginBottom: 0 }}>
           <Text strong>Partial failures &amp; reversal:</Text> the apply is

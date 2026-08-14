@@ -729,7 +729,20 @@ router.get("/:id/submission-history", async (req, res) => {
       // Projected populate — un-projected this inlined the whole SlfFacility doc
       // into every submission in the user's history (see SLF_GENERATOR_REF_FIELDS
       // in routes/dataSLF.js).
-      DataSLF.find({ submittedBy: user.email }).setOptions({ includeHiddenYears: true }).populate("slfGenerator", "_id lgu slfName province dataYear").sort({ createdAt: -1 }).lean(),
+      DataSLF.find({
+        submittedBy: user.email,
+        // The tracker lists SUBMISSIONS. A record with no transport entries is
+        // the baseline-only container PATCH /portal-save-baseline writes (it
+        // carries `submittedBy` and a save-time `dateOfDisposal`), so every
+        // baseline update used to add a phantom "no ID / Pending" row here and a
+        // "Submission" entry to the activity feed. The baseline save's own
+        // `baseline_update` Transaction still appears in the activity timeline —
+        // that audit record is classified as a transaction, not a submission.
+        // See SUBMISSION_HAS_TRUCKS in routes/dataSLF.js.
+        "trucks.0": { $exists: true },
+        // Soft-deleted records are not part of the user's live tracker either.
+        deletedAt: null,
+      }).setOptions({ includeHiddenYears: true }).populate("slfGenerator", "_id lgu slfName province dataYear").sort({ createdAt: -1 }).lean(),
       SupportTicket.find({ $or: [{ portalUser: user._id }, { portalUserEmail: user.email }] }).sort({ updatedAt: -1 }).lean(),
     ]);
     const submissionIds = submissions.map((submission) => submission.submissionId).filter(Boolean);

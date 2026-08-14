@@ -145,6 +145,8 @@ async function findPortalFacility(id, slfName, selectFields) {
 
 const {
   computeCellOccupancy,
+  applyPreBaselineRule,
+  preBaselineExclusionEnabled,
   OCCUPANCY_ENTRY_FIELDS,
 } = require("../utils/cellOccupancy");
 
@@ -202,10 +204,32 @@ function normalizeCellStatus(status) {
 const CELL_INFRA_ARRAYS = [
   "cellNames", "cellCapacities", "cellCapacityUnits", "cellStatuses",
   "cellTypes", "cellSubmissionAllowed", "cellNotes", "cellFillValues", "cellFillUnits",
+  "cellFillOverridden",
 ];
 const PROTECTED_CELL_STATUSES = new Set(["Used/Completed", "Under Construction", "Reserved Area", "Not Existed"]);
 
-function mergeCellInfrastructureUpdate(update, record) {
+/**
+ * Merge an incoming cell-infrastructure payload over the stored arrays.
+ *
+ * The resolvers below exist because most callers send a PARTIAL picture (an
+ * inline table edit, a portal-driven write, a form that only knows some cells),
+ * and a missing entry there must not wipe a stored value.
+ *
+ * `authoritative` marks the opposite case: the Cell Infrastructure editor sends
+ * the COMPLETE state of every cell it displays, so an entry it left blank was
+ * blanked on purpose. Without this distinction the editor could not:
+ *   • reopen a cell — a status going from Used/Completed / Under Construction /
+ *     Reserved Area / Not Existed back to "Active Cell" was silently reverted to
+ *     the protected status, so Save appeared to do nothing;
+ *   • clear a capacity — an emptied field fell back to the previous number;
+ *   • clear a cell name.
+ * That was the "Save does not persist" report: MongoDB was written, but with the
+ * old values, so the refetch legitimately showed no change.
+ *
+ * The wipe guard (an entirely EMPTY array over a populated one) still applies in
+ * both modes — that is the accident this was built to stop.
+ */
+function mergeCellInfrastructureUpdate(update, record, { authoritative = false } = {}) {
   const preserved = [];
   const touchesCells = CELL_INFRA_ARRAYS.some((key) => Array.isArray(update[key])) || update.numberOfCell !== undefined;
   if (!touchesCells) return preserved;
@@ -237,7 +261,7 @@ function mergeCellInfrastructureUpdate(update, record) {
   mergeArray("cellNames", (next, prev) => {
     const incoming = String(next ?? "").trim();
     const existing = String(prev ?? "").trim();
-    if (!incoming && existing) {
+    if (!authoritative && !incoming && existing) {
       preserved.push(`cellNames.${preserved.length}`);
       return existing;
     }
@@ -246,13 +270,14 @@ function mergeCellInfrastructureUpdate(update, record) {
   mergeArray("cellStatuses", (next, prev) => {
     const incoming = normalizeCellStatus(next);
     const existing = normalizeCellStatus(prev);
-    if (incoming === "Active Cell" && PROTECTED_CELL_STATUSES.has(existing)) {
+    if (!authoritative && incoming === "Active Cell" && PROTECTED_CELL_STATUSES.has(existing)) {
       preserved.push(`cellStatuses.${preserved.length}`);
       return existing;
     }
     return incoming;
   });
   mergeArray("cellCapacities", (next, prev) => {
+    if (authoritative) return next ?? null;
     if ((next === null || next === undefined || next === "") && prev !== null && prev !== undefined && prev !== "") return prev;
     return next;
   });
@@ -266,6 +291,10 @@ function mergeCellInfrastructureUpdate(update, record) {
     if (next === undefined && prev !== undefined) return prev;
     return next !== false;
   });
+  // Marks which cells carry an admin-declared Waste in Cell. Never sent by a
+  // client — it is derived below from what actually changed — so an incoming
+  // value is ignored and the stored flag is carried forward.
+  mergeArray("cellFillOverridden", (next, prev) => prev === true);
   mergeArray("cellTypes", (next, prev) => next || prev || "Residual");
   mergeArray("cellNotes", (next, prev) => next ?? prev ?? "");
   mergeArray("cellCapacityUnits", (next, prev) => normalizeUnitStrict(next) || normalizeUnitStrict(prev) || "tons");
@@ -288,14 +317,27 @@ async function enrichPortalFacilityVolumes(facilityDoc, requestedSlfName) {
   // year-visibility plugin adds its OWN top-level $or via .where(), which would
   // otherwise CLOBBER the $or scope and make this query return every SLF's
   // records (slow + wrong cell fills).
-  const entries = await DataSLF.find({ deletedAt: null, $and: [{ $or: filters }] })
-    .select(OCCUPANCY_ENTRY_FIELDS)
+  const entries = await DataSLF.find({
+    deletedAt: null,
+    // A real facility's figures must not include test submissions, and a dummy
+    // facility keeps its own. The admin rollup already scoped this way; the
+    // portal did not, so a demo submission counted on one side only.
+    ...(facility.isDummy ? {} : { isDummy: { $ne: true } }),
+    $and: [{ $or: filters }],
+  })
+    // `dateOfDisposal` is what the pre-baseline rule compares against.
+    .select(`${OCCUPANCY_ENTRY_FIELDS} dateOfDisposal`)
     .sort({ createdAt: -1 })
     .lean();
 
   // ONE shared calculator (utils/cellOccupancy.js) — see that file for why this
-  // must not be reimplemented here.
-  const occupancy = computeCellOccupancy(facility, entries);
+  // must not be reimplemented here — behind the SAME pre-baseline filter the
+  // admin rollup applies. Applying it on one side only is what made Cell
+  // Infrastructure and the portal's own tiles disagree for the same SLF.
+  const { counted } = applyPreBaselineRule(entries, {
+    exclude: await preBaselineExclusionEnabled(),
+  });
+  const occupancy = computeCellOccupancy(facility, counted, { unitSource: entries });
   if (!occupancy.hasVolume) return facility;
 
   return {
@@ -575,6 +617,10 @@ router.get("/stats", cacheJson(facilityStatsKey, FACILITY_STATS_TTL_MS), async (
           // dashboard gauges/legends.
           numberOfCell: 1, cellNames: 1, cellCapacities: 1, cellCapacityUnits: 1, cellStatuses: 1, cellTypes: 1, cellFillValues: 1, cellFillUnits: 1,
           cellFillBaselineValues: 1, cellFillSubmittedValues: 1, baselineVolumeTotal: 1, submittedVolumeTotal: 1,
+          // Which cells carry a hand-entered Waste in Cell, so the dashboard
+          // gauges can label that contribution instead of implying a derived
+          // baseline/submitted split behind it.
+          cellFillOverridden: 1,
           leachatePondDetails: 1, gasVentDetails: 1,
           // preventiveMeasureFileDetails carries each document's ORIGINAL file name;
           // without it the Preventive Measures panel could only show opaque storage ids.
@@ -756,7 +802,45 @@ router.put("/:id", adminOnly, async (req, res) => {
       });
     });
 
-    const preservedCellArrays = mergeCellInfrastructureUpdate(update, record);
+    // The dedicated Cell Infrastructure editor sends the complete state of every
+    // cell, so its blanks and status changes are intentional. Consumed here (not
+    // $set onto the document) — it is a request flag, not a facility field.
+    const cellInfrastructureAuthoritative = update.cellInfrastructureAuthoritative === true;
+    delete update.cellInfrastructureAuthoritative;
+
+    // WASTE IN CELL: derived by default, admin-declared on demand.
+    //
+    // Only the SLF edit form actually exposes a "Waste in Cell" input, and it
+    // says so with `cellFillValuesDeclared`. Everything else that carries
+    // cellFillValues through a payload (the Cell Infrastructure editor remaps
+    // them by original index when cells are added, removed or reordered) must
+    // NOT be read as a declaration — inferring it from a value diff would mark a
+    // reordered cell as hand-set.
+    //
+    // A supplied figure marks that cell as overridden; clearing the field hands
+    // it back to the derived baseline + submissions value.
+    const fillsDeclared = update.cellFillValuesDeclared === true;
+    delete update.cellFillValuesDeclared;
+    const declaredFills = fillsDeclared && Array.isArray(update.cellFillValues)
+      ? [...update.cellFillValues]
+      : null;
+
+    const preservedCellArrays = mergeCellInfrastructureUpdate(update, record, {
+      authoritative: cellInfrastructureAuthoritative,
+    });
+
+    if (declaredFills) {
+      const isBlank = (v) => v === null || v === undefined || v === "";
+      const storedFlags = Array.isArray(record.cellFillOverridden) ? record.cellFillOverridden : [];
+      const length = Array.isArray(update.cellFillValues)
+        ? update.cellFillValues.length
+        : declaredFills.length;
+      update.cellFillOverridden = Array.from({ length }, (_, index) =>
+        index < declaredFills.length
+          ? !isBlank(declaredFills[index])
+          : storedFlags[index] === true,
+      );
+    }
     if (preservedCellArrays.length) {
       writeLog("warn", "slfFacility.cell_wipe_prevented", {
         message: `Preserved ${preservedCellArrays.join(", ")} for ${record.lgu || record._id} during cell infrastructure update`,
