@@ -7,6 +7,7 @@
     "start": "node server.js",
     "dev": "nodemon server.js",
     "seed:portal-updates": "node seeds/seedPortalUpdatesAnnouncement.js",
+    "announce:aug2026": "node seeds/seedPortalUpdatesAug2026.js",
     "seed:demo": "node seeds/seedDemoAccounts.js",
     "seed:demo:reset": "node seeds/seedDemoAccounts.js --reset",
     "test": "node --test tests/*.test.js",
