@@ -20,11 +20,13 @@ import {
   Popconfirm,
   Collapse,
   Segmented,
+  Timeline,
 } from "antd";
 import {
   DatabaseOutlined,
   EyeOutlined,
   EditOutlined,
+  HistoryOutlined,
   CheckCircleOutlined,
   CloseCircleOutlined,
   SaveOutlined,
@@ -50,6 +52,17 @@ const UNIT_OPTIONS = ["m³", "tons"];
 const WASTE_TYPES = ["Residual", "Inert", "Hazardous"];
 const WASTE_TAG_COLOR = { Residual: "blue", Inert: "green", Hazardous: "red" };
 const PURPLE = "#722ed1";
+
+// Presentation for the baseline-lifecycle transaction types. Mirrors
+// BASELINE_TXN_TYPES in server/routes/transactions.js — these are exactly the
+// events excluded from a submission's Transaction History and surfaced here.
+const BASELINE_TXN_META = {
+  baseline_update: { color: "#1677ff", label: "Baseline Saved" },
+  baseline_update_request: { color: "#fa8c16", label: "Update Requested" },
+  baseline_update_approved: { color: "#52c41a", label: "Update Approved" },
+  baseline_update_rejected: { color: "#ff4d4f", label: "Update Rejected" },
+  baseline_locked: { color: "#722ed1", label: "Baseline Locked" },
+};
 const GREEN = "#52c41a";
 const ORANGE = "#fa8c16";
 const BLUE = "#1677ff";
@@ -290,6 +303,28 @@ export default function BaselineData({
   const [selectedRecord, setSelectedRecord] = useState(null);
   const [editOpen, setEditOpen] = useState(false);
   const [editRecord, setEditRecord] = useState(null);
+  // Baseline history — the counterpart to a submission's Transaction History.
+  // Baseline events are scoped to the FACILITY (see GET /transactions/baseline/
+  // :slfName), which is why they are keyed by SLF name rather than a record id.
+  const [historyModal, setHistoryModal] = useState({ open: false, slfName: "" });
+  const [historyData, setHistoryData] = useState([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
+
+  const openBaselineHistory = useCallback(async (slfName) => {
+    setHistoryModal({ open: true, slfName });
+    setHistoryLoading(true);
+    setHistoryData([]);
+    try {
+      const { data } = await api.get(
+        `/transactions/baseline/${encodeURIComponent(slfName)}`,
+      );
+      setHistoryData(Array.isArray(data) ? data : []);
+    } catch {
+      setHistoryData([]);
+    } finally {
+      setHistoryLoading(false);
+    }
+  }, []);
   const [saving, setSaving] = useState(false);
   const [form] = Form.useForm();
   const [haulers, setHaulers] = useState([]);
@@ -352,11 +387,16 @@ export default function BaselineData({
 
   const filteredBaselines = useMemo(() => {
     return baselines.filter((record) => {
-      // The "actual" tab shows real baselines and — for developers only — the
-      // SAMPLE (dummy) baselines inline, highlighted with a SAMPLE tag. The
-      // "dummy" tab is a developer-only samples-only filter.
+      // ACTUAL vs DUMMY are mutually exclusive.
+      //
+      // This view fetches with ?includeDummy=true for developers so the Dummy
+      // tab has data. The "actual" branch previously did not filter dummies back
+      // OUT, so demo/SAMPLE baselines — including everything the demo portal
+      // account saves — appeared inside the real portal-user baseline table and
+      // counted towards its badge. The dummy tab already isolates them; the
+      // actual tab must exclude them.
       const isDummyRecord = !!record.isDummy;
-      if (baselineTab === "dummy" && !isDummyRecord) return false;
+      if (baselineTab === "dummy" ? !isDummyRecord : isDummyRecord) return false;
       const matchesLock = lockFilter === "all" || getLockState(record) === lockFilter;
       if (!matchesLock) return false;
       return rowMatchesSearch(record, deferredSearch, [
@@ -747,9 +787,20 @@ export default function BaselineData({
       title: "Last Updated",
       dataIndex: "lastUpdated",
       key: "lastUpdated",
-      width: 120,
+      width: 150,
       sorter: (a, b) => new Date(a.lastUpdated || 0) - new Date(b.lastUpdated || 0),
-      render: (v) => (v ? dayjs(v).format("MM/DD/YYYY") : "—"),
+      // Date AND time. A portal user often saves their baseline more than once in
+      // a day, and a date-only stamp made those edits indistinguishable — which is
+      // the one question this column exists to answer. The tooltip carries the
+      // full timestamp for anyone who needs the seconds.
+      render: (v) =>
+        v ? (
+          <Tooltip title={dayjs(v).format("dddd, MMMM D, YYYY h:mm:ss A")}>
+            <Text style={{ fontSize: 12 }}>{dayjs(v).format("MM/DD/YYYY h:mm A")}</Text>
+          </Tooltip>
+        ) : (
+          "—"
+        ),
     },
     {
       title: "Total Volume",
@@ -847,6 +898,14 @@ export default function BaselineData({
             size="small"
             type="text"
           />
+          <Tooltip title="Baseline History">
+            <Button
+              size="small"
+              type="text"
+              icon={<HistoryOutlined />}
+              onClick={() => openBaselineHistory(r.slfName)}
+            />
+          </Tooltip>
           {r.baselineUpdateRequested && (
             <>
               <Tooltip title="Approve Update Request">
@@ -2045,6 +2104,77 @@ export default function BaselineData({
             ]}
           />
         </Form>
+      </Modal>
+
+      {/* ── Baseline History ──
+          The counterpart to a submission's Transaction History. Baseline events
+          (saved / update requested / approved / rejected / locked) belong to the
+          FACILITY, so they are listed here rather than inside any one
+          submission's thread — see BASELINE_TXN_TYPES in routes/transactions.js. */}
+      <Modal
+        title={
+          <Space>
+            <HistoryOutlined style={{ color: PURPLE }} />
+            <span>Baseline History — {historyModal.slfName}</span>
+          </Space>
+        }
+        open={historyModal.open}
+        onCancel={() => setHistoryModal({ open: false, slfName: "" })}
+        footer={
+          <Button onClick={() => setHistoryModal({ open: false, slfName: "" })}>
+            Close
+          </Button>
+        }
+        width={720}
+        style={{ maxWidth: "95vw" }}
+        classNames={{ body: "slf-slim-scroll" }}
+        destroyOnHidden
+      >
+        {historyLoading ? (
+          <div style={{ textAlign: "center", padding: "28px 0" }}>
+            <Spin />
+          </div>
+        ) : historyData.length === 0 ? (
+          <Empty
+            image={Empty.PRESENTED_IMAGE_SIMPLE}
+            description="No baseline activity recorded for this SLF yet"
+          />
+        ) : (
+          <Timeline
+            style={{ marginTop: 8 }}
+            items={historyData.map((txn) => {
+              const meta = BASELINE_TXN_META[txn.type] || {
+                color: "#8c8c8c",
+                label: txn.type || "Event",
+              };
+              return {
+                color: meta.color,
+                children: (
+                  <div>
+                    <Space size={6} wrap style={{ marginBottom: 2 }}>
+                      <Tag color={meta.color} style={{ margin: 0 }}>
+                        {meta.label}
+                      </Tag>
+                      <Text type="secondary" style={{ fontSize: 11 }}>
+                        {txn.createdAt
+                          ? dayjs(txn.createdAt).format("MMM D, YYYY h:mm A")
+                          : "—"}
+                      </Text>
+                    </Space>
+                    <div style={{ fontSize: 12.5, wordBreak: "break-word" }}>
+                      {txn.description || "—"}
+                    </div>
+                    {(txn.performedBy || txn.submittedBy) && (
+                      <Text type="secondary" style={{ fontSize: 11 }}>
+                        by {txn.performedBy || txn.submittedBy}
+                      </Text>
+                    )}
+                  </div>
+                ),
+              };
+            })}
+          />
+        )}
       </Modal>
     </Spin>
   );

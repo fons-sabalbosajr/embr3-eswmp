@@ -3,7 +3,9 @@
 // canonical shape, merge duplicates by name, and clean records for submit.
 // No hooks, no component state.
 
-import { normalizeUnit } from "./helpers";
+// Explicit extension so this module also resolves under plain Node (the
+// `node --test` suite in __tests__), not only through Vite's resolver.
+import { normalizeUnit } from "./helpers.js";
 
 export const normalizeVehicleRecord = (vehicle = {}, fallbackUnit = "m³") => ({
   plateNumber: vehicle.plateNumber || vehicle.plateNo || vehicle.plate || "",
@@ -37,6 +39,9 @@ export const cleanClientForSubmit = (client, index = 0) => {
   return {
     clientName: rest.clientName || "",
     clientType: rest.clientType || "Private",
+    // Kept in the submit payload — this whitelist used to strip it, so a Client
+    // Address entered or bulk-uploaded never reached the server.
+    clientAddress: rest.clientAddress || rest.address || "",
     region: rest.region || "",
     regionName: rest.regionName || "",
     province: rest.province || "",
@@ -78,6 +83,38 @@ export const normalizeHaulerRecord = (hauler = {}, index = 0, fallbackUnit = "m�
   };
 };
 
+// A value the incoming record does not actually carry. Used by mergeRecordFields
+// so "not supplied" can never overwrite "already stored".
+const isBlankValue = (value) =>
+  value === undefined ||
+  value === null ||
+  value === "" ||
+  (Array.isArray(value) && value.length === 0);
+
+/**
+ * Field-wise merge of two records describing the SAME entity — the same vehicle
+ * (matched by plate) or the same client (matched by name).
+ *
+ * The later record supplies UPDATES; every field it does not carry leaves the
+ * stored value intact. This is what makes a bulk upload of, say, only Truck
+ * Capacity update the capacity without blanking the vehicle type, the client
+ * details or anything else on that record.
+ *
+ * Previously a collision was resolved by KEEPING the first record and dropping the
+ * second outright, so an uploaded capacity / client address for an already-known
+ * plate or client name was silently discarded — the upload reported success and
+ * the values were gone on the next load.
+ */
+const mergeRecordFields = (existing = {}, incoming = {}) => {
+  const merged = { ...existing };
+  Object.entries(incoming).forEach(([field, value]) => {
+    if (!isBlankValue(value)) merged[field] = value;
+  });
+  // Keep the row identity the list already renders with.
+  if (existing.key !== undefined) merged.key = existing.key;
+  return merged;
+};
+
 export const mergeHaulersByName = (haulers = [], fallbackUnit = "m³") => {
   const merged = new Map();
   haulers.forEach((hauler, index) => {
@@ -99,7 +136,12 @@ export const mergeHaulersByName = (haulers = [], fallbackUnit = "m³") => {
       const plateKey = (vehicle.plateNumber || `new-${vehicleIndex}`)
         .trim()
         .toLowerCase();
-      if (!vehicleMap.has(plateKey)) vehicleMap.set(plateKey, vehicle);
+      vehicleMap.set(
+        plateKey,
+        vehicleMap.has(plateKey)
+          ? mergeRecordFields(vehicleMap.get(plateKey), vehicle)
+          : vehicle,
+      );
     });
     const clientMap = new Map(
       (existing.privateSectorClients || []).map((client, clientIndex) => [
@@ -111,7 +153,12 @@ export const mergeHaulersByName = (haulers = [], fallbackUnit = "m³") => {
       const clientKey = (client.clientName || `new-client-${clientIndex}`)
         .trim()
         .toLowerCase();
-      if (!clientMap.has(clientKey)) clientMap.set(clientKey, client);
+      clientMap.set(
+        clientKey,
+        clientMap.has(clientKey)
+          ? mergeRecordFields(clientMap.get(clientKey), client)
+          : client,
+      );
     });
     const primaryVehicle = vehicleMap.values().next().value || {};
     merged.set(nameKey, {

@@ -12,6 +12,7 @@ const {
   getDriveFileMeta,
 } = require("../utils/googleDrive");
 const cache = require("../utils/serverCache");
+const { MEDIA_META_PREFIX } = require("../utils/cacheKeys");
 const {
   saveLocalUpload,
   resolveLocalUpload,
@@ -190,7 +191,7 @@ router.post("/media-meta", authMiddleware, async (req, res) => {
   const urls = Array.isArray(req.body?.urls) ? req.body.urls.slice(0, MEDIA_META_MAX_URLS) : [];
   const results = {};
 
-  const pending = [];
+  const candidates = [];
   for (const url of urls) {
     if (typeof url !== "string" || !url) continue;
 
@@ -205,15 +206,19 @@ router.post("/media-meta", authMiddleware, async (req, res) => {
     const driveMatch = url.match(/\/upload\/secure\/drive\/([^/?#]+)/);
     if (!driveMatch) continue;
     const fileId = decodeURIComponent(driveMatch[1]);
-
-    const cacheKey = `media-meta:${fileId}`;
-    const cached = cache.get(cacheKey);
-    if (cached) {
-      results[url] = cached;
-      continue;
-    }
-    pending.push({ url, fileId, cacheKey });
+    candidates.push({ url, fileId, cacheKey: `${MEDIA_META_PREFIX}:${fileId}` });
   }
+
+  // Resolve the cache for all candidates at once. Looking them up inside the loop
+  // above would serialise up to MEDIA_META_MAX_URLS round trips once the cache is
+  // Redis-backed rather than a synchronous in-process Map.
+  const cachedMetas = await Promise.all(candidates.map((item) => cache.get(item.cacheKey).catch(() => undefined)));
+  const pending = [];
+  candidates.forEach((item, index) => {
+    const cached = cachedMetas[index];
+    if (cached) results[item.url] = cached;
+    else pending.push(item);
+  });
 
   // Bounded concurrency: a large gallery must not open 200 sockets to Drive.
   const CONCURRENCY = 8;
@@ -225,7 +230,7 @@ router.post("/media-meta", authMiddleware, async (req, res) => {
       const item = slice[offset];
       if (!meta) return;
       const value = { fileName: meta.fileName, mimeType: meta.mimeType };
-      cache.set(item.cacheKey, value, MEDIA_META_TTL_MS);
+      cache.set(item.cacheKey, value, MEDIA_META_TTL_MS).catch(() => {});
       results[item.url] = value;
     });
   }

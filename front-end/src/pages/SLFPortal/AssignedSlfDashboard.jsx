@@ -11,6 +11,7 @@ import {
   InfoCircleOutlined,
   PieChartOutlined,
   RobotOutlined,
+  SaveOutlined,
   SendOutlined,
   TeamOutlined,
 } from "@ant-design/icons";
@@ -48,6 +49,8 @@ export default function AssignedSlfDashboard({
   loading,
   slfCardExpanded,
   handleReviewOpen,
+  handleSaveDraft,
+  savingDraft = false,
   handleOpenWasteReceived,
 }) {
   // #5: Review & Submit is disabled until every submission requirement is met.
@@ -122,6 +125,24 @@ export default function AssignedSlfDashboard({
                 </div>
               }
               extra={
+                <Space size={8} wrap>
+                {/* Save as Draft sits beside Review & Submit and is deliberately
+                    NOT tied to `submitDisabled`: a draft exists precisely to hold
+                    incomplete work, so it stays available while the submission
+                    requirements are still outstanding. It persists through the
+                    same POST /portal-queue path as the Review modal's button — no
+                    second save mechanism. */}
+                <Tooltip title="Save your encoded data without submitting. You can finish it later from Drafts & Scheduled.">
+                  <Button
+                    icon={<SaveOutlined />}
+                    onClick={handleSaveDraft}
+                    loading={savingDraft}
+                    size={isMobile ? "middle" : "large"}
+                    style={{ fontWeight: 600 }}
+                  >
+                    {isMobile ? "Draft" : "Save as Draft"}
+                  </Button>
+                </Tooltip>
                 <Tooltip
                   // #5: a disabled AntD Button swallows pointer events, so the
                   // Tooltip must sit on a NON-disabled wrapper (the span) or the
@@ -176,6 +197,7 @@ export default function AssignedSlfDashboard({
                     </Badge>
                   </span>
                 </Tooltip>
+                </Space>
               }
             >
               {/* ── VERA contextual guidance (Issue 4) ──────────────────────────
@@ -1356,3 +1378,4 @@ export default function AssignedSlfDashboard({
             </Card>
   );
 }
+

@@ -15,6 +15,10 @@
   --lp-gradient-subtle: linear-gradient(135deg, rgba(41,68,167,0.06) 0%, rgba(57,172,96,0.06) 100%);
   --lp-nav-bg: rgba(255,255,255,0.7);
   --lp-glass: rgba(255,255,255,0.55);
+  /* Modal scrim. A near-black wash is far too heavy over a white page — it reads
+     as a dark-mode overlay dropped onto light mode. A softer slate tint at lower
+     alpha separates the dialog without dimming the page into another theme. */
+  --lp-overlay: rgba(26, 29, 46, 0.38);
 }
 
 .landing-page.landing-dark {
@@ -31,6 +35,10 @@
   --lp-gradient-subtle: linear-gradient(135deg, rgba(41,68,167,0.12) 0%, rgba(57,172,96,0.12) 100%);
   --lp-nav-bg: rgba(8,11,18,0.75);
   --lp-glass: rgba(18,24,38,0.5);
+  /* Dark mode needs the opposite correction: the page is already near-black, so
+     the same 0.55 wash barely separated the dialog. Deeper + slightly more
+     opaque restores the contrast between dialog and background. */
+  --lp-overlay: rgba(2, 4, 8, 0.66);
 }
 
 .landing-page {
@@ -2539,7 +2547,10 @@
   align-items: center;
   justify-content: center;
   padding: 20px;
-  background: rgba(8, 11, 18, 0.55);
+  /* Theme-aware scrim (see --lp-overlay in both theme blocks). This was a single
+     hardcoded near-black wash, which made light mode look dimmed-out and gave
+     dark mode too little separation. */
+  background: var(--lp-overlay);
   backdrop-filter: blur(4px);
   animation: lpModalFade 0.2s ease-out;
 }
@@ -2709,8 +2720,54 @@
 .lp-scroll-top:focus-visible { outline: 3px solid #91caff; outline-offset: 2px; }
 @media (max-width: 520px) { .lp-scroll-top { right: 14px; bottom: 18px; } }
 
+/* ── Mobile: fewer moving parts ─────────────────────────────────────────────
+   A phone should not be compositing four 200–500px blurred orbs (blur(80–100px)
+   is one of the most expensive filters there is) while also drifting them on
+   15–22s loops, on top of the hero gradient sweep. The orbs STAY — they are the
+   page's signature background — they simply hold still, which costs nothing once
+   painted. Nothing is hidden and no layout changes; this is complexity
+   reduction, not a shrunken desktop animation.
+
+   The mockup's own "live refresh" loop opts out on the same breakpoint — see
+   SMALL_SCREEN_QUERY in landingMockupMotion.js. */
+@media (max-width: 768px) {
+  /* The expensive, visible-at-rest decorations only. `.lp-map-pulse` is
+     deliberately NOT here: it sits at opacity:0 between pulses, so stopping it
+     would erase the marker rather than calm it. */
+  .lp-blur-orb,
+  .lp-hero::after,
+  .lp-map-stat,
+  .lp-map-region-dot {
+    animation: none !important;
+  }
+  /* Halve the blink load: the grid reads the same with fewer live cells. */
+  .lp-hero-grid .lp-grid-cell:nth-child(even) { animation: none !important; }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .lp-hero-grid .lp-grid-cell { opacity: 0.18 !important; }
+
+  /* The JS (anime.js) sequences already opt out at their source — each effect in
+     Landing.jsx early-returns on this query. The CSS animations did NOT, so a
+     reduced-motion visitor still got ~12 infinite loops: four drifting hero orbs,
+     the gradient sweep, the floating laptop/phone mockups, pulsing map pins,
+     blinking status dots and the stat-card float. Those are exactly the
+     "continuous floating / particle movement" this setting asks us to stop.
+     Scoped to .landing-page so the rest of the app is untouched.
+
+     Near-zero durations rather than `animation: none`: an element that animates
+     INTO view lands on its final keyframe and stays visible, so no content is
+     hidden when motion is disabled. Modal entrance (lpModalFade / lpModalRise)
+     is covered by the same rule. */
+  .landing-page *,
+  .landing-page *::before,
+  .landing-page *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    animation-delay: 0ms !important;
+    transition-duration: 0.01ms !important;
+    transition-delay: 0ms !important;
+  }
 }
 
 /* ===== VERA dedicated section — distinct dark AI identity (both themes) ===== */

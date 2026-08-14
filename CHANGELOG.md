@@ -8,6 +8,95 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — SLF Portal Data Entry loaded empty
+- `GET /data-slf/baseline/:slfName` fetched its candidates with
+  `sort({ createdAt: -1 }).limit(50)`, but an SLF's baseline lives in a
+  baseline-only *container* created on the first save — the OLDEST document the
+  facility owns. On a busy SLF it fell outside that window (Zambales - Iba ranked
+  79th of 80; Nueva Ecija - Santa Rosa 68th of 69), so Data Entry hydrated from a
+  submission carrying none of the baseline columns and every field came up blank.
+  The containers are now fetched by their own query, so the recency window can
+  only add fallback material, never decide the answer.
+- Each baseline field is resolved across the candidate set when an SLF has NO
+  container (a legacy facility whose baseline was only ever duplicated onto its
+  submissions). Recovers the stored Total Volume Accepted for Limay, Porac,
+  Floridablanca and Prime Waste Solution, plus a missing barangay on Baler and
+  Balanga and a closed-cell entry on Porac. Where a container DOES exist it stays
+  authoritative and nothing falls through, so a deleted cell entry, hauler or
+  address is never resurrected from an older copy.
+
+### Fixed — portal dashboard: the cards below the KPI row
+- `GET /data-slf/waste-received-summary/:slfName` selected `accreditedHaulers` on
+  every submission while using a single copy of it, and that array is duplicated
+  across all of an SLF's baseline documents. It is the one request every card
+  below the KPI row waits on. The hauler list is now resolved in two small passes
+  (pick an id, then read that one record): measured against live data, **84–92%
+  less data and ~8–12× faster** on the heavy facilities — Floridablanca 5.3 MB →
+  0.8 MB, Prime Waste Solution 4.9 MB → 0.4 MB — with identical output.
+- The Accredited Haulers card is gated on the baseline fetch it actually reads,
+  not on the waste-received aggregation. It used to sit in a skeleton behind the
+  slowest request on the page and, when that failed, report "No accredited
+  haulers recorded" for a fleet already loaded.
+- The dashboard's chart derivations (client identity map, hauler ranking, waste
+  breakdowns, cell-status donut) are memoized. They re-ran on every render of the
+  panel — thousands of string builds per render on facilities with 80–141
+  accredited haulers, for data that had not moved.
+
+## [1.5.0] — 2026-08-13
+
+### Fixed — data integrity: baseline, submissions & cell occupancy
+- Baseline data no longer disappears: `GET /data-slf/baseline/:slfName` projects the
+  General Information columns it returns (`address`, `companyRegion`,
+  `companyProvince`, `companyMunicipality`, `companyBarangay`) — they came back
+  `undefined`, so the portal's company form initialised empty on reload.
+- Accredited haulers are read from the same record set the baseline save writes to,
+  so vehicle capacities and client details no longer revert on reload.
+- Submission failures from "duplicate or ambiguous" haulers/clients: an SLF's
+  `accreditedHaulers` array is duplicated across every baseline document, and one
+  client is stored in up to three places on the same hauler. Those copies are now
+  collapsed to one record per distinct entity before the relationship check.
+- Baseline containers are no longer treated as submissions: a record with no
+  transport entries gets no ID No., is excluded from both submission lists, the
+  dashboard counts, the SLF map and the unresolved-revert block, which produced a
+  phantom "SLF-…-XX-0001 · 0 · No Waste Data · Pending" row after every first save.
+- Cell occupancy is recomputed at every lifecycle point (submit, resubmit, status
+  change, admin cell assignment, delete/restore, bulk actions) — it previously
+  refreshed only from Organize Cells, leaving 8 of 16 facilities under-reporting.
+- Reverted submissions: Province/Municipality/Barangay are preserved when loading a
+  record for Edit & Resubmit, the completion gate reads the form store (so an
+  unmounted tab no longer reads as incomplete), and the history refetch is forced
+  so a resubmitted entry shows its new status and ID No. immediately.
+- Bulk upload no longer discards rows that match an existing record; a partial
+  upload updates the fields it carries and leaves the rest intact. `clientAddress`
+  now persists end to end.
+- Preview Uploaded Data: an edited disposal cell re-resolves its canonical
+  `cellIndex`, so the edited placement — not the uploaded one — is imported.
+- Baseline and submission transaction histories are separated; baseline events are
+  no longer filed inside a disposal submission's thread.
+
+### Added — admin tooling
+- Admin → Submissions: an **Actual / Dummy** tab, developer- and demo-gated on both
+  the client and the API (a non-authorised caller gets 403, not a filtered list).
+- Baseline Data: a **Baseline History** timeline per SLF, and Last Updated now shows
+  date *and* time.
+- Client Data Issues: server-side pagination and a status filter (the modal fetched
+  all 28,547 flags at once and showed an empty table when the request died), plus
+  **VERA-assisted repair** — VERA proposes a province/municipality resolved against
+  the Region 3 masterlist and the admin approves it, per row or in bulk. Only
+  high-confidence proposals are bulk-selectable; ambiguous ones need a human choice.
+- `scripts/auditLguCoverage.js`, `scripts/clearBaselineSubmissionIds.js` and
+  `scripts/generateDevTestWorkbook.js` — read-only or dry-run by default.
+
+### Changed
+- Province lists across the admin views sort alphabetically through one shared
+  comparator instead of by record count.
+- Demo-session value masking now honours the global privacy toggle rather than
+  running unconditionally, so a demo account can complete its own workflow.
+- Transport Entries in Review & Submit, and the Trucks tables, render as tables
+  that fit their modal, with wrapping cells and slim scrollbars.
+- Landing page: reduced-motion now stops the CSS animations too, mobile runs fewer
+  moving elements, and the hero dashboard mockup animates as a working system.
+
 ### Added — VERA assistant & operational tooling (1.5.0)
 - VERA (Virtual Environmental Response Assistant): role-aware chatbot for the SLF
   Portal and Admin Portal — KB-grounded answers with a rule-based fallback when no
@@ -158,5 +247,6 @@ scaffolding; this is the first tagged version.
 - Data-table rendering errors.
 - Accredited-haulers Excel upload.
 
-[Unreleased]: https://github.com/fons-sabalbosajr/embr3-eswmp/compare/v1.4.0...HEAD
+[Unreleased]: https://github.com/fons-sabalbosajr/embr3-eswmp/compare/v1.5.0...HEAD
+[1.5.0]: https://github.com/fons-sabalbosajr/embr3-eswmp/compare/v1.4.0...v1.5.0
 [1.4.0]: https://github.com/fons-sabalbosajr/embr3-eswmp/releases/tag/v1.4.0

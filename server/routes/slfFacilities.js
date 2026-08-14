@@ -80,6 +80,19 @@ const { requireAnyAuth, adminOnly } = require("../middleware/auth");
 const { validateBody } = require("../utils/validate");
 router.use(requireAnyAuth);
 
+// ── Dashboard tile cache ──
+// GET /stats is one of the two requests the admin dashboard BLOCKS its first
+// paint on, and its first stage is a full-collection dedup aggregation over every
+// facility before any of the nine metric passes even start. The rollup is global,
+// so one computation serves every admin. Keyed by year AND dummy-inclusion
+// because both change the record set. 60s to match the dashboard's poll, with
+// every write on this router invalidating it immediately.
+const { cacheJson, invalidateOnWrite } = require("../middleware/cacheRoute");
+const { MODULE_STATS, yearSeg } = require("../utils/cacheKeys");
+const FACILITY_STATS_KEY = MODULE_STATS.slfFacilities;
+const FACILITY_STATS_TTL_MS = 60000;
+router.use(invalidateOnWrite(FACILITY_STATS_KEY));
+
 const escapeRegExp = (value) => String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 // Refresh every portal user assigned to a facility so their Portal Submissions
@@ -321,6 +334,11 @@ router.get("/", async (req, res) => {
 router.get("/portal/:id", async (req, res) => {
   try {
     const selectFields =
+      // `isDummy` is required by the demo-session response masker: without it a
+      // dummy facility's own cellCapacities / cellFillValues come back masked,
+      // every cell then reads as unusable and the demo account cannot place
+      // waste. Production facilities are unaffected (flag absent → still masked).
+      "isDummy " +
       "province lgu barangay category ownership statusOfSLF remainingLifeSpan " +
       "volumeCapacity volumeCapacityUnit receivingVolumeCapacity receivingVolumeCapacityUnit numberOfCell cellNames cellCapacities cellCapacityUnits cellStatuses cellTypes cellSubmissionAllowed cellNotes cellFillValues cellFillUnits estimatedVolumeWaste estimatedVolumeWasteUnit actualResidualWasteReceived wasteReceivedUnit " +
       "noOfLeachatePond numberOfGasVents mrfEstablished yearStartedOperation " +
@@ -367,7 +385,8 @@ router.patch("/portal/:id/facility-details", async (req, res) => {
 });
 
 // Dashboard stats
-router.get("/stats", async (req, res) => {
+const facilityStatsKey = (req) => `${FACILITY_STATS_KEY}:${yearSeg(req.query.year)}:${req.query.includeDummy === "true" ? "dummy" : "default"}`;
+router.get("/stats", cacheJson(facilityStatsKey, FACILITY_STATS_TTL_MS), async (req, res) => {
   try {
     const yearFilter = req.query.year ? { dataYear: Number(req.query.year) } : {};
     // Exclude dummy/test facilities from every dashboard tile, map point, and

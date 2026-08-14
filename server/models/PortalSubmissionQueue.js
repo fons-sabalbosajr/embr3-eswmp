@@ -42,6 +42,16 @@ const portalSubmissionQueueSchema = new mongoose.Schema(
     failureReason: { type: String, trim: true, default: "" },
     retryCount: { type: Number, default: 0 },
 
+    // Marks demo/test queue records, mirroring DataSLF / UserPortal / SlfFacility.
+    //
+    // Without this field the global demo write guard (utils/demoMode.js) could not
+    // STAMP a draft created by a demonstration account — `hasDummyFlag()` was
+    // false — so the record looked like production data. Every later delete /
+    // cancel / update by that same demo user was then blocked as "would touch a
+    // production record", and the block surfaced as a 500. Additive and indexed
+    // like the others; existing records simply read as non-dummy.
+    isDummy: { type: Boolean, default: false, index: true },
+
     createdBy: { type: String, trim: true },
     updatedBy: { type: String, trim: true },
     // Reference to the AppLog entry for the latest action, when available.

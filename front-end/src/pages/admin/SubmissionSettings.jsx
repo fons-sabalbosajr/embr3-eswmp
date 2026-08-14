@@ -23,6 +23,7 @@ import {
   Alert,
   Progress,
   Pagination,
+  Segmented,
   message,
 } from "antd";
 import {
@@ -55,7 +56,7 @@ import { buildSubmissionWasteEntries } from "../../utils/submissionEntries";
 import Swal from "sweetalert2";
 import api from "../../api";
 import secureStorage from "../../utils/secureStorage";
-import { getAdminDisplayName } from "../../utils/adminIdentity";
+import { getAdminDisplayName, canManageTestData } from "../../utils/adminIdentity";
 import { fetchWithCache, invalidateCache } from "../../utils/pageCache";
 import { getSocket } from "../../utils/socket";
 import { withSizeChanger } from "../../utils/tablePagination";
@@ -259,6 +260,21 @@ export default function SubmissionSettings({
     currentUser.username ||
     currentUser.email ||
     "admin";
+  // "actual" | "dummy" — Actual Submissions vs the developer-only Dummy
+  // Submissions tab. Mutually exclusive: the actual list excludes test records
+  // (the server's default) and the dummy list returns only them (dummyOnly=true,
+  // which the server refuses for non-developers).
+  const [submissionScope, setSubmissionScope] = useState("actual");
+  // Developers and DEMONSTRATION accounts may see test data — the demo admin has
+  // to be able to find the submissions the demo portal account just made. Same
+  // rule the API enforces (canManageTestData in routes/dataSLF.js).
+  const canSeeDummyTab = isDeveloper || canManageTestData(currentUser);
+  const dummyScope = canSeeDummyTab && submissionScope === "dummy";
+  // Only the dummy tab may ask for test data; the actual tab never does.
+  const scopeParams = useMemo(
+    () => (dummyScope ? { dummyOnly: "true" } : {}),
+    [dummyScope],
+  );
   const currentCacheKey = useMemo(
     () =>
       [
@@ -269,8 +285,9 @@ export default function SubmissionSettings({
         pagination.current,
         pagination.pageSize,
         isDeveloper ? "dev" : "std",
+        dummyScope ? "dummy" : "actual",
       ].join(":"),
-    [statusFilter, cellPlacementFilter, debouncedSearch, pagination.current, pagination.pageSize, isDeveloper],
+    [statusFilter, cellPlacementFilter, debouncedSearch, pagination.current, pagination.pageSize, isDeveloper, dummyScope],
   );
   const bumpSubmissionsCache = useCallback(() => {
     // Clear cached lists so the next manual/interval refresh re-fetches fresh data,
@@ -405,9 +422,11 @@ export default function SubmissionSettings({
                   grouped: "true",
                   page: pagination.current,
                   limit: pagination.pageSize,
-                  // Developers additionally see SAMPLE (dummy) submissions inline,
-                  // flagged as SAMPLE. The server only honors this for developers.
-                  ...(isDeveloper ? { includeDummy: "true" } : {}),
+                  // Actual vs Dummy are separate tabs, never mixed: the actual
+                  // list sends nothing (server excludes test records by default)
+                  // and the Dummy tab sends dummyOnly=true. Both are enforced
+                  // server-side for developer role.
+                  ...scopeParams,
                   ...(statusFilter && statusFilter !== "all" ? { status: statusFilter } : {}),
                   ...(cellPlacementFilter && cellPlacementFilter !== "all"
                     ? { cellPlacement: cellPlacementFilter }
@@ -465,7 +484,7 @@ export default function SubmissionSettings({
         }
       }
     },
-    [currentCacheKey, statusFilter, cellPlacementFilter, debouncedSearch, pagination.current, pagination.pageSize, isDeveloper],
+    [currentCacheKey, scopeParams, statusFilter, cellPlacementFilter, debouncedSearch, pagination.current, pagination.pageSize, isDeveloper],
   );
 
   // Reset to the first page whenever a server-side filter changes so we never
@@ -680,7 +699,9 @@ export default function SubmissionSettings({
           // Export the ENTIRE filtered result set (every group + all its entries),
           // not just the current page — the server returns all groups when all=true.
           all: "true",
-          ...(isDeveloper ? { includeDummy: "true" } : {}),
+          // The export follows the tab on screen, so an "Actual Submissions"
+          // export can never contain test records.
+          ...scopeParams,
           ...(statusFilter && statusFilter !== "all" ? { status: statusFilter } : {}),
           ...(cellPlacementFilter && cellPlacementFilter !== "all"
             ? { cellPlacement: cellPlacementFilter }
@@ -754,6 +775,7 @@ export default function SubmissionSettings({
     pagination.pageSize,
     pagination.total,
     isDeveloper,
+    scopeParams,
     statusFilter,
     cellPlacementFilter,
     debouncedSearch,
@@ -1873,7 +1895,26 @@ export default function SubmissionSettings({
             <Option value="none">No Cells Assigned</Option>
             <Option value="nowaste">No Waste Data</Option>
           </Select>
-          <Tag color="geekblue" style={{ padding: "4px 8px", fontSize: 12 }}>
+          {/* Actual vs Dummy submissions. Developer-only, and enforced by the
+              API as well — a non-developer calling ?dummyOnly=true is refused
+              with 403, so hiding this control is not the access control. */}
+          {canSeeDummyTab && (
+            <Segmented
+              size="small"
+              value={submissionScope}
+              onChange={(value) => {
+                setSubmissionScope(value);
+                setSelectedRowKeys([]);
+                setPagination((prev) => ({ ...prev, current: 1 }));
+              }}
+              options={[
+                { label: "Actual", value: "actual" },
+                { label: "Dummy", value: "dummy" },
+              ]}
+            />
+          )}
+          <Tag color={dummyScope ? "purple" : "geekblue"} style={{ padding: "4px 8px", fontSize: 12 }}>
+            {dummyScope ? "SAMPLE · " : ""}
             {entryTotal.toLocaleString()} submissions · {pagination.total.toLocaleString()} grouped rows
           </Tag>
           {canRepairIds && (
@@ -2359,6 +2400,9 @@ export default function SubmissionSettings({
         width={SUBMISSION_MODAL_WIDTH}
         style={{ maxWidth: "95vw" }}
         styles={{ body: { padding: 0 } }}
+        // Slim scrollbar on the modal body too, so the details panel and the
+        // Trucks table inside it don't show two different scrollbar styles.
+        classNames={{ body: "slf-slim-scroll" }}
       >
         {viewRecord &&
           (() => {
@@ -3429,7 +3473,7 @@ export default function SubmissionSettings({
                                 `${t?.disposalTicketNo || ""}-${t?.plateNumber || ""}-${i}`
                               }
                               size="small"
-                              className="trucks-compact-table"
+                              className="trucks-compact-table slf-slim-scroll"
                               pagination={{
                                 defaultPageSize: 5,
                                 pageSizeOptions: ["5", "10", "20", "50"],
@@ -3437,65 +3481,66 @@ export default function SubmissionSettings({
                                 size: "small",
                                 showTotal: (total) => `${total} truck${total === 1 ? "" : "s"}`,
                               }}
-                              scroll={{ x: 820, y: 320 }}
+                              tableLayout="fixed"
+                              scroll={{ y: 320 }}
                               columns={[
                                 {
                                   title: "#",
                                   key: "idx",
-                                  width: 40,
+                                  width: 36,
                                   render: (_, __, i) => (
                                     <Text type="secondary">{i + 1}</Text>
                                   ),
                                 },
-                                {
+                                wrapColumn({
                                   title: "Ticket No.",
                                   dataIndex: "disposalTicketNo",
                                   key: "ticket",
-                                  width: 110,
+                                  width: 100,
                                   render: (v) => v || "—",
-                                },
-                                {
+                                }),
+                                wrapColumn({
                                   title: "Hauler",
                                   dataIndex: "hauler",
                                   key: "hauler",
-                                  width: 150,
-                                  ellipsis: true,
-                                  render: (v) => <Text strong>{v || "—"}</Text>,
-                                },
-                                {
+                                  width: 140,
+                                  render: (v) => <Text type="secondary">{v || "—"}</Text>,
+                                }),
+                                wrapColumn({
                                   // #3: Clients immediately after Hauler.
                                   title: "Clients",
                                   key: "clients",
-                                  width: 180,
+                                  width: 165,
                                   render: (_, t) => {
                                     const clients = resolveTruckClients(t, r.accreditedHaulers);
                                     if (!clients.length) return <Text type="secondary">—</Text>;
-                                    const text = clients.join(", ");
                                     return (
-                                      <Tooltip title={text}>
-                                        <Space size={[2, 2]} wrap style={{ maxWidth: 170 }}>
-                                          {clients.slice(0, 2).map((c, ci) => (
-                                            <Tag key={ci} color="purple" bordered={false} style={{ margin: 0, maxWidth: 160, overflow: "hidden", textOverflow: "ellipsis" }}>
-                                              {c}
-                                            </Tag>
-                                          ))}
-                                          {clients.length > 2 && <Tag bordered={false} style={{ margin: 0 }}>+{clients.length - 2}</Tag>}
-                                        </Space>
-                                      </Tooltip>
+                                      <Space size={[2, 2]} wrap>
+                                        {clients.map((c, ci) => (
+                                          <Tag
+                                            key={ci}
+                                            color="purple"
+                                            bordered={false}
+                                            style={{ margin: 0, whiteSpace: "normal", ...WRAP_CELL_STYLE }}
+                                          >
+                                            {c}
+                                          </Tag>
+                                        ))}
+                                      </Space>
                                     );
                                   },
-                                },
-                                {
+                                }),
+                                wrapColumn({
                                   title: "Plate No.",
                                   dataIndex: "plateNumber",
                                   key: "plate",
-                                  width: 110,
+                                  width: 105,
                                   render: (v) => v || "—",
-                                },
+                                }),
                                 {
                                   title: "Capacity",
                                   key: "cap",
-                                  width: 110,
+                                  width: 95,
                                   render: (_, t) =>
                                     t.truckCapacity
                                       ? `${t.truckCapacity} ${(t.truckCapacityUnit || "m³").replace("m3", "m³")}`
@@ -3504,7 +3549,7 @@ export default function SubmissionSettings({
                                 {
                                   title: "Volume",
                                   key: "vol",
-                                  width: 120,
+                                  width: 100,
                                   // #3: colour reflects actual volume vs capacity
                                   // (units normalized first via the shared utility).
                                   render: (_, t) => {
@@ -3539,28 +3584,39 @@ export default function SubmissionSettings({
                                     );
                                   },
                                 },
-                                {
+                                wrapColumn({
                                   title: "Waste Type",
                                   dataIndex: "wasteType",
                                   key: "waste",
+                                  width: 110,
                                   render: (v) =>
                                     v ? (
+                                      // "Treated Hazardous Waste" is far wider than
+                                      // any sensible column, so the tag itself wraps
+                                      // onto two or three lines instead of forcing
+                                      // the table wider than the modal.
                                       <Tag
                                         color={
                                           v === "Residual" ? "blue" : "volcano"
                                         }
                                         bordered={false}
+                                        style={{
+                                          margin: 0,
+                                          display: "inline-block",
+                                          maxWidth: "100%",
+                                          ...WRAP_CELL_STYLE,
+                                        }}
                                       >
                                         {v}
                                       </Tag>
                                     ) : (
                                       "—"
                                     ),
-                                },
-                                {
+                                }),
+                                wrapColumn({
                                   title: "Cell Placed",
                                   key: "cell",
-                                  width: 110,
+                                  width: 105,
                                   render: (_, t) => {
                                     // Collect unique cell names from per-vehicle entries first,
                                     // then fall back to the truck-level cellName.
@@ -3583,21 +3639,40 @@ export default function SubmissionSettings({
                                       </Space>
                                     );
                                   },
-                                },
-                                {
+                                }),
+                                wrapColumn({
                                   title: "HW Code",
                                   key: "hw",
+                                  // A hazardous load can carry several codes. The
+                                  // cell wraps, so every code stays visible and the
+                                  // row grows in height rather than pushing the
+                                  // table past the modal.
+                                  width: 110,
                                   render: (_, t) => {
-                                    const codes = Array.isArray(t.hazWasteCode)
-                                      ? t.hazWasteCode
-                                      : t.hazWasteCode
-                                        ? [t.hazWasteCode]
-                                        : [];
-                                    return codes.length > 0
-                                      ? codes.join(", ")
-                                      : "—";
+                                    const codes = (
+                                      Array.isArray(t.hazWasteCode)
+                                        ? t.hazWasteCode
+                                        : t.hazWasteCode
+                                          ? [t.hazWasteCode]
+                                          : []
+                                    ).filter(Boolean);
+                                    if (!codes.length) return <Text type="secondary">—</Text>;
+                                    return (
+                                      <Space size={[2, 2]} wrap>
+                                        {codes.map((code) => (
+                                          <Tag
+                                            key={code}
+                                            color="volcano"
+                                            bordered={false}
+                                            style={{ margin: 0, ...WRAP_CELL_STYLE, fontSize: 11 }}
+                                          >
+                                            {code}
+                                          </Tag>
+                                        ))}
+                                      </Space>
+                                    );
                                   },
-                                },
+                                }),
                               ]}
                             />
                           ) : (

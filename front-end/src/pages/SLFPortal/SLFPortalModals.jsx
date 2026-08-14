@@ -3,7 +3,7 @@ import dayjs from "dayjs";
 import {
   Avatar, Badge, Button, Checkbox, Col, Collapse, DatePicker, Descriptions, Divider,
   Empty, Form, Input, InputNumber, List,
-  Modal, Progress, Radio, Row, Select, Space, Spin, Table, Tabs, Tag, Upload,
+  Modal, Progress, Radio, Row, Select, Space, Spin, Table, Tabs, Tag, Tooltip, Upload,
   Typography, Card, Alert, Skeleton
 } from "antd";
 
@@ -2288,7 +2288,7 @@ export default function SLFPortalModals({
                                 color={
                                   d.companyType === "LGU" ? "blue" : "green"
                                 }
-                                bordered={false}
+                                variant="filled"
                               >
                                 {d.companyType}
                               </Tag>,
@@ -2419,7 +2419,7 @@ export default function SLFPortalModals({
                                         ? "red"
                                         : "green"
                                     }
-                                    bordered={false}
+                                    variant="filled"
                                   >
                                     {d.cellStatus || "Active"}
                                   </Tag>,
@@ -2730,7 +2730,12 @@ export default function SLFPortalModals({
                               dataSource={wasteEntries}
                               rowKey="key"
                               size="small"
-                              scroll={{ x: 900 }}
+                              className="slf-slim-scroll"
+                              // Natural width rather than a fixed 900px: several
+                              // columns here declare no width, so a fixed x pinched
+                              // them (HW Code worst of all) instead of letting the
+                              // table scroll inside the modal.
+                              scroll={{ x: "max-content" }}
                               pagination={
                                 wasteEntries.length > 10
                                   ? {
@@ -2789,7 +2794,7 @@ export default function SLFPortalModals({
                                         color={
                                           v === "Residual" ? "blue" : "volcano"
                                         }
-                                        bordered={false}
+                                        variant="filled"
                                       >
                                         {v}
                                       </Tag>
@@ -2835,10 +2840,35 @@ export default function SLFPortalModals({
                                 {
                                   title: "HW Code",
                                   key: "hw",
-                                  render: (_, e) =>
-                                    e.hazWasteCodes.length > 0
-                                      ? e.hazWasteCodes.join(", ")
-                                      : "—",
+                                  // Bounded + tooltipped, like the admin-side copy:
+                                  // an unbounded joined list of codes overflowed
+                                  // the column and the modal.
+                                  width: 150,
+                                  render: (_, e) => {
+                                    const codes = (e.hazWasteCodes || []).filter(Boolean);
+                                    if (!codes.length) return <Text type="secondary">—</Text>;
+                                    return (
+                                      <Tooltip title={codes.join(", ")}>
+                                        <Space size={[2, 2]} wrap style={{ maxWidth: 140 }}>
+                                          {codes.slice(0, 2).map((code) => (
+                                            <Tag
+                                              key={code}
+                                              color="volcano"
+                                              variant="filled"
+                                              style={{ margin: 0, fontSize: 11 }}
+                                            >
+                                              {code}
+                                            </Tag>
+                                          ))}
+                                          {codes.length > 2 && (
+                                            <Tag variant="filled" style={{ margin: 0, fontSize: 11 }}>
+                                              +{codes.length - 2}
+                                            </Tag>
+                                          )}
+                                        </Space>
+                                      </Tooltip>
+                                    );
+                                  },
                                 },
                               ]}
                             />
@@ -3091,7 +3121,12 @@ export default function SLFPortalModals({
             </div>
           )
         }
-        width={860}
+        // Widened for the Transport Entries table. Capped at 96vw so it still
+        // fits a laptop screen and never forces the page itself to scroll
+        // sideways — the table handles its own overflow.
+        width={1100}
+        style={{ maxWidth: "96vw", top: 24 }}
+        classNames={{ body: "slf-slim-scroll" }}
         destroyOnHidden
       >
         <div
@@ -3355,42 +3390,120 @@ export default function SLFPortalModals({
                   <CarOutlined /> Transport Entries ({trucks.length})
                 </Text>
               ),
-              children: (
-                <div>
-                  {trucks.map((t, ti) => {
-                    const vehs = t.vehicles || [];
-                    const plateStr = vehs.length > 1
+              // One ROW per transport entry instead of a stacked read-only card
+              // each. The card layout cost ~7 inputs of vertical space per entry,
+              // so a submission with a dozen trucks was unreviewable; a table puts
+              // every entry on one line and keeps the header in view while
+              // scrolling. Same fields as before, plus the Disposal Cell — the
+              // placement was previously not shown on the review screen at all.
+              children: (() => {
+                const unitOf = (u) => String(u || baselineUnit).replace("m3", "m³");
+                const rows = trucks.map((t, ti) => {
+                  const vehs = t.vehicles || [];
+                  const plate =
+                    vehs.length > 1
                       ? vehs.map((v) => v.plateNumber).filter(Boolean).join(", ") || t.plateNumber || "—"
                       : vehs[0]?.plateNumber || t.plateNumber || "—";
-                    const capStr = vehs.length > 1
-                      ? vehs.filter((v) => v.capacity != null).map((v) => `${v.capacity} ${(v.capacityUnit || baselineUnit).replace("m3", "m³")}`).join(", ") || "—"
-                      : (() => { const cap = vehs[0]?.capacity ?? t.truckCapacity; const unit = (vehs[0]?.capacityUnit || t.truckCapacityUnit || baselineUnit).replace("m3", "m³"); return cap != null ? `${cap} ${unit}` : "—"; })();
-                    return (
-                      <div key={t.key ?? ti} style={{ background: "#f9f9f9", borderRadius: 8, padding: "10px 12px", marginBottom: 10 }}>
-                        <Text strong style={{ fontSize: 12, color: "#1a3353", display: "block", marginBottom: 8 }}>
-                          Entry #{ti + 1}
-                        </Text>
-                        <Row gutter={[8, 6]}>
-                          {[
-                            { label: "Ticket No.", value: t.disposalTicketNo || "—" },
-                            { label: "Hauler", value: t.hauler || "—" },
-                            { label: "Plate No.", value: plateStr },
-                            { label: "Capacity", value: capStr },
-                            { label: "Actual Volume", value: t.actualVolume != null ? `${t.actualVolume} ${(t.actualVolumeUnit || baselineUnit).replace("m3", "m³")}` : "—" },
-                            { label: "Waste Type", value: t.wasteType || "—" },
-                            ...(t.hazWasteCode?.length ? [{ label: "Haz. Code", value: Array.isArray(t.hazWasteCode) ? t.hazWasteCode.join(", ") : t.hazWasteCode }] : []),
-                          ].map(({ label, value }) => (
-                            <Col xs={24} sm={12} key={label}>
-                              <Text type="secondary" style={{ fontSize: 10 }}>{label}</Text>
-                              <Input size="small" value={value} readOnly style={{ background: "#fafafa", cursor: "default" }} />
-                            </Col>
-                          ))}
-                        </Row>
-                      </div>
-                    );
-                  })}
-                </div>
-              ),
+                  const capacity =
+                    vehs.length > 1
+                      ? vehs
+                          .filter((v) => v.capacity != null)
+                          .map((v) => `${v.capacity} ${unitOf(v.capacityUnit)}`)
+                          .join(", ") || "—"
+                      : (() => {
+                          const cap = vehs[0]?.capacity ?? t.truckCapacity;
+                          return cap != null
+                            ? `${cap} ${unitOf(vehs[0]?.capacityUnit || t.truckCapacityUnit)}`
+                            : "—";
+                        })();
+                  const cell =
+                    vehs.length > 1
+                      ? [...new Set(vehs.map((v) => v.cellName).filter(Boolean))].join(", ") ||
+                        t.cellName ||
+                        "—"
+                      : vehs[0]?.cellName || t.cellName || "—";
+                  return {
+                    key: t.key ?? ti,
+                    no: ti + 1,
+                    ticket: t.disposalTicketNo || "—",
+                    hauler: t.hauler || "—",
+                    plate,
+                    capacity,
+                    volume:
+                      t.actualVolume != null
+                        ? `${t.actualVolume} ${unitOf(t.actualVolumeUnit)}`
+                        : "—",
+                    wasteType: t.wasteType || "—",
+                    cell,
+                    hazCode: Array.isArray(t.hazWasteCode)
+                      ? t.hazWasteCode.join(", ")
+                      : t.hazWasteCode || "",
+                  };
+                });
+                // Only shown when at least one entry actually carries codes, so a
+                // residual-only submission keeps the table narrow.
+                const showHazCode = rows.some((r) => r.hazCode);
+                // Long free-text values are ellipsised with the full value in a
+                // tooltip rather than wrapping and breaking row alignment.
+                const textCell = (value) => (
+                  <Text
+                    style={{ fontSize: 12 }}
+                    ellipsis={{ tooltip: value !== "—" ? value : undefined }}
+                  >
+                    {value}
+                  </Text>
+                );
+                return (
+                  <Table
+                    size="small"
+                    className="slf-slim-scroll"
+                    dataSource={rows}
+                    rowKey="key"
+                    sticky
+                    pagination={
+                      rows.length > 10
+                        ? { pageSize: 10, size: "small", showSizeChanger: false }
+                        : false
+                    }
+                    scroll={{ x: "max-content", y: rows.length > 8 ? 360 : undefined }}
+                    columns={[
+                      { title: "#", dataIndex: "no", width: 44, fixed: "left", render: (v) => <Text style={{ fontSize: 12 }}>{v}</Text> },
+                      { title: "Ticket No.", dataIndex: "ticket", width: 130, render: textCell },
+                      { title: "Hauler", dataIndex: "hauler", width: 160, render: textCell },
+                      { title: "Plate No.", dataIndex: "plate", width: 130, render: textCell },
+                      { title: "Capacity", dataIndex: "capacity", width: 120, align: "right", render: textCell },
+                      { title: "Volume", dataIndex: "volume", width: 120, align: "right", render: textCell },
+                      {
+                        title: "Waste Type",
+                        dataIndex: "wasteType",
+                        width: 150,
+                        render: (value) => (
+                          <Tag
+                            color={/haz/i.test(value) ? "volcano" : "green"}
+                            style={{ fontSize: 11, marginInlineEnd: 0 }}
+                          >
+                            {value}
+                          </Tag>
+                        ),
+                      },
+                      {
+                        title: "Disposal Cell",
+                        dataIndex: "cell",
+                        width: 130,
+                        render: (value) =>
+                          value === "—" ? (
+                            <Text type="secondary" style={{ fontSize: 12 }}>—</Text>
+                          ) : (
+                            <Tag color="purple" style={{ fontSize: 11, marginInlineEnd: 0 }}>{value}</Tag>
+                          ),
+                      },
+                      ...(showHazCode
+                        ? [{ title: "Haz. Code", dataIndex: "hazCode", width: 120, render: (v) => textCell(v || "—") }]
+                        : []),
+                    ]}
+                  />
+                );
+              })(),
             },
           ]}
         />
@@ -4340,7 +4453,7 @@ export default function SLFPortalModals({
           className: "slf-primary-btn",
           disabled: (uploadMissingColumns || []).length > 0 || uploadPreviewData.some((row) => row._errors?.length),
         }}
-        width={1300}
+        width={1400}
         className="slf-upload-preview-modal"
       >
         <div style={{ marginBottom: 12 }}>
@@ -4368,7 +4481,7 @@ export default function SLFPortalModals({
           />
         )}
         <Table
-          className="slf-upload-preview-table"
+          className="slf-upload-preview-table slf-slim-scroll"
           dataSource={uploadPreviewData}
           columns={(uploadPreviewColumns || []).map((col) => {
             // keep the row-number (#) and actions columns as-is
@@ -4387,6 +4500,29 @@ export default function SLFPortalModals({
                       updateUploadCell(record.key, col.dataIndex, value)
                     }
                     style={{ width: "100%" }}
+                  />
+                ) : col.dataIndex === "cellName" && uploadType === "truck" ? (
+                  // The cell that came from the file is pre-selected here, so a
+                  // valid uploaded placement never has to be re-assigned by hand.
+                  // A picker (not free text) is what keeps an EDITED placement a
+                  // real cell — updateUploadCell re-resolves the canonical
+                  // cellIndex from this value before import.
+                  <Select
+                    size="small"
+                    value={text || undefined}
+                    placeholder="Select cell"
+                    style={{ width: "100%" }}
+                    allowClear
+                    showSearch
+                    optionFilterProp="label"
+                    status={record.cellIndex == null && text ? "error" : ""}
+                    options={activeCellOptions.map((option) => ({
+                      label: option.label,
+                      value: option.value,
+                    }))}
+                    onChange={(value) =>
+                      updateUploadCell(record.key, col.dataIndex, value || "")
+                    }
                   />
                 ) : col.dataIndex === "privateSectorClients" ? (
                   <Select

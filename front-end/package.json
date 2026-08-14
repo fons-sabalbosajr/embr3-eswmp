@@ -7,6 +7,8 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
+    "test": "node --test src/pages/SLFPortal/__tests__/*.test.js src/pages/__tests__/*.test.js",
+    "lint": "eslint .",
     "preview": "vite preview"
   },
   "dependencies": {
@@ -35,7 +37,12 @@
     "esbuild": "^0.28.1"
   },
   "devDependencies": {
+    "@eslint/js": "^10.0.1",
     "@vitejs/plugin-react": "^5.1.4",
+    "eslint": "^10.8.1",
+    "eslint-plugin-react-hooks": "^7.1.1",
+    "eslint-plugin-react-refresh": "^0.5.4",
+    "globals": "^17.11.0",
     "vite": "^7.3.1"
   }
 }

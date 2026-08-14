@@ -16,6 +16,21 @@ export function isDeveloper(user = {}) {
   return false;
 }
 
+/**
+ * May this user see/manage test (dummy) data — e.g. the Dummy Submissions tab?
+ *
+ * Developers manage test data. A DEMONSTRATION account also qualifies: every
+ * record those views can reach is synthetic (`isDummy: true`), so this grants
+ * access to nothing real, and without it a demo admin cannot see the very
+ * submissions the demo account just made.
+ *
+ * Mirrors canManageTestData() in server/routes/dataSLF.js — the API enforces the
+ * same rule, so hiding the control is presentation only, never the access check.
+ */
+export function canManageTestData(user = {}) {
+  return isDeveloper(user) || user?.isDemo === true;
+}
+
 // True for admins and developers.
 export function isAdminOrDeveloper(user = {}) {
   const r = norm(user?.role);

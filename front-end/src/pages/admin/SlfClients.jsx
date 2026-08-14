@@ -8,6 +8,7 @@ import {
   ReloadOutlined, TeamOutlined, BankOutlined, UserOutlined, FilterOutlined,
   ClearOutlined, DeleteOutlined, StopOutlined, CheckCircleOutlined, EnvironmentOutlined,
   PhoneOutlined, MailOutlined, SolutionOutlined, SyncOutlined, WarningOutlined,
+  RobotOutlined,
 } from "@ant-design/icons";
 import Swal from "sweetalert2";
 import dayjs from "dayjs";
@@ -141,6 +142,97 @@ export default function SlfClients({ isDark, canView = true, canEdit = true, can
   const [issuesOpen, setIssuesOpen] = useState(false);
   const [issues, setIssues] = useState([]);
   const [issuesLoading, setIssuesLoading] = useState(false);
+  const [issuesError, setIssuesError] = useState("");
+  // "open" by default — the actionable set. Everything else is history.
+  const [issuesStatus, setIssuesStatus] = useState("open");
+  const [issuesPaging, setIssuesPaging] = useState({ current: 1, pageSize: 10, total: 0 });
+  const [issuesCounts, setIssuesCounts] = useState({});
+  // VERA proposal for one issue. `suggestion` is what the server computed; the
+  // admin approves it before anything is written.
+  const [veraFix, setVeraFix] = useState({
+    open: false, loadingId: null, applying: false, issue: null, suggestion: null, choice: null,
+  });
+  // issueId -> suggestion, for the rows currently on screen. Drives which
+  // checkboxes are selectable.
+  const [issueFixable, setIssueFixable] = useState({});
+  const [selectedIssueKeys, setSelectedIssueKeys] = useState([]);
+  const [bulkFixing, setBulkFixing] = useState(false);
+
+  // Only HIGH-confidence proposals are bulk-selectable. An ambiguous match needs
+  // a province chosen by a person, so it stays a one-at-a-time decision.
+  const isBulkFixable = (id) => {
+    const s = issueFixable[id];
+    return !!s?.canFix && s.confidence === "high";
+  };
+  const fixableOnPage = issues.filter((i) => i.status === "open" && isBulkFixable(i._id));
+
+  const runBulkVeraFix = async () => {
+    if (!selectedIssueKeys.length) return;
+    const confirm = await Swal.fire({
+      icon: "question",
+      title: `Repair ${selectedIssueKeys.length} issue(s)?`,
+      text: "VERA will set the province and municipality on each client from the Region 3 masterlist, then resolve the issue. This is recorded against your account.",
+      showCancelButton: true,
+      confirmButtonText: "Approve & Repair",
+      confirmButtonColor: "#722ed1",
+    });
+    if (!confirm.isConfirmed) return;
+    setBulkFixing(true);
+    try {
+      const { data } = await api.post("/slf-clients/issues/apply-batch", { ids: selectedIssueKeys });
+      setSelectedIssueKeys([]);
+      await loadIssues(issuesPaging.current, issuesPaging.pageSize, issuesStatus);
+      fetchOpenIssueCount();
+      fetchRecords(false);
+      Swal.fire({
+        icon: data?.applied ? "success" : "info",
+        title: `${data?.applied || 0} repaired`,
+        text: data?.skipped
+          ? `${data.skipped} were skipped — they need a province chosen by hand.`
+          : "All selected issues were repaired.",
+        confirmButtonColor: "#1a3353",
+      });
+    } catch (err) {
+      Swal.fire("Error", err.response?.data?.message || "Bulk repair failed.", "error");
+    } finally {
+      setBulkFixing(false);
+    }
+  };
+
+  const askVera = async (issue) => {
+    setVeraFix((s) => ({ ...s, loadingId: issue._id }));
+    try {
+      const { data } = await api.get(`/slf-clients/issues/${issue._id}/suggestion`);
+      setVeraFix({
+        open: true, loadingId: null, applying: false, issue,
+        suggestion: data,
+        choice: data?.proposal || null,
+      });
+    } catch (err) {
+      setVeraFix((s) => ({ ...s, loadingId: null }));
+      Swal.fire("Error", err.response?.data?.message || "Could not get a suggestion.", "error");
+    }
+  };
+
+  const applyVeraFix = async () => {
+    const { issue, choice } = veraFix;
+    if (!issue || !choice?.province) return;
+    setVeraFix((s) => ({ ...s, applying: true }));
+    try {
+      await api.post(`/slf-clients/issues/${issue._id}/apply-suggestion`, {
+        province: choice.province,
+        municipalityCity: choice.municipalityCity,
+      });
+      setVeraFix({ open: false, loadingId: null, applying: false, issue: null, suggestion: null, choice: null });
+      await loadIssues(issuesPaging.current, issuesPaging.pageSize, issuesStatus);
+      fetchOpenIssueCount();
+      fetchRecords(false);
+      Swal.fire({ icon: "success", title: "Fix applied", text: "The client record was updated and the issue resolved.", timer: 1800, showConfirmButton: false });
+    } catch (err) {
+      setVeraFix((s) => ({ ...s, applying: false }));
+      Swal.fire("Error", err.response?.data?.message || "Could not apply the fix.", "error");
+    }
+  };
   const [openIssueCount, setOpenIssueCount] = useState(0);
 
   const fetchRecords = useCallback(async (showSpinner = true) => {
@@ -495,23 +587,58 @@ export default function SlfClients({ isDark, canView = true, canEdit = true, can
     }
   };
 
-  const openIssues = async () => {
-    setIssuesOpen(true);
+  // Server-side paging. There are tens of thousands of flagged records; asking
+  // for all of them never returned, and the failure surfaced as an empty table.
+  const loadIssues = useCallback(async (page = 1, pageSize = 10, status = issuesStatus) => {
     setIssuesLoading(true);
+    setIssuesError("");
     try {
-      const { data } = await api.get("/slf-clients/issues");
-      setIssues(Array.isArray(data) ? data : []);
-    } catch {
+      const { data } = await api.get("/slf-clients/issues", {
+        params: { page, limit: pageSize, ...(status ? { status } : {}) },
+      });
+      // Tolerates the previous array-shaped response.
+      const rows = Array.isArray(data) ? data : data?.data || [];
+      setIssues(rows);
+      // Ask VERA which of THIS page's rows it can actually repair, in one call,
+      // so the checkboxes can be limited to those. Non-blocking: the table shows
+      // immediately and the boxes enable when the answer lands.
+      setIssueFixable({});
+      setSelectedIssueKeys([]);
+      if (rows.length) {
+        api
+          .post("/slf-clients/issues/suggest-batch", { ids: rows.map((r) => r._id) })
+          .then(({ data: res }) => setIssueFixable(res?.suggestions || {}))
+          .catch(() => setIssueFixable({}));
+      }
+      setIssuesPaging({
+        current: data?.page || page,
+        pageSize: data?.limit || pageSize,
+        total: Array.isArray(data) ? rows.length : data?.total || 0,
+      });
+      setIssuesCounts(data?.counts || {});
+    } catch (err) {
       setIssues([]);
+      // Say so, rather than rendering "No data issues" over a failed request.
+      setIssuesError(
+        err.response?.data?.message || "Could not load data issues. Please try again.",
+      );
     } finally {
       setIssuesLoading(false);
     }
+  }, [issuesStatus]);
+
+  const openIssues = async () => {
+    setIssuesOpen(true);
+    loadIssues(1, issuesPaging.pageSize, issuesStatus);
   };
 
   const resolveIssue = async (issue, status) => {
     try {
       await api.patch(`/slf-clients/issues/${issue._id}/resolve`, { status });
-      setIssues((prev) => prev.map((i) => (i._id === issue._id ? { ...i, status } : i)));
+      // Reload the current page rather than patching the row in place: with a
+      // status filter active the row has just left the result set, and the total
+      // and per-status counts have both moved.
+      await loadIssues(issuesPaging.current, issuesPaging.pageSize, issuesStatus);
       fetchOpenIssueCount();
     } catch (err) {
       Swal.fire("Error", err.response?.data?.message || "Could not update issue", "error");
@@ -903,14 +1030,103 @@ export default function SlfClients({ isDark, canView = true, canEdit = true, can
         width={1300}
         style={{ maxWidth: "96vw" }}
       >
+        {issuesError && (
+          <Alert
+            type="error"
+            showIcon
+            message="Could not load data issues"
+            description={issuesError}
+            action={<Button size="small" onClick={() => loadIssues(1, issuesPaging.pageSize, issuesStatus)}>Retry</Button>}
+            style={{ marginBottom: 12 }}
+          />
+        )}
+        <Space size={8} wrap style={{ marginBottom: 10 }}>
+          <Text type="secondary" style={{ fontSize: 12 }}>Status</Text>
+          <Select
+            size="small"
+            value={issuesStatus}
+            style={{ width: 150 }}
+            onChange={(value) => {
+              setIssuesStatus(value);
+              loadIssues(1, issuesPaging.pageSize, value);
+            }}
+            options={[
+              { value: "open", label: `Open${issuesCounts.open ? ` (${issuesCounts.open.toLocaleString()})` : ""}` },
+              { value: "resolved", label: `Resolved${issuesCounts.resolved ? ` (${issuesCounts.resolved.toLocaleString()})` : ""}` },
+              { value: "ignored", label: `Ignored${issuesCounts.ignored ? ` (${issuesCounts.ignored.toLocaleString()})` : ""}` },
+              { value: "", label: "All" },
+            ]}
+          />
+          <Tag color="volcano">{issuesPaging.total.toLocaleString()} record(s)</Tag>
+          {canEdit && issuesStatus === "open" && (
+            <>
+              <Button
+                type="primary"
+                size="small"
+                icon={<RobotOutlined />}
+                loading={bulkFixing}
+                disabled={selectedIssueKeys.length === 0}
+                style={{ background: "#722ed1", borderColor: "#722ed1" }}
+                onClick={runBulkVeraFix}
+              >
+                Repair {selectedIssueKeys.length || ""} with VERA
+              </Button>
+              {fixableOnPage.length > 0 && (
+                <Button
+                  size="small"
+                  onClick={() =>
+                    setSelectedIssueKeys(
+                      selectedIssueKeys.length === fixableOnPage.length
+                        ? []
+                        : fixableOnPage.map((i) => i._id),
+                    )
+                  }
+                >
+                  {selectedIssueKeys.length === fixableOnPage.length ? "Clear" : `Select all ${fixableOnPage.length} fixable`}
+                </Button>
+              )}
+              <Text type="secondary" style={{ fontSize: 11 }}>
+                {fixableOnPage.length} of {issues.length} on this page can be auto-repaired
+              </Text>
+            </>
+          )}
+        </Space>
         <Table
           dataSource={issues}
           rowKey="_id"
           size="small"
           loading={issuesLoading}
           scroll={{ x: 800 }}
-          locale={{ emptyText: <Empty description="No data issues. Run Sync from Baseline to check." /> }}
-          pagination={withSizeChanger({ defaultPageSize: 10 })}
+          locale={{
+            emptyText: issuesError ? (
+              <Empty description="Could not load — see the error above." />
+            ) : (
+              <Empty description="No data issues. Run Sync from Baseline to check." />
+            ),
+          }}
+          // Server-side: only the current page is ever fetched or rendered.
+          // Selection is limited to rows VERA can actually repair — everything
+          // else is disabled with the reason on hover, so a bulk run can never
+          // include a record that needs human judgement.
+          rowSelection={
+            canEdit && issuesStatus === "open"
+              ? {
+                  selectedRowKeys: selectedIssueKeys,
+                  onChange: setSelectedIssueKeys,
+                  getCheckboxProps: (record) => ({
+                    disabled: record.status !== "open" || !isBulkFixable(record._id),
+                  }),
+                  columnWidth: 40,
+                }
+              : undefined
+          }
+          pagination={withSizeChanger({
+            current: issuesPaging.current,
+            pageSize: issuesPaging.pageSize,
+            total: issuesPaging.total,
+            showTotal: (total) => `${total.toLocaleString()} record(s)`,
+          })}
+          onChange={(p) => loadIssues(p.current, p.pageSize, issuesStatus)}
           columns={[
             { title: "Type", dataIndex: "flagType", width: 190, render: (v) => <Tag color="volcano">{FLAG_LABELS[v] || v}</Tag> },
             { title: "Description", dataIndex: "description", ellipsis: true, render: (v) => <Text style={{ fontSize: 12 }}>{v || "—"}</Text> },
@@ -918,10 +1134,34 @@ export default function SlfClients({ isDark, canView = true, canEdit = true, can
             { title: "Hauler", dataIndex: "hauler", width: 160, render: (v) => <Text type="secondary" style={{ fontSize: 11 }}>{v || "—"}</Text> },
             { title: "Status", dataIndex: "status", width: 100, render: (v) => v === "open" ? <Tag color="red">Open</Tag> : v === "ignored" ? <Tag>Ignored</Tag> : <Tag color="green">Resolved</Tag> },
             {
-              title: "Action", key: "action", width: 150, fixed: "right",
+              title: "Action", key: "action", width: 230, fixed: "right",
               render: (_, issue) => canEdit ? (
                 issue.status === "open" ? (
                   <Space size={4}>
+                    {/* VERA proposes; the admin approves. The button only asks
+                        for a suggestion — it never writes. */}
+                    <Tooltip
+                      title={
+                        issueFixable[issue._id]
+                          ? issueFixable[issue._id].canFix
+                            ? issueFixable[issue._id].rationale
+                            : issueFixable[issue._id].reason
+                          : "Ask VERA to propose a fix"
+                      }
+                    >
+                      <Button
+                        size="small"
+                        icon={<RobotOutlined />}
+                        loading={veraFix.loadingId === issue._id}
+                        // Purple when VERA has a confident proposal for this row,
+                        // so the repairable ones are obvious at a glance.
+                        type={isBulkFixable(issue._id) ? "primary" : "default"}
+                        style={isBulkFixable(issue._id) ? { background: "#722ed1", borderColor: "#722ed1" } : undefined}
+                        onClick={() => askVera(issue)}
+                      >
+                        VERA
+                      </Button>
+                    </Tooltip>
                     <Button size="small" type="primary" onClick={() => resolveIssue(issue, "resolved")}>Resolve</Button>
                     <Button size="small" type="primary" danger onClick={() => resolveIssue(issue, "ignored")}>Ignore</Button>
                   </Space>
@@ -932,6 +1172,85 @@ export default function SlfClients({ isDark, canView = true, canEdit = true, can
             },
           ]}
         />
+      </Modal>
+
+      {/* ── VERA fix proposal ──
+          Read-only until the admin presses Apply. The exact field changes are
+          shown verbatim, and the proposal is resolved against the Region 3
+          masterlist — never generated text — so a province can't be invented on
+          a compliance record. */}
+      <Modal
+        title={<Space><RobotOutlined style={{ color: "#722ed1" }} /> VERA — Suggested Fix</Space>}
+        open={veraFix.open}
+        onCancel={() => setVeraFix((s) => ({ ...s, open: false }))}
+        width={620}
+        style={{ maxWidth: "95vw" }}
+        footer={[
+          <Button key="cancel" onClick={() => setVeraFix((s) => ({ ...s, open: false }))}>Cancel</Button>,
+          veraFix.suggestion?.canFix && (
+            <Button
+              key="apply"
+              type="primary"
+              loading={veraFix.applying}
+              disabled={!veraFix.choice?.province}
+              onClick={applyVeraFix}
+            >
+              Approve &amp; Apply
+            </Button>
+          ),
+        ].filter(Boolean)}
+      >
+        {!veraFix.suggestion ? null : !veraFix.suggestion.canFix ? (
+          <Alert
+            type="info"
+            showIcon
+            message="VERA cannot fix this one automatically"
+            description={veraFix.suggestion.reason}
+          />
+        ) : (
+          <>
+            <Alert
+              type={veraFix.suggestion.confidence === "high" ? "success" : "warning"}
+              showIcon
+              message={veraFix.suggestion.confidence === "high" ? "High confidence" : "Needs your confirmation"}
+              description={veraFix.suggestion.rationale}
+              style={{ marginBottom: 14 }}
+            />
+            <Descriptions size="small" column={1} bordered>
+              <Descriptions.Item label="Client">{veraFix.suggestion.client?.name}</Descriptions.Item>
+              <Descriptions.Item label="Province">
+                <Text strong style={{ color: "#52c41a" }}>{veraFix.choice?.province || "—"}</Text>
+              </Descriptions.Item>
+              <Descriptions.Item label="Municipality / City">
+                {veraFix.choice?.municipalityCity || "—"}
+              </Descriptions.Item>
+              <Descriptions.Item label="Region">within-region-3</Descriptions.Item>
+            </Descriptions>
+            {(veraFix.suggestion.alternatives || []).length > 1 && (
+              <div style={{ marginTop: 12 }}>
+                <Text type="secondary" style={{ fontSize: 12 }}>
+                  Other masterlist matches — pick the correct one:
+                </Text>
+                <Select
+                  style={{ width: "100%", marginTop: 6 }}
+                  value={`${veraFix.choice?.province}|${veraFix.choice?.municipalityCity}`}
+                  onChange={(val) => {
+                    const [province, municipalityCity] = val.split("|");
+                    setVeraFix((s) => ({ ...s, choice: { ...s.choice, province, municipalityCity } }));
+                  }}
+                  options={veraFix.suggestion.alternatives.map((a) => ({
+                    value: `${a.province}|${a.municipalityCity}`,
+                    label: `${a.municipalityCity} — ${a.province}`,
+                  }))}
+                />
+              </div>
+            )}
+            <Text type="secondary" style={{ fontSize: 11, display: "block", marginTop: 12 }}>
+              Applying writes only these fields to the client record and marks the
+              issue resolved, recorded against your account.
+            </Text>
+          </>
+        )}
       </Modal>
 
       {/* Synchronization Progress Modal — real percentage from processed records /

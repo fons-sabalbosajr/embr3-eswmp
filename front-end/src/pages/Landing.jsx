@@ -6,6 +6,7 @@ import bplogo from "../assets/bagongpilipinaslogo.png";
 import bgemb from "../assets/bgemb.webp";
 import VeraFlameIcon from "../components/VeraFlameIcon";
 import secureStorage from "../utils/secureStorage";
+import startMockupMotion from "./landingMockupMotion";
 import "./Landing.css";
 
 export default function Landing() {
@@ -131,6 +132,16 @@ export default function Landing() {
       io.disconnect();
       created.forEach((a) => { try { a.pause?.(); a.revert?.(); } catch { /* ignore */ } });
     };
+  }, []);
+
+  // Hero dashboard mockup — the "systems operating" sequence (counters climbing,
+  // chart bars settling, submission rows arriving). Kept in its own module so the
+  // motion is reusable and can be dropped without touching this page; it gates
+  // itself on visibility, screen size and reduced motion. See landingMockupMotion.
+  useEffect(() => {
+    const root = landingRef.current;
+    if (!root) return undefined;
+    return startMockupMotion(root, { animate, stagger });
   }, []);
 
   // Hero device float + AI grid blink + About-map parallax (Anime.js). All looped

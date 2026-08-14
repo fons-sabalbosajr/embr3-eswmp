@@ -260,9 +260,11 @@ const MASKED_FIELDS = new Set(
 function maskConfidentialValues(payload) {
   const seen = new WeakSet();
 
-  const walk = (value) => {
+  // `ownedByDemo` propagates DOWN a record: once a document is known to be demo
+  // owned, its nested cells/haulers/entries are demo-owned too.
+  const walk = (value, ownedByDemo = false) => {
     if (value === null || value === undefined) return value;
-    if (Array.isArray(value)) return value.map(walk);
+    if (Array.isArray(value)) return value.map((item) => walk(item, ownedByDemo));
     if (value instanceof Date) return value;
     if (typeof value !== "object") return value;
 
@@ -276,16 +278,27 @@ function maskConfidentialValues(payload) {
       const plain = value.toJSON();
       // toJSON on a scalar wrapper (ObjectId) yields a primitive — done.
       if (plain === null || typeof plain !== "object") return plain;
-      return walk(plain);
+      return walk(plain, ownedByDemo);
     }
 
     // Guard against cycles in populated Mongoose graphs.
     if (seen.has(value)) return value;
     seen.add(value);
 
+    // A record the demo session OWNS is fabricated demo data, not a real
+    // confidential figure — the masking contract is "never receive a REAL
+    // confidential figure". Masking demo-owned records broke the very workflow
+    // the demo account exists to exercise: its own saved Total Volume Accepted
+    // came back as "***********", so the portal's baseline form held a
+    // non-numeric string, Review & Submit reported "Baseline Data is
+    // incomplete", and the submission was rejected server-side for the same
+    // reason. Production documents never carry either flag, so their figures
+    // stay masked exactly as before.
+    const owned = ownedByDemo || value.isDummy === true || value.isDemo === true;
+
     const out = {};
     for (const [key, val] of Object.entries(value)) {
-      if (MASKED_FIELDS.has(key.toLowerCase())) {
+      if (!owned && MASKED_FIELDS.has(key.toLowerCase())) {
         const isNumericish = (v) =>
           typeof v === "number" ||
           (typeof v === "string" && v.trim() !== "" && !Number.isNaN(Number(v)));
@@ -293,12 +306,12 @@ function maskConfidentialValues(payload) {
           // Per-cell figures (cellCapacities, cellFillValues, …) are arrays of
           // numbers. Masking element-wise preserves the array LENGTH, which the
           // cell gauges rely on to render the right number of cells.
-          out[key] = val.map((v) => (isNumericish(v) ? MASK : walk(v)));
+          out[key] = val.map((v) => (isNumericish(v) ? MASK : walk(v, owned)));
         } else {
-          out[key] = isNumericish(val) ? MASK : walk(val);
+          out[key] = isNumericish(val) ? MASK : walk(val, owned);
         }
       } else {
-        out[key] = walk(val);
+        out[key] = walk(val, owned);
       }
     }
     return out;
@@ -319,6 +332,46 @@ function maskConfidentialValues(payload) {
  * Verification failures simply mean "not a demo session"; real authentication is
  * still the routes' job, so this never widens access.
  */
+/**
+ * The developer-controlled GLOBAL PRIVACY toggle
+ * (AppSettings.maskSensitiveSlfValues) is the single documented switch for
+ * sensitive-value masking across the SLF Portal. Demo masking used to run
+ * unconditionally, which directly contradicted it: with the toggle OFF, a demo
+ * session still received "***********" for every volume and capacity.
+ *
+ * Both now answer to the same switch — no second, undocumented privacy rule.
+ * Turning the toggle ON masks production figures for demo sessions exactly as it
+ * does everywhere else; demo-OWNED records stay readable either way (see
+ * maskConfidentialValues) so the demonstration workflow keeps working.
+ *
+ * Cached briefly because this runs on EVERY API response; a settings change
+ * already broadcasts "app-settings", and a few seconds of staleness on a
+ * developer-only toggle is not worth a database read per request.
+ */
+const PRIVACY_TOGGLE_TTL_MS = 15_000;
+let privacyToggleCache = { value: false, readAt: 0 };
+
+async function isGlobalPrivacyMaskingOn() {
+  if (Date.now() - privacyToggleCache.readAt < PRIVACY_TOGGLE_TTL_MS) {
+    return privacyToggleCache.value;
+  }
+  try {
+    const AppSettings = require("mongoose").model("AppSettings");
+    const settings = await AppSettings.findOne().select("maskSensitiveSlfValues").lean();
+    privacyToggleCache = { value: Boolean(settings?.maskSensitiveSlfValues), readAt: Date.now() };
+  } catch {
+    // Settings unavailable (model not registered yet / DB blip) — fail CLOSED so
+    // an outage can never turn masking off for a session that should have it.
+    privacyToggleCache = { value: true, readAt: Date.now() };
+  }
+  return privacyToggleCache.value;
+}
+
+/** Drop the cached toggle so the next request re-reads it (used on settings change). */
+function resetPrivacyToggleCache() {
+  privacyToggleCache = { value: false, readAt: 0 };
+}
+
 function demoMaskingMiddleware(req, res, next) {
   let isDemoSession = Boolean(req.user?.isDemo || req.portalUser?.isDemo);
 
@@ -340,12 +393,21 @@ function demoMaskingMiddleware(req, res, next) {
   if (!isDemoSession) return next();
 
   req.isDemoSession = true;
-  const originalJson = res.json.bind(res);
-  res.json = (body) => originalJson(maskConfidentialValues(body));
 
-  // Everything downstream — including Mongoose hooks, which never see `req` —
-  // runs inside this store, which is how the write guard knows to engage.
-  demoContext.run({ isDemo: true }, next);
+  // The WRITE guard is not a privacy control — it stops a demonstration from
+  // corrupting production records — so it engages regardless of the toggle.
+  // Only the response masking is gated.
+  isGlobalPrivacyMaskingOn()
+    .then((maskingOn) => {
+      if (maskingOn) {
+        const originalJson = res.json.bind(res);
+        res.json = (body) => originalJson(maskConfidentialValues(body));
+      }
+      // Everything downstream — including Mongoose hooks, which never see `req` —
+      // runs inside this store, which is how the write guard knows to engage.
+      demoContext.run({ isDemo: true }, next);
+    })
+    .catch(() => demoContext.run({ isDemo: true }, next));
 }
 
 /**
@@ -393,6 +455,8 @@ module.exports = {
   // Write isolation
   demoContext,
   isDemoRequest,
+  isGlobalPrivacyMaskingOn,
+  resetPrivacyToggleCache,
   decideDemoWrite,
   installDemoWriteGuard,
   demoWriteGuardPlugin,

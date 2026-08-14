@@ -7,6 +7,22 @@ const { wantsIncludeDummy } = require("../utils/dummyFilter");
 
 const router = express.Router();
 
+/**
+ * Baseline-lifecycle transaction types.
+ *
+ * These describe the facility's BASELINE — the declared capacity, cell entries
+ * and accredited haulers — not any single disposal submission. Kept as one list
+ * so the submission thread and a baseline history can never disagree about which
+ * side an event belongs to.
+ */
+const BASELINE_TXN_TYPES = [
+  "baseline_update",
+  "baseline_update_request",
+  "baseline_update_approved",
+  "baseline_update_rejected",
+  "baseline_locked",
+];
+
 // Require an authenticated caller on every route below. Both frontends always
 // send a Bearer token, so this closes anonymous read/write/delete access to the
 // activity/audit log without changing client behaviour.
@@ -244,7 +260,18 @@ router.get("/thread/:submissionId", async (req, res) => {
       filters.push({ dataEntry: { $in: [null, undefined] }, "meta.idNo": { $in: ownKeys } });
     }
 
-    const transactions = await Transaction.find({ $or: filters }).sort({ createdAt: -1, _id: -1 }).lean();
+    // A SUBMISSION's Transaction History shows what happened to that disposal
+    // record — submitted, reverted, resubmitted, acknowledged, cells organized.
+    // BASELINE events belong to the facility's baseline, not to any one
+    // submission, and are read through their own history.
+    //
+    // Historical rows were filed against a submission because the baseline routes
+    // stamped the newest record's submissionId/dataEntry onto them (fixed at the
+    // source in routes/dataSLF.js). Excluding the baseline types here keeps those
+    // already-written rows out of this thread too, so the separation holds for
+    // existing data without rewriting audit history.
+    const baseFilter = { $or: filters, type: { $nin: BASELINE_TXN_TYPES } };
+    const transactions = await Transaction.find(baseFilter).sort({ createdAt: -1, _id: -1 }).lean();
     const seen = new Set();
     res.json(transactions.filter((txn) => {
       const id = String(txn._id || "");
@@ -252,6 +279,31 @@ router.get("/thread/:submissionId", async (req, res) => {
       seen.add(id);
       return true;
     }));
+  } catch (error) {
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+});
+
+/**
+ * Baseline history for one SLF — the other half of the split above.
+ *
+ * Baseline events are excluded from a submission's thread, so they need a home
+ * of their own; without this the separation would just hide them. Scoped by SLF
+ * name because a baseline belongs to the FACILITY, not to a submission — which
+ * is exactly why filing these against a submission was wrong in the first place.
+ */
+router.get("/baseline/:slfName", async (req, res) => {
+  try {
+    const slfName = decodeURIComponent(req.params.slfName || "").trim();
+    if (!slfName) return res.json([]);
+    const rx = new RegExp(`^${slfName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "i");
+    const transactions = await Transaction.find({
+      type: { $in: BASELINE_TXN_TYPES },
+      $or: [{ companyName: rx }, { "meta.slfName": rx }],
+    })
+      .sort({ createdAt: -1, _id: -1 })
+      .lean();
+    res.json(transactions);
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });
   }

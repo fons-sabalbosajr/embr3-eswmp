@@ -2,6 +2,12 @@ const express = require("express");
 const mongoose = require("mongoose");
 const SlfClient = require("../models/SlfClient");
 const { writeLog } = require("../utils/logger");
+// Shared name normalizer (trim/lowercase/collapse) — used by the VERA issue
+// suggestion below as well as the relationship map further down.
+const { normalizeName } = require("../utils/region3");
+// The project's municipality normalizer — handles "City of X" / "X City" and
+// punctuation, so a client's free-text town matches the masterlist's form.
+const { normMuni } = require("../utils/lguMatch");
 const { refreshAdmin } = require("../utils/socketEmit");
 const { authMiddleware, adminOnly, requirePermission } = require("../middleware/auth");
 const { getRegion3ProvinceSet, classifyRegion } = require("../utils/region3");
@@ -22,6 +28,18 @@ const PERM = "slfClients";
 const REL_MAP_TTL_MS = Number(process.env.REL_MAP_CACHE_TTL_MS ?? 60_000);
 const _relMapCache = new Map(); // type -> { data, expires }
 function clearRelMapCache() { _relMapCache.clear(); }
+
+// ── Dashboard client-count cache ──
+// GET /summary re-runs recalcCounts() — a dedup aggregation over the whole client
+// collection — on every dashboard poll, for a three-number tile that only moves
+// when a client or a baseline changes. 60s TTL; every write on this router
+// invalidates it, and baseline saves invalidate it through refreshAdmin (see
+// staleKeysFor in utils/socketEmit.js), which is what re-derives the roster.
+const { cacheJson, invalidateOnWrite } = require("../middleware/cacheRoute");
+const { MODULE_STATS } = require("../utils/cacheKeys");
+const CLIENT_SUMMARY_KEY = MODULE_STATS.slfClients;
+const CLIENT_SUMMARY_TTL_MS = 60000;
+router.use(invalidateOnWrite(CLIENT_SUMMARY_KEY));
 const actor = (req) => req.headers["x-user-name"] || req.headers["x-user-email"] || "admin";
 
 // Canonical duplicate: one profile per (normalizedName + type). Manual adds may
@@ -174,7 +192,7 @@ router.get("/by-slf/:slfId", requirePermission(PERM, "view"), async (req, res) =
 // ── Deduped unique-client counts for the SLF dashboard tiles + the four
 //    Region 3 breakdown tiles. Single authoritative source (recalcCounts reads
 //    the PERSISTED collection, deduped by normalized name+type). ──
-router.get("/summary", requirePermission(PERM, "view"), async (req, res) => {
+router.get("/summary", requirePermission(PERM, "view"), cacheJson(() => CLIENT_SUMMARY_KEY, CLIENT_SUMMARY_TTL_MS), async (req, res) => {
   try {
     const { recalcCounts } = require("../services/syncBaselineClients");
     const counts = await recalcCounts();
@@ -483,8 +501,37 @@ router.get("/issues", requirePermission(PERM, "view"), async (req, res) => {
       filter.status = req.query.status;
     }
     if (req.query.flagType) filter.flagType = req.query.flagType;
-    const issues = await SlfDataIssue.find(filter).sort({ status: 1, updatedAt: -1 }).lean();
-    res.json(issues);
+
+    // PAGINATED. This returned every matching document — 28,547 of them on
+    // production, each carrying its own `meta` object. The response never
+    // finished arriving, the client's catch swallowed it, and the modal showed
+    // its "No data issues" empty state: the data was there all along.
+    //
+    // Only the fields the table renders are projected; `meta`/`resolutionNotes`
+    // are the bulk of each document and nothing in the list reads them.
+    const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
+    const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 25, 1), 100);
+
+    const [data, total, byStatus] = await Promise.all([
+      SlfDataIssue.find(filter)
+        .select("flagType description portalUserEmail hauler clientName status updatedAt")
+        .sort({ status: 1, updatedAt: -1 })
+        .skip((page - 1) * limit)
+        .limit(limit)
+        .lean(),
+      SlfDataIssue.countDocuments(filter),
+      // Counts for the whole set, so the UI can show what is out there without
+      // fetching it.
+      SlfDataIssue.aggregate([{ $group: { _id: "$status", n: { $sum: 1 } } }]),
+    ]);
+
+    res.json({
+      data,
+      total,
+      page,
+      limit,
+      counts: byStatus.reduce((acc, row) => ({ ...acc, [row._id]: row.n }), {}),
+    });
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });
   }
@@ -508,6 +555,330 @@ router.get("/issues/count", requirePermission(PERM, "view"), async (req, res) =>
 });
 
 // ── Resolve / reopen a data issue (edit permission). ──
+/**
+ * ── VERA-assisted issue repair ──────────────────────────────────────────────
+ *
+ * VERA PROPOSES; the admin DECIDES. Nothing here writes on its own: the suggest
+ * endpoint is read-only and returns the exact field changes it would make, and
+ * the apply endpoint runs only when an admin sends the proposal back.
+ *
+ * The proposal is DETERMINISTIC — it is resolved against the Region 3 masterlist
+ * (Region3Lgu), never generated text. A fabricated province on a compliance
+ * record would be far worse than an unresolved flag, so when the masterlist
+ * cannot answer confidently the endpoint says so and proposes nothing.
+ */
+const stripLguPrefix = (value) =>
+  String(value || "")
+    .replace(/^\s*(lgu|municipality|city|mun\.?|brgy\.?|barangay)\s*[-–—:]?\s*/i, "")
+    .trim();
+
+// Client names arrive as "LGU - BAGAC BATAAN" / "LGU ANGELES": the town, and
+// often its province, in one free-text field. Compare against every masterlist
+// name and keep the longest match, so "STA. ANA PAMPANGA" prefers "Sta. Ana"
+// over a shorter incidental substring.
+function proposeMunicipalityMatch(rawName, masters) {
+  // normMuni (utils/lguMatch) is the project's own municipality normalizer: it
+  // strips the "City of …" / "… City" forms the masterlist uses, plus punctuation.
+  // A plain lowercase compare missed every city — "PRIVATE - ANGELES PAMPANGA"
+  // failed against the masterlist's "City of Angeles" — so the same normalizer
+  // is used on both sides here.
+  const haystack = normMuni(stripLguPrefix(rawName));
+  if (!haystack) return [];
+  const hits = masters.filter((m) => {
+    const muni = normMuni(m.name || m.municipalityCity || "");
+    // Two-letter fragments match far too much to be evidence of anything.
+    if (!muni || muni.length < 4) return false;
+    return haystack === muni || haystack.startsWith(`${muni} `) || haystack.includes(` ${muni} `) || haystack.endsWith(` ${muni}`);
+  });
+  // Ranking, in order:
+  //
+  // 1. A municipality whose name is ALSO its province's name ("City of Tarlac"
+  //    in Tarlac, "City of Bulacan"-style pairs) loses to any other candidate.
+  //    Client addresses end with the province, so that province word was being
+  //    matched as the town: "SITIO KAWILIWILI, CUTCUT II, CAPAS TARLAC" resolved
+  //    to City of Tarlac when the town is plainly Capas.
+  // 2. Then longest match, so "STA. ANA PAMPANGA" prefers "Sta. Ana" over a
+  //    shorter incidental hit.
+  const echoesProvince = (m) => normMuni(m.name || "") === normMuni(m.province || "");
+  return hits.sort((a, b) => {
+    const aEcho = echoesProvince(a);
+    const bEcho = echoesProvince(b);
+    if (aEcho !== bEcho) return aEcho ? 1 : -1;
+    return normMuni(b.name || "").length - normMuni(a.name || "").length;
+  });
+}
+
+/**
+ * Compute the proposal for ONE issue. Pure apart from the reads it is handed —
+ * masters and the client are passed in so a batch resolves them once instead of
+ * per row. Single and batch share this, so a proposal can never differ between
+ * the two paths.
+ */
+function buildIssueSuggestion(issue, client, masters) {
+  const noFix = (reason) => ({ canFix: false, reason, flagType: issue.flagType });
+
+  if (issue.flagType !== "region_unclassified") {
+    return noFix(
+      issue.flagType === "duplicate_client"
+        ? "Merging duplicate clients changes which records the coverage figures count, and the right survivor is a judgement call. Use Merge on the Clients page."
+        : issue.flagType === "missing_hauler"
+          ? "Assigning a hauler is an operational decision — it must come from the SLF's accredited hauler list, not be inferred."
+          : "No automatic repair is defined for this issue type.",
+    );
+  }
+  if (!client) return noFix(`No client record named "${issue.clientName}" was found — it may have been merged or removed.`);
+  if (client.province) return noFix("This client already has a province — re-run Sync from Baseline to clear the flag.");
+
+  const candidates =
+    proposeMunicipalityMatch(client.municipalityCity, masters).length
+      ? proposeMunicipalityMatch(client.municipalityCity, masters)
+      : proposeMunicipalityMatch(client.name, masters).length
+        ? proposeMunicipalityMatch(client.name, masters)
+        : proposeMunicipalityMatch(client.address, masters);
+
+  if (candidates.length === 0) {
+    return noFix(`"${client.name}" does not match any Region 3 municipality or city. It may be outside Region 3 — set the province by hand, or ignore the issue.`);
+  }
+
+  const distinctProvinces = [...new Set(candidates.map((c) => c.province).filter(Boolean))];
+  const best = candidates[0];
+  return {
+    canFix: true,
+    flagType: issue.flagType,
+    confidence: distinctProvinces.length === 1 ? "high" : "ambiguous",
+    client: { _id: String(client._id), name: client.name, municipalityCity: client.municipalityCity || "" },
+    proposal: {
+      province: best.province || "",
+      municipalityCity: best.municipalityCity || best.name || "",
+      regionClass: "within-region-3",
+    },
+    alternatives: candidates.slice(0, 6).map((c) => ({
+      province: c.province || "",
+      municipalityCity: c.municipalityCity || c.name || "",
+      regionClass: "within-region-3",
+    })),
+    rationale:
+      distinctProvinces.length === 1
+        ? `"${client.name}" matches the Region 3 masterlist entry ${best.name} (${best.province}).`
+        : `"${client.name}" matches ${candidates.length} masterlist entries across ${distinctProvinces.join(", ")}. Confirm which one is correct.`,
+  };
+}
+
+/** Resolve the client an issue refers to — these flags key on clientName. */
+function findIssueClient(issue, clientsByKey) {
+  return (
+    clientsByKey.get(`${issue.clientName}|${issue.clientType || ""}`) ||
+    clientsByKey.get(`${issue.clientName}|`) ||
+    null
+  );
+}
+
+/**
+ * Batch proposals — one pass for a whole page of issues.
+ *
+ * The UI needs to know which rows are even fixable BEFORE the admin picks any,
+ * so the checkboxes can be limited to those. Doing that one request per row
+ * would be dozens of round-trips per page; here the masterlist and the clients
+ * are each read once.
+ */
+router.post("/issues/suggest-batch", requirePermission(PERM, "view"), async (req, res) => {
+  try {
+    const SlfDataIssue = require("../models/SlfDataIssue");
+    const Region3Lgu = require("../models/Region3Lgu");
+    const ids = (Array.isArray(req.body?.ids) ? req.body.ids : [])
+      .filter((id) => mongoose.isValidObjectId(id))
+      .slice(0, 200);
+    if (!ids.length) return res.json({ suggestions: {} });
+
+    const issues = await SlfDataIssue.find({ _id: { $in: ids } })
+      .select("flagType clientName clientType client").lean();
+
+    const [masters, clients] = await Promise.all([
+      Region3Lgu.find({ status: "Active", lguType: { $in: ["Municipality", "City"] } })
+        .select("name municipalityCity province").lean(),
+      SlfClient.find({ name: { $in: [...new Set(issues.map((i) => i.clientName).filter(Boolean))] }, deletedAt: null })
+        .select("name type province municipalityCity address").lean(),
+    ]);
+    const clientsByKey = new Map();
+    clients.forEach((c) => clientsByKey.set(`${c.name}|${c.type || ""}`, c));
+
+    const suggestions = {};
+    issues.forEach((issue) => {
+      suggestions[String(issue._id)] = buildIssueSuggestion(issue, findIssueClient(issue, clientsByKey), masters);
+    });
+    res.json({ suggestions });
+  } catch (error) {
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+});
+
+/**
+ * Apply many approved proposals in one request.
+ *
+ * Only HIGH-confidence proposals are accepted without an explicit province:
+ * an ambiguous match must be decided by a person, so a bulk run can never guess
+ * one. Every row is applied independently and reported on — one bad record never
+ * aborts the rest.
+ */
+router.post("/issues/apply-batch", requirePermission(PERM, "edit"), async (req, res) => {
+  try {
+    const SlfDataIssue = require("../models/SlfDataIssue");
+    const Region3Lgu = require("../models/Region3Lgu");
+    const ids = (Array.isArray(req.body?.ids) ? req.body.ids : [])
+      .filter((id) => mongoose.isValidObjectId(id))
+      .slice(0, 200);
+    if (!ids.length) return res.status(400).json({ message: "No issues selected." });
+
+    const issues = await SlfDataIssue.find({ _id: { $in: ids }, status: "open" });
+    const [masters, clients] = await Promise.all([
+      Region3Lgu.find({ status: "Active", lguType: { $in: ["Municipality", "City"] } })
+        .select("name municipalityCity province").lean(),
+      SlfClient.find({ name: { $in: [...new Set(issues.map((i) => i.clientName).filter(Boolean))] }, deletedAt: null })
+        .select("name type").lean(),
+    ]);
+    const clientsByKey = new Map();
+    clients.forEach((c) => clientsByKey.set(`${c.name}|${c.type || ""}`, c));
+
+    const who = actor(req);
+    const results = { applied: 0, skipped: 0, rows: [] };
+
+    for (const issue of issues) {
+      // Re-derive rather than trust the client: the proposal is recomputed here
+      // from the masterlist, so a tampered payload cannot write an arbitrary
+      // province.
+      const lean = clientsByKey.get(`${issue.clientName}|${issue.clientType || ""}`) || clientsByKey.get(`${issue.clientName}|`);
+      const full = lean ? await SlfClient.findById(lean._id) : null;
+      const suggestion = buildIssueSuggestion(issue, full, masters);
+
+      if (!suggestion.canFix || suggestion.confidence !== "high") {
+        results.skipped += 1;
+        results.rows.push({
+          _id: String(issue._id), clientName: issue.clientName, status: "skipped",
+          reason: suggestion.canFix ? "Ambiguous — needs a province chosen by hand." : suggestion.reason,
+        });
+        continue;
+      }
+
+      const { province, municipalityCity } = suggestion.proposal;
+      const before = { province: full.province || "", municipalityCity: full.municipalityCity || "" };
+      full.province = province;
+      if (municipalityCity) full.municipalityCity = municipalityCity;
+      full.regionClass = "within-region-3";
+      full.updatedBy = who;
+      await full.save();
+
+      issue.status = "resolved";
+      issue.resolvedAt = new Date();
+      issue.resolvedBy = who;
+      issue.resolutionNotes = `Resolved via VERA bulk repair (approved by ${who}): province set to "${province}".`;
+      await issue.save();
+
+      results.applied += 1;
+      results.rows.push({
+        _id: String(issue._id), clientName: issue.clientName, status: "applied",
+        province, municipalityCity, before,
+      });
+    }
+
+    writeLog("info", "slf-client.vera_bulk_fix", {
+      message: `VERA bulk repair: ${results.applied} applied, ${results.skipped} skipped`,
+      user: who,
+      ip: req.ip,
+      meta: { requested: ids.length, applied: results.applied, skipped: results.skipped },
+    });
+
+    res.json(results);
+    clearRelMapCache();
+    refreshAdmin(req, "slf-clients");
+    refreshAdmin(req, "clients");
+  } catch (error) {
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+});
+
+router.get("/issues/:id/suggestion", requirePermission(PERM, "view"), async (req, res) => {
+  try {
+    const SlfDataIssue = require("../models/SlfDataIssue");
+    const Region3Lgu = require("../models/Region3Lgu");
+    if (!mongoose.isValidObjectId(req.params.id)) return res.status(404).json({ message: "Issue not found" });
+    const issue = await SlfDataIssue.findById(req.params.id).lean();
+    if (!issue) return res.status(404).json({ message: "Issue not found" });
+
+    // Shares buildIssueSuggestion with the batch endpoint, so a single-row
+    // proposal and a bulk one can never disagree.
+    const [masters, client] = await Promise.all([
+      Region3Lgu.find({ status: "Active", lguType: { $in: ["Municipality", "City"] } })
+        .select("name municipalityCity province").lean(),
+      issue.client
+        ? SlfClient.findById(issue.client).lean()
+        : SlfClient.findOne({
+            name: issue.clientName,
+            ...(issue.clientType ? { type: issue.clientType } : {}),
+            deletedAt: null,
+          }).lean(),
+    ]);
+
+    res.json(buildIssueSuggestion(issue, client, masters));
+  } catch (error) {
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+});
+
+router.post("/issues/:id/apply-suggestion", requirePermission(PERM, "edit"), async (req, res) => {
+  try {
+    const SlfDataIssue = require("../models/SlfDataIssue");
+    if (!mongoose.isValidObjectId(req.params.id)) return res.status(404).json({ message: "Issue not found" });
+    const issue = await SlfDataIssue.findById(req.params.id);
+    if (!issue) return res.status(404).json({ message: "Issue not found" });
+    if (issue.flagType !== "region_unclassified") {
+      return res.status(400).json({ message: "No automatic repair is defined for this issue type." });
+    }
+
+    // The admin sends back the proposal they approved. Only these three fields
+    // are ever written — an approved suggestion can never turn into a broader edit.
+    const province = String(req.body?.province || "").trim();
+    const municipalityCity = String(req.body?.municipalityCity || "").trim();
+    if (!province) return res.status(400).json({ message: "A province is required to apply this fix." });
+
+    // Same resolution as the suggest endpoint — these issues key on clientName.
+    const client = issue.client
+      ? await SlfClient.findById(issue.client)
+      : await SlfClient.findOne({
+          name: issue.clientName,
+          ...(issue.clientType ? { type: issue.clientType } : {}),
+          deletedAt: null,
+        });
+    if (!client) return res.status(404).json({ message: "The client record no longer exists." });
+
+    const before = { province: client.province || "", municipalityCity: client.municipalityCity || "", regionClass: client.regionClass || "" };
+    client.province = province;
+    if (municipalityCity) client.municipalityCity = municipalityCity;
+    client.regionClass = "within-region-3";
+    client.updatedBy = actor(req);
+    await client.save();
+
+    issue.status = "resolved";
+    issue.resolvedAt = new Date();
+    issue.resolvedBy = actor(req);
+    issue.resolutionNotes = `Resolved via VERA (approved by ${actor(req)}): province set to "${province}"${municipalityCity ? `, municipality "${municipalityCity}"` : ""}.`;
+    await issue.save();
+
+    writeLog("info", "slf-client.vera_fix_applied", {
+      message: `VERA fix applied to client "${client.name}" — province "${before.province || "(blank)"}" → "${province}"`,
+      user: actor(req),
+      ip: req.ip,
+      meta: { issueId: String(issue._id), clientId: String(client._id), before, after: { province, municipalityCity, regionClass: "within-region-3" } },
+    });
+
+    res.json({ message: "Fix applied", issue, client: { _id: String(client._id), province: client.province, municipalityCity: client.municipalityCity } });
+    clearRelMapCache();
+    refreshAdmin(req, "slf-clients");
+    refreshAdmin(req, "clients");
+  } catch (error) {
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+});
+
 router.patch("/issues/:id/resolve", requirePermission(PERM, "edit"), async (req, res) => {
   try {
     const SlfDataIssue = require("../models/SlfDataIssue");
@@ -855,3 +1226,7 @@ module.exports = router;
 // Exposed so the LGU masterlist route can invalidate the served/unserved counts
 // immediately when masterlist entries change (add/edit/delete/import).
 module.exports.clearRelMapCache = clearRelMapCache;
+// Pure helpers behind the VERA issue repair, exposed for tests — these decide a
+// value that gets WRITTEN to a client record, so their ranking rules are pinned.
+module.exports.proposeMunicipalityMatch = proposeMunicipalityMatch;
+module.exports.buildIssueSuggestion = buildIssueSuggestion;

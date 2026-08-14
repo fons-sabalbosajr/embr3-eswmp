@@ -11,7 +11,19 @@ const { refreshAdmin, broadcastRefresh } = require("../utils/socketEmit");
 const { writeLog } = require("../utils/logger");
 const { NON_DUMMY_CLAUSE } = require("../utils/dummyFilter");
 
+const serverCache = require("../utils/serverCache");
+const { cacheJson, invalidateOnWrite } = require("../middleware/cacheRoute");
+const { PORTAL_FIELDS_CACHE_KEY, PSGC_PREFIX } = require("../utils/cacheKeys");
+
 const router = express.Router();
+
+// The active portal field definitions are read on EVERY portal Data Entry load
+// and change only when an admin edits them here. Cached for 10 minutes, and
+// invalidated after any successful write on this router — deliberately router-wide
+// rather than per field route, so a settings write can never leave the portal
+// rendering a stale form. Over-invalidating a single small key costs nothing.
+const PORTAL_FIELDS_TTL_MS = 600000;
+router.use(invalidateOnWrite(PORTAL_FIELDS_CACHE_KEY));
 
 function serializeAnnouncement(item = {}) {
   return {
@@ -83,7 +95,7 @@ function migrateLegacyAnnouncement(settings) {
 // ── Portal Fields ──
 
 // Get all active fields (for client portal)
-router.get("/fields", async (req, res) => {
+router.get("/fields", cacheJson(() => PORTAL_FIELDS_CACHE_KEY, PORTAL_FIELDS_TTL_MS), async (req, res) => {
   try {
     const fields = await PortalField.find({ isActive: true }).sort({ order: 1 });
     res.json(fields);
@@ -291,6 +303,10 @@ router.put("/slf-masking", authMiddleware, developerOnly, async (req, res) => {
         settings.maskSensitiveSlfAudit = settings.maskSensitiveSlfAudit.slice(-200);
       }
       await settings.save();
+      // Demo-session response masking answers to this same toggle — drop its
+      // cached copy so the change takes effect on the next request instead of
+      // after the TTL.
+      require("../utils/demoMode").resetPrivacyToggleCache();
       writeLog("info", "settings.slfMasking.updated", {
         message: `SLF sensitive-value masking ${next ? "enabled" : "disabled"}`,
         user: req.user?.email || req.user?.id || "",
@@ -826,17 +842,21 @@ router.put("/org-chart", authMiddleware, adminOnly, async (req, res) => {
   }
 });
 
-// ── Philippine Address API Proxy (PSGC) — with 24-hour in-memory cache ──
-const _psgcCache = new Map(); // key → { data, expiresAt }
+// ── Philippine Address API Proxy (PSGC) — 24-hour cache ──
+// A miss here costs an EXTERNAL network round trip (psgc.gitlab.io), not a Mongo
+// query, so it is the most expensive miss in the app and the one most worth
+// keeping across restarts — which the shared cache does once Redis is configured.
+// The upstream data is effectively immutable, hence the long TTL and no
+// invalidation path; the URL is the key, so every level of the address cascade
+// gets its own entry. `wrap` gives it single-flight too: a portal page that opens
+// the address picker for the first time fires one upstream request, not one per
+// concurrent user.
 const PSGC_TTL = 24 * 60 * 60 * 1000; // 24 hours
 async function fetchPsgc(url) {
-  const now = Date.now();
-  const cached = _psgcCache.get(url);
-  if (cached && cached.expiresAt > now) return cached.data;
-  const resp = await fetch(url);
-  const data = await resp.json();
-  _psgcCache.set(url, { data, expiresAt: now + PSGC_TTL });
-  return data;
+  return serverCache.wrap(`${PSGC_PREFIX}:${url}`, PSGC_TTL, async () => {
+    const resp = await fetch(url);
+    return resp.json();
+  });
 }
 
 router.get("/address/regions", async (_req, res) => {

@@ -1033,7 +1033,9 @@ export default function AdminHome() {
               letterSpacing: 0.5,
             }}
           >
-            EMBR3-ESWMP v1.0.0
+            {/* Injected from package.json at build time (see vite.config.js) so
+                this can never drift from the released version again. */}
+            EMBR3-ESWMP v{__APP_VERSION__}
           </Text>
         </div>
       )}

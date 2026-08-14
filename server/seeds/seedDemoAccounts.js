@@ -44,8 +44,8 @@ const DEMO_PORTAL_EMAIL = "demo.portal@eswmp-demo.local";
 const DEMO_ADMIN_USERNAME = "demo.admin";
 const DEMO_PORTAL_USERNAME = "demo.portal";
 
-const DEFAULT_ADMIN_PASSWORD = "EswmpDemo!Admin2026";
-const DEFAULT_PORTAL_PASSWORD = "EswmpDemo!Portal2026";
+const DEFAULT_ADMIN_PASSWORD = process.env.DEFAULT_ADMIN_PASSWORD;
+const DEFAULT_PORTAL_PASSWORD = process.env.DEFAULT_PORTAL_PASSWORD;
 
 const adminPassword = process.env.DEMO_ADMIN_PASSWORD || DEFAULT_ADMIN_PASSWORD;
 const portalPassword = process.env.DEMO_PORTAL_PASSWORD || DEFAULT_PORTAL_PASSWORD;

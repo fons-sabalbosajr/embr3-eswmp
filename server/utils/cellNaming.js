@@ -134,10 +134,130 @@ function collectCellNames(entry, facilityCellNames) {
   return [...out].filter(Boolean);
 }
 
+/**
+ * How many cells a facility actually has.
+ *
+ * `numberOfCell` lags behind in practice — an admin who adds a cell populates the
+ * parallel arrays without it catching up — so the count is the widest of every
+ * source, matching computeCellOccupancy() and the portal's own slfCellCount.
+ * Disagreeing here is what truncates the tail of a facility's cell list.
+ */
+function facilityCellCount(facility) {
+  return Math.max(
+    Number(facility?.numberOfCell || 0),
+    facility?.cellNames?.length || 0,
+    facility?.cellStatuses?.length || 0,
+    facility?.cellCapacities?.length || 0,
+    facility?.cellTypes?.length || 0,
+    0,
+  );
+}
+
+/** "Cell 3" → 2. Anything else → null. The positional label resolveCellName emits. */
+function positionalIndexOf(name) {
+  const match = /^\s*cell\s*0*(\d+)\s*$/i.exec(String(name || ""));
+  if (!match) return null;
+  const ordinal = Number(match[1]);
+  return Number.isInteger(ordinal) && ordinal > 0 ? ordinal - 1 : null;
+}
+
+/**
+ * Resolve a baseline cell entry to the facility's AUTHORITATIVE cell index.
+ *
+ * ── Why this exists ─────────────────────────────────────────────────────────
+ * `cellIndex` is the stable relationship to the admin's cell configuration;
+ * `cellName` is a snapshot of the label at save time. The portal's baseline save
+ * historically stored entries verbatim from the request body, and the body
+ * usually carried only a name — in the live data 1052 of 1112 baseline cell
+ * entries (94.6%) have NO cellIndex at all. Without it the portal cannot tie a
+ * baseline row to the admin's cell, so Data Entry rendered the frozen snapshot
+ * ("Cell 1", "CELL IA", even a facility name used as a cell name) while every
+ * other view rendered the admin's current name. That is the reported mismatch.
+ *
+ * ── Resolution order (most authoritative first) ─────────────────────────────
+ *   1. an existing in-range integer index — already authoritative, never overridden
+ *   2. an exact (case/space-insensitive) match against facility.cellNames
+ *   3. the positional "Cell N" convention, ONLY when N is within the cell count
+ *
+ * Returns null when none of those identify a cell. That is deliberate: leaving a
+ * row unbound is correct, and binding a volume to a GUESSED cell would corrupt
+ * the admin's capacity figures. Never guess.
+ *
+ * @returns {number|null}
+ */
+function resolveCellIndex(facility, entry) {
+  const count = facilityCellCount(facility);
+  if (!count) return null;
+
+  const raw = entry?.cellIndex;
+  const hasIndex = raw !== null && raw !== undefined && raw !== "";
+  const index = hasIndex ? Number(raw) : NaN;
+  if (Number.isInteger(index) && index >= 0 && index < count) return index;
+
+  const wanted = String(entry?.cellName || "").trim().toLowerCase();
+  if (!wanted) return null;
+
+  const names = facility?.cellNames || [];
+  for (let i = 0; i < count; i += 1) {
+    if (String(names[i] || "").trim().toLowerCase() === wanted) return i;
+  }
+
+  const positional = positionalIndexOf(wanted);
+  return positional !== null && positional < count ? positional : null;
+}
+
+/**
+ * Bind baseline cell entries to the admin's authoritative cell configuration.
+ *
+ * Pure: returns new rows, never mutates the stored document. Used on BOTH sides
+ * so the two can never drift —
+ *   • the portal baseline READ, so Data Entry renders the admin's current cells;
+ *   • the portal baseline SAVE, so newly written rows carry the index and the
+ *     read no longer has to infer it.
+ *
+ * An entry that cannot be resolved keeps its stored name and gets `cellIndex:
+ * null`, so the caller can tell "unbound" from "bound to cell 0".
+ *
+ * @param {Array} entries activeCellEntries / closedCellEntries
+ * @param {object} facility lean SlfFacility carrying the cell arrays
+ */
+function resolveBaselineCellEntries(entries, facility) {
+  if (!Array.isArray(entries)) return entries;
+  if (!facility) return entries; // nothing authoritative to resolve against
+
+  return entries.map((entry) => {
+    if (!entry || typeof entry !== "object") return entry;
+    const index = resolveCellIndex(facility, entry);
+    const resolvedName =
+      index === null
+        ? String(entry.cellName || "").trim()
+        : resolveCellName(facility.cellNames, index, entry.cellName);
+    // The admin's configured type wins for a bound cell: a row saved as
+    // "Residual" against a cell the admin has since switched to Treated Haz Waste
+    // must not keep claiming the old type.
+    const resolvedType =
+      index === null
+        ? entry.cellType
+        : facility.cellTypes?.[index] || entry.cellType;
+
+    if (
+      entry.cellIndex === index &&
+      entry.cellName === resolvedName &&
+      entry.cellType === resolvedType
+    ) {
+      return entry; // unchanged — keep object identity
+    }
+    return { ...entry, cellIndex: index, cellName: resolvedName, cellType: resolvedType };
+  });
+}
+
 module.exports = {
   resolveCellName,
   applyResolvedCellNames,
   applyResolvedCellNamesToAll,
   collectCellNames,
   facilityNamesOf,
+  facilityCellCount,
+  resolveCellIndex,
+  resolveBaselineCellEntries,
 };

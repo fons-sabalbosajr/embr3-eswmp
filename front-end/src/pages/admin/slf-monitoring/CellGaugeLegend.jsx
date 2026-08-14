@@ -1,47 +1,55 @@
-import { Space, Tooltip, Typography } from "antd";
+import { Space, Tag, Tooltip, Typography } from "antd";
 import { VOLUME_METRICS } from "../../../utils/volumeMetrics";
 
 const { Text } = Typography;
 
-// The Cell Infrastructure gauges encode TWO independent things, and until now
-// neither was labelled — a reader saw coloured arcs with no key.
+// Key for the Cell Infrastructure gauges.
 //
-//   • the ARC COLOUR is the utilization band (how full the cell is)
-//   • the VOLUME behind that percentage is made of a declared baseline plus
-//     volumes submitted through the Portal
+// The legend answers "what is this volume made of?" — a declared BASELINE plus
+// what portal users SUBMITTED, giving the stored total and the remaining
+// headroom. Colours come from the shared palette (utils/volumeMetrics.js), so a
+// colour means the same thing on every gauge in the app.
 //
-// Both are explained here, using the same palette as every other gauge in the
-// app (utils/volumeMetrics.js), so a colour means the same thing wherever it
-// appears.
+// How full a cell is used to be keyed here as three utilization COLOUR bands,
+// which forced the reader to decode green/amber/red twice — once as a volume
+// metric and once as a fullness band. Fullness is now stated in words as a
+// status tag (OK / Near Full / Full), which is what an operator actually needs.
 
-/** Utilization bands — these MUST match the strokeColor thresholds on the gauges. */
-export const UTILIZATION_BANDS = [
-  { key: "normal", label: "Under 70%", color: "#52c41a", description: "Cell has comfortable headroom." },
-  { key: "elevated", label: "70–89%", color: "#faad14", description: "Filling up — plan the next cell." },
-  { key: "nearFull", label: "90% and over", color: "#ff4d4f", description: "Near or at capacity." },
-  { key: "inactive", label: "Inactive", color: "#bfbfbf", description: "Closed, completed, reserved or under construction." },
+/**
+ * Fullness status — the same thresholds that tint the gauge arc, expressed as a
+ * plain-language STATUS rather than a colour key.
+ *
+ * The legend now explains the gauge in terms of what the volume IS (baseline /
+ * submitted / stored / remaining); how full a cell happens to be is a warning,
+ * not a colour to decode, so it is surfaced as a tag instead.
+ */
+export const FULLNESS_STATUS = [
+  { key: "ok", label: "OK", color: "#52c41a", range: "under 70%", description: "Cell has comfortable headroom." },
+  { key: "nearFull", label: "Near Full", color: "#faad14", range: "70–89%", description: "Filling up — plan the next cell." },
+  { key: "full", label: "Full", color: "#ff4d4f", range: "90% and over", description: "Near or at capacity — stop directing waste here." },
+  { key: "inactive", label: "Inactive", color: "#bfbfbf", range: "—", description: "Closed, completed, reserved or under construction." },
 ];
 
-// Two DIFFERENT things are keyed in this legend, and since the standard palette
-// reuses green/amber/red for both axes the swatch SHAPE is what tells them apart:
-//
-//   arc glyph  → how the gauge ARC is tinted (utilization band)
-//   square     → a named VOLUME metric (baseline / submitted / stored / remaining)
-//
-// Without this, "green" reads ambiguously as both "under 70% full" and "waste
-// stored in cell" in the very same key.
-const arcGlyph = (color) => (
-  <svg width={14} height={9} viewBox="0 0 14 9" aria-hidden style={{ flex: "0 0 auto" }}>
-    <path
-      d="M 2 8 A 5 5 0 0 1 12 8"
-      fill="none"
-      stroke={color}
-      strokeWidth={2.5}
-      strokeLinecap="round"
-    />
-  </svg>
-);
+/**
+ * Resolve a cell's fullness status from its utilization percentage.
+ *
+ * ONE definition, shared by the legend and any gauge that wants to show the tag,
+ * so the wording can never disagree with the arc's own thresholds.
+ *
+ * @param {number} percent 0–100 utilization
+ * @param {boolean} [inactive] cell is closed/completed/reserved/under construction
+ */
+export function cellFullnessStatus(percent, inactive = false) {
+  if (inactive) return FULLNESS_STATUS[3];
+  const value = Number(percent);
+  if (!Number.isFinite(value)) return FULLNESS_STATUS[0];
+  if (value >= 90) return FULLNESS_STATUS[2];
+  if (value >= 70) return FULLNESS_STATUS[1];
+  return FULLNESS_STATUS[0];
+}
 
+// Solid square = a stored volume; dashed square = remaining capacity (headroom,
+// not waste), so the two never read as the same kind of figure.
 const swatch = (color, dashed = false) => (
   <span
     aria-hidden
@@ -65,15 +73,6 @@ const item = ({ key, label, color, description }, dashed) => (
   </Tooltip>
 );
 
-const bandItem = ({ key, label, color, description }) => (
-  <Tooltip key={key} title={description}>
-    <span style={{ display: "inline-flex", alignItems: "center", gap: 5 }}>
-      {arcGlyph(color)}
-      <Text style={{ fontSize: 11 }}>{label}</Text>
-    </span>
-  </Tooltip>
-);
-
 /**
  * @param {boolean} [showVolumeComposition] hide the volume rows when the facility
  *   has no baseline/submitted split recorded (legacy records)
@@ -89,25 +88,11 @@ export default function CellGaugeLegend({ isDark = false, showVolumeComposition 
         background: isDark ? "rgba(255,255,255,0.02)" : "#fff",
       }}
     >
-      <div style={{ display: "flex", flexWrap: "wrap", gap: "6px 18px", alignItems: "center" }}>
-        <Text strong style={{ fontSize: 11, color: isDark ? "rgba(255,255,255,0.55)" : "rgba(0,0,0,0.55)" }}>
-          Gauge fill
-        </Text>
-        <Space size={14} wrap>
-          {UTILIZATION_BANDS.map((band) => bandItem(band))}
-        </Space>
-      </div>
-
+      {/* The legend leads with WHAT THE VOLUME IS — baseline, submitted, the
+          stored total and the headroom left. That is the question a reader
+          actually has in front of a cell gauge. */}
       {showVolumeComposition && (
-        <div
-          style={{
-            display: "flex",
-            flexWrap: "wrap",
-            gap: "6px 18px",
-            alignItems: "center",
-            marginTop: 6,
-          }}
-        >
+        <div style={{ display: "flex", flexWrap: "wrap", gap: "6px 18px", alignItems: "center" }}>
           <Text strong style={{ fontSize: 11, color: isDark ? "rgba(255,255,255,0.55)" : "rgba(0,0,0,0.55)" }}>
             Volume in cell
           </Text>
@@ -117,16 +102,45 @@ export default function CellGaugeLegend({ isDark = false, showVolumeComposition 
             {item(VOLUME_METRICS.stored)}
             {item(VOLUME_METRICS.remaining, true)}
           </Space>
-          <Text
-            type="secondary"
-            style={{ fontSize: 10.5, width: "100%", marginTop: 2 }}
-          >
-            {VOLUME_METRICS.stored.label} = {VOLUME_METRICS.baseline.label} +{" "}
-            {VOLUME_METRICS.submitted.label}. The percentage on each gauge is that
-            total against the cell&apos;s capacity. Arc-shaped keys above describe
-            how the gauge arc is tinted; square keys describe a volume figure.
-          </Text>
         </div>
+      )}
+
+      {/* How full the cell is, as a STATUS rather than a colour to decode. Same
+          thresholds that tint the arc (see cellFullnessStatus), so the tag and
+          the gauge can never disagree. */}
+      <div
+        style={{
+          display: "flex",
+          flexWrap: "wrap",
+          gap: "6px 18px",
+          alignItems: "center",
+          marginTop: showVolumeComposition ? 6 : 0,
+        }}
+      >
+        <Text strong style={{ fontSize: 11, color: isDark ? "rgba(255,255,255,0.55)" : "rgba(0,0,0,0.55)" }}>
+          Cell status
+        </Text>
+        <Space size={8} wrap>
+          {FULLNESS_STATUS.map((s) => (
+            <Tooltip key={s.key} title={s.description}>
+              <Tag
+                color={s.color}
+                style={{ margin: 0, fontSize: 10.5, lineHeight: "18px", borderRadius: 10 }}
+              >
+                {s.label}
+                {s.range !== "—" ? ` · ${s.range}` : ""}
+              </Tag>
+            </Tooltip>
+          ))}
+        </Space>
+      </div>
+
+      {showVolumeComposition && (
+        <Text type="secondary" style={{ fontSize: 10.5, display: "block", marginTop: 6 }}>
+          {VOLUME_METRICS.stored.label} = {VOLUME_METRICS.baseline.label} +{" "}
+          {VOLUME_METRICS.submitted.label}. The percentage on each gauge is that
+          total against the cell&apos;s capacity.
+        </Text>
       )}
     </div>
   );

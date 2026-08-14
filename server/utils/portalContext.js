@@ -159,6 +159,19 @@ function sendPortalContextError(res, error) {
   if (error instanceof PortalContextError) {
     return res.status(error.statusCode).json({ message: error.message });
   }
+  // Any error that already carries an HTTP status is a DELIBERATE refusal, not a
+  // crash — forward it with its own message instead of flattening it to a bare
+  // 500 "Server error". The demo write guard (utils/demoMode.js) throws exactly
+  // this shape (`status` + `code`), and swallowing it is what turned a
+  // "demonstration accounts cannot modify production records" refusal into an
+  // unexplained 500 in the portal's Drafts panel.
+  const status = Number(error?.statusCode || error?.status);
+  if (Number.isInteger(status) && status >= 400 && status < 600) {
+    return res.status(status).json({
+      message: error.message || "Request refused",
+      ...(error.code ? { code: error.code } : {}),
+    });
+  }
   return res.status(500).json({ message: "Server error", error: error.message });
 }
 
