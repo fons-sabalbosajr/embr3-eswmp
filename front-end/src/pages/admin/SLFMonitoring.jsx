@@ -385,6 +385,8 @@ export default function SLFMonitoring({
   const [capacityAlertSending, setCapacityAlertSending] = useState(false);
   const [mapPreview, setMapPreview] = useState(null);
   const [slfSubmissions, setSlfSubmissions] = useState([]);
+  // facilityId → the server's canonical per-cell rollup. See /data-slf/cell-occupancy.
+  const [cellOccupancy, setCellOccupancy] = useState({});
   const [cellAssignmentModal, setCellAssignmentModal] = useState(null);
   // The placement editor now fetches its facility's real submissions on open, so
   // its trigger needs a pending state to stop a second click firing a second fetch.
@@ -559,12 +561,21 @@ export default function SLFMonitoring({
           // returns the same totals in ~285KB / ~3s. Anything needing real per-truck
           // rows (the detail modal, the cell-assignment editor) fetches its own
           // facility's full records on demand.
-          const calls = [api.get("/data-slf/cell-usage")];
+          //
+          // `/data-slf/cell-occupancy` is the AUTHORITATIVE per-cell rollup
+          // (server-side computeCellOccupancy — the same function that writes
+          // SlfFacility.cellFillValues). It replaces the browser's own
+          // re-derivation of Waste in Cell, which could not see per-vehicle
+          // placements and disagreed with the stored gauge after a cell move.
+          // The cell-usage rows are still fetched for the per-truck drill-downs
+          // that need real submission rows; both requests run in parallel.
+          const calls = [api.get("/data-slf/cell-usage"), api.get("/data-slf/cell-occupancy")];
           if (!facilitiesCache) calls.push(api.get("/slf-facilities"));
           if (!baselineMapCache) calls.push(api.get("/data-slf/baselines"));
           const res = await Promise.all(calls);
           const submissions = res[0].data;
-          let idx = 1;
+          const occupancyByFacility = res[1]?.data?.byFacility || {};
+          let idx = 2;
           if (!facilitiesCache)
             facilitiesCache = excludeDummy(res[idx++]?.data || []);
           if (!baselineMapCache)
@@ -581,11 +592,13 @@ export default function SLFMonitoring({
                 record,
                 findBaselineForFacility(record, baselineMapCache),
                 getFacilityCandidateSubmissions(record, submissionIndex),
+                occupancyByFacility[String(record._id)] || null,
               ),
             ),
             // Keep the lean set in memory for table-level cell math; the detail
             // modal fetches the richer per-facility data when opened.
             submissions: normalizedSubmissions,
+            occupancy: occupancyByFacility,
           };
         },
         {
@@ -600,6 +613,7 @@ export default function SLFMonitoring({
             setSlfSubmissions(
               Array.isArray(data) ? [] : data?.submissions || [],
             );
+            setCellOccupancy(Array.isArray(data) ? {} : data?.occupancy || {});
             // Silently replace records with fully-enriched version (no spinner)
             setRecords(rows.map((r) => ({ ...r, ...computeFields(r) })));
           },
@@ -674,7 +688,9 @@ export default function SLFMonitoring({
     // component.
     let refreshTimer = null;
     const handler = ({ target } = {}) => {
-      if (!target || target === "submissions" || target === "baselines") {
+      // "facility" is emitted by refreshFacilityCellOccupancy — the write that
+      // changes Waste in Cell after a placement is organized, moved or corrected.
+      if (!target || target === "submissions" || target === "baselines" || target === "facility") {
         if (refreshTimer) clearTimeout(refreshTimer);
         refreshTimer = setTimeout(() => {
           refreshTimer = null;
@@ -893,11 +909,14 @@ export default function SLFMonitoring({
         : detailYearRecords.find(
             (r) => (r.dataYear || new Date().getFullYear()) === detailYear,
           ) || null;
-    // Include portal submissions so cell fill values reflect submitted volumes
+    // Cell fill comes from the server rollup so View SLF Details, the SLF
+    // Dashboard gauges and Cell Infrastructure all show the same Waste in Cell.
+    // Submissions are still passed for the fallback path.
     return enrichFacilityWithBaseline(
       baseRecord,
       baselineData,
       facilitySubmissions,
+      cellOccupancy[String(baseRecord?._id || "")] || null,
     );
   }, [
     baselineData,
@@ -905,6 +924,7 @@ export default function SLFMonitoring({
     detailYearRecords,
     detailYear,
     facilitySubmissions,
+    cellOccupancy,
   ]);
 
   // Consolidated dashboard data for the "SLF Dashboard" tab in the view modal.
@@ -1064,17 +1084,43 @@ export default function SLFMonitoring({
         : parseCellIndex(cellRow?.cellName);
     const fallbackIndex = targetIndex != null ? targetIndex : 0;
     const rows = facilitySubmissions
+      // One row per PLACEMENT, not per truck. A multi-vehicle trip records its
+      // volume and its cell on each VEHICLE and leaves the truck level at 0, so
+      // reading only the truck dropped those rows entirely — the drill-down came
+      // up empty for exactly the cells whose waste arrived that way.
       .flatMap((submission) =>
-        (submission.trucks || []).map((truck, truckIndex) => ({
-          key: `${submission._id}-${truckIndex}`,
-          submission,
-          truck,
-          truckIndex,
-          cellIndex: getTruckCellIndex(truck),
-        })),
+        (submission.trucks || []).flatMap((truck, truckIndex) => {
+          const vehicles = (truck.vehicles || []).filter(
+            (v) => Number(v?.actualVolume || 0) > 0,
+          );
+          if (!vehicles.length) {
+            return [
+              {
+                key: `${submission._id}-${truckIndex}`,
+                submission,
+                truck,
+                truckIndex,
+                volume: Number(truck?.actualVolume || 0),
+                cellIndex: getTruckCellIndex(truck),
+              },
+            ];
+          }
+          return vehicles.map((vehicle) => ({
+            key: `${submission._id}-${truckIndex}-${(truck.vehicles || []).indexOf(vehicle)}`,
+            submission,
+            // The row renders truck-level columns (hauler, ticket) alongside the
+            // vehicle's own plate/volume, so both travel with it.
+            truck: { ...truck, ...vehicle, hauler: truck.hauler || truck.haulerName },
+            truckIndex,
+            vehicle,
+            volume: Number(vehicle?.actualVolume || 0),
+            cellIndex:
+              getTruckCellIndex(vehicle) ?? getTruckCellIndex(truck),
+          }));
+        }),
       )
       .filter((item) => {
-        if (!hasTruckVolume({ trucks: [item.truck] })) return false;
+        if (!(item.volume > 0)) return false;
         const placedIndex = findBestCellIndex(
           detailViewRecord._cellUsageRows || [],
           item.truck?.wasteType,
@@ -1856,6 +1902,11 @@ export default function SLFMonitoring({
           .filter((d) => d.title || d.url || d.description || d.docType),
       };
       Object.assign(payload, computeFields(payload));
+      // This form is the only place a "Waste in Cell" figure is typed by hand.
+      // Saying so marks the cells the admin filled in as admin-declared, so the
+      // figure survives the derived recompute instead of being overwritten by
+      // the next submission. A cell left blank stays derived.
+      payload.cellFillValuesDeclared = true;
       if (editing && editing._id) {
         const { data } = await api.put(
           `/slf-facilities/${editing._id}`,

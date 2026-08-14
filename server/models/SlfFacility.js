@@ -115,6 +115,24 @@ const slfFacilitySchema = new mongoose.Schema(
     cellNotes: [{ type: String, trim: true }], // per-cell notes (used for Under Construction / Reserved Cell status)
     cellFillValues: [threeDecimalNumber],
     cellFillUnits: [{ type: String, enum: ["m³", "tons", "m3"], default: "tons" }],
+    // Parallel to cellFillValues: true where an admin TYPED that cell's Waste in
+    // Cell figure (SLF Table → Edit → Waste in Cell).
+    //
+    // Waste in Cell is normally DERIVED — baseline + valid submissions,
+    // recomputed by refreshFacilityCellOccupancy on every submission, placement
+    // and acknowledgement. Without this flag a hand-entered figure was silently
+    // discarded: the recompute overwrote it on the next write, and every view
+    // that reads the derived rollup never showed it at all. The flag makes the
+    // admin's declaration deliberate and durable, and clearing the field hands
+    // the cell back to the derived value.
+    cellFillOverridden: [{ type: Boolean }],
+    // Which version of utils/cellOccupancy.js wrote the derived cell figures on
+    // this facility. When the calculation changes its version is bumped and the
+    // startup repair sweep recomputes every facility still carrying an older
+    // stamp — without it, a corrected calculation would leave the previously
+    // stored (wrong) numbers in place until something happened to touch the
+    // facility. Derived; never entered by a user.
+    cellOccupancyVersion: { type: Number, default: 0, index: true },
     // Provenance split of cellFillValues, in the SAME unit as cellFillUnits.
     // Derived — written only by utils/cellOccupancy.js via refreshFacilityCellOccupancy.
     // These exist so every view (admin dashboard gauges, portal cell utilization,

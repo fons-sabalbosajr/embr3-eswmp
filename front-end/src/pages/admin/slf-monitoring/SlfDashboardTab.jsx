@@ -1059,9 +1059,14 @@ const isSameDataEntry = (left, right) => {
   return !!leftId && !!rightId && leftId === rightId;
 };
 
+// Volume lives on the VEHICLE when a truck carries them (the truck level stays 0
+// for a multi-vehicle trip); checking only the truck dropped those submissions.
+// Mirrors hasTruckVolume in server/utils/cellOccupancy.js.
 const hasTruckVolume = (submission) =>
   (submission?.trucks || []).some(
-    (truck) => Number(truck?.actualVolume || 0) > 0,
+    (truck) =>
+      Number(truck?.actualVolume || 0) > 0 ||
+      (truck?.vehicles || []).some((v) => Number(v?.actualVolume || 0) > 0),
   );
 
 const getPortalVolumeUnit = (baseline, submissions = [], record) =>
@@ -1309,11 +1314,99 @@ export const buildFacilityCellUsage = (record, baseline, submissions = []) => {
   };
 };
 
-const enrichFacilityWithBaseline = (record, baseline, submissions = []) => {
+/**
+ * Turn the server's canonical per-cell rollup (GET /data-slf/cell-occupancy,
+ * which is `computeCellOccupancy` — the same function that writes the persisted
+ * SlfFacility.cellFillValues) into the row shape this page's gauges, breakdown
+ * table and charts already read.
+ *
+ * Doing it this way is what makes Waste in Cell mean ONE thing everywhere:
+ * before, the gauge rendered the stored fill while the breakdown rendered the
+ * browser's own re-derivation, so they disagreed after any cell move — and the
+ * browser's version could not see per-VEHICLE placements at all.
+ */
+const usageFromOccupancy = (occupancy) => ({
+  rows: occupancy.cells.map((cell) => ({
+    key: `cell-${cell.index + 1}`,
+    index: cell.index,
+    cellName: cell.label,
+    status: cell.status,
+    type: cell.type,
+    isHazardous: isHazardousCellType(cell.type),
+    // findBestCellIndex (shared with the server) reads `hazardous`.
+    hazardous: isHazardousCellType(cell.type),
+    capacity: cell.capacity,
+    capacityUnit: cell.unit,
+    unit: cell.unit,
+    baseline: cell.baselineUsed,
+    submissions: cell.submittedUsed,
+    total: cell.used,
+    // How many submissions actually placed waste in this cell. The per-cell
+    // drill-down is offered on this, not on the volume: a cell can hold waste
+    // from a submission whose per-vehicle volumes sum into it while its
+    // truck-level figure is 0, and a cell whose figure is an admin override has
+    // no submissions to list at all.
+    submissionCount: cell.submissionCount || 0,
+    submissionIds: cell.submissionIds || [],
+    overridden: !!cell.overridden,
+    derivedTotal: cell.derivedTotal,
+    byWasteType: {},
+    unitsSeen: [],
+    hasUnconvertible: (cell.unconvertible || 0) > 0,
+    mixedUnits: false,
+  })),
+  totalBaseline: Number(occupancy.totals?.baseline || 0),
+  totalSubmissions: Number(occupancy.totals?.submitted || 0),
+  total: Number(occupancy.totals?.total || 0),
+  // Received but not yet organized into a cell: the difference between the
+  // facility total and the sum of its cells. Reported so the two can differ
+  // honestly instead of the gap being pushed into an arbitrary cell.
+  unplaced: Number(occupancy.totals?.unplaced || 0),
+  placedSubmitted: Number(occupancy.totals?.placedSubmitted || 0),
+  unit: occupancy.unit,
+  submissionCount: Number(occupancy.submissionCount || 0),
+  anyMixedUnits: false,
+  anyUnconvertible: occupancy.cells.some((c) => (c.unconvertible || 0) > 0),
+});
+
+const enrichFacilityWithBaseline = (record, baseline, submissions = [], occupancy = null) => {
   if (!record) return record;
   const cellCount = Number(record.numberOfCell || 0);
-  const usage = buildFacilityCellUsage(record, baseline, submissions);
+  // The server rollup wins whenever it is available: it is the authoritative
+  // calculation, it already applies the pre-baseline rule and the acknowledged/
+  // active-status rule, and it sees per-vehicle placements. The client
+  // computation stays as the fallback for a facility the rollup has no entry for
+  // (a brand-new facility, or the rollup request having failed).
+  const usage =
+    occupancy?.cells?.length
+      ? usageFromOccupancy(occupancy)
+      : buildFacilityCellUsage(record, baseline, submissions);
   if (usage.total <= 0) return record;
+
+  if (occupancy?.cells?.length) {
+    return {
+      ...record,
+      actualResidualWasteReceived: usage.total,
+      wasteReceivedUnit: usage.unit,
+      // Waste in Cell = baseline in cell + valid submissions in cell, each
+      // counted exactly once. Moving a volume between cells changes only which
+      // row holds it; the total is unchanged.
+      cellFillValues: occupancy.cells.map((c) => c.used),
+      cellFillUnits: occupancy.cells.map((c) => c.unit),
+      cellFillBaselineValues: occupancy.cells.map((c) => c.baselineUsed),
+      cellFillSubmittedValues: occupancy.cells.map((c) => c.submittedUsed),
+      _baselineWasteReceived: usage.totalBaseline,
+      _baselineWasteReceivedUnit: usage.unit,
+      _submissionWasteReceived: usage.totalSubmissions,
+      _submissionWasteReceivedUnit: usage.unit,
+      _cellUsageRows: usage.rows,
+      _cellUsageSubmissionCount: usage.submissionCount,
+      _unplacedVolume: usage.unplaced || 0,
+      _placedSubmittedVolume: usage.placedSubmitted || 0,
+      _cellOccupancySource: "server",
+      _baselineActiveCellEntries: baseline?.activeCellEntries || [],
+    };
+  }
 
   const currentFillValues = Array.isArray(record.cellFillValues)
     ? record.cellFillValues

@@ -1521,7 +1521,22 @@ export default function SLFPortal() {
         lguCompanyName: sub.lguCompanyName,
         status: sub.status,
         // Each placement keeps its canonical truckIndex / vehicleIndex.
-        placements: sub.placements || [],
+        //
+        // A placement missing its Truck Capacity is pre-filled from the capacity
+        // this SLF already declared for that plate on its baseline (the server
+        // resolves it — see buildBaselineCapacityIndex). The operator confirms by
+        // saving rather than re-typing a figure they have already encoded; a
+        // plate with nothing on file is left blank and still asks for one.
+        placements: (sub.placements || []).map((p) =>
+          p.needsCapacity && !(Number(p.capacity) > 0) && Number(p.suggestedCapacity) > 0
+            ? {
+                ...p,
+                capacity: Number(p.suggestedCapacity),
+                capacityUnit: p.suggestedCapacityUnit || p.capacityUnit || "",
+                capacityPrefilled: true,
+              }
+            : p,
+        ),
       }));
       setCellOrganizerData(working);
     } catch (err) {
@@ -1633,6 +1648,19 @@ export default function SLFPortal() {
 
   // Complete a missing historical Truck Capacity for ONE placement, addressed by
   // its canonical truckIndex/vehicleIndex. Stored in the declared baseline unit.
+  // How many capacities the baseline filled in and the operator has not yet
+  // overridden — surfaced in the organizer so the prefill is never silent.
+  const prefilledCapacityCount = useMemo(
+    () =>
+      cellOrganizerData.reduce(
+        (total, sub) =>
+          total +
+          (sub.placements || []).filter((p) => p.capacityPrefilled && Number(p.capacity) > 0).length,
+        0,
+      ),
+    [cellOrganizerData],
+  );
+
   const updateOrganizerCapacity = (subId, truckIndex, vehicleIndex, capacityValue) => {
     setCellOrganizerData((prev) =>
       prev.map((sub) => {
@@ -1641,7 +1669,14 @@ export default function SLFPortal() {
           ...sub,
           placements: (sub.placements || []).map((p) =>
             p.truckIndex === truckIndex && p.vehicleIndex === vehicleIndex
-              ? { ...p, capacity: capacityValue, capacityUnit: baselineUnit || p.capacityUnit || slfUnit }
+              ? {
+                  ...p,
+                  capacity: capacityValue,
+                  capacityUnit: baselineUnit || p.capacityUnit || slfUnit,
+                  // Once the operator types over it, it is their figure, not the
+                  // baseline's — drop the label.
+                  capacityPrefilled: false,
+                }
               : p,
           ),
         };
@@ -8009,7 +8044,7 @@ export default function SLFPortal() {
                           <li><b>Expand a submission card</b> below to see the trucks/vehicles that still need a disposal cell.</li>
                           <li><b>Pick a cell</b> for each row using the cell selector on the right — only cells that are <i>Open for Disposal</i> (active and not full) can be chosen.</li>
                           <li>To place many rows at once, <b>tick the checkboxes</b>, choose a cell in the purple bulk-assign bar, and press <b>Apply</b>.</li>
-                          <li>If a row is missing its <b>Truck Capacity</b>, enter it (in your declared baseline unit) — historical entries need this completed here rather than at submission time.</li>
+                          <li>If a row is missing its <b>Truck Capacity</b>, enter it (in your declared baseline unit) — historical entries need this completed here rather than at submission time. Where that plate&apos;s capacity is already on your <b>Baseline Data</b>, it is filled in for you and marked <i>from baseline</i>; check it and edit only if that trip was different.</li>
                           <li>Rows fully completed turn green. When everything is placed and every capacity is filled, click <b>Save Placement</b> to update your records and the cell fill levels.</li>
                           <li><b>Organizing is required</b> — new submissions are blocked until all past waste is placed into cells and any missing truck capacities are completed.</li>
                         </ol>
@@ -8017,6 +8052,18 @@ export default function SLFPortal() {
                     },
                   ]}
                 />
+
+                {/* Pre-filled capacities are stated up front: numbers appear in a
+                    form the operator is about to submit, so where they came from
+                    must be visible rather than implied. */}
+                {prefilledCapacityCount > 0 && (
+                  <Alert
+                    type="success"
+                    showIcon
+                    message={`${prefilledCapacityCount} truck capacit${prefilledCapacityCount === 1 ? "y was" : "ies were"} filled in from your Baseline Data`}
+                    description="These plates already have a declared capacity on your baseline, so you do not need to re-encode them. Each one is marked “from baseline” — review it and edit only if that trip was different. Nothing is saved until you click Save Placement."
+                  />
+                )}
 
               {/* ── Cell Status Summary ──
                   Reads the SAME canonical admin-side data and helpers the Cell
@@ -8426,6 +8473,9 @@ export default function SLFPortal() {
                     needsCell: p.needsCell !== false,
                     needsCapacity: !!p.needsCapacity,
                     capacity: p.capacity,
+                    // Pre-filled from the baseline fleet, shown so the operator
+                    // knows where the number came from and can correct it.
+                    capacityPrefilled: !!p.capacityPrefilled,
                   }));
 
                   // A row is complete when it has a cell (if it needed one) AND a
@@ -8587,18 +8637,27 @@ export default function SLFPortal() {
                             width: 140,
                             render: (_, r) =>
                               r.needsCapacity ? (
-                                <InputNumber
-                                  size="small"
-                                  style={{ width: "100%" }}
-                                  min={0}
-                                  step={0.1}
-                                  placeholder="Required"
-                                  status={Number(r.capacity) > 0 ? "" : "warning"}
-                                  value={Number(r.capacity) > 0 ? r.capacity : undefined}
-                                  onChange={(val) =>
-                                    updateOrganizerCapacity(sub._id, r.truckIndex, r.vehicleIndex, val)
-                                  }
-                                />
+                                <Space direction="vertical" size={0} style={{ width: "100%" }}>
+                                  <InputNumber
+                                    size="small"
+                                    style={{ width: "100%" }}
+                                    min={0}
+                                    step={0.1}
+                                    placeholder="Required"
+                                    status={Number(r.capacity) > 0 ? "" : "warning"}
+                                    value={Number(r.capacity) > 0 ? r.capacity : undefined}
+                                    onChange={(val) =>
+                                      updateOrganizerCapacity(sub._id, r.truckIndex, r.vehicleIndex, val)
+                                    }
+                                  />
+                                  {r.capacityPrefilled && Number(r.capacity) > 0 && (
+                                    <Tooltip title="Taken from this plate's capacity on your Baseline Data. Edit it if this trip was different.">
+                                      <Text type="secondary" style={{ fontSize: 10 }}>
+                                        from baseline
+                                      </Text>
+                                    </Tooltip>
+                                  )}
+                                </Space>
                               ) : (
                                 <Text style={{ fontSize: 12 }}>
                                   {Number(r.capacity) > 0

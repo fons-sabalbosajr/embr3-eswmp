@@ -67,6 +67,76 @@ const PORTAL_SUBMISSION_LIST_FIELDS = [
 // cell can be detected and treated as unassigned (see isValidCellRef).
 const PORTAL_SLF_REF_FIELDS = "_id lgu slfName province cellNames cellStatuses";
 
+// `cellCorrections[]` is the ADMIN audit trail of a waste-placement correction:
+// who at EMB moved it, and the internal reason they recorded. The portal user
+// sees the corrected placement itself — `trucks[].cellIndex/cellName` is already
+// the current cell — and is notified when one happens, but the reviewer metadata
+// is not theirs to read. Applied to every route that returns whole submission
+// documents; the list projection above is a whitelist and never included it.
+const PORTAL_HIDDEN_ADMIN_FIELDS = "-cellCorrections";
+
+/**
+ * facilityKey → Map(normalised plate → { capacity, capacityUnit }) from the SLF
+ * baseline's accredited-hauler fleet.
+ *
+ * The operator declares each accredited vehicle's plate and capacity once, on
+ * the baseline. Re-typing the same figure for every historical placement that
+ * happens to be missing one is pure duplicate encoding, so the organizer offers
+ * the declared value back.
+ *
+ * ONE query for the whole batch — the fleet is read per FACILITY, not per
+ * submission, so a 60-submission organizer session still costs a single lookup.
+ * A submission with no linked facility falls back to its SLF name, which is how
+ * the rest of this route keys a facility too.
+ */
+async function buildBaselineCapacityIndex(submissions = []) {
+  const DataSLF = require("../models/DataSLF");
+  const byKey = new Map();
+  const facilityIds = new Set();
+  const slfNames = new Set();
+  submissions.forEach((sub) => {
+    const id = sub?.slfGenerator?._id || sub?.slfGenerator;
+    if (id) facilityIds.add(String(id));
+    else if (sub?.slfName) slfNames.add(String(sub.slfName));
+  });
+  if (!facilityIds.size && !slfNames.size) return byKey;
+
+  const or = [];
+  if (facilityIds.size) or.push({ slfGenerator: { $in: [...facilityIds] } });
+  if (slfNames.size) or.push({ slfName: { $in: [...slfNames] } });
+
+  const fleets = await DataSLF.find({
+    deletedAt: null,
+    "accreditedHaulers.0": { $exists: true },
+    $and: [{ $or: or }],
+  })
+    .setOptions({ includeHiddenYears: true })
+    .select("slfGenerator slfName accreditedHaulers.vehicles accreditedHaulers.plateNumber accreditedHaulers.capacity accreditedHaulers.capacityUnit")
+    .sort({ updatedAt: -1, createdAt: -1 })
+    .lean();
+
+  const normalise = (plate) => String(plate || "").replace(/[\s-]+/g, "").toUpperCase();
+  const add = (fleet, plate, capacity, unit) => {
+    const key = normalise(plate);
+    if (!key || !(Number(capacity) > 0)) return;
+    // Newest record wins; the sort above put it first, so never overwrite.
+    if (!fleet.has(key)) fleet.set(key, { capacity: Number(capacity), capacityUnit: unit || "" });
+  };
+
+  fleets.forEach((doc) => {
+    [String(doc.slfGenerator || ""), String(doc.slfName || "")].filter(Boolean).forEach((key) => {
+      if (!byKey.has(key)) byKey.set(key, new Map());
+      const fleet = byKey.get(key);
+      (doc.accreditedHaulers || []).forEach((hauler) => {
+        (hauler.vehicles || []).forEach((v) => add(fleet, v?.plateNumber, v?.capacity, v?.capacityUnit));
+        // Legacy single-vehicle haulers kept their plate/capacity on the hauler.
+        add(fleet, hauler?.plateNumber, hauler?.capacity, hauler?.capacityUnit);
+      });
+    });
+  });
+  return byKey;
+}
+
 // Cell naming comes from the SHARED resolver so the Portal and the admin side can
 // never disagree about what a cell is called. See utils/cellNaming.js.
 const resolvePortalCellName = resolveCellName;
@@ -831,13 +901,18 @@ router.post("/my-submissions/batch", async (req, res) => {
     if (unassignedOnly) {
       query.select(
         "idNo submissionId slfName slfGenerator dateOfDisposal lguCompanyName status " +
-          "trucks.hauler trucks.plateNumber trucks.wasteType trucks.actualVolume " +
+          "trucks.disposalTicketNo trucks.hauler trucks.plateNumber trucks.wasteType trucks.actualVolume " +
           "trucks.actualVolumeUnit trucks.truckCapacity trucks.truckCapacityUnit " +
           "trucks.cellIndex trucks.cellName trucks.cellType " +
           "trucks.vehicles.plateNumber trucks.vehicles.wasteType trucks.vehicles.actualVolume " +
           "trucks.vehicles.actualVolumeUnit trucks.vehicles.capacity trucks.vehicles.capacityUnit " +
           "trucks.vehicles.cellIndex trucks.vehicles.cellName trucks.vehicles.cellType",
       );
+    } else {
+      // Whole records — strip the admin-only correction trail. (Mongoose rejects
+      // mixing this exclusion with the inclusion projection above, hence the
+      // else.)
+      query.select(PORTAL_HIDDEN_ADMIN_FIELDS);
     }
 
     const submissions = await query.lean();
@@ -860,11 +935,34 @@ router.post("/my-submissions/batch", async (req, res) => {
     // ask for. A placement that already has both a cell and a capacity is complete
     // and is not offered.
     const isPositive = (v) => Number.isFinite(Number(v)) && Number(v) > 0;
+
+    // ── Truck capacity the operator ALREADY declared ──────────────────────────
+    // The SLF's baseline records its accredited fleet: every vehicle's plate
+    // number and that vehicle's capacity. When a historical placement is missing
+    // a Truck Capacity, that figure is usually already on file — so it is offered
+    // back as a suggestion keyed on the plate, and the organizer pre-fills it
+    // instead of asking the operator to type a number they have already given us.
+    //
+    // It is a SUGGESTION, never a silent write: nothing is persisted until the
+    // user saves the arrangement, and a plate with no baseline entry (or a
+    // baseline capacity of zero) yields nothing rather than a guess.
+    const capacityByPlate = await buildBaselineCapacityIndex(submissions);
+    const plateKey = (plate) => String(plate || "").replace(/[\s-]+/g, "").toUpperCase();
+    const suggestCapacity = (facilityKey, ...plates) => {
+      const fleet = capacityByPlate.get(facilityKey);
+      if (!fleet) return null;
+      for (const plate of plates) {
+        const key = plateKey(plate);
+        if (key && fleet.has(key)) return fleet.get(key);
+      }
+      return null;
+    };
     const rows = submissions.map((sub) => {
       // Same validity rule as summarizeCellAssignment: a placement needs a cell
       // unless it already has a VALID cell identifier (not just a name copy).
       const facilityCellNames = sub.slfGenerator?.cellNames;
       const facilityCellStatuses = sub.slfGenerator?.cellStatuses;
+      const facilityKey = String(sub.slfGenerator?._id || sub.slfGenerator || sub.slfName || "");
       const placements = [];
       (sub.trucks || []).forEach((truck, truckIndex) => {
         const vehicles = (truck.vehicles || []).filter(
@@ -877,9 +975,19 @@ router.post("/my-submissions/batch", async (req, res) => {
             const needsCell = !isValidCellRef(v?.cellIndex, facilityCellNames, facilityCellStatuses);
             const needsCapacity = !isPositive(effectiveCapacity);
             if (!needsCell && !needsCapacity) return; // already complete
+            const suggested = needsCapacity
+              ? suggestCapacity(facilityKey, v?.plateNumber, truck?.plateNumber)
+              : null;
             placements.push({
+              suggestedCapacity: suggested?.capacity ?? null,
+              suggestedCapacityUnit: suggested?.capacityUnit || "",
+              suggestedCapacitySource: suggested ? "baseline" : "",
               truckIndex,
               vehicleIndex,
+              // The disposal ticket the operator wrote on the trip. It is the
+              // reference they recognise on paper, so the bulk-organize template
+              // carries it; it is never generated when the trip has none.
+              disposalTicketNo: truck.disposalTicketNo || "",
               hauler: truck.hauler || "",
               plateNumber: v.plateNumber || truck.plateNumber || "",
               wasteType: v.wasteType || truck.wasteType || "",
@@ -901,9 +1009,14 @@ router.post("/my-submissions/batch", async (req, res) => {
         const needsCell = !isValidCellRef(truck?.cellIndex, facilityCellNames, facilityCellStatuses);
         const needsCapacity = !isPositive(truck?.truckCapacity);
         if (!needsCell && !needsCapacity) return; // already complete
+        const suggested = needsCapacity ? suggestCapacity(facilityKey, truck?.plateNumber) : null;
         placements.push({
+          suggestedCapacity: suggested?.capacity ?? null,
+          suggestedCapacityUnit: suggested?.capacityUnit || "",
+          suggestedCapacitySource: suggested ? "baseline" : "",
           truckIndex,
           vehicleIndex: null,
+          disposalTicketNo: truck.disposalTicketNo || "",
           hauler: truck.hauler || "",
           plateNumber: truck.plateNumber || "",
           wasteType: truck.wasteType || "",
@@ -951,6 +1064,7 @@ router.get("/my-submissions/:id", async (req, res) => {
     });
     const DataSLF = require("../models/DataSLF");
     const submission = await DataSLF.findById(req.params.id)
+      .select(PORTAL_HIDDEN_ADMIN_FIELDS)
       .populate("slfGenerator", PORTAL_SLF_REF_FIELDS)
       .lean();
     if (!submission) return res.status(404).json({ message: "Submission not found" });
@@ -1374,3 +1488,6 @@ module.exports = router;
 // outstanding?" answers) reuses the SAME cell-placement rule rather than restating
 // it — two copies of this would inevitably drift apart.
 module.exports.summarizeCellAssignment = summarizeCellAssignment;
+// Exposed for testing: the baseline fleet → capacity lookup that lets Organize
+// Cells pre-fill a Truck Capacity the operator already declared.
+module.exports.buildBaselineCapacityIndex = buildBaselineCapacityIndex;

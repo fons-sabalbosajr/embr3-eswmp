@@ -233,14 +233,37 @@ test("the waste summary never bulk-selects the hauler graph", () => {
   assert.match(selectLiteral("WASTE_SUMMARY_SUBMISSION_SELECT"), /trucks\.selectedClients/);
 });
 
-test("the hauler list is resolved in two passes — pick an id, then read one record", () => {
-  // Pass 1 must stay cheap: id + the truck flag the tier order needs, nothing else.
-  assert.match(haulerResolver, /\.select\("_id trucks\.actualVolume"\)/);
-  // Pass 2 reads the winner alone.
-  assert.match(haulerResolver, /findById\(winner\._id\)[\s\S]*\.select\("accreditedHaulers"\)/);
-  // And the tier order is the same one the portal baseline read uses.
-  assert.match(haulerResolver, /candidates\.find\(isBaselineOnlyRecord\)/);
-  assert.match(haulerResolver, /candidates\.find\(\(item\) => !hasTruckVolume\(item\)\)/);
+test("the hauler roster is UNIONED across records, never taken from one winner", () => {
+  // This replaces a two-pass "pick the best record, then read its haulers" rule.
+  // The copies of `accreditedHaulers` are not identical: portal-save-baseline
+  // writes the hauler list to its container WITHOUT the per-hauler client
+  // arrays, while the submissions carry the full roster. Preferring the
+  // container — newest AND baseline-only, so it won both tie-breaks — returned
+  // haulers with no clients. Measured on production: Prime Waste Solution's
+  // container held 141 haulers and 0 client rows against 141 haulers and 212
+  // client rows on each of its 22 submissions, so Clients Served showed 1
+  // instead of 158.
+  assert.doesNotMatch(haulerResolver, /findById\(winner\._id\)/, "no single-record read");
+  assert.doesNotMatch(haulerResolver, /candidates\.find\(isBaselineOnlyRecord\)/, "no single winner");
+
+  // Collapsed to distinct (hauler, client) pairs in the DATABASE, newest copy
+  // first — the same pipeline shape the admin Hauler Clients view already uses,
+  // so the two views cannot disagree.
+  assert.match(haulerResolver, /DataSLF\.aggregate\(\[/);
+  assert.match(haulerResolver, /"accreditedHaulers\.0": \{ \$exists: true \}/);
+  assert.match(haulerResolver, /\$sort: \{ createdAt: -1 \}/);
+  assert.match(haulerResolver, /\$unwind: "\$accreditedHaulers"/);
+  assert.match(haulerResolver, /\$unwind: "\$client"/);
+  // Both shapes of the client roster are read.
+  assert.match(haulerResolver, /privateSectorClients/);
+  assert.match(haulerResolver, /accreditedHaulers\.clients/);
+  // Grouped per (hauler, client) so a duplicated array cannot inflate the count.
+  assert.match(haulerResolver, /hauler: \{ \$toLower/);
+  assert.match(haulerResolver, /client: \{\s*\n?\s*\$toLower/);
+  // Blank client names are dropped rather than counted as a client.
+  assert.match(haulerResolver, /\$match: \{ "_id\.client": \{ \$ne: "" \} \}/);
+  // Still a projection — the vehicles graph is never materialised.
+  assert.match(haulerResolver, /\$project: \{ accreditedHaulers: 1 \}/);
 });
 
 test("the summary picks its baseline record by the same container-first rule", () => {

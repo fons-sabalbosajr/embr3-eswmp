@@ -71,6 +71,44 @@ const recVolume = (record) => {
   return value ? `${value.toLocaleString(undefined, { maximumFractionDigits: 2 })} ${unit}` : "—";
 };
 
+// ONE logical submission = one submit REQUEST. A single request can persist
+// several DataSLF documents (one per entry of a multi-entry / bulk submission),
+// and they all share the `submissionId` minted for that request — so counting
+// documents over-reported every tracker figure on this calendar. Older records
+// that predate submissionId fall back to their own `_id`, which still counts
+// them exactly once.
+const submissionKeyOf = (record) => String(record?.submissionId || record?._id || record?.idNo || "");
+
+// Collapse a day's records into one entry per submission EVENT, carrying the
+// statuses of every record in that event so the day can be classified without
+// counting the same submission twice.
+const groupBySubmission = (records = []) => {
+  const map = new Map();
+  records.forEach((record) => {
+    const key = submissionKeyOf(record);
+    if (!key) return;
+    if (!map.has(key)) map.set(key, { key, records: [] });
+    map.get(key).records.push(record);
+  });
+  return [...map.values()];
+};
+
+const isPendingStatus = (r) => String(r.status || "").toLowerCase() === "pending";
+const isResubmissionRecord = (r) => Array.isArray(r.previousIdNos) && r.previousIdNos.length > 0;
+
+// One submission event → one tracker bucket. Pending wins over acknowledged so a
+// partly-reviewed event still shows as needing attention, mirroring the
+// per-record priority the day cell used before.
+const bucketForEvent = (event) => {
+  if (event.records.some(isPendingStatus)) {
+    return event.records.some((r) => isPendingStatus(r) && isResubmissionRecord(r))
+      ? "resubmission"
+      : "pending";
+  }
+  if (event.records.some((r) => String(r.status || "").toLowerCase() === "rejected")) return "rejected";
+  return "acknowledged";
+};
+
 const DISPOSAL_STATUS_META = {
   acknowledged: { label: "", color: "success", icon: <CheckCircleOutlined /> },
   approved: { label: "", color: "success", icon: <CheckCircleOutlined /> },
@@ -90,6 +128,11 @@ export default function DisposalActivityCalendar({ isDark, height, onOpenSubmiss
   const [refreshTick, setRefreshTick] = useState(0);
   const [selectedDate, setSelectedDate] = useState(null);
   const [modalPreparing, setModalPreparing] = useState(false);
+  // submissionId → the SAME record with its transport entries. The calendar feed
+  // carries no trucks[] (it would ship every trip ever made to render a month
+  // grid), so the day modal — which renders Hauler / Client / Plate No. / Cell /
+  // Waste Type per TRIP — pulls that day's trips when it opens.
+  const [dayDetail, setDayDetail] = useState({ key: null, byId: {} });
   const [cursor, setCursor] = useState(dayjs());
   // Month grid by default (Week strip stays available via the toggle).
   const [viewMode, setViewMode] = useState("month");
@@ -214,7 +257,13 @@ export default function DisposalActivityCalendar({ isDark, height, onOpenSubmiss
     [records, filterUser, filterSlf],
   );
 
-  // date (YYYY-MM-DD) → { users: [{key,name,company,count}], records: [] }
+  // date (YYYY-MM-DD) → { users: [{key,name,company,count}], records: [], … }
+  //
+  // Every count here is per submission EVENT, not per stored document: a
+  // multi-entry submission persists one document per entry, and counting rows
+  // made a single submit look like several on the day cell, in the per-user
+  // avatar tooltip and in the year grid. `records` is still the raw list — the
+  // day modal breaks it down into trips and needs each one.
   const dayMap = useMemo(() => {
     const map = {};
     filteredRecords.forEach((record) => {
@@ -230,35 +279,44 @@ export default function DisposalActivityCalendar({ isDark, height, onOpenSubmiss
           key: uKey,
           name,
           company: known?.company || record.lguCompanyName || "",
-          count: 0, pending: 0, approved: 0, rejected: 0,
+          events: new Map(),
         };
       }
       const u = map[key].userMap[uKey];
-      u.count += 1;
-      const s = String(record.status || "").toLowerCase();
-      if (s === "pending") u.pending += 1;
-      else if (s === "rejected") u.rejected += 1;
-      else u.approved += 1; // acknowledged / legacy
+      const evKey = submissionKeyOf(record);
+      if (!u.events.has(evKey)) u.events.set(evKey, { key: evKey, records: [] });
+      u.events.get(evKey).records.push(record);
     });
-    // A pending submission is a RESUBMISSION when it carries prior idNo(s)
-    // (previously reverted, resubmitted). Distinguished from a pending INITIAL
-    // submission so the calendar cell can flag them separately.
-    const isPendingResub = (r) =>
-      String(r.status || "").toLowerCase() === "pending" &&
-      Array.isArray(r.previousIdNos) && r.previousIdNos.length > 0;
     Object.values(map).forEach((d) => {
       d.users = Object.values(d.userMap)
-        // A user's avatar is "pending" only when ALL of their records that day are
-        // still pending (mixed days show the active style + a day pending badge).
-        .map((u) => ({ ...u, isPending: u.pending > 0 && u.approved === 0 && u.rejected === 0 }))
+        .map((u) => {
+          const buckets = [...u.events.values()].map(bucketForEvent);
+          const pending = buckets.filter((b) => b === "pending" || b === "resubmission").length;
+          const rejected = buckets.filter((b) => b === "rejected").length;
+          const approved = buckets.filter((b) => b === "acknowledged").length;
+          return {
+            key: u.key,
+            name: u.name,
+            company: u.company,
+            count: buckets.length,
+            pending,
+            rejected,
+            approved,
+            // A user's avatar is "pending" only when ALL of their submissions that
+            // day are still pending (mixed days show the active style + a day
+            // pending badge).
+            isPending: pending > 0 && approved === 0 && rejected === 0,
+          };
+        })
         .sort((a, b) => b.count - a.count);
-      d.resubmissionCount = d.records.filter(isPendingResub).length;
-      d.pendingCount = d.records.filter(
-        (r) => String(r.status || "").toLowerCase() === "pending" && !isPendingResub(r),
-      ).length;
-      d.acknowledgedCount = d.records.filter(
-        (r) => !["pending", "rejected", "reverted", "revert_requested"].includes(String(r.status || "").toLowerCase()),
-      ).length;
+      const dayBuckets = groupBySubmission(d.records).map(bucketForEvent);
+      d.submissionCount = dayBuckets.length;
+      // A pending submission is a RESUBMISSION when it carries prior idNo(s)
+      // (previously reverted, resubmitted). Distinguished from a pending INITIAL
+      // submission so the calendar cell can flag them separately.
+      d.resubmissionCount = dayBuckets.filter((b) => b === "resubmission").length;
+      d.pendingCount = dayBuckets.filter((b) => b === "pending").length;
+      d.acknowledgedCount = dayBuckets.filter((b) => b === "acknowledged").length;
     });
     return map;
   }, [filteredRecords, userByEmail]);
@@ -273,7 +331,7 @@ export default function DisposalActivityCalendar({ isDark, height, onOpenSubmiss
       {users.map((u) => (
         <Tooltip
           key={u.key}
-          title={`${u.name}${u.company ? ` — ${u.company}` : ""} · ${u.count} record(s)`}
+          title={`${u.name}${u.company ? ` — ${u.company}` : ""} · ${u.count} submission(s)`}
         >
           <Avatar
             size={size === "small" ? 20 : 28}
@@ -297,7 +355,7 @@ export default function DisposalActivityCalendar({ isDark, height, onOpenSubmiss
           size={18}
         >
           {data.users.map((u) => (
-            <Tooltip key={u.key} title={`${u.name}${u.company ? ` — ${u.company}` : ""} · ${u.count} record(s)${u.isPending ? " · Pending" : ""}`}>
+            <Tooltip key={u.key} title={`${u.name}${u.company ? ` — ${u.company}` : ""} · ${u.count} submission(s)${u.isPending ? " · Pending" : ""}`}>
               <Avatar
                 size={18}
                 className={u.isPending ? "slf-pending-avatar" : undefined}
@@ -309,7 +367,7 @@ export default function DisposalActivityCalendar({ isDark, height, onOpenSubmiss
           ))}
         </Avatar.Group>
         <span className="slf-cal-count">
-          {data.records.length} rec{data.records.length !== 1 ? "s" : ""}
+          {data.submissionCount} subm{data.submissionCount !== 1 ? "s" : ""}
         </span>
         {/* Item #6: all status counts on ONE horizontal row (icons + counts),
             no line breaks; scrolls horizontally within the cell if it overflows
@@ -355,7 +413,11 @@ export default function DisposalActivityCalendar({ isDark, height, onOpenSubmiss
   const openDay = (date) => {
     setCursor(date);
     if (onSelectDate) onSelectDate(date);
-    if (dayData(date)) setSelectedDate(date);
+    if (!dayData(date)) return;
+    // The day's trips are fetched when the modal opens; show the skeleton from
+    // the click rather than after the first render.
+    if (dayDetail.key !== date.format("YYYY-MM-DD")) setModalPreparing(true);
+    setSelectedDate(date);
   };
 
   const border = isDark ? "#303030" : "#f0f0f0";
@@ -376,17 +438,19 @@ export default function DisposalActivityCalendar({ isDark, height, onOpenSubmiss
       rejected: 0,
       slfs: new Set(),
     }));
-    filteredRecords.forEach((r) => {
-      const d = dayjs(r.dateOfDisposal);
+    // Same per-EVENT rule as the day cells: a multi-entry submission is one
+    // submission in the month totals, not one per stored entry.
+    groupBySubmission(filteredRecords).forEach((event) => {
+      const d = dayjs(event.records[0]?.dateOfDisposal);
       if (!d.isValid() || d.year() !== year) return;
       const b = buckets[d.month()];
       b.submissions += 1;
-      b.slfs.add(r.slfName || r.lguCompanyName || "");
-      const s = String(r.status || "").toLowerCase();
-      if (s.includes("acknowledg") || s === "approved" || s === "accepted" || s === "completed") b.acknowledged += 1;
-      else if (s.includes("reject")) b.rejected += 1;
-      else if (s.includes("revert")) b.reverted += 1;
-      else b.pending += 1;
+      event.records.forEach((r) => b.slfs.add(r.slfName || r.lguCompanyName || ""));
+      const statuses = event.records.map((r) => String(r.status || "").toLowerCase());
+      if (statuses.some((s) => s.includes("reject"))) b.rejected += 1;
+      else if (statuses.some((s) => s.includes("revert"))) b.reverted += 1;
+      else if (statuses.some((s) => !s || s === "pending")) b.pending += 1;
+      else b.acknowledged += 1;
     });
     return buckets.map((b) => ({ ...b, slfCount: b.slfs.size }));
   }, [filteredRecords, cursor]);
@@ -503,7 +567,7 @@ export default function DisposalActivityCalendar({ isDark, height, onOpenSubmiss
                 <>
                   {renderAvatars(data.users, "small")}
                   <Text type="secondary" style={{ fontSize: 9 }}>
-                    {data.records.length} rec{data.records.length !== 1 ? "s" : ""}
+                    {data.submissionCount} subm{data.submissionCount !== 1 ? "s" : ""}
                   </Text>
                 </>
               ) : (
@@ -536,6 +600,43 @@ export default function DisposalActivityCalendar({ isDark, height, onOpenSubmiss
         : cursor.format("MMMM YYYY");
 
   const selected = selectedDate ? dayData(selectedDate) : null;
+
+  // Pull that day's transport entries when the modal opens. Bounded to one day
+  // and to the columns the table renders; the server resolves cell names to the
+  // facility's current labels before responding.
+  useEffect(() => {
+    if (!selectedDate) return undefined;
+    const key = selectedDate.format("YYYY-MM-DD");
+    if (dayDetail.key === key) return undefined;
+    let cancelled = false;
+    api
+      .get("/data-slf/disposal-calendar/day", { params: { date: key } })
+      .then(({ data }) => {
+        if (cancelled) return;
+        const byId = {};
+        (Array.isArray(data?.records) ? data.records : []).forEach((r) => {
+          if (r?._id) byId[String(r._id)] = r;
+        });
+        setDayDetail({ key, byId });
+      })
+      .catch(() => {
+        // Non-fatal: the table still renders the per-submission summary rows.
+        if (!cancelled) setDayDetail({ key, byId: {} });
+      })
+      .finally(() => {
+        if (!cancelled) setModalPreparing(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedDate, dayDetail.key]);
+
+  // A submission's full record when the day fetch has landed, otherwise the lean
+  // calendar record. Never a fabricated value — only real fields, or none.
+  const withTrips = useCallback(
+    (record) => dayDetail.byId[String(record?._id || "")] || record,
+    [dayDetail],
+  );
 
   const buildDisposalRows = useCallback((recs) => {
     const rows = [];
@@ -608,8 +709,8 @@ export default function DisposalActivityCalendar({ isDark, height, onOpenSubmiss
   }, [userByEmail]);
 
   const modalRows = useMemo(
-    () => (selected ? buildDisposalRows(selected.records) : []),
-    [selected, buildDisposalRows],
+    () => (selected ? buildDisposalRows(selected.records.map(withTrips)) : []),
+    [selected, buildDisposalRows, withTrips],
   );
 
   const modalGroups = useMemo(() => {
@@ -1072,10 +1173,11 @@ export default function DisposalActivityCalendar({ isDark, height, onOpenSubmiss
         {selected && (
           <>
             <Space wrap style={{ marginBottom: 12 }}>
-              <Badge count={selected.records.length} color="#1677ff" />
+              <Badge count={selected.submissionCount} color="#1677ff" />
               <Text type="secondary">
                 {modalGroups.length} facilit{modalGroups.length !== 1 ? "ies" : "y"} ·{" "}
-                {selected.users.length} portal user(s) · {selected.records.length} record(s)
+                {selected.users.length} portal user(s) · {selected.submissionCount} submission(s) ·{" "}
+                {selected.records.length} record(s)
               </Text>
               {renderAvatars(selected.users, "default")}
             </Space>

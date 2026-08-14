@@ -23,28 +23,25 @@ import {
   BellOutlined,
   CheckOutlined,
   DatabaseOutlined,
+  HistoryOutlined,
   ReloadOutlined,
   SaveOutlined,
   SearchOutlined,
+  SwapOutlined,
 } from "@ant-design/icons";
 import Swal from "sweetalert2";
 import dayjs from "dayjs";
 import api from "../../api";
-import { fetchWithCache, invalidateCache } from "../../utils/pageCache";
 import { getSocket } from "../../utils/socket";
-import { rowMatchesSearch } from "./shared/tableFilters";
-import { convertVolume } from "../../utils/volumeUnits";
 
 const { Text, Title } = Typography;
-const CACHE_KEY = "cell-waste-placement-cache";
-const CACHE_TTL = 2 * 60 * 1000;
 const DEFAULT_PAGE_SIZE = 12;
 // Display-only unit label (a missing unit renders as m³, as it always has).
-// Conversion itself comes from the shared module — see utils/volumeUnits.js.
 const normalizeUnit = (unit) => String(unit || "m³").replace("m3", "m³");
-
-const isActiveCellStatus = (status) =>
-  /active|operational|open/i.test(String(status || "Active Cell"));
+const MIN_CORRECTION_REASON = 5;
+// Mirrors CORRECTABLE_STATUSES on the server. The button follows the same rule
+// the API enforces — it is a convenience, never the authorization.
+const CORRECTABLE_STATUSES = ["acknowledged", "pending"];
 
 const statusColor = (pct) => {
   if (pct == null) return "#8c8c8c";
@@ -90,14 +87,14 @@ function MiniDonut({ pct, color }) {
 export default function CellWastePlacement({ canEdit = true }) {
   // Server-paginated list page (only entries with truck volume). The heavy
   // full-dataset load was replaced with (a) a paginated list like Portal
-  // Submissions and (b) a lazy per-facility aggregation fetch below.
+  // Submissions and (b) the per-facility cell rollup below.
   const [pageRecords, setPageRecords] = useState([]);
-  // All records for the currently selected facility — drives cell-fill totals.
-  const [facilityRecords, setFacilityRecords] = useState([]);
+  // Per-cell fill for the selected facility, computed server-side. This used to
+  // be done in the browser by downloading every record of the facility (with
+  // full trucks[]) plus the whole /baselines aggregation; both are gone.
+  const [overview, setOverview] = useState(null);
   const [facilityLoading, setFacilityLoading] = useState(false);
   const [facilityRefresh, setFacilityRefresh] = useState(0);
-  const [baselines, setBaselines] = useState([]);
-  const [settings, setSettings] = useState({});
   const [loading, setLoading] = useState(false);
   const [selectedId, setSelectedId] = useState(null);
   // "unassigned" = submissions still awaiting cell placement; "assigned" =
@@ -115,24 +112,16 @@ export default function CellWastePlacement({ canEdit = true }) {
   const [bulkCellIndex, setBulkCellIndex] = useState(undefined);
   const [alertModal, setAlertModal] = useState({ open: false, cell: null });
   const [alertMessage, setAlertMessage] = useState("");
+  // Correct Cell workflow — one placement at a time.
+  const [correction, setCorrection] = useState(null);
+  const [correctionCell, setCorrectionCell] = useState(undefined);
+  const [correctionReason, setCorrectionReason] = useState("");
+  const [correcting, setCorrecting] = useState(false);
+  const [historyFor, setHistoryFor] = useState(null);
 
   const page = pagination.current;
   const pageSize = pagination.pageSize;
   const searchTerm = debouncedSearch.trim();
-
-  // Reference data (baselines + app settings) — small, loaded once and on refresh.
-  const fetchReference = useCallback(async () => {
-    try {
-      const [baselinesRes, settingsRes] = await Promise.all([
-        api.get("/data-slf/baselines"),
-        api.get("/settings/app"),
-      ]);
-      setBaselines(Array.isArray(baselinesRes.data) ? baselinesRes.data : []);
-      setSettings(settingsRes.data || {});
-    } catch {
-      /* non-fatal */
-    }
-  }, []);
 
   // Server-paginated submissions list (mirrors the Portal Submissions loading).
   const fetchPage = useCallback(
@@ -179,10 +168,6 @@ export default function CellWastePlacement({ canEdit = true }) {
   }, [search]);
 
   useEffect(() => {
-    fetchReference();
-  }, [fetchReference]);
-
-  useEffect(() => {
     fetchPage();
   }, [fetchPage]);
 
@@ -190,54 +175,42 @@ export default function CellWastePlacement({ canEdit = true }) {
     const socket = getSocket();
     if (!socket) return undefined;
     const handler = ({ target } = {}) => {
-      if (!target || target === "submissions") {
+      if (!target || target === "submissions" || target === "baselines" || target === "facility") {
         fetchPage({ silent: true });
-        fetchReference();
         setFacilityRefresh((n) => n + 1);
       }
     };
     socket.on("data-refresh", handler);
     return () => socket.off("data-refresh", handler);
-  }, [fetchPage, fetchReference]);
+  }, [fetchPage]);
 
   const submissions = pageRecords;
   const selected =
     pageRecords.find((record) => record._id === selectedId) || pageRecords[0] || null;
-  const facility = selected?.slfGenerator || {};
-  const selectedFacilityName = selected ? getFacilityName(selected) : "";
+  const facilityId = selected?.slfGenerator?._id
+    ? String(selected.slfGenerator._id)
+    : selected?.slfGenerator
+      ? String(selected.slfGenerator)
+      : "";
 
-  // Lazy-load every record for the SELECTED facility so cell-fill totals stay
-  // accurate without loading the whole dataset up front.
+  // ONE small request per facility for the whole cell panel. The rollup is
+  // computed by the server from the same function that produces the persisted
+  // occupancy, so this panel cannot disagree with the dashboard gauges — and the
+  // response is sized by the number of CELLS, not the number of submissions.
   useEffect(() => {
-    if (!selectedFacilityName) {
-      setFacilityRecords([]);
+    if (!facilityId) {
+      setOverview(null);
       return undefined;
     }
     let cancelled = false;
     setFacilityLoading(true);
     api
-      .get("/data-slf", {
-        params: {
-          mode: "list",
-          includeTrucks: true,
-          withTruckVolume: true,
-          search: selectedFacilityName,
-        },
-      })
+      .get(`/data-slf/cell-placement-overview/${facilityId}`)
       .then(({ data }) => {
-        if (cancelled) return;
-        const rows = Array.isArray(data?.data)
-          ? data.data
-          : Array.isArray(data)
-            ? data
-            : [];
-        const own = rows.filter(
-          (r) => getFacilityName(r) === selectedFacilityName,
-        );
-        setFacilityRecords(own.length ? own : rows);
+        if (!cancelled) setOverview(data || null);
       })
       .catch(() => {
-        if (!cancelled) setFacilityRecords([]);
+        if (!cancelled) setOverview(null);
       })
       .finally(() => {
         if (!cancelled) setFacilityLoading(false);
@@ -245,110 +218,98 @@ export default function CellWastePlacement({ canEdit = true }) {
     return () => {
       cancelled = true;
     };
-  }, [selectedFacilityName, facilityRefresh]);
-  const baselineMap = useMemo(() => {
-    const map = new Map();
-    baselines.forEach((baseline) => {
-      const key = String(baseline.slfName || baseline.lguCompanyName || "").trim().toLowerCase();
-      if (key) map.set(key, baseline);
-    });
-    return map;
-  }, [baselines]);
+  }, [facilityId, facilityRefresh]);
 
-  const getBaselineForRecord = (record) =>
-    baselineMap.get(String(getFacilityName(record) || "").trim().toLowerCase()) || null;
-
-  const shouldCountRecord = (record) => {
-    if (!settings.excludePreBaselineDisposalFromCellFill) return true;
-    const baseline = getBaselineForRecord(record);
-    const baselineDate = baseline?.lastUpdated || baseline?.createdAt;
-    if (!baselineDate || !record?.dateOfDisposal) return true;
-    const disposalBeforeBaseline = dayjs(record.dateOfDisposal).startOf("day").isBefore(dayjs(baselineDate).startOf("day"));
-    const submittedAfterBaseline = record.createdAt && dayjs(record.createdAt).isAfter(dayjs(baselineDate));
-    return !disposalBeforeBaseline || submittedAfterBaseline;
-  };
-
-  const excludedPreBaselineCount = useMemo(() =>
-    facilityRecords.filter((record) => (record.trucks || []).length && !shouldCountRecord(record)).length,
-  [facilityRecords, settings.excludePreBaselineDisposalFromCellFill, baselineMap]);
-
-  const cellRows = useMemo(() => {
-    if (!selected) return [];
-    const cellCount = Math.max(
-      Number(facility.numberOfCell || 0),
-      facility.cellCapacities?.length || 0,
-      facility.cellStatuses?.length || 0,
-      1,
-    );
-    const rows = Array.from({ length: cellCount }, (_, index) => {
-      const unit = normalizeUnit(facility.cellCapacityUnits?.[index] || facility.cellFillUnits?.[index] || selected.baselineUnit || "m³");
-      const capacity = Number(facility.cellCapacities?.[index] || 0);
-      const baseFill = convertVolume(facility.cellFillValues?.[index] || 0, facility.cellFillUnits?.[index] || unit, unit);
-      return {
-        index,
-        key: index,
-        label: String(facility.cellNames?.[index] || "").trim() || `Cell ${index + 1}`,
-        status: facility.cellStatuses?.[index] || "Active Cell",
-        type: facility.cellTypes?.[index] || "Residual",
-        unit,
-        capacity,
-        used: baseFill,
-        submissions: [],
-      };
-    });
-    facilityRecords.forEach((record) => {
-      if (getFacilityName(record) !== getFacilityName(selected) || !shouldCountRecord(record)) return;
-      (record.trucks || []).forEach((truck, truckIndex) => {
-        // Prefer per-vehicle cell placements (new model); fall back to the
-        // truck-level cell for legacy submissions.
-        const vehiclePlacements = (truck.vehicles || []).filter(
-          (v) => v.cellIndex != null && Number(v.actualVolume || 0) > 0,
-        );
-        if (vehiclePlacements.length > 0) {
-          vehiclePlacements.forEach((veh, vehIndex) => {
-            const row = rows[Number(veh.cellIndex)];
-            if (!row) return;
-            const volume = convertVolume(
-              veh.actualVolume,
-              veh.actualVolumeUnit || truck.actualVolumeUnit || record.baselineUnit || row.unit,
-              row.unit,
-            );
-            row.used += volume;
-            row.submissions.push({ record, truck, truckIndex, vehicle: veh, vehIndex, volume });
-          });
-          return;
-        }
-        if (truck.cellIndex == null) return;
-        const row = rows[Number(truck.cellIndex)];
-        if (!row) return;
-        const volume = convertVolume(truck.actualVolume, truck.actualVolumeUnit || record.baselineUnit || row.unit, row.unit);
-        row.used += volume;
-        row.submissions.push({ record, truck, truckIndex, volume });
-      });
-    });
-    return rows.map((row) => ({
-      ...row,
-      pct: row.capacity > 0 ? Math.min(100, (row.used / row.capacity) * 100) : null,
-      remaining: row.capacity > 0 ? Math.max(0, row.capacity - row.used) : null,
-    }));
-  }, [facility, facilityRecords, selected, settings.excludePreBaselineDisposalFromCellFill, baselineMap]);
+  const cellRows = useMemo(
+    () => (overview?.cells || []).map((cell) => ({ ...cell, key: cell.index })),
+    [overview],
+  );
+  const excludedPreBaselineCount = overview?.excludedPreBaselineCount || 0;
+  const preBaselineDetectorEnabled = overview?.preBaselineDetectorEnabled !== false;
 
   const activeCellOptions = cellRows
-    .filter((cell) => isActiveCellStatus(cell.status))
+    .filter((cell) => cell.active)
     .map((cell) => ({ label: `${cell.label} - ${cell.status}`, value: cell.index }));
+  const cellByIndex = useMemo(
+    () => new Map(cellRows.map((cell) => [cell.index, cell])),
+    [cellRows],
+  );
 
-  const updateTruckCell = (truckIndex, cellIndex) => {
+  // One row per PLACEMENT: a vehicle when the truck carries them (that is where
+  // the portal records per-vehicle cells), the truck itself otherwise. Both the
+  // assignment editor and the correction workflow address a placement by its
+  // (truckIndex, vehicleIndex) pair, which is what the API writes back to.
+  const placements = useMemo(() => {
+    const rows = [];
+    (selected?.trucks || []).forEach((truck, truckIndex) => {
+      const vehicles = Array.isArray(truck.vehicles) ? truck.vehicles : [];
+      const withVolume = vehicles.filter((v) => Number(v?.actualVolume || 0) > 0);
+      const source = withVolume.length ? withVolume : null;
+      if (!source) {
+        rows.push({
+          key: `${truckIndex}`,
+          truckIndex,
+          vehicleIndex: null,
+          ticket: truck.disposalTicketNo || truck.plateNumber || "—",
+          wasteType: truck.wasteType || "Residual",
+          volume: Number(truck.actualVolume || 0),
+          unit: normalizeUnit(truck.actualVolumeUnit || selected?.baselineUnit || "m³"),
+          cellIndex: truck.cellIndex ?? null,
+        });
+        return;
+      }
+      source.forEach((vehicle) => {
+        const vehicleIndex = vehicles.indexOf(vehicle);
+        rows.push({
+          key: `${truckIndex}-${vehicleIndex}`,
+          truckIndex,
+          vehicleIndex,
+          ticket:
+            vehicle.plateNumber || truck.disposalTicketNo || truck.plateNumber || "—",
+          wasteType: vehicle.wasteType || truck.wasteType || "Residual",
+          volume: Number(vehicle.actualVolume || 0),
+          unit: normalizeUnit(
+            vehicle.actualVolumeUnit || truck.actualVolumeUnit || selected?.baselineUnit || "m³",
+          ),
+          cellIndex: vehicle.cellIndex ?? null,
+        });
+      });
+    });
+    return rows;
+  }, [selected]);
+
+  // A correction reassigns waste that is ALREADY placed on a submission the
+  // business rules allow to be corrected. The server enforces exactly this.
+  const canCorrect =
+    canEdit && CORRECTABLE_STATUSES.includes(String(selected?.status || "").toLowerCase());
+
+  // Local (unsaved) edit of one placement's cell. Applied to the loaded record so
+  // the table reflects the choice; persisted by Save Placement.
+  const updatePlacementCell = (row, cellIndex) => {
     setPageRecords((prev) => prev.map((record) => {
       if (record._id !== selected?._id) return record;
+      const cell = cellByIndex.get(cellIndex);
+      const patch = {
+        cellIndex,
+        cellName: cell ? cell.label : "",
+        cellType: cell ? cell.type : "",
+      };
       const trucks = (record.trucks || []).map((truck, index) => {
-        if (index !== truckIndex) return truck;
-        const cell = cellRows.find((item) => item.index === cellIndex);
-        return {
-          ...truck,
-          cellIndex,
-          cellName: cell ? cell.label : "",
-          cellType: cell ? cell.type : "",
-        };
+        if (index !== row.truckIndex) return truck;
+        if (row.vehicleIndex == null) {
+          const vehicles = Array.isArray(truck.vehicles)
+            ? truck.vehicles.map((v) => ({ ...v, ...patch }))
+            : truck.vehicles;
+          return { ...truck, ...patch, ...(vehicles ? { vehicles } : {}) };
+        }
+        const vehicles = (truck.vehicles || []).map((v, vi) =>
+          vi === row.vehicleIndex ? { ...v, ...patch } : v,
+        );
+        // Legacy readers use the truck-level copy, which mirrors vehicle 0 —
+        // the same rule the API applies.
+        return row.vehicleIndex === 0
+          ? { ...truck, ...patch, vehicles }
+          : { ...truck, vehicles };
       });
       return { ...record, trucks };
     }));
@@ -361,45 +322,40 @@ export default function CellWastePlacement({ canEdit = true }) {
 
   const applyBulkCell = () => {
     if (!selected || bulkCellIndex == null || selectedTruckIndexes.length === 0) return;
-    setPageRecords((prev) => prev.map((record) => {
-      if (record._id !== selected._id) return record;
-      const cell = cellRows.find((item) => item.index === bulkCellIndex);
-      const trucks = (record.trucks || []).map((truck, index) => {
-        if (!selectedTruckIndexes.includes(index)) return truck;
-        return {
-          ...truck,
-          cellIndex: bulkCellIndex,
-          cellName: cell ? cell.label : "",
-          cellType: cell ? cell.type : "",
-        };
-      });
-      return { ...record, trucks };
-    }));
+    placements
+      .filter((row) => selectedTruckIndexes.includes(row.key))
+      .forEach((row) => updatePlacementCell(row, bulkCellIndex));
   };
 
   const savePlacement = async () => {
     if (!selected) return;
     setSaving(true);
     try {
-      const assignments = (selected.trucks || []).map((truck, truckIndex) => {
+      // One assignment per PLACEMENT, addressed by (truckIndex, vehicleIndex) —
+      // a truck's vehicles each carry their own cell, and sending only the truck
+      // index silently overwrote all of them with one value.
+      const assignments = placements.map((row) => {
+        const truck = selected.trucks?.[row.truckIndex] || {};
+        const slot = row.vehicleIndex == null ? truck : truck.vehicles?.[row.vehicleIndex] || {};
+        const ci = slot.cellIndex;
         // Persist the CURRENT cell name (from the facility's cellRows), not the copy
         // frozen on the truck at a previous assignment — otherwise an admin rename
         // would leave a stale name stored here. Reads re-resolve canonically anyway,
         // but keeping the stored copy current avoids drift between Admin and Portal.
-        const ci = truck.cellIndex;
-        const match = ci != null ? cellRows.find((c) => c.index === Number(ci)) : null;
+        const match = ci != null ? cellByIndex.get(Number(ci)) : null;
         return {
-          truckIndex,
+          truckIndex: row.truckIndex,
+          vehicleIndex: row.vehicleIndex,
           cellIndex: ci ?? null,
           cellName:
-            match?.label || truck.cellName || (ci != null ? `Cell ${Number(ci) + 1}` : ""),
-          cellType: match?.type || truck.cellType || "",
+            match?.label || slot.cellName || (ci != null ? `Cell ${Number(ci) + 1}` : ""),
+          cellType: match?.type || slot.cellType || "",
         };
       });
       const { data } = await api.patch(`/data-slf/${selected._id}/cell-assignments`, { assignments });
       const updated = data.data || selected;
       setPageRecords((prev) => prev.map((record) => (record._id === selected._id ? updated : record)));
-      // Re-pull the selected facility's records so cell-fill totals reflect the save.
+      // Re-pull the facility rollup so cell-fill totals reflect the save.
       setFacilityRefresh((n) => n + 1);
       // Re-filter the current tab so a now-assigned submission moves out of
       // "For Cell Assignment" into "Assigned Records" (and totals update).
@@ -412,10 +368,50 @@ export default function CellWastePlacement({ canEdit = true }) {
     }
   };
 
+  const openCorrection = (row) => {
+    setCorrection(row);
+    setCorrectionCell(undefined);
+    setCorrectionReason("");
+  };
+
+  // Correct Cell — reassign an already-placed volume, with a reason, preserving
+  // the original placement in the submission's audit trail.
+  const submitCorrection = async () => {
+    if (!selected || !correction) return;
+    setCorrecting(true);
+    try {
+      const { data } = await api.patch(
+        `/data-slf/${selected._id}/correct-cell-placement`,
+        {
+          truckIndex: correction.truckIndex,
+          vehicleIndex: correction.vehicleIndex,
+          // Sent so the server can refuse if somebody else moved this waste
+          // while the modal was open.
+          fromCellIndex: correction.cellIndex,
+          toCellIndex: correctionCell,
+          reason: correctionReason.trim(),
+          expectedIdNo: selected.idNo || undefined,
+        },
+      );
+      const updated = data.data || selected;
+      setPageRecords((prev) => prev.map((record) => (record._id === selected._id ? updated : record)));
+      setCorrection(null);
+      setCorrectionCell(undefined);
+      setCorrectionReason("");
+      setFacilityRefresh((n) => n + 1);
+      fetchPage({ silent: true });
+      Swal.fire({ icon: "success", title: "Placement Corrected", text: data.message, timer: 1600, showConfirmButton: false });
+    } catch (err) {
+      Swal.fire("Error", err.response?.data?.message || "Could not correct the placement.", "error");
+    } finally {
+      setCorrecting(false);
+    }
+  };
+
   const sendAlert = async () => {
     const cell = alertModal.cell;
     if (!cell) return;
-    const submissionIds = [...new Set(cell.submissions.map((item) => item.record._id).filter(Boolean))];
+    const submissionIds = cell.submissionIds || [];
     try {
       await api.post("/data-slf/cell-capacity-alert", {
         submissionIds,
@@ -549,7 +545,7 @@ export default function CellWastePlacement({ canEdit = true }) {
                 showIcon
                 message={activeCellOptions.length ? `Assigning waste for ${getFacilityName(selected)}` : "No active landfill cells are configured for this SLF."}
                 description={
-                  settings.preBaselineDisposalDetectorEnabled && excludedPreBaselineCount > 0
+                  preBaselineDetectorEnabled && excludedPreBaselineCount > 0
                     ? `${excludedPreBaselineCount} submission(s) with disposal dates before baseline encoding are currently excluded from cell-fill totals.`
                     : undefined
                 }
@@ -573,12 +569,16 @@ export default function CellWastePlacement({ canEdit = true }) {
                           <MiniDonut pct={cell.pct} color={statusColor(cell.pct)} />
                           <Space direction="vertical" size={2}>
                             <Text strong>{cell.label}</Text>
-                            <Tag color={isActiveCellStatus(cell.status) ? "green" : "default"} style={{ width: "fit-content" }}>
+                            <Tag color={cell.active ? "green" : "default"} style={{ width: "fit-content" }}>
                               {cell.status}
                             </Tag>
                             <Text type="secondary" style={{ fontSize: 11 }}>
                               {Number(cell.used || 0).toLocaleString(undefined, { maximumFractionDigits: 2 })}
                               {cell.capacity ? ` / ${Number(cell.capacity).toLocaleString()}` : ""} {cell.unit}
+                            </Text>
+                            <Text type="secondary" style={{ fontSize: 10 }}>
+                              baseline {Number(cell.baselineUsed || 0).toLocaleString(undefined, { maximumFractionDigits: 2 })}
+                              {" · "}submitted {Number(cell.submittedUsed || 0).toLocaleString(undefined, { maximumFractionDigits: 2 })}
                             </Text>
                           </Space>
                         </Space>
@@ -591,7 +591,7 @@ export default function CellWastePlacement({ canEdit = true }) {
                         <Button
                           size="small"
                           icon={<BellOutlined />}
-                          disabled={!cell.submissions.length}
+                          disabled={!cell.submissionCount}
                           style={{ marginTop: 8 }}
                           onClick={() => {
                             setAlertModal({ open: true, cell });
@@ -608,9 +608,14 @@ export default function CellWastePlacement({ canEdit = true }) {
 
               <Card
                 size="small"
-                title="Submission Truck Placement"
+                title="Submission Waste Placement"
                 extra={
                   <Space wrap>
+                    {(selected.cellCorrections || []).length > 0 && (
+                      <Button size="small" icon={<HistoryOutlined />} onClick={() => setHistoryFor(selected)}>
+                        Corrections ({selected.cellCorrections.length})
+                      </Button>
+                    )}
                     <Select
                       disabled={!canEdit || activeCellOptions.length === 0 || selectedTruckIndexes.length === 0}
                       placeholder="Cell for selected"
@@ -634,42 +639,69 @@ export default function CellWastePlacement({ canEdit = true }) {
               >
                 <Table
                   size="small"
-                  rowKey={(_, index) => index}
+                  rowKey="key"
                   pagination={false}
-                  scroll={{ x: 820 }}
-                  dataSource={selected.trucks || []}
+                  scroll={{ x: 940 }}
+                  dataSource={placements}
                   rowSelection={{
                     selectedRowKeys: selectedTruckIndexes,
-                    onChange: (keys) => setSelectedTruckIndexes(keys.map(Number)),
+                    onChange: (keys) => setSelectedTruckIndexes(keys),
                     getCheckboxProps: () => ({ disabled: !canEdit || activeCellOptions.length === 0 }),
                   }}
                   columns={[
-                    { title: "Ticket / Plate", width: 160, render: (_, truck) => <Text>{truck.disposalTicketNo || truck.plateNumber || "—"}</Text> },
-                    { title: "Waste Type", width: 150, render: (_, truck) => <Tag>{truck.wasteType || "Residual"}</Tag> },
+                    { title: "Ticket / Plate", dataIndex: "ticket", width: 150, render: (v) => <Text>{v}</Text> },
+                    { title: "Waste Type", dataIndex: "wasteType", width: 140, render: (v) => <Tag>{v}</Tag> },
                     {
                       title: "Volume",
-                      width: 130,
-                      render: (_, truck) => `${Number(truck.actualVolume || 0).toLocaleString()} ${normalizeUnit(truck.actualVolumeUnit || selected.baselineUnit || "m³")}`,
+                      width: 120,
+                      render: (_, row) => `${row.volume.toLocaleString()} ${row.unit}`,
                     },
                     {
                       title: "Assigned Cell",
-                      render: (_, truck, index) => (
+                      render: (_, row) => (
                         <Select
                           disabled={!canEdit || activeCellOptions.length === 0}
                           placeholder="Select active cell"
                           style={{ width: "100%" }}
                           allowClear
-                          value={truck.cellIndex ?? undefined}
+                          value={row.cellIndex ?? undefined}
                           options={activeCellOptions}
-                          onChange={(value) => updateTruckCell(index, value)}
+                          onChange={(value) => updatePlacementCell(row, value)}
                         />
                       ),
                     },
                     {
                       title: "Saved",
-                      width: 80,
+                      width: 70,
                       align: "center",
-                      render: (_, truck) => truck.cellIndex != null ? <CheckOutlined style={{ color: "#52c41a" }} /> : "—",
+                      render: (_, row) => (row.cellIndex != null ? <CheckOutlined style={{ color: "#52c41a" }} /> : "—"),
+                    },
+                    {
+                      title: "Correction",
+                      width: 130,
+                      align: "center",
+                      // Only a placement that HAS a cell can be corrected —
+                      // assigning an unplaced one is Save Placement's job.
+                      render: (_, row) => (
+                        <Tooltip
+                          title={
+                            row.cellIndex == null
+                              ? "Assign a cell first"
+                              : !canCorrect
+                                ? `A ${String(selected.status || "pending").replace(/_/g, " ")} submission cannot be corrected here`
+                                : "Move this waste to a different cell, with a reason"
+                          }
+                        >
+                          <Button
+                            size="small"
+                            icon={<SwapOutlined />}
+                            disabled={!canCorrect || row.cellIndex == null}
+                            onClick={() => openCorrection(row)}
+                          >
+                            Correct Cell
+                          </Button>
+                        </Tooltip>
+                      ),
                     },
                   ]}
                 />
@@ -697,6 +729,127 @@ export default function CellWastePlacement({ canEdit = true }) {
             onChange={(e) => setAlertMessage(e.target.value)}
           />
         </Space>
+      </Modal>
+
+      {/* Correct Cell — the whole change is shown before it is made: which
+          submission, which waste, where it is now and where it is going. The
+          reason is mandatory because it is what the audit entry records. */}
+      <Modal
+        title="Correct Waste Placement"
+        open={!!correction}
+        onCancel={() => setCorrection(null)}
+        onOk={submitCorrection}
+        okText="Confirm Correction"
+        confirmLoading={correcting}
+        okButtonProps={{
+          icon: <SwapOutlined />,
+          disabled:
+            correctionCell == null ||
+            correctionCell === correction?.cellIndex ||
+            correctionReason.trim().length < MIN_CORRECTION_REASON,
+        }}
+        destroyOnHidden
+      >
+        {correction && (
+          <Space direction="vertical" size={12} style={{ width: "100%" }}>
+            <Alert
+              type="info"
+              showIcon
+              message="The original placement is preserved"
+              description="The submission, its reference and its volume do not change. The cell it was recorded against moves, and the previous cell is kept in the submission's correction history."
+            />
+            <div>
+              <Text type="secondary" style={{ fontSize: 12 }}>Submission</Text>
+              <div><Text strong>{selected?.idNo || selected?.submissionId || "—"}</Text> · <Text>{getFacilityName(selected)}</Text></div>
+            </div>
+            <Row gutter={12}>
+              <Col span={12}>
+                <Text type="secondary" style={{ fontSize: 12 }}>Waste</Text>
+                <div>
+                  <Text strong>{correction.volume.toLocaleString()} {correction.unit}</Text>
+                  <div><Text type="secondary" style={{ fontSize: 12 }}>{correction.ticket} · {correction.wasteType}</Text></div>
+                </div>
+              </Col>
+              <Col span={12}>
+                <Text type="secondary" style={{ fontSize: 12 }}>Current cell</Text>
+                <div>
+                  <Tag color="orange">
+                    {cellByIndex.get(correction.cellIndex)?.label || `Cell ${Number(correction.cellIndex) + 1}`}
+                  </Tag>
+                </div>
+              </Col>
+            </Row>
+            <div>
+              <Text type="secondary" style={{ fontSize: 12 }}>New cell</Text>
+              <Select
+                style={{ width: "100%" }}
+                placeholder="Select the correct active cell"
+                value={correctionCell}
+                onChange={setCorrectionCell}
+                options={activeCellOptions.filter((o) => o.value !== correction.cellIndex)}
+              />
+            </div>
+            <div>
+              <Text type="secondary" style={{ fontSize: 12 }}>Reason for correction (required)</Text>
+              <Input.TextArea
+                rows={3}
+                maxLength={500}
+                showCount
+                value={correctionReason}
+                onChange={(e) => setCorrectionReason(e.target.value)}
+                placeholder="e.g. Portal user selected the wrong cell; the load was tipped in Cell 05."
+              />
+            </div>
+          </Space>
+        )}
+      </Modal>
+
+      {/* Correction history — kept out of the main table so the placement view
+          stays readable; opened per submission. */}
+      <Modal
+        title="Waste Placement Corrections"
+        open={!!historyFor}
+        onCancel={() => setHistoryFor(null)}
+        footer={null}
+        width={760}
+      >
+        <Table
+          size="small"
+          rowKey={(row, index) => row._id || index}
+          pagination={false}
+          scroll={{ x: 700 }}
+          dataSource={historyFor?.cellCorrections || []}
+          locale={{ emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No corrections recorded" /> }}
+          columns={[
+            {
+              title: "Corrected At",
+              dataIndex: "correctedAt",
+              width: 160,
+              render: (v) => (v ? dayjs(v).format("MMM D, YYYY h:mm A") : "—"),
+            },
+            {
+              title: "Change",
+              width: 210,
+              render: (_, row) => (
+                <Space size={4}>
+                  <Tag color="default">{row.fromCellName || `Cell ${Number(row.fromCellIndex) + 1}`}</Tag>
+                  <SwapOutlined />
+                  <Tag color="blue">{row.toCellName || `Cell ${Number(row.toCellIndex) + 1}`}</Tag>
+                </Space>
+              ),
+            },
+            {
+              title: "Volume",
+              width: 110,
+              render: (_, row) =>
+                row.volume
+                  ? `${Number(row.volume).toLocaleString()} ${normalizeUnit(row.volumeUnit)}`
+                  : "—",
+            },
+            { title: "Corrected By", dataIndex: "correctedBy", width: 180 },
+            { title: "Reason", dataIndex: "reason" },
+          ]}
+        />
       </Modal>
     </div>
   );

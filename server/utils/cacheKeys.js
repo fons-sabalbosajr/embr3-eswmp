@@ -36,6 +36,20 @@ module.exports = {
   // GET /api/data-slf/cell-usage — per-cell truck-volume rollup for the SLF Data
   // Table; keyed by dummy-inclusion. Same invalidation as the two above.
   CELL_USAGE_CACHE_PREFIX: `${NAMESPACE}dashboard:cell-usage`,
+  // GET /api/data-slf/cell-placement-overview/:facilityId — the Cell Waste
+  // Placement tab's per-cell fill panel. One facility's occupancy rollup, keyed
+  // by facility id + the pre-baseline-exclusion setting that changes the answer.
+  // Derived from submissions AND the baseline, so it is invalidated by the same
+  // writes as the rest of `slfData` in socketEmit.staleKeysFor.
+  CELL_PLACEMENT_PREFIX: `${NAMESPACE}admin:cell-placement`,
+  // GET /api/data-slf/baselines — a full-collection aggregation (match on ten
+  // possible baseline fields, blocking $sort, $group per SLF) that three pages
+  // load on mount: Submission Summary, SLF Monitoring and the Baseline Data tab.
+  // The underlying data changes only on a baseline save/approve/lock/reject, all
+  // of which already route through refreshAdmin/refreshPortal("baselines"), so
+  // the invalidation is exact. Keyed by dummy scope — a developer's inline
+  // SAMPLE baselines must never be served to an ordinary admin.
+  BASELINES_CACHE_PREFIX: `${NAMESPACE}admin:baselines`,
 
   // ── Dashboard module stats (one prefix per collection) ──
   // Each is the `/stats` (or `/summary`) fan-out target of the admin dashboard.

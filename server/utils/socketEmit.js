@@ -44,6 +44,16 @@ function staleKeysFor(target) {
     keys.ADMIN_SUBMISSIONS_PREFIX,
     keys.ADMIN_ANALYTICS_KEY,
     keys.ADMIN_SUMMARY_DASHBOARD_KEY,
+    // Cell Waste Placement's per-cell fill panel. A cell assignment, a cell
+    // CORRECTION, a revert/acknowledge and a baseline save all change where a
+    // facility's volume sits, so it has to be invalidated with the rest —
+    // serving a stale panel is how an admin would move waste out of a cell and
+    // still see it there.
+    keys.CELL_PLACEMENT_PREFIX,
+    // The baselines aggregation ranks each SLF's records by whether they carry
+    // truck volume, so a SUBMISSION write can change which record answers as the
+    // baseline — it belongs with the rest, not only under the "baselines" target.
+    keys.BASELINES_CACHE_PREFIX,
   ];
   switch (target) {
     case "submissions":

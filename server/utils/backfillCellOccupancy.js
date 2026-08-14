@@ -21,22 +21,41 @@
 
 const SlfFacility = require("../models/SlfFacility");
 const DataSLF = require("../models/DataSLF");
-const { computeCellOccupancy, OCCUPANCY_ENTRY_FIELDS } = require("./cellOccupancy");
+const {
+  computeCellOccupancy,
+  applyPreBaselineRule,
+  preBaselineExclusionEnabled,
+  OCCUPANCY_ENTRY_FIELDS,
+  OCCUPANCY_CALC_VERSION,
+} = require("./cellOccupancy");
 
 const BATCH_SIZE = 25;
 /** Rounding tolerance when comparing stored vs recomputed totals. */
 const TOTAL_EPSILON = 0.001;
 
+/** Facilities whose derived figures were written by an older calculation. */
+const STALE_FILTER = {
+  deletedAt: null,
+  numberOfCell: { $gt: 0 },
+  $or: [
+    { cellFillBaselineValues: { $exists: false } },
+    { cellOccupancyVersion: { $ne: OCCUPANCY_CALC_VERSION } },
+  ],
+};
+
 async function backfillCellOccupancy() {
-  // Cheap gate: once every facility carries the split, this migration has
-  // nothing left to do and boot costs a single count instead of a full
-  // recompute sweep. Ongoing correctness is maintained by the live write path
-  // (refreshFacilityCellOccupancy), not by re-running this on every start.
-  const outstanding = await SlfFacility.countDocuments({
-    deletedAt: null,
-    numberOfCell: { $gt: 0 },
-    cellFillBaselineValues: { $exists: false },
-  }).setOptions({ includeHiddenYears: true });
+  // Cheap gate: once every facility carries the split AND the current
+  // calculation's version stamp, this migration has nothing to do and boot costs
+  // a single count instead of a full recompute sweep.
+  //
+  // The version is what makes it self-heal. The gate used to test only for a
+  // MISSING split, so a corrected calculation never reached the facilities it
+  // corrected — the stored figures stayed as the old code left them (a cell
+  // reporting a 441,324 t baseline that had been merged in from two other cells)
+  // until an unrelated write happened to recompute that one facility.
+  const outstanding = await SlfFacility.countDocuments(STALE_FILTER).setOptions({
+    includeHiddenYears: true,
+  });
   if (outstanding === 0) return 0;
 
   // Every facility with cells is then examined; only the ones that actually
@@ -50,12 +69,18 @@ async function backfillCellOccupancy() {
     .select(
       "_id numberOfCell cellNames cellStatuses cellTypes cellCapacities " +
       "cellCapacityUnits cellFillValues cellFillUnits wasteReceivedUnit volumeCapacityUnit " +
-      "actualResidualWasteReceived cellFillBaselineValues cellFillSubmittedValues",
+      // cellFillOverridden is READ so an admin-declared Waste in Cell survives
+      // the sweep; the version stamp decides whether a facility needs rewriting.
+      "actualResidualWasteReceived cellFillBaselineValues cellFillSubmittedValues " +
+      "cellFillOverridden cellOccupancyVersion",
     )
     .setOptions({ includeHiddenYears: true })
     .lean();
 
   if (!pending.length) return 0;
+
+  // Read once for the whole sweep rather than per facility.
+  const excludePreBaseline = await preBaselineExclusionEnabled();
 
   let updated = 0;
   for (let index = 0; index < pending.length; index += BATCH_SIZE) {
@@ -69,7 +94,8 @@ async function backfillCellOccupancy() {
       deletedAt: null,
       isDummy: { $ne: true },
     })
-      .select(OCCUPANCY_ENTRY_FIELDS)
+      // `dateOfDisposal` is what the pre-baseline rule compares against.
+      .select(`${OCCUPANCY_ENTRY_FIELDS} dateOfDisposal`)
       .sort({ createdAt: -1 })
       .lean();
 
@@ -82,18 +108,23 @@ async function backfillCellOccupancy() {
 
     const operations = [];
     batch.forEach((facility) => {
-      const occupancy = computeCellOccupancy(
-        facility,
-        entriesByFacility.get(String(facility._id)) || [],
-      );
+      const own = entriesByFacility.get(String(facility._id)) || [];
+      // EXACTLY what refreshFacilityCellOccupancy does on the live write path —
+      // the same filter and the same unit anchor. A repair that computed the
+      // figures differently from the code that maintains them would simply
+      // rewrite the drift it was meant to remove.
+      const { counted } = applyPreBaselineRule(own, { exclude: excludePreBaseline });
+      const occupancy = computeCellOccupancy(facility, counted, { unitSource: own });
 
       const hasSplit = Array.isArray(facility.cellFillBaselineValues) && facility.cellFillBaselineValues.length > 0;
       const storedTotal = Number(facility.actualResidualWasteReceived || 0);
       const totalMatches = Math.abs(storedTotal - occupancy.totalVolume) <= TOTAL_EPSILON;
+      const versionMatches = Number(facility.cellOccupancyVersion || 0) === OCCUPANCY_CALC_VERSION;
 
-      // Leave a facility alone when it is already consistent — this keeps the
-      // startup pass free on a healthy database.
-      if (hasSplit && totalMatches) return;
+      // Leave a facility alone when it is already consistent AND was written by
+      // the current calculation — this keeps the startup pass free on a healthy
+      // database.
+      if (hasSplit && totalMatches && versionMatches) return;
 
       operations.push({
         updateOne: {
@@ -108,6 +139,7 @@ async function backfillCellOccupancy() {
               cellFillSubmittedValues: occupancy.cellFillSubmittedValues,
               baselineVolumeTotal: occupancy.baselineTotal,
               submittedVolumeTotal: occupancy.submittedTotal,
+              cellOccupancyVersion: OCCUPANCY_CALC_VERSION,
             },
           },
         },

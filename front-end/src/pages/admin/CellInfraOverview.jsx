@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import {
+  Alert,
   Collapse,
   Table,
   Button,
@@ -43,6 +44,8 @@ import {
   CELL_STATUS_OPTIONS,
 } from "../../utils/cellVisuals";
 import api from "../../api";
+import { convertVolume } from "../../utils/volumeUnits";
+import { getSocket } from "../../utils/socket";
 
 const { Text } = Typography;
 
@@ -81,30 +84,55 @@ function deriveUnit(facility) {
 // Derive the real cells from the facility's existing cell-infra arrays. Deleted
 // cells ("Not Existed") are excluded; missing capacity/volume stay null/0 so the
 // gauge shows "no data" rather than a fabricated value.
-function deriveCells(facility) {
+//
+// `occupancy` is the server's canonical per-cell rollup (GET
+// /data-slf/cell-occupancy → computeCellOccupancy). When present it is used for
+// the fill figures — it is the same calculation that drives View SLF Details,
+// the SLF Dashboard gauges and the Cell Waste Placement panel, so all four read
+// one number. It already includes the applicable BASELINE volume plus valid
+// submission volume, each counted exactly once.
+function deriveCells(facility, occupancy = null) {
   if (!facility) return [];
   const caps = facility.cellCapacities || [];
   const fills = facility.cellFillValues || [];
+  const fillUnits = facility.cellFillUnits || [];
   const types = facility.cellTypes || [];
   const statuses = facility.cellStatuses || [];
   const names = facility.cellNames || [];
   const capUnits = facility.cellCapacityUnits || [];
+  const rollupCells = occupancy?.cells || [];
+  const rollupByIndex = new Map(rollupCells.map((c) => [c.index, c]));
   const n = Math.max(
     Number(facility.numberOfCell || 0),
     caps.length,
     fills.length,
     types.length,
     statuses.length,
+    rollupCells.length,
   );
   const cells = [];
   for (let i = 0; i < n; i += 1) {
     const status = statuses[i] || "Active Cell";
     if (isNonExistentCell(status)) continue; // deleted cell — not shown/counted
     const capacity = Number(caps[i]);
-    const usedRaw = Number(fills[i]);
-    const used = Number.isFinite(usedRaw) ? usedRaw : 0;
-    const type = types[i] || "Residual";
     const cap = Number.isFinite(capacity) ? capacity : null;
+    const unit = capUnits[i] || deriveUnit(facility) || "m³";
+    const rollup = rollupByIndex.get(i);
+    // The fill and the capacity can be declared in DIFFERENT units — the fill
+    // resolves to whatever the portal reported in, the capacity to whatever the
+    // facility declared. Dividing them directly reported a utilisation out by
+    // the conversion factor; convert into the capacity's unit first.
+    const usedRaw = rollup
+      ? convertVolume(rollup.used, rollup.unit, unit)
+      : convertVolume(Number(fills[i]) || 0, fillUnits[i] || unit, unit);
+    const used = Number.isFinite(usedRaw) ? usedRaw : 0;
+    const baselineUsed = rollup
+      ? Number(convertVolume(rollup.baselineUsed, rollup.unit, unit) || 0)
+      : null;
+    const submittedUsed = rollup
+      ? Number(convertVolume(rollup.submittedUsed, rollup.unit, unit) || 0)
+      : null;
+    const type = types[i] || "Residual";
     const typeConfig = getCellTypeConfig(type);
     const statusConfig = getCellStatusConfig(status);
     const percent = computeGaugePercent({ usedCapacity: used, totalCapacity: cap });
@@ -118,7 +146,16 @@ function deriveCells(facility) {
       statusConfig,
       capacity: cap,
       used,
-      unit: capUnits[i] || deriveUnit(facility) || "m³",
+      baselineUsed,
+      submittedUsed,
+      // Set when an admin declared this cell's Waste in Cell by hand;
+      // derivedTotal is what baseline + submissions alone would have given.
+      overridden: !!rollup?.overridden,
+      derivedTotal:
+        rollup?.overridden && rollup.derivedTotal != null
+          ? Number(convertVolume(rollup.derivedTotal, rollup.unit, unit) || 0)
+          : null,
+      unit,
       percent,
       capacityStatus: getCapacityStatus(percent),
       remaining: cap != null ? Math.max(0, cap - used) : null,
@@ -170,6 +207,26 @@ function CellHoverDetails({ cell, row }) {
         </div>
       )}
       {item("Current volume", `${fmt(cell.used)} ${cell.unit}`)}
+      {/* An admin-declared figure is labelled as such, with what the data alone
+          says beside it — the derived split does not add up to an override and
+          showing it as if it did would be misleading. */}
+      {cell.overridden
+        ? item(
+            "— source",
+            <>
+              <Tag color="purple" style={{ marginInlineEnd: 4 }}>Admin-set</Tag>
+              {cell.derivedTotal != null && (
+                <Text type="secondary" style={{ fontSize: 11 }}>
+                  data says {fmt(cell.derivedTotal)} {cell.unit}
+                </Text>
+              )}
+            </>,
+          )
+        : cell.baselineUsed != null &&
+          item(
+            "— of which",
+            `${fmt(cell.baselineUsed)} baseline · ${fmt(cell.submittedUsed)} submitted`,
+          )}
       {item("Capacity", cell.capacity == null ? "—" : `${fmt(cell.capacity)} ${cell.unit}`)}
       {item("Remaining", cell.remaining == null ? "—" : `${fmt(cell.remaining)} ${cell.unit}`)}
       {item(
@@ -290,6 +347,10 @@ export default function CellInfraOverview({
   const [editRow, setEditRow] = useState(null);
   const [editCells, setEditCells] = useState([]);
   const [saving, setSaving] = useState(false);
+  // facilityId → the server's canonical per-cell rollup. Fetched only once the
+  // card is expanded, and re-fetched when a placement write reports in.
+  const [occupancy, setOccupancy] = useState({});
+  const [occupancyTick, setOccupancyTick] = useState(0);
 
   // facilityId → approved portal users assigned to it. Built once from the
   // already-loaded portal-user list; the hover card and SLF column both read it,
@@ -317,6 +378,58 @@ export default function CellInfraOverview({
     return map;
   }, [portalUsers]);
 
+  // The canonical rollup, loaded lazily with the card and refreshed whenever a
+  // placement is organized, moved or corrected (the server invalidates its own
+  // cache on the same event, so this always re-reads fresh figures).
+  useEffect(() => {
+    if (!expanded) return undefined;
+    let cancelled = false;
+    let timer = null;
+    const load = () => {
+      api
+        .get("/data-slf/cell-occupancy")
+        .then(({ data }) => {
+          if (!cancelled) setOccupancy(data?.byFacility || {});
+        })
+        .catch(() => {
+          // Non-fatal: deriveCells falls back to the facility's stored fills.
+        });
+    };
+    load();
+    const socket = getSocket();
+    const handler = ({ target } = {}) => {
+      if (target && !["submissions", "baselines", "facility"].includes(target)) return;
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(load, 800); // collapse a burst of writes into one refetch
+    };
+    socket?.on("data-refresh", handler);
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+      socket?.off("data-refresh", handler);
+    };
+  }, [expanded, occupancyTick]);
+
+  // How many submissions the pre-baseline rule is holding out of these figures.
+  // Surfaced because it is the one reason a cell here can read lower than the
+  // portal's own tile for the same SLF.
+  // Received but not organized into a cell. Shown because it is the honest
+  // reason the cells can sum to less than the SLF's received total.
+  const unplacedTotal = useMemo(
+    () =>
+      Object.values(occupancy).reduce((sum, f) => sum + Number(f?.totals?.unplaced || 0), 0),
+    [occupancy],
+  );
+
+  const excludedPreBaselineTotal = useMemo(
+    () =>
+      Object.values(occupancy).reduce(
+        (sum, f) => sum + Number(f?.excludedPreBaselineCount || 0),
+        0,
+      ),
+    [occupancy],
+  );
+
   // One row per facility (dedup across summary rows), with derived cell metrics.
   // Only computed once the card is expanded (avoids the per-cell work on every
   // Portal Submissions load while the card stays collapsed).
@@ -339,7 +452,7 @@ export default function CellInfraOverview({
     });
     return [...map.values()]
       .map((o) => {
-        const cells = deriveCells(o.facility);
+        const cells = deriveCells(o.facility, occupancy[o.key] || null);
         return {
           ...o,
           cells,
@@ -350,7 +463,7 @@ export default function CellInfraOverview({
         };
       })
       .sort((a, b) => (b.submissions || 0) - (a.submissions || 0));
-  }, [rows, expanded, operatorsByFacility]);
+  }, [rows, expanded, operatorsByFacility, occupancy]);
 
   const isLoading = loading;
 
@@ -380,6 +493,11 @@ export default function CellInfraOverview({
     const origFills = facility.cellFillValues || [];
     const origFillUnits = facility.cellFillUnits || [];
     const payload = {
+      // This editor shows every cell and submits all of them, so a blanked field
+      // or a status change back to "Active Cell" is deliberate. Without this the
+      // server's partial-payload guards silently kept the previous values and the
+      // save looked like it had done nothing.
+      cellInfrastructureAuthoritative: true,
       numberOfCell: editCells.length,
       cellNames: editCells.map((c) => c.name || ""),
       cellTypes: editCells.map((c) => c.type || "Residual"),
@@ -403,6 +521,10 @@ export default function CellInfraOverview({
       await api.put(`/slf-facilities/${facility._id}`, payload);
       message.success("Cell infrastructure updated.");
       setEditRow(null);
+      // Re-read from the server rather than trusting local state: the facility
+      // rows come back through onEdited, and the per-cell rollup is re-derived
+      // from the freshly-persisted cell configuration.
+      setOccupancyTick((n) => n + 1);
       onEdited?.();
     } catch (err) {
       message.error(err.response?.data?.message || "Could not update cell infrastructure.");
@@ -567,6 +689,45 @@ export default function CellInfraOverview({
                 />
               ) : overviewRows.length ? (
                 <>
+                  <Alert
+                    type="info"
+                    showIcon
+                    style={{ marginBottom: 12 }}
+                    message="Waste in Cell already includes the baseline"
+                    description={
+                      <>
+                        Each cell&apos;s volume is the SLF&apos;s applicable baseline volume for
+                        that cell PLUS its valid submission volume — never one or the other,
+                        and never counted twice. Do not add the baseline again when reviewing
+                        or encoding these figures. Reassigning waste between cells moves the
+                        volume; it does not increase the SLF&apos;s total.
+                        {unplacedTotal > 0 && (
+                          <>
+                            {" "}
+                            <b>
+                              {unplacedTotal.toLocaleString(undefined, { maximumFractionDigits: 2 })}
+                            </b>{" "}
+                            of submitted waste is <b>awaiting placement</b> — it has been
+                            received but the operator has not organized it into a cell, so it
+                            is not counted in any cell above.
+                          </>
+                        )}
+                        {excludedPreBaselineTotal > 0 && (
+                          <>
+                            {" "}
+                            <b>
+                              {excludedPreBaselineTotal} submission
+                              {excludedPreBaselineTotal === 1 ? " is" : "s are"} excluded
+                            </b>{" "}
+                            because the disposal predates the baseline encoding — that waste is
+                            already inside the baseline figure. Toggle it under App Settings →
+                            &quot;Exclude pre-baseline disposal from cell fill&quot;; the Portal
+                            applies the same rule, so both sides show the same volume.
+                          </>
+                        )}
+                      </>
+                    }
+                  />
                   <Table
                     size="small"
                     rowKey="key"

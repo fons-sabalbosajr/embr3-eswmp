@@ -25,6 +25,8 @@ const {
   ADMIN_SUBMISSIONS_PREFIX,
   ADMIN_ANALYTICS_KEY,
   ADMIN_SUMMARY_DASHBOARD_KEY,
+  CELL_PLACEMENT_PREFIX,
+  BASELINES_CACHE_PREFIX,
 } = require("../utils/cacheKeys");
 const { isBataanSlfName } = require("../utils/mergeBataanSlf");
 const {
@@ -33,10 +35,20 @@ const {
   evaluateFacilityCellAcceptance,
   toBaseM3,
 } = require("../utils/cellAvailability");
-const { authMiddleware, requireAnyAuth, adminOnly, developerOnly } = require("../middleware/auth");
+const { authMiddleware, requireAnyAuth, adminOnly, developerOnly, requirePermission } = require("../middleware/auth");
 const { requirePortalRule } = require("../utils/portalPolicy");
 const { resolveTotalVolumeForUpdate } = require("../utils/baselineVolume");
-const { computeCellOccupancy, OCCUPANCY_ENTRY_FIELDS } = require("../utils/cellOccupancy");
+const {
+  computeCellOccupancy,
+  applyPreBaselineRule,
+  preBaselineExclusionEnabled,
+  OCCUPANCY_CALC_VERSION,
+  OCCUPANCY_ENTRY_FIELDS,
+  ACTIVE_VOLUME_STATUSES,
+  normalizeCellStatus,
+  isActiveCellStatus,
+  displayUnit,
+} = require("../utils/cellOccupancy");
 const {
   resolveCellName,
   collectCellNames,
@@ -241,7 +253,11 @@ async function refreshFacilityCellOccupancy(req, facilityId) {
   const facility = await SlfFacility.findById(facilityId)
     .select(
       "numberOfCell cellNames cellStatuses cellTypes cellCapacities cellCapacityUnits " +
-      "cellFillUnits wasteReceivedUnit volumeCapacityUnit",
+      // cellFillValues + cellFillOverridden are READ here, not just written: a
+      // cell whose Waste in Cell an admin declared keeps that figure through the
+      // recompute. Without them in the projection the override was invisible to
+      // computeCellOccupancy and the next submission wiped it.
+      "cellFillValues cellFillOverridden cellFillUnits wasteReceivedUnit volumeCapacityUnit",
     )
     .lean();
   if (!facility) return null;
@@ -258,11 +274,20 @@ async function refreshFacilityCellOccupancy(req, facilityId) {
     deletedAt: null,
     isDummy: { $ne: true },
   })
-    .select(OCCUPANCY_ENTRY_FIELDS)
+    // `dateOfDisposal` is what the pre-baseline rule compares against.
+    .select(`${OCCUPANCY_ENTRY_FIELDS} dateOfDisposal`)
     .sort({ createdAt: -1 })
     .lean();
 
-  const occupancy = computeCellOccupancy(facility, entries);
+  // The PERSISTED figures must be the same ones every reader computes. Applying
+  // the pre-baseline rule only on the read side left this function writing
+  // cellFillValues that included submissions the dashboards excluded — so the
+  // portal's capacity gate and the admin's gauges disagreed for exactly the
+  // facilities whose disposals predate their baseline encoding.
+  const { counted } = applyPreBaselineRule(entries, {
+    exclude: await preBaselineExclusionEnabled(),
+  });
+  const occupancy = computeCellOccupancy(facility, counted, { unitSource: entries });
   const updated = await SlfFacility.findByIdAndUpdate(
     facility._id,
     {
@@ -277,6 +302,9 @@ async function refreshFacilityCellOccupancy(req, facilityId) {
         cellFillSubmittedValues: occupancy.cellFillSubmittedValues,
         baselineVolumeTotal: occupancy.baselineTotal,
         submittedVolumeTotal: occupancy.submittedTotal,
+        // Stamped so the repair sweep can tell figures written by the CURRENT
+        // calculation from ones an older version left behind.
+        cellOccupancyVersion: OCCUPANCY_CALC_VERSION,
       },
     },
     { returnDocument: "after" },
@@ -707,7 +735,16 @@ const PORTAL_BASELINE_SELECT = {
 };
 
 function hasTruckVolume(entry) {
-  return (entry?.trucks || []).some((truck) => Number(truck?.actualVolume || 0) > 0);
+  // Vehicle-aware: a multi-vehicle trip records its volume per VEHICLE and leaves
+  // the truck level at 0. Reading only the truck made such a submission look like
+  // it carried no waste — which, where this is used to pick a baseline record,
+  // meant a real submission could be chosen as the SLF's baseline container.
+  // Same rule as utils/cellOccupancy.js and DataSLF.computeSlfMetrics.
+  return (entry?.trucks || []).some(
+    (truck) =>
+      Number(truck?.actualVolume || 0) > 0 ||
+      (truck?.vehicles || []).some((v) => Number(v?.actualVolume || 0) > 0),
+  );
 }
 
 // A doc is "baseline-only" when it carries no transport entries at all. This is
@@ -2339,7 +2376,15 @@ router.get("/baseline/:slfName", async (req, res) => {
 });
 
 // Get latest baseline info for ALL SLF generators — admin tab
-router.get("/baselines", optionalAuth, async (req, res) => {
+// Cache-aside, using the SAME service every other cached read here uses (Redis
+// when configured, in-process otherwise — see utils/serverCache.js). Mounted
+// AFTER optionalAuth so the resolved dummy scope is known before the key is
+// built; MongoDB stays the source of truth and the entry is dropped the moment a
+// baseline or submission write lands (staleKeysFor → BASELINES_CACHE_PREFIX).
+const baselinesCacheKey = (req) =>
+  `${BASELINES_CACHE_PREFIX}:${devWantsDummy(req) ? "dummy" : "default"}`;
+
+router.get("/baselines", optionalAuth, cacheJson(baselinesCacheKey, 120000), async (req, res) => {
   try {
     // Aggregate from DataSLF directly — covers both SLFGenerator and SlfFacility refs
     // Include soft-deleted records since baseline is facility-level data
@@ -4480,12 +4525,28 @@ router.get("/disposal-calendar", async (req, res) => {
       isDummy: { $ne: true },
       dateOfDisposal: { $ne: null },
       status: { $nin: ["reverted", "revert_requested"] },
+      // A BASELINE UPDATE IS NOT A SUBMISSION.
+      //
+      // PATCH /portal-save-baseline stamps its baseline-only container with
+      // `dateOfDisposal: new Date()` (the save time) because the field is
+      // required by the schema — so every baseline save used to land on this
+      // calendar as a disposal on the day it was saved, and was then counted by
+      // the day/month status tracker. It carries no transport entries, which is
+      // exactly what identifies a container rather than a submission.
+      //
+      // The admin submissions list, the dashboard stats and the SLF map marker
+      // (`mode=latest`) already filter on this; the calendar was the one reader
+      // that did not. See SUBMISSION_HAS_TRUCKS.
+      ...SUBMISSION_HAS_TRUCKS,
     };
 
     const records = await DataSLF.find(match)
       .setOptions({ includeHiddenYears: true })
       .sort({ dateOfDisposal: -1, createdAt: -1 })
-      .select("_id idNo submissionId previousIdNos dateOfDisposal submittedBy slfName lguCompanyName status baselineUnit totalVolumeM3 totalVolumeTons truckCount companyType createdAt")
+      // `slfGenerator` is what the day modal groups facilities on — without it
+      // every group fell back to the NAME key, splitting one SLF in two whenever
+      // some of its records still held an older name snapshot.
+      .select("_id idNo submissionId previousIdNos dateOfDisposal submittedBy slfGenerator slfName lguCompanyName status baselineUnit totalVolumeM3 totalVolumeTons truckCount companyType createdAt")
       .lean();
 
     const emails = [...new Set(records.map((r) => String(r.submittedBy || "").trim().toLowerCase()).filter(Boolean))];
@@ -4505,6 +4566,91 @@ router.get("/disposal-calendar", async (req, res) => {
     }));
 
     res.json({ records, userByEmail, generatedAt: new Date() });
+  } catch (error) {
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+});
+
+/**
+ * The Disposal Activity modal's rows, for ONE day.
+ *
+ * ── Why the modal was showing a stripped-down row ───────────────────────────
+ * GET /disposal-calendar deliberately ships no `trucks[]`: it answers "which
+ * days had activity" for the whole dashboard and would otherwise carry every
+ * transport entry of every submission ever made. But the day modal renders
+ * PER-TRIP columns — Hauler, Client, Plate No., Cell, Waste Type, per-trip
+ * Volume — and those live only on trucks[]/vehicles[]. With no trucks the
+ * client's row builder fell back to one summary row per submission and rendered
+ * "—" in all five columns. The data was in MongoDB the whole time; it simply
+ * never left the server.
+ *
+ * So the trips are fetched when the modal opens, for that day only. Bounded by
+ * the date, projected to exactly the fields the table renders, and cell names
+ * are resolved to the facility's CURRENT labels before responding (the copy
+ * stored on a truck can be a stale snapshot — see utils/cellNaming.js).
+ *
+ * Baseline containers are excluded by the same rule as the calendar itself: a
+ * baseline save carries a save-time `dateOfDisposal` and no transport entries,
+ * and it is not a disposal.
+ */
+const DISPOSAL_ACTIVITY_TRUCK_FIELDS = [
+  "trucks.disposalTicketNo",
+  "trucks.hauler",
+  "trucks.haulerName",
+  "trucks.plateNumber",
+  "trucks.wasteType",
+  "trucks.actualVolume",
+  "trucks.actualVolumeUnit",
+  "trucks.cellIndex",
+  "trucks.cellName",
+  "trucks.cellType",
+  "trucks.selectedClients",
+  "trucks.vehicles.plateNumber",
+  "trucks.vehicles.wasteType",
+  "trucks.vehicles.actualVolume",
+  "trucks.vehicles.actualVolumeUnit",
+  "trucks.vehicles.cellIndex",
+  "trucks.vehicles.cellName",
+  "trucks.vehicles.cellType",
+  "trucks.vehicles.selectedClients",
+].join(" ");
+
+router.get("/disposal-calendar/day", async (req, res) => {
+  try {
+    const day = String(req.query.date || "").trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) {
+      return res.status(400).json({ message: "A date (YYYY-MM-DD) is required." });
+    }
+    // Matched on the same local-day boundaries the calendar groups by, so a row
+    // can never land on a different day in the modal than in the grid.
+    const start = new Date(`${day}T00:00:00.000`);
+    const end = new Date(start.getTime());
+    end.setDate(end.getDate() + 1);
+    if (Number.isNaN(start.getTime())) {
+      return res.status(400).json({ message: "A valid date is required." });
+    }
+
+    const records = await DataSLF.find({
+      deletedAt: null,
+      isDummy: { $ne: true },
+      dateOfDisposal: { $gte: start, $lt: end },
+      status: { $nin: ["reverted", "revert_requested"] },
+      ...SUBMISSION_HAS_TRUCKS,
+    })
+      .setOptions({ includeHiddenYears: true })
+      .sort({ dateOfDisposal: -1, createdAt: -1 })
+      .select(
+        "_id idNo submissionId previousIdNos dateOfDisposal submittedBy slfGenerator slfName " +
+          `lguCompanyName status baselineUnit totalVolumeM3 totalVolumeTons truckCount companyType createdAt ${DISPOSAL_ACTIVITY_TRUCK_FIELDS}`,
+      )
+      .populate("slfGenerator", "_id lgu slfName cellNames")
+      .lean();
+
+    res.json({
+      date: day,
+      records: applyResolvedCellNamesToAll(records),
+      generatedAt: new Date(),
+    });
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });
   }
@@ -5049,6 +5195,324 @@ router.get("/detail/:id", async (req, res) => {
   }
 });
 
+/**
+ * Per-cell fill panel for Admin → Portal Submission → Cell Waste Placement.
+ *
+ * ── The bottleneck this replaces ────────────────────────────────────────────
+ * The page used to answer "how full is each cell?" in the BROWSER. Selecting a
+ * submission fired `GET /data-slf?mode=list&includeTrucks=true&search=<facility
+ * name>` with NO `limit`, so the unpaginated branch returned EVERY record that
+ * matched the name — each with its complete `trucks[]`/`vehicles[]` array and a
+ * populated facility — purely so the client could add the volumes up. The
+ * request re-fired on every facility switch, could not be cached (includeTrucks
+ * disables the admin-list cache) and grew without bound as a facility submits.
+ * A second full-collection aggregation, `GET /data-slf/baselines`, was loaded
+ * on mount for one field: the selected facility's baseline date.
+ *
+ * It was also WRONG. The cell grid is built from the facility's cell
+ * configuration, but the only facility document the page had was the
+ * `slfGenerator` populated by the list route — projected down to
+ * SLF_GENERATOR_REF_FIELDS, which carries `cellNames` and none of
+ * numberOfCell / cellCapacities / cellStatuses / cellTypes. The cell count
+ * therefore collapsed to the `1` fallback: the panel showed a single "Cell 1",
+ * the assignment dropdown offered only that cell, and any volume placed in a
+ * cell other than index 0 was dropped from the totals.
+ *
+ * Both problems have one answer — compute it where the data already is. The
+ * rollup itself is `computeCellOccupancy`, the SAME function that produces the
+ * persisted `SlfFacility.cellFillValues`, so this panel cannot drift from the
+ * dashboard gauges or the portal tiles.
+ *
+ * Response is O(cells), not O(submissions).
+ */
+const cellPlacementOverviewKey = (req) =>
+  `${CELL_PLACEMENT_PREFIX}:${req.params.facilityId}:${devWantsDummy(req) ? "dummy" : "default"}`;
+
+/**
+ * THE per-cell row shape every consumer reads.
+ *
+ * `computeCellOccupancy` is the one calculation (it also produces the persisted
+ * `SlfFacility.cellFillValues`); this turns its rows into the presentation shape
+ * — label, status, capacity, utilisation — so the Cell Waste Placement panel,
+ * Cell Infrastructure, View SLF Details and the portal dashboard cannot each
+ * derive a different number from the same record.
+ *
+ * Capacity is converted INTO the occupancy unit before the percentage is taken.
+ * A facility whose capacity is declared in tons while its fill resolves to m³
+ * (or vice-versa) otherwise divides two different units and reports a
+ * utilisation that is out by the conversion factor.
+ */
+function buildOccupancyCells(facility, occupancy, idsByCell = new Map()) {
+  const unit = occupancy.unit;
+  return occupancy.rows.map((row) => {
+    const converted = convertVolumeStrict(
+      Number(facility.cellCapacities?.[row.index] || 0),
+      facility.cellCapacityUnits?.[row.index] || unit,
+      unit,
+    );
+    const capacity = Number.isFinite(Number(converted)) ? Number(converted) : 0;
+    const status = normalizeCellStatus(facility.cellStatuses?.[row.index]);
+    const submissionIds = [...(idsByCell.get(row.index) || [])];
+    return {
+      index: row.index,
+      label: String(facility.cellNames?.[row.index] || "").trim() || `Cell ${row.index + 1}`,
+      status,
+      type: facility.cellTypes?.[row.index] || "Residual",
+      active: isActiveCellStatus(status),
+      unit: displayUnit(unit),
+      capacity,
+      // `used` = baseline + valid submissions, counted exactly once each —
+      // unless an admin declared this cell's figure, in which case it is theirs
+      // and `derivedTotal` carries what the data alone would have said.
+      used: Math.round(row.total * 1000) / 1000,
+      baselineUsed: Math.round(row.baseline * 1000) / 1000,
+      submittedUsed: Math.round(row.submitted * 1000) / 1000,
+      overridden: !!row.overridden,
+      derivedTotal: row.overridden ? row.derivedTotal : undefined,
+      unconvertible: row.unconvertible || 0,
+      pct: capacity > 0 ? Math.min(100, (row.total / capacity) * 100) : null,
+      remaining: capacity > 0 ? Math.max(0, capacity - row.total) : null,
+      submissionIds,
+      submissionCount: submissionIds.length,
+    };
+  });
+}
+
+/** Per-cell set of submission ids contributing waste, under the occupancy rules. */
+function collectSubmissionIdsByCell(entries) {
+  const idsByCell = new Map();
+  entries.forEach((entry) => {
+    if (!(entry.trucks || []).length) return;
+    if (!ACTIVE_VOLUME_STATUSES.has(entry.status || "pending")) return;
+    const place = (index) => {
+      if (!Number.isInteger(index) || index < 0) return;
+      if (!idsByCell.has(index)) idsByCell.set(index, new Set());
+      idsByCell.get(index).add(String(entry._id));
+    };
+    entry.trucks.forEach((truck) => {
+      const vehicles = (truck.vehicles || []).filter(
+        (v) => v?.cellIndex !== null && v?.cellIndex !== undefined && v?.cellIndex !== "",
+      );
+      if (vehicles.length) {
+        vehicles.forEach((v) => place(Number(v.cellIndex)));
+        return;
+      }
+      if (truck?.cellIndex !== null && truck?.cellIndex !== undefined && truck?.cellIndex !== "") {
+        place(Number(truck.cellIndex));
+      }
+    });
+  });
+  return idsByCell;
+}
+
+/**
+ * Record that ONE existing placement moved from one cell to another.
+ *
+ * Every path that can change a placement writes here: the admin correction, the
+ * admin assignment editor, the portal's Organize Cell Placement and its bulk
+ * upload. That is what makes the cell tracker answerable from persisted data —
+ * current cell, previous cell, who moved it, when — and it is deliberately the
+ * ONLY record of the move: the volume itself is not copied anywhere, so a
+ * reassignment can never inflate a facility's total.
+ *
+ * A no-op (same cell) and a FIRST assignment (nothing to move from) are both
+ * ignored — there is no movement to record.
+ */
+function recordCellMovement(entry, move) {
+  const from = move.fromCellIndex;
+  if (from === null || from === undefined || from === "" || !Number.isInteger(Number(from))) return null;
+  if (Number(from) === Number(move.toCellIndex)) return null;
+  const record = {
+    truckIndex: move.truckIndex,
+    vehicleIndex: move.vehicleIndex ?? null,
+    fromCellIndex: Number(from),
+    fromCellName: move.fromCellName || `Cell ${Number(from) + 1}`,
+    fromCellType: move.fromCellType || "",
+    toCellIndex: Number(move.toCellIndex),
+    toCellName: move.toCellName || `Cell ${Number(move.toCellIndex) + 1}`,
+    toCellType: move.toCellType || "",
+    volume: Number(move.volume || 0) || undefined,
+    volumeUnit: move.volumeUnit || "",
+    reason: move.reason,
+    correctedBy: move.actor,
+    correctedAt: new Date(),
+    statusAtCorrection: entry.status,
+    source: move.source,
+  };
+  if (!Array.isArray(entry.cellCorrections)) entry.cellCorrections = [];
+  entry.cellCorrections.push(record);
+  return record;
+}
+
+/** The cell a placement currently sits in, or null when it has never been placed. */
+function currentCellIndexOf(truck, vehicleIndex) {
+  const slot =
+    Number.isInteger(vehicleIndex) && Array.isArray(truck?.vehicles) && truck.vehicles[vehicleIndex]
+      ? truck.vehicles[vehicleIndex]
+      : truck;
+  const raw = slot?.cellIndex;
+  if (raw === null || raw === undefined || raw === "") return null;
+  const index = Number(raw);
+  return Number.isInteger(index) && index >= 0 ? index : null;
+}
+
+const FACILITY_CELL_FIELDS =
+  "_id lgu slfName province numberOfCell cellNames cellStatuses cellTypes " +
+  "cellCapacities cellCapacityUnits cellFillValues cellFillOverridden cellFillUnits " +
+  "wasteReceivedUnit volumeCapacityUnit";
+
+/**
+ * Per-cell occupancy for EVERY facility, in one request.
+ *
+ * SLF Monitoring / View SLF Details / Cell Infrastructure used to recompute this
+ * in the browser (`buildFacilityCellUsage` in slf-monitoring/SlfDashboardTab.jsx)
+ * from `/data-slf/cell-usage`. That was a THIRD implementation of a calculation
+ * that already exists twice, and it disagreed with both:
+ *   • it reads only truck-level `actualVolume`/`cellIndex`, so a submission whose
+ *     waste is split across per-VEHICLE placements contributed nothing;
+ *   • the gauge rendered the STORED `cellFillValues` while the breakdown table
+ *     and chart rendered the browser's own numbers, so the two disagreed after
+ *     any cell move;
+ *   • capacity utilisation divided a fill in one unit by a capacity in another.
+ *
+ * One rollup, from `computeCellOccupancy`, serves all of them. It is also far
+ * smaller on the wire than the row set it replaces: O(facilities × cells)
+ * instead of O(submissions × trucks).
+ */
+const cellOccupancyAllKey = (req) =>
+  `${CELL_PLACEMENT_PREFIX}:all:${devWantsDummy(req) ? "dummy" : "default"}`;
+
+router.get("/cell-occupancy", cacheJson(cellOccupancyAllKey, 60000), async (req, res) => {
+  try {
+    const includeDummy = devWantsDummy(req);
+    const [facilities, entries, appSettings] = await Promise.all([
+      SlfFacility.find({ deletedAt: null, ...(includeDummy ? {} : { isDummy: { $ne: true } }) })
+        .select(FACILITY_CELL_FIELDS)
+        .lean(),
+      DataSLF.find({
+        deletedAt: null,
+        slfGenerator: { $ne: null },
+        ...(includeDummy ? {} : { isDummy: { $ne: true } }),
+      })
+        .setOptions({ includeHiddenYears: true })
+        .select(`${OCCUPANCY_ENTRY_FIELDS} dateOfDisposal`)
+        .sort({ createdAt: -1 })
+        .lean(),
+      require("../models/AppSettings")
+        .findOne()
+        .select("excludePreBaselineDisposalFromCellFill")
+        .lean(),
+    ]);
+
+    const exclude = appSettings?.excludePreBaselineDisposalFromCellFill !== false;
+    const byFacilityEntries = new Map();
+    entries.forEach((entry) => {
+      const key = String(entry.slfGenerator);
+      if (!byFacilityEntries.has(key)) byFacilityEntries.set(key, []);
+      byFacilityEntries.get(key).push(entry);
+    });
+
+    const byFacility = {};
+    facilities.forEach((facility) => {
+      const key = String(facility._id);
+      const own = byFacilityEntries.get(key) || [];
+      const { counted, excludedCount } = applyPreBaselineRule(own, { exclude });
+      // `own`, not the whole batch — another facility's declared unit must never
+      // decide this one's.
+      const occupancy = computeCellOccupancy(facility, counted, { unitSource: own });
+      byFacility[key] = {
+        unit: displayUnit(occupancy.unit),
+        cells: buildOccupancyCells(facility, occupancy, collectSubmissionIdsByCell(counted)),
+        totals: {
+          baseline: occupancy.baselineTotal,
+          submitted: occupancy.submittedTotal,
+          total: occupancy.totalVolume,
+          // Received but not organized into a cell yet — the gap between the
+          // facility total and the sum of its cells. Reported rather than
+          // attributed to a cell nobody chose.
+          unplaced: occupancy.unplacedTotal,
+          placedSubmitted: occupancy.placedSubmittedTotal,
+          cellTotal: occupancy.cellTotal,
+        },
+        submissionCount: counted.filter(
+          (e) => (e.trucks || []).length > 0 && ACTIVE_VOLUME_STATUSES.has(e.status || "pending"),
+        ).length,
+        excludedPreBaselineCount: excludedCount,
+      };
+    });
+
+    res.json({ byFacility, generatedAt: new Date() });
+  } catch (error) {
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+});
+
+router.get(
+  "/cell-placement-overview/:facilityId",
+  authMiddleware,
+  adminOnly,
+  cacheJson(cellPlacementOverviewKey, 60000),
+  async (req, res) => {
+    try {
+      const facilityId = String(req.params.facilityId || "").trim();
+      if (!mongoose.isValidObjectId(facilityId)) {
+        return res.status(400).json({ message: "A valid facility id is required." });
+      }
+      const facility = await SlfFacility.findById(facilityId).select(FACILITY_CELL_FIELDS).lean();
+      if (!facility) return res.status(404).json({ message: "Facility not found" });
+
+      const includeDummy = devWantsDummy(req);
+      const [entries, appSettings] = await Promise.all([
+        DataSLF.find({
+          slfGenerator: facility._id,
+          deletedAt: null,
+          ...(includeDummy ? {} : { isDummy: { $ne: true } }),
+        })
+          .setOptions({ includeHiddenYears: true })
+          // The occupancy projection, plus the two dates the pre-baseline rule
+          // compares. Never the whole document.
+          .select(`${OCCUPANCY_ENTRY_FIELDS} dateOfDisposal`)
+          .sort({ createdAt: -1 })
+          .lean(),
+        require("../models/AppSettings")
+          .findOne()
+          .select("excludePreBaselineDisposalFromCellFill preBaselineDisposalDetectorEnabled")
+          .lean(),
+      ]);
+
+      const { baselineDate, counted, excludedCount } = applyPreBaselineRule(entries, {
+        exclude: appSettings?.excludePreBaselineDisposalFromCellFill !== false,
+      });
+      const occupancy = computeCellOccupancy(facility, counted, { unitSource: entries });
+      const cells = buildOccupancyCells(facility, occupancy, collectSubmissionIdsByCell(counted));
+
+      res.json({
+        facility: {
+          _id: facility._id,
+          slfName: facility.slfName || facility.lgu || "",
+          lgu: facility.lgu || "",
+        },
+        unit: displayUnit(occupancy.unit),
+        cells,
+        totals: {
+          baseline: occupancy.baselineTotal,
+          submitted: occupancy.submittedTotal,
+          total: occupancy.totalVolume,
+          unplaced: occupancy.unplacedTotal,
+          placedSubmitted: occupancy.placedSubmittedTotal,
+          cellTotal: occupancy.cellTotal,
+        },
+        excludedPreBaselineCount: excludedCount,
+        preBaselineDetectorEnabled: appSettings?.preBaselineDisposalDetectorEnabled !== false,
+        baselineLastUpdated: baselineDate,
+        generatedAt: new Date(),
+      });
+    } catch (error) {
+      res.status(500).json({ message: "Server error", error: error.message });
+    }
+  },
+);
+
 router.post("/cell-capacity-alert", async (req, res) => {
   try {
     const { submissionIds = [], message, cellName, slfName, performedBy } = req.body || {};
@@ -5099,6 +5563,296 @@ router.post("/cell-capacity-alert", async (req, res) => {
   }
 });
 
+/**
+ * Admin: CORRECT the cell a submission's waste was placed in.
+ *
+ * ── Why this is not just "let the admin edit the field" ─────────────────────
+ * PATCH /:id/cell-assignments exists for the ordinary case: waste that has not
+ * been placed yet. Once a submission is ACKNOWLEDGED the placement is a figure
+ * the facility's occupancy, the dashboards and the portal's own tiles are all
+ * derived from, so changing it has to be deliberate, attributable and
+ * reversible in the record — not an untracked overwrite of `trucks[].cellIndex`.
+ *
+ * The correction moves ONE placement (a truck, or one vehicle of a truck):
+ *   • `trucks[].cellIndex` becomes the new cell — there is always exactly one
+ *     current placement, so the volume can never be counted in two cells and no
+ *     duplicate submission is created;
+ *   • the placement it replaced is appended to `cellCorrections[]` with the
+ *     admin, the timestamp and the required reason;
+ *   • the submission's `_id`, `idNo`, `submissionId`, volumes, owner and
+ *     workflow status are all left exactly as they were.
+ *
+ * Atomicity: everything the correction WRITES lives in one document, so the
+ * `save()` is atomic on its own — there is no window in which the old cell is
+ * updated and the new one is not. `SlfFacility.cellFillValues` is a DERIVED
+ * denormalization that is RECOMPUTED from the submissions afterwards (never
+ * incremented/decremented), so a failure there can only leave it stale for one
+ * refresh cycle, not wrong — which is why this follows the codebase's existing
+ * recompute pattern instead of introducing a multi-document transaction.
+ */
+// Reverted / revert-requested / rejected submissions are excluded on purpose:
+// those are already in the portal user's hands through the revert workflow, and
+// correcting one behind their back would collide with the resubmission they are
+// being asked to make.
+const CORRECTABLE_STATUSES = new Set(["acknowledged", "pending"]);
+const MIN_CORRECTION_REASON = 5;
+
+router.patch(
+  "/:id/correct-cell-placement",
+  authMiddleware,
+  adminOnly,
+  requirePermission("cellWastePlacement", "edit"),
+  async (req, res) => {
+    try {
+      if (!mongoose.isValidObjectId(String(req.params.id))) {
+        return res.status(400).json({ message: "A valid submission id is required." });
+      }
+      const entry = await DataSLF.findOne({ _id: req.params.id, deletedAt: null });
+      if (!entry) return res.status(404).json({ message: "Submission not found" });
+
+      // A baseline container has no waste placement to correct.
+      if (!Array.isArray(entry.trucks) || entry.trucks.length === 0) {
+        return res.status(400).json({ message: "This record carries no waste placement to correct." });
+      }
+
+      const status = String(entry.status || "pending").toLowerCase();
+      if (!CORRECTABLE_STATUSES.has(status)) {
+        return res.status(409).json({
+          message: `A ${status.replace(/_/g, " ")} submission cannot have its cell corrected. Resolve the revert/rejection first.`,
+          code: "NOT_CORRECTABLE",
+        });
+      }
+
+      const body = req.body || {};
+      const reason = String(body.reason || "").trim();
+      if (reason.length < MIN_CORRECTION_REASON) {
+        return res.status(400).json({ message: "A reason for the correction is required." });
+      }
+
+      // Optional caller-supplied expectations. When the client sends them they
+      // are ENFORCED, so a stale screen cannot correct the wrong submission.
+      if (body.expectedIdNo && String(body.expectedIdNo).trim() !== String(entry.idNo || "").trim()) {
+        return res.status(409).json({
+          message: "This submission's reference has changed. Reload and try again.",
+          code: "STALE_SUBMISSION",
+        });
+      }
+      if (
+        body.expectedSlfGenerator &&
+        String(body.expectedSlfGenerator) !== String(entry.slfGenerator || "")
+      ) {
+        return res.status(409).json({ message: "This submission belongs to a different SLF." });
+      }
+
+      const truckIndex = Number(body.truckIndex);
+      if (!Number.isInteger(truckIndex) || truckIndex < 0 || truckIndex >= entry.trucks.length) {
+        return res.status(400).json({ message: "The waste placement to correct was not found on this submission." });
+      }
+      const truck = entry.trucks[truckIndex];
+      const hasVehicleIndex = body.vehicleIndex !== null && body.vehicleIndex !== undefined && body.vehicleIndex !== "";
+      const vehicleIndex = hasVehicleIndex ? Number(body.vehicleIndex) : null;
+      if (
+        hasVehicleIndex &&
+        (!Number.isInteger(vehicleIndex) ||
+          vehicleIndex < 0 ||
+          !Array.isArray(truck.vehicles) ||
+          vehicleIndex >= truck.vehicles.length)
+      ) {
+        return res.status(400).json({ message: "The waste placement to correct was not found on this submission." });
+      }
+      const slot = hasVehicleIndex ? truck.vehicles[vehicleIndex] : truck;
+
+      // A correction REASSIGNS an existing placement. Waste that has never been
+      // placed belongs in the ordinary assignment flow, which needs no reason
+      // and no audit hop.
+      const currentIndex =
+        slot.cellIndex === null || slot.cellIndex === undefined || slot.cellIndex === ""
+          ? null
+          : Number(slot.cellIndex);
+      if (currentIndex === null || !Number.isInteger(currentIndex)) {
+        return res.status(400).json({
+          message: "This waste has no cell assigned yet — use Save Placement to assign it.",
+          code: "NOT_PLACED",
+        });
+      }
+
+      // The admin must be correcting the cell they were LOOKING at. If somebody
+      // else moved it in the meantime, refuse rather than overwrite their change.
+      if (
+        body.fromCellIndex !== null &&
+        body.fromCellIndex !== undefined &&
+        body.fromCellIndex !== "" &&
+        Number(body.fromCellIndex) !== currentIndex
+      ) {
+        return res.status(409).json({
+          message: "This waste is no longer in the cell shown on screen. Refresh and try again.",
+          code: "CELL_CHANGED",
+        });
+      }
+
+      const toCellIndex = Number(body.toCellIndex);
+      if (!Number.isInteger(toCellIndex) || toCellIndex < 0) {
+        return res.status(400).json({ message: "Select a valid cell to move this waste to." });
+      }
+      if (toCellIndex === currentIndex) {
+        return res.status(400).json({ message: "The new cell is the same as the current cell." });
+      }
+
+      const facility = entry.slfGenerator
+        ? await SlfFacility.findById(entry.slfGenerator)
+            .select("_id lgu slfName numberOfCell cellNames cellStatuses cellTypes")
+            .lean()
+        : null;
+      if (!facility) {
+        return res.status(400).json({ message: "This submission is not linked to an SLF facility, so its cells cannot be validated." });
+      }
+      const cellCount = Math.max(
+        Number(facility.numberOfCell || 0),
+        facility.cellNames?.length || 0,
+        facility.cellStatuses?.length || 0,
+        facility.cellTypes?.length || 0,
+      );
+      if (toCellIndex >= cellCount) {
+        return res.status(400).json({ message: "That cell does not exist for this SLF." });
+      }
+      const toStatus = normalizeCellStatus(facility.cellStatuses?.[toCellIndex]);
+      if (!isActiveCellStatus(toStatus)) {
+        return res.status(400).json({ message: `That cell is ${toStatus} — waste can only be moved into an active cell.` });
+      }
+
+      const toCellName =
+        String(facility.cellNames?.[toCellIndex] || "").trim() || `Cell ${toCellIndex + 1}`;
+      const toCellType = facility.cellTypes?.[toCellIndex] || "";
+      const fromCellName =
+        String(facility.cellNames?.[currentIndex] || "").trim() ||
+        String(slot.cellName || "").trim() ||
+        `Cell ${currentIndex + 1}`;
+      // Captured BEFORE the write: `slot` is the live subdocument, so reading
+      // these after the apply block would record the new values as the old ones.
+      const fromCellType = slot.cellType || "";
+      const movedVolume = Number(slot.actualVolume ?? truck.actualVolume ?? 0) || undefined;
+      const movedVolumeUnit =
+        slot.actualVolumeUnit || truck.actualVolumeUnit || entry.baselineUnit || "";
+
+      // ── Apply ── one document, one save.
+      if (hasVehicleIndex) {
+        truck.vehicles[vehicleIndex].cellIndex = toCellIndex;
+        truck.vehicles[vehicleIndex].cellName = toCellName;
+        truck.vehicles[vehicleIndex].cellType = toCellType;
+        // The truck-level copy mirrors the first vehicle for legacy readers —
+        // the same rule PATCH /:id/cell-assignments applies.
+        if (vehicleIndex === 0) {
+          truck.cellIndex = toCellIndex;
+          truck.cellName = toCellName;
+          truck.cellType = toCellType;
+        }
+      } else {
+        truck.cellIndex = toCellIndex;
+        truck.cellName = toCellName;
+        truck.cellType = toCellType;
+        if (Array.isArray(truck.vehicles)) {
+          truck.vehicles.forEach((veh) => {
+            veh.cellIndex = toCellIndex;
+            veh.cellName = toCellName;
+            veh.cellType = toCellType;
+          });
+        }
+      }
+
+      const correctedBy = getRequestActor(req, "admin");
+      const correction = recordCellMovement(entry, {
+        truckIndex,
+        vehicleIndex: hasVehicleIndex ? vehicleIndex : null,
+        fromCellIndex: currentIndex,
+        fromCellName,
+        fromCellType,
+        toCellIndex,
+        toCellName,
+        toCellType,
+        volume: movedVolume,
+        volumeUnit: movedVolumeUnit,
+        reason,
+        actor: correctedBy,
+        source: "admin_correction",
+      });
+      entry.markModified("trucks");
+      await entry.save();
+
+      // Derived data: the volume left one cell and entered another, so the
+      // facility's persisted occupancy is recomputed from the submissions by the
+      // same function every other placement write uses.
+      await refreshOccupancyForFacilities(req, [entry.slfGenerator]);
+
+      await Transaction.create({
+        submissionId: entry.submissionId || entry.idNo,
+        dataEntry: entry._id,
+        companyName: entry.lguCompanyName,
+        companyType: entry.companyType,
+        submittedBy: entry.submittedBy || "",
+        type: "cell_correction",
+        description: `Corrected waste placement on ${entry.idNo || entry.lguCompanyName}: ${fromCellName} → ${toCellName}`,
+        performedBy: correctedBy,
+        meta: {
+          idNo: entry.idNo,
+          truckIndex,
+          vehicleIndex: correction.vehicleIndex,
+          fromCellIndex: currentIndex,
+          fromCellName,
+          toCellIndex,
+          toCellName,
+          volume: correction.volume,
+          volumeUnit: correction.volumeUnit,
+          reason,
+          statusAtCorrection: correction.statusAtCorrection,
+        },
+      });
+
+      writeLog("info", "submissions.cell_corrected", {
+        message: `Waste placement corrected on ${entry.idNo || entry._id}: ${fromCellName} → ${toCellName}`,
+        user: correctedBy,
+        ip: req.ip,
+        meta: { dataEntry: String(entry._id), idNo: entry.idNo, fromCellName, toCellName },
+      });
+
+      notifyAdmin(req, {
+        type: "cell_correction",
+        title: "Waste Placement Corrected",
+        message: `${entry.idNo || entry.lguCompanyName}: ${fromCellName} → ${toCellName}`,
+        meta: { idNo: entry.idNo, dataEntry: entry._id },
+      });
+      if (entry.submittedBy) {
+        // The submitting operator sees the corrected cell on their own record, so
+        // they are told it moved and why — without the admin-only metadata.
+        await Notification.create({
+          recipient: entry.submittedBy,
+          type: "cell_correction",
+          title: "Waste Placement Corrected",
+          message: `EMB Region III moved the waste on ${entry.idNo || "your submission"} from ${fromCellName} to ${toCellName}.`,
+          submissionId: entry.submissionId,
+          dataEntry: entry._id,
+          meta: { idNo: entry.idNo, fromCellName, toCellName },
+        }).catch(() => {});
+        notifyPortal(req, entry.submittedBy, {
+          type: "cell_correction",
+          title: "Waste Placement Corrected",
+          message: `Your waste placement on ${entry.idNo || "a submission"} was moved from ${fromCellName} to ${toCellName}.`,
+        });
+        refreshPortal(req, entry.submittedBy, "submissions");
+      }
+      refreshAdmin(req, "submissions");
+
+      const saved = applyResolvedCellNames(entry.toObject(), facility.cellNames);
+      res.json({
+        message: `Waste placement corrected: ${fromCellName} → ${toCellName}`,
+        data: saved,
+        correction,
+      });
+    } catch (error) {
+      res.status(500).json({ message: "Server error", error: error.message });
+    }
+  },
+);
+
 // Admin: assign submitted truck volumes to specific active SLF cells.
 router.patch("/:id/cell-assignments", async (req, res) => {
   try {
@@ -5106,6 +5860,7 @@ router.patch("/:id/cell-assignments", async (req, res) => {
     if (!entry) return res.status(404).json({ message: "Entry not found" });
 
     const assignments = Array.isArray(req.body?.assignments) ? req.body.assignments : [];
+    const movements = [];
     assignments.forEach((assignment) => {
       const truckIndex = Number(assignment.truckIndex);
       if (!Number.isInteger(truckIndex) || truckIndex < 0 || truckIndex >= entry.trucks.length) return;
@@ -5121,6 +5876,31 @@ router.patch("/:id/cell-assignments", async (req, res) => {
           ? null
           : Number(assignment.vehicleIndex);
       const truck = entry.trucks[truckIndex];
+      // Reassigning an already-placed volume from this editor is a move too, and
+      // belongs in the same tracker as the portal's and the correction workflow's.
+      const priorCellIndex = cellIndex === undefined ? null : currentCellIndexOf(truck, vehicleIndex);
+      if (priorCellIndex !== null && priorCellIndex !== cellIndex) {
+        const priorSlot =
+          Number.isInteger(vehicleIndex) && truck.vehicles?.[vehicleIndex]
+            ? truck.vehicles[vehicleIndex]
+            : truck;
+        movements.push({
+          truckIndex,
+          vehicleIndex: Number.isInteger(vehicleIndex) ? vehicleIndex : null,
+          fromCellIndex: priorCellIndex,
+          fromCellName: priorSlot?.cellName || "",
+          fromCellType: priorSlot?.cellType || "",
+          toCellIndex: cellIndex,
+          toCellName: cellName,
+          toCellType: cellType,
+          volume: Number(priorSlot?.actualVolume ?? truck?.actualVolume ?? 0) || undefined,
+          volumeUnit:
+            priorSlot?.actualVolumeUnit || truck?.actualVolumeUnit || entry.baselineUnit || "",
+          reason: "Admin reassigned the waste placement from the cell editor.",
+          actor: getRequestActor(req, "admin"),
+          source: "admin_assignment",
+        });
+      }
       if (
         Number.isInteger(vehicleIndex) &&
         Array.isArray(truck.vehicles) &&
@@ -5150,6 +5930,7 @@ router.patch("/:id/cell-assignments", async (req, res) => {
         });
       }
     });
+    movements.forEach((move) => recordCellMovement(entry, move));
     entry.markModified("trucks");
     await entry.save();
 
@@ -5261,6 +6042,7 @@ router.patch("/:id/portal-cell-assignments", async (req, res) => {
     const isPositiveCap = (v) => Number.isFinite(Number(v)) && Number(v) > 0;
     const normCapUnit = (u) => (u ? String(u).trim().replace("m3", "m³") : null);
 
+    const movements = [];
     list.forEach((assignment) => {
       const truckIndex = Number(assignment.truckIndex);
       if (!Number.isInteger(truckIndex) || truckIndex < 0 || truckIndex >= entry.trucks.length) return;
@@ -5279,6 +6061,41 @@ router.patch("/:id/portal-cell-assignments", async (req, res) => {
         assignment.vehicleIndex === null || assignment.vehicleIndex === undefined
           ? null
           : Number(assignment.vehicleIndex);
+      // ORGANIZING AN ALREADY-PLACED VOLUME IS A MOVE, NOT AN ADDITION.
+      //
+      // The write below overwrites `cellIndex` in place and the facility's
+      // occupancy is then RECOMPUTED from the submissions, so the volume leaves
+      // its previous cell and enters the new one — the SLF's total submitted
+      // volume is unchanged. This records the hop (previous cell → new cell) so
+      // the cell tracker can show it, which matters most for an ACKNOWLEDGED
+      // submission whose volume is already counted everywhere.
+      const priorCellIndex = hasCell ? currentCellIndexOf(truck, vehicleIndex) : null;
+      const priorSlot =
+        Number.isInteger(vehicleIndex) && truck.vehicles?.[vehicleIndex]
+          ? truck.vehicles[vehicleIndex]
+          : truck;
+      const priorCellName = priorSlot?.cellName || "";
+      const priorCellType = priorSlot?.cellType || "";
+      const priorVolume = Number(priorSlot?.actualVolume ?? truck?.actualVolume ?? 0) || undefined;
+      const priorVolumeUnit =
+        priorSlot?.actualVolumeUnit || truck?.actualVolumeUnit || entry.baselineUnit || "";
+      if (priorCellIndex !== null && priorCellIndex !== cellIndex) {
+        movements.push({
+          truckIndex,
+          vehicleIndex: Number.isInteger(vehicleIndex) ? vehicleIndex : null,
+          fromCellIndex: priorCellIndex,
+          fromCellName: priorCellName,
+          fromCellType: priorCellType,
+          toCellIndex: cellIndex,
+          toCellName: cellName,
+          toCellType: cellType,
+          volume: priorVolume,
+          volumeUnit: priorVolumeUnit,
+          reason: "Portal user reorganized the waste placement.",
+          actor: submittedBy,
+          source: "portal_organize",
+        });
+      }
       if (
         Number.isInteger(vehicleIndex) &&
         Array.isArray(truck.vehicles) &&
@@ -5318,6 +6135,8 @@ router.patch("/:id/portal-cell-assignments", async (req, res) => {
         if (capUnit) truck.truckCapacityUnit = capUnit;
       }
     });
+    // Recorded after the writes so the whole batch is captured in file order.
+    movements.forEach((move) => recordCellMovement(entry, move));
     entry.markModified("trucks");
     await entry.save();
     await refreshFacilityCellOccupancy(req, entry.slfGenerator);
@@ -5470,6 +6289,11 @@ router.post("/portal-cell-assignments/bulk", async (req, res) => {
       const base = {
         row: i + 1,
         submissionId: r.submissionId || r.idNo || "",
+        // Echoed back so the preview names the trip the way the operator's
+        // paperwork does. Overwritten with the truck's real ticket once resolved.
+        disposalTicketNo: String(r.disposalTicketNo || "").trim(),
+        // Echoed so the preview shows what the file supplied for this trip.
+        truckCapacity: Number(r.truckCapacity) > 0 ? Number(r.truckCapacity) : null,
         truckIndex: r.truckIndex,
         vehicleIndex: r.vehicleIndex ?? null,
         // Echo of the uploaded target. Once the facility is resolved further down
@@ -5505,6 +6329,24 @@ router.post("/portal-cell-assignments/bulk", async (req, res) => {
         r.vehicleIndex === null || r.vehicleIndex === undefined || r.vehicleIndex === "" ? null : Number(r.vehicleIndex);
       if (vehicleIndex !== null && (!Number.isInteger(vehicleIndex) || vehicleIndex < 0 || vehicleIndex >= (truck.vehicles || []).length)) {
         results.push({ ...base, status: "invalid", code: "bad_vehicle", message: "Invalid vehicle reference." });
+        continue;
+      }
+
+      // Submission Ticket No, when the row carries one, must match the ticket on
+      // the truck the indices resolve to. The template ships it so the operator
+      // can recognise the trip; validating it here is what stops a row that was
+      // re-ordered, pasted or hand-edited from organizing a DIFFERENT trip than
+      // the one the person was looking at.
+      const claimedTicket = String(r.disposalTicketNo || "").trim();
+      const actualTicket = String(truck?.disposalTicketNo || "").trim();
+      if (actualTicket) base.disposalTicketNo = actualTicket;
+      if (claimedTicket && actualTicket && claimedTicket.toLowerCase() !== actualTicket.toLowerCase()) {
+        results.push({
+          ...base,
+          status: "invalid",
+          code: "bad_ticket",
+          message: `Submission Ticket No does not match this placement (expected ${actualTicket}).`,
+        });
         continue;
       }
 
@@ -5545,11 +6387,36 @@ router.post("/portal-cell-assignments/bulk", async (req, res) => {
         continue;
       }
 
+      // A historical trip can also be missing its Truck Capacity. The manual
+      // organizer completes both in one save, so the bulk path must too —
+      // otherwise a file could place every cell and leave the submitter still
+      // blocked. Same validity rule as PATCH /:id/portal-cell-assignments.
+      const rawCapacity = r.truckCapacity;
+      const hasCapacity = rawCapacity !== null && rawCapacity !== undefined && rawCapacity !== "";
+      const capacity = hasCapacity ? Number(rawCapacity) : null;
+      if (hasCapacity && (!Number.isFinite(capacity) || capacity <= 0)) {
+        results.push({
+          ...base,
+          status: "invalid",
+          code: "bad_capacity",
+          message: "Truck Capacity must be a number greater than 0.",
+        });
+        continue;
+      }
+
       // Valid — reserve the volume and stage the write.
       cellPlanned.set(cellKey, planned + vol);
       const already = (truck.vehicles?.[vehicleIndex]?.cellName || truck.cellName) ? true : false;
       if (!pendingByDoc.has(String(doc._id))) pendingByDoc.set(String(doc._id), { doc, list: [] });
-      pendingByDoc.get(String(doc._id)).list.push({ truckIndex, vehicleIndex, cellIndex, cellName, cellType });
+      pendingByDoc.get(String(doc._id)).list.push({
+        truckIndex,
+        vehicleIndex,
+        cellIndex,
+        cellName,
+        cellType,
+        capacity,
+        capacityUnit: r.truckCapacityUnit || doc.baselineUnit || "",
+      });
       results.push({
         ...base,
         targetCell: cellName,
@@ -5586,9 +6453,35 @@ router.post("/portal-cell-assignments/bulk", async (req, res) => {
     const touchedDocs = [];
     const touchedFacilityIds = new Set();
     for (const { doc, list } of pendingByDoc.values()) {
-      list.forEach(({ truckIndex, vehicleIndex, cellIndex, cellName, cellType }) => {
+      list.forEach(({ truckIndex, vehicleIndex, cellIndex, cellName, cellType, capacity, capacityUnit }) => {
         const truck = doc.trucks[truckIndex];
         if (!truck) return;
+        // Same rule as the manual organizer: reassigning an already-placed volume
+        // MOVES it. Recorded here so bulk and manual leave identical state — the
+        // volume is never added again, only its cell changes.
+        const priorCellIndex = currentCellIndexOf(truck, vehicleIndex);
+        if (priorCellIndex !== null && priorCellIndex !== cellIndex) {
+          const priorSlot =
+            Number.isInteger(vehicleIndex) && truck.vehicles?.[vehicleIndex]
+              ? truck.vehicles[vehicleIndex]
+              : truck;
+          recordCellMovement(doc, {
+            truckIndex,
+            vehicleIndex: Number.isInteger(vehicleIndex) ? vehicleIndex : null,
+            fromCellIndex: priorCellIndex,
+            fromCellName: priorSlot?.cellName || "",
+            fromCellType: priorSlot?.cellType || "",
+            toCellIndex: cellIndex,
+            toCellName: cellName,
+            toCellType: cellType,
+            volume: Number(priorSlot?.actualVolume ?? truck?.actualVolume ?? 0) || undefined,
+            volumeUnit:
+              priorSlot?.actualVolumeUnit || truck?.actualVolumeUnit || doc.baselineUnit || "",
+            reason: "Portal user reorganized the waste placement (bulk upload).",
+            actor: submittedBy,
+            source: "portal_bulk",
+          });
+        }
         if (Number.isInteger(vehicleIndex) && Array.isArray(truck.vehicles) && truck.vehicles[vehicleIndex]) {
           truck.vehicles[vehicleIndex].cellIndex = cellIndex;
           truck.vehicles[vehicleIndex].cellName = cellName;
@@ -5608,6 +6501,20 @@ router.post("/portal-cell-assignments/bulk", async (req, res) => {
               veh.cellName = cellName;
               veh.cellType = cellType;
             });
+          }
+        }
+        // Truck Capacity completion, written to the same slot the cell went to —
+        // identical to the manual organizer, so bulk and manual leave the same
+        // database state (and a bulk-organized submission is no longer left
+        // blocked by a capacity the file already supplied).
+        if (capacity != null) {
+          const unit = capacityUnit ? String(capacityUnit).trim().replace("m3", "m³") : null;
+          if (Number.isInteger(vehicleIndex) && truck.vehicles?.[vehicleIndex]) {
+            truck.vehicles[vehicleIndex].capacity = capacity;
+            if (unit) truck.vehicles[vehicleIndex].capacityUnit = unit;
+          } else {
+            truck.truckCapacity = capacity;
+            if (unit) truck.truckCapacityUnit = unit;
           }
         }
         appliedRows += 1;
@@ -7452,27 +8359,83 @@ const WASTE_SUMMARY_BASELINE_SELECT =
  * the winner's haulers alone. Both queries are small — the previous single query
  * pulled the same hauler graph once per submission.
  */
+/**
+ * The SLF's accredited haulers WITH their client rosters, unioned across every
+ * record that carries them.
+ *
+ * ── Why this cannot pick a single record ────────────────────────────────────
+ * An SLF's `accreditedHaulers` array is duplicated onto every one of its
+ * documents, but the copies are NOT identical: `PATCH /portal-save-baseline`
+ * writes the hauler list to its baseline container without the per-hauler
+ * `clients` / `privateSectorClients` arrays, while the submissions carry the
+ * full roster. Preferring the container — which is both the newest record and a
+ * baseline-only one, so it won both tie-breaks — therefore returned haulers with
+ * no clients at all. Measured on production: Prime Waste Solution's container
+ * holds 141 haulers and 0 client rows while each of its 22 submissions holds the
+ * same 141 haulers and 212 client rows, so the portal's Clients Served card
+ * counted the fallback company alone and showed 1 instead of 158.
+ *
+ * The collapse to distinct (hauler, client) pairs happens in the DATABASE, and
+ * the newest copy of each pair wins — the same rule and the same pipeline shape
+ * the admin Hauler Clients view already uses, so the two can never disagree.
+ * Output is proportional to the DISTINCT roster, not to how many times the array
+ * has been copied.
+ */
 async function resolveWasteSummaryHaulers(match) {
-  const candidates = await DataSLF.find({
-    $and: [match, { "accreditedHaulers.0": { $exists: true } }],
-  })
-    .select("_id trucks.actualVolume")
-    .sort({ createdAt: -1 })
-    .limit(50)
-    .maxTimeMS(20000)
-    .lean();
+  const grouped = await DataSLF.aggregate([
+    { $match: { $and: [match, { "accreditedHaulers.0": { $exists: true } }] } },
+    { $sort: { createdAt: -1 } },
+    { $project: { accreditedHaulers: 1 } },
+    { $unwind: "$accreditedHaulers" },
+    {
+      $project: {
+        haulerName: "$accreditedHaulers.haulerName",
+        officeAddress: "$accreditedHaulers.officeAddress",
+        client: {
+          $concatArrays: [
+            { $ifNull: ["$accreditedHaulers.privateSectorClients", []] },
+            { $ifNull: ["$accreditedHaulers.clients", []] },
+          ],
+        },
+      },
+    },
+    { $unwind: "$client" },
+    {
+      $group: {
+        _id: {
+          hauler: { $toLower: { $trim: { input: { $ifNull: ["$haulerName", ""] } } } },
+          client: {
+            $toLower: {
+              $trim: {
+                input: {
+                  $cond: [
+                    { $eq: [{ $type: "$client" }, "string"] },
+                    "$client",
+                    { $ifNull: ["$client.clientName", ""] },
+                  ],
+                },
+              },
+            },
+          },
+        },
+        haulerName: { $first: "$haulerName" },
+        officeAddress: { $first: "$officeAddress" },
+        client: { $first: "$client" },
+      },
+    },
+    { $match: { "_id.client": { $ne: "" } } },
+  ])
+    .option({ includeHiddenYears: true })
+    .allowDiskUse(true);
 
-  const winner =
-    candidates.find(isBaselineOnlyRecord) ||
-    candidates.find((item) => !hasTruckVolume(item)) ||
-    candidates[0];
-  if (!winner) return [];
-
-  const doc = await DataSLF.findById(winner._id)
-    .select("accreditedHaulers")
-    .maxTimeMS(20000)
-    .lean();
-  return doc?.accreditedHaulers || [];
+  // Re-shaped into the hauler form the caller already walks, one entry per
+  // distinct (hauler, client) pair.
+  return grouped.map((row) => ({
+    haulerName: row.haulerName,
+    officeAddress: row.officeAddress,
+    clients: [row.client],
+    privateSectorClients: [],
+  }));
 }
 
 const WASTE_SUMMARY_SUBMISSION_SELECT =
@@ -7978,3 +8941,6 @@ module.exports.makeBaselineFieldReader = makeBaselineFieldReader;
 module.exports.chooseBaselineRecord = chooseBaselineRecord;
 module.exports.isBaselineOnlyRecord = isBaselineOnlyRecord;
 module.exports.BASELINE_ONLY_FILTER = BASELINE_ONLY_FILTER;
+// Exposed for testing: the hauler/client roster union behind the portal's
+// Clients Served card.
+module.exports.resolveWasteSummaryHaulers = resolveWasteSummaryHaulers;

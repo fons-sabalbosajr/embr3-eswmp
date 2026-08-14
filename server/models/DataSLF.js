@@ -82,6 +82,52 @@ const haulerSchema = new mongoose.Schema(
   { _id: false }
 );
 
+// One admin correction of a waste placement's cell.
+//
+// A portal user can place a truck's volume in the wrong cell and only notice
+// after the submission has been acknowledged. The admin fix must not overwrite
+// the original assignment silently: `trucks[].cellIndex` becomes the corrected
+// cell (so every reader — admin, portal, occupancy, reports — sees ONE current
+// placement and the volume is never counted twice), and the placement it
+// replaced is preserved here with who changed it, when, and why.
+//
+// Append-only: a slot corrected twice keeps both hops in order.
+const cellCorrectionSchema = new mongoose.Schema(
+  {
+    // Which placement was moved. vehicleIndex is null for a truck-level slot.
+    truckIndex: { type: Number, required: true },
+    vehicleIndex: { type: Number, default: null },
+    fromCellIndex: { type: Number, default: null },
+    fromCellName: { type: String, trim: true },
+    fromCellType: { type: String, trim: true },
+    toCellIndex: { type: Number, required: true },
+    toCellName: { type: String, trim: true },
+    toCellType: { type: String, trim: true },
+    // The volume that moved, recorded as it stood at correction time so the
+    // audit entry stays readable even if the placement is corrected again.
+    volume: { type: Number },
+    volumeUnit: { type: String, trim: true },
+    reason: { type: String, trim: true, required: true },
+    correctedBy: { type: String, trim: true, required: true },
+    correctedAt: { type: Date, default: Date.now },
+    // WHICH workflow moved it. An admin correction and a portal reorganization
+    // are both movements of one existing volume — they belong in the same
+    // append-only log so the cell tracker can show "previous cell → current
+    // cell" from persisted data — but they are not the same act, and the admin
+    // views label them differently.
+    source: {
+      type: String,
+      enum: ["admin_correction", "admin_assignment", "portal_organize", "portal_bulk"],
+      default: "admin_correction",
+    },
+    // The submission's status when the correction was applied. A correction does
+    // not change the workflow status — an acknowledged submission stays
+    // acknowledged — so this records the state it was corrected in.
+    statusAtCorrection: { type: String, trim: true },
+  },
+  { _id: true },
+);
+
 const dataSLFSchema = new mongoose.Schema(
   {
     slfGenerator: {
@@ -168,6 +214,9 @@ const dataSLFSchema = new mongoose.Schema(
     companyBarangay: { type: String, trim: true },
 
     trucks: [truckSchema],
+
+    // Admin waste-placement corrections, oldest first. See cellCorrectionSchema.
+    cellCorrections: [cellCorrectionSchema],
 
     // Denormalized metric fields — computed from trucks/dateOfDisposal on save.
     // Aggregations may fall back to computing from trucks when these are missing
