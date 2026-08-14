@@ -758,6 +758,12 @@ router.get("/my-submissions", async (req, res) => {
         submittedBy: user.email,
         deletedAt: null,
         hiddenFromPortal: { $ne: true },
+        // Only real submissions. A record with no transport entries is the
+        // baseline-only container written by PATCH /portal-save-baseline — never
+        // something the user submitted — and listing it put a phantom
+        // "0 / No Waste Data / Pending" row in Submission History after the first
+        // baseline save. See SUBMISSION_HAS_TRUCKS in routes/dataSLF.js.
+        "trucks.0": { $exists: true },
       },
       PORTAL_SUBMISSION_LIST_FIELDS,
     )

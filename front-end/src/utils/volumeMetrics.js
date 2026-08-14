@@ -114,3 +114,58 @@ export function cellVolumeSegments(cell = {}) {
 export function storedVolumeOf(segments = []) {
   return segments.reduce((sum, s) => sum + (Number(s.value) || 0), 0);
 }
+
+/**
+ * Read one side of a waste-received summary in the facility's declared unit.
+ *
+ * `GET /data-slf/waste-received-summary` reports m³ and tons side by side; a
+ * facility declares ONE unit, and every portal figure is shown in it.
+ *
+ * @param {{m3?:number, tons?:number}} totals a `totals` / `baselineTotals` block
+ * @param {string} unit the facility's declared unit
+ */
+function totalInUnit(totals, unit) {
+  const value = String(unit || "m³").replace("m3", "m³") === "tons" ? totals?.tons : totals?.m3;
+  const numeric = Number(value);
+  // `Number(x || 0)` is not enough: a non-numeric string is truthy, so it reaches
+  // Number() and yields NaN — which the tile would render literally as "NaN".
+  // Anything that is not a finite number means "nothing recorded", i.e. 0.
+  return Number.isFinite(numeric) ? numeric : 0;
+}
+
+/**
+ * SUBMITTED VOLUME — volume recorded through Portal truck submissions.
+ *
+ * This is the API's `totals`, which is the sum over `submissionClients`, which
+ * the route builds from each record's `trucks[]`. It is deliberately NOT derived
+ * from the baseline: baseline and submitted are two independent quantities whose
+ * SUM is the cell's current fill (see the header of this file).
+ *
+ * The Portal's "Submitted Vol." tile used to render
+ * `Math.max(0, baselineTotals − totals)` — leftover baseline headroom, which is
+ * not a metric this app defines, and which reads as 0 for any facility whose
+ * submissions have reached its declared baseline. Three live SLFs showed 0 that
+ * way while holding real submitted volume. Exported so the tile and its test read
+ * the same definition.
+ *
+ * @param {object} wasteReceivedData the summary response
+ * @param {string} unit the facility's declared unit
+ * @returns {number} 0 when there is nothing submitted — never null/undefined, so
+ *   a genuine zero renders as "0" rather than as an empty tile.
+ */
+export function submittedVolumeOf(wasteReceivedData = {}, unit = "m³") {
+  return totalInUnit(wasteReceivedData?.totals, unit);
+}
+
+/** BASELINE VOLUME — the facility's declared opening volume, in `unit`. */
+export function baselineVolumeOf(wasteReceivedData = {}, unit = "m³") {
+  return totalInUnit(wasteReceivedData?.baselineTotals, unit);
+}
+
+/**
+ * WASTE CURRENTLY STORED — baseline + submitted, the derived total.
+ * Never its own gauge segment; see the header.
+ */
+export function storedVolumeFor(wasteReceivedData = {}, unit = "m³") {
+  return baselineVolumeOf(wasteReceivedData, unit) + submittedVolumeOf(wasteReceivedData, unit);
+}

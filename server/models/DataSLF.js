@@ -6,6 +6,12 @@ const clientSchema = new mongoose.Schema(
   {
     clientName: { type: String, trim: true },
     clientType: { type: String, enum: ["Private", "LGU"], default: "Private" },
+    // Free-text client address. The structured region/province/municipality fields
+    // below are PSGC-coded and cannot hold the "Client Address" column the portal's
+    // hauler bulk upload accepts (and the hauler export reads back), so an uploaded
+    // address had nowhere to land and was dropped on save. Optional and additive —
+    // existing records are unaffected.
+    clientAddress: { type: String, trim: true },
     region: { type: String, trim: true },
     regionName: { type: String, trim: true },
     province: { type: String, trim: true },
@@ -334,6 +340,22 @@ async function nextIdNoSequence(typeCode, provCode) {
   return seq;
 }
 
+// An ID No. identifies a SUBMISSION. A record with no transport entries is not
+// one — it is the baseline-only container that PATCH /portal-save-baseline writes
+// an SLF's baseline into, and `submitEntries` rejects an empty trucks[] outright
+// ("At least one truck entry is required"), so the two can never be confused.
+//
+// Stamping a baseline container with an ID No. is what made every first baseline
+// save look like a pending submission (SLF-PVT-XX-0001 · 0 · No Waste Data ·
+// Pending) in the portal and admin submission views. Baselines belong in the
+// Baseline Data tab, which does not read idNo at all.
+//
+// The ID is still assigned the moment a record actually carries transport
+// entries — including an existing container that later gains them — so a real
+// submission is never left without one.
+const isSubmissionRecord = (doc) =>
+  Array.isArray(doc?.trucks) && doc.trucks.length > 0;
+
 // Auto-generate the ID No based on province of the SLF
 dataSLFSchema.pre("save", async function () {
   // Regenerate the TYPE segment when companyType changes on an existing entry,
@@ -356,7 +378,7 @@ dataSLFSchema.pre("save", async function () {
     }
   }
 
-  if (this.isNew && !this.idNo) {
+  if (!this.idNo && isSubmissionRecord(this)) {
     const DataSLF = mongoose.model("DataSLF");
     const SlfFacility = mongoose.model("SlfFacility");
 

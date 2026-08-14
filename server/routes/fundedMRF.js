@@ -8,6 +8,19 @@ const router = express.Router();
 const { authMiddleware, adminOnly } = require("../middleware/auth");
 router.use(authMiddleware, adminOnly);
 
+// ── Dashboard tile cache ──
+// GET /stats is a fan-out target of the admin dashboard, which refreshes every
+// 60s per open admin session and runs several aggregations per call. The result
+// is a global rollup — identical for every admin — so one computation serves all
+// of them. Two minutes because this module's records are maintained by hand, not
+// by portal traffic; any write below invalidates the key immediately anyway, so
+// the TTL is only the backstop for changes made outside this router.
+const { cacheJson, invalidateOnWrite } = require("../middleware/cacheRoute");
+const { MODULE_STATS, yearSeg } = require("../utils/cacheKeys");
+const STATS_KEY = MODULE_STATS.fundedMrf;
+const STATS_TTL_MS = 120000;
+router.use(invalidateOnWrite(STATS_KEY));
+
 // Get all records
 router.get("/", async (req, res) => {
   try {
@@ -19,7 +32,7 @@ router.get("/", async (req, res) => {
 });
 
 // Dashboard stats
-router.get("/stats", async (req, res) => {
+router.get("/stats", cacheJson((req) => `${STATS_KEY}:${yearSeg(req.query.year)}`, STATS_TTL_MS), async (req, res) => {
   try {
     const yearFilter = req.query.year ? { dataYear: Number(req.query.year) } : {};
     const [

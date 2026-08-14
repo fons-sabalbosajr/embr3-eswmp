@@ -4,7 +4,13 @@ import { TeamOutlined, BankOutlined, EnvironmentOutlined, ApartmentOutlined, Dat
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip as RTooltip, ResponsiveContainer, Cell as RCell,
 } from "recharts";
-import { loadRelationshipMap, peekRelationshipMap } from "../../utils/relationshipMapCache";
+import {
+  loadRelationshipMap,
+  peekRelationshipMap,
+  invalidateRelationshipMap,
+} from "../../utils/relationshipMapCache";
+import { getSocket } from "../../utils/socket";
+import { compareProvinceNames, sortByProvince } from "../../utils/provinceSort";
 
 const { Text } = Typography;
 
@@ -21,6 +27,9 @@ export default function ClientServedSummary() {
   const [priv, setPriv] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(false);
+  // Bumped when the server reports the canonical client list changed, forcing the
+  // load effect to re-run against a freshly invalidated cache.
+  const [reloadToken, setReloadToken] = useState(0);
   const aliveRef = useRef(true);
 
   useEffect(() => {
@@ -55,6 +64,23 @@ export default function ClientServedSummary() {
     return () => {
       aliveRef.current = false;
     };
+  }, [reloadToken]);
+
+  // An admin correcting a Hauler Client's address changes which masterlist
+  // municipality that client resolves to — i.e. it moves the LGUs Served and
+  // Private Sectors Served figures. The server re-syncs the canonical client
+  // collection after such an edit and emits a "clients" refresh; without this
+  // listener the cached relationship map kept serving the pre-edit coverage.
+  useEffect(() => {
+    const sock = getSocket();
+    if (!sock) return undefined;
+    const onRefresh = (payload) => {
+      if (payload?.target !== "clients") return;
+      invalidateRelationshipMap();
+      setReloadToken((n) => n + 1);
+    };
+    sock.on("data-refresh", onRefresh);
+    return () => sock.off("data-refresh", onRefresh);
   }, []);
 
   const stats = useMemo(() => {
@@ -88,9 +114,20 @@ export default function ClientServedSummary() {
       (r.slfs || []).forEach((s) => s && p.slfs.add(s));
     });
 
-    const provinceRows = [...provinceMap.values()]
-      .map((p) => ({ province: p.province, lguServed: p.lguServed.size, privateClients: p.privateClients, slfs: p.slfs.size }))
-      .sort((a, b) => b.lguServed - a.lguServed || a.province.localeCompare(b.province));
+    const provinceStats = [...provinceMap.values()].map((p) => ({
+      province: p.province,
+      lguServed: p.lguServed.size,
+      privateClients: p.privateClients,
+      slfs: p.slfs.size,
+    }));
+    // The province LIST reads alphabetically so a province can be found by name;
+    // it used to be ranked by LGUs-served, which reordered itself as the figures
+    // moved. The "Top Provinces" CHART below keeps its value ranking — that one is
+    // a leaderboard, where the order is the information.
+    const provinceRows = sortByProvince(provinceStats);
+    const provincesByVolume = [...provinceStats].sort(
+      (a, b) => b.lguServed - a.lguServed || compareProvinceNames(a.province, b.province),
+    );
 
     // Clients referencing each SLF (LGU + private), for the "SLF totals" chart.
     const slfMap = new Map();
@@ -112,7 +149,7 @@ export default function ClientServedSummary() {
       coveragePercent,
       totalSlfs: slfMap.size,
       provinceRows,
-      topProvinceChart: provinceRows.slice(0, 10).map((p) => ({ name: p.province, value: p.lguServed })),
+      topProvinceChart: provincesByVolume.slice(0, 10).map((p) => ({ name: p.province, value: p.lguServed })),
       topSlfChart: slfRows.slice(0, 8).map((s) => ({ name: s.slf.length > 22 ? `${s.slf.slice(0, 21)}…` : s.slf, value: s.clients })),
     };
   }, [lgu, priv]);

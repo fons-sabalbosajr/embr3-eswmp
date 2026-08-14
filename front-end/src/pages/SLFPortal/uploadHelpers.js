@@ -228,6 +228,32 @@ export const UPLOAD_REQUIRED_FIELDS = {
   hauler: HAULER_UPLOAD_COLUMNS.filter((column) => column.required),
 };
 
+/**
+ * Resolve an uploaded / preview-edited cell label to the facility's canonical
+ * cell. Accepts the option's value, its configured cell name, or its display
+ * label, all case/whitespace-insensitively.
+ *
+ * `cellIndex` is the canonical reference the import writes; `null` means "not an
+ * available cell under this SLF", which is what both the parser and the preview
+ * editor use to flag the row. Kept here — with the rest of the pure upload
+ * logic — so a cell typed into the preview is resolved by exactly the same rule
+ * as one that arrived in the file.
+ */
+export const resolveUploadCell = (activeCellOptions = [], value) => {
+  const comparable = cleanUploadText(value).toLowerCase();
+  const match = (activeCellOptions || []).find((option) =>
+    [option?.value, option?.cellName, option?.label]
+      .filter(Boolean)
+      .map((candidate) => cleanUploadText(candidate).toLowerCase())
+      .includes(comparable),
+  );
+  return {
+    cellName: match?.value || cleanUploadText(value),
+    cellIndex: typeof match?.cellIndex === "number" ? match.cellIndex : null,
+    cellType: match?.cellType || "",
+  };
+};
+
 export const isEmptyUploadValue = (value) =>
   value === undefined ||
   value === null ||
@@ -312,22 +338,47 @@ export const findUploadHauler = (haulers = [], haulerName) => {
   const matches = (haulers || []).filter(
     (hauler) => normalizeComparableText(hauler?.haulerName || hauler?.name) === target,
   );
-  return matches.length === 1 ? matches[0] : { ambiguous: matches.length > 1, matches };
+  // NOTHING matched → null, so getUploadRelationshipErrors reports "not assigned
+  // under this SLF". Returning the `{ ambiguous: false, matches: [] }` stub made
+  // that object truthy, so an unknown hauler passed the upload preview and only
+  // failed later at submit.
+  if (matches.length === 0) return null;
+  return matches.length === 1 ? matches[0] : { ambiguous: true, matches };
 };
 
 export const findUploadClientForHauler = (hauler, clientValue) => {
   const target = normalizeComparableText(clientValue);
   if (!target || !hauler || hauler.ambiguous) return null;
-  const clientPools = [
+  // One client is routinely stored in THREE places on the same hauler:
+  // privateSectorClients, clients, and each vehicle's selectedClients. Counting
+  // those copies as separate records made every uploaded row report "Client is
+  // duplicated or ambiguous" and blocked the whole import. Collapse the pool by
+  // normalized client name first — the same identity key the server-side
+  // relationship check and GET /hauler-clients already use — so only genuinely
+  // different clients can be ambiguous.
+  const clientPools = [];
+  const seenClients = new Set();
+  [
     ...(Array.isArray(hauler.privateSectorClients) ? hauler.privateSectorClients : []),
     ...(Array.isArray(hauler.clients) ? hauler.clients : []),
     ...(Array.isArray(hauler.vehicles)
       ? hauler.vehicles.flatMap((vehicle) => vehicle.selectedClients || [])
       : []),
-  ];
+  ].forEach((client) => {
+    const identity = normalizeComparableText(
+      typeof client === "string" ? client : client?.clientName || client?.name,
+    );
+    if (!identity || seenClients.has(identity)) return;
+    seenClients.add(identity);
+    clientPools.push(client);
+  });
   const matches = clientPools.filter((client) =>
     clientLookupValues(client).some((value) => normalizeComparableText(value) === target),
   );
+  // Same rule as findUploadHauler: an unknown client must be null (→ "not
+  // assigned to hauler"), not a truthy stub that silently passes validation and
+  // is then stored as the row's selectedClient.
+  if (matches.length === 0) return null;
   const activeMatches = matches.filter(
     (client) => String(client?.status || client?.active || "active").toLowerCase() !== "inactive" && client?.isActive !== false,
   );

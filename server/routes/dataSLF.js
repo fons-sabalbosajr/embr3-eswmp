@@ -16,8 +16,16 @@ const Region3Lgu = require("../models/Region3Lgu");
 const { matchClient } = require("../utils/lguMatch");
 const { getRegion3ProvinceSet, classifyRegion } = require("../utils/region3");
 const { notifyAdmin, notifyPortal, refreshAdmin, refreshPortal } = require("../utils/socketEmit");
-const serverCache = require("../utils/serverCache");
-const { SUMMARY_BY_SLF_CACHE_KEY, STATS_CACHE_PREFIX, CELL_USAGE_CACHE_PREFIX } = require("../utils/cacheKeys");
+const { cacheJson } = require("../middleware/cacheRoute");
+const {
+  SUMMARY_BY_SLF_CACHE_KEY,
+  STATS_CACHE_PREFIX,
+  CELL_USAGE_CACHE_PREFIX,
+  WASTE_RECEIVED_PREFIX,
+  ADMIN_SUBMISSIONS_PREFIX,
+  ADMIN_ANALYTICS_KEY,
+  ADMIN_SUMMARY_DASHBOARD_KEY,
+} = require("../utils/cacheKeys");
 const { isBataanSlfName } = require("../utils/mergeBataanSlf");
 const {
   isOperationalStatus,
@@ -34,6 +42,7 @@ const {
   collectCellNames,
   applyResolvedCellNames,
   applyResolvedCellNamesToAll,
+  resolveBaselineCellEntries,
 } = require("../utils/cellNaming");
 const { todayRange } = require("../utils/appTime");
 const { NON_DUMMY_CLAUSE } = require("../utils/dummyFilter");
@@ -147,10 +156,54 @@ function getDeveloperPortalContext(req) {
   return null;
 }
 
-// Only developers may opt into seeing dummy/sample submissions inline.
+/**
+ * May this caller see test/dummy data?
+ *
+ * Developers manage test data. A DEMO admin also qualifies: everything it can
+ * reach in the dummy views is synthetic by construction (`isDummy: true`), so
+ * this grants access to nothing real — and without it a demonstration cannot
+ * show its own submission, which is the point of the demo environment.
+ */
+function canManageTestData(req) {
+  return req.user?.role === "developer" || req.user?.isDemo === true;
+}
+
+// Only authorized callers may opt into seeing dummy/sample submissions inline.
 function devWantsDummy(req) {
-  return req.user?.role === "developer" &&
+  return canManageTestData(req) &&
     String(req.query.includeDummy || "").toLowerCase() === "true";
+}
+
+// The Dummy Submissions tab: return ONLY test/demo records.
+function devWantsDummyOnly(req) {
+  return canManageTestData(req) &&
+    String(req.query.dummyOnly || "").toLowerCase() === "true";
+}
+
+/**
+ * Reject a dummy-data request from a caller who may not manage test data.
+ *
+ * Hiding the tab in the UI is not access control — the endpoint has to refuse
+ * too, or anyone can read (or enumerate) test records by adding the query
+ * parameter by hand. Returns true when the request was rejected.
+ */
+function rejectUnauthorizedDummyAccess(req, res) {
+  const asked =
+    String(req.query.includeDummy || "").toLowerCase() === "true" ||
+    String(req.query.dummyOnly || "").toLowerCase() === "true";
+  if (!asked) return false;
+  if (canManageTestData(req)) return false;
+  writeLog("warn", "submissions.dummy_access_denied", {
+    message: "Unauthorized request for dummy/test submissions",
+    user: req.logUser || req.user?.email || "",
+    ip: req.ip,
+    meta: { role: req.user?.role || "none", includeDummy: req.query.includeDummy, dummyOnly: req.query.dummyOnly },
+  });
+  res.status(403).json({
+    message: "Test/dummy submissions are restricted to developer and demonstration accounts.",
+    code: "DUMMY_ACCESS_DENIED",
+  });
+  return true;
 }
 
 const SLF_GENERATOR_REF_FIELDS = "_id lgu ownership slfName province dataYear cellNames";
@@ -232,6 +285,36 @@ async function refreshFacilityCellOccupancy(req, facilityId) {
   const assigned = await UserPortal.find({ assignedSlf: facility._id }).select("email").lean().catch(() => []);
   assigned.forEach((pu) => pu.email && refreshPortal(req, pu.email, "facility"));
   return updated;
+}
+
+/**
+ * Refresh occupancy for a set of facilities, de-duplicated.
+ *
+ * Every lifecycle event that changes whether a submission's volume COUNTS —
+ * submit, resubmit, revert/acknowledge, delete/restore, cell assignment — has to
+ * land here, because `cellFillValues` is a persisted denormalization that the
+ * capacity gate and the dashboard gauges both read.
+ *
+ * Best-effort by design: a failure to refresh a derived figure must never fail
+ * the user's actual operation. The next event (or the Organize Cells path)
+ * recomputes from scratch anyway.
+ */
+async function refreshOccupancyForFacilities(req, facilityIds = []) {
+  const unique = [...new Set(
+    (Array.isArray(facilityIds) ? facilityIds : [facilityIds])
+      .map((id) => (id ? String(id) : ""))
+      .filter((id) => id && mongoose.Types.ObjectId.isValid(id)),
+  )];
+  for (const id of unique) {
+    try {
+      await refreshFacilityCellOccupancy(req, id);
+    } catch (error) {
+      writeLog("warn", "cell_occupancy.refresh_failed", {
+        message: `Could not refresh cell occupancy for facility ${id}: ${error.message}`,
+        meta: { facilityId: id },
+      });
+    }
+  }
 }
 
 function getNameVariants(value) {
@@ -364,11 +447,85 @@ async function resolveSlfRecordIds(slfName, { requireBaselineData = false, slfGe
   return [...new Set(finalMatched.map((item) => String(item._id)).filter(Boolean))];
 }
 
+/**
+ * Re-align the ID No. sequence for one `SLF-TYPE-PROV-` prefix against what is
+ * ACTUALLY in the database. Run after a record is permanently deleted, because
+ * that is the only point at which a sequence number is genuinely released.
+ *
+ * What it repairs: DUPLICATE ID Nos. Two records sharing an ID is the one broken
+ * state — it makes an ID ambiguous in search, exports, transactions and e-mails.
+ * The OLDEST record keeps the ID (it is the one already referenced elsewhere);
+ * every later duplicate is moved to the next free number in the prefix and its
+ * old value is recorded in `previousIdNos`, the same trail a companyType-driven
+ * ID change already leaves.
+ *
+ * What it deliberately does NOT do: renumber records to close gaps. An ID No. is
+ * a permanent business reference — it is quoted in Transactions, Notifications,
+ * follow-up e-mails and printed reports — so a gap left by a deleted submission
+ * is correct history, not damage. Compacting the sequence would silently
+ * invalidate every one of those references.
+ *
+ * A soft delete does NOT call this: a trashed record still owns its ID and can
+ * be restored.
+ */
+async function realignIdNoSequence(idNo) {
+  const parts = String(idNo || "").split("-");
+  if (parts.length < 4 || parts[0] !== "SLF") return { prefix: null, repaired: [] };
+  const prefix = `SLF-${parts[1]}-${parts[2]}-`;
+
+  const siblings = await DataSLF.find({ idNo: new RegExp(`^${escapeRegExp(prefix)}`) })
+    .setOptions({ includeHiddenYears: true })
+    .select("idNo createdAt")
+    .lean();
+  if (siblings.length < 2) return { prefix, repaired: [] };
+
+  const seqOf = (value) => {
+    const n = parseInt(String(value || "").split("-")[3], 10);
+    return Number.isFinite(n) ? n : null;
+  };
+  // Oldest first, so the record that has carried the ID longest keeps it.
+  siblings.sort((a, b) => {
+    const at = new Date(a.createdAt || 0).getTime();
+    const bt = new Date(b.createdAt || 0).getTime();
+    if (at !== bt) return at - bt;
+    return String(a._id).localeCompare(String(b._id));
+  });
+
+  const used = new Set(siblings.map((doc) => seqOf(doc.idNo)).filter((n) => n !== null));
+  let highest = used.size ? Math.max(...used) : 0;
+  const taken = new Set();
+  const repaired = [];
+
+  for (const doc of siblings) {
+    if (!taken.has(doc.idNo)) {
+      taken.add(doc.idNo);
+      continue;
+    }
+    do {
+      highest += 1;
+    } while (used.has(highest));
+    used.add(highest);
+    const nextIdNo = `${prefix}${String(highest).padStart(4, "0")}`;
+    await DataSLF.updateOne(
+      { _id: doc._id },
+      { $set: { idNo: nextIdNo }, $push: { previousIdNos: doc.idNo } },
+    ).setOptions({ includeHiddenYears: true });
+    taken.add(nextIdNo);
+    repaired.push({ _id: String(doc._id), from: doc.idNo, to: nextIdNo });
+  }
+
+  return { prefix, repaired };
+}
+
 async function softDeleteOverdueReverted(req) {
   const dueEntries = await DataSLF.find({
     deletedAt: null,
     status: "reverted",
     temporaryDeleteAfter: { $lte: new Date() },
+    // Never sweep a baseline container into the trash — it holds the SLF's Total
+    // Volume Accepted, cell entries and accredited haulers, and it is not a
+    // submission that can expire.
+    ...SUBMISSION_HAS_TRUCKS,
   }).limit(100);
 
   for (const entry of dueEntries) {
@@ -452,6 +609,18 @@ function getRequestActor(req, fallback = ADMIN_DISPLAY_NAME) {
   return headerName || headerEmail || fallback;
 }
 
+// A SUBMISSION always carries at least one transport entry — `submitEntries`
+// rejects an empty trucks[] outright ("At least one truck entry is required").
+// A record with NO trucks is therefore never a submission: it is the baseline-only
+// container that PATCH /portal-save-baseline writes the SLF's baseline into.
+//
+// Those containers were being listed by both submission views, which is where the
+// phantom "SLF-…-0001 / SAMPLE / 0 / No Waste Data / Pending" row came from after
+// every first baseline save — on real portal accounts as well as the demo one.
+// Baselines have their own admin page; they must not appear as submissions or
+// count towards submission totals.
+const SUBMISSION_HAS_TRUCKS = { "trucks.0": { $exists: true } };
+
 const baselineDataMatch = {
   $or: [
     { totalVolumeAccepted: { $exists: true, $ne: null } },
@@ -503,7 +672,39 @@ const BASELINE_PROJECTION = {
   baselineUpdateRequested: 1,
 };
 
-const PORTAL_BASELINE_SELECT = { ...BASELINE_PROJECTION, "trucks.actualVolume": 1 };
+// The portal read adds the General Information (company address) columns on top of
+// the admin projection. GET /baseline/:slfName RETURNS address / companyRegion /
+// companyProvince / companyMunicipality / companyBarangay, but the projection did
+// not select them — so every one of those came back `undefined`, the Portal's
+// company form initialized empty on reload, and the saved address "disappeared".
+// It also made the Review & Submit blockage report General Information as
+// incomplete for data that is actually persisted.
+// `accreditedHaulers` is dropped down to ONE subfield here, and the full array is
+// fetched afterwards for the single record that wins the haulerSource election.
+//
+// The array is deliberately duplicated onto every one of an SLF's records (see
+// mergeAccreditedHaulerCopies), and it carries each hauler's vehicles AND its
+// private-sector clients — so it is by far the largest thing on the document.
+// Measured on production data: Prime Waste Solution's 22 baseline-carrying records
+// hold 5,099 KB of accreditedHaulers against 14 KB of cell entries, and this read
+// pulled all of it (up to 50 records) on every Data Entry load just to use ONE
+// record's copy. That is 99.7% of the payload, discarded. It is also why Data
+// Entry timed out (HTTP 500) for that facility.
+//
+// Projecting `accreditedHaulers.haulerName` keeps `.length` intact, which is all
+// the selection below and hasBaselineData() ever inspect. Same trick, and same
+// reason, as the 773 KB → 13 KB projection fix in findBaselineCandidates above.
+const { accreditedHaulers: _fullHaulers, ...BASELINE_PROJECTION_SANS_HAULERS } = BASELINE_PROJECTION;
+const PORTAL_BASELINE_SELECT = {
+  ...BASELINE_PROJECTION_SANS_HAULERS,
+  "accreditedHaulers.haulerName": 1,
+  "trucks.actualVolume": 1,
+  address: 1,
+  companyRegion: 1,
+  companyProvince: 1,
+  companyMunicipality: 1,
+  companyBarangay: 1,
+};
 
 function hasTruckVolume(entry) {
   return (entry?.trucks || []).some((truck) => Number(truck?.actualVolume || 0) > 0);
@@ -516,6 +717,78 @@ function hasTruckVolume(entry) {
 // silently reverts on reload.
 function isBaselineOnlyRecord(entry) {
   return !(Array.isArray(entry?.trucks) ? entry.trucks : []).length;
+}
+
+// Mongo-side twin of isBaselineOnlyRecord(), so the read can ask for the
+// containers DIRECTLY instead of hoping they fall inside a recency window.
+const BASELINE_ONLY_FILTER = {
+  $or: [{ trucks: { $exists: false } }, { trucks: { $size: 0 } }],
+};
+
+/**
+ * Resolve one baseline field across a facility's records, newest first.
+ *
+ * Only used when the SLF has NO baseline-only container (a legacy facility whose
+ * baseline was only ever duplicated onto its submissions). There is no
+ * authoritative record to read, and the newest submission usually carries none of
+ * the baseline columns — which is why reading the whole payload off a single
+ * chosen record returned an empty Total Volume Accepted / address / cell entries
+ * for those SLFs.
+ *
+ * `undefined` and `null` mean "this record does not carry the field" and fall
+ * through. An empty string does NOT: a cleared address is a real value, and
+ * falling through would resurrect the old one.
+ */
+function carriesBaselineValue(value) {
+  if (Array.isArray(value)) return value.length > 0;
+  return value !== undefined && value !== null;
+}
+
+/**
+ * Candidate order for the portal baseline read: every baseline-only CONTAINER
+ * first (most recently written first), then the recency window with those
+ * containers removed.
+ *
+ * The containers are fetched by their own query rather than being hoped for
+ * inside a `createdAt: -1` window, because a container is created on the FIRST
+ * baseline save and is therefore the OLDEST document the facility owns — on a
+ * busy SLF it sorts last, not first.
+ */
+function orderBaselineCandidates(containers = [], recent = []) {
+  const containerIds = new Set(containers.map((item) => String(item?._id)));
+  return [
+    ...containers,
+    ...recent.filter((item) => !containerIds.has(String(item?._id))),
+  ];
+}
+
+/**
+ * Decide which record each baseline field is read from.
+ *
+ * With a container present it is authoritative and nothing falls through — it is
+ * the only record the portal writes baseline values to, so it is also the only
+ * one that can express a DELETION. Without one, each field comes from the newest
+ * record that actually carries it.
+ *
+ * Pure — exported at the bottom of this file so the rule can be tested without a
+ * database.
+ */
+function makeBaselineFieldReader(matchedCandidates = [], latest = null) {
+  const hasContainer = isBaselineOnlyRecord(latest);
+  const readOrder = hasContainer
+    ? [latest]
+    : [latest, ...matchedCandidates.filter((item) => item !== latest)];
+  const sourceFor = (field) =>
+    readOrder.find((item) => carriesBaselineValue(item?.[field])) || latest;
+  return {
+    hasContainer,
+    sourceFor,
+    valueOf: (field) => sourceFor(field)?.[field],
+    // A volume and the unit it was recorded in must come from the SAME record —
+    // pairing a value with another record's unit would silently misreport it.
+    unitFor: (field, unitField, fallbackUnit) =>
+      sourceFor(field)?.[unitField] || fallbackUnit,
+  };
 }
 
 function chooseBaselineRecord(entries = []) {
@@ -885,6 +1158,7 @@ function sanitizeClient(client) {
     return {
       clientName: client.trim(),
       clientType: "Private",
+      clientAddress: "",
       region: "",
       regionName: "",
       province: "",
@@ -897,6 +1171,9 @@ function sanitizeClient(client) {
   return {
     clientName: String(client.clientName || "").trim(),
     clientType: String(client.clientType || "Private").trim() || "Private",
+    // Carried through so a bulk-uploaded / admin-corrected Client Address survives
+    // the save instead of being stripped by this whitelist.
+    clientAddress: String(client.clientAddress || client.address || "").trim(),
     region: String(client.region || "").trim(),
     regionName: String(client.regionName || "").trim(),
     province: String(client.province || "").trim(),
@@ -918,14 +1195,67 @@ const haulerClientPool = (hauler) => [
   ...(Array.isArray(hauler?.vehicles) ? hauler.vehicles.flatMap((vehicle) => vehicle?.selectedClients || []) : []),
 ];
 
+// Canonical identity of a client inside ONE hauler's lists: the normalized client
+// name — the same key GET /hauler-clients already collapses its duplicated copies
+// by. Everything else (client type, region/province codes, which array the copy was
+// stored in, whether it was stored as a bare string) is detail that must never
+// split one client into two "ambiguous" candidates.
+const clientIdentityKey = (client) => {
+  if (typeof client === "string") return normalizeRelationshipText(client);
+  if (!client || typeof client !== "object") return "";
+  return normalizeRelationshipText(client.clientName || client.name);
+};
+
+// An SLF's accreditedHaulers array is deliberately DUPLICATED across every one of
+// its baseline documents (see the Hauler Clients CRUD block below), and one hauler
+// lists the same client in `privateSectorClients`, in `clients` and again on each
+// vehicle's `selectedClients`. Counting those copies as separate records is what
+// made submission fail with "Hauler/Client is duplicated or ambiguous under this
+// SLF" — the entity is one, the rows are many.
+//
+// Collapse to ONE record per distinct hauler (normalized name) whose client pool is
+// the UNION of every copy's clients, de-duplicated by canonical client identity.
+// Unioning also fixes the mirror-image failure: reading only the first copy made a
+// client added by the newest baseline read as "not assigned to this hauler".
+//
+// Pure — exported at the bottom of this file so the relationship rules can be
+// tested without a database.
+function mergeAccreditedHaulerCopies(haulers = []) {
+  const byHauler = new Map();
+  (Array.isArray(haulers) ? haulers : []).forEach((hauler) => {
+    const key = normalizeRelationshipText(hauler?.haulerName || hauler?.name);
+    if (!key) return;
+    let merged = byHauler.get(key);
+    if (!merged) {
+      merged = { haulerName: hauler?.haulerName || hauler?.name || "", clientPool: new Map() };
+      byHauler.set(key, merged);
+    }
+    haulerClientPool(hauler).forEach((client) => {
+      const clientKey = clientIdentityKey(client);
+      if (!clientKey || merged.clientPool.has(clientKey)) return;
+      merged.clientPool.set(clientKey, client);
+    });
+  });
+
+  return [...byHauler.values()].map((entry) => ({
+    haulerName: entry.haulerName,
+    clients: [...entry.clientPool.values()],
+  }));
+}
+
 async function getAuthoritativeHaulersForEntry(item) {
   const query = item?.slfGenerator
     ? { slfGenerator: item.slfGenerator, "accreditedHaulers.0": { $exists: true } }
     : { slfName: item?.slfName, "accreditedHaulers.0": { $exists: true } };
   const baselines = await DataSLF.find(query).select("accreditedHaulers createdAt").sort({ createdAt: -1 }).lean();
   const savedHaulers = baselines.flatMap((baseline) => baseline.accreditedHaulers || []);
-  if (savedHaulers.length) return savedHaulers;
-  return Array.isArray(item?.accreditedHaulers) ? item.accreditedHaulers : [];
+  return mergeAccreditedHaulerCopies(
+    savedHaulers.length
+      ? savedHaulers
+      : Array.isArray(item?.accreditedHaulers)
+        ? item.accreditedHaulers
+        : [],
+  );
 }
 
 async function validateUploadedClientRelationships(item) {
@@ -960,7 +1290,7 @@ async function validateUploadedClientRelationships(item) {
     }
 
     const clientTargetValues = clientRelationshipValues(client).map(normalizeRelationshipText).filter(Boolean);
-    const candidates = haulerClientPool(haulerMatches[0]).filter((candidate) => {
+    const candidates = (haulerMatches[0].clients || []).filter((candidate) => {
       const values = clientRelationshipValues(candidate).map(normalizeRelationshipText).filter(Boolean);
       return values.some((value) => clientTargetValues.includes(value));
     });
@@ -1108,6 +1438,13 @@ async function assertNoUnresolvedRevert(email) {
     submittedBy: normalizedEmail,
     status: "reverted",
     deletedAt: null,
+    // Only a real submission can be "corrected and resubmitted". Baseline
+    // containers used to surface in the submissions list, so admins reverted
+    // some of them — and because a container carries no waste data there is
+    // nothing to correct, which left those portal users permanently blocked from
+    // submitting with no way out. Verified in production: at least one account is
+    // in exactly that state. See SUBMISSION_HAS_TRUCKS.
+    ...SUBMISSION_HAS_TRUCKS,
   })
     .setOptions({ includeHiddenYears: true })
     .select("idNo revertedAt updatedAt")
@@ -1451,6 +1788,16 @@ async function submitEntries({ entries, submittedBy, req, idempotencyKey = null 
     }
   }
 
+  // Waste that just landed in a cell has to reach the facility's occupancy NOW.
+  // This used to run ONLY when someone opened Organize Cells, so between a
+  // submission and the next organize the stored cellFillValues under-reported the
+  // real load — measured across production: 8 of 16 facilities were stale, one
+  // showing a cell as empty while it held 52.97. Cell-availability gating and the
+  // admin gauges both read those stored values, so a full cell could keep
+  // accepting waste. computeCellOccupancy RECOMPUTES from the live records rather
+  // than incrementing, so calling it here is idempotent and can never double-count.
+  await refreshOccupancyForFacilities(req, saved.map((s) => s.slfGenerator));
+
   // Fire-and-forget side effects (audit trail, admin notification, socket, log).
   (async () => {
     try {
@@ -1654,6 +2001,12 @@ router.put("/:id", optionalAuth, requirePortalRule("can_edit_submitted_data"), a
 
     await entry.save();
 
+    // A resubmission updates this record IN PLACE (volumes and cell placements may
+    // both have changed) and flips it back to `pending`, so it starts counting
+    // again. Recomputed, never incremented — the pre-revert volume cannot be
+    // double-counted alongside the corrected one.
+    await refreshOccupancyForFacilities(req, [entry.slfGenerator]);
+
     const resubmitComment = typeof req.body.resubmitComment === "string" ? req.body.resubmitComment.trim() : "";
 
     try {
@@ -1723,23 +2076,55 @@ router.get("/baseline/:slfName", async (req, res) => {
       { lguCompanyName: slfName },
     ];
 
-    let candidates = slfObjectId
-      ? await DataSLF.find({
-        $and: [{ slfGenerator: slfObjectId }, baselineDataMatch],
+    const identityFilter = slfObjectId
+      ? { slfGenerator: slfObjectId }
+      : { $or: nameOrFilters };
+
+    // TWO reads, deliberately.
+    //
+    // The recency window alone silently lost the baseline. PATCH
+    // /portal-save-baseline writes an SLF's baseline values into its BASELINE-ONLY
+    // containers (findMatchingBaselineOnlyIds → updateMany), and a container is
+    // created on the FIRST baseline save — so it is the OLDEST document the
+    // facility owns. Every disposal submission made afterwards is newer, so on a
+    // busy SLF the `createdAt: -1` window never reached it: Zambales - Iba's
+    // container ranked 79th of 80 and Nueva Ecija - Santa Rosa's 68th of 69. The
+    // portal then hydrated Data Entry from whatever submission happened to sort
+    // first — one that carries no baseline columns at all — and every field came
+    // up empty, including a Total Volume Accepted that is stored and intact.
+    //
+    // Asking for the containers directly makes the read window irrelevant to
+    // correctness: it can only ever add fallback material now, never decide the
+    // answer. Containers are at most a handful per facility.
+    // The facility rides along in the SAME round trip rather than waiting for the
+    // baseline to be chosen first. The portal always sends ?slfId, so the id is
+    // known up front; only a caller that omits it pays for a follow-up lookup
+    // (handled after `latest` is resolved, below).
+    const facilityCellSelect = "numberOfCell cellNames cellTypes cellStatuses cellCapacities";
+    const [containers, recent, facilityById] = await Promise.all([
+      DataSLF.find({
+        $and: [{ deletedAt: null }, identityFilter, BASELINE_ONLY_FILTER, baselineDataMatch],
       })
+        .setOptions({ includeHiddenYears: true })
+        .select(PORTAL_BASELINE_SELECT)
+        .sort({ updatedAt: -1, createdAt: -1 })
+        .limit(20)
+        .lean(),
+      DataSLF.find({ $and: [{ deletedAt: null }, identityFilter, baselineDataMatch] })
         .setOptions({ includeHiddenYears: true })
         .select(PORTAL_BASELINE_SELECT)
         .sort({ createdAt: -1 })
         .limit(50)
-        .lean()
-      : await DataSLF.find({
-        $and: [{ $or: nameOrFilters }, baselineDataMatch],
-      })
-      .setOptions({ includeHiddenYears: true })
-      .select(PORTAL_BASELINE_SELECT)
-      .sort({ createdAt: -1 })
-      .limit(50)
-      .lean();
+        .lean(),
+      slfObjectId
+        ? SlfFacility.findById(slfObjectId).select(facilityCellSelect).lean().catch(() => null)
+        : Promise.resolve(null),
+    ]);
+
+    // Containers first (most recently written first), then the recency window with
+    // the containers removed — `chooseBaselineRecord` picks the first container it
+    // sees, and the rest stay available as fallback for a facility that has none.
+    let candidates = orderBaselineCandidates(containers, recent);
 
     // Prefer records that match by facility id (most reliable link after a rename).
     let matchedCandidates = candidates;
@@ -1754,7 +2139,7 @@ router.get("/baseline/:slfName", async (req, res) => {
     let latest = chooseBaselineRecord(matchedCandidates);
 
     if (!latest && !slfObjectId) {
-      candidates = await DataSLF.find(baselineDataMatch)
+      candidates = await DataSLF.find({ $and: [{ deletedAt: null }, baselineDataMatch] })
         .setOptions({ includeHiddenYears: true })
         .select(PORTAL_BASELINE_SELECT)
         .sort({ createdAt: -1 })
@@ -1770,12 +2155,36 @@ router.get("/baseline/:slfName", async (req, res) => {
 
     if (!latest) return res.json(null);
 
+    // ── Where each field is read from ──────────────────────────────────────────
+    //
+    // When the SLF HAS a baseline-only container, that container is authoritative
+    // and every field is read from it verbatim. It is the only record the portal
+    // writes baseline values to, so it is also the only record that can represent
+    // a DELETION — falling back to an older submission's copy would resurrect a
+    // cell entry or an address the operator had just removed.
+    //
+    // When it has NONE (a legacy SLF whose baseline was only ever duplicated onto
+    // its submissions) there is no authoritative record, so each field is taken
+    // from the newest record that actually carries it. Reading everything off a
+    // single chosen record is what left Limay, Porac, Floridablanca and Prime
+    // Waste Solution reporting no Total Volume Accepted while the figure sat on a
+    // sibling record. Nothing here can hide a deletion, because without a
+    // container the portal has never had anywhere to record one.
+    const { hasContainer, valueOf, unitFor } = makeBaselineFieldReader(
+      matchedCandidates,
+      latest,
+    );
+
     // #2 defensive regression signal: a record that carries baseline data but has
     // NO Total Volume Accepted is almost always a data-loss regression (the value
     // was reset/dropped on a prior save). Log it — with non-sensitive context only
     // (slfName + which baseline fields are present) — so it can be spotted in App
     // Logs without ever exposing the numbers or user data to the portal response.
-    if (latest.totalVolumeAccepted == null && hasBaselineData(latest)) {
+    //
+    // Tested against the RESOLVED value, not the chosen record's own column, so
+    // this stays a genuine data-loss signal instead of firing for every legacy SLF
+    // whose figure simply lives on a sibling record.
+    if (valueOf("totalVolumeAccepted") == null && hasBaselineData(latest)) {
       writeLog("warn", "baseline.missing_total_volume", {
         message: `Baseline for "${latest.slfName || latest.lguCompanyName || "unknown"}" has no Total Volume Accepted but carries other baseline data`,
         meta: {
@@ -1788,10 +2197,28 @@ router.get("/baseline/:slfName", async (req, res) => {
       });
     }
 
-    const baselineUnit = latest.baselineUnit || latest.totalVolumeAcceptedUnit || "m³";
+    const baselineUnit =
+      valueOf("baselineUnit") || valueOf("totalVolumeAcceptedUnit") || "m³";
+    // Accredited haulers must be read from the SAME set the portal save WRITES to
+    // (the baseline-only records — see findMatchingBaselineOnlyIds), otherwise a
+    // stale hauler snapshot copied onto an older submission wins and the just-saved
+    // vehicle capacities / client details revert on the next load.
+    //
+    // `hasTruckVolume` alone was not that set: it only inspects `truck.actualVolume`,
+    // and the portal stores volume per VEHICLE, so a real submission whose trucks
+    // carry their volume on `vehicles[]` looked volume-free and was served as the
+    // hauler source. Prefer a genuine baseline-only record first.
+    //
+    // Once ANY container exists the search stops there, for the same reason the
+    // field resolution above does: a container is the only record that can express
+    // "the operator removed every hauler", and falling through to a submission's
+    // copy would put the deleted haulers straight back on screen.
     const haulerSource =
-      matchedCandidates.find((item) => item?.accreditedHaulers?.length > 0 && !hasTruckVolume(item)) ||
-      matchedCandidates.find((item) => item?.accreditedHaulers?.length > 0) ||
+      matchedCandidates.find((item) => item?.accreditedHaulers?.length > 0 && isBaselineOnlyRecord(item)) ||
+      (hasContainer
+        ? latest
+        : matchedCandidates.find((item) => item?.accreditedHaulers?.length > 0 && !hasTruckVolume(item)) ||
+          matchedCandidates.find((item) => item?.accreditedHaulers?.length > 0)) ||
       latest;
 
     // Resolve the approval/request flags ACROSS every candidate for this SLF, not
@@ -1812,39 +2239,95 @@ router.get("/baseline/:slfName", async (req, res) => {
     // Matching the admin's $max here makes both sides agree by construction, and is
     // the safe direction: an approval that reached ANY record unlocks the portal,
     // rather than being silently swallowed.
-    const anyFlag = (field) => matchedCandidates.some((item) => !!item?.[field]);
+    //
+    // ── …with one correction: "ANY record wins" cannot survive a container ──────
+    //
+    // A submission INHERITS the baseline columns of the record it was created
+    // from, `baselineUpdateApproved` included. So every submission made during an
+    // approved (unlocked) window keeps that approval forever, and "any record
+    // wins" then reads it back as a permanent unlock that nothing can clear.
+    // Measured on production: 624 records carry baselineUpdateApproved=true and
+    // 621 of them are SUBMISSIONS, which left 17 of 19 assigned SLFs permanently
+    // unlocked — the "saving the baseline does not lock it" report.
+    //
+    // The baseline-only CONTAINER is the authoritative record for baseline state.
+    // Every VALUE above is already read from it verbatim when one exists, for the
+    // same reason (it is the only record that can express a deletion). The
+    // workflow flags now follow that same rule: read them from the container(s),
+    // and fall back to the across-all-records scan only for a legacy SLF that has
+    // no container — where the old behaviour is still the safe direction.
+    const containerCandidates = matchedCandidates.filter((item) => isBaselineOnlyRecord(item));
+    const flagSource = containerCandidates.length ? containerCandidates : matchedCandidates;
+    const anyFlag = (field) => flagSource.some((item) => !!item?.[field]);
     const baselineUpdateApproved = anyFlag("baselineUpdateApproved");
+
+    // Now that ONE record has won the election above, fetch its haulers in full.
+    // Everything up to this point only needed `.length`, which the trimmed
+    // projection preserves — see PORTAL_BASELINE_SELECT for the measured cost of
+    // carrying every candidate's copy instead. Skipped entirely when the winner
+    // has no haulers, so the common case adds no round trip at all.
+    const haulerDoc =
+      haulerSource?._id && haulerSource.accreditedHaulers?.length
+        ? await DataSLF.findById(haulerSource._id)
+            .setOptions({ includeHiddenYears: true })
+            .select("accreditedHaulers")
+            .lean()
+        : null;
+
+    // ── Bind the baseline's cell rows to the ADMIN's cell configuration ────────
+    //
+    // Every other endpoint resolves cell names at the API boundary
+    // (applyResolvedCellNames); this one did not, and it is the only read that
+    // feeds Data Entry. So Data Entry rendered each row's frozen snapshot name
+    // while the submission lists, the admin table and the reports all rendered
+    // the admin's current name — the reported "portal cells don't match Admin".
+    //
+    // Resolution needs the facility, not just its names, because 94.6% of stored
+    // baseline rows carry NO cellIndex and have to be re-bound by name first.
+    // A facility that cannot be loaded (or a legacy SLFGenerator ref) simply
+    // leaves the rows untouched — never worse than before.
+    const facilityForCells =
+      facilityById ||
+      (latest.slfGenerator
+        ? await SlfFacility.findById(latest.slfGenerator).select(facilityCellSelect).lean().catch(() => null)
+        : null);
     // An approval supersedes a pending request — otherwise a record still carrying
     // the old requested flag would re-show "Pending" next to an unlocked form.
     const baselineUpdateRequested = !baselineUpdateApproved && anyFlag("baselineUpdateRequested");
 
     res.json({
       baselineUnit,
-      lguCompanyName: latest.lguCompanyName,
-      companyType: latest.companyType,
-      address: latest.address,
-      companyRegion: latest.companyRegion,
-      companyProvince: latest.companyProvince,
-      companyMunicipality: latest.companyMunicipality,
-      companyBarangay: latest.companyBarangay,
-      totalVolumeAccepted: latest.totalVolumeAccepted,
-      totalVolumeAcceptedUnit: latest.totalVolumeAcceptedUnit || baselineUnit,
-      activeCellResidualVolume: latest.activeCellResidualVolume,
-      activeCellResidualUnit: latest.activeCellResidualUnit || baselineUnit,
-      activeCellInertVolume: latest.activeCellInertVolume,
-      activeCellInertUnit: latest.activeCellInertUnit || baselineUnit,
-      activeCellHazardousVolume: latest.activeCellHazardousVolume,
-      activeCellHazardousUnit: latest.activeCellHazardousUnit || baselineUnit,
-      closedCellResidualVolume: latest.closedCellResidualVolume,
-      closedCellResidualUnit: latest.closedCellResidualUnit || baselineUnit,
-      closedCellInertVolume: latest.closedCellInertVolume,
-      closedCellInertUnit: latest.closedCellInertUnit || baselineUnit,
-      closedCellHazardousVolume: latest.closedCellHazardousVolume,
-      closedCellHazardousUnit: latest.closedCellHazardousUnit || baselineUnit,
-      acceptsHazardousWaste: latest.acceptsHazardousWaste || false,
-      activeCellEntries: latest.activeCellEntries || [],
-      closedCellEntries: latest.closedCellEntries || [],
-      accreditedHaulers: haulerSource.accreditedHaulers || [],
+      // Carried so the demo-session response masker can tell this is demo-owned
+      // data and leave its figures readable (see utils/demoMode.js). Without it
+      // the hand-built payload below has no isolation flag, every volume comes
+      // back as "***********", and the demo account can never satisfy the
+      // Total Volume Accepted gate.
+      isDummy: latest.isDummy === true,
+      lguCompanyName: valueOf("lguCompanyName"),
+      companyType: valueOf("companyType"),
+      address: valueOf("address"),
+      companyRegion: valueOf("companyRegion"),
+      companyProvince: valueOf("companyProvince"),
+      companyMunicipality: valueOf("companyMunicipality"),
+      companyBarangay: valueOf("companyBarangay"),
+      totalVolumeAccepted: valueOf("totalVolumeAccepted"),
+      totalVolumeAcceptedUnit: unitFor("totalVolumeAccepted", "totalVolumeAcceptedUnit", baselineUnit),
+      activeCellResidualVolume: valueOf("activeCellResidualVolume"),
+      activeCellResidualUnit: unitFor("activeCellResidualVolume", "activeCellResidualUnit", baselineUnit),
+      activeCellInertVolume: valueOf("activeCellInertVolume"),
+      activeCellInertUnit: unitFor("activeCellInertVolume", "activeCellInertUnit", baselineUnit),
+      activeCellHazardousVolume: valueOf("activeCellHazardousVolume"),
+      activeCellHazardousUnit: unitFor("activeCellHazardousVolume", "activeCellHazardousUnit", baselineUnit),
+      closedCellResidualVolume: valueOf("closedCellResidualVolume"),
+      closedCellResidualUnit: unitFor("closedCellResidualVolume", "closedCellResidualUnit", baselineUnit),
+      closedCellInertVolume: valueOf("closedCellInertVolume"),
+      closedCellInertUnit: unitFor("closedCellInertVolume", "closedCellInertUnit", baselineUnit),
+      closedCellHazardousVolume: valueOf("closedCellHazardousVolume"),
+      closedCellHazardousUnit: unitFor("closedCellHazardousVolume", "closedCellHazardousUnit", baselineUnit),
+      acceptsHazardousWaste: valueOf("acceptsHazardousWaste") || false,
+      activeCellEntries: resolveBaselineCellEntries(valueOf("activeCellEntries") || [], facilityForCells),
+      closedCellEntries: resolveBaselineCellEntries(valueOf("closedCellEntries") || [], facilityForCells),
+      accreditedHaulers: haulerDoc?.accreditedHaulers || [],
       baselineUpdateApproved,
       baselineUpdateRequested,
       savedAt: latest.updatedAt || latest.createdAt,
@@ -2021,6 +2504,52 @@ function findHaulerClientRecords(slfGeneratorId) {
 
 // Push the change out to admin views AND to every portal account that submitted for
 // this SLF, so the portal user's baseline reflects the correction without a reload.
+/**
+ * Coalesced canonical-client resync.
+ *
+ * `runBaselineClientSync` is a FULL pass over every baseline. Correcting a batch
+ * of hauler clients — the normal way an admin works, one row after another —
+ * would otherwise queue one full sync per edit, each redoing the last one's work.
+ *
+ * So: wait for the edits to stop, then run ONCE. A request arriving mid-run sets
+ * `dirty`, which triggers exactly one more pass afterwards, so the last edit is
+ * never the one that gets dropped. The `clients` refresh is emitted only when a
+ * pass actually finishes, which is the point the figures have really moved.
+ */
+const CLIENT_SYNC_DEBOUNCE_MS = 3000;
+let clientSyncTimer = null;
+let clientSyncRunning = false;
+let clientSyncDirty = false;
+
+function scheduleClientSync(req) {
+  if (clientSyncRunning) {
+    clientSyncDirty = true;
+    return;
+  }
+  if (clientSyncTimer) clearTimeout(clientSyncTimer);
+  clientSyncTimer = setTimeout(async () => {
+    clientSyncTimer = null;
+    clientSyncRunning = true;
+    try {
+      const { runBaselineClientSync } = require("../services/syncBaselineClients");
+      await runBaselineClientSync({ actor: "hauler-client-edit" });
+      refreshAdmin(req, "clients");
+    } catch (error) {
+      writeLog("warn", "hauler-client.sync_failed", {
+        message: `Client sync after a hauler-client edit failed: ${error.message}`,
+      });
+    } finally {
+      clientSyncRunning = false;
+      if (clientSyncDirty) {
+        clientSyncDirty = false;
+        scheduleClientSync(req);
+      }
+    }
+  }, CLIENT_SYNC_DEBOUNCE_MS);
+  // Never hold the process open for a derived-figure refresh.
+  clientSyncTimer.unref?.();
+}
+
 async function announceHaulerClientChange(req, records) {
   refreshAdmin(req, "baselines");
   const emails = new Set();
@@ -2036,6 +2565,18 @@ async function announceHaulerClientChange(req, records) {
       message: "An administrator updated the client details in your baseline data.",
     });
   }
+
+  // Push the correction into the CANONICAL client collection.
+  //
+  // Hauler-client edits are written into the portal's baseline
+  // (accreditedHaulers[].privateSectorClients) so the portal user sees them —
+  // but "LGUs Served" and "Private Sectors Served" are computed from
+  // `slf_clients`, which only picked the change up on the NEXT scheduled sync.
+  // Until then an admin could correct a client's municipality and watch the
+  // coverage figures not move at all.
+  //
+  // Detached and COALESCED — see scheduleClientSync.
+  scheduleClientSync(req);
 }
 
 // LIST — flattened hauler→client rows for one facility, searchable + paginated.
@@ -2045,9 +2586,87 @@ router.get("/hauler-clients/:slfGeneratorId", adminOnly, async (req, res) => {
     if (!mongoose.isValidObjectId(slfGeneratorId)) {
       return res.status(400).json({ message: "A valid SLF id is required." });
     }
-    const records = await findHaulerClientRecords(slfGeneratorId).select(
-      "accreditedHaulers slfName lguCompanyName submittedBy updatedAt",
-    ).sort({ createdAt: -1 }).lean();
+    // The collapse to distinct (hauler, client) pairs happens in the DATABASE.
+    //
+    // An SLF's accreditedHaulers array is duplicated across every one of its
+    // baseline documents, so loading them all to de-duplicate in JS meant
+    // shipping the whole set into Node first. Measured on production:
+    // Floridablanca holds 59 baseline docs carrying 4,366 hauler copies (Prime
+    // Waste 2,962; Porac 946), each with its own clients and vehicles arrays —
+    // tens of thousands of sub-documents materialised to produce a few hundred
+    // distinct rows. That is the bottleneck behind the Server Error on
+    // Edit SLF Facility → Hauler Clients.
+    //
+    // $unwind + $group does the same collapse where the data already lives, so
+    // the payload is proportional to the DISTINCT rows the UI renders rather than
+    // to how many times the array has been copied. The projection also drops
+    // `vehicles`, which this view never reads.
+    const grouped = await DataSLF.aggregate([
+      { $match: { slfGenerator: new mongoose.Types.ObjectId(String(slfGeneratorId)), deletedAt: null, "accreditedHaulers.0": { $exists: true } } },
+      { $sort: { createdAt: -1 } },
+      { $project: { accreditedHaulers: 1, slfName: 1, lguCompanyName: 1, submittedBy: 1, updatedAt: 1 } },
+      { $unwind: "$accreditedHaulers" },
+      {
+        $project: {
+          slfName: 1, lguCompanyName: 1, submittedBy: 1, updatedAt: 1,
+          haulerName: "$accreditedHaulers.haulerName",
+          officeAddress: "$accreditedHaulers.officeAddress",
+          client: {
+            $concatArrays: [
+              { $ifNull: ["$accreditedHaulers.privateSectorClients", []] },
+              { $ifNull: ["$accreditedHaulers.clients", []] },
+            ],
+          },
+        },
+      },
+      { $unwind: "$client" },
+      {
+        // One row per (hauler, client); the FIRST wins, and because the pipeline
+        // is sorted newest-first that is the most recent copy — same "newest
+        // copy wins" rule the old JS loop had.
+        $group: {
+          _id: {
+            hauler: { $toLower: { $trim: { input: { $ifNull: ["$haulerName", ""] } } } },
+            client: {
+              $toLower: {
+                $trim: {
+                  input: {
+                    $cond: [
+                      { $eq: [{ $type: "$client" }, "string"] },
+                      "$client",
+                      { $ifNull: ["$client.clientName", ""] },
+                    ],
+                  },
+                },
+              },
+            },
+          },
+          haulerName: { $first: "$haulerName" },
+          officeAddress: { $first: "$officeAddress" },
+          client: { $first: "$client" },
+          slfName: { $first: "$slfName" },
+          lguCompanyName: { $first: "$lguCompanyName" },
+          submittedBy: { $first: "$submittedBy" },
+          updatedAt: { $first: "$updatedAt" },
+        },
+      },
+      { $match: { "_id.client": { $ne: "" } } },
+    ]).option({ includeHiddenYears: true }).allowDiskUse(true);
+
+    // Re-shaped into the record/hauler form the mapping below already expects, so
+    // the response contract and every downstream consumer are unchanged.
+    const records = [{
+      slfName: grouped[0]?.slfName,
+      lguCompanyName: grouped[0]?.lguCompanyName,
+      submittedBy: grouped[0]?.submittedBy,
+      updatedAt: grouped[0]?.updatedAt,
+      accreditedHaulers: grouped.map((row) => ({
+        haulerName: row.haulerName,
+        officeAddress: row.officeAddress,
+        privateSectorClients: [row.client],
+        clients: [],
+      })),
+    }];
 
     // Collapse the duplicated copies into one distinct list per (hauler, client).
     const byKey = new Map();
@@ -2551,9 +3170,14 @@ router.patch("/baseline-update-approve/:slfName", async (req, res) => {
       notificationDocs.length
         ? Notification.insertMany(notificationDocs, { ordered: false }).catch(() => {})
         : Promise.resolve(),
+      // A baseline event belongs to the BASELINE, not to whichever submission
+      // happened to be newest. `latest` here is resolved across every record for
+      // the SLF — submissions included, because they carry baseline copies — so
+      // stamping its `submissionId`/`_id` filed this row inside that submission's
+      // Transaction History, mixing baseline events into a disposal thread.
+      // Identified by slfName only; the thread endpoint keys baseline events off
+      // that (see BASELINE_TXN_TYPES).
       Transaction.create({
-        submissionId: latest.submissionId,
-        dataEntry: latest._id,
         companyName: slfName,
         submittedBy: latest.submittedBy,
         type: "baseline_update_approved",
@@ -2874,7 +3498,10 @@ router.get("/today-status", adminOnly, async (req, res) => {
     // marker reflects an SLF's real last-known status, not just "today".
     if (String(req.query.mode || "").toLowerCase() === "latest") {
       const groups = await DataSLF.aggregate([
-        { $match: { deletedAt: null, isDummy: { $ne: true }, dateOfDisposal: { $ne: null } } },
+        // A baseline container carries `dateOfDisposal: <save time>`, so without
+        // this it became the SLF's "latest calendar record" the moment a baseline
+        // was saved and drove the map marker to Pending. It is not a disposal.
+        { $match: { deletedAt: null, isDummy: { $ne: true }, dateOfDisposal: { $ne: null }, ...SUBMISSION_HAS_TRUCKS } },
         { $sort: { dateOfDisposal: -1 } },
         { $group: {
           _id: "$slfGenerator",
@@ -2931,6 +3558,8 @@ router.get("/today-status", adminOnly, async (req, res) => {
         isDummy: { $ne: true },
         // Match by dateOfDisposal (the calendar's date field), not createdAt.
         dateOfDisposal: { $gte: start, $lt: end },
+        // A baseline saved today is not a disposal reported today.
+        ...SUBMISSION_HAS_TRUCKS,
       } },
       { $group: {
         _id: "$slfGenerator",
@@ -2984,15 +3613,24 @@ router.get("/today-status", adminOnly, async (req, res) => {
 });
 
 // Dashboard stats
-router.get("/stats", async (req, res) => {
+// The cache lives in middleware rather than inline so this route gets the same
+// single-flight guard as the other dashboard tiles: when the key expires under a
+// dozen open dashboards, ONE request runs the eight aggregation passes and the
+// rest wait for it. 60s TTL is a safety net; refreshAdmin() busts the key on
+// every submission/baseline/facility write, so the tiles are never stale after a
+// CRUD op. Keyed by dummy-inclusion because that changes the record set.
+const statsCacheKey = (req) => `${STATS_CACHE_PREFIX}:${devWantsDummy(req) ? "dummy" : "default"}`;
+router.get("/stats", cacheJson(statsCacheKey, 60000), async (req, res) => {
   try {
     // Exclude dummy/test entries from all production dashboard tiles. Developers
     // may opt in via ?includeDummy=true (requires a developer token).
     const includeDummy = devWantsDummy(req);
-    const cacheKey = `${STATS_CACHE_PREFIX}:${includeDummy ? "dummy" : "default"}`;
-    const cachedStats = serverCache.get(cacheKey);
-    if (cachedStats) return res.json(cachedStats);
-    const match = includeDummy ? { deletedAt: null } : { deletedAt: null, ...NON_DUMMY_CLAUSE };
+    // Baseline containers are not submissions — counting them inflated the
+    // "Submissions" tile and put a phantom entry in the Pending bucket after every
+    // first baseline save. See SUBMISSION_HAS_TRUCKS.
+    const match = includeDummy
+      ? { deletedAt: null, ...SUBMISSION_HAS_TRUCKS }
+      : { deletedAt: null, ...NON_DUMMY_CLAUSE, ...SUBMISSION_HAS_TRUCKS };
     const [submissions, generators, totalTrucks, byStatus, byCompanyType, wasteByType, monthlyData, recentSubmissions] =
       await Promise.all([
         DataSLF.countDocuments(match),
@@ -3111,9 +3749,6 @@ router.get("/stats", async (req, res) => {
       monthlyData,
       recentSubmissions,
     };
-    // 60s TTL is a safety net; refreshAdmin() busts this on every submission/
-    // baseline/facility write so the tiles are never stale after a CRUD op.
-    serverCache.set(cacheKey, statsPayload, 60000);
     res.json(statsPayload);
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });
@@ -3234,10 +3869,10 @@ router.get("/summary-tiles", async (req, res) => {
 
 // Grouped per-SLF summary rows for the Submission Summary table. Replaces the
 // previous "load all records + group in React" approach. Compact rows only.
-router.get("/summary-by-slf", async (req, res) => {
+// Same freshness contract as /stats: bounded TTL as a safety net, with
+// refreshAdmin() busting the key on every submission/baseline/facility write.
+router.get("/summary-by-slf", cacheJson(() => SUMMARY_BY_SLF_CACHE_KEY, 60000), async (req, res) => {
   try {
-    const cached = serverCache.get(SUMMARY_BY_SLF_CACHE_KEY);
-    if (cached) return res.json(cached);
     const rows = await DataSLF.aggregate([
       { $match: { deletedAt: null, isDummy: { $ne: true } } },
       {
@@ -3356,9 +3991,6 @@ router.get("/summary-by-slf", async (req, res) => {
       })
       .sort((a, b) => String(a.slfName).localeCompare(String(b.slfName)));
 
-    // 60s TTL is only a safety net — the real freshness comes from refreshAdmin()
-    // busting this key on every submission/baseline/facility write.
-    serverCache.set(SUMMARY_BY_SLF_CACHE_KEY, payload, 60000);
     res.json(payload);
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });
@@ -3383,13 +4015,10 @@ router.get("/summary-by-slf", async (req, res) => {
 // This deliberately drops trucks[].vehicles — the cell rollup never reads it. The
 // cell-ASSIGNMENT editor does, and it keeps its own per-facility fetch (which needs
 // real truck/vehicle indices to write placements back).
-router.get("/cell-usage", async (req, res) => {
+const cellUsageCacheKey = (req) => `${CELL_USAGE_CACHE_PREFIX}:${devWantsDummy(req) ? "dummy" : "default"}`;
+router.get("/cell-usage", cacheJson(cellUsageCacheKey, 60000), async (req, res) => {
   try {
     const includeDummy = devWantsDummy(req);
-    const cacheKey = `${CELL_USAGE_CACHE_PREFIX}:${includeDummy ? "dummy" : "default"}`;
-    const cached = serverCache.get(cacheKey);
-    if (cached) return res.json(cached);
-
     const match = includeDummy ? { deletedAt: null } : { deletedAt: null, ...NON_DUMMY_CLAUSE };
     // Identity of a cell bucket: everything findBestCellIndex + addVolumeToCell read.
     const bucketKey = {
@@ -3506,9 +4135,6 @@ router.get("/cell-usage", async (req, res) => {
       { $sort: { createdAt: -1 } },
     ]).allowDiskUse(true);
 
-    // Same freshness contract as /summary-by-slf: bounded TTL as a safety net, with
-    // refreshAdmin() busting the key on every submission/baseline/facility write.
-    serverCache.set(cacheKey, rows, 60000);
     res.json(rows);
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });
@@ -3518,7 +4144,10 @@ router.get("/cell-usage", async (req, res) => {
 // Combined dashboard payload for the Submission Summary page. This keeps the
 // legacy /summary-tiles and /summary-by-slf endpoints intact, but lets the main
 // dashboard fetch both from one aggregate scan instead of two duplicate requests.
-router.get("/summary-dashboard", async (req, res) => {
+// Rollup tile beside the submissions table: no query parameters, no user context,
+// ~1.4s per call. One computation serves every admin; invalidated by the same
+// submission/baseline/facility writes that change the table.
+router.get("/summary-dashboard", cacheJson(() => ADMIN_SUMMARY_DASHBOARD_KEY, 60000), async (req, res) => {
   try {
     const [facet = {}] = await DataSLF.aggregate([
       { $match: { deletedAt: null, isDummy: { $ne: true } } },
@@ -3694,7 +4323,8 @@ router.get("/summary-dashboard", async (req, res) => {
 // implementation fetched every submission plus every portal user, then grouped in
 // React for three small widgets. This endpoint returns only chart-ready aggregate
 // rows so the dashboard avoids large payloads and client-side full-table scans.
-router.get("/analytics-summary", async (req, res) => {
+// Same shape and same reasoning as /summary-dashboard above (~1.4s, global).
+router.get("/analytics-summary", cacheJson(() => ADMIN_ANALYTICS_KEY, 60000), async (req, res) => {
   try {
     const match = {
       deletedAt: null,
@@ -3881,17 +4511,80 @@ router.get("/disposal-calendar", async (req, res) => {
 });
 
 // Get all SLF data entries (admin) — excludes soft-deleted
-router.get("/", optionalAuth, async (req, res) => {
+/**
+ * Cache key for the Admin → Portal Submissions list.
+ *
+ * Returns null — meaning "do not cache this request" — for everything that is not
+ * the light list view:
+ *   • `all=true`  the export, which returns the ENTIRE filtered result set
+ *   • `includeTrucks=true` the row-expand refetch, which ships trucks[]
+ * Caching either would put an unbounded payload in Redis to serve one click.
+ *
+ * The RESOLVED dummy scope is in the key, never the raw `includeDummy` parameter:
+ * `devWantsDummy()` only grants test-record visibility to a developer/demo caller,
+ * so keying on the raw parameter would let an ordinary admin who appends
+ * `?includeDummy=true` share an entry with a developer — and be served records
+ * they may not see. Keying on the resolved booleans makes that impossible.
+ *
+ * `search` is free text, so it is hashed rather than concatenated: a long query
+ * would otherwise become a long Redis key, and the hash keeps keys fixed-width
+ * while staying deterministic.
+ */
+const adminSubmissionsCacheKey = (req) => {
+  const q = req.query || {};
+  if (q.mode !== "list") return null;
+  if (String(q.all) === "true") return null;
+  if (String(q.includeTrucks) === "true") return null;
+
+  // An UNAUTHORIZED dummy request must reach the handler, which answers 403 and
+  // writes an audit entry (rejectUnauthorizedDummyAccess). Resolving it to the
+  // "default" scope instead would collide with the ordinary page-1 entry and
+  // serve a 200 — turning the cache into a bypass for an access-control check.
+  // Skip caching entirely for those requests rather than normalising them.
+  const askedForDummy =
+    String(q.includeDummy || "").toLowerCase() === "true" ||
+    String(q.dummyOnly || "").toLowerCase() === "true";
+  if (askedForDummy && !canManageTestData(req)) return null;
+
+  const search = String(q.search || "").trim().toLowerCase();
+  const searchPart = search
+    ? `s${require("crypto").createHash("sha1").update(search).digest("hex").slice(0, 10)}`
+    : "-";
+  const scope = devWantsDummyOnly(req) ? "dummyOnly" : devWantsDummy(req) ? "dummy" : "default";
+
+  const parts = [
+    scope,
+    String(q.grouped) === "true" ? "grouped" : "flat",
+    `p${Number(q.page) || 1}`,
+    `l${Number(q.limit) || 10}`,
+    q.status || "-",
+    q.cellPlacement || "-",
+    q.assignment || "-",
+    q.excludeStatuses || "-",
+    q.slfGenerator || "-",
+    q.withTruckVolume || "-",
+    q.cellUsage || "-",
+    searchPart,
+  ];
+  return `${ADMIN_SUBMISSIONS_PREFIX}:${parts.join(":")}`;
+};
+
+router.get("/", optionalAuth, cacheJson(adminSubmissionsCacheKey, 60000), async (req, res) => {
   try {
     // Admin management view — respects App Settings year visibility filter
     const listMode = req.query.mode === "list";
     const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
     const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 0, 0), 100);
     const paginated = listMode && limit > 0;
-    const filter = { deletedAt: null };
-    // Exclude dummy/test (SAMPLE) submissions from production admin views.
-    // Only developers may opt into seeing them inline via ?includeDummy=true.
-    if (!devWantsDummy(req)) {
+    if (rejectUnauthorizedDummyAccess(req, res)) return;
+    const filter = { deletedAt: null, ...SUBMISSION_HAS_TRUCKS };
+    // Three mutually exclusive views, all developer-gated except the default:
+    //   dummyOnly=true    → the Dummy Submissions tab: test/demo records ONLY
+    //   includeDummy=true → legacy inline mode: both, dummies flagged SAMPLE
+    //   (default)         → Actual Submissions: production records only
+    if (devWantsDummyOnly(req)) {
+      filter.isDummy = true;
+    } else if (!devWantsDummy(req)) {
       filter.isDummy = { $ne: true };
     }
     const status = String(req.query.status || "").trim();
@@ -4459,6 +5152,11 @@ router.patch("/:id/cell-assignments", async (req, res) => {
     });
     entry.markModified("trucks");
     await entry.save();
+
+    // Moving waste between cells changes WHERE the volume sits, so the facility's
+    // per-cell occupancy has to be recomputed — the portal path
+    // (portal-cell-assignments) already did this; the admin path did not.
+    await refreshOccupancyForFacilities(req, [entry.slfGenerator]);
 
     await Transaction.create({
       submissionId: entry.submissionId || entry.idNo,
@@ -5064,6 +5762,13 @@ router.patch("/:id/status", async (req, res) => {
     if (!entry) return res.status(404).json({ message: "Entry not found" });
     res.json(entry);
 
+    // A status change decides whether this submission's volume counts at all —
+    // only pending/acknowledged/revert_requested do (ACTIVE_VOLUME_STATUSES), so
+    // reverting or rejecting must REMOVE the volume from the facility's occupancy
+    // and re-approving must put it back. Fire-and-forget: the response is already
+    // sent and the recompute is idempotent.
+    refreshOccupancyForFacilities(req, [entry.slfGenerator?._id || entry.slfGenerator]).catch(() => {});
+
     if (status === "acknowledged") {
       markSubmissionNotificationsRead(entry).catch(() => {});
     }
@@ -5157,6 +5862,14 @@ router.patch("/bulk-status", async (req, res) => {
 
     const updated = await DataSLF.find({ _id: { $in: ids } }).populate("slfGenerator");
 
+    // Same rule as the single-status route: only pending/acknowledged/
+    // revert_requested count toward occupancy, so a bulk revert/reject has to
+    // release those volumes (and a bulk approve reinstate them).
+    await refreshOccupancyForFacilities(
+      req,
+      updated.map((entry) => entry.slfGenerator?._id || entry.slfGenerator),
+    );
+
     if (status === "acknowledged") {
       markSubmissionNotificationsRead(updated).catch(() => {});
     }
@@ -5249,6 +5962,10 @@ router.post("/bulk-delete", async (req, res) => {
         });
       } catch { /* silent */ }
     }
+
+    // One recompute per DISTINCT facility, not per entry — a 50-row bulk delete
+    // across 3 facilities costs 3 recomputes.
+    await refreshOccupancyForFacilities(req, entries.map((entry) => entry.slfGenerator));
 
     refreshAdmin(req, "submissions");
     writeLog("warn", "submission.bulk-delete", {
@@ -5913,6 +6630,9 @@ router.delete("/:id", async (req, res) => {
     entry.deletedAt = new Date();
     entry.deletedBy = getRequestActor(req, "admin");
     await entry.save();
+    // Occupancy only counts non-deleted records, so trashing a submission must
+    // release its volume from the cell it was placed in.
+    await refreshOccupancyForFacilities(req, [entry.slfGenerator]);
     res.json({ message: "Entry moved to trash" });
     writeLog("warn", "submission.delete", { message: `Submission soft-deleted: ${req.params.id}`, user: getRequestActor(req, "admin"), ip: req.ip });
   } catch (error) {
@@ -5946,6 +6666,8 @@ router.patch("/:id/restore", async (req, res) => {
     entry.deletedAt = null;
     entry.deletedBy = null;
     await entry.save();
+    // Restoring puts the volume back into play — the mirror of the soft delete.
+    await refreshOccupancyForFacilities(req, [entry.slfGenerator]);
     try {
       await Transaction.create({
         submissionId: entry.submissionId,
@@ -5973,7 +6695,26 @@ router.delete("/:id/permanent", async (req, res) => {
     if (!entry) return res.status(404).json({ message: "Entry not found" });
     if (!entry.deletedAt) return res.status(400).json({ message: "Entry must be soft-deleted first" });
     await DataSLF.findByIdAndDelete(req.params.id).setOptions({ includeHiddenYears: true });
-    res.json({ message: "Entry permanently deleted" });
+    // The sequence number is only released now — re-align the remaining IDs in
+    // this prefix against the live collection (duplicates are repaired; gaps are
+    // preserved as history). See realignIdNoSequence.
+    const realigned = await realignIdNoSequence(entry.idNo);
+    // The record is gone for good — release whatever volume it still held. (A
+    // soft-deleted record was already excluded, so this is usually a no-op; it
+    // matters when a record is purged without having been trashed first.)
+    await refreshOccupancyForFacilities(req, [entry.slfGenerator]);
+    res.json({
+      message: "Entry permanently deleted",
+      idNoRealigned: realigned.repaired,
+    });
+    if (realigned.repaired.length) {
+      writeLog("warn", "submission.idno-realigned", {
+        message: `Re-aligned ${realigned.repaired.length} duplicate ID No(s). after permanent delete of ${entry.idNo}`,
+        user: getRequestActor(req, "admin"),
+        ip: req.ip,
+        meta: { prefix: realigned.prefix, changes: realigned.repaired },
+      });
+    }
     writeLog("warn", "submission.permanent-delete", { message: `Submission permanently deleted: ${entry.idNo}`, user: getRequestActor(req, "admin"), ip: req.ip });
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });
@@ -6236,7 +6977,7 @@ router.patch("/portal-save-baseline/:slfName", optionalAuth, requirePortalRule("
   try {
     const slfName = decodeURIComponent(req.params.slfName);
     const {
-      submittedBy,
+      submittedBy: claimedSubmittedBy,
       slfGenerator,
       lguCompanyName,
       companyType,
@@ -6259,7 +7000,33 @@ router.patch("/portal-save-baseline/:slfName", optionalAuth, requirePortalRule("
     } = req.body || {};
 
     if (!slfName) return res.status(400).json({ message: "slfName is required" });
-    await ensurePortalAccountCanSubmit(submittedBy);
+    // WHO is saving comes from the TOKEN, never from the body. A portal caller
+    // cannot write baseline data as somebody else by naming them in `submittedBy`
+    // — the body value is only trusted for admin/developer callers, who legitimately
+    // act on a portal user's behalf and are gated by their own middleware.
+    let submittedBy = claimedSubmittedBy;
+    if (req.user?.role === "portal_user" && req.user.id) {
+      const tokenAccount = await UserPortal.findById(req.user.id).select("email").lean();
+      const tokenEmail = String(tokenAccount?.email || "").trim();
+      if (tokenEmail) {
+        if (
+          claimedSubmittedBy &&
+          String(claimedSubmittedBy).trim().toLowerCase() !== tokenEmail.toLowerCase()
+        ) {
+          writeLog("warn", "baseline.identity_rejected", {
+            message: `Baseline save claimed a different submitter than the authenticated account`,
+            user: tokenEmail,
+            ip: req.ip,
+            meta: { slfName, claimed: String(claimedSubmittedBy).trim() },
+          });
+        }
+        submittedBy = tokenEmail;
+      }
+    }
+
+    // The guard already loads `assignedSlf`; capture it for the ownership check
+    // below rather than re-querying the account.
+    const portalAccount = await ensurePortalAccountCanSubmit(submittedBy);
 
     let genId = slfGenerator || null;
     let facilityLgu = lguCompanyName || slfName;
@@ -6291,7 +7058,7 @@ router.patch("/portal-save-baseline/:slfName", optionalAuth, requirePortalRule("
     // The facility lookup is also skipped entirely when the block above already
     // loaded the document — that re-queried the same row purely to read
     // `isDummy`, which was already in memory.
-    const [baselineOnlyIds, facDummy, submitter] = await Promise.all([
+    const [baselineOnlyIds, saveFacility, submitter] = await Promise.all([
       findMatchingBaselineOnlyIds({
         slfName,
         slfGenerator: genId,
@@ -6299,8 +7066,13 @@ router.patch("/portal-save-baseline/:slfName", optionalAuth, requirePortalRule("
       }),
       resolvedFacility
         ? Promise.resolve(resolvedFacility)
+        // Also carries the cell configuration now: the entries below are bound to
+        // it before they are written, and that costs nothing on a query already
+        // being made for `isDummy`.
         : genId
-          ? SlfFacility.findById(genId).select("isDummy").lean()
+          ? SlfFacility.findById(genId)
+              .select("isDummy numberOfCell cellNames cellTypes cellStatuses cellCapacities")
+              .lean()
           : Promise.resolve(null),
       submittedBy
         ? UserPortal.findOne({ email: String(submittedBy).trim().toLowerCase() })
@@ -6313,7 +7085,67 @@ router.patch("/portal-save-baseline/:slfName", optionalAuth, requirePortalRule("
     // they stay out of production admin views (Task: dummy data isolation).
     // Same result as the previous short-circuit — the submitter is now resolved
     // in parallel rather than only when the facility check came back false.
-    const baselineIsDummy = Boolean(facDummy?.isDummy) || Boolean(submitter?.isDummy);
+    const baselineIsDummy = Boolean(saveFacility?.isDummy) || Boolean(submitter?.isDummy);
+
+    // ── Server-side BASELINE LOCK enforcement ─────────────────────────────────
+    //
+    // Saving a baseline locks it; reopening it is an ADMIN action
+    // (baseline-update-approve). Until now that rule lived only in the portal UI:
+    // this route checked the caller's permission and their ownership of the SLF,
+    // but never whether the baseline was locked — so the lock could be bypassed by
+    // reloading, or by calling this endpoint directly, and a locked baseline could
+    // be overwritten.
+    //
+    // The container is the authoritative record for baseline state (see the flag
+    // resolution in GET /baseline/:slfName). Locked means: a container exists and
+    // no container carries an admin approval.
+    //
+    // Scope: portal callers only. Admin/developer callers reach this route acting
+    // on an operator's behalf and already own the approve/lock endpoints — gating
+    // them here would take away the very controls that manage the lock.
+    if (req.user?.role === "portal_user" && baselineOnlyIds.length) {
+      const approvedCount = await DataSLF.countDocuments({
+        _id: { $in: baselineOnlyIds },
+        baselineUpdateApproved: true,
+      }).setOptions({ includeHiddenYears: true });
+      if (approvedCount === 0) {
+        writeLog("warn", "baseline.locked_save_rejected", {
+          message: "Portal user attempted to save a LOCKED baseline",
+          user: submittedBy || "",
+          ip: req.ip,
+          meta: { slfName, slfGenerator: String(genId || "") },
+        });
+        return res.status(409).json({
+          message:
+            "This baseline is locked. Request a baseline update and wait for an administrator to approve it before saving changes.",
+          locked: true,
+        });
+      }
+    }
+
+    // ── Ownership enforcement ──
+    // A portal user may write baseline data ONLY for a facility they are assigned
+    // to. `submitEntries` has always enforced this for disposal submissions, but
+    // this route did not: the target facility comes from the request body, so a
+    // crafted call (or a bulk baseline upload aimed at the wrong SLF) could
+    // overwrite another operator's Total Volume Accepted, cell entries and
+    // accredited haulers. Same rule and same shape as the submit path — skipped
+    // only when the account has no assignment recorded (nothing to compare
+    // against).
+    if (genId && Array.isArray(portalAccount?.assignedSlf) && portalAccount.assignedSlf.length) {
+      const assignedIds = portalAccount.assignedSlf.map((id) => String(id));
+      if (!assignedIds.includes(String(genId))) {
+        writeLog("warn", "baseline.ownership_rejected", {
+          message: "Portal user attempted to save baseline data for a facility they are not assigned to",
+          user: submittedBy || "",
+          ip: req.ip,
+          meta: { operation: "portal-save-baseline", slfGenerator: String(genId), slfName },
+        });
+        return res.status(403).json({
+          message: "You can only update baseline data for the SLF facility assigned to your account.",
+        });
+      }
+    }
 
     const updateFields = {
       slfName,
@@ -6340,7 +7172,12 @@ router.patch("/portal-save-baseline/:slfName", optionalAuth, requirePortalRule("
       closedCellResidualVolume, closedCellResidualUnit,
       closedCellInertVolume, closedCellInertUnit,
       closedCellHazardousVolume, closedCellHazardousUnit,
-      activeCellEntries, closedCellEntries,
+      // Bind each row to the admin's authoritative cell BEFORE it is stored, so
+      // the relationship is a stable cellIndex rather than a display name that an
+      // admin rename would orphan. This is the source-side half of the fix; the
+      // read path resolves the rows already in the database the same way.
+      activeCellEntries: resolveBaselineCellEntries(activeCellEntries, saveFacility),
+      closedCellEntries: resolveBaselineCellEntries(closedCellEntries, saveFacility),
       accreditedHaulers: accreditedHaulers
         ? sanitizeAccreditedHaulers(accreditedHaulers, baselineUnit || totalVolumeAcceptedUnit || "m³")
         : accreditedHaulers,
@@ -6387,17 +7224,17 @@ router.patch("/portal-save-baseline/:slfName", optionalAuth, requirePortalRule("
 
     // If no existing records exist for this SLF, create a baseline-only record
     if (updateResult.matchedCount === 0) {
-      const provCode = getProvinceCode("");
-      const typeCode = facilityType === "Private" ? "PVT" : "LGU";
-      const pattern = new RegExp(`^SLF-${typeCode}-${provCode}-`);
-      const lastDoc = await DataSLF.findOne({ idNo: pattern }).sort({ idNo: -1 });
-      let seq = 1;
-      if (lastDoc?.idNo) {
-        const parts = lastDoc.idNo.split("-");
-        const lastNum = parseInt(parts[3], 10);
-        if (!isNaN(lastNum)) seq = lastNum + 1;
-      }
-
+      // The ID No. is left to the model's pre("save") hook. The hand-rolled
+      // generator this replaces was wrong twice over:
+      //   • it called getProvinceCode("") — a hardcoded EMPTY province — so every
+      //     baseline-created record was stamped "XX" (SLF-PVT-XX-0001) instead of
+      //     the facility's real province code.
+      //   • its `findOne({ idNo })` ran WITHOUT `includeHiddenYears`, so the
+      //     year-visibility plugin hid records outside the visible year and the
+      //     "next" sequence could repeat one already in use.
+      // The hook resolves the province from the linked facility, falls back to
+      // companyProvince and then to a sibling record's code, and reads across all
+      // years — which is exactly what "aligned to the current database" requires.
       const newDoc = new DataSLF({
         ...updateFields,
         slfGenerator: genId,
@@ -6411,7 +7248,6 @@ router.patch("/portal-save-baseline/:slfName", optionalAuth, requirePortalRule("
         companyBarangay,
         dateOfDisposal: new Date(),
         submittedBy: submittedBy || slfName,
-        idNo: `SLF-${typeCode}-${provCode}-${String(seq).padStart(4, "0")}`,
         status: "pending",
       });
       await newDoc.save();
@@ -6494,7 +7330,22 @@ router.patch("/portal-save-baseline/:slfName", optionalAuth, requirePortalRule("
 
     // Return the freshly-persisted baseline so the portal can reload from the
     // server's copy (not stale local form state) and reflect the save immediately.
-    res.json({ message: "Baseline saved and locked", data: latest || null });
+    //
+    // `locked` is READ BACK from the database rather than assumed from the fact
+    // that the write returned 200 — it is the same rule GET /baseline resolves, so
+    // the portal can trust it without waiting for the refetch, and a re-lock that
+    // silently failed shows up as locked:false instead of a UI that only looks
+    // locked until the next reload.
+    const persistedApproval = await DataSLF.countDocuments({
+      _id: { $in: lockIds.length ? lockIds : [latest?._id].filter(Boolean) },
+      baselineUpdateApproved: true,
+    }).setOptions({ includeHiddenYears: true });
+    res.json({
+      message: "Baseline saved and locked",
+      data: latest || null,
+      locked: Boolean(latest) && persistedApproval === 0,
+      baselineUpdateApproved: persistedApproval > 0,
+    });
   } catch (error) {
     if (error.statusCode) return res.status(error.statusCode).json({ message: error.message });
     res.status(500).json({ message: "Server error", error: error.message });
@@ -6541,13 +7392,12 @@ router.post("/baseline-update-request", optionalAuth, requirePortalRule("can_cha
         baselineUpdateApproved: false,
       },
     });
-    const latestEntry = await DataSLF.findOne(filter).setOptions({ includeHiddenYears: true }).sort({ createdAt: -1 });
-
-    // Log transaction
+    // Log transaction. Deliberately carries NO submissionId: the newest record
+    // for an SLF is normally a disposal submission, and inheriting its id filed
+    // every baseline request inside that submission's Transaction History.
     await Transaction.create({
       companyName: slfName,
       submittedBy: requestedBy,
-      submissionId: latestEntry?.submissionId || undefined,
       type: "baseline_update_request",
       description: `Baseline update request: ${(fields || []).join(", ")}`,
       performedBy: requestedBy,
@@ -6566,9 +7416,83 @@ router.post("/baseline-update-request", optionalAuth, requirePortalRule("can_cha
   }
 });
 
+// The portal dashboard reads this summary in TWO shapes, and they must not be
+// fetched as one.
+//
+// `accreditedHaulers` is deliberately DUPLICATED onto every one of an SLF's
+// baseline documents, and the summary uses exactly ONE copy of it
+// (`baselineHaulerSource`). Selecting it on every record therefore re-read the
+// same hauler/vehicle/client graph once per submission: measured against live
+// data it was 4.7 MB of a 5.3 MB response for Floridablanca (59 records) and
+// 4.7 MB of 4.9 MB for Prime Waste Solution — ~90% pure duplication, and the
+// single fetch every card below the dashboard's KPI row waits on.
+//
+// So: NO query below selects `accreditedHaulers` in bulk. The one record the
+// summary reads them from is identified first by a cheap id-only pass, then
+// fetched on its own (see resolveWasteSummaryHaulers).
+const WASTE_SUMMARY_BASELINE_SELECT =
+  "companyType companyRegion companyProvince companyMunicipality lguCompanyName " +
+  "baselineUnit totalVolumeAccepted totalVolumeAcceptedUnit " +
+  "activeCellEntries activeCellResidualVolume activeCellResidualUnit " +
+  "activeCellInertVolume activeCellInertUnit activeCellHazardousVolume activeCellHazardousUnit " +
+  "closedCellEntries closedCellResidualVolume closedCellResidualUnit " +
+  "closedCellInertVolume closedCellInertUnit closedCellHazardousVolume closedCellHazardousUnit " +
+  // Presence only — `chooseBaselineRecord` / `hasTruckVolume` need to tell a
+  // container from a submission, not to read the transport entries.
+  "trucks.actualVolume";
+
+/**
+ * The accredited-hauler list for a waste-received summary, read from exactly ONE
+ * record.
+ *
+ * Two passes on purpose. Choosing the source needs the same tier order the
+ * portal baseline read uses (container → no truck volume → any), which means
+ * inspecting several records; but `accreditedHaulers` is the heavy field, so the
+ * first pass carries only `_id` and `trucks.actualVolume` and the second reads
+ * the winner's haulers alone. Both queries are small — the previous single query
+ * pulled the same hauler graph once per submission.
+ */
+async function resolveWasteSummaryHaulers(match) {
+  const candidates = await DataSLF.find({
+    $and: [match, { "accreditedHaulers.0": { $exists: true } }],
+  })
+    .select("_id trucks.actualVolume")
+    .sort({ createdAt: -1 })
+    .limit(50)
+    .maxTimeMS(20000)
+    .lean();
+
+  const winner =
+    candidates.find(isBaselineOnlyRecord) ||
+    candidates.find((item) => !hasTruckVolume(item)) ||
+    candidates[0];
+  if (!winner) return [];
+
+  const doc = await DataSLF.findById(winner._id)
+    .select("accreditedHaulers")
+    .maxTimeMS(20000)
+    .lean();
+  return doc?.accreditedHaulers || [];
+}
+
+const WASTE_SUMMARY_SUBMISSION_SELECT =
+  "companyType companyRegion companyProvince companyMunicipality lguCompanyName dateOfDisposal baselineUnit " +
+  "trucks.actualVolume trucks.actualVolumeUnit trucks.selectedClients trucks.lguCompanyName trucks.companyType " +
+  "trucks.vehicles.actualVolume trucks.vehicles.actualVolumeUnit trucks.vehicles.selectedClients " +
+  "trucks.vehicles.lguCompanyName trucks.vehicles.companyType";
+
 // Portal: Get waste received breakdown by baseline clients and submitted client selections.
 // Region 3 Central Luzon: PSGC region code starts with "03".
-router.get("/waste-received-summary/:slfName", async (req, res) => {
+// The Mini Dashboard summary. Expensive (3.5–8s on the larger facilities, where it
+// walks every submission's trucks and splits volume across clients) and identical
+// for every operator of the same SLF — this route reads no user context at all, so
+// one computation legitimately serves them all. The key carries every parameter
+// that changes the answer; freshness comes from refreshAdmin/refreshPortal busting
+// the prefix on submission, baseline and facility writes (see staleKeysFor in
+// utils/socketEmit.js), with the TTL as a bounded backstop.
+const wasteReceivedCacheKey = (req) =>
+  `${WASTE_RECEIVED_PREFIX}:${req.query.slfId || "-"}:${decodeURIComponent(req.params.slfName || "")}:${req.query.year || "all"}`;
+router.get("/waste-received-summary/:slfName", cacheJson(wasteReceivedCacheKey, 120000), async (req, res) => {
   try {
     const slfName = decodeURIComponent(req.params.slfName);
     const { year, slfId } = req.query;
@@ -6651,10 +7575,32 @@ router.get("/waste-received-summary/:slfName", async (req, res) => {
       match.dateOfDisposal = { $gte: new Date(`${y}-01-01`), $lte: new Date(`${y}-12-31`) };
     }
 
-    const records = await DataSLF.find(match).select(
-      "companyType companyRegion companyProvince companyMunicipality lguCompanyName dateOfDisposal accreditedHaulers baselineUnit totalVolumeAccepted totalVolumeAcceptedUnit activeCellEntries activeCellResidualVolume activeCellResidualUnit activeCellInertVolume activeCellInertUnit activeCellHazardousVolume activeCellHazardousUnit closedCellEntries closedCellResidualVolume closedCellResidualUnit closedCellInertVolume closedCellInertUnit closedCellHazardousVolume closedCellHazardousUnit " +
-      "trucks.actualVolume trucks.actualVolumeUnit trucks.selectedClients trucks.lguCompanyName trucks.companyType trucks.vehicles.selectedClients"
-    ).maxTimeMS(20000).lean();
+    // Three reads, run together. See WASTE_SUMMARY_*_SELECT above for why the
+    // baseline columns are not carried on the per-submission pass.
+    //
+    // The baseline candidates follow the SAME rule as GET /baseline/:slfName —
+    // containers first, recency window as fallback — so the Baseline Breakdown
+    // card and the Data Entry form can no longer disagree about which record the
+    // SLF's baseline lives on.
+    const [baselineContainers, baselineRecent, records, baselineHaulers] = await Promise.all([
+      DataSLF.find({ $and: [match, BASELINE_ONLY_FILTER, baselineDataMatch] })
+        .select(WASTE_SUMMARY_BASELINE_SELECT)
+        .sort({ updatedAt: -1, createdAt: -1 })
+        .limit(20)
+        .maxTimeMS(20000)
+        .lean(),
+      DataSLF.find({ $and: [match, baselineDataMatch] })
+        .select(WASTE_SUMMARY_BASELINE_SELECT)
+        .sort({ createdAt: -1 })
+        .limit(50)
+        .maxTimeMS(20000)
+        .lean(),
+      DataSLF.find(match)
+        .select(WASTE_SUMMARY_SUBMISSION_SELECT)
+        .maxTimeMS(20000)
+        .lean(),
+      resolveWasteSummaryHaulers(match),
+    ]);
 
     const summary = { lguR3: [], lguOutside: [], privateIndustry: [] };
     const baselineClientMap = new Map();
@@ -6722,6 +7668,37 @@ router.get("/waste-received-summary/:slfName", async (req, res) => {
       if (volume || truckCount) row.entries += 1;
       row.truckCount += truckCount;
     };
+    const disposalRowsForTruck = (truck = {}, parent = {}) => {
+      const vehicles = Array.isArray(truck.vehicles)
+        ? truck.vehicles.filter((vehicle) => Number(vehicle?.actualVolume || 0) > 0)
+        : [];
+      if (vehicles.length) {
+        return vehicles.map((vehicle) => ({
+          volume: Number(vehicle.actualVolume || 0),
+          unit: vehicle.actualVolumeUnit || truck.actualVolumeUnit || parent.baselineUnit || "m³",
+          selectedClients: Array.isArray(vehicle.selectedClients) ? vehicle.selectedClients : [],
+          fallbackClient: {
+            clientName: vehicle.lguCompanyName || truck.lguCompanyName || parent.lguCompanyName || "—",
+            clientType: vehicle.companyType || truck.companyType || parent.companyType || "Private",
+            region: parent.companyRegion || "",
+            province: parent.companyProvince || "",
+            municipality: parent.companyMunicipality || "",
+          },
+        }));
+      }
+      return [{
+        volume: Number(truck.actualVolume || 0),
+        unit: truck.actualVolumeUnit || parent.baselineUnit || "m³",
+        selectedClients: Array.isArray(truck.selectedClients) ? truck.selectedClients : [],
+        fallbackClient: {
+          clientName: truck.lguCompanyName || parent.lguCompanyName || "—",
+          clientType: truck.companyType || parent.companyType || "Private",
+          region: parent.companyRegion || "",
+          province: parent.companyProvince || "",
+          municipality: parent.companyMunicipality || "",
+        },
+      }];
+    };
 
     const addBaselineVolume = (label, volume = 0, unit = "m³", wasteType = "Residual") => {
       const amount = Number(volume || 0);
@@ -6747,7 +7724,22 @@ router.get("/waste-received-summary/:slfName", async (req, res) => {
     const facilityCellNames =
       facilities.find((f) => Array.isArray(f?.cellNames) && f.cellNames.length)?.cellNames || [];
 
-    const baseline = chooseBaselineRecord(records.filter(hasBaselineData));
+    // No `.filter(hasBaselineData)` — both queries already carry
+    // `baselineDataMatch`, so every row returned has baseline data by
+    // construction. Re-testing it here would now be WRONG as well as redundant:
+    // `accreditedHaulers` is no longer projected, so a record whose only baseline
+    // data is its hauler list would fail the predicate and be discarded.
+    const baselineRecords = orderBaselineCandidates(baselineContainers, baselineRecent);
+    const baseline = chooseBaselineRecord(baselineRecords);
+
+    baselineHaulers.forEach((hauler) => {
+      const clients = [
+        ...(Array.isArray(hauler.privateSectorClients) ? hauler.privateSectorClients : hauler.privateSectorClients ? [hauler.privateSectorClients] : []),
+        ...(Array.isArray(hauler.clients) ? hauler.clients : []),
+      ];
+      clients.forEach((client) => addClient(baselineClientMap, client));
+    });
+
     if (baseline?.activeCellEntries?.length) {
       baseline.activeCellEntries.forEach((entry, index) => {
         addBaselineVolume(
@@ -6769,15 +7761,11 @@ router.get("/waste-received-summary/:slfName", async (req, res) => {
     }
 
     for (const r of records) {
-      (r.accreditedHaulers || []).forEach((hauler) => {
-        const clients = [
-          ...(Array.isArray(hauler.privateSectorClients) ? hauler.privateSectorClients : hauler.privateSectorClients ? [hauler.privateSectorClients] : []),
-          ...(Array.isArray(hauler.clients) ? hauler.clients : []),
-        ];
-        clients.forEach((client) => addClient(baselineClientMap, client));
-      });
-
-      const totalVol = (r.trucks || []).reduce((s, t) => s + (t.actualVolume || 0), 0);
+      const disposalRows = (r.trucks || [])
+        .flatMap((truck) => disposalRowsForTruck(truck, r))
+        .filter((row) => Number(row.volume || 0) > 0);
+      if (!disposalRows.length) continue;
+      const totalVol = disposalRows.reduce((sum, row) => sum + Number(row.volume || 0), 0);
       const isR3 = (r.companyRegion || "").startsWith("03");
       const item = {
         company: r.lguCompanyName || "—",
@@ -6793,27 +7781,14 @@ router.get("/waste-received-summary/:slfName", async (req, res) => {
         summary.privateIndustry.push(item);
       }
 
-      (r.trucks || []).forEach((truck) => {
-        const vehicleClients = (truck.vehicles || []).flatMap((vehicle) =>
-          Array.isArray(vehicle.selectedClients) ? vehicle.selectedClients : [],
-        );
-        const clients = Array.isArray(truck.selectedClients) && truck.selectedClients.length
-          ? truck.selectedClients
-          : vehicleClients.length
-            ? vehicleClients
-            : [{
-                clientName: truck.lguCompanyName || r.lguCompanyName || "—",
-                clientType: truck.companyType || r.companyType || "Private",
-                region: r.companyRegion || "",
-                province: r.companyProvince || "",
-                municipality: r.companyMunicipality || "",
-              }];
-        const splitVolume = Number(truck.actualVolume || 0) / Math.max(clients.length, 1);
+      disposalRows.forEach((row) => {
+        const clients = row.selectedClients.length ? row.selectedClients : [row.fallbackClient];
+        const splitVolume = Number(row.volume || 0) / Math.max(clients.length, 1);
         clients.forEach((client) => addClient(
           submissionClientMap,
           client,
           splitVolume,
-          truck.actualVolumeUnit || r.baselineUnit || "m³",
+          row.unit || r.baselineUnit || "m³",
           1 / Math.max(clients.length, 1),
           { filterMunicipality: true },
         ));
@@ -6986,3 +7961,20 @@ router.post("/merge-slf", authMiddleware, developerOnly, async (req, res) => {
 module.exports = router;
 module.exports.submitEntries = submitEntries;
 module.exports.sanitizeSubmissionEntry = sanitizeSubmissionEntry;
+// Pure helpers exposed for tests/ so the duplicate-row and client-persistence
+// rules can be exercised without a database connection.
+module.exports.mergeAccreditedHaulerCopies = mergeAccreditedHaulerCopies;
+module.exports.realignIdNoSequence = realignIdNoSequence;
+module.exports.devWantsDummy = devWantsDummy;
+module.exports.devWantsDummyOnly = devWantsDummyOnly;
+module.exports.rejectUnauthorizedDummyAccess = rejectUnauthorizedDummyAccess;
+module.exports.SUBMISSION_HAS_TRUCKS = SUBMISSION_HAS_TRUCKS;
+module.exports.sanitizeClient = sanitizeClient;
+module.exports.sanitizeAccreditedHaulers = sanitizeAccreditedHaulers;
+// Portal baseline read — the candidate ordering and the field-source rule that
+// decide what Data Entry hydrates from.
+module.exports.orderBaselineCandidates = orderBaselineCandidates;
+module.exports.makeBaselineFieldReader = makeBaselineFieldReader;
+module.exports.chooseBaselineRecord = chooseBaselineRecord;
+module.exports.isBaselineOnlyRecord = isBaselineOnlyRecord;
+module.exports.BASELINE_ONLY_FILTER = BASELINE_ONLY_FILTER;

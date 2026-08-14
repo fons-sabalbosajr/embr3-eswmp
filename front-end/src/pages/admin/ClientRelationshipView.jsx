@@ -3,6 +3,7 @@ import { Table, Tag, Card, Statistic, Space, Typography, Input, Alert, Skeleton,
 import { TeamOutlined, InfoCircleOutlined, AppstoreOutlined, UnorderedListOutlined, EnvironmentOutlined, DatabaseOutlined, ApartmentOutlined, WarningOutlined } from "@ant-design/icons";
 import SummaryTile from "./shared/SummaryTile";
 import { loadRelationshipMap, peekRelationshipMap } from "../../utils/relationshipMapCache";
+import { compareProvinceNames } from "../../utils/provinceSort";
 
 const { Text } = Typography;
 
@@ -130,7 +131,13 @@ export default function ClientRelationshipView({ type = "LGU" }) {
             servedMunis.add(c.municipalityId || c.municipalityCity);
           }
         });
-        const provinces = [...provinceCounts.keys()].filter((p) => p !== "Unspecified");
+        // Alphabetical, not encounter order — this list drives the province label
+        // on every SLF group in the LGUs Served / Private Sectors Served tabs, and
+        // it only shows the first two, so an arbitrary order also decided WHICH
+        // two appeared.
+        const provinces = [...provinceCounts.keys()]
+          .filter((p) => p !== "Unspecified")
+          .sort(compareProvinceNames);
         return {
           slf: g.slf,
           // Group the client table by Client Address (municipality) then name.
@@ -299,7 +306,7 @@ export default function ClientRelationshipView({ type = "LGU" }) {
                       return acc;
                     }, {}),
                   )
-                    .sort(([a], [b]) => a.localeCompare(b))
+                    .sort(([a], [b]) => compareProvinceNames(a, b))
                     .map(([province, munis]) => (
                       <div key={province}>
                         <Space size={6} style={{ marginBottom: 4 }}>

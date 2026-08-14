@@ -213,7 +213,13 @@ io.on("connection", (socket) => {
     if (userId) socket.join(`admin-${userId}`);
   }
   if (role === "portal") {
-    const email = socket.handshake.query.email;
+    // Normalize the room name. Every emitter targets
+    // `portal-${email.toLowerCase()}` (see utils/socketEmit.js and
+    // routes/portalMessages.js), but the JOIN used the raw handshake value — so a
+    // client connecting with any capitalisation joined a room nothing ever
+    // published to. The message still persisted and appeared on the next reload,
+    // which is exactly what "does not reflect in real time" looks like.
+    const email = String(socket.handshake.query.email || "").trim().toLowerCase();
     if (email) socket.join(`portal-${email}`);
   }
   socket.on("disconnect", () => {});
@@ -482,6 +488,12 @@ try {
   console.warn("[Google Drive] Config check skipped:", err.message);
 }
 
+// Open the ONE Redis connection for this process, if the deployment configures
+// one. Deliberately not awaited and deliberately after the Mongo/Drive checks:
+// Redis is a cache layer, so the server must boot and serve normally whether it
+// connects or not (utils/serverCache falls back to its in-process tier).
+require("./config/redis").getClient();
+
 // Listen on 0.0.0.0 so the server is accessible over the network
 server.listen(PORT, "0.0.0.0", () => {
   const localIP = getLocalIP();
@@ -489,3 +501,12 @@ server.listen(PORT, "0.0.0.0", () => {
   console.log(`  Local:   http://localhost:${PORT}`);
   console.log(`  Network: http://${localIP}:${PORT}\n`);
 });
+
+// Release the Redis socket on shutdown so a restart does not leave a connection
+// lingering until the server-side timeout. Everything else here is already
+// process-scoped, so this is the only handle worth closing explicitly.
+for (const signal of ["SIGINT", "SIGTERM"]) {
+  process.on(signal, () => {
+    require("./config/redis").close().finally(() => process.exit(0));
+  });
+}

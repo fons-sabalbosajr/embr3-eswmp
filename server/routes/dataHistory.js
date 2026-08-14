@@ -2,6 +2,17 @@ const express = require("express");
 const router = express.Router();
 const { authMiddleware } = require("../middleware/auth");
 const DataHistory = require("../models/DataHistory");
+const { cacheJson, invalidateOnWrite } = require("../middleware/cacheRoute");
+const { MODULE_STATS } = require("../utils/cacheKeys");
+
+// ── Dashboard history cache ──
+// GET /summary loads EVERY DataHistory document and groups them in JS on each
+// call — a cost that grows with every yearly snapshot ever taken, repeated by the
+// dashboard's 60s poll for data that only changes when someone takes a new
+// snapshot. 5 minutes, and any write here (snapshot/delete) clears it at once.
+const HISTORY_KEY = MODULE_STATS.dataHistory;
+const HISTORY_TTL_MS = 300000;
+router.use(invalidateOnWrite(HISTORY_KEY));
 
 // GET /data-history — all historical records
 router.get("/", authMiddleware, async (req, res) => {
@@ -22,7 +33,7 @@ router.get("/", authMiddleware, async (req, res) => {
 });
 
 // GET /data-history/summary — aggregated year-over-year summary for dashboard
-router.get("/summary", authMiddleware, async (req, res) => {
+router.get("/summary", authMiddleware, cacheJson(() => `${HISTORY_KEY}:summary`, HISTORY_TTL_MS), async (req, res) => {
   try {
     const records = await DataHistory.find()
       .sort({ year: 1 })

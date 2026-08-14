@@ -49,6 +49,75 @@ body {
   font-weight: 600;
 }
 
+/* ── Slim scrollbars ────────────────────────────────────────────────────────
+   The default OS scrollbar is ~15px and sits INSIDE a scrollable table body, so
+   it eats a column's worth of width and looks heavy against the compact tables.
+
+   Same treatment the auth panel already uses (.auth-announcement-scroll in
+   pages/Auth.css) — deliberately identical so the app has ONE scrollbar look
+   rather than two. `height` is set as well as `width` because several of these
+   areas scroll horizontally too.
+
+   ONE composable utility: put `slf-slim-scroll` on a scroll container (a modal
+   body) or on an AntD Table — the descendant rule reaches the table's inner
+   `.ant-table-body`, which is the element that actually scrolls. Firefox reads
+   the standard properties, WebKit/Blink the pseudo-elements. */
+.slf-slim-scroll,
+.slf-slim-scroll .ant-table-body {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(92, 118, 144, 0.45) rgba(208, 220, 232, 0.35);
+}
+
+.slf-slim-scroll::-webkit-scrollbar,
+.slf-slim-scroll .ant-table-body::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+.slf-slim-scroll::-webkit-scrollbar-track,
+.slf-slim-scroll .ant-table-body::-webkit-scrollbar-track {
+  background: rgba(208, 220, 232, 0.35);
+  border-radius: 999px;
+}
+
+.slf-slim-scroll::-webkit-scrollbar-thumb,
+.slf-slim-scroll .ant-table-body::-webkit-scrollbar-thumb {
+  background: rgba(92, 118, 144, 0.45);
+  border-radius: 999px;
+}
+
+.slf-slim-scroll::-webkit-scrollbar-thumb:hover,
+.slf-slim-scroll .ant-table-body::-webkit-scrollbar-thumb:hover {
+  background: rgba(92, 118, 144, 0.7);
+}
+
+/* Where both axes scroll, the corner would otherwise render as a grey block. */
+.slf-slim-scroll::-webkit-scrollbar-corner,
+.slf-slim-scroll .ant-table-body::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+/* Dark theme: the light thumb/track would glare against a dark surface. */
+[data-theme="dark"] .slf-slim-scroll,
+[data-theme="dark"] .slf-slim-scroll .ant-table-body {
+  scrollbar-color: rgba(148, 168, 190, 0.45) rgba(255, 255, 255, 0.08);
+}
+
+[data-theme="dark"] .slf-slim-scroll::-webkit-scrollbar-track,
+[data-theme="dark"] .slf-slim-scroll .ant-table-body::-webkit-scrollbar-track {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+[data-theme="dark"] .slf-slim-scroll::-webkit-scrollbar-thumb,
+[data-theme="dark"] .slf-slim-scroll .ant-table-body::-webkit-scrollbar-thumb {
+  background: rgba(148, 168, 190, 0.45);
+}
+
+[data-theme="dark"] .slf-slim-scroll::-webkit-scrollbar-thumb:hover,
+[data-theme="dark"] .slf-slim-scroll .ant-table-body::-webkit-scrollbar-thumb:hover {
+  background: rgba(148, 168, 190, 0.7);
+}
+
 .portal-user-wrap-table .ant-table-cell,
 .portal-user-wrap-table .ant-descriptions-item-content,
 .portal-user-wrap-table .ant-descriptions-item-label {
@@ -290,6 +359,36 @@ body:has([data-theme="dark"]) .swal2-validation-message {
 /* ── Ant modal responsive ── */
 .ant-modal {
   max-width: calc(100vw - 32px) !important;
+}
+
+/* ── Ant drawer responsive ──
+   Drawers are opened with a fixed pixel width (620px for the submission and log
+   detail panels), and unlike Modal, antd does NOT clamp that to the viewport —
+   so on a 320–430px phone the panel ran wider than the screen and its footer
+   actions sat off-canvas. Clamping the wrapper here fixes every drawer at once,
+   including any added later, without touching a single component.
+
+   Left/right drawers only: a top/bottom drawer's width is already 100%. */
+.ant-drawer-content-wrapper {
+  max-width: 100vw;
+}
+@media (max-width: 576px) {
+  .ant-drawer-left .ant-drawer-content-wrapper,
+  .ant-drawer-right .ant-drawer-content-wrapper {
+    width: 100vw !important;
+  }
+}
+@media (min-width: 577px) and (max-width: 768px) {
+  .ant-drawer-left .ant-drawer-content-wrapper,
+  .ant-drawer-right .ant-drawer-content-wrapper {
+    max-width: 92vw;
+  }
+}
+/* Long-form drawer content (VERA findings, log detail) must scroll inside the
+   panel rather than pushing it wider. */
+.ant-drawer-body {
+  overflow-x: auto;
+  overscroll-behavior: contain;
 }
 
 /* ── Responsive Ant tables across admin and portal screens ── */

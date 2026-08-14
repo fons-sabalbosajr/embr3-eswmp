@@ -109,6 +109,7 @@ import useMediaMeta from "../../utils/useMediaMeta";
 import api from "../../api";
 import GaugeMeter, { computeGaugePercent } from "../../components/GaugeMeter";
 import GaugeLegend from "../../components/GaugeLegend";
+import { compareProvinceNames } from "../../utils/provinceSort";
 import LazyDocumentFrame from "../../components/LazyDocumentFrame";
 import {
   resolveCellName,
@@ -1830,7 +1831,9 @@ export default function DashboardContent({ user, isDark, setActiveMenu, onOpenSu
                     // Group facility tiles by province for the modal. A stable global
                     // index is carried alongside each facility so the SLF palette
                     // colour stays consistent regardless of grouping. Province groups
-                    // are ordered by facility count (busiest first), then name.
+                    // are ordered ALPHABETICALLY: a count-based order reshuffled
+                    // itself whenever the underlying figures changed, so the same
+                    // province sat somewhere different on every visit.
                     const stripProvince = (p) => String(p || "").replace(/^Province of\s+/i, "").trim() || "Unspecified";
                     const cellGaugeByProvince = (() => {
                       const groups = new Map();
@@ -1839,8 +1842,8 @@ export default function DashboardContent({ user, isDark, setActiveMenu, onOpenSu
                         if (!groups.has(prov)) groups.set(prov, []);
                         groups.get(prov).push({ f, idx });
                       });
-                      return [...groups.entries()].sort(
-                        (a, b) => (b[1].length - a[1].length) || a[0].localeCompare(b[0]),
+                      return [...groups.entries()].sort((a, b) =>
+                        compareProvinceNames(a[0], b[0]),
                       );
                     })();
                     // Selected SLF for the Cell Infrastructure per-cell drill-down.

@@ -1,4 +1,4 @@
-import { memo } from "react";
+import { memo, useMemo } from "react";
 import {
   Row,
   Col,
@@ -48,7 +48,7 @@ import {
 } from "recharts";
 import { isHazardousWasteType } from "../../utils/wasteCategories";
 import { isPermitNotRequired } from "../admin/slf-monitoring/helpers.jsx";
-import { VOLUME_METRICS } from "../../utils/volumeMetrics";
+import { VOLUME_METRICS, submittedVolumeOf } from "../../utils/volumeMetrics";
 
 /**
  * One label style for every bar chart on this dashboard, so the on-bar figures
@@ -87,7 +87,11 @@ function OverviewPanel({
   onOrganizeCells,
   onBulkOrganize,
 }) {
-  const ownSubmissions = Array.isArray(submissions) ? submissions : [];
+  // Held stable: a fresh `[]` on every render would defeat the memo below.
+  const ownSubmissions = useMemo(
+    () => (Array.isArray(submissions) ? submissions : []),
+    [submissions],
+  );
   // Global SLF sensitive-value masking. When on, waste volume + cell
   // capacity/fill figures render as the placeholder (counts/statuses stay
   // visible — they are not sensitive). Aggregation is unaffected: masking is a
@@ -97,41 +101,60 @@ function OverviewPanel({
   // ── Submission status + organization rollups (from the lean list rows, which
   // already carry status + per-submission cell-placement summary fields) ──
   const isRevertStatus = (s) => /revert/i.test(String(s || ""));
-  const statusCounts = ownSubmissions.reduce(
-    (acc, r) => {
-      if (r.deletedAt || r.hiddenFromPortal) return acc;
-      const s = String(r.status || "").toLowerCase();
-      if (s === "pending") acc.pending += 1;
-      else if (s === "acknowledged") acc.approved += 1;
-      else if (s === "approved") acc.approved += 1;
-      else if (isRevertStatus(s)) acc.reverted += 1;
-      else if (s === "rejected") acc.rejected += 1;
-      return acc;
-    },
-    { pending: 0, approved: 0, reverted: 0, rejected: 0 },
-  );
-  // A submission is "unorganized" if it still has waste awaiting a cell or a
-  // missing truck capacity (same rule the organizer uses).
-  const unorganizedSubs = ownSubmissions.filter(
-    (r) => Number(r.unplacedCount || 0) > 0 || Number(r.missingCapacityCount || 0) > 0,
-  ).length;
-  const organizedSubs = ownSubmissions.length - unorganizedSubs;
-  const unplacedTransactions = ownSubmissions.reduce(
-    (sum, r) => sum + Number(r.unplacedCount || 0),
-    0,
-  );
-
-  // Read the DENORMALIZED metrics the model already maintains
+  // ONE pass over the submission list, memoized on the list itself.
+  //
+  // These rollups used to be five independent traversals running on every
+  // render — and this panel re-renders on every socket event, filter change and
+  // parent state update, none of which change the submissions. On a facility
+  // with a few hundred submissions that is the portal's main stall. The
+  // arithmetic is identical; only the number of times it happens changed.
+  //
+  // Volume reads the DENORMALIZED metrics the model already maintains
   // (computeSlfMetrics keeps totalVolumeM3/Tons and truckCount in sync on save)
-  // instead of re-summing every truck in the browser. The history list no longer
-  // ships trucks[] at all, and this is the same number the admin totals use.
-  const volumeTotals = ownSubmissions.reduce(
-    (acc, item) => ({
-      m3: acc.m3 + Number(item.totalVolumeM3 || 0),
-      tons: acc.tons + Number(item.totalVolumeTons || 0),
-    }),
-    { m3: 0, tons: 0 },
-  );
+  // rather than re-summing every truck in the browser. The history list no
+  // longer ships trucks[] at all, and this is the number the admin totals use.
+  const {
+    statusCounts,
+    unorganizedSubs,
+    organizedSubs,
+    unplacedTransactions,
+    volumeTotals,
+    truckEntries,
+  } = useMemo(() => {
+    const counts = { pending: 0, approved: 0, reverted: 0, rejected: 0 };
+    let unorganized = 0;
+    let unplaced = 0;
+    let m3 = 0;
+    let tons = 0;
+    let trucks = 0;
+    for (const r of ownSubmissions) {
+      // Deleted / hidden rows are excluded from the STATUS mix only, exactly as
+      // before — the volume and organization totals never filtered them out.
+      if (!r.deletedAt && !r.hiddenFromPortal) {
+        const s = String(r.status || "").toLowerCase();
+        if (s === "pending") counts.pending += 1;
+        else if (s === "acknowledged" || s === "approved") counts.approved += 1;
+        else if (isRevertStatus(s)) counts.reverted += 1;
+        else if (s === "rejected") counts.rejected += 1;
+      }
+      // A submission is "unorganized" if it still has waste awaiting a cell or a
+      // missing truck capacity (same rule the organizer uses).
+      const rowUnplaced = Number(r.unplacedCount || 0);
+      if (rowUnplaced > 0 || Number(r.missingCapacityCount || 0) > 0) unorganized += 1;
+      unplaced += rowUnplaced;
+      m3 += Number(r.totalVolumeM3 || 0);
+      tons += Number(r.totalVolumeTons || 0);
+      trucks += Number(r.truckCount || 0);
+    }
+    return {
+      statusCounts: counts,
+      unorganizedSubs: unorganized,
+      organizedSubs: ownSubmissions.length - unorganized,
+      unplacedTransactions: unplaced,
+      volumeTotals: { m3, tons },
+      truckEntries: trucks,
+    };
+  }, [ownSubmissions]);
   // #7: show the recorded volume in the facility's single declared baseline unit,
   // never "m³ / tons" side-by-side. m³ and tons are kept in lockstep upstream.
   const baselineUnit = resolveFacilityUnit(slfInfo);
@@ -142,7 +165,7 @@ function OverviewPanel({
       ? `${recordedVolume.toLocaleString(undefined, { maximumFractionDigits: 2 })} ${baselineUnit}`
       : `0 ${baselineUnit}`;
   const statusColors = ["#1677ff", "#52c41a", "#faad14", "#ff4d4f", "#722ed1", "#13c2c2"];
-  const cellStatusCounts = (() => {
+  const cellStatusCounts = useMemo(() => {
     const statuses = Array.isArray(slfInfo?.cellStatuses) ? slfInfo.cellStatuses : [];
     const declaredCount = Math.max(
       Number(slfInfo?.numberOfCell || 0),
@@ -160,7 +183,34 @@ function OverviewPanel({
       else if (/used|completed|closed/i.test(String(status || ""))) counts.completed += 1;
     }
     return counts;
-  })();
+  }, [slfInfo]);
+
+  // ── Chart series for the cards below the KPI row ──
+  //
+  // ONE memo for the whole derivation, keyed on the three inputs it actually
+  // reads. Everything below used to run on EVERY render of this panel: the
+  // client identity Map is rebuilt over every baseline + submission client row,
+  // the hauler ranking is re-sorted, and both breakdowns are re-bucketed. On
+  // Prime Waste Solution (141 accredited haulers) and Floridablanca (80) that is
+  // thousands of string builds per render, for data that had not moved.
+  //
+  // Same reasoning as the submission rollups above — those were already memoized;
+  // this block was left behind. The arithmetic is unchanged.
+  const {
+    submissionBreakdownRows,
+    baselineBreakdownRows,
+    baselineCategoryData,
+    submissionCategoryData,
+    haulerCount,
+    lguClientCount,
+    privateClientCount,
+    haulerChartData,
+    clientChartData,
+    wasteFilledM3,
+    wasteFilledTons,
+    groupedVolumeData,
+    submittedVolume,
+  } = useMemo(() => {
   const legacySubmissionRows = [
     ...(wasteReceivedData.lguR3 || []).map((row) => ({ ...row, clientType: "LGU", region: row.region })),
     ...(wasteReceivedData.lguOutside || []).map((row) => ({ ...row, clientType: "LGU", region: row.region })),
@@ -186,12 +236,6 @@ function OverviewPanel({
   }, {})).map(([name, value]) => ({ name, value }));
   const baselineCategoryData = toCategoryData(baselineBreakdownRows);
   const submissionCategoryData = toCategoryData(submissionBreakdownRows);
-  const categoryColors = {
-    "LGU - Region III": "#1677ff",
-    "LGU - Outside Region III": "#722ed1",
-    "Private Industry": "#52c41a",
-    "Baseline Utilization": "#fa8c16",
-  };
   const clientIdentityKey = (row = {}) => [
     row.clientName || row.company || "",
     row.clientType || row.companyType || "Private",
@@ -239,33 +283,8 @@ function OverviewPanel({
     { name: "Private", value: privateClientCount, color: "#52c41a" },
   ].filter((row) => row.value > 0);
 
-  const cellStatusPieData = [
-    { name: "Active", value: cellStatusCounts.active, color: "#52c41a" },
-    { name: "Reserved", value: cellStatusCounts.reserved, color: "#fa8c16" },
-    { name: "Used / Completed", value: cellStatusCounts.completed, color: "#8c8c8c" },
-    {
-      // Whatever the three named buckets did not claim (under construction,
-      // unknown legacy statuses) — so the donut always totals the cell count.
-      name: "Other",
-      value: Math.max(
-        0,
-        cellStatusCounts.total - cellStatusCounts.active - cellStatusCounts.reserved - cellStatusCounts.completed,
-      ),
-      color: "#bfbfbf",
-    },
-  ].filter((row) => row.value > 0);
   const wasteFilledM3 = Number(wasteReceivedData.baselineTotals?.m3 || 0) + Number(wasteReceivedData.totals?.m3 || 0);
   const wasteFilledTons = Number(wasteReceivedData.baselineTotals?.tons || 0) + Number(wasteReceivedData.totals?.tons || 0);
-  // #5: show the total in the facility's SINGLE declared baseline unit (m³ and tons
-  // are kept in lockstep upstream), with consistent formatting and the unit beside
-  // the value — never "m³ / tons" side-by-side. The figures come from the backend
-  // aggregation, which now excludes rejected/reverted records.
-  const formatWasteTotal = () => {
-    if (masked) return MASK_PLACEHOLDER;
-    const unit = normalizeUnit(baselineUnit);
-    const value = unit === "tons" ? wasteFilledTons : wasteFilledM3;
-    return `${Number(value || 0).toLocaleString(undefined, { maximumFractionDigits: 2 })} ${unit}`;
-  };
   const rowVolumeForUnit = (row = {}) => {
     const unit = normalizeUnit(baselineUnit);
     return unit === "tons" ? Number(row.totalTons || 0) : Number(row.totalM3 || row.totalVolume || 0);
@@ -284,14 +303,78 @@ function OverviewPanel({
     { category: "Residual", baseline: baselineVolumes.residual, submitted: submittedVolumes.residual },
     { category: "Hazardous", baseline: baselineVolumes.hazardous, submitted: submittedVolumes.hazardous },
   ];
+  // "Submitted Volume" has ONE meaning in this app: volume recorded through Portal
+  // truck submissions (VOLUME_METRICS.submitted). That is exactly what the API's
+  // `totals` is — the sum over submissionClients, which are built from each
+  // record's trucks[]. `baselineTotals` is the separate declared opening volume.
+  //
+  // The tile used to show max(0, baselineTotals − submitted), which is neither
+  // metric: it is leftover baseline headroom, and it collapses to 0 the moment
+  // submissions reach the declared baseline — which is why the tile read as
+  // "missing data". It also contradicted the Baseline vs Submitted chart directly
+  // below it, which has always plotted the real submitted volume.
+  const submittedVolume = submittedVolumeOf(wasteReceivedData, baselineUnit);
+
+  return {
+    submissionBreakdownRows,
+    baselineBreakdownRows,
+    baselineCategoryData,
+    submissionCategoryData,
+    haulerCount,
+    lguClientCount,
+    privateClientCount,
+    haulerChartData,
+    clientChartData,
+    wasteFilledM3,
+    wasteFilledTons,
+    groupedVolumeData,
+    submittedVolume,
+  };
+  }, [wasteReceivedData, haulers, baselineUnit]);
+
+  const categoryColors = {
+    "LGU - Region III": "#1677ff",
+    "LGU - Outside Region III": "#722ed1",
+    "Private Industry": "#52c41a",
+    "Baseline Utilization": "#fa8c16",
+  };
+  // Keyed on the cell counts alone — it is the facility's shape, not the waste
+  // aggregation, that moves this donut.
+  const cellStatusPieData = useMemo(() => [
+    { name: "Active", value: cellStatusCounts.active, color: "#52c41a" },
+    { name: "Reserved", value: cellStatusCounts.reserved, color: "#fa8c16" },
+    { name: "Used / Completed", value: cellStatusCounts.completed, color: "#8c8c8c" },
+    {
+      // Whatever the three named buckets did not claim (under construction,
+      // unknown legacy statuses) — so the donut always totals the cell count.
+      name: "Other",
+      value: Math.max(
+        0,
+        cellStatusCounts.total - cellStatusCounts.active - cellStatusCounts.reserved - cellStatusCounts.completed,
+      ),
+      color: "#bfbfbf",
+    },
+  ].filter((row) => row.value > 0), [cellStatusCounts]);
+
+  // #5: show the total in the facility's SINGLE declared baseline unit (m³ and tons
+  // are kept in lockstep upstream), with consistent formatting and the unit beside
+  // the value — never "m³ / tons" side-by-side. The figures come from the backend
+  // aggregation, which now excludes rejected/reverted records.
+  //
+  // Outside the memo above: these read `masked`, which is a display concern that
+  // must re-evaluate when the privacy toggle flips, not when the data changes.
+  const formatWasteTotal = () => {
+    if (masked) return MASK_PLACEHOLDER;
+    const unit = normalizeUnit(baselineUnit);
+    const value = unit === "tons" ? wasteFilledTons : wasteFilledM3;
+    return `${Number(value || 0).toLocaleString(undefined, { maximumFractionDigits: 2 })} ${unit}`;
+  };
+  const formatUnitValue = (value) => masked ? MASK_PLACEHOLDER : `${Number(value || 0).toLocaleString(undefined, { maximumFractionDigits: 2 })} ${normalizeUnit(baselineUnit)}`;
   const submissionStatusData = [
     { name: "Pending", value: statusCounts.pending, color: "#faad14" },
     { name: "Approved", value: statusCounts.approved, color: "#52c41a" },
     { name: "Reverted", value: statusCounts.reverted, color: "#ff4d4f" },
   ];
-  const recordedSubmissionVolume = normalizeUnit(baselineUnit) === "tons" ? Number(wasteReceivedData.totals?.tons || 0) : Number(wasteReceivedData.totals?.m3 || 0);
-  const netRecordedVolume = Math.max(0, (normalizeUnit(baselineUnit) === "tons" ? Number(wasteReceivedData.baselineTotals?.tons || 0) : Number(wasteReceivedData.baselineTotals?.m3 || 0)) - recordedSubmissionVolume);
-  const formatUnitValue = (value) => masked ? MASK_PLACEHOLDER : `${Number(value || 0).toLocaleString(undefined, { maximumFractionDigits: 2 })} ${normalizeUnit(baselineUnit)}`;
   const latestPermit = (items = [], numberField = "permitNo") => {
     const list = (Array.isArray(items) ? items : []).filter((item) => item?.[numberField] || item?.validity || item?.status);
     return list.sort((a, b) => new Date(b.validity || 0) - new Date(a.validity || 0))[0] || null;
@@ -528,14 +611,21 @@ function OverviewPanel({
     slfInfo?.cellFillValues?.length || 0,
     slfInfo?.cellNames?.length || 0,
   );
-  const cellUtilization = [];
+  // Memoized on the facility record: this walks every encoded cell and does unit
+  // conversion per cell, and a site with many cells paid that on every render.
+  const cellUtilization = useMemo(() => {
+  const rows = [];
   for (let idx = 0; idx < cellCount; idx += 1) {
     const stored = slfInfo?.cellStatuses?.[idx];
     if (isNonExistentCell(stored)) continue;
     // A Used/Completed cell is closed and full — it can never receive waste
     // again, so its utilization bar carries no operational meaning and only
-    // crowds out the cells the operator can still dispose into.
-    if (/used|completed|closed/i.test(String(stored || ""))) continue;
+    // crowds out the cells the operator can still dispose into. This panel
+    // answers "where can I still put waste", not "what does the whole site look
+    // like"; the full inventory lives in Baseline Data / Organize Cells.
+    // Reserved / under-construction cells are excluded for the same reason: they
+    // exist on paper but cannot take waste today, so they only pad the grid.
+    if (/used|completed|closed|reserved|construction/i.test(String(stored || ""))) continue;
     const operational = isOperationalCellStatus(stored);
     const submissionClosed = slfInfo?.cellSubmissionAllowed?.[idx] === false;
     const statusConfig = getCellStatusConfig(stored);
@@ -565,7 +655,7 @@ function OverviewPanel({
     } else {
       band = "available";
     }
-    cellUtilization.push({
+    rows.push({
       idx,
       name: resolveCellName(slfInfo, idx, slfInfo?.cellNames?.[idx]),
       type: slfInfo?.cellTypes?.[idx] || "Residual",
@@ -581,7 +671,9 @@ function OverviewPanel({
       band,
     });
   }
-  const cellBandCounts = cellUtilization.reduce(
+  return rows;
+  }, [slfInfo, cellCount]);
+  const cellBandCounts = useMemo(() => cellUtilization.reduce(
     (acc, c) => {
       if (c.band === "full") acc.full += 1;
       else if (c.band === "near") acc.near += 1;
@@ -591,7 +683,7 @@ function OverviewPanel({
       return acc;
     },
     { active: 0, inuse: 0, near: 0, full: 0, unavailable: 0 },
-  );
+  ), [cellUtilization]);
   // One colour per band — an Active Cell (accepting, still empty) and an In Use
   // cell (accepting, partially filled) are visually distinct, as are the cells
   // that cannot receive waste at all.
@@ -649,8 +741,8 @@ function OverviewPanel({
             />
           </Card>
         </Col>
-        <Col xs={12} md={6} xl={3}><Card size="small" loading={kpisLoading} style={{ borderRadius: 8 }}><Statistic title="Truck Entries" value={ownSubmissions.reduce((sum, item) => sum + Number(item.truckCount || 0), 0)} valueStyle={{ fontSize: 20 }} /></Card></Col>
-        <Col xs={12} md={6} xl={3}><Card size="small" loading={kpisLoading} style={{ borderRadius: 8 }}><Statistic title="Submitted Vol." value={formatUnitValue(netRecordedVolume)} valueStyle={{ fontSize: 20, color: "#52c41a" }} /></Card></Col>
+        <Col xs={12} md={6} xl={3}><Card size="small" loading={kpisLoading} style={{ borderRadius: 8 }}><Statistic title="Truck Entries" value={truckEntries} valueStyle={{ fontSize: 20 }} /></Card></Col>
+        <Col xs={12} md={6} xl={3}><Card size="small" loading={kpisLoading} style={{ borderRadius: 8 }}><Statistic title="Submitted Vol." value={formatUnitValue(submittedVolume)} valueStyle={{ fontSize: 20, color: VOLUME_METRICS.submitted.color }} /></Card></Col>
       </Row>
 
       {/* Cell utilization overview — capacity, band, and status per open cell. */}
@@ -847,7 +939,12 @@ function OverviewPanel({
                 <Tag color="geekblue" style={{ margin: 0 }}>{haulerCount}</Tag>
               </Space>
             }
-            loading={wasteReceivedLoading}
+            // Gated on the BASELINE fetch, which is where `haulers` comes from —
+            // not on the waste-received aggregation, which this card never reads.
+            // It used to sit in a skeleton behind the slowest request on the page
+            // and, if that request failed, fall through to "No accredited haulers
+            // recorded" for a fleet that was already loaded.
+            loading={baselineLoading}
             style={{ borderRadius: 8, height: "100%" }}
             bodyStyle={{ height: 250 }}
           >

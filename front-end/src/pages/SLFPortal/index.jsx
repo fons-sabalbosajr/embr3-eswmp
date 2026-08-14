@@ -184,6 +184,7 @@ import {
   getUploadRelationshipErrors,
   findUploadHauler,
   findUploadClientForHauler,
+  resolveUploadCell,
   UPLOAD_COLUMNS,
 } from "./uploadHelpers";
 import { convertVolume, resolveCellUnit, resolveFacilityUnit } from "../../utils/volumeUnits";
@@ -261,6 +262,28 @@ function resolveBaselineLock(data) {
   // An approved update request is the ONLY thing that reopens the tabs.
   if (data.baselineUpdateApproved) return { locked: false, updatePending: false };
   return { locked: true, updatePending: !!data.baselineUpdateRequested };
+}
+
+/**
+ * A handler whose IDENTITY never changes but whose BODY is always the latest one.
+ *
+ * Memoized children (OverviewPanel) re-render whenever a prop identity changes.
+ * An inline `onClick={() => ...}` is a new function on every render, so the child
+ * re-renders every time regardless of whether its data moved — which is what made
+ * `memo()` on those panels do nothing.
+ *
+ * `useCallback` would be the usual answer, but it needs an exact dependency list,
+ * and a missed dependency here means a handler quietly closing over stale state —
+ * a correctness bug traded for a performance win. This keeps the newest closure in
+ * a ref and hands out one stable wrapper, so there is no dependency list to get
+ * wrong and no stale reads.
+ */
+function useStableCallback(fn) {
+  const ref = useRef(fn);
+  useEffect(() => {
+    ref.current = fn;
+  });
+  return useCallback((...args) => ref.current?.(...args), []);
 }
 
 export default function SLFPortal() {
@@ -411,6 +434,7 @@ export default function SLFPortal() {
     field: "createdAt",
     order: "descend",
   });
+  const supportTicketsLoadAttemptedRef = useRef(false);
   const [portalNotifications, setPortalNotifications] = useState([]);
   const [portalUnreadCount, setPortalUnreadCount] = useState(0);
   const [notificationPanelOpen, setNotificationPanelOpen] = useState(false);
@@ -529,21 +553,34 @@ export default function SLFPortal() {
 
   // Wrap each pane in its own loader. Applied to the items array so the (very
   // large) tab bodies below stay untouched.
+  //
+  // Each pane's `children` is a THUNK, and only the open tab's thunk is called.
+  // `destroyOnHidden` already keeps hidden panes out of the DOM, but the JSX for
+  // all three was still evaluated on every render — building the full element
+  // tree for the hauler/vehicle tables and both cell grids even while you were
+  // on another tab. That work is what made Data Entry slow to open and sluggish
+  // to type in. Now a hidden tab costs nothing until you switch to it.
   const withTabLoading = (items) =>
     items.map((item) => {
       const isLoading = TAB_DEPENDENCIES[item.key]?.() ?? false;
-      if (!isLoading) return item;
-      return {
-        ...item,
-        children: (
-          <div style={{ padding: "48px 0", textAlign: "center" }}>
-            <Spin size="large" />
-            <div style={{ marginTop: 12 }}>
-              <Text type="secondary">{tabLoadingMessage(item.key)}</Text>
+      if (isLoading) {
+        return {
+          ...item,
+          children: (
+            <div style={{ padding: "48px 0", textAlign: "center" }}>
+              <Spin size="large" />
+              <div style={{ marginTop: 12 }}>
+                <Text type="secondary">{tabLoadingMessage(item.key)}</Text>
+              </div>
             </div>
-          </div>
-        ),
-      };
+          ),
+        };
+      }
+      if (typeof item.children !== "function") return item;
+      // Build the open pane only. A hidden pane renders nothing — antd keeps the
+      // tab itself, and the forms live above this component, so nothing entered
+      // is lost by not rendering the pane.
+      return { ...item, children: item.key === activeTab ? item.children() : null };
     });
 
   const isDeveloperContext = !!(portalUser?.developerContext || portalUser?.devImpersonation);
@@ -565,13 +602,31 @@ export default function SLFPortal() {
     return issues;
   }, [haulers]);
 
-  const missingBaselineInfo =
-    watchedTotalVolumeAccepted == null || watchedTotalVolumeAccepted === "";
+  // Mirrors the server's required-submission gate (routes/dataSLF.js →
+  // hasPositiveRequiredNumber): a submission is rejected unless Total Volume
+  // Accepted is a POSITIVE number. Testing only for "not empty" let a locked
+  // baseline holding 0 / a non-numeric value pass the Review & Submit blockage and
+  // then fail at the server with "Baseline Data is incomplete".
+  // A watched value is only reliable once its field has been RENDERED. Edit &
+  // Resubmit loads a reverted submission and lands the user on the Disposal tab,
+  // so General Information is never mounted — every watch read `undefined` and
+  // the blockage claimed the company details were missing while the record (and
+  // the form store) held them all along. Reading the STORE as the fallback fixes
+  // that without losing reactivity: the watches still drive the re-render, the
+  // store supplies the value.
+  const companyStore = companyForm.getFieldsValue(true) || {};
+  const baselineStore = baselineForm.getFieldsValue(true) || {};
+  const resolveField = (watched, store, field) =>
+    watched !== undefined && watched !== null ? watched : store?.[field];
+
+  const missingBaselineInfo = !(
+    Number(resolveField(watchedTotalVolumeAccepted, baselineStore, "totalVolumeAccepted")) > 0
+  );
   const missingGeneralInfo = [
-    watchedCompanyName,
-    watchedCompanyRegion,
-    watchedCompanyProvince,
-    watchedCompanyMunicipality,
+    resolveField(watchedCompanyName, companyStore, "lguCompanyName"),
+    resolveField(watchedCompanyRegion, companyStore, "companyRegion"),
+    resolveField(watchedCompanyProvince, companyStore, "companyProvince"),
+    resolveField(watchedCompanyMunicipality, companyStore, "companyMunicipality"),
   ].some((value) => value == null || String(value).trim() === "");
   // Every Waste Generation Information field (incl. Truck Capacity) is required
   // for FINAL submission. Reuses the same rule set the backend enforces, so the
@@ -692,6 +747,10 @@ export default function SLFPortal() {
 
   const isMobile = !screens.md;
 
+  useEffect(() => {
+    supportTicketsLoadAttemptedRef.current = false;
+  }, [portalUser?.email]);
+
   // ── Online / offline awareness ──
   useEffect(() => {
     const goOnline = () => setIsOnline(true);
@@ -781,15 +840,23 @@ export default function SLFPortal() {
 
   const [loadingAddress, setLoadingAddress] = useState("");
 
-  const fetchProvinces = (regionCode) => {
+  // `preserveSelection` = we are HYDRATING an existing record's address, not
+  // reacting to the user picking a new Region. The clearing below is correct for
+  // a user change (a new region invalidates the province/municipality/barangay
+  // beneath it) but destructive when loading stored values: Edit & Resubmit
+  // called all three cascaders straight after setFieldsValue, so the record's
+  // Province, Municipality and Barangay were wiped the instant they were loaded.
+  const fetchProvinces = (regionCode, { preserveSelection = false } = {}) => {
     setProvinces([]);
-    setMunicipalities([]);
-    setBarangays([]);
-    companyForm.setFieldsValue({
-      companyProvince: undefined,
-      companyMunicipality: undefined,
-      companyBarangay: undefined,
-    });
+    if (!preserveSelection) {
+      setMunicipalities([]);
+      setBarangays([]);
+      companyForm.setFieldsValue({
+        companyProvince: undefined,
+        companyMunicipality: undefined,
+        companyBarangay: undefined,
+      });
+    }
     if (!regionCode) return;
     setLoadingAddress("province");
     withRetry(() => api.get(`/settings/address/provinces/${regionCode}`), {
@@ -806,13 +873,15 @@ export default function SLFPortal() {
       .finally(() => setLoadingAddress(""));
   };
 
-  const fetchMunicipalities = (provinceCode) => {
+  const fetchMunicipalities = (provinceCode, { preserveSelection = false } = {}) => {
     setMunicipalities([]);
-    setBarangays([]);
-    companyForm.setFieldsValue({
-      companyMunicipality: undefined,
-      companyBarangay: undefined,
-    });
+    if (!preserveSelection) {
+      setBarangays([]);
+      companyForm.setFieldsValue({
+        companyMunicipality: undefined,
+        companyBarangay: undefined,
+      });
+    }
     if (!provinceCode) return;
     setLoadingAddress("municipality");
     withRetry(
@@ -831,9 +900,9 @@ export default function SLFPortal() {
       .finally(() => setLoadingAddress(""));
   };
 
-  const fetchBarangays = (municipalityCode) => {
+  const fetchBarangays = (municipalityCode, { preserveSelection = false } = {}) => {
     setBarangays([]);
-    companyForm.setFieldsValue({ companyBarangay: undefined });
+    if (!preserveSelection) companyForm.setFieldsValue({ companyBarangay: undefined });
     if (!municipalityCode) return;
     setLoadingAddress("barangay");
     withRetry(
@@ -1290,6 +1359,11 @@ export default function SLFPortal() {
 
   const activeCellOptions = cellPlacementOptions.filter((o) => o.available);
 
+  // Bound to this SLF's open cells. ONE resolver shared by the upload parser and
+  // the preview editor (see uploadHelpers#resolveUploadCell), so a cell typed or
+  // picked in the preview resolves exactly like one that came from the file.
+  const resolveUploadCellValue = (value) => resolveUploadCell(activeCellOptions, value);
+
   const baselineCellOptions = (() => {
     return Array.from({ length: slfCellCount }, (_, index) => {
       const rawStatus = slfInfo?.cellStatuses?.[index];
@@ -1467,6 +1541,71 @@ export default function SLFPortal() {
     }
   };
 
+  // ── Per-menu fetch cache ──
+  // Switching menus re-ran each menu's fetch unconditionally, so going
+  // Dashboard → Data Entry → Dashboard paid for the overview charts three times
+  // and blanked them on every return. The fetched data already lives in state
+  // that survives the switch; all that was missing was a reason NOT to refetch.
+  //
+  // Deliberately short. This exists to absorb menu *navigation*, not to serve
+  // stale figures — a minute after a submission the operator still sees the new
+  // numbers, and any socket data-refresh clears the entry outright.
+  const MENU_CACHE_MS = 30000;
+  const menuFetchedAtRef = useRef({});
+  const isMenuDataFresh = useCallback((key) => {
+    const at = menuFetchedAtRef.current[key];
+    return Boolean(at) && Date.now() - at < MENU_CACHE_MS;
+  }, []);
+  const markMenuFetched = useCallback((key) => {
+    menuFetchedAtRef.current[key] = Date.now();
+  }, []);
+  const invalidateMenuCache = useCallback(() => {
+    menuFetchedAtRef.current = {};
+  }, []);
+
+  // Stable identities for the dashboard's quick actions. These are the only
+  // props OverviewPanel receives that are not plain state, so they were the only
+  // thing forcing it to re-render — see useStableCallback above.
+  const goToDataEntry = useStableCallback(() => setActiveMenu("data-entry"));
+  const goToHistory = useStableCallback(() => setActiveMenu("history"));
+  const handleOrganizeCells = useStableCallback(() => openCellOrganizer());
+  // BasicInfoTab is memoized, but memo compares prop IDENTITY — and these three
+  // address loaders are plain consts rebuilt on every render, so without this the
+  // memo would never match and Data Entry would re-render on every keystroke
+  // elsewhere in the form. Wrapping keeps the newest implementation while giving
+  // the child something stable to compare.
+  const stableFetchProvinces = useStableCallback((...a) => fetchProvinces(...a));
+  const stableFetchMunicipalities = useStableCallback((...a) => fetchMunicipalities(...a));
+  const stableFetchBarangays = useStableCallback((...a) => fetchBarangays(...a));
+
+  // Same reason, for the notification panel and the requests list — their memo
+  // wrappers were inert until these stopped changing identity every render.
+  const stableNotificationMeta = useStableCallback((...a) => getPortalNotificationMeta(...a));
+  const stableOpenNotification = useStableCallback((...a) => openPortalNotification(...a));
+  const stableHideRequest = useStableCallback((...a) => handleHideRequest(...a));
+
+  // AssignedSlfDashboard is the largest panel in the portal (~1.4k lines) and sits
+  // above the Data Entry form, so it re-rendered on every keystroke in the form
+  // below it. Its data props are state or already memoized (submitBlockers); only
+  // these three handlers were unstable.
+  const stableReviewOpen = useStableCallback((...a) => handleReviewOpen(...a));
+  const stableSaveDraft = useStableCallback((...a) => handleSaveDraft(...a));
+  const stableOpenWasteReceived = useStableCallback((...a) => handleOpenWasteReceived(...a));
+
+  const handleHistoryRefresh = useStableCallback(() => fetchSubmissions(false, true));
+  const handleDraftSubmitted = useStableCallback(() => {
+    invalidateMenuCache();
+    invalidateCache(`${PORTAL_SUBMISSIONS_CACHE_KEY}-${portalUser?.email || ""}`);
+    fetchSubmissions(true, true);
+  });
+  const handleBulkOrganize = useStableCallback(async () => {
+    // Ensure the unplaced placements are loaded before opening the bulk modal
+    // (it reuses cellOrganizerData); open the organizer silently if empty, then
+    // surface the bulk uploader.
+    if (cellOrganizerData.length === 0) await openCellOrganizer();
+    setBulkOrganizeOpen(true);
+  });
+
   // Assign a cell to ONE unassigned placement, addressed by its canonical
   // truckIndex/vehicleIndex (which the server preserved).
   const updateOrganizerCell = (subId, truckIndex, vehicleIndex, cellValue) => {
@@ -1541,7 +1680,13 @@ export default function SLFPortal() {
           _id: sub._id,
           assignments: (sub.placements || [])
             .map((p) => {
-              const hasCell = !!p.cellName;
+              // A placement counts as carrying a cell only with a VALID cell
+              // IDENTIFIER. A legacy row can hold a cellName copy with no
+              // cellIndex — the server treats that as unassigned (which is why it
+              // is offered here). Sending it as `{ cellIndex: null, cellName }`
+              // made the backend skip the row while the modal still reported
+              // "Waste Placement Saved", so the arrangement never persisted.
+              const hasCell = !!p.cellName && Number.isInteger(p.cellIndex);
               const providesCapacity = p.needsCapacity && isPos(p.capacity);
               if (!hasCell && !providesCapacity) return null; // untouched / still incomplete
               return {
@@ -1595,7 +1740,9 @@ export default function SLFPortal() {
       setCellOrganizerData([]); // release the full trucks[] working copy
       setCellOrganizerSelected([]);
       setCellOrganizerExpanded([]);
-      fetchSubmissions(true);
+      // Forced: organizing changes each submission's unplaced/missing-capacity
+      // counts, and a cached list would keep showing them as still needing work.
+      fetchSubmissions(true, true);
       // Refresh facility info so the Organized Cells menu reflects the new fills.
       setSlfInfoRefresh((n) => n + 1);
     } catch (err) {
@@ -1693,14 +1840,25 @@ export default function SLFPortal() {
           (data.firePrevMeasures || []).map((m, i) => ({ ...m, _key: i })),
         );
       })
-      .catch(() => {})
+      .catch((err) => {
+        if (ac.signal.aborted) return;
+        showError({
+          type: "error",
+          title: "Could Not Load SLF Facility",
+          message:
+            err.response?.data?.message ||
+            "We couldn't load the assigned SLF facility details. Please refresh or try again.",
+        });
+      })
       .finally(() => setSlfInfoLoading(false));
     return () => ac.abort();
   }, [activeSlfId, activeSlfName, slfInfoRefresh]);
 
+  const activeSlfInfoReadyForBaseline = !activeSlfId || !!slfInfo;
+
   // Fetch existing baseline when user is loaded (with retry)
   useEffect(() => {
-    if (!activeSlfName) return;
+    if (!activeSlfName || !activeSlfInfoReadyForBaseline) return;
     const ac = new AbortController();
     setBaselineLoading(true);
     withRetry(
@@ -1924,13 +2082,24 @@ export default function SLFPortal() {
           setClosedCellEntries([]);
         }
       })
-      .catch(() => {})
+      .catch((err) => {
+        if (ac.signal.aborted) return;
+        showError({
+          type: "error",
+          title: "Could Not Load Data Entry Values",
+          message:
+            err.response?.data?.message ||
+            "We couldn't load your saved baseline and Data Entry values. Please refresh or try again.",
+        });
+      })
       .finally(() => setBaselineLoading(false));
     return () => ac.abort();
     // Stable primitive deps (see slfInfo effect above) so a portalUser reference
-    // change doesn't abort the in-flight baseline fetch.
+    // change doesn't abort the in-flight baseline fetch. The readiness flag keeps
+    // hydration behind facility metadata because legacy baseline rows need live
+    // cell names/types/units to populate the Data Entry TabPanes correctly.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeSlfId, activeSlfName, baselineRefresh]);
+  }, [activeSlfId, activeSlfName, activeSlfInfoReadyForBaseline, baselineRefresh]);
 
   // Re-fetch baseline when admin approves/rejects
   useEffect(() => {
@@ -2029,12 +2198,24 @@ export default function SLFPortal() {
 
   useEffect(() => {
     if ((activeMenu === "history" || activeMenu === "overview") && portalUser) {
-      // Force-refresh when entering the history tab so status changes from admin are immediate
-      invalidateCache(`${PORTAL_SUBMISSIONS_CACHE_KEY}-${portalUser?.email || ""}`);
-      fetchSubmissions(false, true);
+      // Entering history/overview used to blow the cache away and force a full
+      // refetch EVERY time, which is why each menu switch showed a loading state
+      // for data the portal already had. The force-refresh existed so admin
+      // status changes appeared immediately — but the socket handler below
+      // already delivers those the moment they happen, and the 60s poll backs it
+      // up. So force only when the data is actually cold.
+      const subsKey = `subs:${portalUser?.email || ""}`;
+      if (!isMenuDataFresh(subsKey)) {
+        markMenuFetched(subsKey);
+        invalidateCache(`${PORTAL_SUBMISSIONS_CACHE_KEY}-${portalUser?.email || ""}`);
+        fetchSubmissions(false, true);
+      }
       // Real-time refresh via socket + fallback 60s polling
       const sock = connectSocket("portal", portalUser.email);
       const handler = () => {
+        // Something actually changed — drop the menu-entry cache so the next
+        // switch re-reads rather than trusting a now-stale timestamp.
+        invalidateMenuCache();
         invalidateCache(`${PORTAL_SUBMISSIONS_CACHE_KEY}-${portalUser?.email || ""}`);
         invalidateCache(`${PORTAL_WASTE_RECEIVED_CACHE_KEY}:${activeSlfId || activeSlfName}`);
         fetchSubmissions(true);
@@ -2600,11 +2781,27 @@ export default function SLFPortal() {
       provinceName,
       regionName,
     ].filter(Boolean);
-    const resolvedAddress = addressParts.join(", ");
+    // Empty means "this edit did not supply an address", never "clear it" — the
+    // same rule the company address already uses. Only `officeAddress` is stored
+    // on a baseline hauler (the office* PSGC codes are not persisted), so on a
+    // re-edit the cascading selects come back empty and the composed string
+    // collapses to "" — which used to wipe the saved hauler address.
+    const resolvedAddress = addressParts.join(", ") || haulerDraft.officeAddress || "";
     const finalDraft = normalizeHaulerRecord(
       { ...haulerDraft, officeAddress: resolvedAddress },
       0,
       baselineUnit || slfUnit,
+    );
+    // Drop the blank rows openHaulerModal pads out to `numberOfTrucks`. Persisting
+    // them created phantom vehicles with no capacity, which then permanently
+    // blocked submission via haulerVehiclesMissingCapacity. Same predicate
+    // cleanHaulerForSubmit already uses.
+    finalDraft.vehicles = (finalDraft.vehicles || []).filter(
+      (v) =>
+        v.plateNumber?.trim() ||
+        v.vehicleType?.trim() ||
+        v.capacity != null ||
+        (v.selectedClients || []).length > 0,
     );
     if (editingHaulerKey) {
       setHaulers((prev) =>
@@ -3070,7 +3267,9 @@ export default function SLFPortal() {
       setRevertModalOpen(false);
       setRevertRecord(null);
       setRevertReason("");
-      fetchSubmissions();
+      // Forced: the request sets revertRequested on the record, which the history
+      // row renders — a cached list would not show it.
+      fetchSubmissions(true, true);
       Swal.fire({
         icon: "success",
         title: "Edit Requested",
@@ -3302,7 +3501,7 @@ export default function SLFPortal() {
         closedCellEntries, isHazardousEntry, baselineValues.closedCellHazardousVolume,
       );
 
-      await api.patch(
+      const { data: saveResult } = await api.patch(
         `/data-slf/portal-save-baseline/${encodeURIComponent(activeSlfName)}`,
         {
           submittedBy: portalUser?.email,
@@ -3379,7 +3578,12 @@ export default function SLFPortal() {
         },
       );
 
-      setBaselineSaved(true);
+      // Trust the SERVER's persisted lock state, not the fact that the request
+      // returned 200. The response reads `locked` back out of the database after
+      // the write, so a re-lock that did not actually persist can no longer show
+      // as a locked form that silently reopens on the next reload.
+      const lockedNow = saveResult?.locked !== undefined ? !!saveResult.locked : true;
+      setBaselineSaved(lockedNow);
       setBaselineUpdatePending(false);
       // Re-read the saved baseline so the Active/Closed Cell tables (and the
       // totals derived from them) show what was persisted, immediately — the same
@@ -3389,7 +3593,9 @@ export default function SLFPortal() {
       Swal.fire({
         icon: "success",
         title: "Baseline Updated!",
-        text: "Your baseline data has been saved and locked successfully.",
+        text: lockedNow
+          ? "Your baseline data has been saved and locked successfully."
+          : "Your baseline data has been saved. An approved update window is still open, so the form stays editable.",
         confirmButtonColor: "#1a3353",
         timer: 2500,
         showConfirmButton: false,
@@ -3400,6 +3606,21 @@ export default function SLFPortal() {
           icon: "warning",
           title: "Review Baseline Fields",
           text: "Please complete the required baseline and company information before saving.",
+          confirmButtonColor: "#1a3353",
+        });
+        return;
+      }
+      // The server refuses a save against a LOCKED baseline (409). That is not a
+      // form error the user can fix by retrying — surface the workflow instead,
+      // and re-lock the form so it matches the state the server just reported.
+      if (err.response?.status === 409 && err.response?.data?.locked) {
+        setBaselineSaved(true);
+        setBaselineUpdatePending(false);
+        setBaselineRefresh((n) => n + 1);
+        Swal.fire({
+          icon: "info",
+          title: "Baseline Is Locked",
+          text: err.response.data.message,
           confirmButtonColor: "#1a3353",
         });
         return;
@@ -3528,8 +3749,14 @@ export default function SLFPortal() {
 
   useEffect(() => {
     if (activeMenu === "overview" && activeSlfName) {
+      // Returning to the dashboard within the cache window keeps the charts
+      // already on screen instead of tearing them down for an identical fetch.
+      const key = `waste:${activeSlfId || activeSlfName}`;
+      if (isMenuDataFresh(key)) return;
+      markMenuFetched(key);
       handleOpenWasteReceived({ openModal: false });
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeMenu, activeSlfId, activeSlfName]);
 
   // ── Support Ticket Functions ──
@@ -3564,8 +3791,16 @@ export default function SLFPortal() {
       });
       setSupportTicketSearch(nextSearch);
       setSupportTicketSorter(nextSorter);
-    } catch {
-      /* silent */
+      supportTicketsLoadAttemptedRef.current = true;
+    } catch (err) {
+      supportTicketsLoadAttemptedRef.current = true;
+      showError({
+        type: "error",
+        title: "Could Not Load Support Tickets",
+        message:
+          err.response?.data?.message ||
+          "We couldn't load your support tickets. Please check your connection and try again.",
+      });
     } finally {
       setSupportLoading(false);
     }
@@ -3754,7 +3989,10 @@ export default function SLFPortal() {
     ) {
       fetchPortalNotifications();
     }
-    if ((supportDrawerOpen || messageDrawerOpen) && supportTickets.length === 0) {
+    if (
+      (supportDrawerOpen || messageDrawerOpen) &&
+      !supportTicketsLoadAttemptedRef.current
+    ) {
       fetchSupportTickets();
     }
     sock.on("notification", refreshMessages);
@@ -3879,21 +4117,6 @@ export default function SLFPortal() {
           const parsed = dayjs(text, ["YYYY-MM-DD", "MM/DD/YYYY", "M/D/YYYY", "YYYY/MM/DD"], true);
           return parsed.isValid() ? parsed.format("YYYY-MM-DD") : text;
         };
-        const resolveUploadCell = (value) => {
-          const text = cleanUploadText(value);
-          const comparable = text.toLowerCase();
-          const match = activeCellOptions.find((option) => {
-            const values = [option.value, option.cellName, option.label]
-              .filter(Boolean)
-              .map((candidate) => cleanUploadText(candidate).toLowerCase());
-            return values.includes(comparable);
-          });
-          return {
-            cellName: match?.value || text,
-            cellIndex: typeof match?.cellIndex === "number" ? match.cellIndex : null,
-            cellType: match?.cellType || "",
-          };
-        };
         const normalized = jsonData.map((row, i) => {
           const normalized = { key: `upload-${i}-${Date.now()}`, _rowNumber: i + 2 };
           for (const [key, value] of Object.entries(row)) {
@@ -3914,7 +4137,7 @@ export default function SLFPortal() {
               else if (UPLOAD_COLUMNS.truck.find((column) => column.field === "actualVolumeUnit")?.matches(k))
                 normalized.actualVolumeUnit = normalizeUnit(value || baselineUnit || slfUnit);
               else if (UPLOAD_COLUMNS.truck.find((column) => column.field === "cellName")?.matches(k))
-                Object.assign(normalized, resolveUploadCell(value));
+                Object.assign(normalized, resolveUploadCellValue(value));
               else if (k.includes("waste") && k.includes("type"))
                 normalized.wasteType = cleanUploadText(value);
               else if (k.includes("haz") || k.includes("code"))
@@ -3923,10 +4146,27 @@ export default function SLFPortal() {
                   .map((s) => s.trim())
                   .filter(Boolean);
             } else {
+              // The CLIENT columns are matched FIRST. "Client Type" contains
+              // "type" and "Client Address" contains "address", so the generic
+              // vehicle-type / office-address branches below used to swallow them:
+              // an uploaded Client Type landed in Vehicle Type and an uploaded
+              // Client Address landed in Office Address, which is why a bulk
+              // upload lost the client details and rewrote the hauler's office
+              // address. `isClientsHeader` stays after them — it matches any
+              // "client*" header and would otherwise claim both columns too.
               if (isNumberOfTrucksHeader(k))
                 normalized.numberOfTrucks = parseUploadNumber(value);
               else if (isHaulerNameHeader(k))
                 normalized.haulerName = cleanUploadText(value);
+              else if (k.includes("client") && k.includes("type"))
+                normalized.clientType = cleanUploadText(value);
+              else if (k.includes("client") && k.includes("address"))
+                normalized.clientAddress = cleanUploadText(value);
+              else if (isClientsHeader(k))
+                normalized.privateSectorClients = cleanUploadText(value)
+                  .split(",")
+                  .map((s) => s.trim())
+                  .filter(Boolean);
               else if (k.includes("office") || k.includes("address"))
                 normalized.officeAddress = cleanUploadText(value);
               else if (k.includes("plate"))
@@ -3939,15 +4179,6 @@ export default function SLFPortal() {
                 normalized.capacityUnit = normalizeUnit(
                   value || baselineUnit || slfUnit,
                 );
-              else if (k.includes("client") && k.includes("type"))
-                normalized.clientType = cleanUploadText(value);
-              else if (k.includes("client") && k.includes("address"))
-                normalized.clientAddress = cleanUploadText(value);
-              else if (isClientsHeader(k))
-                normalized.privateSectorClients = cleanUploadText(value)
-                  .split(",")
-                  .map((s) => s.trim())
-                  .filter(Boolean);
             }
           }
           const relationshipErrors = effectiveType === "truck"
@@ -4267,15 +4498,33 @@ export default function SLFPortal() {
           field === "privateSectorClients" && typeof value === "string"
             ? value.split(",").map((s) => s.trim()).filter(Boolean)
             : value;
-        const updated = { ...row, [field]: coercedValue };
+        // Editing the CELL must re-resolve its identifier, not just its label.
+        // The import writes `cellIndex` (the canonical reference); leaving the
+        // originally-parsed index in place meant an edited cell silently
+        // imported the waste into the cell that came from the FILE, not the one
+        // the user picked in the preview.
+        const cellPatch =
+          field === "cellName" ? resolveUploadCellValue(coercedValue) : null;
+        const updated = { ...row, [field]: coercedValue, ...(cellPatch || {}) };
         if (uploadType === "truck") {
           updated._relationshipErrors = getUploadRelationshipErrors(updated, haulers);
         }
+        // Same cell-availability rule the initial parse applies, re-run against
+        // the EDITED value so an unknown/closed cell cannot pass by being typed
+        // in after the upload.
+        const cellKnown =
+          uploadType !== "truck" ||
+          !updated.cellName ||
+          updated.cellIndex != null ||
+          activeCellOptions.length === 0;
         return {
           ...updated,
           _errors: [
             ...getUploadRowErrors(updated, uploadType || "truck"),
             ...(updated._relationshipErrors || []),
+            ...(cellKnown
+              ? []
+              : [`Row ${updated._rowNumber} — Cell or Disposal Area "${updated.cellName}" is not an available cell under this SLF.`]),
           ],
         };
       }),
@@ -4489,10 +4738,21 @@ export default function SLFPortal() {
     setHistoryDetailModal(null);
     setActiveMenu("data-entry");
     setActiveTab("disposal");
-    // Cascade address dropdowns if codes are available
-    if (record.companyRegion) fetchProvinces(record.companyRegion);
-    if (record.companyProvince) fetchMunicipalities(record.companyProvince);
-    if (record.companyMunicipality) fetchBarangays(record.companyMunicipality);
+    // Load the option lists for the record's stored codes WITHOUT clearing the
+    // values we just wrote — this is hydration, not a user re-selecting a region.
+    const keepSelection = { preserveSelection: true };
+    if (record.companyRegion) fetchProvinces(record.companyRegion, keepSelection);
+    if (record.companyProvince) fetchMunicipalities(record.companyProvince, keepSelection);
+    if (record.companyMunicipality) fetchBarangays(record.companyMunicipality, keepSelection);
+    // Re-assert the stored address after the option lists resolve. The three
+    // fetches above are async; without this a late response could still land on
+    // a form whose values were changed in between.
+    companyForm.setFieldsValue({
+      companyRegion: record.companyRegion,
+      companyProvince: record.companyProvince,
+      companyMunicipality: record.companyMunicipality,
+      companyBarangay: record.companyBarangay,
+    });
     Swal.fire({
       icon: "info",
       title: "Edit Reverted Entry",
@@ -4638,7 +4898,11 @@ export default function SLFPortal() {
       setEditingTruckKey(null);
       entryForm.resetFields();
       setActiveTab("disposal");
-      fetchSubmissions();
+      // FORCE the refetch. A resubmission changes the record's status
+      // (reverted → pending) and its ID No. on the server, but the plain call
+      // re-read the cached list, so Submission History kept showing the entry as
+      // reverted under its old ID until the cache expired or the page reloaded.
+      fetchSubmissions(true, true);
     } catch (err) {
       setSubmitProgress((p) =>
         p.open
@@ -5411,6 +5675,19 @@ export default function SLFPortal() {
   // required-field rules, incl. Truck Capacity, apply only at final submit).
   const handleSaveDraft = async () => {
     if (blockedByDeveloperContext("save a draft for them")) return;
+    // A draft may be INCOMPLETE — that is its purpose — but an entirely EMPTY one
+    // is not worth persisting. Now that the button also sits on the main screen
+    // (beside Review & Submit, enabled while requirements are outstanding), a
+    // stray click would otherwise fill Drafts & Scheduled with blank records.
+    if (trucks.length === 0 && !entryForm.getFieldValue("dateOfDisposal")) {
+      showError({
+        type: "warning",
+        title: "Nothing to Save Yet",
+        message:
+          "Add at least one transport entry or select the Date of Disposal before saving a draft. A draft may be incomplete, but it cannot be empty.",
+      });
+      return;
+    }
     // Re-entrancy guard. The disabled state alone is not enough — a fast double
     // click fires both handlers before React flushes `savingDraft`, which created
     // two identical drafts. The ref flips synchronously; `clientRequestId` makes
@@ -5560,15 +5837,36 @@ export default function SLFPortal() {
   // OverviewPanel / detail modal masks volumes + capacity via the context.
   const maskSensitive = !!portalSettings?.maskSensitiveSlfValues;
 
-  const historyColumns = makeHistoryColumns({
-    submissions,
-    trucks,
-    maskSensitive,
-    openHistoryDetail,
-    openRevertModal,
-    handleEditRevertedRow,
-    handleHideSubmission,
-  });
+  // The column set carries a render function per column and was rebuilt on every
+  // render, handing HistoryPanel a brand-new `columns` array each time — which
+  // makes antd's Table re-render every row. The row handlers are wrapped so the
+  // memo has a stable dependency set without having to relocate their
+  // declarations (and without a dependency list that can go stale).
+  const stableOpenHistoryDetail = useStableCallback((...a) => openHistoryDetail(...a));
+  const stableOpenRevertModal = useStableCallback((...a) => openRevertModal(...a));
+  const stableEditRevertedRow = useStableCallback((...a) => handleEditRevertedRow(...a));
+  const stableHideSubmission = useStableCallback((...a) => handleHideSubmission(...a));
+  const historyColumns = useMemo(
+    () =>
+      makeHistoryColumns({
+        submissions,
+        trucks,
+        maskSensitive,
+        openHistoryDetail: stableOpenHistoryDetail,
+        openRevertModal: stableOpenRevertModal,
+        handleEditRevertedRow: stableEditRevertedRow,
+        handleHideSubmission: stableHideSubmission,
+      }),
+    [
+      submissions,
+      trucks,
+      maskSensitive,
+      stableOpenHistoryDetail,
+      stableOpenRevertModal,
+      stableEditRevertedRow,
+      stableHideSubmission,
+    ],
+  );
 
   if (loadingUser) {
     return (
@@ -6118,8 +6416,10 @@ export default function SLFPortal() {
               submitBlockers={submitBlockers}
               loading={loading}
               slfCardExpanded={slfCardExpanded}
-              handleReviewOpen={handleReviewOpen}
-              handleOpenWasteReceived={handleOpenWasteReceived}
+              handleReviewOpen={stableReviewOpen}
+              handleSaveDraft={stableSaveDraft}
+              savingDraft={savingDraft}
+              handleOpenWasteReceived={stableOpenWasteReceived}
             />
 
             {/* Disposal Data Form */}
@@ -6149,7 +6449,7 @@ export default function SLFPortal() {
                         <RequiredDot show={missingGeneralInfo} />
                       </span>
                     ),
-                    children: (
+                    children: () => (
                       <BasicInfoTab
                         companyForm={companyForm}
                         entryForm={entryForm}
@@ -6158,9 +6458,9 @@ export default function SLFPortal() {
                         municipalities={municipalities}
                         barangays={barangays}
                         loadingAddress={loadingAddress}
-                        fetchProvinces={fetchProvinces}
-                        fetchMunicipalities={fetchMunicipalities}
-                        fetchBarangays={fetchBarangays}
+                        fetchProvinces={stableFetchProvinces}
+                        fetchMunicipalities={stableFetchMunicipalities}
+                        fetchBarangays={stableFetchBarangays}
                         addressLocked={baselineSaved}
                       />
                     ),
@@ -6179,7 +6479,7 @@ export default function SLFPortal() {
                         )}
                       </span>
                     ),
-                    children: (
+                    children: () => (
                       <div ref={baselinePanelRef}>
                         {baselineSaved && (
                           <div
@@ -6913,7 +7213,7 @@ export default function SLFPortal() {
                         />
                       </span>
                     ),
-                    children: (
+                    children: () => (
                       <WasteGeneratorPane
                         entryForm={entryForm}
                         trucks={trucks}
@@ -7234,8 +7534,8 @@ export default function SLFPortal() {
                   isMobile={isMobile}
                   portalNotifications={portalNotifications}
                   portalNotificationCounts={portalNotificationCounts}
-                  getPortalNotificationMeta={getPortalNotificationMeta}
-                  openPortalNotification={openPortalNotification}
+                  getPortalNotificationMeta={stableNotificationMeta}
+                  openPortalNotification={stableOpenNotification}
                   markPortalNotificationsRead={markPortalNotificationsRead}
                   setNotificationPanelOpen={setNotificationPanelOpen}
                   setPreviousNotifOpen={setPreviousNotifOpen}
@@ -7525,16 +7825,10 @@ export default function SLFPortal() {
               slfInfoLoading={slfInfoLoading}
               haulers={haulers}
               activeSlfName={activeSlfName}
-              onCreateSubmission={() => setActiveMenu("data-entry")}
-              onViewSubmissions={() => setActiveMenu("history")}
-              onOrganizeCells={openCellOrganizer}
-              onBulkOrganize={async () => {
-                // Ensure the unplaced placements are loaded before opening the bulk
-                // modal (it reuses cellOrganizerData); open the organizer silently
-                // if empty, then surface the bulk uploader.
-                if (cellOrganizerData.length === 0) await openCellOrganizer();
-                setBulkOrganizeOpen(true);
-              }}
+              onCreateSubmission={goToDataEntry}
+              onViewSubmissions={goToHistory}
+              onOrganizeCells={handleOrganizeCells}
+              onBulkOrganize={handleBulkOrganize}
             />
           )}
           {activeMenu === "data-entry" && renderDataEntry()}
@@ -7543,26 +7837,21 @@ export default function SLFPortal() {
               submissions={submissions}
               historyColumns={historyColumns}
               loadingSubmissions={loadingSubmissions}
-              onRefresh={() => fetchSubmissions(false, true)}
+              onRefresh={handleHistoryRefresh}
             />
           )}
           {activeMenu === "requests" && (
             <RequestsPanel
               myRequests={myRequests}
               myRequestsLoading={myRequestsLoading}
-              onHideRequest={handleHideRequest}
+              onHideRequest={stableHideRequest}
             />
           )}
           {activeMenu === "drafts" && (
             <DraftsScheduledPanel
               portalUser={portalUser}
               isMobile={isMobile}
-              onSubmitted={() => {
-                invalidateCache(
-                  `${PORTAL_SUBMISSIONS_CACHE_KEY}-${portalUser?.email || ""}`,
-                );
-                fetchSubmissions(true, true);
-              }}
+              onSubmitted={handleDraftSubmitted}
             />
           )}
         </Content>
@@ -8127,7 +8416,13 @@ export default function SLFPortal() {
                     wasteType: p.wasteType || "Residual",
                     volume: p.actualVolume,
                     volumeUnit: p.actualVolumeUnit || baselineUnit || slfUnit,
-                    cellName: p.cellName,
+                    // A cell counts only with a valid cell IDENTIFIER. A legacy
+                    // name-only copy (cellName without cellIndex) is unassigned —
+                    // showing it made the row read as "placed" while nothing could
+                    // be written back, so the arrangement never persisted. Once the
+                    // user picks a cell, updateOrganizerCell writes a real
+                    // cellIndex and the selection renders normally.
+                    cellName: Number.isInteger(p.cellIndex) ? p.cellName : undefined,
                     needsCell: p.needsCell !== false,
                     needsCapacity: !!p.needsCapacity,
                     capacity: p.capacity,

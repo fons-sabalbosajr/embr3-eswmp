@@ -17,6 +17,225 @@ const QUEUE_CACHE_TTL = 3 * 60 * 1000;
 
 const { Text } = Typography;
 
+const DASH = "—";
+const unitOf = (u, fallback) => String(u || fallback || "m³").replace("m3", "m³");
+const orDash = (v) => (v === null || v === undefined || v === "" ? DASH : v);
+
+// Cells wrap rather than overflow — a draft can hold long hauler/client names and
+// several hazardous codes, and the table has to stay inside the modal.
+const WRAP_CELL = { whiteSpace: "normal", overflowWrap: "anywhere", wordBreak: "break-word", fontSize: 12 };
+const wrapCol = (column) => ({
+  ...column,
+  onCell: () => ({ style: WRAP_CELL }),
+  onHeaderCell: () => ({ style: { ...WRAP_CELL, fontWeight: 600 } }),
+});
+
+// Flatten one payload truck into a display row. A truck reports its load either
+// directly or through per-vehicle placements — both shapes exist in the model,
+// so both are read (same rule the Review modal and the admin details use).
+function transportRows(trucks = []) {
+  return (Array.isArray(trucks) ? trucks : []).map((t, i) => {
+    const vehicles = Array.isArray(t?.vehicles) ? t.vehicles : [];
+    const many = vehicles.length > 1;
+    const clients = [
+      ...(Array.isArray(t?.selectedClients) ? t.selectedClients : []),
+      ...vehicles.flatMap((v) => v?.selectedClients || []),
+    ]
+      .map((c) => (typeof c === "string" ? c : c?.clientName))
+      .filter(Boolean);
+    return {
+      key: t?.key ?? i,
+      no: i + 1,
+      ticket: orDash(t?.disposalTicketNo),
+      hauler: orDash(t?.hauler),
+      clients: [...new Set(clients)],
+      plate: many
+        ? vehicles.map((v) => v.plateNumber).filter(Boolean).join(", ") || orDash(t?.plateNumber)
+        : orDash(vehicles[0]?.plateNumber || t?.plateNumber),
+      capacity: many
+        ? vehicles.filter((v) => v.capacity != null)
+            .map((v) => `${v.capacity} ${unitOf(v.capacityUnit)}`).join(", ") || DASH
+        : (() => {
+            const cap = vehicles[0]?.capacity ?? t?.truckCapacity;
+            return cap != null ? `${cap} ${unitOf(vehicles[0]?.capacityUnit || t?.truckCapacityUnit)}` : DASH;
+          })(),
+      volume: t?.actualVolume != null ? `${t.actualVolume} ${unitOf(t?.actualVolumeUnit)}` : DASH,
+      wasteType: orDash(t?.wasteType),
+      cell: many
+        ? [...new Set(vehicles.map((v) => v.cellName).filter(Boolean))].join(", ") || orDash(t?.cellName)
+        : orDash(vehicles[0]?.cellName || t?.cellName),
+      hazCodes: (Array.isArray(t?.hazWasteCode) ? t.hazWasteCode : t?.hazWasteCode ? [t.hazWasteCode] : []).filter(Boolean),
+    };
+  });
+}
+
+/**
+ * Full detail view for one queued draft / scheduled submission — the same
+ * breakdown the Submission Details modal gives an admin, read out of the stored
+ * `payload` (which is exactly the entry POST /data-slf would receive).
+ *
+ * A DRAFT is allowed to be incomplete, so every field degrades to "—" and the
+ * transport table shows an empty state rather than implying missing data is an
+ * error.
+ */
+function QueueRecordDetails({ record }) {
+  const payload = record.payload || {};
+  const rows = transportRows(payload.trucks);
+  const baseUnit = unitOf(payload.baselineUnit || payload.totalVolumeAcceptedUnit);
+  const haulers = Array.isArray(payload.accreditedHaulers) ? payload.accreditedHaulers : [];
+  const cellEntries = [
+    ...(Array.isArray(payload.activeCellEntries) ? payload.activeCellEntries : []),
+    ...(Array.isArray(payload.closedCellEntries) ? payload.closedCellEntries : []),
+  ];
+
+  return (
+    <Space direction="vertical" size={14} style={{ width: "100%" }}>
+      {record.failureReason && (
+        <Alert type="error" showIcon message="Last attempt failed" description={record.failureReason} />
+      )}
+      {record.status === "draft" && rows.length === 0 && (
+        <Alert
+          type="info"
+          showIcon
+          message="This draft has no transport entries yet"
+          description="Drafts can be saved incomplete. Open it in Data Entry to continue encoding before submitting."
+        />
+      )}
+
+      <Descriptions size="small" column={{ xs: 1, sm: 2 }} bordered title="Queue Record">
+        <Descriptions.Item label="Facility">{orDash(record.slfName)}</Descriptions.Item>
+        <Descriptions.Item label="Type">{STATUS_META[record.type]?.label || record.type}</Descriptions.Item>
+        <Descriptions.Item label="Status">{statusTag(record.status)}</Descriptions.Item>
+        <Descriptions.Item label="Saved">{safeDate(record.createdAt)}</Descriptions.Item>
+        {record.scheduledAt && (
+          <Descriptions.Item label="Scheduled For">{safeDate(record.scheduledAt)}</Descriptions.Item>
+        )}
+        {record.submittedAt && (
+          <Descriptions.Item label="Submitted">{safeDate(record.submittedAt)}</Descriptions.Item>
+        )}
+        {record.resultSubmissionId && (
+          <Descriptions.Item label="Submission ID">{record.resultSubmissionId}</Descriptions.Item>
+        )}
+      </Descriptions>
+
+      <Descriptions size="small" column={{ xs: 1, sm: 2 }} bordered title="General Information">
+        <Descriptions.Item label="Company">{orDash(payload.lguCompanyName)}</Descriptions.Item>
+        <Descriptions.Item label="Company Type">{orDash(payload.companyType)}</Descriptions.Item>
+        <Descriptions.Item label="Date of Disposal">{orDash(payload.dateOfDisposal)}</Descriptions.Item>
+        <Descriptions.Item label="Transport Entries">{rows.length}</Descriptions.Item>
+        <Descriptions.Item label="Address" span={2}>{orDash(payload.address)}</Descriptions.Item>
+      </Descriptions>
+
+      <Descriptions size="small" column={{ xs: 1, sm: 2 }} bordered title="Baseline Snapshot">
+        <Descriptions.Item label="Total Volume Accepted">
+          {payload.totalVolumeAccepted != null ? `${payload.totalVolumeAccepted} ${baseUnit}` : DASH}
+        </Descriptions.Item>
+        <Descriptions.Item label="Declared Unit">{baseUnit}</Descriptions.Item>
+        <Descriptions.Item label="Accepts Hazardous Waste">
+          {payload.acceptsHazardousWaste ? "Yes" : "No"}
+        </Descriptions.Item>
+        <Descriptions.Item label="Accredited Haulers">{haulers.length}</Descriptions.Item>
+        <Descriptions.Item label="Baseline Cell Entries" span={2}>
+          {cellEntries.length
+            ? cellEntries.map((e, i) => (
+                <Tag key={i} color="blue" variant="filled" style={{ margin: "0 4px 4px 0", ...WRAP_CELL }}>
+                  {[e.cellName, e.wasteType, e.volume != null ? `${e.volume} ${unitOf(e.unit, baseUnit)}` : null]
+                    .filter(Boolean)
+                    .join(" · ")}
+                </Tag>
+              ))
+            : DASH}
+        </Descriptions.Item>
+      </Descriptions>
+
+      <div>
+        <Text strong style={{ display: "block", marginBottom: 8 }}>
+          Transport &amp; Disposal Entries ({rows.length})
+        </Text>
+        {rows.length === 0 ? (
+          <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No transport entries encoded yet" />
+        ) : (
+          <Table
+            size="small"
+            rowKey="key"
+            dataSource={rows}
+            className="slf-slim-scroll"
+            tableLayout="fixed"
+            scroll={{ y: 320 }}
+            pagination={rows.length > 10 ? { pageSize: 10, size: "small" } : false}
+            columns={[
+              { title: "#", dataIndex: "no", width: 36 },
+              wrapCol({ title: "Ticket No.", dataIndex: "ticket", width: 100 }),
+              wrapCol({ title: "Hauler", dataIndex: "hauler", width: 130 }),
+              wrapCol({
+                title: "Clients",
+                dataIndex: "clients",
+                width: 150,
+                render: (list) =>
+                  list.length ? (
+                    <Space size={[2, 2]} wrap>
+                      {list.map((c) => (
+                        <Tag key={c} color="purple" variant="filled" style={{ margin: 0, ...WRAP_CELL }}>{c}</Tag>
+                      ))}
+                    </Space>
+                  ) : (
+                    <Text type="secondary">{DASH}</Text>
+                  ),
+              }),
+              wrapCol({ title: "Plate No.", dataIndex: "plate", width: 105 }),
+              { title: "Capacity", dataIndex: "capacity", width: 95 },
+              { title: "Volume", dataIndex: "volume", width: 100 },
+              wrapCol({
+                title: "Waste Type",
+                dataIndex: "wasteType",
+                width: 105,
+                render: (v) =>
+                  v === DASH ? (
+                    <Text type="secondary">{DASH}</Text>
+                  ) : (
+                    <Tag
+                      color={/haz/i.test(v) ? "volcano" : "green"}
+                      variant="filled"
+                      style={{ margin: 0, display: "inline-block", maxWidth: "100%", ...WRAP_CELL }}
+                    >
+                      {v}
+                    </Tag>
+                  ),
+              }),
+              wrapCol({
+                title: "Disposal Cell",
+                dataIndex: "cell",
+                width: 105,
+                render: (v) =>
+                  v === DASH ? (
+                    <Text type="secondary">{DASH}</Text>
+                  ) : (
+                    <Tag color="cyan" variant="filled" style={{ margin: 0, ...WRAP_CELL }}>{v}</Tag>
+                  ),
+              }),
+              wrapCol({
+                title: "HW Code",
+                dataIndex: "hazCodes",
+                width: 105,
+                render: (codes) =>
+                  codes.length ? (
+                    <Space size={[2, 2]} wrap>
+                      {codes.map((c) => (
+                        <Tag key={c} color="volcano" variant="filled" style={{ margin: 0, ...WRAP_CELL }}>{c}</Tag>
+                      ))}
+                    </Space>
+                  ) : (
+                    <Text type="secondary">{DASH}</Text>
+                  ),
+              }),
+            ]}
+          />
+        )}
+      </div>
+    </Space>
+  );
+}
+
 const STATUS_META = {
   draft: { color: "default", label: "Draft", icon: <FileTextOutlined /> },
   scheduled: { color: "blue", label: "Scheduled", icon: <ClockCircleOutlined /> },
@@ -206,13 +425,6 @@ export default function DraftsScheduledPanel({ portalUser, isMobile, onSubmitted
       title={<Space><FileTextOutlined style={{ color: "#722ed1" }} /><Text strong>Drafts & Scheduled Submissions</Text></Space>}
       extra={<Button size="small" icon={<ReloadOutlined />} onClick={() => fetchQueue(true)} loading={loading}>Refresh</Button>}
     >
-      <Alert
-        type="info"
-        showIcon
-        style={{ marginBottom: 12, borderRadius: 8 }}
-        message="Save submissions as drafts so you never lose encoded data, or schedule them for automatic submission later."
-        description="Scheduled submissions are submitted automatically at the chosen time and then appear in EMB Region III's Portal Submissions."
-      />
       <Spin spinning={loading}>
         <Tabs
           size="small"
@@ -254,29 +466,22 @@ export default function DraftsScheduledPanel({ portalUser, isMobile, onSubmitted
       </Spin>
 
       <Modal
-        title="Submission Data"
+        title={
+          <Space size={8} wrap>
+            <FileTextOutlined style={{ color: "#722ed1" }} />
+            <span>{viewRecord?.type === "scheduled" ? "Scheduled Submission" : "Draft Submission"}</span>
+            {viewRecord && statusTag(viewRecord.status)}
+          </Space>
+        }
         open={!!viewRecord}
         onCancel={() => setViewRecord(null)}
         footer={<Button onClick={() => setViewRecord(null)}>Close</Button>}
-        width={640}
+        width={1200}
+        style={{ maxWidth: "96vw", top: 24 }}
+        classNames={{ body: "slf-slim-scroll" }}
         destroyOnHidden
       >
-        {viewRecord && (
-          <Descriptions size="small" column={1} bordered>
-            <Descriptions.Item label="Facility">{viewRecord.slfName || "—"}</Descriptions.Item>
-            <Descriptions.Item label="Type">{STATUS_META[viewRecord.type]?.label || viewRecord.type}</Descriptions.Item>
-            <Descriptions.Item label="Status">{statusTag(viewRecord.status)}</Descriptions.Item>
-            <Descriptions.Item label="Company">{viewRecord.payload?.lguCompanyName || "—"}</Descriptions.Item>
-            <Descriptions.Item label="Date of Disposal">{viewRecord.payload?.dateOfDisposal || "—"}</Descriptions.Item>
-            <Descriptions.Item label="Truck Entries">{Array.isArray(viewRecord.payload?.trucks) ? viewRecord.payload.trucks.length : 0}</Descriptions.Item>
-            {viewRecord.scheduledAt && (
-              <Descriptions.Item label="Scheduled For">{safeDate(viewRecord.scheduledAt)}</Descriptions.Item>
-            )}
-            {viewRecord.failureReason && (
-              <Descriptions.Item label="Failure Reason"><Text type="danger">{viewRecord.failureReason}</Text></Descriptions.Item>
-            )}
-          </Descriptions>
-        )}
+        {viewRecord && <QueueRecordDetails record={viewRecord} />}
       </Modal>
     </Card>
   );

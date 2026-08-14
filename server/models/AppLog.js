@@ -27,7 +27,17 @@ const appLogSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-// Auto-delete logs older than 30 days
+// Auto-delete logs older than 30 days. This index also serves the plain
+// newest-first sort, in either direction.
 appLogSchema.index({ createdAt: 1 }, { expireAfterSeconds: 30 * 24 * 60 * 60 });
+
+// The three filters the System & Logs view actually pages by, each paired with
+// the sort key so the query is served from the index instead of a blocking
+// in-memory sort. Deliberately only three: `message` and `geo.*` are searched by
+// regex, which no index can serve, and adding more would cost write throughput
+// on a collection that takes an insert on virtually every request.
+appLogSchema.index({ level: 1, createdAt: -1 });
+appLogSchema.index({ user: 1, createdAt: -1 });
+appLogSchema.index({ action: 1, createdAt: -1 });
 
 module.exports = mongoose.model("AppLog", appLogSchema, "app-logs");

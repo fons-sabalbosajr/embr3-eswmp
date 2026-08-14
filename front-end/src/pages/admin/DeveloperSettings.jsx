@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback, Children, isValidElement } from "react";
+import { useState, useEffect, useCallback, Children, isValidElement } from "react";
 import {
   Card,
   Typography,
@@ -25,6 +25,9 @@ import {
   Modal,
   Collapse,
   Table,
+  Drawer,
+  List,
+  Skeleton,
 } from "antd";
 import {
   SettingOutlined,
@@ -40,6 +43,8 @@ import {
   FileTextOutlined,
   ReloadOutlined,
   DeleteOutlined,
+  DownloadOutlined,
+  CloudDownloadOutlined,
   TeamOutlined,
   UndoOutlined,
   ExclamationCircleOutlined,
@@ -92,6 +97,16 @@ import VeraWorkarounds from "./VeraWorkarounds";
 const { Title, Text } = Typography;
 const { Option } = Select;
 const { TextArea } = Input;
+const { RangePicker } = DatePicker;
+
+// Severity → colour + label for VERA log findings. Colour is never the ONLY
+// signal: the label is always rendered beside it.
+const VERA_SEVERITY = {
+  critical: { color: "red", label: "Critical" },
+  warning: { color: "orange", label: "Warning" },
+  recommendation: { color: "blue", label: "Recommendation" },
+  informational: { color: "default", label: "Informational" },
+};
 
 // App Settings had grown to 13 flat top-level tabs. They are grouped here by
 // responsibility — the tab PANES themselves are untouched, this only decides
@@ -219,7 +234,16 @@ export default function DeveloperSettings({onSettingsSaved, isDark, isDeveloper 
   const [veraDevModeSaving, setVeraDevModeSaving] = useState(false);
   const [logLevel, setLogLevel] = useState("all");
   const [logSearch, setLogSearch] = useState("");
-  const logFiltersRef = useRef({ level: "all", search: "" });
+  // Server-side paging: the table shows exactly the page the API returned, so the
+  // browser never holds more than `pageSize` rows regardless of how many logs
+  // exist. `logsTotal` drives the pager, and it is the SERVER's total.
+  const [logPage, setLogPage] = useState(1);
+  const [logPageSize, setLogPageSize] = useState(50);
+  const [logRange, setLogRange] = useState(null); // [dayjs, dayjs] | null
+  const [logUser, setLogUser] = useState("");
+  const [logBusy, setLogBusy] = useState(""); // "export" | "backup" | "analyze"
+  const [veraLogOpen, setVeraLogOpen] = useState(false);
+  const [veraLogResult, setVeraLogResult] = useState(null);
 
   // Deleted submissions state
   const [deletedEntries, setDeletedEntries] = useState([]);
@@ -358,23 +382,104 @@ export default function DeveloperSettings({onSettingsSaved, isDark, isDeveloper 
   };
 
 
+  /**
+   * The exact query the API is looking at, in one place.
+   *
+   * Export, Backup and VERA analysis all send THIS object, which is what makes
+   * "the export respects the filters on screen" true rather than aspirational.
+   */
+  const buildLogParams = (over = {}) => {
+    const level = over.level ?? logLevel;
+    const search = over.search ?? logSearch;
+    const user = over.user ?? logUser;
+    const range = over.range ?? logRange;
+    const params = {};
+    if (level && level !== "all") params.level = level;
+    if (search?.trim()) params.search = search.trim();
+    if (user?.trim()) params.user = user.trim();
+    if (range?.[0]) params.from = range[0].startOf("day").toISOString();
+    if (range?.[1]) params.to = range[1].endOf("day").toISOString();
+    return params;
+  };
+
   const fetchLogs = async (options = {}) => {
     const showLoading = options.showLoading !== false;
-    const level = options.level ?? logFiltersRef.current.level;
-    const search = options.search ?? logFiltersRef.current.search;
-    logFiltersRef.current = { level, search };
+    // level/search/user/range are resolved inside buildLogParams — passing
+    // `options` straight through keeps one source of truth for the query.
+    const page = options.page ?? logPage;
+    const limit = options.limit ?? logPageSize;
     if (showLoading) setLogsLoading(true);
     try {
-      const params = { limit: 100 };
-      if (level !== "all") params.level = level;
-      if (search) params.search = search;
+      // page + limit, never a bare limit: the server returns ONE page and the
+      // total, so the 100-record ceiling is gone without the browser ever
+      // holding the whole collection.
+      const params = { ...buildLogParams(options), page, limit };
       const { data } = await api.get("/logs", { params });
-      setLogs(data.logs);
-      setLogsTotal(data.total);
+      setLogs(data.logs || []);
+      setLogsTotal(data.pagination?.total ?? data.total ?? 0);
     } catch {
-      /* silent */
+      setLogs([]);
     } finally {
       if (showLoading) setLogsLoading(false);
+    }
+  };
+
+  /**
+   * Download a filtered CSV / NDJSON produced by the SERVER.
+   *
+   * Fetched as a blob rather than navigated to, because the API requires a bearer
+   * token that a plain <a href> cannot carry. The server streams the rows, so a
+   * large window never materialises in React.
+   */
+  const downloadLogs = async (kind) => {
+    setLogBusy(kind);
+    try {
+      const { data, headers } = await api.get(`/logs/${kind}`, {
+        params: buildLogParams(),
+        responseType: "blob",
+      });
+      const stampName = new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
+      const name = kind === "export"
+        ? `system-logs-${stampName}.csv`
+        : `system-logs-backup-${stampName}.ndjson`;
+      const url = window.URL.createObjectURL(new Blob([data]));
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = name;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.URL.revokeObjectURL(url);
+      const rows = headers?.["x-export-rows"] || headers?.["x-backup-rows"];
+      Swal.fire({
+        icon: "success",
+        title: kind === "export" ? "Export ready" : "Backup ready",
+        text: rows
+          ? `${Number(rows).toLocaleString()} record(s) written. Original logs were not modified.`
+          : "Download started.",
+        timer: 2200,
+        showConfirmButton: false,
+      });
+    } catch {
+      Swal.fire("Error", `Could not ${kind === "export" ? "export" : "back up"} the logs.`, "error");
+    } finally {
+      setLogBusy("");
+    }
+  };
+
+  /** Run VERA detection over the same window the table is showing. */
+  const analyzeLogsWithVera = async () => {
+    setLogBusy("analyze");
+    setVeraLogOpen(true);
+    setVeraLogResult(null);
+    try {
+      const { data } = await api.get("/logs/analyze", { params: buildLogParams() });
+      setVeraLogResult(data);
+    } catch {
+      // A VERA failure must not take the logs page down — show it inline.
+      setVeraLogResult({ findings: [], scanned: 0, error: "VERA could not analyze this log window." });
+    } finally {
+      setLogBusy("");
     }
   };
 
@@ -2443,37 +2548,95 @@ export default function DeveloperSettings({onSettingsSaved, isDark, isDeveloper 
                       <Badge count={logsTotal} overflowCount={999} style={{ marginLeft: 4 }} />
                     </Space>
                   }
+                  // The control bar wraps instead of forcing one row: on a phone
+                  // these stack, on a laptop they sit inline. `flex: "1 1 <basis>"`
+                  // lets each control shrink rather than overflow the card.
                   extra={
-                    <Space wrap>
+                    <Space wrap size={[8, 8]} style={{ rowGap: 8, maxWidth: "100%" }}>
                       <Select
                         value={logLevel}
                         onChange={(v) => {
                           setLogLevel(v);
-                          fetchLogs({ level: v, search: logSearch, showLoading: true });
+                          setLogPage(1);
+                          fetchLogs({ level: v, page: 1, showLoading: true });
                         }}
-                        style={{ width: "100%", minWidth: 90, maxWidth: 110 }}
+                        style={{ minWidth: 100 }}
                         size="small"
+                        aria-label="Filter by log level"
                       >
                         <Option value="all">All Levels</Option>
                         <Option value="info">Info</Option>
                         <Option value="warn">Warning</Option>
                         <Option value="error">Error</Option>
                       </Select>
+                      <RangePicker
+                        size="small"
+                        value={logRange}
+                        onChange={(v) => {
+                          setLogRange(v);
+                          setLogPage(1);
+                          fetchLogs({ range: v, page: 1, showLoading: true });
+                        }}
+                        style={{ maxWidth: 230 }}
+                        aria-label="Filter by date range"
+                      />
+                      <Input
+                        placeholder="User…"
+                        value={logUser}
+                        onChange={(e) => setLogUser(e.target.value)}
+                        onPressEnter={() => { setLogPage(1); fetchLogs({ page: 1, showLoading: true }); }}
+                        style={{ width: 130 }}
+                        size="small"
+                        allowClear
+                        aria-label="Filter by user"
+                      />
                       <Input
                         placeholder="Search logs..."
                         value={logSearch}
-                        onChange={(e) => {
-                          setLogSearch(e.target.value);
-                          logFiltersRef.current = { ...logFiltersRef.current, search: e.target.value };
-                        }}
-                        onPressEnter={() => fetchLogs({ showLoading: true })}
-                        style={{ width: "100%", maxWidth: 180 }}
+                        onChange={(e) => setLogSearch(e.target.value)}
+                        onPressEnter={() => { setLogPage(1); fetchLogs({ page: 1, showLoading: true }); }}
+                        style={{ width: 160 }}
                         size="small"
                         allowClear
+                        aria-label="Search logs"
                       />
-                      <Button size="small" icon={<ReloadOutlined />} onClick={() => fetchLogs({ showLoading: true })}>
-                        Refresh
-                      </Button>
+                      <Tooltip title="Reload the current page">
+                        <Button size="small" icon={<ReloadOutlined />} onClick={() => fetchLogs({ showLoading: true })}>
+                          Refresh
+                        </Button>
+                      </Tooltip>
+                      <Tooltip title="Download the filtered logs as CSV for analysis">
+                        <Button
+                          size="small"
+                          icon={<DownloadOutlined />}
+                          loading={logBusy === "export"}
+                          onClick={() => downloadLogs("export")}
+                        >
+                          Export
+                        </Button>
+                      </Tooltip>
+                      <Tooltip title="Download a durable NDJSON archive. Nothing is deleted or modified.">
+                        <Button
+                          size="small"
+                          icon={<CloudDownloadOutlined />}
+                          loading={logBusy === "backup"}
+                          onClick={() => downloadLogs("backup")}
+                        >
+                          Backup
+                        </Button>
+                      </Tooltip>
+                      <Tooltip title="Have VERA look for patterns in the filtered logs">
+                        <Button
+                          size="small"
+                          type="primary"
+                          ghost
+                          icon={<SafetyCertificateOutlined />}
+                          loading={logBusy === "analyze"}
+                          onClick={analyzeLogsWithVera}
+                        >
+                          VERA Detection
+                        </Button>
+                      </Tooltip>
                       <Popconfirm title="Clear all logs?" onConfirm={clearLogs}>
                         <Button size="small" danger icon={<DeleteOutlined />}>
                           Clear
@@ -2487,7 +2650,22 @@ export default function DeveloperSettings({onSettingsSaved, isDark, isDeveloper 
                     rowKey="_id"
                     size="small"
                     loading={logsLoading}
-                    pagination={withSizeChanger({ pageSize: 30, size: "small" })}
+                    // CONTROLLED pagination: `total` is the server's count and the
+                    // table only ever holds one page, so an admin can reach every
+                    // record without the browser loading them all.
+                    pagination={withSizeChanger({
+                      current: logPage,
+                      pageSize: logPageSize,
+                      total: logsTotal,
+                      size: "small",
+                      pageSizeOptions: ["25", "50", "100", "250"],
+                      showTotal: (t, r) => (t ? `${r[0]}-${r[1]} of ${t.toLocaleString()}` : "0 records"),
+                      onChange: (page, size) => {
+                        setLogPage(page);
+                        setLogPageSize(size);
+                        fetchLogs({ page, limit: size, showLoading: true });
+                      },
+                    })}
                     scroll={{ x: 950 }}
                     style={{ fontSize: 11 }}
                     className="compact-logs-table"
@@ -2571,6 +2749,112 @@ export default function DeveloperSettings({onSettingsSaved, isDark, isDeveloper 
                     ]}
                   />
                 </Card>
+
+                {/*
+                  VERA log detection results.
+
+                  A DRAWER rather than a modal: findings are long-form and the
+                  admin reads them beside the table. Width is a percentage on
+                  small screens so it never overflows a phone, and capped on
+                  desktop so the lines stay readable.
+
+                  Each finding keeps VERA's four parts visually separate —
+                  "Observed" is a fact from the aggregation, "Possible risk" is
+                  an interpretation — so an interpretation can never be mistaken
+                  for a confirmed incident.
+                */}
+                <Drawer
+                  title={<span><SafetyCertificateOutlined style={{ color: "#722ed1", marginRight: 8 }} />VERA — Log Detection</span>}
+                  open={veraLogOpen}
+                  onClose={() => setVeraLogOpen(false)}
+                  // Plain pixel width — the responsive clamp lives in index.css
+                  // (.ant-drawer-content-wrapper), so there is no resize listener
+                  // and no width measured at render time that a rotation would
+                  // leave stale.
+                  width={560}
+                  styles={{ body: { paddingTop: 12 } }}
+                >
+                  {!veraLogResult ? (
+                    <Skeleton active paragraph={{ rows: 6 }} />
+                  ) : veraLogResult.error ? (
+                    <Alert
+                      type="warning"
+                      showIcon
+                      message="Analysis unavailable"
+                      description={`${veraLogResult.error} The log table is unaffected — close this panel to keep browsing.`}
+                    />
+                  ) : (
+                    <>
+                      <Alert
+                        type="info"
+                        showIcon
+                        style={{ marginBottom: 12 }}
+                        message={`${veraLogResult.scanned?.toLocaleString?.() || 0} log record(s) analyzed`}
+                        description={
+                          <Text type="secondary" style={{ fontSize: 12 }}>
+                            Findings are derived by counting matching records, not by summarizing text.
+                            &quot;Observed&quot; is a fact; &quot;Possible risk&quot; is an interpretation to verify.
+                          </Text>
+                        }
+                      />
+                      {!veraLogResult.findings?.length ? (
+                        <Empty
+                          image={Empty.PRESENTED_IMAGE_SIMPLE}
+                          description={
+                            veraLogResult.scanned
+                              ? "No repeating pattern crossed a detection threshold in this window."
+                              : "No logs matched the current filters."
+                          }
+                        />
+                      ) : (
+                        <List
+                          itemLayout="vertical"
+                          dataSource={veraLogResult.findings}
+                          renderItem={(f) => {
+                            const sev = VERA_SEVERITY[f.severity] || VERA_SEVERITY.informational;
+                            return (
+                              <List.Item key={f.id} style={{ paddingInline: 0 }}>
+                                <Space direction="vertical" size={6} style={{ width: "100%" }}>
+                                  <Space wrap size={6}>
+                                    {/* Label beside the colour — colour is never the only cue. */}
+                                    <Tag color={sev.color}>{sev.label}</Tag>
+                                    <Text strong>{f.title}</Text>
+                                    <Tag bordered={false}>{f.count} record(s)</Tag>
+                                  </Space>
+                                  <div style={{ fontSize: 12, lineHeight: 1.6 }}>
+                                    <div><Text strong>Observed: </Text><Text>{f.observed}</Text></div>
+                                    <div><Text strong>Detected pattern: </Text><Text>{f.detectedPattern}</Text></div>
+                                    <div><Text strong>Possible risk: </Text><Text type="secondary">{f.possibleRisk}</Text></div>
+                                    <div><Text strong>Recommendation: </Text><Text>{f.recommendation}</Text></div>
+                                  </div>
+                                  {!!f.evidence?.length && (
+                                    <Collapse
+                                      ghost
+                                      size="small"
+                                      items={[{
+                                        key: "ev",
+                                        label: <Text style={{ fontSize: 12 }}>Evidence ({f.evidence.length} sample record(s))</Text>,
+                                        children: (
+                                          <div style={{ overflowX: "auto" }}>
+                                            {f.evidence.map((e, i) => (
+                                              <div key={i} style={{ fontFamily: "monospace", fontSize: 11, whiteSpace: "nowrap", marginBottom: 4 }}>
+                                                {dayjs(e.at).format("MM/DD HH:mm:ss")} · {e.level} · {e.action} · {e.user} · {e.ip}
+                                              </div>
+                                            ))}
+                                          </div>
+                                        ),
+                                      }]}
+                                    />
+                                  )}
+                                </Space>
+                              </List.Item>
+                            );
+                          }}
+                        />
+                      )}
+                    </>
+                  )}
+                </Drawer>
               </>
             ),
           },

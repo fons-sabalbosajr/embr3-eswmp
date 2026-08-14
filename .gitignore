@@ -34,3 +34,11 @@ docs/DEPLOYMENT_GUIDE.md
 # Internal operational/credential runbooks — kept locally, not published
 docs/GOOGLE_DRIVE_CREDENTIAL_UPDATE.md
 docs/JWT_SECRET_ROTATION.md
+
+# Generated developer test workbooks. Build artifacts of
+# server/scripts/generateDevTestWorkbook.js — regenerated on demand (the bulk
+# upload test suite rebuilds them automatically if missing), and their column
+# headers are derived from the portal's own upload definitions, so a committed
+# copy would go stale the moment the import format changes. The README beside
+# them IS tracked: it documents the test environment and the order of use.
+docs/dev-test-data/*.xlsx
