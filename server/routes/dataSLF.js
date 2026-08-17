@@ -220,6 +220,15 @@ function rejectUnauthorizedDummyAccess(req, res) {
 
 const SLF_GENERATOR_REF_FIELDS = "_id lgu ownership slfName province dataYear cellNames";
 
+// Exactly what Admin → Cell Waste Placement renders for a submission: its
+// identity, the trucks it is placing, and its correction history. It deliberately
+// does NOT carry the baseline block or `accreditedHaulers` — the biggest arrays on
+// a DataSLF document, unread by that page, and previously shipped in full for
+// every row of every page because the list re-read used no projection at all.
+const CELL_PLACEMENT_LIST_FIELDS =
+  "_id idNo submissionId lguCompanyName companyType slfName slfGenerator " +
+  "status createdAt dateOfDisposal baselineUnit trucks cellCorrections";
+
 // Province code mapping (mirrors DataSLF model)
 const PROVINCE_CODES = {
   aurora: "AU", bataan: "BA", bulacan: "BU",
@@ -1021,6 +1030,63 @@ function logSlfCrudError(req, action, error, meta = {}) {
     ip: req?.ip,
     meta: { ...meta, error: error?.message },
   });
+}
+
+/**
+ * THE admin submissions-row shape.
+ *
+ * `cellPlacement` and `remarks` are DERIVED, never stored — both are pure
+ * functions of the submission's own `trucks`, so they exist only on a response
+ * that bothers to compute them. The list endpoint computed them inline; the
+ * approval endpoint returned raw documents. The Submissions table merges an
+ * approval response over its row, so approving a submission REPLACED an enriched
+ * row with an unenriched one and the Cell Placement and Remarks columns fell back
+ * to their empty rendering — until the next full list fetch put them back. That
+ * is the "shows – after approval, correct after a refresh" defect.
+ *
+ * One helper, used by every endpoint that hands the table a row, so the two can
+ * no longer drift. `allowancePct` is read once per request by the caller, never
+ * per row.
+ */
+function enrichSubmissionRow(raw, { allowancePct = 10, includeTrucks = false, derive = true } = {}) {
+  const entry = applyResolvedCellNames(raw);
+  return {
+    ...entry,
+    isResubmission: isResubmissionEntry(entry),
+    truckCount: entry.truckCount ?? (Array.isArray(entry.trucks) ? entry.trucks.length : 0),
+    // `derive: false` returns the RECORD without the table's computed columns.
+    //
+    // `remarks` is the collision that makes this necessary. DataSLF has no
+    // `remarks` field, so a consumer reading `record.remarks` is reading a
+    // free-text remark that falls through to resubmitComment/revertReason when
+    // absent — while the admin Submissions TABLE uses the same name for a derived
+    // array of {text, level} review flags. Attaching the array to a read that
+    // wants the string renders an object as a React child and crashes the page
+    // (SubmissionSummary's disposal calendar did exactly this).
+    //
+    // So the shape follows the KIND of read: a table-row read gets the computed
+    // columns, a whole-record read gets the record.
+    ...(derive
+      ? {
+          cellPlacement: computeCellPlacementSummary(entry),
+          cellNames: collectCellNames(entry),
+          remarks: computeSubmissionRemarks(entry, allowancePct),
+        }
+      : {}),
+    trucks: includeTrucks ? entry.trucks : [],
+  };
+}
+
+/** The truck-capacity allowance the remarks rule uses. One read per request. */
+async function readCapacityAllowancePct() {
+  try {
+    const AppSettings = require("../models/AppSettings");
+    const cfg = await AppSettings.findOne().select("truckCapacityAllowancePercent").lean();
+    if (cfg && Number.isFinite(Number(cfg.truckCapacityAllowancePercent))) {
+      return Number(cfg.truckCapacityAllowancePercent);
+    }
+  } catch { /* fall back to the documented default */ }
+  return 10;
 }
 
 function computeSubmissionRemarks(entry, allowancePct = 10) {
@@ -4796,9 +4862,43 @@ router.get("/", optionalAuth, cacheJson(adminSubmissionsCacheKey, 60000), async 
     ) {
       const assignment = String(req.query.assignment).toLowerCase();
       const skip = (page - 1) * limit;
+      // STAGE ORDER IS THE WHOLE OPTIMIZATION HERE.
+      //
+      // `$sort` sits immediately after `$match`, so it is served by the
+      // {deletedAt, createdAt, _id} index and streams. It used to run LAST, after
+      // two `$addFields` stages had attached computed fields to documents that
+      // still carried everything else they store — `accreditedHaulers` and its
+      // nested vehicle/client lists above all — which forced a blocking sort of
+      // the entire matched set with full payloads in memory (hence the
+      // allowDiskUse). The placement test itself only ever reads cell fields.
+      //
+      // `$project` then reduces each document to the handful of cell fields the
+      // test needs BEFORE it is computed, and the facet's page branch emits ids
+      // only, because the documents are re-read (projected, populated) below.
       const pipeline = [
         { $match: filter },
-        { $addFields: { _trucksArr: { $ifNull: ["$trucks", []] } } },
+        { $sort: { createdAt: -1, _id: -1 } },
+        {
+          $project: {
+            _trucksArr: {
+              $map: {
+                input: { $ifNull: ["$trucks", []] },
+                as: "t",
+                in: {
+                  cellName: "$$t.cellName",
+                  cellIndex: "$$t.cellIndex",
+                  vehicles: {
+                    $map: {
+                      input: { $ifNull: ["$$t.vehicles", []] },
+                      as: "v",
+                      in: { cellName: "$$v.cellName", cellIndex: "$$v.cellIndex" },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
         {
           $addFields: {
             _tcount: { $size: "$_trucksArr" },
@@ -4838,8 +4938,12 @@ router.get("/", optionalAuth, cacheJson(adminSubmissionsCacheKey, 60000), async 
               ? { $expr: { $and: [{ $gt: ["$_tcount", 0] }, { $gte: ["$_placed", "$_tcount"] }] } }
               : { $expr: { $lt: ["$_placed", "$_tcount"] } },
         },
-        { $sort: { createdAt: -1 } },
-        { $facet: { page: [{ $skip: skip }, { $limit: limit }], meta: [{ $count: "total" }] } },
+        {
+          $facet: {
+            page: [{ $skip: skip }, { $limit: limit }, { $project: { _id: 1 } }],
+            meta: [{ $count: "total" }],
+          },
+        },
       ];
       const aggRes = await DataSLF.aggregate(pipeline).allowDiskUse(true);
       const facet = aggRes[0] || {};
@@ -4848,6 +4952,7 @@ router.get("/", optionalAuth, cacheJson(adminSubmissionsCacheKey, 60000), async 
       const docs = idOrder.length
         ? await DataSLF.find({ _id: { $in: idOrder } })
             .setOptions({ includeHiddenYears: true })
+            .select(CELL_PLACEMENT_LIST_FIELDS)
             .populate("slfGenerator", SLF_GENERATOR_REF_FIELDS)
             .lean()
         : [];
@@ -5043,29 +5148,11 @@ router.get("/", optionalAuth, cacheJson(adminSubmissionsCacheKey, 60000), async 
         : [];
       const byId = new Map(entryDocs.map((d) => [String(d._id), d]));
 
-      let allowancePct = 10;
-      try {
-        const AppSettings = require("../models/AppSettings");
-        const cfg = await AppSettings.findOne().select("truckCapacityAllowancePercent").lean();
-        if (cfg && Number.isFinite(Number(cfg.truckCapacityAllowancePercent))) {
-          allowancePct = Number(cfg.truckCapacityAllowancePercent);
-        }
-      } catch { /* fall back to 10% */ }
+      const allowancePct = await readCapacityAllowancePct();
 
       // Cell names are resolved to the facility's CURRENT labels before the entry
       // leaves the server, so no consumer can render a name frozen at submit time.
-      const enrich = (raw) => {
-        const entry = applyResolvedCellNames(raw);
-        return {
-          ...entry,
-          isResubmission: isResubmissionEntry(entry),
-          truckCount: entry.truckCount ?? (Array.isArray(entry.trucks) ? entry.trucks.length : 0),
-          cellPlacement: computeCellPlacementSummary(entry),
-          cellNames: collectCellNames(entry),
-          remarks: computeSubmissionRemarks(entry, allowancePct),
-          trucks: includeTrucks ? entry.trucks : [],
-        };
-      };
+      const enrich = (raw) => enrichSubmissionRow(raw, { allowancePct, includeTrucks });
       // Return the RAW entries for this page's groups (every group is returned
       // whole, so no batch is split across pages). The admin table regroups them
       // client-side exactly as before — keeping all existing grouped-row actions
@@ -5126,28 +5213,10 @@ router.get("/", optionalAuth, cacheJson(adminSubmissionsCacheKey, 60000), async 
     ]);
     // Configured truck-capacity allowance (default 10%) — used to compute the
     // "Exceeded truck capacity" admin remark. Fetched once per request.
-    let allowancePct = 10;
-    try {
-      const AppSettings = require("../models/AppSettings");
-      const cfg = await AppSettings.findOne().select("truckCapacityAllowancePercent").lean();
-      if (cfg && Number.isFinite(Number(cfg.truckCapacityAllowancePercent))) {
-        allowancePct = Number(cfg.truckCapacityAllowancePercent);
-      }
-    } catch { /* fall back to 10% */ }
+    const allowancePct = await readCapacityAllowancePct();
     if (paginated) {
       res.json({
-        data: entries.map((raw) => {
-          const entry = applyResolvedCellNames(raw);
-          return {
-            ...entry,
-            isResubmission: isResubmissionEntry(entry),
-            truckCount: entry.truckCount ?? (Array.isArray(entry.trucks) ? entry.trucks.length : 0),
-            cellPlacement: computeCellPlacementSummary(entry),
-            cellNames: collectCellNames(entry),
-            remarks: computeSubmissionRemarks(entry, allowancePct),
-            trucks: includeTrucks ? entry.trucks : [],
-          };
-        }),
+        data: entries.map((raw) => enrichSubmissionRow(raw, { allowancePct, includeTrucks })),
         total,
         page,
         limit,
@@ -5159,20 +5228,12 @@ router.get("/", optionalAuth, cacheJson(adminSubmissionsCacheKey, 60000), async 
       // filters or grouping; original reference preserved via previousIdNos). The
       // Submissions tab consumes this non-paginated list and groups client-side, so
       // ordering here drives the table's resubmission-priority ordering.
+      // One implementation of the row shape, but the derived columns follow the
+      // KIND of read: `includeTrucks=true` is a whole-record read (the disposal
+      // calendar), not a table-row read, and it has a consumer that treats
+      // `remarks` as the record's free-text remark. See enrichSubmissionRow.
       const decorated = entries
-        .map((raw) => applyResolvedCellNames(raw))
-        .map((entry) => ({
-          ...entry,
-          isResubmission: isResubmissionEntry(entry),
-          ...(includeTrucks
-            ? {}
-            : {
-                cellPlacement: computeCellPlacementSummary(entry),
-                cellNames: collectCellNames(entry),
-                remarks: computeSubmissionRemarks(entry, allowancePct),
-                trucks: [],
-              }),
-        }))
+        .map((raw) => enrichSubmissionRow(raw, { allowancePct, includeTrucks, derive: !includeTrucks }))
         .sort(chronologicalNewestFirst);
       res.json(decorated);
       return;
@@ -6191,7 +6252,40 @@ router.patch("/:id/portal-cell-assignments", async (req, res) => {
 // full), and the COMBINED volume assigned to each cell in this batch is checked
 // against that cell's remaining capacity. Idempotency: a completed batchId is
 // remembered via its audit Transaction, so a retry does not double-apply.
-const BULK_MAX_ROWS = 1000;
+//
+// ── COST MODEL (why this route is shaped the way it is) ─────────────────────
+// A large organize file is O(rows) rows across O(docs) submissions, and the two
+// must not be confused. The pipeline is deliberately:
+//
+//   1 read   — every referenced submission resolved in ONE query, projected down
+//              to the fields organization actually touches. Loading whole
+//              documents pulled `accreditedHaulers` (every hauler, its vehicles
+//              and its client list) into memory for records the batch never
+//              reads, which dominated both wire time and heap on a big upload.
+//   0 reads  — validation runs entirely against that in-memory set plus a
+//              per-facility cache; no query is issued inside the row loop.
+//   1 write  — ONE `bulkWrite` carrying one targeted `updateOne` per touched
+//              submission. Not one `save()` per submission: that was
+//              O(submissions) sequential round trips, and `markModified("trucks")`
+//              made each one rewrite the document's ENTIRE trucks array to change
+//              a cell name. The ops here `$set` only the exact placement paths
+//              (`trucks.3.vehicles.1.cellName`) and `$push` only the new movement
+//              records, so write volume is proportional to what actually changed.
+//   1 recompute per facility — occupancy is derived, never incremented.
+//
+// Validation is unchanged and still runs BEFORE any write: every row is checked,
+// and (unless allowPartial) a single invalid row means nothing is written at all.
+const BULK_MAX_ROWS = 5000;
+// Ops per bulkWrite command. Well under the 100k-op / 16MB driver ceiling, and
+// small enough that a batch spanning thousands of submissions stays bounded in
+// memory instead of assembling one giant command.
+const BULK_WRITE_CHUNK = 500;
+
+// Fields the organize pipeline reads or writes. Everything else on a DataSLF
+// document (baseline block, accredited haulers, client lists, corrections
+// history) is irrelevant here and is left in the database.
+const BULK_ORGANIZE_FIELDS =
+  "_id submissionId idNo status slfGenerator baselineUnit lguCompanyName companyType submittedBy trucks";
 
 router.post("/portal-cell-assignments/bulk", async (req, res) => {
   try {
@@ -6234,8 +6328,14 @@ router.post("/portal-cell-assignments/bulk", async (req, res) => {
     const orClauses = [];
     if (ids.length) orClauses.push({ _id: { $in: ids } });
     if (refs.length) orClauses.push({ submissionId: { $in: refs } }, { idNo: { $in: refs } });
+    // Projected + lean: the row loop mutates plain objects and the apply step
+    // turns those mutations into targeted `$set` paths, so there is nothing for
+    // Mongoose change-tracking to do and no reason to hydrate documents whose
+    // heaviest arrays this route never looks at.
     const docs = orClauses.length
       ? await DataSLF.find({ deletedAt: null, submittedBy: new RegExp(`^${escapeRegExp(callerEmail)}$`, "i"), $or: orClauses })
+          .select(BULK_ORGANIZE_FIELDS)
+          .lean()
       : [];
 
     const docByKey = new Map();
@@ -6449,13 +6549,21 @@ router.post("/portal-cell-assignments/bulk", async (req, res) => {
     // Apply staged placements per document. cellName/cellType/cellIndex written to
     // the vehicle (and mirrored to the truck for vehicle 0) exactly like the single
     // endpoint, so downstream metrics/utilization recompute consistently.
+    //
+    // Each document is mutated in memory AND records the exact field paths it
+    // changed, so the whole batch leaves as ONE bulkWrite of targeted updates
+    // rather than a sequential save() per submission.
     let appliedRows = 0;
     const touchedDocs = [];
     const touchedFacilityIds = new Set();
+    const bulkOps = [];
     for (const { doc, list } of pendingByDoc.values()) {
+      const $set = {};
+      const movements = [];
       list.forEach(({ truckIndex, vehicleIndex, cellIndex, cellName, cellType, capacity, capacityUnit }) => {
         const truck = doc.trucks[truckIndex];
         if (!truck) return;
+        const truckPath = `trucks.${truckIndex}`;
         // Same rule as the manual organizer: reassigning an already-placed volume
         // MOVES it. Recorded here so bulk and manual leave identical state — the
         // volume is never added again, only its cell changes.
@@ -6465,7 +6573,7 @@ router.post("/portal-cell-assignments/bulk", async (req, res) => {
             Number.isInteger(vehicleIndex) && truck.vehicles?.[vehicleIndex]
               ? truck.vehicles[vehicleIndex]
               : truck;
-          recordCellMovement(doc, {
+          const movement = recordCellMovement(doc, {
             truckIndex,
             vehicleIndex: Number.isInteger(vehicleIndex) ? vehicleIndex : null,
             fromCellIndex: priorCellIndex,
@@ -6481,26 +6589,25 @@ router.post("/portal-cell-assignments/bulk", async (req, res) => {
             actor: submittedBy,
             source: "portal_bulk",
           });
+          if (movement) movements.push(movement);
         }
+        // `setCell` writes the in-memory slot and stages the SAME change as an
+        // explicit field path, so the persisted update touches only these fields.
+        const setCell = (path, slot) => {
+          slot.cellIndex = cellIndex;
+          slot.cellName = cellName;
+          slot.cellType = cellType;
+          $set[`${path}.cellIndex`] = cellIndex;
+          $set[`${path}.cellName`] = cellName;
+          $set[`${path}.cellType`] = cellType;
+        };
         if (Number.isInteger(vehicleIndex) && Array.isArray(truck.vehicles) && truck.vehicles[vehicleIndex]) {
-          truck.vehicles[vehicleIndex].cellIndex = cellIndex;
-          truck.vehicles[vehicleIndex].cellName = cellName;
-          truck.vehicles[vehicleIndex].cellType = cellType;
-          if (vehicleIndex === 0) {
-            truck.cellIndex = cellIndex;
-            truck.cellName = cellName;
-            truck.cellType = cellType;
-          }
+          setCell(`${truckPath}.vehicles.${vehicleIndex}`, truck.vehicles[vehicleIndex]);
+          if (vehicleIndex === 0) setCell(truckPath, truck);
         } else {
-          truck.cellIndex = cellIndex;
-          truck.cellName = cellName;
-          truck.cellType = cellType;
+          setCell(truckPath, truck);
           if (Array.isArray(truck.vehicles)) {
-            truck.vehicles.forEach((veh) => {
-              veh.cellIndex = cellIndex;
-              veh.cellName = cellName;
-              veh.cellType = cellType;
-            });
+            truck.vehicles.forEach((veh, vi) => setCell(`${truckPath}.vehicles.${vi}`, veh));
           }
         }
         // Truck Capacity completion, written to the same slot the cell went to —
@@ -6511,22 +6618,81 @@ router.post("/portal-cell-assignments/bulk", async (req, res) => {
           const unit = capacityUnit ? String(capacityUnit).trim().replace("m3", "m³") : null;
           if (Number.isInteger(vehicleIndex) && truck.vehicles?.[vehicleIndex]) {
             truck.vehicles[vehicleIndex].capacity = capacity;
-            if (unit) truck.vehicles[vehicleIndex].capacityUnit = unit;
+            $set[`${truckPath}.vehicles.${vehicleIndex}.capacity`] = capacity;
+            if (unit) {
+              truck.vehicles[vehicleIndex].capacityUnit = unit;
+              $set[`${truckPath}.vehicles.${vehicleIndex}.capacityUnit`] = unit;
+            }
           } else {
             truck.truckCapacity = capacity;
-            if (unit) truck.truckCapacityUnit = unit;
+            $set[`${truckPath}.truckCapacity`] = capacity;
+            if (unit) {
+              truck.truckCapacityUnit = unit;
+              $set[`${truckPath}.truckCapacityUnit`] = unit;
+            }
           }
         }
         appliedRows += 1;
       });
-      doc.markModified("trucks");
-      await doc.save();
+      if (Object.keys($set).length || movements.length) {
+        bulkOps.push({
+          updateOne: {
+            filter: { _id: doc._id, deletedAt: null },
+            update: {
+              ...(Object.keys($set).length ? { $set } : {}),
+              ...(movements.length ? { $push: { cellCorrections: { $each: movements } } } : {}),
+            },
+          },
+        });
+      }
       touchedDocs.push(doc);
       if (doc.slfGenerator) touchedFacilityIds.add(String(doc.slfGenerator));
     }
-    for (const facilityId of touchedFacilityIds) {
-      await refreshFacilityCellOccupancy(req, facilityId);
+
+    // ONE round trip for the whole batch, chunked so a very large upload never
+    // builds an oversized command. `ordered: false` lets independent submissions
+    // apply in parallel server-side; every op targets a distinct `_id`, so there
+    // is no ordering dependency between them.
+    //
+    // Placement changes cell/capacity only — never a volume or a disposal date —
+    // so the denormalized metrics the save() hook recomputes are unchanged by
+    // definition and nothing is lost by bypassing it. `refreshOccupancy…` below
+    // still re-derives the facility's cell fill from the stored submissions.
+    let writeError = null;
+    for (let i = 0; i < bulkOps.length; i += BULK_WRITE_CHUNK) {
+      const chunk = bulkOps.slice(i, i + BULK_WRITE_CHUNK);
+      // eslint-disable-next-line no-await-in-loop
+      const result = await DataSLF.bulkWrite(chunk, { ordered: false }).catch((err) => {
+        writeError = err;
+        return null;
+      });
+      if (writeError) break;
+      // A filter that matched nothing means the submission was deleted between
+      // validation and apply. Surface it — never report rows as applied that the
+      // database did not accept.
+      if (result && Number(result.matchedCount ?? chunk.length) < chunk.length) {
+        writeError = new Error(
+          "Some submissions changed while the batch was being applied. Re-validate and try again.",
+        );
+        break;
+      }
     }
+    if (writeError) {
+      writeLog("error", "organize_cells_bulk_failed", {
+        message: `Bulk cell organization failed to write: ${writeError.message}`,
+        user: submittedBy,
+        ip: req.ip,
+        meta: { batchId: batchId ? String(batchId) : undefined, rows: results.length },
+      });
+      // Occupancy is derived from what is actually stored, so recompute before
+      // answering: a partially-accepted chunk must not leave stale cell fills.
+      await refreshOccupancyForFacilities(req, [...touchedFacilityIds]);
+      return res.status(500).json({
+        message: `Could not apply the batch: ${writeError.message}`,
+        summary,
+      });
+    }
+    await refreshOccupancyForFacilities(req, [...touchedFacilityIds]);
 
     // Audit: one per-submission transaction + one batch record carrying the
     // idempotency key and the before/after context.
@@ -6563,7 +6729,17 @@ router.post("/portal-cell-assignments/bulk", async (req, res) => {
 
     refreshAdmin(req, "submissions");
     refreshPortal(req, submittedBy, "submissions");
-    res.json({ message: `Applied ${appliedRows} placement(s).`, applied: appliedRows, summary, rows: results, batchId: batchId ? String(batchId) : undefined });
+    // On success the caller needs the counts and anything that did NOT apply
+    // cleanly — echoing back thousands of "valid" rows it already has locally
+    // only inflates the response. Previews and rejections still return every row,
+    // because that is what the operator has to act on.
+    res.json({
+      message: `Applied ${appliedRows} placement(s).`,
+      applied: appliedRows,
+      summary,
+      rows: results.filter((r) => r.status !== "valid"),
+      batchId: batchId ? String(batchId) : undefined,
+    });
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });
   }
@@ -6767,75 +6943,139 @@ router.patch("/bulk-status", async (req, res) => {
 
     await DataSLF.updateMany({ _id: { $in: ids } }, { status });
 
-    const updated = await DataSLF.find({ _id: { $in: ids } }).populate("slfGenerator");
+    // The new status is now durable. Everything below this line is DERIVED work —
+    // occupancy, audit rows, acknowledgement email — and none of it changes what
+    // the status IS, so none of it belongs between the approval and the answer.
+    // Awaiting all of it first is what made an approved submission take seconds to
+    // read back: the admin's request sat through a facility-wide occupancy
+    // recompute, one Transaction insert per entry, one submission lookup per
+    // acknowledged submission, and an SMTP send per submission — before the route
+    // had said a single word about the status the operator was waiting on.
+    const rawUpdated = await DataSLF.find({ _id: { $in: ids } })
+      .populate("slfGenerator", SLF_GENERATOR_REF_FIELDS)
+      .lean();
 
-    // Same rule as the single-status route: only pending/acknowledged/
-    // revert_requested count toward occupancy, so a bulk revert/reject has to
-    // release those volumes (and a bulk approve reinstate them).
-    await refreshOccupancyForFacilities(
-      req,
-      updated.map((entry) => entry.slfGenerator?._id || entry.slfGenerator),
+    // Answer in the SAME shape the submissions list returns. The table merges this
+    // response straight over its row, so a leaner shape here silently blanked the
+    // derived Cell Placement and Remarks columns until the next full list fetch.
+    // Both are pure functions of `trucks`, which is already loaded — computing
+    // them costs no extra query, and it removes the asynchronous gap entirely
+    // rather than papering over it with a refetch or a retry.
+    const allowancePct = await readCapacityAllowancePct();
+    const updated = rawUpdated.map((raw) =>
+      // `includeTrucks: false` matches what the Submissions tab receives from the
+      // list, so the row a user sees after approving is byte-identical to the one
+      // they get after a page refresh.
+      enrichSubmissionRow(raw, { allowancePct, includeTrucks: false }),
     );
 
-    if (status === "acknowledged") {
-      markSubmissionNotificationsRead(updated).catch(() => {});
-    }
-
-    // Log transactions
-    for (const entry of updated) {
-      try {
-        await Transaction.create({
-          submissionId: entry.submissionId,
-          dataEntry: entry._id,
-          companyName: entry.lguCompanyName,
-          companyType: entry.companyType,
-          submittedBy: entry.submittedBy,
-          type: "status_change",
-          description: `Entry ${entry.idNo} marked as ${status} (bulk)`,
-          performedBy: getRequestActor(req),
-          meta: { status, idNo: entry.idNo, bulk: true },
-        });
-      } catch { /* silent */ }
-    }
-
-    // Send bulk acknowledge email grouped by submittedBy + submissionId (one email per submission)
-    if (status === "acknowledged") {
-      const bySubmission = {};
-      for (const entry of updated) {
-        if (!entry.submittedBy || !entry.submissionId) continue;
-        const key = `${entry.submittedBy}::${entry.submissionId}`;
-        if (!bySubmission[key]) bySubmission[key] = { email: entry.submittedBy, submissionId: entry.submissionId, entries: [] };
-        bySubmission[key].entries.push(entry);
-      }
-      for (const { email, submissionId, entries } of Object.values(bySubmission)) {
-        // Only send if all entries in this submission are now acknowledged
-        const allInSubmission = await DataSLF.find({ submissionId });
-        const allAcknowledged = allInSubmission.every((e) => e.status === "acknowledged");
-        if (!allAcknowledged) continue;
-        try {
-          await sendBulkAcknowledgeEmail(email, {
-            submissionId,
-            totalEntries: allInSubmission.length,
-            entries: allInSubmission.map((e) => ({
-              idNo: e.idNo,
-              dateOfDisposal: e.dateOfDisposal,
-              lguCompanyName: e.lguCompanyName,
-              companyType: e.companyType,
-              trucks: e.trucks,
-            })),
-          });
-        } catch (emailErr) {
-          console.error("Bulk acknowledge email failed:", emailErr.message);
-        }
-      }
-    }
+    // Invalidate the cached submission lists and tell every open admin/portal
+    // session to re-read, BEFORE answering. This is what was missing entirely:
+    // every other bulk route on this file broadcasts, this one never did, so an
+    // approval was invisible to any session other than the one that made it (and
+    // to this one beyond its own in-place row merge) until a cache TTL expired.
+    refreshAdmin(req, "submissions");
+    [...new Set(updated.map((e) => e.submittedBy).filter(Boolean))].forEach((email) =>
+      refreshPortal(req, email, "submissions"),
+    );
 
     res.json({ message: `${updated.length} entries ${status}`, data: updated });
+
     writeLog("info", "submission.bulk-status", {
       message: `Bulk ${status}: ${updated.length} entries`,
       user: getRequestActor(req, "admin"),
       ip: req.ip,
       meta: { status, count: updated.length, ids: updated.map((e) => e.idNo) },
+    });
+
+    // ── Derived work, after the response ────────────────────────────────────
+    // Best-effort by the same rule refreshOccupancyForFacilities already states:
+    // a failure here must never fail the approval, and the next lifecycle event
+    // recomputes from the stored submissions regardless.
+    const performedBy = getRequestActor(req);
+    (async () => {
+      // Same rule as the single-status route: only pending/acknowledged/
+      // revert_requested count toward occupancy, so a bulk revert/reject has to
+      // release those volumes (and a bulk approve reinstate them).
+      await refreshOccupancyForFacilities(
+        req,
+        updated.map((entry) => entry.slfGenerator?._id || entry.slfGenerator),
+      );
+
+      if (status === "acknowledged") {
+        markSubmissionNotificationsRead(updated).catch(() => {});
+      }
+
+      // One insert for the whole batch instead of one round trip per entry.
+      try {
+        await Transaction.insertMany(
+          updated.map((entry) => ({
+            submissionId: entry.submissionId,
+            dataEntry: entry._id,
+            companyName: entry.lguCompanyName,
+            companyType: entry.companyType,
+            submittedBy: entry.submittedBy,
+            type: "status_change",
+            description: `Entry ${entry.idNo} marked as ${status} (bulk)`,
+            performedBy,
+            meta: { status, idNo: entry.idNo, bulk: true },
+          })),
+          { ordered: false },
+        );
+      } catch { /* silent */ }
+
+      // Send bulk acknowledge email grouped by submittedBy + submissionId (one email per submission)
+      if (status === "acknowledged") {
+        const bySubmission = {};
+        for (const entry of updated) {
+          if (!entry.submittedBy || !entry.submissionId) continue;
+          const key = `${entry.submittedBy}::${entry.submissionId}`;
+          if (!bySubmission[key]) bySubmission[key] = { email: entry.submittedBy, submissionId: entry.submissionId };
+        }
+        const groups = Object.values(bySubmission);
+        // ONE lookup for every affected submission, not one per submission. The
+        // "is the whole submission acknowledged?" rule is unchanged — it is just
+        // evaluated against a single batched read.
+        const siblingIds = [...new Set(groups.map((g) => g.submissionId))];
+        const siblings = siblingIds.length
+          ? await DataSLF.find({ submissionId: { $in: siblingIds } })
+              .select("submissionId status idNo dateOfDisposal lguCompanyName companyType trucks")
+              .lean()
+          : [];
+        const bySubmissionId = new Map();
+        siblings.forEach((entry) => {
+          const key = String(entry.submissionId);
+          if (!bySubmissionId.has(key)) bySubmissionId.set(key, []);
+          bySubmissionId.get(key).push(entry);
+        });
+        for (const { email, submissionId } of groups) {
+          // Only send if all entries in this submission are now acknowledged
+          const allInSubmission = bySubmissionId.get(String(submissionId)) || [];
+          const allAcknowledged =
+            allInSubmission.length > 0 && allInSubmission.every((e) => e.status === "acknowledged");
+          if (!allAcknowledged) continue;
+          try {
+            await sendBulkAcknowledgeEmail(email, {
+              submissionId,
+              totalEntries: allInSubmission.length,
+              entries: allInSubmission.map((e) => ({
+                idNo: e.idNo,
+                dateOfDisposal: e.dateOfDisposal,
+                lguCompanyName: e.lguCompanyName,
+                companyType: e.companyType,
+                trucks: e.trucks,
+              })),
+            });
+          } catch (emailErr) {
+            console.error("Bulk acknowledge email failed:", emailErr.message);
+          }
+        }
+      }
+    })().catch((error) => {
+      writeLog("warn", "submission.bulk-status.followup_failed", {
+        message: `Post-approval work failed for a bulk ${status}: ${error.message}`,
+        meta: { status, count: updated.length },
+      });
     });
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });

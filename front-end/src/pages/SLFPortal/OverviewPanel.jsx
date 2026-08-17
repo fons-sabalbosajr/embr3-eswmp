@@ -1,4 +1,4 @@
-import { memo, useMemo } from "react";
+import { memo, useMemo, useState } from "react";
 import {
   Row,
   Col,
@@ -11,6 +11,10 @@ import {
   Progress,
   Tag,
   Tooltip,
+  Modal,
+  Table,
+  Segmented,
+  Input,
 } from "antd";
 import {
   DashboardOutlined,
@@ -22,6 +26,7 @@ import {
   ClockCircleOutlined,
   UndoOutlined,
   WarningOutlined,
+  SearchOutlined,
 } from "@ant-design/icons";
 import { resolveFacilityUnit, normalizeUnit, convertVolume, resolveCellUnit } from "../../utils/volumeUnits";
 import { useSensitiveMask, MASK_PLACEHOLDER } from "../../utils/sensitiveMask";
@@ -97,6 +102,16 @@ function OverviewPanel({
   // visible — they are not sensitive). Aggregation is unaffected: masking is a
   // display concern applied only to the formatted output below.
   const { masked } = useSensitiveMask();
+
+  // ── Drill-down modals ──
+  // Purely local view state: which list is open, and how it is filtered. It feeds
+  // nothing back into the panel's derivations, so the memoized chart work above is
+  // unaffected by opening a list.
+  const [clientsOpen, setClientsOpen] = useState(false);
+  const [clientTypeFilter, setClientTypeFilter] = useState("All");
+  const [clientSearch, setClientSearch] = useState("");
+  const [haulersOpen, setHaulersOpen] = useState(false);
+  const [haulerSearch, setHaulerSearch] = useState("");
 
   // ── Submission status + organization rollups (from the lean list rows, which
   // already carry status + per-submission cell-placement summary fields) ──
@@ -206,6 +221,8 @@ function OverviewPanel({
     privateClientCount,
     haulerChartData,
     clientChartData,
+    clientDirectory,
+    haulerDirectory,
     wasteFilledM3,
     wasteFilledTons,
     groupedVolumeData,
@@ -283,6 +300,91 @@ function OverviewPanel({
     { name: "Private", value: privateClientCount, color: "#52c41a" },
   ].filter((row) => row.value > 0);
 
+  // ── Drill-down directories ──
+  // The card tells the operator HOW MANY; these are the WHICH behind it. Both are
+  // built from the SAME rows the counts come from — `combinedClients` and the
+  // deduped hauler names — so a list can never disagree with the number on the
+  // card that opened it. Derived inside this memo because that is where the
+  // deduplication already happened; recomputing them beside the modal would be a
+  // second implementation of the same identity rule.
+  const isLguRow = (row = {}) => /lgu/i.test(String(row.clientType || row.companyType || ""));
+  // A PSGC code is NOT a place name. `municipality`/`province` hold either a
+  // human name or the PSGC code depending on how the record was encoded, so
+  // falling back to them blindly printed "035400000, 034900000" into the card.
+  // Same rule the server applies (getClientMunicipalityKeys in
+  // /waste-received-summary): an all-digits value is a code, so ignore it and
+  // prefer the resolved *Name field.
+  const placeName = (...candidates) => {
+    for (const candidate of candidates) {
+      const value = String(candidate || "").trim();
+      if (value && !/^\d+$/.test(value)) return value;
+    }
+    return "";
+  };
+  const clientDirectory = combinedClients
+    .map((row, index) => ({
+      key: `${clientIdentityKey(row)}|${index}`,
+      name: String(row.clientName || row.company || "").trim() || "Unnamed client",
+      type: isLguRow(row) ? "LGU" : "Private",
+      municipality: placeName(row.municipalityName, row.municipality, row.companyMunicipality),
+      province: placeName(row.provinceName, row.province, row.companyProvince),
+    }))
+    .map((row) => ({
+      ...row,
+      location: [row.municipality, row.province].filter(Boolean).join(", "),
+    }))
+    .sort((a, b) => a.type.localeCompare(b.type) || a.name.localeCompare(b.name));
+
+  // One row per DISTINCT hauler name — the same identity rule `haulerCount` uses,
+  // so the badge and the list always agree. Vehicles are merged across duplicate
+  // entries for the same hauler rather than showing the fleet twice.
+  const haulerDirectory = (() => {
+    const byName = new Map();
+    (haulers || []).forEach((hauler) => {
+      const name = String(hauler?.haulerName || "").trim();
+      if (!name) return;
+      const key = name.toLowerCase();
+      if (!byName.has(key)) {
+        byName.set(key, { key, name, declared: 0, plates: new Map() });
+      }
+      const entry = byName.get(key);
+      entry.declared = Math.max(entry.declared, Number(hauler.numberOfTrucks || 0));
+      (Array.isArray(hauler.vehicles) ? hauler.vehicles : []).forEach((vehicle) => {
+        const plate = String(vehicle?.plateNumber || "").trim();
+        if (!plate) return;
+        // Keyed on the plate so the same vehicle listed twice counts once.
+        entry.plates.set(plate.replace(/[\s-]+/g, "").toUpperCase(), {
+          plate,
+          type: String(vehicle?.vehicleType || "").trim(),
+          capacity: Number(vehicle?.capacity) > 0 ? Number(vehicle.capacity) : null,
+          capacityUnit: String(vehicle?.capacityUnit || "").replace("m3", "m³"),
+        });
+      });
+      // Legacy single-vehicle haulers kept the plate on the hauler itself.
+      const legacyPlate = String(hauler?.plateNumber || "").trim();
+      if (legacyPlate && !entry.plates.has(legacyPlate.replace(/[\s-]+/g, "").toUpperCase())) {
+        entry.plates.set(legacyPlate.replace(/[\s-]+/g, "").toUpperCase(), {
+          plate: legacyPlate,
+          type: String(hauler?.vehicleType || "").trim(),
+          capacity: Number(hauler?.capacity) > 0 ? Number(hauler.capacity) : null,
+          capacityUnit: String(hauler?.capacityUnit || "").replace("m3", "m³"),
+        });
+      }
+    });
+    return [...byName.values()]
+      .map((entry) => {
+        const vehicles = [...entry.plates.values()];
+        return {
+          ...entry,
+          vehicles,
+          // The chart uses the same "declared vs listed, whichever is higher"
+          // rule, so the two views of a fleet cannot disagree.
+          fleetSize: Math.max(vehicles.length, entry.declared, 1),
+        };
+      })
+      .sort((a, b) => b.fleetSize - a.fleetSize || a.name.localeCompare(b.name));
+  })();
+
   const wasteFilledM3 = Number(wasteReceivedData.baselineTotals?.m3 || 0) + Number(wasteReceivedData.totals?.m3 || 0);
   const wasteFilledTons = Number(wasteReceivedData.baselineTotals?.tons || 0) + Number(wasteReceivedData.totals?.tons || 0);
   const rowVolumeForUnit = (row = {}) => {
@@ -325,12 +427,41 @@ function OverviewPanel({
     privateClientCount,
     haulerChartData,
     clientChartData,
+    clientDirectory,
+    haulerDirectory,
     wasteFilledM3,
     wasteFilledTons,
     groupedVolumeData,
     submittedVolume,
   };
   }, [wasteReceivedData, haulers, baselineUnit]);
+
+  // Drill-down filtering. Memoized on the directory plus the controls that
+  // actually change the result, so typing in a search box does not re-filter on
+  // every unrelated re-render of this panel (it re-renders on every socket
+  // event). Search covers the fields the operator can see in the row.
+  const filteredClients = useMemo(() => {
+    const needle = clientSearch.trim().toLowerCase();
+    return clientDirectory.filter(
+      (row) =>
+        (clientTypeFilter === "All" || row.type === clientTypeFilter) &&
+        (!needle ||
+          row.name.toLowerCase().includes(needle) ||
+          row.location.toLowerCase().includes(needle)),
+    );
+  }, [clientDirectory, clientTypeFilter, clientSearch]);
+
+  const filteredHaulers = useMemo(() => {
+    const needle = haulerSearch.trim().toLowerCase();
+    if (!needle) return haulerDirectory;
+    // Plates are searchable too — "which hauler runs ABC-1234?" is the question
+    // an operator actually arrives with.
+    return haulerDirectory.filter(
+      (row) =>
+        row.name.toLowerCase().includes(needle) ||
+        row.vehicles.some((vehicle) => vehicle.plate.toLowerCase().includes(needle)),
+    );
+  }, [haulerDirectory, haulerSearch]);
 
   const categoryColors = {
     "LGU - Region III": "#1677ff",
@@ -406,10 +537,21 @@ function OverviewPanel({
    * "Not Required" marking previously resolved to the dated row and still
    * rendered a New/Complied badge. Checking the flat field AND every array
    * entry is what makes the marking authoritative wherever it was recorded.
+   *
+   * That includes the permit NUMBER field. There is no "Not Required" number to
+   * type, so an operator recording a non-applicable permit writes the words into
+   * the number — which is precisely the text the card then displays. Reading only
+   * `status` meant the card showed the operator's own "Not Required" line and
+   * stamped a blue "New / Complied" tag underneath it, asserting compliance for a
+   * permit the same card had just said does not apply.
    */
-  const permitNotRequired = (list, legacyStatus) =>
+  const permitNotRequired = (list, legacyStatus, legacyNo) =>
     isPermitNotRequired(legacyStatus) ||
-    (Array.isArray(list) && list.some((item) => isPermitNotRequired(item?.status)));
+    isPermitNotRequired(legacyNo) ||
+    (Array.isArray(list) &&
+      list.some(
+        (item) => isPermitNotRequired(item?.status) || isPermitNotRequired(item?.permitNo),
+      ));
 
   /**
    * `hideStatus` blanks the badge area entirely. Two cases need it:
@@ -423,9 +565,13 @@ function OverviewPanel({
    *
    * The surrounding cell still renders, so the grid stays aligned.
    */
-  const resolvePermitStatus = (list, permit, legacyValidity, legacyStatus, references) => {
-    if (permitNotRequired(list, legacyStatus)) {
-      return { label: "Not Required", color: "default", hideStatus: true };
+  const resolvePermitStatus = (list, permit, legacyValidity, legacyStatus, references, legacyNo) => {
+    if (permitNotRequired(list, legacyStatus, legacyNo)) {
+      // `notRequired` drives the VALUE line (a single neutral "Not Required"),
+      // `hideStatus` suppresses the badge. Both are needed: the marking may have
+      // been recorded in the status, in the number, or in both, and the card must
+      // read the same way whichever it was.
+      return { label: "Not Required", color: "default", hideStatus: true, notRequired: true };
     }
     const hasAnyData =
       (Array.isArray(references) && references.length > 0) ||
@@ -520,6 +666,7 @@ function OverviewPanel({
         slfInfo?.permitToOperateValidity,
         slfInfo?.permitToOperateStatus,
         ptoReferences,
+        slfInfo?.permitToOperate,
       ),
       references: ptoReferences,
     },
@@ -531,6 +678,7 @@ function OverviewPanel({
         slfInfo?.dischargePermitValidity,
         slfInfo?.dischargePermitStatus,
         dpReferences,
+        slfInfo?.dischargePermit,
       ),
       references: dpReferences,
     },
@@ -848,7 +996,14 @@ function OverviewPanel({
               {permitCards.map(({ label, status, references }) => (
                 <div key={label} style={{ padding: "8px 10px", border: "1px solid #eef2f7", borderRadius: 8, minHeight: 58 }}>
                   <Text type="secondary" style={{ fontSize: 10, textTransform: "uppercase", letterSpacing: 0.3 }}>{label}</Text>
-                  {references.length === 0 ? (
+                  {status.notRequired ? (
+                    // ONE neutral line, whether the marking was recorded in the
+                    // status or typed into the number field. Rendering the stored
+                    // reference rows here would repeat the same words back.
+                    <div style={{ fontSize: 12, fontWeight: 600, color: "#8c8c8c", lineHeight: 1.25 }}>
+                      Not Required
+                    </div>
+                  ) : references.length === 0 ? (
                     <div style={{ fontSize: 12, fontWeight: 600, color: "#1a3353", lineHeight: 1.25 }}>Not encoded</div>
                   ) : (
                     // Each reference number sits beside its OWN validity date, so
@@ -939,6 +1094,13 @@ function OverviewPanel({
                 <Tag color="geekblue" style={{ margin: 0 }}>{haulerCount}</Tag>
               </Space>
             }
+            extra={
+              haulerDirectory.length ? (
+                <Button type="link" size="small" style={{ padding: 0 }} onClick={() => setHaulersOpen(true)}>
+                  View list
+                </Button>
+              ) : null
+            }
             // Gated on the BASELINE fetch, which is where `haulers` comes from —
             // not on the waste-received aggregation, which this card never reads.
             // It used to sit in a skeleton behind the slowest request on the page
@@ -976,6 +1138,22 @@ function OverviewPanel({
                 <Tag color="green" style={{ margin: 0 }}>{lguClientCount + privateClientCount}</Tag>
               </Space>
             }
+            extra={
+              clientDirectory.length ? (
+                <Button
+                  type="link"
+                  size="small"
+                  style={{ padding: 0 }}
+                  onClick={() => {
+                    setClientTypeFilter("All");
+                    setClientSearch("");
+                    setClientsOpen(true);
+                  }}
+                >
+                  View list
+                </Button>
+              ) : null
+            }
             loading={wasteReceivedLoading}
             style={{ borderRadius: 8, height: "100%" }}
             bodyStyle={{ height: 250 }}
@@ -987,7 +1165,21 @@ function OverviewPanel({
                   <XAxis dataKey="name" tick={{ fontSize: 11 }} />
                   <YAxis allowDecimals={false} tick={{ fontSize: 11 }} />
                   <RTooltip formatter={(value) => [`${value} client(s)`, "Clients"]} />
-                  <Bar dataKey="value" name="Clients" radius={[4, 4, 0, 0]} isAnimationActive={false}>
+                  {/* Clicking a bar opens the list already filtered to that type —
+                      the question a bar provokes is "which ones?", and this is the
+                      shortest path to the answer. */}
+                  <Bar
+                    dataKey="value"
+                    name="Clients"
+                    radius={[4, 4, 0, 0]}
+                    isAnimationActive={false}
+                    cursor="pointer"
+                    onClick={(entry) => {
+                      setClientTypeFilter(entry?.name === "LGU" ? "LGU" : "Private");
+                      setClientSearch("");
+                      setClientsOpen(true);
+                    }}
+                  >
                     {clientChartData.map((entry) => (
                       <RCell key={entry.name} fill={entry.color} />
                     ))}
@@ -1039,6 +1231,233 @@ function OverviewPanel({
           </Card>
         </Col>
       </Row>
+
+      {/* ── Clients Served drill-down ────────────────────────────────────────
+          The card answers "how many"; this answers "which ones". Rows come from
+          the same deduplicated set the counts are computed from, so the totals
+          on the segments always add up to the badge on the card. */}
+      <Modal
+        open={clientsOpen}
+        onCancel={() => setClientsOpen(false)}
+        title={
+          <Space size={6}>
+            <Text strong>Clients Served</Text>
+            <Tag color="green" style={{ margin: 0 }}>{clientDirectory.length}</Tag>
+          </Space>
+        }
+        width={760}
+        footer={[<Button key="close" onClick={() => setClientsOpen(false)}>Close</Button>]}
+        destroyOnHidden
+      >
+        <Space direction="vertical" size={10} style={{ width: "100%" }}>
+          <Space wrap style={{ width: "100%", justifyContent: "space-between" }}>
+            <Segmented
+              size="small"
+              value={clientTypeFilter}
+              onChange={setClientTypeFilter}
+              options={[
+                { label: `All (${clientDirectory.length})`, value: "All" },
+                { label: `LGU (${lguClientCount})`, value: "LGU" },
+                { label: `Private (${privateClientCount})`, value: "Private" },
+              ]}
+            />
+            <Input
+              allowClear
+              size="small"
+              prefix={<SearchOutlined />}
+              placeholder="Search client or location"
+              value={clientSearch}
+              onChange={(e) => setClientSearch(e.target.value)}
+              style={{ width: 240 }}
+            />
+          </Space>
+          <Table
+            size="small"
+            rowKey="key"
+            dataSource={filteredClients}
+            pagination={{ pageSize: 10, size: "small", showSizeChanger: false, showTotal: (t) => `${t} client(s)` }}
+            locale={{
+              emptyText: (
+                <Empty
+                  image={Empty.PRESENTED_IMAGE_SIMPLE}
+                  description={clientSearch ? "No client matches that search" : "No clients recorded yet"}
+                />
+              ),
+            }}
+            columns={[
+              {
+                title: "Client",
+                dataIndex: "name",
+                ellipsis: true,
+                render: (v) => <Tooltip title={v}><Text strong style={{ fontSize: 12 }}>{v}</Text></Tooltip>,
+              },
+              {
+                title: "Type",
+                dataIndex: "type",
+                width: 100,
+                render: (v) => <Tag color={v === "LGU" ? "blue" : "green"} style={{ margin: 0 }}>{v}</Tag>,
+              },
+              {
+                title: "Location",
+                dataIndex: "location",
+                width: 260,
+                ellipsis: true,
+                // Blank means the municipality/province were never encoded (or were
+                // stored only as a PSGC code, which is not a name). Say that rather
+                // than printing the code or an ambiguous dash.
+                render: (v) =>
+                  v ? (
+                    <Tooltip title={v}>
+                      <Text type="secondary" style={{ fontSize: 12 }}>{v}</Text>
+                    </Tooltip>
+                  ) : (
+                    <Tooltip title="No municipality or province recorded for this client">
+                      <Text type="secondary" style={{ fontSize: 11, fontStyle: "italic" }}>Not recorded</Text>
+                    </Tooltip>
+                  ),
+              },
+            ]}
+          />
+        </Space>
+      </Modal>
+
+      {/* ── Accredited Haulers drill-down ────────────────────────────────────
+          Same approach. Each hauler expands to the vehicles recorded for it, so
+          the fleet number on the chart can be checked against the plates behind
+          it without leaving the dashboard. */}
+      <Modal
+        open={haulersOpen}
+        onCancel={() => setHaulersOpen(false)}
+        title={
+          <Space size={6}>
+            <Text strong>Accredited Haulers</Text>
+            <Tag color="geekblue" style={{ margin: 0 }}>{haulerDirectory.length}</Tag>
+          </Space>
+        }
+        width={900}
+        footer={[<Button key="close" onClick={() => setHaulersOpen(false)}>Close</Button>]}
+        destroyOnHidden
+      >
+        <Space direction="vertical" size={10} style={{ width: "100%" }}>
+          <Input
+            allowClear
+            size="small"
+            prefix={<SearchOutlined />}
+            placeholder="Search hauler or plate number"
+            value={haulerSearch}
+            onChange={(e) => setHaulerSearch(e.target.value)}
+            style={{ width: 280 }}
+          />
+          <Table
+            size="small"
+            rowKey="key"
+            dataSource={filteredHaulers}
+            pagination={{ pageSize: 8, size: "small", showSizeChanger: false, showTotal: (t) => `${t} hauler(s)` }}
+            expandable={{
+              // Only offer the expander where there is something to expand — a
+              // hauler with a declared truck count but no plates on file has
+              // nothing to show, and an empty drawer reads as a loading failure.
+              rowExpandable: (row) => row.vehicles.length > 0,
+              // A wrapped row of tags forced the eye to re-parse "plate · type ·
+              // capacity" for every vehicle. A fleet is a LIST of comparable
+              // things, so it gets aligned columns: plates read down one edge,
+              // capacities down another, and a missing capacity is visible as a
+              // gap in a column instead of a silently shorter tag.
+              expandedRowRender: (row) => (
+                <Table
+                  size="small"
+                  rowKey="plate"
+                  dataSource={row.vehicles}
+                  pagination={row.vehicles.length > 6 ? { pageSize: 6, size: "small" } : false}
+                  showHeader={row.vehicles.length > 1}
+                  columns={[
+                    {
+                      title: "Plate No.",
+                      dataIndex: "plate",
+                      width: 130,
+                      render: (v) => (
+                        <Text strong style={{ fontSize: 12, fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace" }}>
+                          {v}
+                        </Text>
+                      ),
+                    },
+                    {
+                      title: "Vehicle Type",
+                      dataIndex: "type",
+                      ellipsis: true,
+                      width: 200,
+                      render: (v) =>
+                        v ? (
+                          <Text style={{ fontSize: 12 }}>{v}</Text>
+                        ) : (
+                          <Text type="secondary" style={{ fontSize: 11, fontStyle: "italic" }}>Not specified</Text>
+                        ),
+                    },
+                    {
+                      title: "Capacity",
+                      dataIndex: "capacity",
+                      width: 100,
+                      align: "right",
+                      render: (v, vehicle) =>
+                        v ? (
+                          <Text style={{ fontSize: 12, fontVariantNumeric: "tabular-nums" }}>
+                            {v.toLocaleString()}{" "}
+                            <Text type="secondary" style={{ fontSize: 11 }}>
+                              {vehicle.capacityUnit || baselineUnit}
+                            </Text>
+                          </Text>
+                        ) : (
+                          // Capacity is required before a trip using this vehicle
+                          // can be submitted, so a blank here is actionable — not
+                          // just missing decoration.
+                          <Tooltip title="No capacity recorded. Trips using this vehicle cannot be submitted until it is set on the Baseline.">
+                            <Tag color="warning" style={{ margin: 0, fontSize: 10 }}>Not set</Tag>
+                          </Tooltip>
+                        ),
+                    },
+                  ]}
+                />
+              ),
+            }}
+            locale={{
+              emptyText: (
+                <Empty
+                  image={Empty.PRESENTED_IMAGE_SIMPLE}
+                  description={haulerSearch ? "No hauler matches that search" : "No accredited haulers recorded"}
+                />
+              ),
+            }}
+            columns={[
+              {
+                title: "Hauler",
+                dataIndex: "name",
+                ellipsis: true,
+                render: (v) => <Tooltip title={v}><Text strong style={{ fontSize: 12 }}>{v}</Text></Tooltip>,
+              },
+              {
+                title: "Fleet",
+                dataIndex: "fleetSize",
+                width: 90,
+                align: "right",
+                render: (v) => <Tag color="blue" style={{ margin: 0 }}>{v}</Tag>,
+              },
+              {
+                title: "Plates on file",
+                width: 120,
+                align: "right",
+                render: (_, row) =>
+                  row.vehicles.length ? (
+                    <Text style={{ fontSize: 12 }}>{row.vehicles.length}</Text>
+                  ) : (
+                    <Tooltip title="Fleet size is declared, but no plate numbers have been recorded">
+                      <Text type="secondary" style={{ fontSize: 12 }}>none</Text>
+                    </Tooltip>
+                  ),
+              },
+            ]}
+          />
+        </Space>
+      </Modal>
     </div>
   );
 }

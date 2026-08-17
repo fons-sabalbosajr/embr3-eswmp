@@ -6,6 +6,8 @@ const multer = require("multer");
 const AppSettings = require("../models/AppSettings");
 const UserPortal = require("../models/UserPortal");
 const { writeLog } = require("../utils/logger");
+const serverCache = require("../utils/serverCache");
+const keys = require("../utils/cacheKeys");
 const {
   resolveCellName,
   applyResolvedCellNames,
@@ -88,7 +90,30 @@ const PORTAL_HIDDEN_ADMIN_FIELDS = "-cellCorrections";
  * submission, so a 60-submission organizer session still costs a single lookup.
  * A submission with no linked facility falls back to its SLF name, which is how
  * the rest of this route keys a facility too.
+ *
+ * ── WHY THIS IS BOUNDED AND CACHED ──────────────────────────────────────────
+ * `accreditedHaulers` is deliberately DUPLICATED onto every one of an SLF's
+ * baseline-carrying records (see mergeAccreditedHaulerCopies in routes/dataSLF.js)
+ * and carries each hauler's vehicles AND its client lists, making it by far the
+ * largest thing on the document — measured on production, one facility's 22
+ * records hold 5,099 KB of it. This read had no limit, so opening Organize Cell
+ * Placement pulled every copy and walked all of them in JS, to build a map in
+ * which the newest record already supplies every plate (`add` never overwrites).
+ * The same unbounded read of the same array is what made Data Entry time out for
+ * that facility before it was projected down.
+ *
+ * Two bounds, neither of which changes the answer in practice:
+ *   • FLEET_SOURCE_LIMIT — the copies are kept in sync, so the newest few records
+ *     hold the whole fleet. The limit is generous enough to absorb a partially
+ *     migrated facility while capping the worst case.
+ *   • serverCache (Redis-backed when configured) — the fleet changes only on a
+ *     baseline/submission write, and every one of those already invalidates
+ *     PORTAL_FLEET_CAPACITY_PREFIX, so the cache is exact rather than merely
+ *     time-bounded.
  */
+const FLEET_SOURCE_LIMIT = 8;
+const FLEET_CACHE_TTL_MS = 10 * 60 * 1000;
+
 async function buildBaselineCapacityIndex(submissions = []) {
   const DataSLF = require("../models/DataSLF");
   const byKey = new Map();
@@ -105,15 +130,24 @@ async function buildBaselineCapacityIndex(submissions = []) {
   if (facilityIds.size) or.push({ slfGenerator: { $in: [...facilityIds] } });
   if (slfNames.size) or.push({ slfName: { $in: [...slfNames] } });
 
-  const fleets = await DataSLF.find({
-    deletedAt: null,
-    "accreditedHaulers.0": { $exists: true },
-    $and: [{ $or: or }],
-  })
-    .setOptions({ includeHiddenYears: true })
-    .select("slfGenerator slfName accreditedHaulers.vehicles accreditedHaulers.plateNumber accreditedHaulers.capacity accreditedHaulers.capacityUnit")
-    .sort({ updatedAt: -1, createdAt: -1 })
-    .lean();
+  // Keyed by the exact facility set this batch spans, so two different SLFs never
+  // share an entry. Sorted so the same set always produces the same key.
+  const cacheKey =
+    `${keys.PORTAL_FLEET_CAPACITY_PREFIX}:` +
+    `${[...facilityIds].sort().join(",")}|${[...slfNames].sort().join(",")}`;
+
+  const fleets = await serverCache.wrap(cacheKey, FLEET_CACHE_TTL_MS, async () =>
+    DataSLF.find({
+      deletedAt: null,
+      "accreditedHaulers.0": { $exists: true },
+      $and: [{ $or: or }],
+    })
+      .setOptions({ includeHiddenYears: true })
+      .select("slfGenerator slfName accreditedHaulers.vehicles.plateNumber accreditedHaulers.vehicles.capacity accreditedHaulers.vehicles.capacityUnit accreditedHaulers.plateNumber accreditedHaulers.capacity accreditedHaulers.capacityUnit")
+      .sort({ updatedAt: -1, createdAt: -1 })
+      .limit(FLEET_SOURCE_LIMIT)
+      .lean(),
+  );
 
   const normalise = (plate) => String(plate || "").replace(/[\s-]+/g, "").toUpperCase();
   const add = (fleet, plate, capacity, unit) => {
@@ -745,6 +779,89 @@ router.get("/me", async (req, res) => {
       payload.developerEmail = ctx.actor;
     }
     res.json(payload);
+  } catch (error) {
+    return sendPortalContextError(res, error);
+  }
+});
+
+// ── Per-user portal UI dismissals ────────────────────────────────────────────
+// "Don't show again" for the What's New guided tour, and "Dismiss" on the portal
+// announcement banner.
+//
+// Both used to live only in the browser, and both came straight back:
+//   • the tour's dismissal was a localStorage key, and portal logout calls
+//     secureStorage.clearAll() → localStorage.clear(), so it was wiped on the way
+//     out and the tour greeted the user again on the very next login;
+//   • the banner's Dismiss was React state only, so it returned on every reload.
+// The same defect was fixed once already for the VERA introduction by moving the
+// flag server-side (UserPortal.veraOnboardingDismissedAt). This is that fix,
+// applied to the other two, and it carries the choices across browsers/devices.
+//
+// ONE endpoint for both: they are the same class of data, read at the same moment
+// on portal load, and two round trips for two flags is waste. The PATCH applies
+// only the keys actually present in the body, so dismissing one can never clear
+// the other.
+const UI_PREFERENCE_FIELDS =
+  "portalTourDismissedAt portalAnnouncementDismissedVersion portalAnnouncementDismissedAt";
+
+const uiPreferencePayload = (doc) => ({
+  tourDismissed: !!doc?.portalTourDismissedAt,
+  tourDismissedAt: doc?.portalTourDismissedAt || null,
+  // The version the user dismissed. The client compares it against the CURRENT
+  // announcement's version, so a newly published announcement still shows.
+  announcementDismissedVersion: doc?.portalAnnouncementDismissedVersion || null,
+  announcementDismissedAt: doc?.portalAnnouncementDismissedAt || null,
+});
+
+router.get("/ui-preferences", async (req, res) => {
+  try {
+    const ctx = await resolvePortalContext(req);
+    // Read the flags directly rather than widening PORTAL_USER_SAFE_FIELDS — that
+    // projection is the security boundary for every portal context read, and a UI
+    // preference is not a reason to loosen it.
+    const doc = await require("../models/UserPortal")
+      .findById(ctx.portalUser._id)
+      .select(UI_PREFERENCE_FIELDS)
+      .lean();
+    res.json(uiPreferencePayload(doc));
+  } catch {
+    // Never block the portal on a preference read. "Nothing dismissed" is the safe
+    // default — an announcement the user has already read is a far smaller problem
+    // than one they never see, and both stay dismissible either way.
+    res.json({ ...uiPreferencePayload(null), unavailable: true });
+  }
+});
+
+router.patch("/ui-preferences", async (req, res) => {
+  try {
+    // WRITE: a developer inspecting this account must not consume the real user's
+    // tour or their unread announcement on their behalf. The client keeps a local
+    // mirror, so both still stay closed for the developer's own session.
+    const ctx = await resolvePortalContext(req);
+    assertPortalWriteAllowed(ctx, req);
+
+    const update = {};
+    if (Object.hasOwn(req.body || {}, "tourDismissed")) {
+      const dismissed = req.body.tourDismissed === true || req.body.tourDismissed === "true";
+      update.portalTourDismissedAt = dismissed ? new Date() : null;
+    }
+    if (Object.hasOwn(req.body || {}, "announcementDismissedVersion")) {
+      const version = String(req.body.announcementDismissedVersion ?? "").trim();
+      update.portalAnnouncementDismissedVersion = version || null;
+      update.portalAnnouncementDismissedAt = version ? new Date() : null;
+    }
+    if (!Object.keys(update).length) {
+      return res.status(400).json({ message: "No preference was provided." });
+    }
+
+    const updated = await require("../models/UserPortal")
+      .findByIdAndUpdate(ctx.portalUser._id, update, {
+        returnDocument: "after",
+        select: UI_PREFERENCE_FIELDS,
+      })
+      .lean();
+    if (!updated) return res.status(404).json({ message: "Portal user not found." });
+    res.json(uiPreferencePayload(updated));
   } catch (error) {
     return sendPortalContextError(res, error);
   }

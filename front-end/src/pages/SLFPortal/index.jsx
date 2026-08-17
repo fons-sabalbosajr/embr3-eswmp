@@ -329,6 +329,13 @@ export default function SLFPortal() {
   const [baselineLoading, setBaselineLoading] = useState(false);
   const [slfInfoRefresh, setSlfInfoRefresh] = useState(0);
   const [baselineRefresh, setBaselineRefresh] = useState(0);
+  // Bumped by the socket handler when something an admin changed affects the
+  // client roster. Sits beside the two counters above for the same reason: the
+  // fetch it drives lives far below the handler that needs to trigger it.
+  const [wasteReceivedRefresh, setWasteReceivedRefresh] = useState(0);
+  // The last bump the waste-received effect acted on, so a plain menu switch is
+  // told apart from an admin-driven invalidation.
+  const lastWasteRefreshRef = useRef(0);
   // "region|province|municipality" the loaded address option lists belong to, so a
   // baseline refresh can skip re-fetching lists it already holds.
   const addressListsKeyRef = useRef("");
@@ -445,9 +452,22 @@ export default function SLFPortal() {
   const [notifDetail, setNotifDetail] = useState(null);
   const [portalSettings, setPortalSettings] = useState(null);
   const [portalAnnouncement, setPortalAnnouncement] = useState(null);
-  const [announcementDismissed, setAnnouncementDismissed] = useState(false);
+  // Which announcement VERSION this user dismissed. Version-keyed rather than a
+  // boolean so a newly published announcement still reaches them — muting the
+  // banner forever would be worse than the reload-and-it's-back behaviour this
+  // replaces, since it is how maintenance and rollout notices are delivered.
+  const [announcementDismissedVersion, setAnnouncementDismissedVersion] = useState(null);
+  // Temporarily overrides the dismissal while the tour is running: the tour's
+  // first step points at the banner, so it has to be on screen to be pointed at.
+  const [announcementRevealed, setAnnouncementRevealed] = useState(false);
   const [updateTourOpen, setUpdateTourOpen] = useState(false);
   const [updateTourCurrent, setUpdateTourCurrent] = useState(0);
+  // "Don't show again" for the What's New tour. The SERVER copy is the source of
+  // truth (see PATCH /portal-auth/ui-preferences) because logout wipes
+  // localStorage; this holds the resolved answer for the session so neither the
+  // tour nor the banner can act before the preferences have been read.
+  const [tourDismissed, setTourDismissed] = useState(false);
+  const [uiPrefsLoaded, setUiPrefsLoaded] = useState(false);
   const announcementBannerRef = useRef(null);
   // Idempotency key for the current submit attempt — reused across recoverable
   // retries (so a lost-response retry returns the saved record instead of
@@ -659,17 +679,102 @@ export default function SLFPortal() {
   const hasMultipleAssignedSlf =
     Array.isArray(portalUser?.assignedSlfName) &&
     portalUser.assignedSlfName.length > 1;
-  const openPortalUpdateTour = useCallback(() => {
-    // Don't show if this user has permanently dismissed the tour
-    const stableKey = portalUser?.email
-      ? `${PORTAL_TOUR_DISMISSED_PREFIX}${portalUser.email}`
-      : null;
-    if (stableKey && secureStorage.get(stableKey) === "1") return;
-    setAnnouncementDismissed(false);
-    setActiveMenu("data-entry");
-    setUpdateTourCurrent(0);
-    setUpdateTourOpen(true);
-  }, [portalUser?.email]);
+  const tourDismissedKey = portalUser?.email
+    ? `${PORTAL_TOUR_DISMISSED_PREFIX}${portalUser.email}`
+    : null;
+
+  // `manual: true` = the user clicked "What's New Tour" themselves, which always
+  // opens it. Only the AUTOMATIC opening honours the preference — a dismissal
+  // that also disabled the button left the user with no way back in.
+  const openPortalUpdateTour = useCallback(
+    ({ manual = true } = {}) => {
+      if (!manual && (tourDismissed || (tourDismissedKey && secureStorage.get(tourDismissedKey) === "1"))) {
+        return;
+      }
+      // Show the banner for the duration of the tour without discarding the
+      // user's dismissal — the first step targets it.
+      setAnnouncementRevealed(true);
+      setActiveMenu("data-entry");
+      setUpdateTourCurrent(0);
+      setUpdateTourOpen(true);
+    },
+    [tourDismissed, tourDismissedKey],
+  );
+
+  // ONE place that records "never show this again", used by every exit from the
+  // tour. The local mirror is written first so the answer survives even if the
+  // request fails; the server copy is what makes it survive logout.
+  const dismissTourPermanently = useCallback(() => {
+    setUpdateTourOpen(false);
+    setTourDismissed(true);
+    // Hand the banner back to whatever the user's own dismissal says.
+    setAnnouncementRevealed(false);
+    try {
+      if (tourDismissedKey) secureStorage.set(tourDismissedKey, "1");
+      if (portalUpdateTourSeenKey) secureStorage.set(portalUpdateTourSeenKey, "1");
+    } catch { /* storage blocked — the server copy still answers next login */ }
+    api.patch("/portal-auth/ui-preferences", { tourDismissed: true }).catch(() => {
+      // Best-effort: the local mirror already suppresses it in this browser, and
+      // the next successful dismissal will persist it. Never interrupt the user
+      // with an error for closing a tour.
+    });
+  }, [portalUpdateTourSeenKey, tourDismissedKey]);
+
+  // Dismissing the announcement banner. Persisted against the CURRENT version, so
+  // it stays gone across reloads and logins but a new announcement still appears.
+  const dismissAnnouncement = useCallback(() => {
+    if (!portalAnnouncementVersion) return;
+    setAnnouncementDismissedVersion(portalAnnouncementVersion);
+    setAnnouncementRevealed(false);
+    api
+      .patch("/portal-auth/ui-preferences", {
+        announcementDismissedVersion: portalAnnouncementVersion,
+      })
+      .catch(() => {
+        // Best-effort, exactly like the tour: it is hidden for this session
+        // regardless, and a failed write only costs the banner reappearing later.
+      });
+  }, [portalAnnouncementVersion]);
+
+  // The banner is hidden only when THIS announcement is the one that was
+  // dismissed — and never while the tour is pointing at it.
+  const announcementDismissed =
+    !announcementRevealed &&
+    !!portalAnnouncementVersion &&
+    announcementDismissedVersion === portalAnnouncementVersion;
+
+  // Resolve both dismissals once per signed-in user, server first. Until this
+  // answers, `uiPrefsLoaded` holds back the tour's auto-open AND the banner, so a
+  // slow response can never flash either at somebody who already dismissed them.
+  useEffect(() => {
+    if (!portalUser?.email) return undefined;
+    let cancelled = false;
+    // The local mirror answers instantly and covers the offline case; the server
+    // is what makes the choice survive logout, which is the whole point.
+    let mirrored = false;
+    try { mirrored = tourDismissedKey && secureStorage.get(tourDismissedKey) === "1"; } catch { /* blocked */ }
+    if (mirrored) setTourDismissed(true);
+
+    api
+      .get("/portal-auth/ui-preferences")
+      .then(({ data }) => {
+        if (cancelled) return;
+        if (data?.tourDismissed) {
+          setTourDismissed(true);
+          // Re-seat the mirror: a logout wiped it, and this is the read that
+          // repairs it for the rest of the session.
+          try { if (tourDismissedKey) secureStorage.set(tourDismissedKey, "1"); } catch { /* blocked */ }
+        }
+        if (data?.announcementDismissedVersion) {
+          setAnnouncementDismissedVersion(data.announcementDismissedVersion);
+        }
+      })
+      .catch(() => { /* keep whatever the mirror said */ })
+      .finally(() => { if (!cancelled) setUiPrefsLoaded(true); });
+
+    return () => { cancelled = true; };
+  }, [portalUser?.email, tourDismissedKey]);
+
   const updateTourSteps = useMemo(() => {
     const steps = [
       {
@@ -716,6 +821,10 @@ export default function SLFPortal() {
           baselinePanelRef.current ||
           dataEntryTabsRef.current,
         placement: "top",
+        // Say plainly what finishing does. The tour has always stopped appearing
+        // once closed or completed — the label makes that a promise the user can
+        // see, rather than something they have to test by logging out.
+        nextButtonProps: { children: "Got it — don't show again" },
       },
     );
 
@@ -1029,15 +1138,21 @@ export default function SLFPortal() {
 
   useEffect(() => {
     if (!portalAnnouncement || !portalUser) return;
+    // Wait for the tour preference before deciding anything. This check has to
+    // come BEFORE the seen-marker below: marking the announcement seen and then
+    // bailing out would consume the session's one chance to show it, so a slow
+    // preference read would silently swallow the announcement entirely.
+    if (!uiPrefsLoaded) return;
     const key = `portal-announcement-seen-${portalAnnouncement.updatedAt || portalAnnouncement._id || portalAnnouncement.portalAnnouncementTitle}`;
     if (secureStorage.sessionGet(key) === "1") return;
     secureStorage.sessionSet(key, "1");
     if (isPortalUpdateAnnouncement) {
       if (
+        !tourDismissed &&
         portalUpdateTourSeenKey &&
         secureStorage.get(portalUpdateTourSeenKey) !== "1"
       ) {
-        openPortalUpdateTour();
+        openPortalUpdateTour({ manual: false });
       }
       return;
     }
@@ -1058,6 +1173,8 @@ export default function SLFPortal() {
     portalAnnouncement,
     portalUpdateTourSeenKey,
     portalUser,
+    tourDismissed,
+    uiPrefsLoaded,
   ]);
 
   useEffect(() => {
@@ -2391,10 +2508,21 @@ export default function SLFPortal() {
           .catch(() => {});
         return;
       }
-      if (!target || ["facility", "submissions", "baselines"].includes(target)) {
+      // `hauler-clients` is what the admin's Hauler Clients editor emits (see
+      // notifyHaulerClientChange). It was not listed here, so an admin adding,
+      // renaming or deleting a client reached the portal and was dropped on the
+      // floor — the Overview's Clients Served and Accredited Haulers cards kept
+      // showing the pre-edit roster until the page was reloaded by hand.
+      const ROSTER_TARGETS = ["facility", "submissions", "baselines", "hauler-clients"];
+      if (!target || ROSTER_TARGETS.includes(target)) {
         setSlfInfoRefresh((n) => n + 1);
         invalidateCache(`${PORTAL_SUBMISSIONS_CACHE_KEY}-${portalUser?.email || ""}`);
         fetchSubmissions(true);
+        // The client roster comes from the waste-received summary, which nothing
+        // here refetched. Bumping the counter is all this handler does — the
+        // effect that owns that fetch knows the active SLF (and therefore its
+        // cache key), which this closure does not.
+        setWasteReceivedRefresh((n) => n + 1);
       }
       // The baseline record itself (and with it the approval / lock state the Data
       // Entry form gates on) was NOT reloaded here — only slfInfo and the submission
@@ -3784,15 +3912,25 @@ export default function SLFPortal() {
 
   useEffect(() => {
     if (activeMenu === "overview" && activeSlfName) {
-      // Returning to the dashboard within the cache window keeps the charts
-      // already on screen instead of tearing them down for an identical fetch.
       const key = `waste:${activeSlfId || activeSlfName}`;
-      if (isMenuDataFresh(key)) return;
+      // A bump means an admin changed something that moves this data, so the
+      // freshness window does NOT apply — that window exists to avoid refetching
+      // data nothing has touched, and something just did. Both caches are dropped
+      // first, or the refetch is handed back the payload we are trying to replace.
+      const invalidated = wasteReceivedRefresh !== lastWasteRefreshRef.current;
+      if (invalidated) {
+        lastWasteRefreshRef.current = wasteReceivedRefresh;
+        invalidateCache(`${PORTAL_WASTE_RECEIVED_CACHE_KEY}:${activeSlfId || activeSlfName}`);
+      } else if (isMenuDataFresh(key)) {
+        // Returning to the dashboard within the cache window keeps the charts
+        // already on screen instead of tearing them down for an identical fetch.
+        return;
+      }
       markMenuFetched(key);
       handleOpenWasteReceived({ openModal: false });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeMenu, activeSlfId, activeSlfName]);
+  }, [activeMenu, activeSlfId, activeSlfName, wasteReceivedRefresh]);
 
   // ── Support Ticket Functions ──
   const fetchSupportTickets = useCallback(async (options = {}) => {
@@ -7717,7 +7855,11 @@ export default function SLFPortal() {
               will be sent once your connection is restored.
             </div>
           )}
-          {portalAnnouncement && !announcementDismissed && (
+          {/* `uiPrefsLoaded` gates the banner so a dismissed announcement is never
+              rendered and then yanked away. If the preference read fails the flag
+              still flips, so the banner shows — an announcement seen twice beats
+              one that is never seen. */}
+          {portalAnnouncement && uiPrefsLoaded && !announcementDismissed && (
             <div ref={announcementBannerRef}>
               <Collapse
               size="small"
@@ -7753,7 +7895,7 @@ export default function SLFPortal() {
                           size="small"
                           type="text"
                           onClick={() => {
-                            setAnnouncementDismissed(true);
+                            dismissAnnouncement();
                           }}
                         >
                           Dismiss
@@ -7913,6 +8055,7 @@ export default function SLFPortal() {
                     size="small"
                     icon={<ThunderboltOutlined />}
                     onClick={() => setBulkOrganizeOpen(true)}
+                    type="primary"
                   >
                     Bulk Upload
                   </Button>
@@ -8989,32 +9132,16 @@ export default function SLFPortal() {
             placeholder="Select date & time"
           />
         </Modal>
+        {/* Closing (X / mask / Esc) and finishing both mean the same thing to the
+            user — "I'm done with this" — so both route through the ONE helper
+            that records it server-side. It previously wrote only to localStorage,
+            which logout wipes, so the tour came back on the next sign-in. */}
         <Tour
           open={updateTourOpen}
           current={updateTourCurrent}
           onChange={setUpdateTourCurrent}
-          onClose={() => {
-            setUpdateTourOpen(false);
-            // Mark as permanently dismissed for this user
-            const stableKey = portalUser?.email
-              ? `${PORTAL_TOUR_DISMISSED_PREFIX}${portalUser.email}`
-              : null;
-            if (stableKey) secureStorage.set(stableKey, "1");
-            if (portalUpdateTourSeenKey) {
-              secureStorage.set(portalUpdateTourSeenKey, "1");
-            }
-          }}
-          onFinish={() => {
-            setUpdateTourOpen(false);
-            // Also mark as dismissed when user completes all steps
-            const stableKey = portalUser?.email
-              ? `${PORTAL_TOUR_DISMISSED_PREFIX}${portalUser.email}`
-              : null;
-            if (stableKey) secureStorage.set(stableKey, "1");
-            if (portalUpdateTourSeenKey) {
-              secureStorage.set(portalUpdateTourSeenKey, "1");
-            }
-          }}
+          onClose={dismissTourPermanently}
+          onFinish={dismissTourPermanently}
           steps={updateTourSteps}
         />
 
