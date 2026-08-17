@@ -132,6 +132,24 @@ const userPortalSchema = new mongoose.Schema(
     // logout wipes localStorage (secureStorage.clearAll), which silently discarded
     // the opt-out and made the intro reappear on the next login.
     veraOnboardingDismissedAt: { type: Date, default: null },
+    // "Don't show again" for the What's New guided tour (antd Tour on the portal
+    // home). Here for exactly the same reason as the field above: the dismissal
+    // was kept only in localStorage under a per-email key, and portal logout calls
+    // secureStorage.clearAll() → localStorage.clear(). The user dismissed the tour,
+    // logged out, and it greeted them again on the next sign-in — every time.
+    // Server-side, it also follows them to another browser or device.
+    portalTourDismissedAt: { type: Date, default: null },
+    // Which portal announcement the user dismissed, identified by its VERSION
+    // (updatedAt / id / title — the same value the portal derives).
+    //
+    // Deliberately a version, not a boolean. "Dismissed" has to mean "I have read
+    // THIS announcement", because a global flag would silently suppress every
+    // future announcement the admin publishes — the banner is how portal users
+    // are told about maintenance windows and rollouts, so muting it permanently
+    // would be worse than the reappearing banner this replaces. A new
+    // announcement gets a new version and shows again.
+    portalAnnouncementDismissedVersion: { type: String, trim: true, default: null },
+    portalAnnouncementDismissedAt: { type: Date, default: null },
   },
   { timestamps: true, collection: "user_portal" }
 );

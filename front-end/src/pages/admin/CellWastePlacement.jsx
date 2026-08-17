@@ -171,17 +171,29 @@ export default function CellWastePlacement({ canEdit = true }) {
     fetchPage();
   }, [fetchPage]);
 
+  // A single admin action fans out into several `data-refresh` events (the write
+  // itself, then the facility occupancy recompute), and the page ALSO refreshes
+  // itself directly after a save. Unthrottled, one Save Placement produced four
+  // requests — two list pages and two facility rollups — for one change. Coalesce
+  // the socket-driven refresh into one trailing call per burst; the explicit
+  // post-save refresh stays, so correctness never depends on socket delivery.
   useEffect(() => {
     const socket = getSocket();
     if (!socket) return undefined;
+    let timer = null;
     const handler = ({ target } = {}) => {
-      if (!target || target === "submissions" || target === "baselines" || target === "facility") {
+      if (target && !["submissions", "baselines", "facility"].includes(target)) return;
+      window.clearTimeout(timer);
+      timer = window.setTimeout(() => {
         fetchPage({ silent: true });
         setFacilityRefresh((n) => n + 1);
-      }
+      }, 400);
     };
     socket.on("data-refresh", handler);
-    return () => socket.off("data-refresh", handler);
+    return () => {
+      window.clearTimeout(timer);
+      socket.off("data-refresh", handler);
+    };
   }, [fetchPage]);
 
   const submissions = pageRecords;
@@ -436,7 +448,10 @@ export default function CellWastePlacement({ canEdit = true }) {
             <Text type="secondary">Assign portal submission truck volumes to active landfill cells.</Text>
           </div>
           <Space wrap>
-            <Button icon={<ReloadOutlined />} loading={loading} onClick={() => { fetchPage(); fetchReference(); setFacilityRefresh((n) => n + 1); }}>
+            {/* `fetchReference()` used to be called here and does not exist in this
+                component — Refresh threw a ReferenceError before it could reload
+                anything. The two refreshes below are the whole page's data. */}
+            <Button icon={<ReloadOutlined />} loading={loading} onClick={() => { fetchPage(); setFacilityRefresh((n) => n + 1); }}>
               Refresh
             </Button>
           </Space>

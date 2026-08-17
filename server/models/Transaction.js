@@ -76,5 +76,11 @@ transactionSchema.index({ createdAt: -1 });
 // the whole audit log on every open and on every socket refresh.
 transactionSchema.index({ submittedBy: 1, type: 1, createdAt: -1 });
 transactionSchema.index({ performedBy: 1, type: 1, createdAt: -1 });
+// Batch idempotency: bulk cell organization (POST /data-slf/portal-cell-assignments/bulk)
+// asks "has this batchId already been applied?" before writing anything. Without
+// this the lookup fell back to {type,createdAt} and scanned every bulk record ever
+// written, on the hot path of an operation the user is waiting on. Sparse — only
+// batched writes carry a batchId.
+transactionSchema.index({ "meta.batchId": 1 }, { sparse: true });
 
 module.exports = mongoose.model("Transaction", transactionSchema, "transactions");

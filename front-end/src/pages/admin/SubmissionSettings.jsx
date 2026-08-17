@@ -170,6 +170,11 @@ export default function SubmissionSettings({
   const fetchingRef = useRef(null);
   const pendingRefreshRef = useRef(false);
   const latestRequestKeyRef = useRef("");
+  // Bumped by every confirmed status write. A list request captures it when it
+  // starts; if it has moved by the time the response lands, that payload was
+  // produced BEFORE the write and must not be allowed to paint the old status
+  // back over the row. See applyUpdatedEntries.
+  const mutationSeqRef = useRef(0);
   const [statusFilter, setStatusFilter] = useState("all");
   const [cellPlacementFilter, setCellPlacementFilter] = useState("all");
   // Apply an incoming Portal Submissions shortcut context (from the Disposal
@@ -298,6 +303,28 @@ export default function SubmissionSettings({
     invalidateCache(currentCacheKey);
   }, [currentCacheKey]);
 
+  /**
+   * Apply a confirmed server response for one or more entries onto the table.
+   *
+   * MERGE, never replace. `cellPlacement` and `remarks` are derived server-side
+   * and are not stored on the submission, so swapping the whole row object for
+   * whatever an endpoint happened to return is what blanked those two columns
+   * after an approval. The approval endpoint now returns the full row shape, and
+   * merging means any field a future endpoint omits keeps its last known value
+   * instead of the column falling back to its empty rendering.
+   */
+  const applyUpdatedEntries = useCallback((entries) => {
+    const updatedById = new Map(entries.map((e) => [e._id, e]));
+    // Marks every in-flight list request as predating this write.
+    mutationSeqRef.current += 1;
+    setData((prev) =>
+      prev.map((entry) => {
+        const next = updatedById.get(entry._id);
+        return next ? { ...entry, ...next } : entry;
+      }),
+    );
+  }, []);
+
   const handleRepairXX = async () => {
     setRepairingXX(true);
     try {
@@ -403,6 +430,10 @@ export default function SubmissionSettings({
   const fetchData = useCallback(
     async ({ force = false, silent = false } = {}) => {
       const requestKey = currentCacheKey;
+      // Snapshot the mutation counter. Anything this request returns describes the
+      // world as it was NOW; if a status write lands before the response does, the
+      // payload is stale for the rows that write touched.
+      const seenMutationSeq = mutationSeqRef.current;
       if (fetchingRef.current === requestKey) {
         if (force) pendingRefreshRef.current = true;
         return;
@@ -450,6 +481,13 @@ export default function SubmissionSettings({
             force,
             onData: (payload) => {
               if (latestRequestKeyRef.current !== requestKey) return;
+              // A status write happened while this was in flight (or this is the
+              // stale half of a stale-while-revalidate pair). Dropping the payload
+              // is safe and correct: the row already holds the CONFIRMED server
+              // response for that write, and every write is followed by a cache
+              // invalidation plus a broadcast, so a genuinely fresh list is
+              // already on its way. Applying it would repaint the old status.
+              if (mutationSeqRef.current !== seenMutationSeq) return;
               const rows = Array.isArray(payload?.rows)
                 ? payload.rows
                 : Array.isArray(payload)
@@ -511,17 +549,28 @@ export default function SubmissionSettings({
     return () => clearInterval(interval);
   }, [fetchData]);
 
+  // The server now broadcasts on every status change, which is what makes an
+  // approval show up in other admin sessions without polling. Acknowledging a
+  // grouped row still sends several requests (one per progress step), so coalesce
+  // the resulting burst into ONE trailing refetch — the row's own status is
+  // already correct from the in-place merge, this is the authoritative catch-up.
   useEffect(() => {
     const socket = getSocket();
     if (!socket) return undefined;
+    let timer = null;
     const handleRefresh = ({ target } = {}) => {
-      if (!target || target === "submissions") {
+      if (target && target !== "submissions") return;
+      window.clearTimeout(timer);
+      timer = window.setTimeout(() => {
         invalidateCache(currentCacheKey);
         fetchData({ force: true, silent: true });
-      }
+      }, 400);
     };
     socket.on("data-refresh", handleRefresh);
-    return () => socket.off("data-refresh", handleRefresh);
+    return () => {
+      window.clearTimeout(timer);
+      socket.off("data-refresh", handleRefresh);
+    };
   }, [currentCacheKey, fetchData]);
 
   // Resolve PSGC codes to names when viewing a record
@@ -814,9 +863,13 @@ export default function SubmissionSettings({
 
       try {
         // Process in batches so the progress bar reflects how many of the
-        // grouped submissions have completed. Single entries finish in one tick;
-        // multiple entries advance one at a time so the percentage is visible.
-        const BATCH = pendingIds.length > 1 ? 1 : 5;
+        // grouped submissions have completed. Sending ONE entry per request made
+        // the progress bar smooth at the cost of N sequential round trips — a
+        // 20-entry group paid twenty full approval round trips to draw twenty
+        // ticks. Size the batch so the bar still advances in steps while the
+        // number of requests stays bounded no matter how large the group is.
+        const PROGRESS_STEPS = 5;
+        const BATCH = Math.max(1, Math.ceil(pendingIds.length / PROGRESS_STEPS));
         const allUpdated = [];
         for (let i = 0; i < pendingIds.length; i += BATCH) {
           const chunk = pendingIds.slice(i, i + BATCH);
@@ -836,10 +889,7 @@ export default function SubmissionSettings({
 
         // Merge updated entries into local state instead of re-fetching everything
         if (allUpdated.length > 0) {
-          const updatedById = new Map(allUpdated.map((e) => [e._id, e]));
-          setData((prev) =>
-            prev.map((entry) => updatedById.get(entry._id) || entry),
-          );
+          applyUpdatedEntries(allUpdated);
         }
         bumpSubmissionsCache();
         secureStorage.invalidateDashboard();
@@ -868,7 +918,7 @@ export default function SubmissionSettings({
         if (clearSelection) setBulkAcknowledgeLoading(false);
       }
     },
-    [addActionKey, removeActionKey, bumpSubmissionsCache, data, selectedRowKeys],
+    [addActionKey, applyUpdatedEntries, removeActionKey, bumpSubmissionsCache, data, selectedRowKeys],
   );
 
   const updateStatus = async (recordOrId, status) => {
@@ -903,10 +953,7 @@ export default function SubmissionSettings({
         ? statusResult.data.map(normalizeSubmissionRecord)
         : [];
       if (updatedEntries.length > 0) {
-        const updatedById = new Map(updatedEntries.map((e) => [e._id, e]));
-        setData((prev) =>
-          prev.map((entry) => updatedById.get(entry._id) || entry),
-        );
+        applyUpdatedEntries(updatedEntries);
       }
       bumpSubmissionsCache();
       secureStorage.invalidateDashboard();

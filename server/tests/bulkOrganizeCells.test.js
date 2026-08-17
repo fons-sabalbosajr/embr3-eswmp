@@ -2,6 +2,11 @@
  * Bulk Organize Cells — the file upload must leave the same database state the
  * manual organizer would.
  *
+ * The batch is persisted with ONE bulkWrite carrying one targeted `updateOne` per
+ * touched submission (not a save() per submission rewriting its whole trucks
+ * array), so these tests also pin WHAT is written: only the placement paths the
+ * batch actually changed, and only the new movement records.
+ *
  * The template now carries Truck Capacity, because a trip missing one cannot be
  * completed by a cell alone: the operator would place every row, apply the batch,
  * and still be blocked. The endpoint therefore accepts and applies a capacity to
@@ -62,7 +67,6 @@ function makeDoc() {
     status: "acknowledged",
     baselineUnit: "tons",
     cellCorrections: [],
-    saved: 0,
     trucks: [
       {
         disposalTicketNo: "DT-1",
@@ -88,9 +92,7 @@ function makeDoc() {
         ],
       },
     ],
-    markModified() {},
-    async save() { this.saved += 1; },
-    toObject() { const { markModified, save, toObject, saved, ...rest } = this; return rest; },
+    toObject() { const { toObject, ...rest } = this; return rest; },
   };
 }
 
@@ -105,6 +107,10 @@ const chain = (value) => {
 };
 
 let server; let baseUrl; let doc; let occupancyRefreshes; let transactions;
+// Every bulkWrite command the route issued, flattened to its ops.
+let writes;
+/** All `$set` paths staged across the batch. */
+const setPaths = () => writes.flat().flatMap((op) => Object.keys(op.updateOne.update.$set || {}));
 
 test.before(async () => {
   AppLog.create = async () => ({});
@@ -116,6 +122,10 @@ test.before(async () => {
   SlfFacility.findById = () => chain(FACILITY);
   SlfFacility.findByIdAndUpdate = () => { occupancyRefreshes += 1; return chain(FACILITY); };
   DataSLF.find = () => chain([doc]);
+  DataSLF.bulkWrite = async (ops) => {
+    writes.push(ops);
+    return { matchedCount: ops.length, modifiedCount: ops.length };
+  };
 
   const app = express();
   app.use(express.json());
@@ -126,7 +136,7 @@ test.before(async () => {
 });
 
 test.after(async () => { if (server) await new Promise((r) => server.close(r)); });
-test.beforeEach(() => { doc = makeDoc(); occupancyRefreshes = 0; transactions = []; });
+test.beforeEach(() => { doc = makeDoc(); occupancyRefreshes = 0; transactions = []; writes = []; });
 
 const token = jwt.sign({ id: String(new mongoose.Types.ObjectId()), role: "portal_user" }, process.env.JWT_SECRET);
 
@@ -151,8 +161,50 @@ test("a capacity supplied by the file is applied to the same slot as the cell", 
   assert.equal(body.applied, 1);
   assert.equal(doc.trucks[0].cellIndex, 1, "cell written");
   assert.equal(doc.trucks[0].truckCapacity, 14, "capacity written to the truck");
-  assert.equal(doc.saved, 1, "one document write");
+  assert.equal(writes.length, 1, "ONE bulkWrite for the whole batch");
+  assert.equal(writes[0].length, 1, "one targeted op for the one touched submission");
+  assert.deepEqual(writes[0][0].updateOne.filter, { _id: doc._id, deletedAt: null });
+  assert.deepEqual(
+    setPaths().sort(),
+    [
+      "trucks.0.cellIndex", "trucks.0.cellName", "trucks.0.cellType",
+      "trucks.0.truckCapacity", "trucks.0.truckCapacityUnit",
+    ].sort(),
+    "only the placement's own fields are written — not the whole trucks array",
+  );
   assert.equal(occupancyRefreshes, 1, "occupancy recomputed, never incremented");
+});
+
+test("a batch across many submissions is still exactly one bulkWrite", async () => {
+  // Two submissions, four placements. The old path issued one save() per
+  // submission, sequentially; the cost must now scale with the round trip, not
+  // with how many submissions the file touches.
+  const second = { ...makeDoc(), _id: new mongoose.Types.ObjectId(), submissionId: "SUB-BULK-2" };
+  const both = [doc, second];
+  const prevFind = DataSLF.find;
+  DataSLF.find = () => chain(both);
+  try {
+    const { status, body } = await bulk({
+      assignments: [
+        row({ truckCapacity: 14 }),
+        row({ truckIndex: 1, vehicleIndex: 1, cellIndex: 3, cellName: "CELL 04", truckCapacity: 9 }),
+        row({ _id: String(second._id), submissionId: "SUB-BULK-2", truckCapacity: 14 }),
+        row({ _id: String(second._id), submissionId: "SUB-BULK-2", truckIndex: 1, vehicleIndex: 1, cellIndex: 3, cellName: "CELL 04", truckCapacity: 9 }),
+      ],
+    });
+    assert.equal(status, 200, body.message);
+    assert.equal(body.applied, 4);
+    assert.equal(writes.length, 1, "one command");
+    assert.equal(writes[0].length, 2, "one op per submission, not per row");
+  } finally {
+    DataSLF.find = prevFind;
+  }
+});
+
+test("a successful apply does not echo back every valid row", async () => {
+  const { body } = await bulk({ assignments: [row({ truckCapacity: 14 })] });
+  assert.equal(body.summary.valid, 1, "the counts are still reported");
+  assert.deepEqual(body.rows, [], "…without repeating rows the client already has");
 });
 
 test("a per-vehicle row writes the capacity to that vehicle only", async () => {
@@ -171,7 +223,7 @@ test("a non-positive capacity is rejected and nothing is written", async () => {
     assert.equal(status, 400, `capacity ${bad}`);
     assert.equal(body.rows[0].code, "bad_capacity");
   }
-  assert.equal(doc.saved, 0);
+  assert.equal(writes.length, 0);
 });
 
 test("omitting the capacity leaves the stored one alone", async () => {
@@ -188,7 +240,7 @@ test("a dry run validates and writes nothing", async () => {
   assert.equal(status, 200);
   assert.equal(body.preview, true);
   assert.equal(body.summary.valid, 1);
-  assert.equal(doc.saved, 0, "no write on a preview");
+  assert.equal(writes.length, 0, "no write on a preview");
   assert.equal(occupancyRefreshes, 0);
 });
 
@@ -212,14 +264,14 @@ test("a ticket that disagrees with the resolved trip is rejected", async () => {
   const { status, body } = await bulk({ assignments: [row({ disposalTicketNo: "DT-999" })] });
   assert.equal(status, 400);
   assert.equal(body.rows[0].code, "bad_ticket");
-  assert.equal(doc.saved, 0);
+  assert.equal(writes.length, 0);
 });
 
 test("a closed cell cannot receive waste", async () => {
   const { status, body } = await bulk({ assignments: [row({ cellIndex: 2, cellName: "CELL 03", truckCapacity: 14 })] });
   assert.equal(status, 400);
   assert.equal(body.rows[0].code, "unavailable");
-  assert.equal(doc.saved, 0);
+  assert.equal(writes.length, 0);
 });
 
 test("one invalid row blocks the whole batch unless partial is asked for", async () => {
@@ -228,7 +280,7 @@ test("one invalid row blocks the whole batch unless partial is asked for", async
   });
   assert.equal(status, 400);
   assert.match(body.message, /No changes were applied/);
-  assert.equal(doc.saved, 0, "the valid row is not written either");
+  assert.equal(writes.length, 0, "the valid row is not written either");
 });
 
 test("a locked submission is refused", async () => {
@@ -236,5 +288,5 @@ test("a locked submission is refused", async () => {
   const { status, body } = await bulk({ assignments: [row({ truckCapacity: 14 })] });
   assert.equal(status, 400);
   assert.equal(body.rows[0].code, "locked");
-  assert.equal(doc.saved, 0);
+  assert.equal(writes.length, 0);
 });

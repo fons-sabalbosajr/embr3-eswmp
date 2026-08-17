@@ -24,6 +24,7 @@ delete process.env.REDIS_HOST;
 mongoose.set("bufferCommands", false);
 
 const DataSLF = require("../models/DataSLF");
+const serverCache = require("../utils/serverCache");
 const { buildBaselineCapacityIndex } = require("../routes/portalAuth");
 
 const FACILITY_ID = new mongoose.Types.ObjectId();
@@ -50,11 +51,14 @@ const FLEET_DOC = {
 let fleetDocs;
 let queries;
 
+let limits;
+
 const chain = (value) => {
   const c = {
     select: () => c,
     sort: () => c,
     setOptions: () => c,
+    limit: (n) => { limits.push(n); return c; },
     lean: () => c,
     then: (resolve, reject) => Promise.resolve(value).then(resolve, reject),
   };
@@ -64,6 +68,11 @@ const chain = (value) => {
 test.beforeEach(() => {
   fleetDocs = [FLEET_DOC];
   queries = [];
+  limits = [];
+  // The fleet lookup is cached (serverCache, Redis-backed in production). Clear
+  // the in-process tier between tests so each one measures its own queries
+  // instead of inheriting the previous test's warm cache.
+  serverCache._clearLocal();
   DataSLF.find = (filter) => {
     queries.push(filter);
     return chain(fleetDocs);
@@ -142,6 +151,70 @@ test("the whole batch costs ONE query, scoped to baselines that have a fleet", a
   assert.equal(queries.length, 1, "one lookup per batch, not per submission");
   assert.deepEqual(queries[0]["accreditedHaulers.0"], { $exists: true });
   assert.equal(queries[0].deletedAt, null);
+});
+
+// ── What made Organize Cell Placement slow to open ──────────────────────────
+test("the fleet scan is BOUNDED — it never reads every baseline copy", async () => {
+  // accreditedHaulers is duplicated onto every one of an SLF's baseline-carrying
+  // records and carries each hauler's vehicles AND client lists; measured on
+  // production one facility's 22 records hold 5,099 KB of it. Unbounded, opening
+  // the organizer read all of it to build a map the newest record already
+  // answers, because `add` never overwrites.
+  await buildBaselineCapacityIndex([submission()]);
+  assert.equal(limits.length, 1, "the query is limited");
+  assert.ok(limits[0] > 0 && limits[0] <= 25, `a small bound, got ${limits[0]}`);
+});
+
+test("only the three fields the index reads are fetched", () => {
+  const projection = slice(portalAuth, "serverCache.wrap(cacheKey", ".sort({ updatedAt");
+  // A vehicle subdocument also carries `selectedClients`. Selecting whole
+  // vehicles pulled every vehicle's client list across every copy, to read a
+  // plate and a number.
+  ["accreditedHaulers.vehicles.plateNumber", "accreditedHaulers.vehicles.capacity"].forEach((field) =>
+    assert.ok(projection.includes(field), `${field} must be projected explicitly`),
+  );
+  assert.ok(
+    !/select\([^)]*accreditedHaulers\.vehicles(?!\.)/.test(projection),
+    "the whole vehicles array must not be selected",
+  );
+});
+
+test("a repeat open is served from cache, not re-read", async () => {
+  const batch = [submission(), submission()];
+  const first = await buildBaselineCapacityIndex(batch);
+  assert.equal(queries.length, 1);
+
+  // Reopening the organizer must not re-read the fleet. Invalidation is exact —
+  // every baseline/submission write clears PORTAL_FLEET_CAPACITY_PREFIX — so this
+  // cannot serve a stale plate after a new vehicle is accredited.
+  const second = await buildBaselineCapacityIndex(batch);
+  assert.equal(queries.length, 1, "the second open issued no query");
+  assert.deepEqual(
+    [...second.get(String(FACILITY_ID)).entries()],
+    [...first.get(String(FACILITY_ID)).entries()],
+    "and returns the same fleet",
+  );
+});
+
+test("a different facility does not share the cached fleet", async () => {
+  await buildBaselineCapacityIndex([submission()]);
+  assert.equal(queries.length, 1);
+  // A second SLF is a different key — serving the first one's fleet here would
+  // offer an operator a capacity from somebody else's baseline.
+  await buildBaselineCapacityIndex([
+    submission({ slfGenerator: { _id: OTHER_FACILITY_ID, cellNames: [] }, slfName: "Other SLF" }),
+  ]);
+  assert.equal(queries.length, 2, "a facility set it has not seen is looked up");
+});
+
+test("the cache key is invalidated by the writes that change a fleet", () => {
+  const socketEmit = fs.readFileSync(path.join(__dirname, "..", "utils", "socketEmit.js"), "utf8");
+  const slfData = socketEmit.slice(socketEmit.indexOf("const slfData = ["), socketEmit.indexOf("switch (target)"));
+  assert.match(
+    slfData,
+    /keys\.PORTAL_FLEET_CAPACITY_PREFIX/,
+    "a baseline save must not leave a newly accredited vehicle waiting out a TTL",
+  );
 });
 
 // ── How it is offered ───────────────────────────────────────────────────────

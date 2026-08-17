@@ -54,6 +54,12 @@ function staleKeysFor(target) {
     // truck volume, so a SUBMISSION write can change which record answers as the
     // baseline — it belongs with the rest, not only under the "baselines" target.
     keys.BASELINES_CACHE_PREFIX,
+    // The portal's plate → truck-capacity index, read when Organize Cell
+    // Placement opens. Derived from accreditedHaulers, which a baseline save
+    // rewrites — and a submission write can change which record supplies it —
+    // so a newly accredited vehicle must not wait out a TTL before its declared
+    // capacity is offered back to the operator.
+    keys.PORTAL_FLEET_CAPACITY_PREFIX,
   ];
   switch (target) {
     case "submissions":
@@ -68,6 +74,16 @@ function staleKeysFor(target) {
       return [...slfData, keys.MODULE_STATS.slfFacilities];
     case "slf-clients":
       return [keys.MODULE_STATS.slfClients];
+    // An admin editing a facility's hauler CLIENTS changes the roster the portal's
+    // "Clients Served" card counts and lists, and the waste-received summary those
+    // figures come from is cached for two minutes. This used to fall through to
+    // `[]`, so the portal-targeted emit invalidated nothing and the card kept
+    // serving the pre-edit roster until the TTL lapsed. It happened to work only
+    // because notifyHaulerClientChange ALSO calls refreshAdmin("baselines") —
+    // relying on a sibling call to clear your own cache is how this breaks the
+    // next time one of the two is moved.
+    case "hauler-clients":
+      return [...slfData, keys.MODULE_STATS.slfClients];
     default:
       return [];
   }

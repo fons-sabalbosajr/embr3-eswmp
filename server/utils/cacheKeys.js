@@ -50,6 +50,18 @@ module.exports = {
   // the invalidation is exact. Keyed by dummy scope — a developer's inline
   // SAMPLE baselines must never be served to an ordinary admin.
   BASELINES_CACHE_PREFIX: `${NAMESPACE}admin:baselines`,
+  // Plate → declared truck capacity, per SLF, read by the portal's Organize Cell
+  // Placement modal to pre-fill a capacity the operator already encoded on their
+  // baseline.
+  //
+  // It is derived from `accreditedHaulers`, which is deliberately duplicated onto
+  // every one of an SLF's baseline-carrying records and is by far the largest
+  // thing on the document — measured on production, 5,099 KB across one
+  // facility's 22 records. Rebuilding the index meant re-reading all of it on
+  // every open of the modal. Cached per facility set and invalidated by the same
+  // baseline/submission writes as the rest of `slfData`, so a newly declared
+  // plate is offered as soon as it is saved.
+  PORTAL_FLEET_CAPACITY_PREFIX: `${NAMESPACE}portal:fleet-capacity`,
 
   // ── Dashboard module stats (one prefix per collection) ──
   // Each is the `/stats` (or `/summary`) fan-out target of the admin dashboard.

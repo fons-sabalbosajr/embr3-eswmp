@@ -329,6 +329,35 @@ function MiniStat({ icon, color, label, children, subtitle }) {
   );
 }
 
+/**
+ * The record's free-text remark, as a STRING that is always safe to render.
+ *
+ * `remarks` carries two different things in this app: the record's own free-text
+ * remark (what this panel wants), and — on admin submissions-TABLE rows — a
+ * derived array of `{ text, level }` review flags. Rendering the array as a React
+ * child throws "Objects are not valid as a React child" and takes the whole page
+ * down with it, which is what happened here when a list response started carrying
+ * the derived shape.
+ *
+ * The server no longer sends the array on this read, but a display path should not
+ * be able to crash a page over the shape of one optional field, so both are
+ * handled: an array is flattened to its text, anything non-string is ignored.
+ */
+const remarkText = (record = {}) => {
+  const { remarks } = record;
+  if (Array.isArray(remarks)) {
+    const joined = remarks
+      .map((entry) => (typeof entry === "string" ? entry : entry?.text))
+      .filter(Boolean)
+      .join(" · ");
+    if (joined) return joined;
+  } else if (typeof remarks === "string" && remarks.trim()) {
+    return remarks;
+  }
+  const fallback = record.resubmitComment || record.revertReason;
+  return typeof fallback === "string" && fallback.trim() ? fallback : "";
+};
+
 export default function SubmissionSummary({ isDark }) {
   const [tiles, setTiles] = useState(null);
   const [slfRows, setSlfRows] = useState([]);
@@ -1582,8 +1611,8 @@ export default function SubmissionSummary({ isDark }) {
                       </Tag>
                       {isResub && <Tag color="orange">Resubmission</Tag>}
                     </Col>
-                    {(record.remarks || record.resubmitComment || record.revertReason) && (
-                      <Col xs={24}><Text type="secondary">Remarks:</Text><br /><Text>{record.remarks || record.resubmitComment || record.revertReason}</Text></Col>
+                    {remarkText(record) && (
+                      <Col xs={24}><Text type="secondary">Remarks:</Text><br /><Text>{remarkText(record)}</Text></Col>
                     )}
                     {record.submittedBy && (
                       <Col xs={24} md={12}><Text type="secondary">Submitted by:</Text> <Text>{record.submittedBy}</Text></Col>
