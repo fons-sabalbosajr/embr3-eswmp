@@ -787,8 +787,23 @@
   animation: guideIconFloat 1.7s ease-in-out infinite;
 }
 
+/* Invalid rows are tinted red and duplicates amber, so the two states the
+   preview distinguishes are readable at a glance and not only from the Action
+   column. Left border keeps them legible for colour-blind users. */
 .slf-upload-row-error > td {
   background: #fff2f0 !important;
+}
+
+.slf-upload-row-error > td:first-child {
+  box-shadow: inset 3px 0 0 #ff4d4f;
+}
+
+.slf-upload-row-duplicate > td {
+  background: #fffbe6 !important;
+}
+
+.slf-upload-row-duplicate > td:first-child {
+  box-shadow: inset 3px 0 0 #faad14;
 }
 
 .slf-upload-preview-modal .ant-modal-body {
@@ -810,10 +825,98 @@
   vertical-align: top;
 }
 
+/* The header stays pinned while the rows scroll (AntD renders it in its own
+   element once scroll.y is set). It keeps an opaque background so the scrolled
+   rows never show through, and wraps on spaces only — `overflow-wrap: anywhere`
+   from the rule above would otherwise split a column label mid-word. */
+.slf-upload-preview-table .ant-table-thead > tr > th {
+  font-weight: 600;
+  overflow-wrap: normal;
+  word-break: normal;
+  background: #fafafa;
+}
+
 .slf-upload-preview-table .ant-input,
 .slf-upload-preview-table .ant-input-number,
 .slf-upload-preview-table .ant-input-number-input {
   font-size: 11px;
+}
+
+/* ── Preview pickers wrap instead of ellipsizing ──────────────────────────────
+   A Select is a fixed-height, single-line control: its value is clipped with an
+   ellipsis and the dropdown arrow eats ~18px more of an already narrow column,
+   so a cell name, a unit or a client name was cut off in the very cell the
+   operator is reviewing it in. Letting the selector grow and wrap costs nothing
+   but row height — which the rest of this table already does.
+
+   `padding-inline-end` reserves the arrow's lane so wrapped text never runs
+   underneath it. */
+.slf-upload-preview-table .ant-select {
+  font-size: 11px;
+}
+
+.slf-upload-preview-table .ant-select .ant-select-selector {
+  height: auto;
+  min-height: 24px;
+  flex-wrap: wrap;
+  padding-inline-end: 20px;
+  row-gap: 2px;
+}
+
+.slf-upload-preview-table .ant-select-single .ant-select-selector .ant-select-selection-item,
+.slf-upload-preview-table .ant-select .ant-select-selection-placeholder {
+  white-space: normal;
+  overflow: visible;
+  text-overflow: clip;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  line-height: 1.3;
+  padding-block: 2px;
+}
+
+/* Tag mode (Clients): each tag wraps its own label and the tags wrap as a set,
+   so every encoded client stays visible instead of collapsing into "+2".
+   antd applies its own ellipsis to these at three-class specificity, so these
+   selectors carry four to win it outright rather than relying on source order. */
+.slf-upload-preview-table
+  .ant-select-multiple
+  .ant-select-selector
+  .ant-select-selection-item {
+  max-width: 100%;
+  height: auto;
+  line-height: 1.3;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  padding-block: 1px;
+}
+
+.slf-upload-preview-table
+  .ant-select-multiple
+  .ant-select-selector
+  .ant-select-selection-item-content {
+  white-space: normal;
+  overflow: visible;
+  text-overflow: clip;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+/* The option list is portalled out of the table, so it carries its own class
+   (UPLOAD_PREVIEW_POPUP_CLASS). Same rule: a long option is wrapped, never
+   truncated, because it is what the operator is choosing between. */
+.slf-upload-preview-popup .ant-select-item-option-content {
+  white-space: normal;
+  overflow: visible;
+  text-overflow: clip;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  line-height: 1.35;
+}
+
+.slf-upload-preview-popup .ant-select-item {
+  min-height: 26px;
+  align-items: flex-start;
 }
 
 .slf-waste-breakdown-table .ant-table {

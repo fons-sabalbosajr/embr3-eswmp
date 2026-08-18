@@ -186,9 +186,13 @@ export const mergeHaulersByName = (haulers = [], fallbackUnit = "m³") => {
         fallbackUnit,
       vehicles: Array.from(vehicleMap.values()),
       privateSectorClients: Array.from(clientMap.values()),
+      // The LATER record supplies the update, so an upload that corrects a
+      // hauler's fleet DOWNWARD (5 → 3) applies. Taking the max of both
+      // records made the count a high-water mark that no re-upload could
+      // lower. It is still floored at the number of distinct vehicles, which
+      // is a fact about the merged record rather than a stale figure.
       numberOfTrucks: Math.max(
-        Number(existing.numberOfTrucks || 0),
-        Number(normalized.numberOfTrucks || 0),
+        Number(normalized.numberOfTrucks || existing.numberOfTrucks || 0),
         vehicleMap.size,
       ),
     });

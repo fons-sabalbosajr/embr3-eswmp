@@ -17,7 +17,7 @@ export function makeHaulerColumns({
 }) {
   return [
       { title: "#", key: "index", width: 40, render: (_, __, i) => i + 1 },
-      { title: "Accredited Hauler", dataIndex: "haulerName", key: "haulerName" },
+      { title: "Accredited Hauler", dataIndex: "haulerName", key: "haulerName", width: 200 },
       {
         title: "Trucks",
         dataIndex: "numberOfTrucks",
@@ -27,6 +27,7 @@ export function makeHaulerColumns({
       {
         title: "Vehicles",
         key: "vehicles",
+        width: 250,
         render: (_, h) => {
           const veh =
             h.vehicles?.length > 0
@@ -56,7 +57,7 @@ export function makeHaulerColumns({
         title: "Clients",
         dataIndex: "privateSectorClients",
         key: "privateSectorClients",
-        width: 220,
+        width: 180,
         render: (v) => {
           const arr = Array.isArray(v) ? v : v ? [v] : [];
           if (arr.length === 0) return "—";

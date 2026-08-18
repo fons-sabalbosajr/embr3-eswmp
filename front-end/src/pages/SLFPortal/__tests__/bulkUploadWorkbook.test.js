@@ -33,9 +33,9 @@ import {
   cleanUploadText,
   parseUploadNumber,
   isEmptyUploadValue,
-  isNumberOfTrucksHeader,
-  isHaulerNameHeader,
-  isClientsHeader,
+  parseHaulerUploadRow,
+  annotateHaulerUploadRows,
+  summarizeHaulerUpload,
 } from "../uploadHelpers.js";
 import { mergeHaulersByName } from "../haulerNormalization.js";
 import { normalizeUnit } from "../helpers.js";
@@ -93,6 +93,8 @@ const normalizeRows = (rows, type, haulers = []) =>
   rows.map((row, i) => {
     const col = (field) => UPLOAD_COLUMNS[type].find((c) => c.field === field);
     const n = { key: `upload-${i}`, _rowNumber: i + 2 };
+    // The hauler mapping is NOT mirrored — index.jsx calls this exact function.
+    if (type !== "truck") Object.assign(n, parseHaulerUploadRow(row, { fallbackUnit: UNIT }));
     for (const [rawKey, value] of Object.entries(row)) {
       const k = uploadHeaderKey(rawKey);
       if (type === "truck") {
@@ -108,18 +110,6 @@ const normalizeRows = (rows, type, haulers = []) =>
         else if (k.includes("waste") && k.includes("type")) n.wasteType = cleanUploadText(value);
         else if (k.includes("haz") || k.includes("code"))
           n.hazWasteCode = cleanUploadText(value).split(",").map((s) => s.trim()).filter(Boolean);
-      } else {
-        if (isNumberOfTrucksHeader(k)) n.numberOfTrucks = parseUploadNumber(value);
-        else if (isHaulerNameHeader(k)) n.haulerName = cleanUploadText(value);
-        else if (k.includes("client") && k.includes("type")) n.clientType = cleanUploadText(value);
-        else if (k.includes("client") && k.includes("address")) n.clientAddress = cleanUploadText(value);
-        else if (isClientsHeader(k))
-          n.privateSectorClients = cleanUploadText(value).split(",").map((s) => s.trim()).filter(Boolean);
-        else if (k.includes("office") || k.includes("address")) n.officeAddress = cleanUploadText(value);
-        else if (k.includes("plate")) n.plateNumber = cleanUploadText(value);
-        else if (k.includes("vehicle") || k.includes("type")) n.vehicleType = cleanUploadText(value);
-        else if (k.includes("capacity") && !k.includes("unit")) n.capacity = parseUploadNumber(value);
-        else if (k.includes("capacity") && k.includes("unit")) n.capacityUnit = normalizeUnit(value || UNIT);
       }
     }
     const relationshipErrors = type === "truck" ? getUploadRelationshipErrors(n, haulers) : [];
@@ -298,4 +288,239 @@ test("T05 04_Invalid_Data_Test rejects every seeded defect", () => {
 
   // handleConfirmUpload refuses the whole import when any row carries an error.
   assert.equal(normalized.some((r) => r._errors.length), true);
+});
+
+// ── Sample template ⇄ uploader ──────────────────────────────────────────────
+// index.jsx#downloadHaulerTemplate writes UPLOAD_COLUMNS.hauler labels as the
+// header row and the column samples as the first data row, so building the same
+// two rows here is the template the button produces.
+const haulerTemplateRow = () =>
+  Object.fromEntries(
+    UPLOAD_COLUMNS.hauler.map((column) => [column.label, column.sample || ""]),
+  );
+
+test("the downloaded hauler template satisfies the uploader's own requirements", () => {
+  const templateRow = haulerTemplateRow();
+  assert.deepEqual(
+    getUploadMissingColumns(Object.keys(templateRow), "hauler"),
+    [],
+    "every REQUIRED column must be present in the template",
+  );
+
+  const parsed = parseHaulerUploadRow(templateRow, { fallbackUnit: UNIT });
+  // Every declared column must map to its own field — not to a neighbour's.
+  for (const column of UPLOAD_COLUMNS.hauler) {
+    assert.ok(
+      parsed[column.field] !== undefined,
+      `${column.label} must map to ${column.field}`,
+    );
+  }
+  assert.equal(parsed.haulerName, "XYZ Hauling Services");
+  assert.equal(parsed.officeAddress, "San Fernando, Pampanga");
+  assert.equal(parsed.clientAddress, "San Fernando, Pampanga");
+  assert.equal(parsed.vehicleType, "Dump Truck");
+  assert.equal(parsed.clientType, "Private");
+  assert.equal(parsed.numberOfTrucks, 2);
+  assert.equal(parsed.capacity, 15);
+  assert.deepEqual(parsed.privateSectorClients, ["ABC Manufacturing", "DEF Foods"]);
+
+  // The sample row must also PASS validation, or the template teaches a file
+  // that the uploader rejects.
+  assert.deepEqual(getUploadRowErrors(parsed, "hauler"), []);
+});
+
+test("the template's real .xlsx bytes survive a full upload round-trip", () => {
+  // Byte-for-byte what downloadHaulerTemplate writes: the column labels as the
+  // header row, the samples as row 2, and a second row repeating the hauler with
+  // another plate to demonstrate grouping.
+  const headers = UPLOAD_COLUMNS.hauler.map((column) => column.label);
+  const sampleRow = UPLOAD_COLUMNS.hauler.map((column) => column.sample || "");
+  const secondVehicleRow = UPLOAD_COLUMNS.hauler.map((column) => {
+    if (column.field === "haulerName" || column.field === "numberOfTrucks") return column.sample || "";
+    if (column.field === "plateNumber") return "DEF-5678";
+    if (column.field === "vehicleType") return "Compactor";
+    if (column.field === "capacity") return "12";
+    if (column.field === "capacityUnit") return column.sample || "";
+    return "";
+  });
+  const workbook = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(
+    workbook,
+    XLSX.utils.aoa_to_sheet([headers, sampleRow, secondVehicleRow]),
+    "Accredited Haulers",
+  );
+  const bytes = XLSX.write(workbook, { type: "buffer", bookType: "xlsx" });
+
+  // …read back exactly the way handleExcelUpload reads a picked file.
+  const reread = XLSX.read(bytes, { type: "buffer" });
+  const sheet = reread.Sheets[reread.SheetNames[0]];
+  const rows = XLSX.utils
+    .sheet_to_json(sheet, { defval: "" })
+    .filter((row) => Object.values(row || {}).some((value) => cleanUploadText(value) !== ""));
+
+  assert.equal(rows.length, 2);
+  assert.deepEqual(getUploadMissingColumns(Object.keys(rows[0]), "hauler"), []);
+  const normalized = normalizeRows(rows, "hauler");
+  assert.deepEqual(normalized.flatMap((r) => r._errors), [], "the downloaded template must import as-is");
+
+  const haulers = mergeHaulersByName(toHaulerRecords(normalized), UNIT);
+  assert.equal(haulers.length, 1, "the two rows describe ONE hauler");
+  assert.equal(haulers[0].vehicles.length, 2, "…with two vehicles");
+  assert.equal(haulers[0].officeAddress, "San Fernando, Pampanga");
+  assert.deepEqual(
+    haulers[0].privateSectorClients.map((c) => c.clientName),
+    ["ABC Manufacturing", "DEF Foods"],
+  );
+  assert.equal(haulers[0].privateSectorClients[0].clientType, "Private");
+});
+
+test("REGRESSION — 'Hauler Office Address' is an address, not the hauler's name", () => {
+  // The old template emitted the hauler-EXPORT layout, whose leading columns
+  // both match the hauler-name rule.
+  const parsed = parseHaulerUploadRow({
+    "Hauler Name": "TEST HAULER 001",
+    "Hauler Office Address": "TEST ADDRESS 001",
+    "Client Name": "TEST CLIENT 001",
+  });
+  assert.equal(parsed.haulerName, "TEST HAULER 001");
+  assert.equal(parsed.officeAddress, "TEST ADDRESS 001");
+  assert.deepEqual(parsed.privateSectorClients, ["TEST CLIENT 001"]);
+});
+
+test("Client Type / Client Address never land in Vehicle Type / Office Address", () => {
+  const parsed = parseHaulerUploadRow({
+    "Hauler Name": "TEST HAULER 001",
+    "Office Address": "OFFICE 1",
+    "Vehicle Type": "Compactor",
+    "Client Type": "lgu",
+    "Client Address": "CLIENT 1",
+    Clients: "TEST CLIENT 001",
+  });
+  assert.equal(parsed.vehicleType, "Compactor");
+  assert.equal(parsed.officeAddress, "OFFICE 1");
+  assert.equal(parsed.clientAddress, "CLIENT 1");
+  assert.equal(parsed.clientType, "LGU", "casing is normalized to the stored enum");
+});
+
+test("an unusable Capacity Unit or Client Type is reported before import", () => {
+  assert.deepEqual(
+    getUploadRowErrors(
+      { haulerName: "H", numberOfTrucks: 1, capacityUnit: "cubic yards" },
+      "hauler",
+    ),
+    ["Capacity Unit must be tons, m3, or m³"],
+  );
+  assert.deepEqual(
+    getUploadRowErrors(
+      { haulerName: "H", numberOfTrucks: 1, privateSectorClients: ["C"], clientType: "Commercial" },
+      "hauler",
+    ),
+    ["Client Type must be LGU or Private"],
+  );
+});
+
+// ── Add-or-update classification ────────────────────────────────────────────
+test("the preview says which rows ADD a hauler and which UPDATE one", () => {
+  const baseline = mergeHaulersByName(
+    toHaulerRecords(normalizeRows(readSheet("01_Hauler_Bulk_Upload.xlsx"), "hauler")),
+    UNIT,
+  );
+  const rows = normalizeRows(
+    [
+      { "Hauler Name": "TEST HAULER 001", "Number of Trucks": 2, "Plate Number": "TST-0001" },
+      { "Hauler Name": "test hauler 001", "Number of Trucks": 2, "Plate Number": "TST-0009" },
+      { "Hauler Name": "TEST HAULER 900", "Number of Trucks": 1, "Plate Number": "TST-0900" },
+    ],
+    "hauler",
+  );
+  const annotated = annotateHaulerUploadRows(rows, baseline);
+  assert.deepEqual(annotated.map((r) => r._status), ["update", "update", "new"]);
+
+  const summary = summarizeHaulerUpload(annotated);
+  assert.equal(summary.updatedHaulers, 1, "two rows, one hauler — counted per hauler");
+  assert.equal(summary.newHaulers, 1);
+  assert.equal(summary.duplicates, 0, "a different plate is a second vehicle, not a duplicate");
+  assert.equal(summary.invalid, 0);
+});
+
+test("a repeated hauler+plate row is REPORTED as a duplicate, not imported twice", () => {
+  const rows = normalizeRows(readSheet("05_Duplicate_Data_Test.xlsx"), "hauler");
+  const annotated = annotateHaulerUploadRows(rows, []);
+  assert.deepEqual(annotated.map((r) => r._status), ["new", "duplicate", "new"]);
+  // Row numbers are spreadsheet rows (the header is row 1), so the first data
+  // row is row 2 — which is the one the second row repeats.
+  assert.equal(annotated[1]._duplicateOfRow, 2, "points at the row it repeats");
+
+  const summary = summarizeHaulerUpload(annotated);
+  assert.equal(summary.duplicates, 1);
+  assert.equal(summary.newHaulers, 1, "casing variants are ONE hauler");
+  assert.equal(summary.invalid, 0, "duplicates are merged, so they never block the import");
+
+  // And the merge itself still collapses them into a single hauler record.
+  const merged = mergeHaulersByName(toHaulerRecords(annotated), UNIT);
+  assert.equal(merged.length, 1);
+  assert.equal(merged[0].vehicles.length, 2);
+});
+
+test("re-uploading the SAME file twice never duplicates a hauler", () => {
+  const first = mergeHaulersByName(
+    toHaulerRecords(normalizeRows(readSheet("01_Hauler_Bulk_Upload.xlsx"), "hauler")),
+    UNIT,
+  );
+  const second = mergeHaulersByName(
+    [...first, ...toHaulerRecords(normalizeRows(readSheet("01_Hauler_Bulk_Upload.xlsx"), "hauler"))],
+    UNIT,
+  );
+  assert.equal(second.length, first.length, "hauler count is unchanged");
+  assert.deepEqual(
+    second.map((h) => h.vehicles.length),
+    first.map((h) => h.vehicles.length),
+    "vehicles are matched by plate, so none are re-added",
+  );
+  assert.deepEqual(
+    second.map((h) => h.privateSectorClients.length),
+    first.map((h) => h.privateSectorClients.length),
+    "clients are matched by name, so none are re-added",
+  );
+  // The stored row identity survives an update — the record is edited in place.
+  assert.deepEqual(second.map((h) => h.key), first.map((h) => h.key));
+});
+
+test("an upload that LOWERS a hauler's truck count applies", () => {
+  const baseline = mergeHaulersByName(
+    [{ key: "existing-1", haulerName: "TEST HAULER 001", numberOfTrucks: 5, vehicles: [] }],
+    UNIT,
+  );
+  const merged = mergeHaulersByName(
+    [
+      ...baseline,
+      ...toHaulerRecords(
+        normalizeRows([{ "Hauler Name": "TEST HAULER 001", "Number of Trucks": 3 }], "hauler"),
+      ),
+    ],
+    UNIT,
+  );
+  assert.equal(merged.length, 1);
+  assert.equal(merged[0].numberOfTrucks, 3, "the uploaded correction wins over the stored figure");
+  assert.equal(merged[0].key, "existing-1", "the existing record is updated, not replaced");
+});
+
+test("haulers absent from the uploaded file are left untouched", () => {
+  const baseline = mergeHaulersByName(
+    toHaulerRecords(normalizeRows(readSheet("01_Hauler_Bulk_Upload.xlsx"), "hauler")),
+    UNIT,
+  );
+  const merged = mergeHaulersByName(
+    [
+      ...baseline,
+      ...toHaulerRecords(
+        normalizeRows([{ "Hauler Name": "TEST HAULER 900", "Number of Trucks": 1 }], "hauler"),
+      ),
+    ],
+    UNIT,
+  );
+  assert.equal(merged.length, 3, "the two baseline haulers survive alongside the new one");
+  const untouched = merged.find((h) => h.haulerName === "TEST HAULER 002");
+  assert.equal(untouched.officeAddress, "TEST ADDRESS 002, San Ejemplo");
+  assert.equal(untouched.privateSectorClients.length, 1);
 });

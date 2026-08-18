@@ -1,6 +1,15 @@
 // ── SLF Portal — Excel/CSV upload parsing & validation ──
 // Header matching, value coercion, and per-column / per-row validation for
 // the disposal-truck and hauler upload flows. All pure: no hooks, no state.
+//
+// UPLOAD_COLUMNS is the SINGLE SOURCE OF TRUTH for both halves of an import:
+// the downloadable sample template is generated from it, and the uploaded file
+// is parsed and validated against the very same definitions. Nothing about the
+// accepted columns may be declared anywhere else.
+
+// Explicit extension so this module also resolves under plain Node (the
+// `node --test` suite in __tests__), not only through Vite's resolver.
+import { normalizeUnit } from "./helpers.js";
 
 export const uploadHeaderKey = (header) =>
   String(header || "")
@@ -191,12 +200,54 @@ export const DISPOSAL_UPLOAD_COLUMNS = [
   },
 ];
 
+export const isClientTypeHeader = (header) => {
+  const key = uploadHeaderKey(header);
+  return key.includes("client") && key.includes("type");
+};
+
+export const isClientAddressHeader = (header) => {
+  const key = uploadHeaderKey(header);
+  return key.includes("client") && key.includes("address");
+};
+
+// "Office Address" AND the hauler export's "Hauler Office Address" — matched
+// BEFORE the hauler-name rule, which claims any header containing "hauler".
+export const isOfficeAddressHeader = (header) => {
+  const key = uploadHeaderKey(header);
+  if (isClientAddressHeader(key)) return false;
+  return key.includes("office") || key.includes("address");
+};
+
+export const isCapacityUnitHeader = (header) => {
+  const key = uploadHeaderKey(header);
+  return key.includes("capacity") && key.includes("unit");
+};
+
+export const isCapacityHeader = (header) => {
+  const key = uploadHeaderKey(header);
+  return key.includes("capacity") && !key.includes("unit");
+};
+
+export const HAULER_CLIENT_TYPES = ["Private", "LGU"];
+
+/** "private" / "lgu" / "LGU " → the exact enum value the client record stores. */
+export const normalizeHaulerClientType = (value) => {
+  const text = cleanUploadText(value);
+  if (!text) return "";
+  const match = HAULER_CLIENT_TYPES.find(
+    (type) => type.toLowerCase() === text.toLowerCase(),
+  );
+  return match || text;
+};
+
 export const HAULER_UPLOAD_COLUMNS = [
   {
     field: "haulerName",
     label: "Hauler Name",
     required: true,
-    description: "Full name of the accredited hauler.",
+    format: "Text; the accredited hauler's registered name",
+    description:
+      "Full name of the accredited hauler. This is the MATCHING KEY: a name already on the baseline updates that hauler, a new name adds one. Case-insensitive.",
     sample: "XYZ Hauling Services",
     matches: isHaulerNameHeader,
   },
@@ -204,19 +255,152 @@ export const HAULER_UPLOAD_COLUMNS = [
     field: "numberOfTrucks",
     label: "Number of Trucks",
     required: true,
-    description: "Total number of registered trucks.",
+    format: "Whole number greater than 0",
+    description: "Total number of registered trucks for this hauler.",
     sample: "2",
     matches: isNumberOfTrucksHeader,
   },
-  { field: "officeAddress", label: "Office Address", required: false, description: "Office address of the hauler.", sample: "San Fernando, Pampanga" },
-  { field: "plateNumber", label: "Plate Number", required: false, description: "Plate number of the vehicle.", sample: "ABC-1234" },
-  { field: "vehicleType", label: "Vehicle Type", required: false, description: "Vehicle type.", sample: "Dump Truck" },
-  { field: "capacity", label: "Capacity", required: false, description: "Vehicle capacity in the selected unit.", sample: "15" },
-  { field: "capacityUnit", label: "Capacity Unit", required: false, description: "tons, m3, or m³.", sample: "tons" },
-  { field: "privateSectorClients", label: "Clients", required: false, description: "Comma-separated client names served by this hauler.", sample: "ABC Manufacturing, DEF Foods", matches: isClientsHeader },
-  { field: "clientType", label: "Client Type", required: false, description: "LGU or Private for the listed client.", sample: "Private" },
-  { field: "clientAddress", label: "Client Address", required: false, description: "Client address or service location.", sample: "San Fernando, Pampanga" },
+  {
+    field: "officeAddress",
+    label: "Office Address",
+    required: false,
+    format: "Text",
+    description: "Office address of the hauler. Leave blank to keep the stored address.",
+    sample: "San Fernando, Pampanga",
+    matches: isOfficeAddressHeader,
+  },
+  {
+    field: "plateNumber",
+    label: "Plate Number",
+    required: false,
+    format: "Registered vehicle plate number",
+    description:
+      "Plate number of ONE vehicle. Repeat the Hauler Name on another row to add a second vehicle; the plate is what identifies the vehicle on an update.",
+    sample: "ABC-1234",
+    matches: (key) => uploadHeaderKey(key).includes("plate"),
+  },
+  {
+    field: "vehicleType",
+    label: "Vehicle Type",
+    required: false,
+    format: "Text, e.g. Dump Truck / Compactor",
+    description: "Vehicle type for the plate number on this row.",
+    sample: "Dump Truck",
+    matches: (key) => {
+      const normalized = uploadHeaderKey(key);
+      return normalized.includes("vehicle") || normalized.includes("type");
+    },
+  },
+  {
+    field: "capacity",
+    label: "Capacity",
+    required: false,
+    format: "Positive number; commas are allowed",
+    description: "Vehicle capacity for the plate number on this row.",
+    sample: "15",
+    matches: isCapacityHeader,
+  },
+  {
+    field: "capacityUnit",
+    label: "Capacity Unit",
+    required: false,
+    format: "tons, m3, or m³",
+    description: "Unit of the Capacity value. Defaults to the SLF's baseline unit when blank.",
+    sample: "tons",
+    matches: isCapacityUnitHeader,
+  },
+  {
+    field: "privateSectorClients",
+    label: "Clients",
+    required: false,
+    format: "Comma-separated client names",
+    description: "Client names served by this hauler. Existing clients are matched by name and updated.",
+    sample: "ABC Manufacturing, DEF Foods",
+    matches: isClientsHeader,
+  },
+  {
+    field: "clientType",
+    label: "Client Type",
+    required: false,
+    format: "LGU or Private",
+    description: "Applies to the clients listed on this row.",
+    sample: "Private",
+    matches: isClientTypeHeader,
+  },
+  {
+    field: "clientAddress",
+    label: "Client Address",
+    required: false,
+    format: "Text",
+    description: "Address or service location of the clients listed on this row.",
+    sample: "San Fernando, Pampanga",
+    matches: isClientAddressHeader,
+  },
 ];
+
+/**
+ * Header → field resolution order for the hauler import.
+ *
+ * MOST SPECIFIC FIRST. Several headers legitimately satisfy more than one
+ * matcher — "Hauler Office Address" matches both the office-address and the
+ * hauler-name rule, "Client Type" matches both the client and the vehicle-type
+ * rule — so the order below, not the order of the columns in the file, is what
+ * decides the mapping. Reading it any other way is how an uploaded office
+ * address used to land in Hauler Name and a Client Type in Vehicle Type.
+ */
+export const HAULER_UPLOAD_FIELD_PRIORITY = [
+  "numberOfTrucks",
+  "clientType",
+  "clientAddress",
+  "officeAddress",
+  "haulerName",
+  "privateSectorClients",
+  "plateNumber",
+  "vehicleType",
+  "capacityUnit",
+  "capacity",
+];
+
+export const resolveHaulerUploadField = (header) => {
+  const key = uploadHeaderKey(header);
+  if (!key) return null;
+  for (const field of HAULER_UPLOAD_FIELD_PRIORITY) {
+    const column = HAULER_UPLOAD_COLUMNS.find((item) => item.field === field);
+    if (column?.matches?.(key)) return field;
+  }
+  return null;
+};
+
+/**
+ * One raw spreadsheet row → the Portal's hauler-upload shape.
+ *
+ * The ONLY hauler header→field mapping in the app. The preview, the row
+ * validators and the sample template all read the same HAULER_UPLOAD_COLUMNS,
+ * so a column can never mean one thing in the template and another in the
+ * parser.
+ */
+export const parseHaulerUploadRow = (row = {}, { fallbackUnit = "m³" } = {}) => {
+  const parsed = {};
+  for (const [header, value] of Object.entries(row || {})) {
+    const field = resolveHaulerUploadField(header);
+    if (!field) continue;
+    if (field === "numberOfTrucks" || field === "capacity") {
+      parsed[field] = parseUploadNumber(value);
+    } else if (field === "capacityUnit") {
+      parsed[field] = normalizeUnit(value || fallbackUnit);
+    } else if (field === "clientType") {
+      parsed[field] = normalizeHaulerClientType(value);
+    } else if (field === "privateSectorClients") {
+      parsed[field] = cleanUploadText(value)
+        .split(",")
+        .map((entry) => entry.trim())
+        .filter(Boolean);
+    } else {
+      parsed[field] = cleanUploadText(value);
+    }
+  }
+  return parsed;
+};
 
 export const UPLOAD_COLUMNS = {
   truck: DISPOSAL_UPLOAD_COLUMNS,
@@ -309,9 +493,111 @@ export const getUploadRowErrors = (row, type) => {
     if (!isEmptyUploadValue(row.capacity) && (Number.isNaN(capacity) || capacity <= 0)) {
       errors.push("Capacity must be greater than 0");
     }
+    // Both are enum-constrained on the stored record. Catching them here keeps a
+    // typo in the file from reaching the baseline save as an unusable value.
+    if (
+      !isEmptyUploadValue(row.capacityUnit) &&
+      !["tons", "m3", "m³"].includes(cleanUploadText(row.capacityUnit).toLowerCase())
+    ) {
+      errors.push("Capacity Unit must be tons, m3, or m³");
+    }
+    if (
+      (row.privateSectorClients || []).length > 0 &&
+      !isEmptyUploadValue(row.clientType) &&
+      !HAULER_CLIENT_TYPES.includes(normalizeHaulerClientType(row.clientType))
+    ) {
+      errors.push("Client Type must be LGU or Private");
+    }
   }
 
   return [...new Set(errors)];
+};
+
+/**
+ * Hauler identity — the ONE key this workflow matches on.
+ *
+ * `accreditedHaulers` is an embedded array with `_id: false` (see
+ * server/models/DataSLF.js), so the hauler NAME is the authoritative
+ * identifier, exactly as `mergeHaulersByName` and the server-side relationship
+ * checks already treat it. Normalized here so casing/spacing can never split
+ * one hauler into two.
+ */
+export const haulerUploadIdentity = (hauler = {}) =>
+  cleanUploadText(hauler?.haulerName || hauler?.name).toLowerCase();
+
+// A row describes ONE vehicle under a hauler, so two rows are the same record
+// only when both the hauler and the plate repeat.
+const haulerUploadRowIdentity = (row = {}) =>
+  `${haulerUploadIdentity(row)}||${cleanUploadText(row?.plateNumber).toLowerCase()}`;
+
+/**
+ * Classify every previewed hauler row against the baseline haulers ALREADY
+ * loaded in the portal, so the admin sees what the import will do before it
+ * touches anything:
+ *
+ *   new       — hauler name is not on the baseline yet → it will be added
+ *   update    — hauler name is on the baseline → that record is updated in place
+ *   duplicate — the same hauler+plate appeared on an earlier row in this file;
+ *               the rows are MERGED (later non-blank values win), never imported
+ *               twice — this only reports it so an unintended repeat is visible
+ *   invalid   — the row failed validation and blocks the import
+ *
+ * Pure and derived: it never mutates the preview rows, so re-running it after
+ * an inline edit or a row deletion always yields the current truth.
+ */
+export const annotateHaulerUploadRows = (rows = [], existingHaulers = []) => {
+  const existingNames = new Set(
+    (existingHaulers || []).map(haulerUploadIdentity).filter(Boolean),
+  );
+  const firstSeenRow = new Map();
+  return (rows || []).map((row, index) => {
+    const name = haulerUploadIdentity(row);
+    const identity = haulerUploadRowIdentity(row);
+    const rowNumber = row?._rowNumber ?? index + 2;
+    const duplicateOfRow =
+      name && firstSeenRow.has(identity) ? firstSeenRow.get(identity) : null;
+    if (name && !firstSeenRow.has(identity)) firstSeenRow.set(identity, rowNumber);
+    const status = row?._errors?.length
+      ? "invalid"
+      : duplicateOfRow != null
+        ? "duplicate"
+        : existingNames.has(name)
+          ? "update"
+          : "new";
+    return { ...row, _rowNumber: rowNumber, _duplicateOfRow: duplicateOfRow, _status: status };
+  });
+};
+
+/**
+ * Counts for the preview header. New/updated are counted per HAULER, not per
+ * row — several rows can describe several vehicles of the same hauler — which
+ * is what makes "3 new haulers" mean the same thing as the baseline table will
+ * show after the import.
+ */
+export const summarizeHaulerUpload = (rows = []) => {
+  const newHaulers = new Set();
+  const updatedHaulers = new Set();
+  let invalid = 0;
+  let duplicates = 0;
+  (rows || []).forEach((row) => {
+    if (row?._errors?.length) {
+      invalid += 1;
+      return;
+    }
+    if (row?._duplicateOfRow != null) duplicates += 1;
+    const name = haulerUploadIdentity(row);
+    if (!name) return;
+    if (row?._status === "update") updatedHaulers.add(name);
+    else if (row?._status === "new") newHaulers.add(name);
+  });
+  return {
+    total: (rows || []).length,
+    valid: (rows || []).length - invalid,
+    invalid,
+    duplicates,
+    newHaulers: newHaulers.size,
+    updatedHaulers: updatedHaulers.size,
+  };
 };
 
 const normalizeComparableText = (value) =>

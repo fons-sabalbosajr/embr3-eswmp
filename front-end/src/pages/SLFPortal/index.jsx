@@ -173,9 +173,6 @@ import {
 } from "./haulerNormalization";
 import {
   uploadHeaderKey,
-  isHaulerNameHeader,
-  isNumberOfTrucksHeader,
-  isClientsHeader,
   isEmptyUploadValue,
   cleanUploadText,
   parseUploadNumber,
@@ -185,6 +182,9 @@ import {
   findUploadHauler,
   findUploadClientForHauler,
   resolveUploadCell,
+  parseHaulerUploadRow,
+  annotateHaulerUploadRows,
+  summarizeHaulerUpload,
   UPLOAD_COLUMNS,
 } from "./uploadHelpers";
 import { convertVolume, resolveCellUnit, resolveFacilityUnit } from "../../utils/volumeUnits";
@@ -3339,7 +3339,54 @@ export default function SLFPortal() {
     const who = String(portalUser?.companyName || portalUser?.email || "portal").replace(/[^a-z0-9]+/gi, "_");
     downloadCsv(rows, `hauler-data_${who}_${new Date().toISOString().slice(0, 10)}.csv`);
   };
-  const downloadHaulerTemplate = () => downloadCsv([HAULER_EXPORT_HEADERS], "hauler-data_template.csv");
+  // The Accredited Haulers sample template. Its headers, sample values and rules
+  // are generated from UPLOAD_COLUMNS.hauler — the same definitions the uploader
+  // parses and validates with — so a file downloaded here always imports.
+  //
+  // It previously emitted HAULER_EXPORT_HEADERS (the hauler-DATA export layout),
+  // which has no "Number of Trucks" column at all and leads with "Hauler Office
+  // Address": the uploader rejected the file for a missing required column, and
+  // the office address was read as the hauler's NAME.
+  const downloadHaulerTemplate = () => {
+    const sampleRow = UPLOAD_COLUMNS.hauler.map((column) => column.sample || "");
+    // A second row for the SAME hauler with a different plate — the shape that
+    // teaches the grouping rule instead of describing it.
+    const secondVehicleRow = UPLOAD_COLUMNS.hauler.map((column) => {
+      if (column.field === "haulerName" || column.field === "numberOfTrucks") return column.sample || "";
+      if (column.field === "plateNumber") return "DEF-5678";
+      if (column.field === "vehicleType") return "Compactor";
+      if (column.field === "capacity") return "12";
+      if (column.field === "capacityUnit") return column.sample || "";
+      return "";
+    });
+    const workbook = buildUploadTemplateWorkbook({
+      type: "hauler",
+      sheetName: "Accredited Haulers",
+      sampleRows: [sampleRow, secondVehicleRow],
+      listValidations: [
+        { label: "Capacity Unit", values: "tons,m3,m³" },
+        { label: "Client Type", values: "Private,LGU" },
+      ],
+      instructions: [
+        ["Accredited Haulers Upload Instructions"],
+        ["Matching key", "Hauler Name. A name that already exists on this baseline UPDATES that hauler; a new name ADDS one. Matching ignores letter case and extra spaces."],
+        ["Nothing is deleted", "This upload only adds and updates. Haulers that are not in the file stay exactly as they are — remove a hauler from the Accredited Haulers table instead."],
+        ["One row = one vehicle", "Repeat the Hauler Name on another row to register a second vehicle. The Plate Number identifies the vehicle being updated."],
+        ["Blank cells keep stored values", "An empty optional cell means \"leave what is already saved\". It never clears a field."],
+        ["Repeated rows", "Two rows with the same Hauler Name AND Plate Number are merged into one — the later non-blank value wins. The preview flags them as Duplicate so an unintended repeat is visible."],
+        ["Clients", "Comma-separate several client names in one cell. Client Type and Client Address apply to the clients on that row."],
+        ["Saving", "The import updates the on-screen Accredited Haulers table only. Click \"Save Baseline Update\" to persist it."],
+        [],
+        ["Common upload errors"],
+        ["Missing Hauler Name or Number of Trucks column"],
+        ["Blank Hauler Name or Number of Trucks value"],
+        ["Number of Trucks or Capacity that is zero, negative or not a number"],
+        ["Capacity Unit that is not tons, m3 or m³"],
+        ["Client Type that is not Private or LGU"],
+      ],
+    });
+    XLSX.writeFile(workbook, "Accredited_Haulers_Template.xlsx");
+  };
 
   const handleSaveTruck = () => {
     if (!validateTruck()) return;
@@ -4238,6 +4285,40 @@ export default function SLFPortal() {
     }
   };
 
+  // ── Accredited-hauler upload: what the import will DO with each row ──
+  // One cell carries both the operation and, when the row cannot be imported,
+  // the reason — so an administrator never has to reconcile the uploaded file
+  // against the baseline table by hand.
+  const HAULER_UPLOAD_STATUS_META = {
+    new: { color: "green", label: "New", hint: "Will be added" },
+    update: { color: "blue", label: "Update", hint: "Existing hauler — will be updated" },
+    duplicate: { color: "orange", label: "Duplicate", hint: "Merged into an earlier row" },
+    invalid: { color: "red", label: "Invalid", hint: "Fix before importing" },
+  };
+  const renderHaulerUploadStatus = (row = {}) => {
+    const meta = HAULER_UPLOAD_STATUS_META[row._status] || HAULER_UPLOAD_STATUS_META.new;
+    return (
+      <Space direction="vertical" size={2} style={{ width: "100%" }}>
+        <Tag color={meta.color} style={{ marginInlineEnd: 0 }}>
+          {meta.label}
+        </Tag>
+        {row._errors?.length ? (
+          <Text type="danger" style={{ fontSize: 10, lineHeight: 1.3 }}>
+            {row._errors.join("; ")}
+          </Text>
+        ) : row._duplicateOfRow != null ? (
+          <Text type="warning" style={{ fontSize: 10, lineHeight: 1.3 }}>
+            Same hauler and plate as row {row._duplicateOfRow} — merged into it.
+          </Text>
+        ) : (
+          <Text type="secondary" style={{ fontSize: 10, lineHeight: 1.3 }}>
+            {meta.hint}
+          </Text>
+        )}
+      </Space>
+    );
+  };
+
   // ── Excel/CSV Upload Handlers ──
   const handleExcelUpload = (file, type) => {
     const effectiveType = type || uploadType || "truck";
@@ -4292,6 +4373,15 @@ export default function SLFPortal() {
         };
         const normalized = jsonData.map((row, i) => {
           const normalized = { key: `upload-${i}-${Date.now()}`, _rowNumber: i + 2 };
+          // Haulers are mapped by the shared schema (uploadHelpers) rather than
+          // an inline header chain, so the sample template and the parser can
+          // never drift apart.
+          if (effectiveType !== "truck") {
+            Object.assign(
+              normalized,
+              parseHaulerUploadRow(row, { fallbackUnit: baselineUnit || slfUnit }),
+            );
+          }
           for (const [key, value] of Object.entries(row)) {
             const k = uploadHeaderKey(key);
             if (effectiveType === "truck") {
@@ -4318,40 +4408,6 @@ export default function SLFPortal() {
                   .split(",")
                   .map((s) => s.trim())
                   .filter(Boolean);
-            } else {
-              // The CLIENT columns are matched FIRST. "Client Type" contains
-              // "type" and "Client Address" contains "address", so the generic
-              // vehicle-type / office-address branches below used to swallow them:
-              // an uploaded Client Type landed in Vehicle Type and an uploaded
-              // Client Address landed in Office Address, which is why a bulk
-              // upload lost the client details and rewrote the hauler's office
-              // address. `isClientsHeader` stays after them — it matches any
-              // "client*" header and would otherwise claim both columns too.
-              if (isNumberOfTrucksHeader(k))
-                normalized.numberOfTrucks = parseUploadNumber(value);
-              else if (isHaulerNameHeader(k))
-                normalized.haulerName = cleanUploadText(value);
-              else if (k.includes("client") && k.includes("type"))
-                normalized.clientType = cleanUploadText(value);
-              else if (k.includes("client") && k.includes("address"))
-                normalized.clientAddress = cleanUploadText(value);
-              else if (isClientsHeader(k))
-                normalized.privateSectorClients = cleanUploadText(value)
-                  .split(",")
-                  .map((s) => s.trim())
-                  .filter(Boolean);
-              else if (k.includes("office") || k.includes("address"))
-                normalized.officeAddress = cleanUploadText(value);
-              else if (k.includes("plate"))
-                normalized.plateNumber = cleanUploadText(value);
-              else if (k.includes("vehicle") || k.includes("type"))
-                normalized.vehicleType = cleanUploadText(value);
-              else if (k.includes("capacity") && !k.includes("unit"))
-                normalized.capacity = parseUploadNumber(value);
-              else if (k.includes("capacity") && k.includes("unit"))
-                normalized.capacityUnit = normalizeUnit(
-                  value || baselineUnit || slfUnit,
-                );
             }
           }
           const relationshipErrors = effectiveType === "truck"
@@ -4438,66 +4494,80 @@ export default function SLFPortal() {
             },
           ]);
         } else {
+          // Widths total 1272px, which is inside the content box of the 1400px
+          // modal even once it is clamped to a 1366px screen (the narrowest
+          // resolution portal administrators use) — so the preview needs no
+          // horizontal scrolling there.
+          //
+          // They are apportioned by what each column actually holds: the four
+          // free-text columns that carry real sentences (hauler name, both
+          // addresses, clients) get the room, and the numeric/coded ones are
+          // sized to their widest realistic value rather than to their header.
+          // Nothing is truncated at any width — text cells wrap and the pickers
+          // wrap too (see .slf-upload-preview-table) — so a narrow column only
+          // makes a row taller, never hides a value.
+          //
+          // scroll.x is the SUM of these widths, so the header and the body can
+          // never disagree about where a column starts.
           setUploadPreviewColumns([
-            { title: "#", width: 44, render: (_, __, i) => i + 1 },
+            { title: "#", key: "index", width: 40, render: (_, __, i) => i + 1 },
+            {
+              title: "Action",
+              key: "status",
+              width: 140,
+              render: (_, row) => renderHaulerUploadStatus(row),
+            },
             {
               title: "Hauler Name",
               dataIndex: "haulerName",
               key: "haulerName",
-              width: 180,
+              width: 160,
             },
             {
               title: "Trucks",
               dataIndex: "numberOfTrucks",
               key: "numberOfTrucks",
-              width: 90,
+              width: 62,
             },
             {
               title: "Office Address",
               dataIndex: "officeAddress",
               key: "officeAddress",
-              width: 240,
+              width: 140,
             },
             {
               title: "Plate No.",
               dataIndex: "plateNumber",
               key: "plateNumber",
-              width: 120,
+              width: 92,
             },
             {
               title: "Vehicle Type",
               dataIndex: "vehicleType",
               key: "vehicleType",
-              width: 140,
+              width: 100,
             },
-            { title: "Capacity", dataIndex: "capacity", key: "capacity", width: 110 },
+            { title: "Capacity", dataIndex: "capacity", key: "capacity", width: 72 },
+            // Editable because it is VALIDATED (the stored unit is enum-constrained):
+            // an unusable unit in the file must be fixable here rather than sending
+            // the user back to the spreadsheet.
+            { title: "Unit", dataIndex: "capacityUnit", key: "capacityUnit", width: 74 },
             {
-              title: "Clients (optional)",
+              title: "Clients",
               dataIndex: "privateSectorClients",
               key: "privateSectorClients",
-              width: 200,
+              width: 146,
               render: (val) =>
                 Array.isArray(val) && val.length > 0
                   ? val.join(", ")
                   : <Text type="secondary" style={{ fontSize: 11 }}>—</Text>,
             },
-                { title: "Client Type", dataIndex: "clientType", key: "clientType", width: 120 },
-                { title: "Client Address", dataIndex: "clientAddress", key: "clientAddress", width: 220 },
+            { title: "Client Type", dataIndex: "clientType", key: "clientType", width: 86 },
+            { title: "Client Address", dataIndex: "clientAddress", key: "clientAddress", width: 120 },
             {
-              title: "Validation",
-              key: "validation",
-              width: 180,
-              render: (_, row) =>
-                row._errors?.length ? (
-                  <Tag color="red">Issue: {row._errors.join(", ")}</Tag>
-                ) : (
-                  <Tag color="green">Ready</Tag>
-                ),
-            },
-            {
-              title: "Actions",
+              title: "",
               key: "actions",
-              width: 60,
+              width: 40,
               render: (_, r) => (
                 <Button
                   type="text"
@@ -4558,9 +4628,34 @@ export default function SLFPortal() {
     input.click();
   };
 
+  // The preview rows the modal actually renders, and the ones the import reads.
+  //
+  // The new/update/duplicate classification is DERIVED from the parsed rows and
+  // the haulers currently on the baseline, never stored on the rows — so it
+  // stays correct after an inline edit, after a row is deleted from the preview,
+  // and after a baseline refresh, with no re-annotation step to forget.
+  const uploadPreviewRows = useMemo(
+    () =>
+      uploadType === "hauler"
+        ? annotateHaulerUploadRows(uploadPreviewData, haulers)
+        : uploadPreviewData,
+    [uploadPreviewData, haulers, uploadType],
+  );
+  const uploadPreviewSummary = useMemo(
+    () =>
+      uploadType === "hauler"
+        ? summarizeHaulerUpload(uploadPreviewRows)
+        : {
+            total: uploadPreviewRows.length,
+            invalid: uploadPreviewRows.filter((row) => row._errors?.length).length,
+            valid: uploadPreviewRows.filter((row) => !row._errors?.length).length,
+          },
+    [uploadPreviewRows, uploadType],
+  );
+
   const handleConfirmUpload = () => {
-    if (uploadPreviewData.length === 0) return;
-    const invalidRows = uploadPreviewData.filter((row) => row._errors?.length);
+    if (uploadPreviewRows.length === 0) return;
+    const invalidRows = uploadPreviewRows.filter((row) => row._errors?.length);
     if (uploadMissingColumns.length > 0 || invalidRows.length > 0) {
       Swal.fire({
         icon: "warning",
@@ -4615,7 +4710,7 @@ export default function SLFPortal() {
       }
       setTrucks((prev) => [...prev, ...newTrucks]);
     } else {
-      const newHaulers = uploadPreviewData.map((d) => ({
+      const newHaulers = uploadPreviewRows.map((d) => ({
         key: d.key,
         haulerName: d.haulerName || "",
         numberOfTrucks: parseUploadNumber(d.numberOfTrucks),
@@ -4649,14 +4744,18 @@ export default function SLFPortal() {
         mergeHaulersByName([...prev, ...newHaulers], baselineUnit || slfUnit),
       );
     }
+    const importedSummary = uploadPreviewSummary;
     setUploadModalOpen(false);
     setUploadPreviewData([]);
     setUploadMissingColumns([]);
     Swal.fire({
       icon: "success",
       title: "Data Imported",
-      text: `${uploadPreviewData.length} records imported successfully.`,
-      timer: 1500,
+      text:
+        uploadType === "hauler"
+          ? `${importedSummary.newHaulers} hauler(s) added, ${importedSummary.updatedHaulers} updated. Click "Save Baseline Update" to persist the changes.`
+          : `${importedSummary.total} records imported successfully.`,
+      timer: uploadType === "hauler" ? 3200 : 1500,
       showConfirmButton: false,
     });
   };
@@ -4704,14 +4803,59 @@ export default function SLFPortal() {
     );
   };
 
-  const downloadDisposalTemplate = () => {
-    const headers = UPLOAD_COLUMNS.truck.map((column) => column.label);
-    const sample = UPLOAD_COLUMNS.truck.map((column) => column.sample || "");
+  /**
+   * Build a sample-template workbook FROM the upload schema.
+   *
+   * Both templates are generated here, from the same UPLOAD_COLUMNS the parser
+   * and the row validators read, so a downloaded template always carries exactly
+   * the headers the uploader accepts and the Instructions sheet always states the
+   * rules that are actually enforced.
+   */
+  const buildUploadTemplateWorkbook = ({ type, sheetName, sampleRows, instructions, listValidations = [] }) => {
+    const headers = UPLOAD_COLUMNS[type].map((column) => column.label);
     const workbook = XLSX.utils.book_new();
-    const worksheet = XLSX.utils.aoa_to_sheet([headers, sample]);
+    const worksheet = XLSX.utils.aoa_to_sheet([headers, ...sampleRows]);
     worksheet["!cols"] = headers.map((header) => ({ wch: Math.max(18, header.length + 2) }));
+    XLSX.utils.book_append_sheet(workbook, worksheet, sheetName);
+    XLSX.utils.book_append_sheet(
+      workbook,
+      XLSX.utils.aoa_to_sheet([
+        ...instructions,
+        [],
+        ["Column", "Required", "Accepted format", "Sample", "Validation rule"],
+        ...UPLOAD_COLUMNS[type].map((column) => [
+          column.label,
+          column.required ? "Required" : "Optional",
+          column.format || "Text",
+          column.sample || "",
+          column.description || "",
+        ]),
+      ]),
+      "Instructions",
+    );
+    if (worksheet["!ref"]) {
+      worksheet["!dataValidation"] = listValidations
+        .map(({ label, values }) => {
+          const index = headers.indexOf(label);
+          if (index < 0) return null;
+          const col = XLSX.utils.encode_col(index);
+          return { sqref: `${col}2:${col}200`, type: "list", formula1: `"${values}"` };
+        })
+        .filter(Boolean);
+    }
+    return workbook;
+  };
 
-    const instructions = [
+  const downloadDisposalTemplate = () => {
+    const workbook = buildUploadTemplateWorkbook({
+      type: "truck",
+      sheetName: "Disposal Entries",
+      sampleRows: [UPLOAD_COLUMNS.truck.map((column) => column.sample || "")],
+      listValidations: [
+        { label: "Waste Type", values: "Residual,Hazardous Waste,Treated Hazardous Waste" },
+        { label: "Unit of Measurement", values: "tons,m3,m³" },
+      ],
+      instructions: [
       ["Waste Generator Disposal Entry Upload Instructions"],
       ["Relationship rule", "Selected SLF -> Hauler -> Client. The Client column is required and must identify a client assigned to the specified hauler under the selected SLF."],
       ["No auto-create", "The upload does not create new clients. Add or correct clients in Baseline / Accredited Haulers first."],
@@ -4720,33 +4864,14 @@ export default function SLFPortal() {
       ["Units", "Use tons, m3, or m³. The unit must match the selected SLF's declared baseline unit."],
       ["Cells", "Use an available Cell or Disposal Area from the selected SLF. Example: Cell 1."],
       [],
-      ["Column", "Required", "Accepted format", "Sample", "Validation rule"],
-      ...UPLOAD_COLUMNS.truck.map((column) => [
-        column.label,
-        column.required ? "Required" : "Optional",
-        column.format || "Text",
-        column.sample || "",
-        column.description || "",
-      ]),
-      [],
       ["Common upload errors"],
       ["Missing Client column"],
       ["Empty Client value"],
       ["Client exists but belongs to another hauler or SLF"],
       ["Duplicate or inactive client record"],
       ["Unknown cell/disposal area"],
-    ];
-    XLSX.utils.book_append_sheet(workbook, worksheet, "Disposal Entries");
-    XLSX.utils.book_append_sheet(workbook, XLSX.utils.aoa_to_sheet(instructions), "Instructions");
-
-    const wasteTypeCol = headers.indexOf("Waste Type");
-    const unitCol = headers.indexOf("Unit of Measurement");
-    if (worksheet["!ref"]) {
-      worksheet["!dataValidation"] = [
-        ...(wasteTypeCol >= 0 ? [{ sqref: `${XLSX.utils.encode_col(wasteTypeCol)}2:${XLSX.utils.encode_col(wasteTypeCol)}200`, type: "list", formula1: '"Residual,Hazardous Waste,Treated Hazardous Waste"' }] : []),
-        ...(unitCol >= 0 ? [{ sqref: `${XLSX.utils.encode_col(unitCol)}2:${XLSX.utils.encode_col(unitCol)}200`, type: "list", formula1: '"tons,m3,m³"' }] : []),
-      ];
-    }
+      ],
+    });
     XLSX.writeFile(workbook, "Waste_Generator_Disposal_Entry_Template.xlsx");
   };
 
@@ -7302,7 +7427,7 @@ export default function SLFPortal() {
                                       </Button>
                                       <Button
                                         type="primary"
-                                        
+                                        icon={<DownloadOutlined />}
                                         onClick={downloadHaulerTemplate}
                                       >
                                         Download Sample Template
@@ -8966,7 +9091,8 @@ export default function SLFPortal() {
           setUploadGuideOpen={setUploadGuideOpen}
           uploadGuideType={uploadGuideType}
           setUploadGuideType={setUploadGuideType}
-          uploadPreviewData={uploadPreviewData}
+          uploadPreviewData={uploadPreviewRows}
+          uploadPreviewSummary={uploadPreviewSummary}
           uploadPreviewColumns={uploadPreviewColumns}
           uploadMissingColumns={uploadMissingColumns}
           setUploadPreviewData={setUploadPreviewData}
@@ -9070,6 +9196,7 @@ export default function SLFPortal() {
           handleConfirmUpload={handleConfirmUpload}
           proceedToFilePicker={proceedToFilePicker}
           downloadDisposalTemplate={downloadDisposalTemplate}
+          downloadHaulerTemplate={downloadHaulerTemplate}
           updateUploadCell={updateUploadCell}
           handleOpenWasteReceived={handleOpenWasteReceived}
           handleSaveFacilityDetails={handleSaveFacilityDetails}
