@@ -38,6 +38,24 @@ const { Text } = Typography;
 const { TextArea } = Input;
 const normalizeUnitLabel = (unit) => String(unit || "tons").replace("m3", "m³");
 
+// Upload-preview columns whose values are routinely long enough to be scrolled
+// out of sight by a single-line input — hauler/company names and free-text
+// addresses. They edit in an auto-sizing TextArea so the whole value stays
+// visible and wraps inside its cell.
+const UPLOAD_PREVIEW_LONG_TEXT_FIELDS = [
+  "haulerName",
+  "officeAddress",
+  "clientAddress",
+  "hauler",
+  "client",
+];
+
+// Select popups render into a portal at the end of <body>, so the preview
+// table's own styles cannot reach them. This class carries the same wrapping
+// rules to the option list — otherwise a long client or cell name is ellipsized
+// in the very list the operator is picking it from.
+const UPLOAD_PREVIEW_POPUP_CLASS = "slf-upload-preview-popup";
+
 function convertCellDraftUnit(draft, nextUnit, declaredUnit) {
   const from = normalizeUnitLabel(draft.unit || declaredUnit || "tons");
   const to = normalizeUnitLabel(nextUnit);
@@ -235,6 +253,7 @@ export default function SLFPortalModals({
   uploadGuideType, setUploadGuideType,
   uploadPreviewData,
   uploadPreviewColumns,
+  uploadPreviewSummary = {},
   uploadMissingColumns,
   setUploadPreviewData,
   setUploadPreviewColumns,
@@ -314,6 +333,7 @@ export default function SLFPortalModals({
   handleConfirmUpload,
   proceedToFilePicker,
   downloadDisposalTemplate,
+  downloadHaulerTemplate = () => {},
   updateUploadCell,
   handleOpenWasteReceived,
   handleSaveFacilityDetails,
@@ -4246,56 +4266,38 @@ export default function SLFPortalModals({
               type="secondary"
               style={{ display: "block", marginBottom: 12 }}
             >
-              Your Excel or CSV file must contain the following columns (in any
-              order):
+              Your Excel or CSV file must contain the exact column headers below (in any order).
+              Haulers are matched by <Text code>Hauler Name</Text>: an existing name updates that
+              hauler, a new name adds one. Nothing is deleted by an upload.
             </Text>
+            <Button
+              icon={<DownloadOutlined />}
+              onClick={downloadHaulerTemplate}
+              style={{ marginBottom: 12 }}
+              type="primary"
+            >
+              Download Sample Template
+            </Button>
+            {/* Driven by the SAME UPLOAD_COLUMNS the parser and the template
+                generator read, so this guide cannot describe a format the
+                uploader does not accept. */}
             <Table
               size="small"
               pagination={false}
               tableLayout="fixed"
               style={{ width: "100%" }}
-              dataSource={[
-                {
-                  col: "Hauler Name",
-                  desc: "Full name of the accredited hauler",
-                  required: true,
-                },
-                {
-                  col: "Number of Trucks",
-                  desc: "Total number of registered trucks",
-                  required: true,
-                },
-                {
-                  col: "Office Address",
-                  desc: "Office address of the hauler",
-                  required: false,
-                },
-                {
-                  col: "Plate Number",
-                  desc: "Plate number of the vehicle",
-                  required: false,
-                },
-                {
-                  col: "Vehicle Type",
-                  desc: "e.g. Dump Truck, Compactor",
-                  required: false,
-                },
-                {
-                  col: "Capacity",
-                  desc: "Vehicle capacity in m³ or tons",
-                  required: false,
-                },
-                {
-                  col: "Clients",
-                  desc: "Comma-separated list of private sector clients served by this hauler (e.g. Acme Corp, XYZ Inc)",
-                  required: false,
-                },
-              ]}
+              dataSource={UPLOAD_COLUMNS.hauler.map((column) => ({
+                col: column.label,
+                desc: column.description,
+                format: column.format,
+                sample: column.sample,
+                required: column.required,
+              }))}
               columns={[
                 {
                   title: "Column Header",
                   dataIndex: "col",
-                  width: 150,
+                  width: 100,
                   render: (v) => (
                     <Text
                       code
@@ -4319,6 +4321,7 @@ export default function SLFPortalModals({
                 },
                 {
                   title: "Description",
+                  width: 250,
                   dataIndex: "desc",
                   onCell: () => ({
                     style: {
@@ -4328,6 +4331,32 @@ export default function SLFPortalModals({
                       verticalAlign: "top",
                     },
                   }),
+                },
+                {
+                  title: "Accepted Format",
+                  dataIndex: "format",
+                  width: 220,
+                  onCell: () => ({
+                    style: {
+                      whiteSpace: "normal",
+                      overflowWrap: "anywhere",
+                      wordBreak: "break-word",
+                      verticalAlign: "top",
+                    },
+                  }),
+                },
+                {
+                  title: "Sample",
+                  dataIndex: "sample",
+                  width: 150,
+                  render: (v) => (
+                    <Text
+                      code
+                      style={{ whiteSpace: "normal", overflowWrap: "anywhere" }}
+                    >
+                      {v}
+                    </Text>
+                  ),
                 },
                 {
                   title: "Required",
@@ -4354,8 +4383,10 @@ export default function SLFPortalModals({
                   style={{ color: "#faad14", marginRight: 6 }}
                 />
                 Each row represents one vehicle entry under a hauler. Rows sharing the same
-                Hauler Name will be grouped. For the <Text code>Clients</Text> column,
-                separate multiple client names with commas.
+                Hauler Name are grouped into one hauler, and a blank optional cell keeps the
+                value already saved — it never clears it. For the <Text code>Clients</Text>{" "}
+                column, separate multiple client names with commas. The import updates the
+                on-screen table only; click <Text strong>Save Baseline Update</Text> to persist it.
               </Text>
             </div>
           </div>
@@ -4454,17 +4485,29 @@ export default function SLFPortalModals({
           disabled: (uploadMissingColumns || []).length > 0 || uploadPreviewData.some((row) => row._errors?.length),
         }}
         width={1400}
+        style={{ top: 24 }}
         className="slf-upload-preview-modal"
       >
         <div style={{ marginBottom: 12 }}>
-          <Space wrap>
+          <Space wrap size={[6, 6]}>
             <Tag color="blue">{uploadPreviewData.length} row(s)</Tag>
             <Tag color="green">
-              {uploadPreviewData.filter((row) => !row._errors?.length).length} ready
+              {uploadPreviewData.filter((row) => !row._errors?.length).length} valid
             </Tag>
             <Tag color={uploadPreviewData.some((row) => row._errors?.length) || (uploadMissingColumns || []).length ? "red" : "default"}>
               {(uploadMissingColumns || []).length + uploadPreviewData.filter((row) => row._errors?.length).length} issue(s)
             </Tag>
+            {/* What the import will DO — resolved against the haulers already on
+                the baseline, so the operation is visible before it is confirmed. */}
+            {uploadType === "hauler" && (
+              <>
+                <Tag color="green">{uploadPreviewSummary.newHaulers || 0} new hauler(s)</Tag>
+                <Tag color="blue">{uploadPreviewSummary.updatedHaulers || 0} existing hauler(s) to update</Tag>
+                {uploadPreviewSummary.duplicates > 0 && (
+                  <Tag color="orange">{uploadPreviewSummary.duplicates} duplicate row(s)</Tag>
+                )}
+              </>
+            )}
           </Space>
         </div>
         {((uploadMissingColumns || []).length > 0 || uploadPreviewData.some((row) => row._errors?.length)) && (
@@ -4480,6 +4523,21 @@ export default function SLFPortalModals({
             }
           />
         )}
+        {uploadType === "hauler" &&
+          (uploadMissingColumns || []).length === 0 &&
+          !uploadPreviewData.some((row) => row._errors?.length) && (
+            <Alert
+              type="info"
+              showIcon
+              style={{ marginBottom: 12 }}
+              message="Nothing is saved yet."
+              description={
+                uploadPreviewSummary.duplicates > 0
+                  ? `Importing adds the new haulers and updates the existing ones in the table below — no hauler is removed. ${uploadPreviewSummary.duplicates} repeated row(s) will be merged into the row they duplicate; delete a row if the repeat was unintended. Click "Save Baseline Update" afterwards to persist the changes.`
+                  : 'Importing adds the new haulers and updates the existing ones — no hauler is removed. Click "Save Baseline Update" afterwards to persist the changes.'
+              }
+            />
+          )}
         <Table
           className="slf-upload-preview-table slf-slim-scroll"
           dataSource={uploadPreviewData}
@@ -4516,10 +4574,30 @@ export default function SLFPortalModals({
                     showSearch
                     optionFilterProp="label"
                     status={record.cellIndex == null && text ? "error" : ""}
+                    classNames={{ popup: { root: UPLOAD_PREVIEW_POPUP_CLASS } }}
                     options={activeCellOptions.map((option) => ({
                       label: option.label,
                       value: option.value,
                     }))}
+                    onChange={(value) =>
+                      updateUploadCell(record.key, col.dataIndex, value || "")
+                    }
+                  />
+                ) : col.dataIndex === "capacityUnit" ? (
+                  // A picker, not free text: the stored unit is enum-constrained,
+                  // so an unusable value from the file is corrected in one click
+                  // instead of sending the operator back to the spreadsheet.
+                  <Select
+                    size="small"
+                    value={text || undefined}
+                    placeholder="Unit"
+                    style={{ width: "100%" }}
+                    status={text && !["tons", "m³", "m3"].includes(String(text)) ? "error" : ""}
+                    classNames={{ popup: { root: UPLOAD_PREVIEW_POPUP_CLASS } }}
+                    options={[
+                      { label: "tons", value: "tons" },
+                      { label: "m³", value: "m³" },
+                    ]}
                     onChange={(value) =>
                       updateUploadCell(record.key, col.dataIndex, value || "")
                     }
@@ -4554,7 +4632,32 @@ export default function SLFPortalModals({
                     optionFilterProp="label"
                     tokenSeparators={[","]}
                     notFoundContent="Type and press Enter to add a new client"
-                    maxTagCount="responsive"
+                    classNames={{ popup: { root: UPLOAD_PREVIEW_POPUP_CLASS } }}
+                    // No `maxTagCount` on purpose: collapsing the tags to "+2"
+                    // hid the very client names this preview exists to check.
+                    // The selector wraps them onto as many lines as they need.
+                  />
+                ) : UPLOAD_PREVIEW_LONG_TEXT_FIELDS.includes(col.dataIndex) ? (
+                  // Long free-text columns edit in an auto-sizing TextArea, not a
+                  // single-line Input: an Input scrolls its value out of sight, so
+                  // a long hauler name or address was hidden by the very cell it
+                  // was being reviewed in. This grows to the text (capped at four
+                  // lines) and wraps, which is what makes the preview readable.
+                  <TextArea
+                    size="small"
+                    autoSize={{ minRows: 1, maxRows: 4 }}
+                    value={Array.isArray(text) ? text.join(", ") : text ?? ""}
+                    onChange={(e) =>
+                      updateUploadCell(record.key, col.dataIndex, e.target.value)
+                    }
+                    style={{
+                      border: "none",
+                      background: "transparent",
+                      padding: "2px 4px",
+                      fontSize: 11,
+                      lineHeight: 1.25,
+                      resize: "none",
+                    }}
                   />
                 ) : (
                   <Input
@@ -4592,9 +4695,29 @@ export default function SLFPortalModals({
           })}
           rowKey="key"
           size="small"
+          tableLayout="fixed"
           pagination={{ pageSize: 20, showSizeChanger: false }}
-          scroll={{ x: uploadType === "hauler" ? 1100 : 980, y: 420 }}
-          rowClassName={(record) => (record._errors?.length ? "slf-upload-row-error" : "")}
+          // The horizontal extent is the SUM of the declared column widths, so
+          // the header and the body always agree on where a column starts. A
+          // hardcoded `x` narrower than that sum is what skewed the preview: AntD
+          // laid the table out at the real width while sizing against the smaller
+          // one. `y` is viewport-relative (and keeps the header pinned while the
+          // rows scroll) so the modal fits a laptop screen as well as a large one.
+          scroll={{
+            x:
+              (uploadPreviewColumns || []).reduce(
+                (sum, col) => sum + (Number(col?.width) || 120),
+                0,
+              ) || 980,
+            y: "min(52vh, 460px)",
+          }}
+          rowClassName={(record) =>
+            record._errors?.length
+              ? "slf-upload-row-error"
+              : record._duplicateOfRow != null
+                ? "slf-upload-row-duplicate"
+                : ""
+          }
         />
       </Modal>
 

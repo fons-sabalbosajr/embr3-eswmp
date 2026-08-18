@@ -115,6 +115,82 @@ test("T06 Client Address and vehicle capacity persist through the DataSLF schema
   );
 });
 
+// ── Accredited Haulers add/update — the payload PATCH /portal-save-baseline
+//    receives after a bulk upload has been merged into the on-screen table ────
+test("the hauler save payload stores every hauler exactly once, add and update alike", () => {
+  // The portal sends the COMPLETE merged list (baseline haulers + uploaded
+  // ones), which is why the array can be $set wholesale: a hauler missing from
+  // the uploaded file is still present here, so nothing is deleted by a save.
+  const sanitized = sanitizeAccreditedHaulers(
+    [
+      {
+        // updated by the upload — office address and capacity changed
+        haulerName: "ABC Hauling",
+        numberOfTrucks: 2,
+        officeAddress: "San Fernando, Pampanga",
+        vehicles: [
+          { plateNumber: "AAA111", vehicleType: "Dump Truck", capacity: 18, capacityUnit: "m3" },
+          { plateNumber: "AAA222", vehicleType: "Compactor", capacity: 12 },
+        ],
+        privateSectorClients: [{ clientName: "Porac LGU", clientType: "LGU", clientAddress: "Brgy. Cangatba" }],
+      },
+      // untouched by the upload — must survive the save unchanged
+      { haulerName: "Legacy Hauling", numberOfTrucks: 1, officeAddress: "Angeles City", vehicles: [] },
+      // added by the upload
+      { haulerName: "XYZ Hauling", numberOfTrucks: 1, vehicles: [{ plateNumber: "ZZZ999", capacity: 20 }] },
+    ],
+    "m³",
+  );
+
+  const doc = new DataSLF({
+    dateOfDisposal: new Date("2026-08-18"),
+    lguCompanyName: "Test SLF",
+    companyType: "LGU",
+    accreditedHaulers: sanitized,
+  });
+  assert.equal(doc.validateSync(), undefined, "the payload must not fail schema validation");
+
+  const stored = doc.toObject().accreditedHaulers;
+  assert.equal(stored.length, 3, "no hauler is dropped and none is duplicated");
+  assert.deepEqual(
+    stored.map((h) => h.haulerName).sort(),
+    ["ABC Hauling", "Legacy Hauling", "XYZ Hauling"],
+  );
+
+  const abc = stored.find((h) => h.haulerName === "ABC Hauling");
+  assert.equal(abc.officeAddress, "San Fernando, Pampanga", "the uploaded update is persisted");
+  assert.equal(abc.vehicles.length, 2, "both vehicles are kept");
+  assert.equal(abc.vehicles[0].capacity, 18);
+  assert.equal(abc.vehicles[0].capacityUnit, "m³", "m3 is normalized to the enum value");
+  assert.equal(abc.privateSectorClients[0].clientAddress, "Brgy. Cangatba");
+  assert.equal(
+    stored.find((h) => h.haulerName === "Legacy Hauling").officeAddress,
+    "Angeles City",
+    "a hauler absent from the uploaded file is untouched by the save",
+  );
+});
+
+test("the saved haulers read back as ONE record per hauler for the relationship check", () => {
+  // getAuthoritativeHaulersForEntry flattens every baseline copy through this,
+  // so a hauler that was updated (rather than re-added) must not resolve as
+  // "duplicated or ambiguous" on the next disposal upload.
+  const payload = sanitizeAccreditedHaulers(
+    [
+      {
+        haulerName: "ABC Hauling",
+        numberOfTrucks: 1,
+        vehicles: [{ plateNumber: "AAA111", capacity: 12 }],
+        privateSectorClients: [{ clientName: "Porac LGU", clientType: "LGU" }],
+      },
+    ],
+    "m³",
+  );
+  // Two baseline records carry the same array (it is duplicated per record).
+  const resolved = mergeAccreditedHaulerCopies([...payload, ...payload]);
+  assert.equal(resolved.length, 1, "the same hauler across copies is ONE hauler");
+  assert.equal(resolved[0].clients.length, 1, "and its client is ONE client");
+});
+
 test("T06 Client Address survives the strict clientSchema on a transport entry", () => {
   // trucks[].selectedClients / vehicles[].selectedClients use clientSchema, which
   // DROPS anything not declared — unlike the Mixed privateSectorClients array.
