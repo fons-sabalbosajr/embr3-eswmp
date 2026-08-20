@@ -140,8 +140,14 @@ import {
   PORTAL_CACHE_TTL,
   PORTAL_UPDATE_TOUR_SEEN_PREFIX,
   PORTAL_TOUR_DISMISSED_PREFIX,
+  PORTAL_FEATURE_TOUR_SEEN_PREFIX,
   ORGANIZE_CELLS_ENABLED,
 } from "./constants";
+import {
+  PORTAL_FEATURE_TOUR_VERSION,
+  PORTAL_FEATURE_TOUR_STEPS,
+  PORTAL_FEATURE_TOUR_VERA_PROMPT,
+} from "./portalFeatureTour";
 import {
   validateWasteGeneration,
   formatWasteGenIssues,
@@ -170,6 +176,7 @@ import {
   normalizeHaulerRecord,
   mergeHaulersByName,
   cleanHaulerForSubmit,
+  buildHaulerExportRows,
 } from "./haulerNormalization";
 import {
   uploadHeaderKey,
@@ -187,6 +194,10 @@ import {
   summarizeHaulerUpload,
   UPLOAD_COLUMNS,
 } from "./uploadHelpers";
+import {
+  buildHaulerVeraContext,
+  HAULER_VERA_ASSESSMENT_PROMPT,
+} from "./haulerVeraContext";
 import { convertVolume, resolveCellUnit, resolveFacilityUnit } from "../../utils/volumeUnits";
 import { isHazardousWasteType } from "../../utils/wasteCategories";
 // Canonical cell helpers — shared with the admin side so the Portal and the admin
@@ -319,6 +330,8 @@ export default function SLFPortal() {
   const [editingHaulerKey, setEditingHaulerKey] = useState(null);
   const [haulerErrors, setHaulerErrors] = useState({});
   const [haulerModalOpen, setHaulerModalOpen] = useState(false);
+  // Which Collapse section Edit Accredited Hauler opens on ("basic" | "clients").
+  const [haulerModalFocus, setHaulerModalFocus] = useState("basic");
   const [baselineSaved, setBaselineSaved] = useState(false);
   const [baselineUpdatePending, setBaselineUpdatePending] = useState(false);
   const [baselineUpdateLoading, setBaselineUpdateLoading] = useState(false);
@@ -469,6 +482,19 @@ export default function SLFPortal() {
   const [tourDismissed, setTourDismissed] = useState(false);
   const [uiPrefsLoaded, setUiPrefsLoaded] = useState(false);
   const announcementBannerRef = useRef(null);
+  // ── Feature tour (versioned, separate from the orientation tour above) ──
+  // Records WHICH release the user has seen, so a portal user who dismissed the
+  // orientation tour is still shown a workflow change. See portalFeatureTour.js.
+  const [featureTourSeenVersion, setFeatureTourSeenVersion] = useState(null);
+  const [featureTourOpen, setFeatureTourOpen] = useState(false);
+  const [featureTourCurrent, setFeatureTourCurrent] = useState(0);
+  // Which Baseline sections are expanded. Closed by default, as before — this is
+  // state only so the feature tour can open the panel its steps point at.
+  const [baselineSections, setBaselineSections] = useState([]);
+  const featureTourAutoOpenedRef = useRef(false);
+  const haulerUploadRef = useRef(null);
+  const haulerExportRef = useRef(null);
+  const haulerTableRef = useRef(null);
   // Idempotency key for the current submit attempt — reused across recoverable
   // retries (so a lost-response retry returns the saved record instead of
   // duplicating) and cleared only after a confirmed success.
@@ -486,6 +512,16 @@ export default function SLFPortal() {
   const [uploadPreviewData, setUploadPreviewData] = useState([]);
   const [uploadPreviewColumns, setUploadPreviewColumns] = useState([]);
   const [uploadMissingColumns, setUploadMissingColumns] = useState([]);
+  // ── VERA assessment of a hauler upload ──
+  // Deliberately separate from the validation outcome: "the preview is valid but
+  // VERA could not answer" must be sayable without reading as a validation
+  // failure. The cycle ref discards a late answer that describes a file the user
+  // has already replaced.
+  const [haulerVeraStage, setHaulerVeraStage] = useState("idle"); // idle | assessing | done | failed
+  const [haulerVeraComment, setHaulerVeraComment] = useState("");
+  const [haulerVeraError, setHaulerVeraError] = useState(null);
+  const [haulerVeraSource, setHaulerVeraSource] = useState(null);
+  const haulerVeraCycleRef = useRef(0);
   // Excel upload progress UX
   const [uploadProgressOpen, setUploadProgressOpen] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
@@ -682,6 +718,67 @@ export default function SLFPortal() {
   const tourDismissedKey = portalUser?.email
     ? `${PORTAL_TOUR_DISMISSED_PREFIX}${portalUser.email}`
     : null;
+  const featureTourSeenKey = portalUser?.email
+    ? `${PORTAL_FEATURE_TOUR_SEEN_PREFIX}${portalUser.email}`
+    : null;
+  // The tour is DUE when the user has not seen THIS release. A user who
+  // dismissed the orientation tour, or a previous feature tour, is still shown
+  // this one — which is the whole reason the marker is a version.
+  const featureTourDue = featureTourSeenVersion !== PORTAL_FEATURE_TOUR_VERSION;
+
+  // `manual: true` = the user asked for it from What's New, which always opens.
+  // Only the AUTOMATIC opening honours the seen-marker.
+  const openFeatureTour = useCallback(
+    ({ manual = true } = {}) => {
+      if (!manual && !featureTourDue) return;
+      // Every step points at something on Data Entry → Baseline → Accredited
+      // Haulers, and that panel's content is not mounted while it is collapsed —
+      // so it is opened first, or every step would anchor to nothing and antd
+      // would render them centred, which reads as a broken tour.
+      setActiveMenu("data-entry");
+      setActiveTab("baseline");
+      setBaselineSections((prev) => (prev.includes("haulers") ? prev : [...prev, "haulers"]));
+      setFeatureTourCurrent(0);
+      // One frame for the panel to mount its content before antd measures the
+      // first target.
+      setTimeout(() => setFeatureTourOpen(true), 160);
+    },
+    [featureTourDue],
+  );
+
+  // ONE place that records "seen", used by every exit from the feature tour.
+  // The local mirror is written first so the answer survives a failed request;
+  // the server copy is what makes it survive logout.
+  const markFeatureTourSeen = useCallback(() => {
+    setFeatureTourOpen(false);
+    setFeatureTourSeenVersion(PORTAL_FEATURE_TOUR_VERSION);
+    try {
+      if (featureTourSeenKey) secureStorage.set(featureTourSeenKey, PORTAL_FEATURE_TOUR_VERSION);
+    } catch { /* storage blocked — the server copy still answers next login */ }
+    api
+      .patch("/portal-auth/ui-preferences", {
+        featureTourVersionSeen: PORTAL_FEATURE_TOUR_VERSION,
+      })
+      .catch(() => {
+        // Best-effort, exactly like the orientation tour: never interrupt the
+        // user with an error for closing a tour.
+      });
+  }, [featureTourSeenKey]);
+
+  // Hand the user to VERA with the question already asked, so "tell me more"
+  // lands them in a conversation rather than an empty chat. Closing the tour
+  // first also marks it seen — they got the walkthrough, just conversationally.
+  const askVeraAboutFeature = useCallback(
+    (question) => {
+      markFeatureTourSeen();
+      window.dispatchEvent(
+        new CustomEvent("vera:open", {
+          detail: { ask: question || PORTAL_FEATURE_TOUR_VERA_PROMPT },
+        }),
+      );
+    },
+    [markFeatureTourSeen],
+  );
 
   // `manual: true` = the user clicked "What's New Tour" themselves, which always
   // opens it. Only the AUTOMATIC opening honours the preference — a dismissal
@@ -754,6 +851,10 @@ export default function SLFPortal() {
     let mirrored = false;
     try { mirrored = tourDismissedKey && secureStorage.get(tourDismissedKey) === "1"; } catch { /* blocked */ }
     if (mirrored) setTourDismissed(true);
+    try {
+      const seen = featureTourSeenKey && secureStorage.get(featureTourSeenKey);
+      if (seen) setFeatureTourSeenVersion(seen);
+    } catch { /* blocked */ }
 
     api
       .get("/portal-auth/ui-preferences")
@@ -768,12 +869,52 @@ export default function SLFPortal() {
         if (data?.announcementDismissedVersion) {
           setAnnouncementDismissedVersion(data.announcementDismissedVersion);
         }
+        if (data?.featureTourVersionSeen) {
+          setFeatureTourSeenVersion(data.featureTourVersionSeen);
+          try {
+            if (featureTourSeenKey) secureStorage.set(featureTourSeenKey, data.featureTourVersionSeen);
+          } catch { /* blocked */ }
+        }
       })
       .catch(() => { /* keep whatever the mirror said */ })
       .finally(() => { if (!cancelled) setUiPrefsLoaded(true); });
 
     return () => { cancelled = true; };
-  }, [portalUser?.email, tourDismissedKey]);
+  }, [portalUser?.email, tourDismissedKey, featureTourSeenKey]);
+
+  // Feature-tour steps: copy comes from portalFeatureTour.js (VERA reads the
+  // same list), targets are resolved here because the refs are local. A step
+  // whose target is not mounted falls back to the haulers panel rather than
+  // anchoring to nothing — antd renders a targetless step centred, which reads
+  // as a broken tour.
+  const featureTourSteps = useMemo(() => {
+    const targets = {
+      "hauler-upload": haulerUploadRef,
+      "hauler-export": haulerExportRef,
+      "hauler-guide": haulerUploadRef,
+      "hauler-client-list": haulerTableRef,
+      "vera-assessment": haulerUploadRef,
+    };
+    return PORTAL_FEATURE_TOUR_STEPS.map((step) => ({
+      key: step.key,
+      title: step.title,
+      description: (
+        <div>
+          <div style={{ marginBottom: 8 }}>{step.description}</div>
+          <Button
+            size="small"
+            type="link"
+            style={{ padding: 0, height: "auto" }}
+            onClick={() => askVeraAboutFeature(step.ask)}
+          >
+            Ask VERA about this →
+          </Button>
+        </div>
+      ),
+      target: () => targets[step.key]?.current || haulerTableRef.current,
+      placement: "top",
+    }));
+  }, [askVeraAboutFeature]);
 
   const updateTourSteps = useMemo(() => {
     const steps = [
@@ -1176,6 +1317,20 @@ export default function SLFPortal() {
     tourDismissed,
     uiPrefsLoaded,
   ]);
+
+  // Auto-open the FEATURE tour once, for a user who has not seen this release.
+  //
+  // Gated on `uiPrefsLoaded` so a slow preference read can never flash the tour
+  // at somebody who already dismissed it, and held behind the orientation tour
+  // so the two can never fight over the screen. The ref makes it at most once
+  // per mount regardless of how often this re-runs.
+  useEffect(() => {
+    if (!uiPrefsLoaded || featureTourAutoOpenedRef.current) return;
+    if (!portalUser?.email || !featureTourDue) return;
+    if (updateTourOpen) return;
+    featureTourAutoOpenedRef.current = true;
+    openFeatureTour({ manual: false });
+  }, [uiPrefsLoaded, portalUser?.email, featureTourDue, updateTourOpen, openFeatureTour]);
 
   useEffect(() => {
     if (!updateTourOpen) return;
@@ -2833,7 +2988,13 @@ export default function SLFPortal() {
     return Object.keys(errs).length === 0;
   };
 
-  const openHaulerModal = (record) => {
+  // `focus` decides which Collapse section the modal opens on, so the row's
+  // client-list action lands the user on Clients instead of making them hunt
+  // for it. Note the file picker itself is NOT auto-opened: browsers only allow
+  // input.click() inside a user gesture, so a dialog fired on modal mount would
+  // be suppressed — the user clicks Upload Client List there.
+  const openHaulerModal = (record, focus = "basic") => {
+    setHaulerModalFocus(focus);
     setHaulerProvinces([]);
     setHaulerCities([]);
     setHaulerBarangayList([]);
@@ -3309,9 +3470,8 @@ export default function SLFPortal() {
   };
 
   // ── Export Hauler Data (client-side, scoped to THIS portal user's loaded
-  //    baseline) → one flat row per hauler-client relationship. CSV with UTF-8
-  //    BOM (preserves PH characters) and formula-injection-safe cells. ──
-  const HAULER_EXPORT_HEADERS = ["Hauler Name", "Hauler Office Address", "Client Ref", "Client Name", "Client Type", "Client Address", "Region", "Province", "City/Municipality"];
+  //    baseline). CSV with UTF-8 BOM (preserves PH characters) and
+  //    formula-injection-safe cells. ──
   const csvCell = (v) => {
     let s = v == null ? "" : String(v);
     if (/^[=+\-@\t\r]/.test(s)) s = `'${s}`; // neutralize spreadsheet formulas
@@ -3326,43 +3486,91 @@ export default function SLFPortal() {
     a.href = url; a.download = name; a.click();
     URL.revokeObjectURL(url);
   };
+  // The export's headers and field order ARE UPLOAD_COLUMNS.hauler, and every
+  // value is placed by buildHaulerExportRows under the field the parser reads it
+  // from — so the file this button produces is by construction a file the
+  // uploader accepts, i.e. a working bulk-EDIT sheet rather than a read-only
+  // report.
+  //
+  // It used to emit a layout of its own (Hauler Office Address / Client Ref /
+  // Region / Province / City/Municipality) with no Number of Trucks column at
+  // all and no vehicle columns: the uploader rejected it outright for a missing
+  // required column, and its leading address column was read as the hauler's
+  // NAME — so nothing exported here could ever be edited and sent back.
   const exportHaulerData = () => {
-    const rows = [HAULER_EXPORT_HEADERS];
-    (haulers || []).forEach((h) => {
-      const clients = h.privateSectorClients || [];
-      if (!clients.length) { rows.push([h.haulerName || "", h.officeAddress || "", "", "", "", "", "", "", ""]); return; }
-      clients.forEach((c) => rows.push([
-        h.haulerName || "", h.officeAddress || "", c.key || "", c.clientName || "", c.clientType || "", c.clientAddress || c.address || [c.municipalityName || c.municipality, c.provinceName || c.province, c.regionName || c.region].filter(Boolean).join(", "),
-        c.regionName || c.region || "", c.provinceName || c.province || "", c.municipalityName || c.municipality || "",
-      ]));
+    const rows = [UPLOAD_COLUMNS.hauler.map((column) => column.label)];
+    (haulers || []).forEach((hauler) => {
+      buildHaulerExportRows(hauler, baselineUnit || slfUnit).forEach((row) =>
+        rows.push(UPLOAD_COLUMNS.hauler.map((column) => row[column.field] ?? "")),
+      );
     });
     const who = String(portalUser?.companyName || portalUser?.email || "portal").replace(/[^a-z0-9]+/gi, "_");
     downloadCsv(rows, `hauler-data_${who}_${new Date().toISOString().slice(0, 10)}.csv`);
   };
+
+  // ONE hauler, same 13-column layout — offered inside Edit Accredited Hauler
+  // so a single record can be pulled out and corrected without exporting, and
+  // then having to find it in, the whole facility's file.
+  const exportSingleHaulerData = (hauler) => {
+    if (!hauler?.haulerName) return;
+    const rows = [
+      UPLOAD_COLUMNS.hauler.map((column) => column.label),
+      ...buildHaulerExportRows(hauler, baselineUnit || slfUnit).map((row) =>
+        UPLOAD_COLUMNS.hauler.map((column) => row[column.field] ?? ""),
+      ),
+    ];
+    const who = String(hauler.haulerName).replace(/[^a-z0-9]+/gi, "_");
+    downloadCsv(rows, `hauler-data_${who}_${new Date().toISOString().slice(0, 10)}.csv`);
+  };
   // The Accredited Haulers sample template. Its headers, sample values and rules
   // are generated from UPLOAD_COLUMNS.hauler — the same definitions the uploader
-  // parses and validates with — so a file downloaded here always imports.
+  // parses and validates with, and the same ones Export Hauler Data writes — so
+  // the template, the export and the uploader are ONE format by construction and
+  // a file downloaded here always imports.
   //
   // It previously emitted HAULER_EXPORT_HEADERS (the hauler-DATA export layout),
   // which has no "Number of Trucks" column at all and leads with "Hauler Office
   // Address": the uploader rejected the file for a missing required column, and
   // the office address was read as the hauler's NAME.
   const downloadHaulerTemplate = () => {
+    const sampleValue = (field) =>
+      UPLOAD_COLUMNS.hauler.find((column) => column.field === field)?.sample || "";
+    const haulerRow = (values) =>
+      UPLOAD_COLUMNS.hauler.map((column) => {
+        // Hauler Name and Number of Trucks identify the hauler and are validated
+        // per row, so every row of the same hauler repeats them.
+        if (column.field === "haulerName" || column.field === "numberOfTrucks") {
+          return column.sample || "";
+        }
+        return values[column.field] ?? "";
+      });
+    // Row 1 — a full record: one vehicle plus its clients.
     const sampleRow = UPLOAD_COLUMNS.hauler.map((column) => column.sample || "");
-    // A second row for the SAME hauler with a different plate — the shape that
-    // teaches the grouping rule instead of describing it.
-    const secondVehicleRow = UPLOAD_COLUMNS.hauler.map((column) => {
-      if (column.field === "haulerName" || column.field === "numberOfTrucks") return column.sample || "";
-      if (column.field === "plateNumber") return "DEF-5678";
-      if (column.field === "vehicleType") return "Compactor";
-      if (column.field === "capacity") return "12";
-      if (column.field === "capacityUnit") return column.sample || "";
-      return "";
+    // Row 2 — the SAME hauler with a different plate, which teaches the
+    // one-row-per-vehicle grouping rule instead of describing it.
+    const secondVehicleRow = haulerRow({
+      plateNumber: "DEF-5678",
+      vehicleType: "Compactor",
+      capacity: "12",
+      capacityUnit: sampleValue("capacityUnit"),
+    });
+    // Row 3 — a clients-only continuation row: no plate at all, carrying a
+    // second client group whose type and location differ from row 1's. This is
+    // exactly the shape Export Hauler Data writes for a hauler with more client
+    // groups than vehicles, so the template teaches the file the export produces
+    // rather than only the file a hand-typed import would.
+    const extraClientsRow = haulerRow({
+      privateSectorClients: "GHI Municipality",
+      clientType: "LGU",
+      clientAddress: "Baliuag, Bulacan",
+      clientRegion: sampleValue("clientRegion"),
+      clientProvince: "Bulacan",
+      clientMunicipality: "Baliuag",
     });
     const workbook = buildUploadTemplateWorkbook({
       type: "hauler",
       sheetName: "Accredited Haulers",
-      sampleRows: [sampleRow, secondVehicleRow],
+      sampleRows: [sampleRow, secondVehicleRow, extraClientsRow],
       listValidations: [
         { label: "Capacity Unit", values: "tons,m3,m³" },
         { label: "Client Type", values: "Private,LGU" },
@@ -3373,8 +3581,10 @@ export default function SLFPortal() {
         ["Nothing is deleted", "This upload only adds and updates. Haulers that are not in the file stay exactly as they are — remove a hauler from the Accredited Haulers table instead."],
         ["One row = one vehicle", "Repeat the Hauler Name on another row to register a second vehicle. The Plate Number identifies the vehicle being updated."],
         ["Blank cells keep stored values", "An empty optional cell means \"leave what is already saved\". It never clears a field."],
-        ["Repeated rows", "Two rows with the same Hauler Name AND Plate Number are merged into one — the later non-blank value wins. The preview flags them as Duplicate so an unintended repeat is visible."],
-        ["Clients", "Comma-separate several client names in one cell. Client Type and Client Address apply to the clients on that row."],
+        ["Repeated rows", "Two rows with the same Hauler Name AND Plate Number are merged into one — the later non-blank value wins. The preview flags them as Duplicate so an unintended repeat is visible. Rows that carry no Plate Number at all are clients-only rows and are compared by their client list instead."],
+        ["Clients", "Comma-separate several client names in one cell. Client Type, Client Address, Client Region, Client Province and Client City/Municipality apply to every client on that row. List clients with a different type or location on another row of the same hauler."],
+        ["Client requirements", "A NEW client needs the same details the Add Client form asks for: Client Type (Private or LGU) and Client Province, which is what classifies it within or outside Region 3. On an update these may be left blank to keep what is stored."],
+        ["Editing exported data", "\"Export Hauler Data\" writes these exact columns, so the export can be corrected in Excel and uploaded straight back. Row 3 of the sample sheet shows the clients-only row the export uses when a hauler serves more client groups than it has vehicles."],
         ["Saving", "The import updates the on-screen Accredited Haulers table only. Click \"Save Baseline Update\" to persist it."],
         [],
         ["Common upload errors"],
@@ -4494,18 +4704,21 @@ export default function SLFPortal() {
             },
           ]);
         } else {
-          // Widths total 1272px, which is inside the content box of the 1400px
-          // modal even once it is clamped to a 1366px screen (the narrowest
-          // resolution portal administrators use) — so the preview needs no
-          // horizontal scrolling there.
+          // One column per UPLOAD_COLUMNS.hauler field plus the row number, the
+          // Action tag and the delete button — the preview shows every value the
+          // file can carry, including the client location the Add Client form
+          // requires, so nothing arrives unseen.
           //
-          // They are apportioned by what each column actually holds: the four
+          // Widths are apportioned by what each column actually holds: the
           // free-text columns that carry real sentences (hauler name, both
           // addresses, clients) get the room, and the numeric/coded ones are
           // sized to their widest realistic value rather than to their header.
           // Nothing is truncated at any width — text cells wrap and the pickers
           // wrap too (see .slf-upload-preview-table) — so a narrow column only
-          // makes a row taller, never hides a value.
+          // makes a row taller, never hides a value. At sixteen columns the sum
+          // is wider than the modal on a laptop, so the table scrolls
+          // horizontally under a pinned header rather than squeezing columns
+          // past the point of being readable.
           //
           // scroll.x is the SUM of these widths, so the header and the body can
           // never disagree about where a column starts.
@@ -4564,6 +4777,14 @@ export default function SLFPortal() {
             },
             { title: "Client Type", dataIndex: "clientType", key: "clientType", width: 86 },
             { title: "Client Address", dataIndex: "clientAddress", key: "clientAddress", width: 120 },
+            { title: "Client Region", dataIndex: "clientRegion", key: "clientRegion", width: 110 },
+            { title: "Client Province", dataIndex: "clientProvince", key: "clientProvince", width: 104 },
+            {
+              title: "Client City/Municipality",
+              dataIndex: "clientMunicipality",
+              key: "clientMunicipality",
+              width: 120,
+            },
             {
               title: "",
               key: "actions",
@@ -4590,6 +4811,28 @@ export default function SLFPortal() {
           setUploadProgressOpen(false);
           setUploadModalOpen(true);
         }, 400);
+
+        // VERA assesses only a CLEAN hauler preview — decided here from the
+        // just-parsed rows and the missing-column result, never from state that
+        // has not re-rendered yet. A file with any failing row goes back to the
+        // user to correct instead; there is nothing to second-guess until the
+        // rows are at least valid.
+        if (effectiveType === "hauler") {
+          haulerVeraCycleRef.current += 1;
+          const cleanPreview =
+            missingColumns.length === 0 &&
+            normalized.length > 0 &&
+            normalized.every((row) => !row._errors?.length);
+          if (cleanPreview) {
+            const annotated = annotateHaulerUploadRows(normalized, haulers);
+            runHaulerVeraAssessment(annotated, summarizeHaulerUpload(annotated), haulers);
+          } else {
+            setHaulerVeraStage("idle");
+            setHaulerVeraComment("");
+            setHaulerVeraError(null);
+            setHaulerVeraSource(null);
+          }
+        }
       } catch {
         setUploadProgressError(true);
         setUploadStatusText(
@@ -4652,6 +4895,64 @@ export default function SLFPortal() {
           },
     [uploadPreviewRows, uploadType],
   );
+
+  // ── VERA assessment of a validated hauler upload ──────────────────────────
+  //
+  // Same discipline as Bulk Organize Cells: VERA is a SECOND OPINION on a batch
+  // that already passed validation, never a gate. It runs only on a clean
+  // preview, is invoked deliberately (never from an effect, which would re-fire
+  // on every re-render), and a failure to reach it leaves the import exactly as
+  // available as it was.
+  //
+  // The stage is separate from the validation outcome for the same reason: "the
+  // preview is valid but VERA could not answer" has to be a state the UI can say
+  // out loud, rather than one that reads as a validation problem.
+  const runHaulerVeraAssessment = useCallback(
+    async (rows, summary, existingHaulers) => {
+      const cycle = haulerVeraCycleRef.current;
+      setHaulerVeraStage("assessing");
+      setHaulerVeraComment("");
+      setHaulerVeraError(null);
+      try {
+        const { data } = await api.post("/vera/chat", {
+          message: HAULER_VERA_ASSESSMENT_PROMPT,
+          history: [],
+          page: "data-entry",
+          pageContext: buildHaulerVeraContext(rows, summary, existingHaulers),
+        });
+        // A newer file was uploaded (or the preview was closed) while this was in
+        // flight — its answer describes rows that are no longer on screen.
+        if (haulerVeraCycleRef.current !== cycle) return;
+        if (data?.ok && data.answer) {
+          setHaulerVeraComment(String(data.answer));
+          setHaulerVeraSource(data.source || null);
+          setHaulerVeraStage("done");
+        } else {
+          // The server explains WHY (disabled / rate limited / duplicate). Show
+          // its reason rather than inventing one, and never a placeholder.
+          setHaulerVeraError(
+            data?.message || "VERA could not assess this upload right now.",
+          );
+          setHaulerVeraStage("failed");
+        }
+      } catch (err) {
+        if (haulerVeraCycleRef.current !== cycle) return;
+        setHaulerVeraError(
+          err.response?.data?.message ||
+            "VERA could not be reached. Your previewed data is unaffected.",
+        );
+        setHaulerVeraStage("failed");
+      }
+    },
+    [],
+  );
+
+  // Re-assess the rows as they stand NOW — after inline preview edits or a row
+  // deletion — which is also what the Retry path uses.
+  const reassessHaulerUpload = useCallback(() => {
+    haulerVeraCycleRef.current += 1;
+    runHaulerVeraAssessment(uploadPreviewRows, uploadPreviewSummary, haulers);
+  }, [runHaulerVeraAssessment, uploadPreviewRows, uploadPreviewSummary, haulers]);
 
   const handleConfirmUpload = () => {
     if (uploadPreviewRows.length === 0) return;
@@ -4725,6 +5026,11 @@ export default function SLFPortal() {
               },
             ]
           : [],
+        // Location is stored as the *Name fields, never as PSGC codes: the
+        // Region 3 classification and the server's "incomplete client" check
+        // both read regionName / provinceName / municipalityName, so a province
+        // spelled out in a spreadsheet ends up exactly as usable as one picked
+        // in the Add Client form.
         privateSectorClients: (d.privateSectorClients || []).map((client, index) =>
           typeof client === "string"
             ? {
@@ -4732,11 +5038,17 @@ export default function SLFPortal() {
                 clientName: client,
                 clientType: d.clientType || "Private",
                 clientAddress: d.clientAddress || "",
+                regionName: d.clientRegion || "",
+                provinceName: d.clientProvince || "",
+                municipalityName: d.clientMunicipality || "",
               }
             : {
                 ...client,
                 clientType: client.clientType || d.clientType || "Private",
                 clientAddress: client.clientAddress || d.clientAddress || "",
+                regionName: client.regionName || d.clientRegion || "",
+                provinceName: client.provinceName || d.clientProvince || "",
+                municipalityName: client.municipalityName || d.clientMunicipality || "",
               },
         ),
       }));
@@ -7020,6 +7332,12 @@ export default function SLFPortal() {
 
                           <Collapse
                             bordered={false}
+                            // Controlled so the feature tour can open the
+                            // Accredited Haulers panel it points at. Left closed
+                            // by default exactly as before; nothing else changes
+                            // the user's own expand/collapse behaviour.
+                            activeKey={baselineSections}
+                            onChange={setBaselineSections}
                             style={{
                               background: "transparent",
                               marginBottom: 14,
@@ -7409,22 +7727,26 @@ export default function SLFPortal() {
                                       >
                                         Add Hauler
                                       </Button>
-                                      <Button
-                                        icon={<UploadOutlined />}
-                                        onClick={() =>
-                                          openUploadGuide("hauler")
-                                        }
-                                        disabled={baselineSaved}
-                                      >
-                                        Upload Excel/CSV
-                                      </Button>
-                                      <Button
-                                        icon={<DownloadOutlined />}
-                                        onClick={exportHaulerData}
-                                        disabled={!haulers.length}
-                                      >
-                                        Export Hauler Data
-                                      </Button>
+                                      <span ref={haulerUploadRef}>
+                                        <Button
+                                          icon={<UploadOutlined />}
+                                          onClick={() =>
+                                            openUploadGuide("hauler")
+                                          }
+                                          disabled={baselineSaved}
+                                        >
+                                          Upload Excel/CSV
+                                        </Button>
+                                      </span>
+                                      <span ref={haulerExportRef}>
+                                        <Button
+                                          icon={<DownloadOutlined />}
+                                          onClick={exportHaulerData}
+                                          disabled={!haulers.length}
+                                        >
+                                          Export Hauler Data
+                                        </Button>
+                                      </span>
                                       <Button
                                         type="primary"
                                         icon={<DownloadOutlined />}
@@ -7432,7 +7754,21 @@ export default function SLFPortal() {
                                       >
                                         Download Sample Template
                                       </Button>
+                                      {/* Always available, not only while the
+                                          release is new — a user who closed the
+                                          tour early needs a way back in, and
+                                          this is where its steps point. */}
+                                      <Tooltip title="Replay the tour of what changed in bulk hauler and client updates">
+                                        <Button
+                                          type="link"
+                                          icon={<BulbOutlined />}
+                                          onClick={() => openFeatureTour()}
+                                        >
+                                          What&apos;s new
+                                        </Button>
+                                      </Tooltip>
                                     </div>
+                                    <div ref={haulerTableRef}>
                                     <Table
                                       dataSource={haulers}
                                       columns={haulerColumns}
@@ -7456,6 +7792,7 @@ export default function SLFPortal() {
                                         ),
                                       }}
                                     />
+                                    </div>
                                   </div>
                                 ),
                               },
@@ -9197,6 +9534,14 @@ export default function SLFPortal() {
           proceedToFilePicker={proceedToFilePicker}
           downloadDisposalTemplate={downloadDisposalTemplate}
           downloadHaulerTemplate={downloadHaulerTemplate}
+          exportHaulerData={exportHaulerData}
+          exportSingleHaulerData={exportSingleHaulerData}
+          haulerModalFocus={haulerModalFocus}
+          haulerVeraStage={haulerVeraStage}
+          haulerVeraComment={haulerVeraComment}
+          haulerVeraError={haulerVeraError}
+          haulerVeraSource={haulerVeraSource}
+          reassessHaulerUpload={reassessHaulerUpload}
           updateUploadCell={updateUploadCell}
           handleOpenWasteReceived={handleOpenWasteReceived}
           handleSaveFacilityDetails={handleSaveFacilityDetails}
@@ -9270,6 +9615,18 @@ export default function SLFPortal() {
           onClose={dismissTourPermanently}
           onFinish={dismissTourPermanently}
           steps={updateTourSteps}
+        />
+
+        {/* Feature tour — one time per RELEASE. Closing it at any step marks the
+            release seen: a user who has read enough to close it should not be
+            interrupted again, and What's New reopens it on demand. */}
+        <Tour
+          open={featureTourOpen}
+          current={featureTourCurrent}
+          onChange={setFeatureTourCurrent}
+          onClose={markFeatureTourSeen}
+          onFinish={markFeatureTourSeen}
+          steps={featureTourSteps}
         />
 
         {/* Bulk submit progress — percentage feedback for large submissions */}

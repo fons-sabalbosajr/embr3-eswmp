@@ -2,7 +2,7 @@ import { useState } from "react";
 import dayjs from "dayjs";
 import {
   Avatar, Badge, Button, Checkbox, Col, Collapse, DatePicker, Descriptions, Divider,
-  Empty, Form, Input, InputNumber, List,
+  Empty, Form, Grid, Input, InputNumber, List,
   Modal, Progress, Radio, Row, Select, Space, Spin, Table, Tabs, Tag, Tooltip, Upload,
   Typography, Card, Alert, Skeleton
 } from "antd";
@@ -23,7 +23,11 @@ import {
   SearchOutlined,
 } from "@ant-design/icons";
 import { EMPTY_VEHICLE } from "./constants";
+import { mergeSelectOptions } from "./helpers";
 import { UPLOAD_COLUMNS } from "./uploadHelpers";
+import HaulerUploadGuide from "./HaulerUploadGuide";
+import HaulerClientListPanel from "./HaulerClientListPanel";
+import VeraFlameIcon from "../../components/VeraFlameIcon";
 import { SUPPORT_EMAIL, SUPPORT_MAILTO } from "../../config/appContact";
 import api from "../../api";
 import secureStorage from "../../utils/secureStorage";
@@ -37,23 +41,16 @@ import { useSensitiveMask, MASK_PLACEHOLDER } from "../../utils/sensitiveMask";
 const { Text } = Typography;
 const { TextArea } = Input;
 const normalizeUnitLabel = (unit) => String(unit || "tons").replace("m3", "m³");
-
-// Upload-preview columns whose values are routinely long enough to be scrolled
-// out of sight by a single-line input — hauler/company names and free-text
-// addresses. They edit in an auto-sizing TextArea so the whole value stays
-// visible and wraps inside its cell.
 const UPLOAD_PREVIEW_LONG_TEXT_FIELDS = [
   "haulerName",
   "officeAddress",
   "clientAddress",
+  "clientRegion",
+  "clientProvince",
+  "clientMunicipality",
   "hauler",
   "client",
 ];
-
-// Select popups render into a portal at the end of <body>, so the preview
-// table's own styles cannot reach them. This class carries the same wrapping
-// rules to the option list — otherwise a long client or cell name is ellipsized
-// in the very list the operator is picking it from.
 const UPLOAD_PREVIEW_POPUP_CLASS = "slf-upload-preview-popup";
 
 function convertCellDraftUnit(draft, nextUnit, declaredUnit) {
@@ -100,8 +97,6 @@ const driveIdFromUrl = (url) => {
   return m ? m[1] : null;
 };
 
-// Normalize a ticket attachment (object or legacy string) into a safe shape and
-// render it without ever crashing on missing/invalid data.
 const TicketAttachment = ({ att, index }) => {
   const norm =
     typeof att === "string"
@@ -162,9 +157,6 @@ const TicketAttachment = ({ att, index }) => {
   );
 };
 
-// FAQ retired — its content now lives in VERA (server/utils/veraKnowledge.js) and
-// is surfaced through the floating VERA chatbot. The support drawer keeps only the
-// ticket tabs, launched from VERA's quick actions.
 const SUPPORT_TAB_KEYS = ["new-ticket", "my-tickets"];
 const SUPPORT_CATEGORY_OPTIONS = [
   { label: "Technical Issue", value: "Technical Issue" },
@@ -334,6 +326,14 @@ export default function SLFPortalModals({
   proceedToFilePicker,
   downloadDisposalTemplate,
   downloadHaulerTemplate = () => {},
+  exportHaulerData = () => {},
+  exportSingleHaulerData = () => {},
+  haulerModalFocus = "basic",
+  haulerVeraStage = "idle",
+  haulerVeraComment = "",
+  haulerVeraError = null,
+  haulerVeraSource = null,
+  reassessHaulerUpload = () => {},
   updateUploadCell,
   handleOpenWasteReceived,
   handleSaveFacilityDetails,
@@ -347,6 +347,8 @@ export default function SLFPortalModals({
 }) {
   // Global SLF sensitive-value masking (read displays only — never input fields).
   const { masked: maskSensitiveValues } = useSensitiveMask();
+  const screens = Grid.useBreakpoint();
+  const isNarrowScreen = !screens.lg;
   const [credentialForm] = Form.useForm();
   const [credentialCodeRequested, setCredentialCodeRequested] = useState(false);
   const [credentialLoading, setCredentialLoading] = useState(false);
@@ -670,9 +672,28 @@ export default function SLFPortalModals({
         destroyOnHidden
         width={1100}
       >
+        {/* This hauler's own record, in the 13-column layout the Accredited
+            Haulers uploader reads — so a single hauler can be pulled out,
+            corrected in Excel and sent back through the baseline-wide upload
+            without exporting the whole facility. */}
+        <div style={{ marginBottom: 8 }}>
+          <Button
+            size="small"
+            icon={<DownloadOutlined />}
+            onClick={() => exportSingleHaulerData(haulerDraft)}
+            disabled={!haulerDraft.haulerName}
+          >
+            Export Hauler Data
+          </Button>
+        </div>
         <Collapse
           bordered={false}
           expandIconPlacement="end"
+          // Opens on the section the user came in for: the Clients panel when
+          // they picked the row's client-list action, Basic Information
+          // otherwise. `destroyOnHidden` on the modal means this re-applies on
+          // every open rather than sticking from a previous edit.
+          defaultActiveKey={[haulerModalFocus || "basic"]}
           style={{ background: "transparent" }}
           items={[
             {
@@ -958,6 +979,11 @@ export default function SLFPortalModals({
               label: (
                 <Text strong style={{ color: "#1a3353" }}>
                   <EnvironmentOutlined /> Clients
+                  {(haulerDraft.privateSectorClients || []).length > 0 && (
+                    <Tag color="blue" style={{ marginLeft: 8 }}>
+                      {haulerDraft.privateSectorClients.length}
+                    </Tag>
+                  )}
                 </Text>
               ),
               children: (
@@ -985,6 +1011,13 @@ export default function SLFPortalModals({
                       Add Client
                     </Button>
                   </div>
+                  {/* Bulk maintenance for THIS hauler's clients. Scoped to the
+                      hauler being edited, so the file carries no Hauler Name to
+                      get wrong — see HaulerClientListPanel. */}
+                  <HaulerClientListPanel
+                    haulerDraft={haulerDraft}
+                    updateHaulerDraft={updateHaulerDraft}
+                  />
                   <Table
                     dataSource={haulerDraft.privateSectorClients || []}
                     rowKey="key"
@@ -4257,139 +4290,20 @@ export default function SLFPortalModals({
         }
         okButtonProps={{ className: "slf-primary-btn" }}
         cancelText="Cancel"
-        width={1400}
+        // Same treatment as the preview it precedes: never wider than the
+        // viewport, and full-bleed below a laptop rather than a squeezed card.
+        width="min(1180px, 100%)"
+        style={{ top: 24 }}
+        className="slf-upload-modal"
         destroyOnHidden
       >
         {uploadGuideType === "hauler" ? (
-          <div>
-            <Text
-              type="secondary"
-              style={{ display: "block", marginBottom: 12 }}
-            >
-              Your Excel or CSV file must contain the exact column headers below (in any order).
-              Haulers are matched by <Text code>Hauler Name</Text>: an existing name updates that
-              hauler, a new name adds one. Nothing is deleted by an upload.
-            </Text>
-            <Button
-              icon={<DownloadOutlined />}
-              onClick={downloadHaulerTemplate}
-              style={{ marginBottom: 12 }}
-              type="primary"
-            >
-              Download Sample Template
-            </Button>
-            {/* Driven by the SAME UPLOAD_COLUMNS the parser and the template
-                generator read, so this guide cannot describe a format the
-                uploader does not accept. */}
-            <Table
-              size="small"
-              pagination={false}
-              tableLayout="fixed"
-              style={{ width: "100%" }}
-              dataSource={UPLOAD_COLUMNS.hauler.map((column) => ({
-                col: column.label,
-                desc: column.description,
-                format: column.format,
-                sample: column.sample,
-                required: column.required,
-              }))}
-              columns={[
-                {
-                  title: "Column Header",
-                  dataIndex: "col",
-                  width: 100,
-                  render: (v) => (
-                    <Text
-                      code
-                      style={{
-                        whiteSpace: "normal",
-                        overflowWrap: "anywhere",
-                        wordBreak: "break-word",
-                      }}
-                    >
-                      {v}
-                    </Text>
-                  ),
-                  onCell: () => ({
-                    style: {
-                      whiteSpace: "normal",
-                      overflowWrap: "anywhere",
-                      wordBreak: "break-word",
-                      verticalAlign: "top",
-                    },
-                  }),
-                },
-                {
-                  title: "Description",
-                  width: 250,
-                  dataIndex: "desc",
-                  onCell: () => ({
-                    style: {
-                      whiteSpace: "normal",
-                      overflowWrap: "anywhere",
-                      wordBreak: "break-word",
-                      verticalAlign: "top",
-                    },
-                  }),
-                },
-                {
-                  title: "Accepted Format",
-                  dataIndex: "format",
-                  width: 220,
-                  onCell: () => ({
-                    style: {
-                      whiteSpace: "normal",
-                      overflowWrap: "anywhere",
-                      wordBreak: "break-word",
-                      verticalAlign: "top",
-                    },
-                  }),
-                },
-                {
-                  title: "Sample",
-                  dataIndex: "sample",
-                  width: 150,
-                  render: (v) => (
-                    <Text
-                      code
-                      style={{ whiteSpace: "normal", overflowWrap: "anywhere" }}
-                    >
-                      {v}
-                    </Text>
-                  ),
-                },
-                {
-                  title: "Required",
-                  dataIndex: "required",
-                  width: 88,
-                  align: "center",
-                  render: (v) =>
-                    v ? <Tag color="red">Yes</Tag> : <Tag>No</Tag>,
-                },
-              ]}
-              rowKey="col"
-            />
-            <div
-              style={{
-                marginTop: 12,
-                padding: "8px 12px",
-                background: "#fffbe6",
-                borderRadius: 6,
-                border: "1px solid #ffe58f",
-              }}
-            >
-              <Text style={{ fontSize: 12 }}>
-                <InfoCircleOutlined
-                  style={{ color: "#faad14", marginRight: 6 }}
-                />
-                Each row represents one vehicle entry under a hauler. Rows sharing the same
-                Hauler Name are grouped into one hauler, and a blank optional cell keeps the
-                value already saved — it never clears it. For the <Text code>Clients</Text>{" "}
-                column, separate multiple client names with commas. The import updates the
-                on-screen table only; click <Text strong>Save Baseline Update</Text> to persist it.
-              </Text>
-            </div>
-          </div>
+          <HaulerUploadGuide
+            downloadHaulerTemplate={downloadHaulerTemplate}
+            exportHaulerData={exportHaulerData}
+            haulerCount={(haulers || []).length}
+            isNarrow={isNarrowScreen}
+          />
         ) : (
           <div>
             <Text
@@ -4409,6 +4323,7 @@ export default function SLFPortalModals({
             <Table
               size="small"
               pagination={false}
+              scroll={{ x: 830 }}
               dataSource={UPLOAD_COLUMNS.truck.map((column) => ({
                 col: column.label,
                 desc: column.description,
@@ -4484,9 +4399,13 @@ export default function SLFPortalModals({
           className: "slf-primary-btn",
           disabled: (uploadMissingColumns || []).length > 0 || uploadPreviewData.some((row) => row._errors?.length),
         }}
-        width={1400}
+        // Never wider than the viewport allows. Below a laptop the stylesheet
+        // takes the modal full-bleed (see .slf-upload-preview-modal) — the grid
+        // simply cannot be narrowed to a phone, so it gets the whole screen and
+        // scrolls sideways inside a pinned frame instead of overflowing the page.
+        width="min(1400px, 100%)"
         style={{ top: 24 }}
-        className="slf-upload-preview-modal"
+        className="slf-upload-modal slf-upload-preview-modal"
       >
         <div style={{ marginBottom: 12 }}>
           <Space wrap size={[6, 6]}>
@@ -4538,15 +4457,96 @@ export default function SLFPortalModals({
               }
             />
           )}
+        {/* ── VERA assessment ──
+            A SECOND OPINION on a batch that already passed validation, never a
+            gate: the Import button's disabled state above does not reference
+            haulerVeraStage, and it must not start to. VERA is pointed at what
+            this import gets wrong QUIETLY — a near-miss hauler name that adds a
+            second hauler instead of updating one, an implausible capacity, a new
+            client with no province — none of which is invalid, so none of which
+            the validator can or should block. */}
+        {uploadType === "hauler" && haulerVeraStage !== "idle" && (
+          <div className="slf-hauler-vera-panel">
+            <div className="slf-hauler-vera-head">
+              <VeraFlameIcon size={18} anime={haulerVeraStage === "assessing"} />
+              <Text strong style={{ fontSize: 12.5 }}>
+                VERA Assessment
+              </Text>
+              {haulerVeraStage === "assessing" && <Spin size="small" />}
+              {haulerVeraStage === "done" && (
+                <Tag color="success" style={{ fontSize: 10, marginInlineEnd: 0 }}>
+                  Assessed
+                </Tag>
+              )}
+              {haulerVeraStage === "failed" && (
+                <Tag color="warning" style={{ fontSize: 10, marginInlineEnd: 0 }}>
+                  Not available
+                </Tag>
+              )}
+              {haulerVeraSource === "guard" && (
+                <Tag style={{ fontSize: 10, marginInlineEnd: 0 }}>from your data</Tag>
+              )}
+              <span style={{ flex: 1 }} />
+              {haulerVeraStage !== "assessing" && (
+                <Button size="small" type="text" onClick={reassessHaulerUpload}>
+                  {haulerVeraStage === "failed" ? "Retry assessment" : "Re-assess edited rows"}
+                </Button>
+              )}
+            </div>
+
+            {haulerVeraStage === "assessing" && (
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                VERA is reviewing the {uploadPreviewData.length} validated row(s) before you
+                import them…
+              </Text>
+            )}
+
+            {/* A VERA failure is NOT a validation failure — say so plainly and
+                leave Import exactly as available as it already was. */}
+            {haulerVeraStage === "failed" && (
+              <Alert
+                type="warning"
+                showIcon
+                style={{ marginBottom: 0 }}
+                message="VERA assessment could not be completed"
+                description={
+                  <span style={{ fontSize: 12 }}>
+                    {haulerVeraError} Your preview is still <b>valid</b> and can be imported.
+                  </span>
+                }
+              />
+            )}
+
+            {haulerVeraStage === "done" && (
+              <div className="slf-hauler-vera-comment">{haulerVeraComment}</div>
+            )}
+          </div>
+        )}
         <Table
           className="slf-upload-preview-table slf-slim-scroll"
           dataSource={uploadPreviewData}
           columns={(uploadPreviewColumns || []).map((col) => {
+            // Row number and hauler/ticket identity stay put while the rest of
+            // the grid scrolls sideways, so an edit three columns to the right is
+            // never made against a row the operator can no longer identify.
+            // Only above `lg`: on a phone two frozen columns would leave almost
+            // no scrollable area at all.
+            const isIdentityColumn =
+              col?.title === "#" ||
+              ["index", "haulerName", "disposalTicketNo"].includes(col?.key);
+            const pinned = isNarrowScreen
+              ? null
+              : isIdentityColumn
+                ? { fixed: "left" }
+                : col?.key === "actions"
+                  ? { fixed: "right" }
+                  : null;
             // keep the row-number (#) and actions columns as-is
             if (!col || !col.dataIndex || col.key === "actions" || col.title === "#")
-              return col;
+              return pinned ? { ...col, ...pinned } : col;
             return {
               ...col,
+              ...pinned,
               render: (text, record) => (
                 ["truckCapacity", "actualVolume", "numberOfTrucks", "capacity"].includes(col.dataIndex) ? (
                   <InputNumber
@@ -4610,20 +4610,15 @@ export default function SLFPortalModals({
                     onChange={(value) =>
                       updateUploadCell(record.key, col.dataIndex, value)
                     }
-                    options={Array.from(
-                      new Map(
-                        [
-                          ...uploadClientOptions,
-                          ...((Array.isArray(text) ? text : [])
-                            .map((clientName) => {
-                              const trimmedName = String(clientName || "").trim();
-                              return trimmedName
-                                ? [trimmedName.toLowerCase(), { label: trimmedName, value: trimmedName }]
-                                : null;
-                            })
-                            .filter(Boolean)),
-                        ],
-                      ).values(),
+                    // The clients already on this baseline, plus whatever the
+                    // row itself carries (a name typed in the file that is not
+                    // stored yet must still show as a selected tag).
+                    options={mergeSelectOptions(
+                      uploadClientOptions,
+                      (Array.isArray(text) ? text : []).map((clientName) => ({
+                        label: String(clientName ?? "").trim(),
+                        value: String(clientName ?? "").trim(),
+                      })),
                     )}
                     placeholder="Select encoded clients"
                     style={{ width: "100%" }}
@@ -4701,15 +4696,21 @@ export default function SLFPortalModals({
           // the header and the body always agree on where a column starts. A
           // hardcoded `x` narrower than that sum is what skewed the preview: AntD
           // laid the table out at the real width while sizing against the smaller
-          // one. `y` is viewport-relative (and keeps the header pinned while the
-          // rows scroll) so the modal fits a laptop screen as well as a large one.
+          // one.
+          //
+          // `y` is viewport-relative and keeps the header pinned while the rows
+          // scroll, so the modal fits a laptop as well as a large screen. The
+          // clamp is what makes it survive a SHORT viewport (a phone in
+          // landscape, a half-height browser window): a bare 52vh collapses to a
+          // couple of rows there and pushes the Import button off-screen, while
+          // the 460px ceiling stops the table from stretching on a tall monitor.
           scroll={{
             x:
               (uploadPreviewColumns || []).reduce(
                 (sum, col) => sum + (Number(col?.width) || 120),
                 0,
               ) || 980,
-            y: "min(52vh, 460px)",
+            y: "clamp(180px, 52vh, 460px)",
           }}
           rowClassName={(record) =>
             record._errors?.length

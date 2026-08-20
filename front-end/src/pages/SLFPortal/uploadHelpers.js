@@ -210,6 +210,36 @@ export const isClientAddressHeader = (header) => {
   return key.includes("client") && key.includes("address");
 };
 
+// ── Client location ──────────────────────────────────────────────────────────
+// The three fields the Add Client form captures alongside the name and the type.
+// They are not decoration: the server classifies a client within / outside
+// Region 3 from its PROVINCE NAME and reports a client with no province or
+// municipality as incomplete, so the bulk path has to be able to carry them or
+// it can only ever produce records the form itself would refuse.
+//
+// The old hauler EXPORT already emitted "Region" / "Province" /
+// "City/Municipality" columns, which is why these matchers accept the bare
+// labels as well as the "Client …" ones.
+export const isClientRegionHeader = (header) => {
+  const key = uploadHeaderKey(header);
+  return /\bregion\b/.test(key);
+};
+
+export const isClientProvinceHeader = (header) => {
+  const key = uploadHeaderKey(header);
+  return key.includes("province");
+};
+
+// `\bcity\b`, never a plain substring test: "Capacity" ENDS in "city", so a
+// substring match would resolve the Capacity column to the municipality. The
+// explicit capacity guard keeps that true even if the word boundary is lost to
+// a header like "Truck-Capacity".
+export const isClientMunicipalityHeader = (header) => {
+  const key = uploadHeaderKey(header);
+  if (key.includes("capacity")) return false;
+  return key.includes("municipal") || /\bcity\b/.test(key);
+};
+
 // "Office Address" AND the hauler export's "Hauler Office Address" — matched
 // BEFORE the hauler-name rule, which claims any header containing "hauler".
 export const isOfficeAddressHeader = (header) => {
@@ -336,6 +366,34 @@ export const HAULER_UPLOAD_COLUMNS = [
     sample: "San Fernando, Pampanga",
     matches: isClientAddressHeader,
   },
+  {
+    field: "clientRegion",
+    label: "Client Region",
+    required: false,
+    format: "Text; the region name",
+    description: "Region of the clients listed on this row.",
+    sample: "Region III (Central Luzon)",
+    matches: isClientRegionHeader,
+  },
+  {
+    field: "clientProvince",
+    label: "Client Province",
+    required: false,
+    format: "Text; the province name",
+    description:
+      "Province of the clients listed on this row. The Add Client form requires it — it is what classifies a client within or outside Region 3 — so supply it for every NEW client. Leave it blank to keep the province already stored.",
+    sample: "Pampanga",
+    matches: isClientProvinceHeader,
+  },
+  {
+    field: "clientMunicipality",
+    label: "Client City/Municipality",
+    required: false,
+    format: "Text; the city or municipality name",
+    description: "City or municipality of the clients listed on this row.",
+    sample: "San Fernando",
+    matches: isClientMunicipalityHeader,
+  },
 ];
 
 /**
@@ -344,6 +402,7 @@ export const HAULER_UPLOAD_COLUMNS = [
  * MOST SPECIFIC FIRST. Several headers legitimately satisfy more than one
  * matcher — "Hauler Office Address" matches both the office-address and the
  * hauler-name rule, "Client Type" matches both the client and the vehicle-type
+ * rule, and every "Client <location>" header also satisfies the bare Clients
  * rule — so the order below, not the order of the columns in the file, is what
  * decides the mapping. Reading it any other way is how an uploaded office
  * address used to land in Hauler Name and a Client Type in Vehicle Type.
@@ -352,6 +411,9 @@ export const HAULER_UPLOAD_FIELD_PRIORITY = [
   "numberOfTrucks",
   "clientType",
   "clientAddress",
+  "clientRegion",
+  "clientProvince",
+  "clientMunicipality",
   "officeAddress",
   "haulerName",
   "privateSectorClients",
@@ -501,6 +563,14 @@ export const getUploadRowErrors = (row, type) => {
     ) {
       errors.push("Capacity Unit must be tons, m3, or m³");
     }
+    // Client Type and Client Province are what the Add Client form REQUIRES, but
+    // they are validated here only when the row actually supplies them.
+    //
+    // An upload is an upsert whose blank cells mean "keep what is stored", so a
+    // partial update that re-lists an existing client to correct one field must
+    // not be forced to restate that client's whole location. A genuinely new
+    // client uploaded without a province is reported on the admin side as an
+    // incomplete client instead — see GET /hauler-clients.
     if (
       (row.privateSectorClients || []).length > 0 &&
       !isEmptyUploadValue(row.clientType) &&
@@ -527,8 +597,22 @@ export const haulerUploadIdentity = (hauler = {}) =>
 
 // A row describes ONE vehicle under a hauler, so two rows are the same record
 // only when both the hauler and the plate repeat.
-const haulerUploadRowIdentity = (row = {}) =>
-  `${haulerUploadIdentity(row)}||${cleanUploadText(row?.plateNumber).toLowerCase()}`;
+//
+// A row with NO plate carries no vehicle at all — it is a clients-only
+// continuation row, the shape Export Hauler Data writes when a hauler has more
+// client groups than vehicles — so those are told apart by their client list
+// instead. Keying them on the empty plate alone reported every clients-only row
+// after the first as a duplicate of it.
+const haulerUploadRowIdentity = (row = {}) => {
+  const plate = cleanUploadText(row?.plateNumber).toLowerCase();
+  if (plate) return `${haulerUploadIdentity(row)}||plate:${plate}`;
+  const clients = (Array.isArray(row?.privateSectorClients) ? row.privateSectorClients : [])
+    .map((client) => cleanUploadText(client).toLowerCase())
+    .filter(Boolean)
+    .sort()
+    .join(",");
+  return `${haulerUploadIdentity(row)}||clients:${clients}`;
+};
 
 /**
  * Classify every previewed hauler row against the baseline haulers ALREADY

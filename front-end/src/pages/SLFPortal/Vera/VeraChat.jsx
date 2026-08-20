@@ -80,6 +80,7 @@ export default function VeraChat({
   const abortReasonRef = useRef(null); // "user" | "timeout" | null
   const lastUserTextRef = useRef("");   // for Retry
   const loadedStatus = useRef(false);
+  const pendingAskRef = useRef("");     // question seeded by a `vera:open` event
 
   // Rotating "thinking" status wording while a request is in flight. Text-only
   // (not motion), so it always runs; the flame glow provides the visual cue.
@@ -121,7 +122,17 @@ export default function VeraChat({
   // VERA card dispatches window `vera:open`. Reuses this mounted chat, never a
   // duplicate.
   useEffect(() => {
-    const onOpen = () => { setOpen(true); setMinimized(false); };
+    const onOpen = (event) => {
+      setOpen(true);
+      setMinimized(false);
+      // `detail.ask` seeds a question — used by the feature tour's "Ask VERA",
+      // so the user lands in a conversation already underway instead of an
+      // empty chat they have to think of a question for. Queued in a ref and
+      // sent by the effect below, because `send` guards on `typing` and would
+      // drop a call made during this handler's render pass.
+      const ask = String(event?.detail?.ask || "").trim();
+      if (ask) pendingAskRef.current = ask;
+    };
     window.addEventListener("vera:open", onOpen);
     return () => window.removeEventListener("vera:open", onOpen);
   }, []);
@@ -275,6 +286,16 @@ export default function VeraChat({
     setInput("");
     runRequest(text);
   }, [typing, runRequest]);
+
+  // Send a question seeded by `vera:open`, once the chat is actually open and
+  // idle. Cleared before sending so a re-render can never ask it twice.
+  useEffect(() => {
+    if (!open || minimized || typing) return;
+    const ask = pendingAskRef.current;
+    if (!ask) return;
+    pendingAskRef.current = "";
+    send(ask);
+  }, [open, minimized, typing, send]);
 
   // Retry the last question without re-adding the user bubble; drop a trailing
   // error bubble first so the transcript stays clean.

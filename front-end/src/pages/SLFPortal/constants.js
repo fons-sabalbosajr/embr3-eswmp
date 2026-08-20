@@ -6,6 +6,10 @@ export const PORTAL_WASTE_RECEIVED_CACHE_KEY = "portal-waste-received-cache";
 export const PORTAL_CACHE_TTL = 2 * 60 * 1000;
 export const PORTAL_UPDATE_TOUR_SEEN_PREFIX = "slf-portal-update-tour-seen-";
 export const PORTAL_TOUR_DISMISSED_PREFIX = "slf-portal-tour-dismissed-"; // stable per-user key
+// Local mirror of the FEATURE tour marker. Holds a release VERSION, not "1" —
+// the value is compared against PORTAL_FEATURE_TOUR_VERSION so the next release
+// shows again. See portalFeatureTour.js.
+export const PORTAL_FEATURE_TOUR_SEEN_PREFIX = "slf-portal-feature-tour-seen-";
 export const ORGANIZE_CELLS_ENABLED = true;
 
 // Request/amendment type → label + tag color, used by the "My Requests" table.

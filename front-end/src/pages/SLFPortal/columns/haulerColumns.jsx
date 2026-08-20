@@ -1,4 +1,4 @@
-import { DeleteOutlined, EditOutlined } from "@ant-design/icons";
+import { DeleteOutlined, EditOutlined, TeamOutlined } from "@ant-design/icons";
 import { Button, Space, Tag, Tooltip } from "antd";
 
 // Column definitions for the Data Entry accredited-hauler table.
@@ -137,7 +137,7 @@ export function makeHaulerColumns({
       {
         title: "Actions",
         key: "actions",
-        width: 100,
+        width: 130,
         render: (_, h) => (
           <Space size="small">
             <Button
@@ -147,6 +147,18 @@ export function makeHaulerColumns({
               onClick={() => openHaulerModal(h)}
               style={{ color: "#1a3353" }}
             />
+            {/* Straight to this hauler's client list. Maintaining clients in
+                bulk is a per-hauler job, so it gets its own way in rather than
+                being buried behind Edit → expand Clients. */}
+            <Tooltip title="Export or upload this hauler's client list">
+              <Button
+                type="text"
+                size="small"
+                icon={<TeamOutlined />}
+                onClick={() => openHaulerModal(h, "clients")}
+                style={{ color: "#614700" }}
+              />
+            </Tooltip>
             <Tooltip
               title={baselineSaved ? "Request hauler deletion" : "Remove hauler"}
             >

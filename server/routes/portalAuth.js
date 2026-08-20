@@ -802,7 +802,8 @@ router.get("/me", async (req, res) => {
 // only the keys actually present in the body, so dismissing one can never clear
 // the other.
 const UI_PREFERENCE_FIELDS =
-  "portalTourDismissedAt portalAnnouncementDismissedVersion portalAnnouncementDismissedAt";
+  "portalTourDismissedAt portalAnnouncementDismissedVersion portalAnnouncementDismissedAt " +
+  "portalFeatureTourVersionSeen portalFeatureTourSeenAt";
 
 const uiPreferencePayload = (doc) => ({
   tourDismissed: !!doc?.portalTourDismissedAt,
@@ -811,6 +812,10 @@ const uiPreferencePayload = (doc) => ({
   // announcement's version, so a newly published announcement still shows.
   announcementDismissedVersion: doc?.portalAnnouncementDismissedVersion || null,
   announcementDismissedAt: doc?.portalAnnouncementDismissedAt || null,
+  // Same rule for the feature tour, against the CURRENT release version — so a
+  // user who dismissed the last one still sees the next.
+  featureTourVersionSeen: doc?.portalFeatureTourVersionSeen || null,
+  featureTourSeenAt: doc?.portalFeatureTourSeenAt || null,
 });
 
 router.get("/ui-preferences", async (req, res) => {
@@ -849,6 +854,13 @@ router.patch("/ui-preferences", async (req, res) => {
       const version = String(req.body.announcementDismissedVersion ?? "").trim();
       update.portalAnnouncementDismissedVersion = version || null;
       update.portalAnnouncementDismissedAt = version ? new Date() : null;
+    }
+    if (Object.hasOwn(req.body || {}, "featureTourVersionSeen")) {
+      // Bounded: this is a client-supplied release marker written straight to
+      // the record, so it is trimmed and capped rather than trusted for length.
+      const version = String(req.body.featureTourVersionSeen ?? "").trim().slice(0, 80);
+      update.portalFeatureTourVersionSeen = version || null;
+      update.portalFeatureTourSeenAt = version ? new Date() : null;
     }
     if (!Object.keys(update).length) {
       return res.status(400).json({ message: "No preference was provided." });

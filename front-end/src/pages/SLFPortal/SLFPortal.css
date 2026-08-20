@@ -806,8 +806,49 @@
   box-shadow: inset 3px 0 0 #faad14;
 }
 
-.slf-upload-preview-modal .ant-modal-body {
+.slf-upload-modal .ant-modal-body {
   padding-top: 14px;
+}
+
+/* The clients-only continuation row in the format guide's worked example — the
+   one row shape the guide exists to explain. Tinted so it reads as a different
+   KIND of row at a glance, not just a row with empty cells. */
+.slf-guide-continuation-row > td {
+  background: #fffbe6 !important;
+}
+
+.slf-guide-continuation-row > td:first-child {
+  box-shadow: inset 3px 0 0 #faad14;
+}
+
+/* ── The guide's worked example ──────────────────────────────────────────────
+   Fitted to the modal, never scrolled sideways: the figure works by showing the
+   SHAPE of three rows across thirteen columns at once, and a horizontal scroll
+   means the clients-only row can never be seen beside the vehicle rows it is
+   being contrasted with. Thirteen columns in that width are narrow, so the
+   padding is tight and every cell wraps — a value costs row height, never
+   visibility. */
+.slf-guide-example-table .ant-table {
+  font-size: 10.5px;
+}
+
+.slf-guide-example-table .ant-table-thead > tr > th,
+.slf-guide-example-table .ant-table-tbody > tr > td {
+  padding: 5px 6px !important;
+  line-height: 1.25;
+  vertical-align: top;
+}
+
+.slf-guide-example-table .ant-table-thead > tr > th {
+  background: #fafafa;
+  font-weight: 600;
+  vertical-align: bottom;
+}
+
+/* antd reserves horizontal room for a sort/filter affordance these columns do
+   not have; reclaiming it is worth a readable character or two per cell. */
+.slf-guide-example-table .ant-table-thead > tr > th::before {
+  display: none;
 }
 
 .slf-upload-preview-table .ant-table {
@@ -917,6 +958,146 @@
 .slf-upload-preview-popup .ant-select-item {
   min-height: 26px;
   align-items: flex-start;
+}
+
+/* The pinned identity columns must stay opaque, or the cells scrolling beneath
+   them show through and the row number/hauler name become unreadable — the one
+   thing they exist to guarantee. */
+.slf-upload-preview-table .ant-table-cell-fix-left,
+.slf-upload-preview-table .ant-table-cell-fix-right {
+  background: #fff;
+}
+
+.slf-upload-preview-table .ant-table-thead > tr > th.ant-table-cell-fix-left,
+.slf-upload-preview-table .ant-table-thead > tr > th.ant-table-cell-fix-right {
+  background: #fafafa;
+}
+
+/* A tinted row keeps its tint under the frozen columns too — the error/duplicate
+   state is read from the whole row, so a white gap at its left edge would break
+   exactly the scan the colour is for. */
+.slf-upload-row-error > td.ant-table-cell-fix-left,
+.slf-upload-row-error > td.ant-table-cell-fix-right {
+  background: #fff2f0 !important;
+}
+
+.slf-upload-row-duplicate > td.ant-table-cell-fix-left,
+.slf-upload-row-duplicate > td.ant-table-cell-fix-right {
+  background: #fffbe6 !important;
+}
+
+/* ── VERA assessment panel, upload preview ───────────────────────────────────
+   Deliberately the same treatment as .bulk-vera-panel in BulkOrganizeCells, so
+   VERA reads as one feature across both bulk flows rather than two look-alikes.
+   The violet frame is what separates an ADVISORY from the red/amber validation
+   states in the same modal — a colour the operator never has to act on. */
+.slf-hauler-vera-panel {
+  border: 1px solid #d3adf7;
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin-bottom: 12px;
+  background: linear-gradient(135deg, rgba(114, 46, 209, 0.05), rgba(19, 194, 194, 0.05));
+}
+
+.slf-hauler-vera-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+  flex-wrap: wrap;
+}
+
+/* VERA's answer is plain text and can be long. It scrolls in its own box rather
+   than being truncated, so nothing it says is hidden and the preview table below
+   stays reachable — the table is what the operator came here to check. */
+.slf-hauler-vera-comment {
+  font-size: 12.5px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  max-height: 180px;
+  overflow-y: auto;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: #fff;
+  border: 1px solid #efdbff;
+}
+
+/* ── Upload modals on smaller screens ────────────────────────────────────────
+   Shared by the format guide and the preview it leads into, so the two steps of
+   one flow behave identically.
+
+   Neither can be folded into a phone: the preview is a sixteen-column review
+   grid where every column is a value the operator is being asked to approve, so
+   hiding one would mean importing data nobody saw. They are given the whole
+   viewport instead of a centred card, and their tables keep their own
+   horizontal scroll. What must never happen is the MODAL itself overflowing:
+   the primary action has to stay reachable without hunting for it.
+
+   `.ant-modal.slf-…` and not the bare class: antd injects its own `.ant-modal`
+   rules (including `max-width: calc(100vw - 32px)`) into <head> at runtime, so
+   an equally-specific selector here would lose on source order alone. */
+@media (max-width: 992px) {
+  .ant-modal.slf-upload-modal {
+    top: 8px !important;
+    max-width: calc(100vw - 16px);
+    padding-bottom: 8px;
+  }
+
+  .slf-upload-modal .ant-modal-body {
+    padding-top: 10px;
+  }
+}
+
+@media (max-width: 768px) {
+  .ant-modal.slf-upload-modal {
+    top: 0 !important;
+    max-width: 100vw;
+    margin: 0;
+    padding-bottom: 0;
+  }
+
+  .slf-upload-modal .ant-modal-content {
+    border-radius: 0;
+  }
+
+  .slf-upload-modal .ant-modal-body {
+    padding-inline: 12px;
+  }
+
+  /* The alerts carry the reason the import is blocked, or the rule the guide
+     turns on, so they are kept — only their weight is reduced. */
+  .slf-upload-modal .ant-alert {
+    padding: 6px 10px;
+  }
+
+  .slf-upload-modal .ant-alert-message {
+    font-size: 13px;
+  }
+
+  .slf-upload-modal .ant-alert-description {
+    font-size: 12px;
+  }
+}
+
+@media (max-width: 576px) {
+  /* "Import 24 Hauler(s)" beside Cancel does not fit a phone footer: side by
+     side they wrap into a ragged two-line block. Stacked full-width, the
+     primary action stays the one under the thumb. */
+  .slf-upload-modal .ant-modal-footer {
+    display: flex;
+    flex-direction: column-reverse;
+    gap: 8px;
+  }
+
+  .slf-upload-modal .ant-modal-footer .ant-btn + .ant-btn,
+  .slf-upload-modal .ant-modal-footer .ant-btn {
+    width: 100%;
+    margin-inline-start: 0;
+  }
+
+  .slf-upload-modal .ant-modal-title {
+    font-size: 15px;
+  }
 }
 
 .slf-waste-breakdown-table .ant-table {

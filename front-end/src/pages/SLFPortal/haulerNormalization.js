@@ -200,6 +200,86 @@ export const mergeHaulersByName = (haulers = [], fallbackUnit = "m³") => {
   return Array.from(merged.values());
 };
 
+/**
+ * One stored hauler → the rows that describe it in the UPLOAD layout.
+ *
+ * Keys are HAULER_UPLOAD_COLUMNS field names, so "Export Hauler Data" can write
+ * the export under the uploader's own headers and the file it produces is by
+ * construction a file the uploader accepts — download, correct it in Excel,
+ * upload it back.
+ *
+ * SAME SHAPE THE UPLOADER PARSES: one row = one vehicle, hauler-level fields
+ * repeated on every row of that hauler (Number of Trucks is validated per row,
+ * so a continuation row that left it blank would fail its own re-import), and
+ * clients comma-separated in a single cell. Clients that share a type, address,
+ * region, province and city/municipality travel together in one row; a hauler
+ * with more distinct client groups than vehicles simply continues on further
+ * rows, which the duplicate check recognizes as clients-only rows rather than
+ * repeats (see haulerUploadRowIdentity).
+ */
+export const buildHaulerExportRows = (hauler = {}, fallbackUnit = "m³") => {
+  const vehicles = hauler.vehicles?.length
+    ? hauler.vehicles
+    : hauler.plateNumber || hauler.vehicleType || hauler.capacity != null
+      ? [
+          {
+            plateNumber: hauler.plateNumber,
+            vehicleType: hauler.vehicleType,
+            capacity: hauler.capacity,
+            capacityUnit: hauler.capacityUnit,
+          },
+        ]
+      : [];
+  const storedClients = Array.isArray(hauler.privateSectorClients)
+    ? hauler.privateSectorClients
+    : hauler.privateSectorClients
+      ? [hauler.privateSectorClients]
+      : [];
+  const groups = new Map();
+  storedClients.forEach((entry) => {
+    const client = typeof entry === "string" ? { clientName: entry } : entry || {};
+    const clientName = String(client.clientName || "").trim();
+    if (!clientName) return;
+    const group = {
+      clientType: client.clientType || "Private",
+      clientAddress: client.clientAddress || client.address || "",
+      // The *Name fields first: a PSGC code is an identifier, not a place, and
+      // printing one into the sheet would upload back as a nonsense province.
+      clientRegion: client.regionName || client.region || "",
+      clientProvince: client.provinceName || client.province || "",
+      clientMunicipality: client.municipalityName || client.municipality || "",
+    };
+    const groupKey = Object.values(group).join("||").toLowerCase();
+    const existing = groups.get(groupKey);
+    if (existing) existing.names.push(clientName);
+    else groups.set(groupKey, { ...group, names: [clientName] });
+  });
+  const clientGroups = Array.from(groups.values());
+  const rowCount = Math.max(vehicles.length, clientGroups.length, 1);
+  return Array.from({ length: rowCount }, (_, index) => {
+    const vehicle = vehicles[index] || {};
+    const group = clientGroups[index] || null;
+    return {
+      haulerName: hauler.haulerName || "",
+      numberOfTrucks: hauler.numberOfTrucks || vehicles.length || "",
+      officeAddress: hauler.officeAddress || "",
+      plateNumber: vehicle.plateNumber || "",
+      vehicleType: vehicle.vehicleType || "",
+      capacity: vehicle.capacity ?? "",
+      capacityUnit:
+        vehicle.capacity == null
+          ? ""
+          : normalizeUnit(vehicle.capacityUnit || fallbackUnit),
+      privateSectorClients: group ? group.names.join(", ") : "",
+      clientType: group ? group.clientType : "",
+      clientAddress: group ? group.clientAddress : "",
+      clientRegion: group ? group.clientRegion : "",
+      clientProvince: group ? group.clientProvince : "",
+      clientMunicipality: group ? group.clientMunicipality : "",
+    };
+  });
+};
+
 export const cleanVehicleForSubmit = (vehicle = {}, fallbackUnit = "m³") => {
   const normalized = normalizeVehicleRecord(vehicle, fallbackUnit);
   return {

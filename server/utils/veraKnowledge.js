@@ -267,6 +267,88 @@ const KNOWLEDGE_BASE = [
       `I'm ${ASSISTANT_NAME} (${ASSISTANT_FULL_NAME}), the SLF Portal assistant. I can explain portal features and workflows, guide you through forms, submissions, status tracking, cell organization, uploads, and common errors, and warn you about missing or risky inputs before you submit. I only cover the SLF Portal — for anything else, or to reach a person, open a support ticket.`,
     related: ["required-to-submit", "how-to-submit", "contact-support"],
   },
+  // ── Bulk hauler & client maintenance ──────────────────────────────────────
+  // Added with the release the portal's feature tour announces. VERA is offered
+  // as a way to walk through that change, so these have to be here: without
+  // them VERA would answer "what's new?" from the OLD workflow entries above
+  // and confidently describe a process that no longer exists.
+  {
+    id: "hauler-upload-columns",
+    category: "haulers",
+    question: "What columns does the Accredited Haulers Excel upload accept?",
+    keywords: [
+      "hauler upload", "upload haulers", "hauler columns", "excel columns", "csv columns",
+      "accredited hauler upload", "hauler template", "required columns", "client region",
+      "client province", "client city", "client municipality", "upload format",
+    ],
+    answer:
+      "Thirteen columns: Hauler Name and Number of Trucks (both required), Office Address, Plate Number, Vehicle Type, Capacity, Capacity Unit, Clients, Client Type, Client Address, Client Region, Client Province and Client City/Municipality. The three client location columns let a bulk update record everything the Add Hauler form asks for — Client Province is what classifies a client inside or outside Region 3, so supply it for every new client. A blank optional cell keeps the value already saved; it never clears one. Download Sample Template writes exactly these columns with a worked example.",
+    related: ["hauler-upload-rows", "hauler-export-roundtrip", "add-haulers"],
+  },
+  {
+    id: "hauler-upload-rows",
+    category: "haulers",
+    question: "How many rows does a hauler need if it serves several clients?",
+    keywords: [
+      "how many rows", "multiple clients", "several clients", "many clients", "one row",
+      "rows per hauler", "client group", "clients only row", "no plate number",
+      "hauler rows", "layout",
+    ],
+    answer:
+      "One row describes one vehicle, and clients belong to the hauler rather than to the truck on their row — so you never match clients to trucks. A hauler needs as many rows as the LARGER of: its number of vehicles, or its number of client groups (at least one). A client group is a set of clients sharing the same Client Type, Client Address, Client Region, Client Province and Client City/Municipality — those can be listed together in one Clients cell, separated by commas. If a hauler has more client groups than vehicles, the extra rows simply carry no Plate Number; they add no vehicle. Repeat the Hauler Name and Number of Trucks on every row of the same hauler.",
+    related: ["hauler-upload-columns", "hauler-client-list-upload"],
+  },
+  {
+    id: "hauler-export-roundtrip",
+    category: "haulers",
+    question: "How do I use Export Hauler Data to update haulers in bulk?",
+    keywords: [
+      "export hauler data", "export haulers", "edit in excel", "round trip", "re-upload",
+      "bulk edit", "bulk update haulers", "download my haulers",
+    ],
+    answer:
+      "Export Hauler Data writes your current haulers in exactly the columns the uploader reads, so it is an editable worksheet rather than a report: download it, correct or add rows in Excel, then upload it back through Upload Excel/CSV. Starting from the export is the safer path, because the hauler and client names then match what is stored letter for letter — and matching is by name, so a retyped name creates a second hauler instead of updating the first. Inside Edit Accredited Hauler there is also an Export Hauler Data button for that one hauler on its own.",
+    related: ["hauler-upload-columns", "hauler-upload-rows"],
+  },
+  {
+    id: "hauler-client-list-upload",
+    category: "haulers",
+    question: "How do I upload a client list for just one hauler?",
+    keywords: [
+      "client list", "upload client list", "export client list", "clients per hauler",
+      "one hauler clients", "client upload", "bulk clients", "client template",
+    ],
+    answer:
+      "Each row in the Accredited Haulers table has a client-list action that opens that hauler with Export Client List and Upload Client List. The sheet has six columns — Client Name and Client Type (required), plus Client Address, Region, Province and City/Municipality — and deliberately NO Hauler Name column, because the hauler is the one you opened, so a bulk client update cannot land on the wrong hauler. Clients are matched by name: an existing name updates that client, a new one adds it. A client being ADDED needs a Client Type and a Province, the same details the Add Client form asks for; a client being updated can fill one field and leave the rest blank. Nothing is ever removed by an upload — delete a client in the Clients table instead.",
+    related: ["hauler-upload-rows", "vera-upload-assessment", "hauler-clients"],
+  },
+  {
+    id: "vera-upload-assessment",
+    category: "haulers",
+    question: "What does VERA check when I upload haulers or a client list?",
+    keywords: [
+      "vera assessment", "vera check", "vera review", "assess upload", "before import",
+      "risky rows", "near match", "duplicate hauler", "second opinion",
+    ],
+    answer:
+      "When an upload preview validates cleanly, I review it before you import and report what is legal but probably wrong: a hauler or client name that closely resembles one you already have without matching it (which would ADD a second record instead of updating the first), a truck capacity or truck count that looks implausible, a fleet count that disagrees with the plate numbers supplied, a new client with no province, and an LGU recorded as Private or the reverse. I am a second opinion, never a gate — I cannot block your import, and if I am unavailable your file is still valid and can be imported. You can also re-assess after editing rows in the preview.",
+    related: ["hauler-client-list-upload", "hauler-upload-columns"],
+  },
+  {
+    id: "whats-new-haulers",
+    category: "haulers",
+    question: "What changed in the Accredited Haulers section?",
+    keywords: [
+      "what changed", "what's new", "whats new", "new feature", "new features", "update",
+      "changes today", "new process", "recent changes", "tour",
+    ],
+    answer:
+      "Five changes to bulk hauler maintenance. (1) The Accredited Haulers upload now carries Client Region, Client Province and Client City/Municipality. (2) Export Hauler Data writes the exact columns the uploader reads, so an export can be corrected in Excel and uploaded straight back. (3) The upload format guide now explains ROW LAYOUT with a worked example — how many rows a hauler needs when it serves several clients. (4) Each hauler row has a new client-list action for exporting and uploading that one hauler's clients on a six-column sheet with no Hauler Name column. (5) I now review a validated upload before you import it and flag rows that look wrong without blocking you. You can replay the guided tour any time from What's New Tour.",
+    related: [
+      "hauler-upload-columns", "hauler-upload-rows", "hauler-export-roundtrip",
+      "hauler-client-list-upload", "vera-upload-assessment",
+    ],
+  },
 ];
 
 // Suggested starter questions shown in the chat when a conversation begins.
