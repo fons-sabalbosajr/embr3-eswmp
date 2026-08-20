@@ -157,10 +157,39 @@ test("seeing it is recorded both locally and on the server", () => {
 
 test("it opens at most once automatically, and never over the other tour", () => {
   assert.match(portal, /if \(!uiPrefsLoaded \|\| featureTourAutoOpenedRef\.current\) return;/);
-  assert.match(portal, /if \(updateTourOpen\) return;/, "the two tours must not collide");
   assert.match(portal, /featureTourAutoOpenedRef\.current = true;/);
   // …and stays reachable afterwards.
   assert.match(portal, /onClick=\{\(\) => openFeatureTour\(\)\}/, "a manual entry point exists");
+});
+
+test("an announcement that opens the orientation tour holds the feature tour back", () => {
+  // Publishing an announcement whose text contains "update" / "what's new"
+  // flips isPortalUpdateAnnouncement, which auto-opens the ORIENTATION tour.
+  // That effect and the feature tour's auto-open run in the SAME commit, where
+  // `updateTourOpen` is still the previous render's false — so the state flag
+  // alone cannot stop both tours opening on top of each other. The ref is
+  // claimed synchronously and is what actually holds the second one back.
+  assert.match(
+    portal,
+    /updateTourClaimedRef\.current = true;/,
+    "the orientation tour must claim the screen synchronously",
+  );
+  assert.match(
+    portal,
+    /if \(updateTourOpen \|\| updateTourClaimedRef\.current\) return;/,
+    "the feature tour must check the ref, not only the state",
+  );
+  // The claim must happen inside openPortalUpdateTour, BEFORE its setState calls
+  // — after them it would be too late for an effect in the same commit.
+  const opener = portal.slice(
+    portal.indexOf("const openPortalUpdateTour = useCallback("),
+    portal.indexOf("// ONE place that records \"never show this again\""),
+  );
+  assert.ok(
+    opener.indexOf("updateTourClaimedRef.current = true;") <
+      opener.indexOf("setUpdateTourOpen(true);"),
+    "the ref must be claimed before the state update",
+  );
 });
 
 test("the panel its steps point at is opened first", () => {
