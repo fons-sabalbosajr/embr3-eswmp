@@ -47,6 +47,10 @@ const DISPOSAL_HEADERS = [
 // Accredited haulers (uploadType "hauler"): Hauler Name + Number of Trucks are
 // required; everything else is optional — which is what makes a partial update
 // possible.
+// The client LOCATION columns are the ones the Add Client form asks for
+// (province classifies a client within / outside Region 3), and they are also
+// what "Export Hauler Data" writes — the export uses this exact layout so it can
+// be edited and uploaded straight back.
 const HAULER_HEADERS = [
   "Hauler Name",
   "Number of Trucks",
@@ -58,6 +62,9 @@ const HAULER_HEADERS = [
   "Clients",
   "Client Type",
   "Client Address",
+  "Client Region",
+  "Client Province",
+  "Client City/Municipality",
 ];
 
 // The demo facility declares m³ and has Cell 2 / Cell 3 (Residual) and Cell 4
@@ -67,10 +74,11 @@ const UNIT = "m³";
 const DISPOSAL_DATE = "2026-08-13";
 
 // ── 1. Hauler bulk upload — establishes the accredited haulers + clients ─────
+const R3 = "Region III (Central Luzon)";
 const haulerUploadRows = [
-  ["TEST HAULER 001", 2, "TEST ADDRESS 001, Demonstration Valley", "TST-0001", "Dump Truck", 15, UNIT, "TEST CLIENT 001", "Private", "TEST CLIENT ADDRESS 001"],
-  ["TEST HAULER 001", 2, "TEST ADDRESS 001, Demonstration Valley", "TST-0002", "Compactor", 12, UNIT, "TEST CLIENT 002", "LGU", "TEST CLIENT ADDRESS 002"],
-  ["TEST HAULER 002", 1, "TEST ADDRESS 002, San Ejemplo", "TST-0003", "Dump Truck", 20, UNIT, "TEST CLIENT 003", "Private", "TEST CLIENT ADDRESS 003"],
+  ["TEST HAULER 001", 2, "TEST ADDRESS 001, Demonstration Valley", "TST-0001", "Dump Truck", 15, UNIT, "TEST CLIENT 001", "Private", "TEST CLIENT ADDRESS 001", R3, "Bulacan", "TEST CITY 001"],
+  ["TEST HAULER 001", 2, "TEST ADDRESS 001, Demonstration Valley", "TST-0002", "Compactor", 12, UNIT, "TEST CLIENT 002", "LGU", "TEST CLIENT ADDRESS 002", R3, "Bulacan", "TEST CITY 002"],
+  ["TEST HAULER 002", 1, "TEST ADDRESS 002, San Ejemplo", "TST-0003", "Dump Truck", 20, UNIT, "TEST CLIENT 003", "Private", "TEST CLIENT ADDRESS 003", R3, "Pampanga", "TEST CITY 003"],
 ];
 
 // ── 2. Hauler PARTIAL update — only the fields being changed ────────────────
@@ -123,9 +131,9 @@ const INVALID_EXPECTATIONS = [
 // Same hauler + client repeated (must MERGE into one hauler/client, not two,
 // and must not report "duplicated or ambiguous"), and a repeated ticket number.
 const duplicateHaulerRows = [
-  ["TEST HAULER 001", 2, "TEST ADDRESS 001, Demonstration Valley", "TST-0001", "Dump Truck", 15, UNIT, "TEST CLIENT 001", "Private", "TEST CLIENT ADDRESS 001"],
-  ["test hauler 001", 2, "", "TST-0001", "", 15, UNIT, "test client 001", "Private", ""],
-  ["TEST HAULER 001", 2, "", "TST-0004", "Dump Truck", 14, UNIT, "TEST CLIENT 001", "Private", ""],
+  ["TEST HAULER 001", 2, "TEST ADDRESS 001, Demonstration Valley", "TST-0001", "Dump Truck", 15, UNIT, "TEST CLIENT 001", "Private", "TEST CLIENT ADDRESS 001", R3, "Bulacan", "TEST CITY 001"],
+  ["test hauler 001", 2, "", "TST-0001", "", 15, UNIT, "test client 001", "Private", "", "", "", ""],
+  ["TEST HAULER 001", 2, "", "TST-0004", "Dump Truck", 14, UNIT, "TEST CLIENT 001", "Private", "", "", "", ""],
 ];
 
 const README_ROWS = [
@@ -145,7 +153,7 @@ const README_ROWS = [
   ["1", "01_Hauler_Bulk_Upload.xlsx — Data Entry > Baseline > Accredited Haulers > Upload"],
   ["2", "Save Baseline (haulers + clients must be persisted before a disposal upload)"],
   ["3", "02_Hauler_Partial_Update.xlsx — re-upload; ONLY Capacity changes (15→18, 20→22)"],
-  ["", "Office Address / Vehicle Type / Clients / Client Address must remain from step 1"],
+  ["", "Office Address / Vehicle Type / Clients / Client Address / Client location must remain from step 1"],
   ["4", "03_Disposal_Bulk_Upload.xlsx — Data Entry > Waste Generation Information > Upload"],
   ["5", "04_Invalid_Data_Test.xlsx — every row must be REPORTED and the import blocked"],
   ["6", "05_Duplicate_Data_Test.xlsx — 3 rows must merge into 1 hauler / 1 client / 2 vehicles"],

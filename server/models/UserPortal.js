@@ -150,6 +150,16 @@ const userPortalSchema = new mongoose.Schema(
     // announcement gets a new version and shows again.
     portalAnnouncementDismissedVersion: { type: String, trim: true, default: null },
     portalAnnouncementDismissedAt: { type: Date, default: null },
+    // Which FEATURE tour the user has seen, identified by its release version.
+    //
+    // A version for the same reason the announcement is one, and pointedly NOT
+    // the `portalTourDismissedAt` boolean above: that flag means "I have seen
+    // the portal orientation", so reusing it would hide every future feature
+    // tour from everyone who ever dismissed the orientation — including a
+    // release that changes how they do their job. Each release bumps
+    // PORTAL_FEATURE_TOUR_VERSION and the tour returns exactly once.
+    portalFeatureTourVersionSeen: { type: String, trim: true, default: null },
+    portalFeatureTourSeenAt: { type: Date, default: null },
   },
   { timestamps: true, collection: "user_portal" }
 );

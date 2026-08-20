@@ -4,6 +4,34 @@
 
 export const normalizeUnit = (unit) => String(unit || "m³").replace("m3", "m³");
 
+/**
+ * Merge option groups into ONE Select-ready list, deduplicated by value
+ * (case-insensitively), first occurrence winning.
+ *
+ * REGRESSION GUARD. This existed inline as `new Map([...groupA, ...groupB])`,
+ * which looks right and is not: Map's constructor takes an iterable of
+ * [key, value] PAIRS, so handed an array of option OBJECTS it reads index 0 and
+ * 1 of each — both `undefined`. Every option collapsed into a single
+ * `undefined → undefined` entry, `.values()` yielded `undefined`, and antd's
+ * option reader threw "Cannot read properties of undefined (reading 'options')"
+ * as soon as the upload preview had any stored client to offer.
+ *
+ * Blank and malformed entries are dropped rather than passed through: a Select
+ * option with no value is unselectable and renders as an empty row.
+ */
+export const mergeSelectOptions = (...groups) => {
+  const byValue = new Map();
+  groups.flat().forEach((option) => {
+    const value = String(option?.value ?? "").trim();
+    if (!value) return;
+    const identity = value.toLowerCase();
+    if (byValue.has(identity)) return;
+    const label = String(option?.label ?? "").trim();
+    byValue.set(identity, { label: label || value, value });
+  });
+  return Array.from(byValue.values());
+};
+
 export const hasBaselinePayload = (data = {}) =>
   !!(
     data &&

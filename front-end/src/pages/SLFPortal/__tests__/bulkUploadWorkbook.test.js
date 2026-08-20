@@ -37,7 +37,14 @@ import {
   annotateHaulerUploadRows,
   summarizeHaulerUpload,
 } from "../uploadHelpers.js";
-import { mergeHaulersByName } from "../haulerNormalization.js";
+import {
+  mergeHaulersByName,
+  buildHaulerExportRows,
+} from "../haulerNormalization.js";
+import {
+  HAULER_UPLOAD_EXAMPLE_ROWS,
+  HAULER_UPLOAD_EXAMPLE_RESULT,
+} from "../haulerUploadExample.js";
 import { normalizeUnit } from "../helpers.js";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -152,6 +159,11 @@ const toHaulerRecords = (rows) =>
       clientName: c,
       clientType: d.clientType || "Private",
       clientAddress: d.clientAddress || "",
+      // Names, not PSGC codes — the Region 3 classification and the server's
+      // "incomplete client" check both read the *Name fields.
+      regionName: d.clientRegion || "",
+      provinceName: d.clientProvince || "",
+      municipalityName: d.clientMunicipality || "",
     })),
   }));
 
@@ -329,24 +341,42 @@ test("the downloaded hauler template satisfies the uploader's own requirements",
   assert.deepEqual(getUploadRowErrors(parsed, "hauler"), []);
 });
 
+// Mirror of index.jsx#downloadHaulerTemplate's three sample rows.
+const templateSampleValue = (field) =>
+  UPLOAD_COLUMNS.hauler.find((column) => column.field === field)?.sample || "";
+const templateHaulerRow = (values) =>
+  UPLOAD_COLUMNS.hauler.map((column) =>
+    column.field === "haulerName" || column.field === "numberOfTrucks"
+      ? column.sample || ""
+      : (values[column.field] ?? ""),
+  );
+const templateSheet = () => [
+  UPLOAD_COLUMNS.hauler.map((column) => column.label),
+  UPLOAD_COLUMNS.hauler.map((column) => column.sample || ""),
+  templateHaulerRow({
+    plateNumber: "DEF-5678",
+    vehicleType: "Compactor",
+    capacity: "12",
+    capacityUnit: templateSampleValue("capacityUnit"),
+  }),
+  templateHaulerRow({
+    privateSectorClients: "GHI Municipality",
+    clientType: "LGU",
+    clientAddress: "Baliuag, Bulacan",
+    clientRegion: templateSampleValue("clientRegion"),
+    clientProvince: "Bulacan",
+    clientMunicipality: "Baliuag",
+  }),
+];
+
 test("the template's real .xlsx bytes survive a full upload round-trip", () => {
   // Byte-for-byte what downloadHaulerTemplate writes: the column labels as the
-  // header row, the samples as row 2, and a second row repeating the hauler with
-  // another plate to demonstrate grouping.
-  const headers = UPLOAD_COLUMNS.hauler.map((column) => column.label);
-  const sampleRow = UPLOAD_COLUMNS.hauler.map((column) => column.sample || "");
-  const secondVehicleRow = UPLOAD_COLUMNS.hauler.map((column) => {
-    if (column.field === "haulerName" || column.field === "numberOfTrucks") return column.sample || "";
-    if (column.field === "plateNumber") return "DEF-5678";
-    if (column.field === "vehicleType") return "Compactor";
-    if (column.field === "capacity") return "12";
-    if (column.field === "capacityUnit") return column.sample || "";
-    return "";
-  });
+  // header row, the samples as row 2, a second row repeating the hauler with
+  // another plate to demonstrate grouping, and a clients-only third row.
   const workbook = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(
     workbook,
-    XLSX.utils.aoa_to_sheet([headers, sampleRow, secondVehicleRow]),
+    XLSX.utils.aoa_to_sheet(templateSheet()),
     "Accredited Haulers",
   );
   const bytes = XLSX.write(workbook, { type: "buffer", bookType: "xlsx" });
@@ -358,20 +388,277 @@ test("the template's real .xlsx bytes survive a full upload round-trip", () => {
     .sheet_to_json(sheet, { defval: "" })
     .filter((row) => Object.values(row || {}).some((value) => cleanUploadText(value) !== ""));
 
-  assert.equal(rows.length, 2);
+  assert.equal(rows.length, 3);
   assert.deepEqual(getUploadMissingColumns(Object.keys(rows[0]), "hauler"), []);
   const normalized = normalizeRows(rows, "hauler");
   assert.deepEqual(normalized.flatMap((r) => r._errors), [], "the downloaded template must import as-is");
 
+  // The clients-only row must not read as a repeat of anything — it is the row
+  // shape the export produces, so a false Duplicate here would flag every
+  // exported file.
+  assert.deepEqual(
+    annotateHaulerUploadRows(normalized, []).map((r) => r._status),
+    ["new", "new", "new"],
+  );
+
   const haulers = mergeHaulersByName(toHaulerRecords(normalized), UNIT);
-  assert.equal(haulers.length, 1, "the two rows describe ONE hauler");
-  assert.equal(haulers[0].vehicles.length, 2, "…with two vehicles");
+  assert.equal(haulers.length, 1, "the three rows describe ONE hauler");
+  assert.equal(haulers[0].vehicles.length, 2, "…with two vehicles, not three");
   assert.equal(haulers[0].officeAddress, "San Fernando, Pampanga");
   assert.deepEqual(
     haulers[0].privateSectorClients.map((c) => c.clientName),
-    ["ABC Manufacturing", "DEF Foods"],
+    ["ABC Manufacturing", "DEF Foods", "GHI Municipality"],
   );
   assert.equal(haulers[0].privateSectorClients[0].clientType, "Private");
+  // The continuation row's own type and location apply to ITS client only.
+  const lgu = haulers[0].privateSectorClients.find((c) => c.clientName === "GHI Municipality");
+  assert.equal(lgu.clientType, "LGU");
+  assert.equal(lgu.provinceName, "Bulacan");
+  assert.equal(lgu.municipalityName, "Baliuag");
+});
+
+test("template, export and uploader are ONE format — same columns, same order", () => {
+  // The three are generated from UPLOAD_COLUMNS.hauler, and this is what keeps
+  // them that way: a column added for one of them without the others is exactly
+  // the drift that made the old export unimportable.
+  const uploaderColumns = UPLOAD_COLUMNS.hauler.map((c) => c.label);
+  const templateHeaders = templateSheet()[0];
+  const exportHeaders = exportSheet([])[0];
+
+  assert.deepEqual(templateHeaders, uploaderColumns, "template headers");
+  assert.deepEqual(exportHeaders, uploaderColumns, "export headers");
+
+  // Order matters as much as membership: the parser resolves headers by NAME,
+  // but a user comparing the two sheets side by side reads them by position.
+  assert.deepEqual(templateHeaders, exportHeaders);
+
+  // Every field the export can emit must be a field the uploader reads back.
+  const exportFields = Object.keys(
+    buildHaulerExportRows(
+      {
+        haulerName: "H",
+        numberOfTrucks: 1,
+        officeAddress: "O",
+        vehicles: [{ plateNumber: "P", vehicleType: "V", capacity: 1, capacityUnit: UNIT }],
+        privateSectorClients: [{ clientName: "C", clientType: "LGU", provinceName: "Bulacan" }],
+      },
+      UNIT,
+    )[0],
+  ).sort();
+  assert.deepEqual(
+    exportFields,
+    UPLOAD_COLUMNS.hauler.map((c) => c.field).sort(),
+    "the export emits exactly the uploader's fields — no more, no fewer",
+  );
+
+  // And every column must carry a sample, or the template ships a blank column
+  // the user has to guess the format of.
+  assert.deepEqual(
+    UPLOAD_COLUMNS.hauler.filter((c) => !c.sample).map((c) => c.label),
+    [],
+  );
+});
+
+// ── Export Hauler Data ⇄ uploader ───────────────────────────────────────────
+// index.jsx#exportHaulerData writes UPLOAD_COLUMNS.hauler labels as the header
+// row and buildHaulerExportRows' values underneath, keyed by column field — so
+// composing the same sheet here IS the file the button produces.
+const exportSheet = (haulers) => [
+  UPLOAD_COLUMNS.hauler.map((column) => column.label),
+  ...haulers.flatMap((hauler) =>
+    buildHaulerExportRows(hauler, UNIT).map((row) =>
+      UPLOAD_COLUMNS.hauler.map((column) => row[column.field] ?? ""),
+    ),
+  ),
+];
+
+// A sheet (header row + data rows) → the row objects XLSX hands the uploader.
+const rowObjects = ([headers, ...rows]) =>
+  rows.map((row) => Object.fromEntries(headers.map((header, i) => [header, row[i]])));
+
+test("an exported hauler file is a file the uploader accepts, unedited", () => {
+  const baseline = mergeHaulersByName(
+    toHaulerRecords(normalizeRows(readSheet("01_Hauler_Bulk_Upload.xlsx"), "hauler")),
+    UNIT,
+  );
+
+  const sheet = exportSheet(baseline);
+  assert.deepEqual(
+    sheet[0],
+    UPLOAD_COLUMNS.hauler.map((c) => c.label),
+    "the export's headers ARE the uploader's columns",
+  );
+
+  const rows = rowObjects(sheet);
+  assert.deepEqual(
+    getUploadMissingColumns(Object.keys(rows[0]), "hauler"),
+    [],
+    "no required column may be missing — the old export had no Number of Trucks at all",
+  );
+  const normalized = normalizeRows(rows, "hauler");
+  assert.deepEqual(
+    normalized.flatMap((r) => r._errors),
+    [],
+    "a straight re-upload of the export must not be rejected",
+  );
+
+  // Every row must round-trip to the SAME baseline: same haulers, same fleets,
+  // same clients with their type and full location intact. This is what makes
+  // "download → edit in Excel → upload" a safe bulk edit rather than a lossy one.
+  const reimported = mergeHaulersByName(toHaulerRecords(normalized), UNIT);
+  assert.equal(reimported.length, baseline.length);
+  const before = baseline.find((h) => h.haulerName === "TEST HAULER 001");
+  const after = reimported.find((h) => h.haulerName === "TEST HAULER 001");
+  assert.equal(after.officeAddress, before.officeAddress);
+  assert.equal(after.numberOfTrucks, before.numberOfTrucks);
+  assert.deepEqual(
+    after.vehicles.map((v) => [v.plateNumber, v.vehicleType, v.capacity]).sort(),
+    before.vehicles.map((v) => [v.plateNumber, v.vehicleType, v.capacity]).sort(),
+  );
+  assert.deepEqual(
+    after.privateSectorClients.map((c) => [
+      c.clientName,
+      c.clientType,
+      c.clientAddress,
+      c.regionName,
+      c.provinceName,
+      c.municipalityName,
+    ]),
+    before.privateSectorClients.map((c) => [
+      c.clientName,
+      c.clientType,
+      c.clientAddress,
+      c.regionName,
+      c.provinceName,
+      c.municipalityName,
+    ]),
+    "client type and location survive the round-trip",
+  );
+});
+
+test("a hauler with more client groups than vehicles exports without false duplicates", () => {
+  // One vehicle, three clients that differ by type/location — so the export has
+  // to continue on rows that carry no vehicle at all.
+  const hauler = {
+    haulerName: "TEST HAULER 003",
+    numberOfTrucks: 1,
+    officeAddress: "TEST ADDRESS 003",
+    vehicles: [{ plateNumber: "TST-0009", vehicleType: "Dump Truck", capacity: 10, capacityUnit: UNIT }],
+    privateSectorClients: [
+      { clientName: "TEST CLIENT A", clientType: "Private", provinceName: "Bulacan" },
+      { clientName: "TEST CLIENT B", clientType: "LGU", provinceName: "Bulacan" },
+      { clientName: "TEST CLIENT C", clientType: "LGU", provinceName: "Tarlac" },
+    ],
+  };
+  const sheet = exportSheet([hauler]);
+  assert.equal(sheet.length - 1, 3, "one row per client group");
+
+  const normalized = normalizeRows(rowObjects(sheet), "hauler");
+  assert.deepEqual(normalized.flatMap((r) => r._errors), []);
+  const annotated = annotateHaulerUploadRows(normalized, [hauler]);
+  assert.deepEqual(
+    annotated.map((r) => r._status),
+    ["update", "update", "update"],
+    "clients-only continuation rows are not repeats of each other",
+  );
+
+  const [reimported] = mergeHaulersByName(toHaulerRecords(normalized), UNIT);
+  assert.equal(reimported.vehicles.length, 1, "the blank vehicle rows add no phantom vehicles");
+  assert.deepEqual(
+    reimported.privateSectorClients.map((c) => `${c.clientName}/${c.clientType}/${c.provinceName}`),
+    ["TEST CLIENT A/Private/Bulacan", "TEST CLIENT B/LGU/Bulacan", "TEST CLIENT C/LGU/Tarlac"],
+  );
+});
+
+test("a client's PSGC code is never exported as its province", () => {
+  // Legacy clients store the picker's code in `province` and the readable name
+  // in `provinceName`. Writing "031400000" into the sheet would upload back as
+  // a province no Region 3 check can match.
+  const [row] = buildHaulerExportRows(
+    {
+      haulerName: "TEST HAULER 004",
+      numberOfTrucks: 1,
+      privateSectorClients: [
+        {
+          clientName: "TEST CLIENT D",
+          clientType: "LGU",
+          region: "030000000",
+          regionName: "Region III (Central Luzon)",
+          province: "031400000",
+          provinceName: "Bulacan",
+          municipality: "031405000",
+          municipalityName: "Baliuag",
+        },
+      ],
+    },
+    UNIT,
+  );
+  assert.equal(row.clientRegion, "Region III (Central Luzon)");
+  assert.equal(row.clientProvince, "Bulacan");
+  assert.equal(row.clientMunicipality, "Baliuag");
+});
+
+// ── Format guide ⇄ uploader ─────────────────────────────────────────────────
+// The guide's worked example is the layout portal users copy. If it taught a
+// file the importer rejects — or one that imports as something other than what
+// the caption claims — the guide would be worse than none at all.
+test("the format guide's worked example imports exactly as the guide says", () => {
+  // Re-key by COLUMN LABEL — which is what a real spreadsheet hands the parser.
+  // Reading only the declared fields also drops the display-only metadata.
+  const rows = HAULER_UPLOAD_EXAMPLE_ROWS.map((row) =>
+    Object.fromEntries(
+      UPLOAD_COLUMNS.hauler.map((column) => [column.label, row[column.field] ?? ""]),
+    ),
+  );
+
+  // No field in the example may be one the uploader does not read.
+  const exampleFields = new Set(
+    HAULER_UPLOAD_EXAMPLE_ROWS.flatMap((row) =>
+      Object.keys(row).filter((k) => k !== "key" && !k.startsWith("_")),
+    ),
+  );
+  const known = new Set(UPLOAD_COLUMNS.hauler.map((c) => c.field));
+  assert.deepEqual([...exampleFields].filter((f) => !known.has(f)), []);
+
+  assert.deepEqual(getUploadMissingColumns(Object.keys(rows[0]), "hauler"), []);
+  const normalized = normalizeRows(rows, "hauler");
+  assert.deepEqual(
+    normalized.flatMap((r) => r._errors),
+    [],
+    "the example the guide displays must pass validation",
+  );
+
+  // The continuation row must not read as a repeat — the guide presents it as a
+  // normal, expected row shape.
+  assert.deepEqual(
+    annotateHaulerUploadRows(normalized, []).map((r) => r._status),
+    ["new", "new", "new"],
+  );
+
+  const haulers = mergeHaulersByName(toHaulerRecords(normalized), UNIT);
+  assert.equal(haulers.length, HAULER_UPLOAD_EXAMPLE_RESULT.haulers);
+  assert.equal(
+    haulers[0].vehicles.length,
+    HAULER_UPLOAD_EXAMPLE_RESULT.vehicles,
+    "the clients-only row must add no third vehicle",
+  );
+  assert.equal(
+    haulers[0].privateSectorClients.length,
+    HAULER_UPLOAD_EXAMPLE_RESULT.clients,
+    "two clients share row 1's cell and two share row 3's",
+  );
+
+  // Row 1's type/location applies to BOTH of its clients, and row 3's to both of
+  // its own — the exact claim the guide's caption makes about client groups.
+  const byName = Object.fromEntries(
+    haulers[0].privateSectorClients.map((c) => [c.clientName, c]),
+  );
+  assert.equal(byName["ABC Manufacturing"].clientType, "Private");
+  assert.equal(byName["DEF Foods"].clientType, "Private");
+  assert.equal(byName["DEF Foods"].provinceName, "Pampanga");
+  assert.equal(byName["Plaridel LGU"].clientType, "LGU");
+  assert.equal(byName["Pulilan LGU"].clientType, "LGU");
+  assert.equal(byName["Pulilan LGU"].provinceName, "Bulacan");
 });
 
 test("REGRESSION — 'Hauler Office Address' is an address, not the hauler's name", () => {
@@ -400,6 +687,50 @@ test("Client Type / Client Address never land in Vehicle Type / Office Address",
   assert.equal(parsed.officeAddress, "OFFICE 1");
   assert.equal(parsed.clientAddress, "CLIENT 1");
   assert.equal(parsed.clientType, "LGU", "casing is normalized to the stored enum");
+});
+
+test("the client LOCATION columns claim their own fields — 'Capacity' is not a city", () => {
+  // "Capacity" ENDS in "city", so a substring test for the municipality would
+  // swallow the vehicle capacity. Every "Client <location>" header also matches
+  // the bare Clients rule, so only the priority order keeps them apart.
+  const parsed = parseHaulerUploadRow({
+    "Hauler Name": "TEST HAULER 001",
+    "Number of Trucks": 1,
+    Capacity: "15",
+    "Capacity Unit": "tons",
+    Clients: "TEST CLIENT 001",
+    "Client Type": "LGU",
+    "Client Address": "CLIENT 1",
+    "Client Region": "Region III (Central Luzon)",
+    "Client Province": "Bulacan",
+    "Client City/Municipality": "Baliuag",
+  });
+  assert.equal(parsed.capacity, 15);
+  assert.equal(parsed.capacityUnit, "tons");
+  assert.deepEqual(parsed.privateSectorClients, ["TEST CLIENT 001"]);
+  assert.equal(parsed.clientAddress, "CLIENT 1");
+  assert.equal(parsed.clientRegion, "Region III (Central Luzon)");
+  assert.equal(parsed.clientProvince, "Bulacan");
+  assert.equal(parsed.clientMunicipality, "Baliuag");
+});
+
+test("the OLD export's bare Region / Province / City headers still resolve", () => {
+  // Files portal users already hold were written with the previous export
+  // layout; its location columns must land on the client, not be dropped.
+  const parsed = parseHaulerUploadRow({
+    "Hauler Name": "TEST HAULER 001",
+    "Hauler Office Address": "TEST ADDRESS 001",
+    "Client Name": "TEST CLIENT 001",
+    "Client Type": "LGU",
+    Region: "Region III (Central Luzon)",
+    Province: "Bulacan",
+    "City/Municipality": "Baliuag",
+  });
+  assert.equal(parsed.clientRegion, "Region III (Central Luzon)");
+  assert.equal(parsed.clientProvince, "Bulacan");
+  assert.equal(parsed.clientMunicipality, "Baliuag");
+  assert.equal(parsed.haulerName, "TEST HAULER 001");
+  assert.equal(parsed.officeAddress, "TEST ADDRESS 001");
 });
 
 test("an unusable Capacity Unit or Client Type is reported before import", () => {
