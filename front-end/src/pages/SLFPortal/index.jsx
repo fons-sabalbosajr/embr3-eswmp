@@ -492,6 +492,9 @@ export default function SLFPortal() {
   // state only so the feature tour can open the panel its steps point at.
   const [baselineSections, setBaselineSections] = useState([]);
   const featureTourAutoOpenedRef = useRef(false);
+  // Set the instant the orientation tour claims the screen, so the feature
+  // tour's auto-open — a separate effect in the same commit — can see it.
+  const updateTourClaimedRef = useRef(false);
   const haulerUploadRef = useRef(null);
   const haulerExportRef = useRef(null);
   const haulerTableRef = useRef(null);
@@ -788,6 +791,12 @@ export default function SLFPortal() {
       if (!manual && (tourDismissed || (tourDismissedKey && secureStorage.get(tourDismissedKey) === "1"))) {
         return;
       }
+      // Claimed SYNCHRONOUSLY, before any state update. The feature tour's
+      // auto-open runs as a separate effect in the SAME commit, where
+      // `updateTourOpen` is still the previous render's `false` — so a state
+      // flag cannot stop the two from opening on top of each other. A ref is
+      // visible immediately, which is what actually holds the second one back.
+      updateTourClaimedRef.current = true;
       // Show the banner for the duration of the tour without discarding the
       // user's dismissal — the first step targets it.
       setAnnouncementRevealed(true);
@@ -1327,7 +1336,11 @@ export default function SLFPortal() {
   useEffect(() => {
     if (!uiPrefsLoaded || featureTourAutoOpenedRef.current) return;
     if (!portalUser?.email || !featureTourDue) return;
-    if (updateTourOpen) return;
+    // Both the state AND the ref: the state covers a later render, the ref
+    // covers the orientation tour claiming the screen earlier in THIS commit
+    // (which an announcement mentioning "update" or "what's new" triggers).
+    // The feature tour stays due, so it opens on the next visit instead.
+    if (updateTourOpen || updateTourClaimedRef.current) return;
     featureTourAutoOpenedRef.current = true;
     openFeatureTour({ manual: false });
   }, [uiPrefsLoaded, portalUser?.email, featureTourDue, updateTourOpen, openFeatureTour]);
