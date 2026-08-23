@@ -27,6 +27,7 @@ const {
   preBaselineExclusionEnabled,
   OCCUPANCY_ENTRY_FIELDS,
   OCCUPANCY_CALC_VERSION,
+  OVERRIDE_FACILITY_FIELDS,
 } = require("./cellOccupancy");
 
 const BATCH_SIZE = 25;
@@ -68,11 +69,16 @@ async function backfillCellOccupancy() {
   })
     .select(
       "_id numberOfCell cellNames cellStatuses cellTypes cellCapacities " +
-      "cellCapacityUnits cellFillValues cellFillUnits wasteReceivedUnit volumeCapacityUnit " +
-      // cellFillOverridden is READ so an admin-declared Waste in Cell survives
-      // the sweep; the version stamp decides whether a facility needs rewriting.
+      "cellCapacityUnits wasteReceivedUnit volumeCapacityUnit " +
+      // The override fields are READ so an admin-declared Waste in Cell survives
+      // the sweep — base, unit and declaration date included, since the date is
+      // what decides which submissions accumulate on top of it. Leaving them out
+      // would have the repair quietly rewrite every override back to a plain
+      // replacement. The version stamp decides whether a facility needs
+      // rewriting at all.
+      `${OVERRIDE_FACILITY_FIELDS} ` +
       "actualResidualWasteReceived cellFillBaselineValues cellFillSubmittedValues " +
-      "cellFillOverridden cellOccupancyVersion",
+      "cellOccupancyVersion",
     )
     .setOptions({ includeHiddenYears: true })
     .lean();

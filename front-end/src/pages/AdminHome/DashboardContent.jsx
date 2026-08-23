@@ -633,10 +633,21 @@ export default function DashboardContent({ user, isDark, setActiveMenu, onOpenSu
     if (!slfDashModal) return undefined;
     let cancelled = false;
     let timer = null;
+    // Request ordering, which `cancelled` does not cover: a burst of writes can
+    // leave two loads in flight and they need not resolve in send order. A slower
+    // EARLIER response landing last would reinstate the figures the newer one
+    // just corrected.
+    let seq = 0;
+    let latest = 0;
     const load = () => {
+      const mine = (seq += 1);
       api
         .get("/data-slf/cell-occupancy")
-        .then(({ data }) => { if (!cancelled) setCellOccupancy(data?.byFacility || {}); })
+        .then(({ data }) => {
+          if (cancelled || mine < latest) return;
+          latest = mine;
+          setCellOccupancy(data?.byFacility || {});
+        })
         .catch(() => { /* non-fatal: the cards fall back to the stored figures */ });
     };
     load();
@@ -1856,6 +1867,17 @@ export default function DashboardContent({ user, isDark, setActiveMenu, onOpenSu
                             // total, so the legend labels it instead of showing a
                             // baseline/submitted split that would not add up.
                             overridden: live ? !!live.overridden : r.cellFillOverridden?.[i] === true,
+                            // A declaration is a BASE: `fill` is it plus whatever
+                            // has been recorded since. cellVolumeSegments draws
+                            // both, so the arc totals the figure beside it rather
+                            // than showing one flat purple band for a cell that
+                            // has taken deliveries since the admin set it.
+                            overrideBase: live
+                              ? toFacilityUnit(live.overrideBase, live.unit)
+                              : toFacilityUnit(r.cellFillOverrideValues?.[i], r.cellFillOverrideUnits?.[i] || fillUnit),
+                            postOverrideSubmitted: live
+                              ? toFacilityUnit(live.postOverrideSubmitted, live.unit)
+                              : null,
                             percent: computeGaugePercent({ usedCapacity: fill, totalCapacity: cap }),
                           });
                         }
@@ -1864,18 +1886,35 @@ export default function DashboardContent({ user, isDark, setActiveMenu, onOpenSu
                         // cell's submitted volume. Segments sum to the facility's
                         // total fill, so the arc can never disagree with the
                         // headline percentage.
-                        const facilityBaseline = cells.reduce((sum, c) => sum + c.baselineFill, 0);
+                        //
+                        // An ADMIN-DECLARED cell contributes its own figure, not a
+                        // baseline/submitted split: that split is what the data
+                        // alone says and the declaration replaced it. Feeding the
+                        // split in anyway is what made the arc add up to a
+                        // different number than the percentage above it for every
+                        // facility with an override.
+                        const derivedCells = cells.filter((c) => !c.overridden);
+                        const overriddenCells = cells.filter((c) => c.overridden);
+                        const facilityBaseline = derivedCells.reduce((sum, c) => sum + c.baselineFill, 0);
                         const volumeSegments = [
                           ...(facilityBaseline > 0
                             ? [{ ...VOLUME_METRICS.baseline, value: facilityBaseline }]
                             : []),
-                          ...cells
+                          ...derivedCells
                             .filter((c) => c.submittedFill > 0)
                             .map((c, cellIdx) => ({
                               key: `cell-${c.index}`,
                               label: c.name,
                               value: c.submittedFill,
                               color: getSlfColor(`${r._id || r.lgu}-${c.index}`, cellIdx),
+                            })),
+                          ...overriddenCells
+                            .filter((c) => Number(c.fill) > 0)
+                            .map((c) => ({
+                              ...VOLUME_METRICS.adminSet,
+                              key: `admin-cell-${c.index}`,
+                              label: `${c.name} (admin-set)`,
+                              value: Number(c.fill),
                             })),
                         ];
                         // Legacy records predate the provenance split (both arrays

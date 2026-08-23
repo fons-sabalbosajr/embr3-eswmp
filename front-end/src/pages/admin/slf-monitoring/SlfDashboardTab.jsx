@@ -1350,6 +1350,12 @@ const usageFromOccupancy = (occupancy) => ({
     submissionIds: cell.submissionIds || [],
     overridden: !!cell.overridden,
     derivedTotal: cell.derivedTotal,
+    // The two halves of an admin-declared figure: what was declared, and what
+    // has been recorded since. They sum to `total`, so a gauge or legend can
+    // show both without the arc disagreeing with the number beside it.
+    overrideBase: cell.overrideBase,
+    postOverrideSubmitted: cell.postOverrideSubmitted,
+    overriddenAt: cell.overriddenAt,
     byWasteType: {},
     unitsSeen: [],
     hasUnconvertible: (cell.unconvertible || 0) > 0,

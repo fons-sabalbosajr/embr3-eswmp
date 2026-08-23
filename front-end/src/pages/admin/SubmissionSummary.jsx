@@ -121,12 +121,27 @@ function addNameVariant(map, name, value) {
   if (shortKey && !map.has(shortKey)) map.set(shortKey, value);
 }
 
+// Sum a set of submissions' transported volume, per declared unit.
+//
+// The volume lives on the VEHICLE whenever a truck carries them — the portal
+// form records wasteType/actualVolume per vehicle and leaves the truck level at
+// 0 — and only falls back to the truck for single-entry rows. Reading the truck
+// level alone reported 0 for every multi-vehicle submission, so a busy SLF's
+// day totals and Selected Volume tile stayed flat no matter how much waste was
+// submitted. Same rule as hasTruckVolume/computeCellOccupancy on the server and
+// buildSubmissionWasteEntries in utils/submissionEntries.js.
 function getTruckTotals(records) {
   return records.reduce((acc, record) => {
     (record.trucks || []).forEach((truck) => {
-      const unit = normalizeUnit(truck.actualVolumeUnit || record.baselineUnit || "m³");
-      if (unit === "tons") acc.tons += Number(truck.actualVolume || 0);
-      else acc.m3 += Number(truck.actualVolume || 0);
+      const vehicles = (truck.vehicles || []).filter((v) => Number(v.actualVolume || 0) > 0);
+      const rows = vehicles.length ? vehicles : [truck];
+      rows.forEach((row) => {
+        const unit = normalizeUnit(
+          row.actualVolumeUnit || truck.actualVolumeUnit || record.baselineUnit || "m³",
+        );
+        if (unit === "tons") acc.tons += Number(row.actualVolume || 0);
+        else acc.m3 += Number(row.actualVolume || 0);
+      });
     });
     return acc;
   }, { m3: 0, tons: 0 });
@@ -149,59 +164,104 @@ function buildBaselineTotals(baseline) {
   return totals;
 }
 
-function buildCellStatusRows(summary, throughDate, settings = {}) {
+/**
+ * The per-cell fill rows shown beside the disposal calendar.
+ *
+ * ── Why this reads a rollup instead of computing one ─────────────────────────
+ * This used to derive the figures here, in the browser, and it was a FOURTH
+ * implementation of a calculation that already exists once on the server
+ * (utils/cellOccupancy.js → GET /data-slf/cell-occupancy). It disagreed with all
+ * three of the others, and not by a rounding error:
+ *
+ *   • it added the facility's ENTIRE cumulative truck total to EVERY active
+ *     cell, so an SLF with three open cells reported the same waste three times
+ *     and each cell read the whole facility's volume;
+ *   • it never looked at `cellIndex`, so where the waste was actually placed —
+ *     the thing Organize Cell Placement exists to record — changed nothing;
+ *   • it summed only truck-level `actualVolume`, so every multi-vehicle
+ *     submission contributed ZERO and the cells stayed flat as approvals landed
+ *     (the "Waste in Cell is not increasing" report);
+ *   • it applied no status filter at all, so rejected and reverted submissions
+ *     counted toward the fill;
+ *   • `Math.max(encodedFill, derived)` meant an admin-declared figure only
+ *     showed when it happened to be the LARGER number — a correction downward
+ *     was silently discarded.
+ *
+ * The server rollup is the authoritative calculation: it applies the
+ * pre-baseline rule and the active-status rule, honours explicit placements
+ * including per-vehicle ones, counts each submission exactly once, and applies
+ * the admin override. Reading it is what makes this table agree with the SLF
+ * Data Table, Cell Infrastructure and the portal's own tiles.
+ *
+ * The fallback is the PERSISTED output of that same calculation
+ * (`cellFillValues` and its provenance split, written by
+ * refreshFacilityCellOccupancy) — never a re-derivation. A stale number from the
+ * right calculation is recoverable; a fresh number from a different one is the
+ * bug this replaced.
+ */
+function buildCellStatusRows(summary, occupancy = null) {
   const facility = summary.facility;
-  const baseline = summary.baseline;
+  const rollupCells = occupancy?.cells || [];
   const cellCount = Math.max(
-    facility?.numberOfCells || 0,
+    Number(facility?.numberOfCell || facility?.numberOfCells || 0),
     facility?.cellCapacities?.length || 0,
-    baseline?.activeCellEntries?.length || 0,
+    facility?.cellStatuses?.length || 0,
+    rollupCells.length,
     1,
   );
+  const rollupByIndex = new Map(rollupCells.map((cell) => [cell.index, cell]));
   const statuses = facility?.cellStatuses || [];
   const capacities = facility?.cellCapacities || [];
   const capacityUnits = facility?.cellCapacityUnits || [];
   const fillValues = facility?.cellFillValues || [];
   const fillUnits = facility?.cellFillUnits || [];
+  const baselineFills = facility?.cellFillBaselineValues || [];
+  const submittedFills = facility?.cellFillSubmittedValues || [];
   const cellNames = facility?.cellNames || [];
-  const baselineDate = baseline?.lastUpdated || baseline?.createdAt;
-  const cumulativeRecords = summary.records.filter((record) => {
-    if (!record.dateOfDisposal) return false;
-    const withinDate = dayjs(record.dateOfDisposal).startOf("day").valueOf() <= dayjs(throughDate).startOf("day").valueOf();
-    if (!withinDate) return false;
-    if (!settings.excludePreBaselineDisposalFromCellFill || !baselineDate) return true;
-    const disposalBeforeBaseline = dayjs(record.dateOfDisposal).startOf("day").isBefore(dayjs(baselineDate).startOf("day"));
-    const submittedAfterBaseline = record.createdAt && dayjs(record.createdAt).isAfter(dayjs(baselineDate));
-    return !disposalBeforeBaseline || submittedAfterBaseline;
-  });
-  const cumulative = getTruckTotals(cumulativeRecords);
 
   return Array.from({ length: cellCount }).map((_, index) => {
-    const status = statuses[index] || (index === 0 ? "Active" : "Available");
-    const capacity = Number(capacities[index] || 0);
-    const unit = normalizeUnit(capacityUnits[index] || fillUnits[index] || baseline?.baselineUnit || "m³");
-    const baselineEntries = baseline?.activeCellEntries || [];
-    const baselineForCell = baselineEntries[index]
-      ? convertVolume(baselineEntries[index].volume, baselineEntries[index].unit, unit)
-      : index === 0
-        ? convertVolume(buildBaselineTotals(baseline).m3, "m³", unit) + convertVolume(buildBaselineTotals(baseline).tons, "tons", unit)
-        : 0;
-    const submissionForCell = isActiveCellStatus(status)
-      ? convertVolume(cumulative.m3, "m³", unit) + convertVolume(cumulative.tons, "tons", unit)
-      : 0;
-    const encodedFill = convertVolume(fillValues[index] || 0, fillUnits[index] || unit, unit);
-    const used = Math.max(encodedFill, baselineForCell + submissionForCell);
+    const rollup = rollupByIndex.get(index);
+    const status = rollup?.status || statuses[index] || (index === 0 ? "Active" : "Available");
+    // Fill and capacity carry independent declared units; converting the fill
+    // into the capacity's unit before comparing them is what stops a facility
+    // that declares tons from reporting a utilisation out by the conversion
+    // factor.
+    const unit = normalizeUnit(capacityUnits[index] || fillUnits[index] || rollup?.unit || "m³");
+    const toUnit = (value, from) => {
+      const converted = convertVolume(Number(value || 0), from || unit, unit);
+      return Number.isFinite(converted) ? converted : 0;
+    };
+    const capacity = Number(capacities[index] || rollup?.capacity || 0);
+    const used = rollup
+      ? toUnit(rollup.used, rollup.unit)
+      : toUnit(fillValues[index], fillUnits[index]);
     const pct = capacity > 0 ? Math.min(Math.round((used / capacity) * 100), 100) : null;
     return {
       key: index,
-      cell: String(cellNames[index] || "").trim() || `Cell ${index + 1}`,
+      cell: rollup?.label || String(cellNames[index] || "").trim() || `Cell ${index + 1}`,
       status,
       used,
+      // The provenance behind `used`, so the table can say where a cell's volume
+      // came from instead of presenting one opaque number.
+      baselineUsed: rollup
+        ? toUnit(rollup.baselineUsed, rollup.unit)
+        : toUnit(baselineFills[index], fillUnits[index]),
+      submittedUsed: rollup
+        ? toUnit(rollup.submittedUsed, rollup.unit)
+        : toUnit(submittedFills[index], fillUnits[index]),
+      // An admin-declared cell: `used` is their base plus everything recorded
+      // since, and `derivedTotal` is what the submissions alone would say.
+      overridden: rollup ? !!rollup.overridden : facility?.cellFillOverridden?.[index] === true,
+      overrideBase: rollup?.overrideBase != null ? toUnit(rollup.overrideBase, rollup.unit) : null,
+      postOverrideSubmitted:
+        rollup?.postOverrideSubmitted != null ? toUnit(rollup.postOverrideSubmitted, rollup.unit) : null,
+      derivedTotal: rollup?.derivedTotal != null ? toUnit(rollup.derivedTotal, rollup.unit) : null,
       capacity,
       remaining: capacity > 0 ? Math.max(0, capacity - used) : null,
       unit,
       pct,
       isActive: isActiveCellStatus(status),
+      fromRollup: !!rollup,
     };
   });
 }
@@ -363,12 +423,17 @@ export default function SubmissionSummary({ isDark }) {
   const [slfRows, setSlfRows] = useState([]);
   const [facilities, setFacilities] = useState([]);
   const [baselines, setBaselines] = useState([]);
-  const [settings, setSettings] = useState({});
   const [loading, setLoading] = useState(false);
   const [refLoading, setRefLoading] = useState(true);
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
   const [calendarRecord, setCalendarRecord] = useState(null);
+  // facilityId → the server's canonical per-cell rollup (GET
+  // /data-slf/cell-occupancy = utils/cellOccupancy.js, the SAME function that
+  // writes SlfFacility.cellFillValues). This page reads it rather than deriving
+  // its own figures, so the cell table here cannot disagree with the SLF Data
+  // Table, Cell Infrastructure or the portal. See buildCellStatusRows.
+  const [cellOccupancy, setCellOccupancy] = useState({});
   const [calendarLoading, setCalendarLoading] = useState(false);
   const [calendarDate, setCalendarDate] = useState(dayjs());
   // Item #2: Daily Submission Details modal (opens when a calendar date is clicked).
@@ -441,6 +506,7 @@ export default function SubmissionSummary({ isDark }) {
       setBaselines(EMPTY_ROWS);
       setPortalUsers(EMPTY_ROWS);
       setCalendarRecord(null);
+      setCellOccupancy({});
       setTiles(null);
     };
   }, []);
@@ -476,16 +542,21 @@ export default function SubmissionSummary({ isDark }) {
     );
   }, []);
 
-  // Facility/baseline/settings reference data is only needed for the calendar
-  // modal — load it separately so the tiles + table render immediately.
+  // Facility/baseline reference data is only needed for the calendar modal —
+  // load it separately so the tiles + table render immediately.
+  //
+  // `/settings/app` used to be fetched here for one flag,
+  // `excludePreBaselineDisposalFromCellFill`, which the page applied to its own
+  // cell-fill derivation. That derivation is gone: the server applies the rule
+  // inside the one shared calculation before the rollup is sent, so re-reading
+  // the flag here could only produce a second, disagreeing opinion.
   const fetchReferenceData = useCallback(async ({ force = false } = {}) => {
     await fetchWithCache(
       `${SUMMARY_CACHE_KEY}:ref`,
       async () => {
-        const [facilitiesRes, baselinesRes, settingsRes, portalUsersRes] = await Promise.all([
+        const [facilitiesRes, baselinesRes, portalUsersRes] = await Promise.all([
           api.get("/slf-facilities"),
           api.get("/data-slf/baselines"),
-          api.get("/settings/app"),
           api.get("/portal-users").catch(() => ({ data: [] })),
         ]);
         // Defensive: keep dummy/test facilities and accounts out of the summary
@@ -493,7 +564,6 @@ export default function SubmissionSummary({ isDark }) {
         return {
           facilities: excludeDummy(Array.isArray(facilitiesRes.data) ? facilitiesRes.data : []),
           baselines: Array.isArray(baselinesRes.data) ? baselinesRes.data : [],
-          settings: settingsRes.data || {},
           portalUsers: excludeDummy(Array.isArray(portalUsersRes.data) ? portalUsersRes.data : []),
         };
       },
@@ -508,7 +578,6 @@ export default function SubmissionSummary({ isDark }) {
           if (!aliveRef.current) return; // navigated away — don't re-seat data
           setFacilities(payload.facilities || []);
           setBaselines(payload.baselines || []);
-          setSettings(payload.settings || {});
           setPortalUsers(payload.portalUsers || []);
           setRefLoading(false);
         },
@@ -526,7 +595,12 @@ export default function SubmissionSummary({ isDark }) {
     const socket = getSocket();
     if (!socket) return undefined;
     const handler = ({ target } = {}) => {
-      if (!target || ["submissions", "baselines"].includes(target)) {
+      // "facility" belongs here: it is what refreshFacilityCellOccupancy emits
+      // after a placement is organized, moved or corrected, and what the SLF
+      // facility editor emits after an admin declares a Waste in Cell. Listening
+      // only for submissions/baselines left this page showing pre-move figures
+      // until something else happened to refresh it.
+      if (!target || ["submissions", "baselines", "facility"].includes(target)) {
         invalidateCache(SUMMARY_CACHE_KEY);
         fetchRecords({ force: true, silent: true });
         fetchReferenceData({ force: true });
@@ -535,6 +609,65 @@ export default function SubmissionSummary({ isDark }) {
     socket.on("data-refresh", handler);
     return () => socket.off("data-refresh", handler);
   }, [fetchRecords, fetchReferenceData]);
+
+  // The facility whose cells the open calendar is showing. Derived as a plain
+  // STRING so the effect below can depend on it: `calendarRecord` is re-seated
+  // with its submissions once they load, and depending on that OBJECT would fire
+  // a second identical rollup request every time the modal opened.
+  const calendarFacilityId = useMemo(
+    () =>
+      String(
+        calendarRecord?.facility?._id ||
+          calendarRecord?.slfGenerator?._id ||
+          calendarRecord?.slfGenerator ||
+          "",
+      ),
+    [calendarRecord],
+  );
+
+  // The canonical per-cell rollup. Loaded only while the disposal calendar is
+  // open — it is the only thing on this page that reads per-cell figures — and
+  // refreshed when a submission, baseline or facility write reports in.
+  //
+  // The `seq` guard is not the same thing as the unmount guard: a burst of
+  // writes can leave two loads in flight, and TCP does not promise they come
+  // back in order. Without it a slower EARLIER response can land last and
+  // reinstate the figures the newer one just corrected — a stale table that no
+  // amount of refetching fixes because the refetch itself caused it.
+  useEffect(() => {
+    if (!calendarFacilityId) return undefined;
+    let cancelled = false;
+    let seq = 0;
+    let latest = 0;
+    let timer = null;
+    const load = () => {
+      const mine = (seq += 1);
+      api
+        .get("/data-slf/cell-occupancy")
+        .then(({ data }) => {
+          if (cancelled || mine < latest) return;
+          latest = mine;
+          setCellOccupancy(data?.byFacility || {});
+        })
+        .catch(() => {
+          // Non-fatal: buildCellStatusRows falls back to the persisted output of
+          // the same server calculation.
+        });
+    };
+    load();
+    const socket = getSocket();
+    const onRefresh = ({ target } = {}) => {
+      if (target && !["submissions", "baselines", "facility"].includes(target)) return;
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(load, 800); // collapse a burst of writes into one refetch
+    };
+    socket?.on("data-refresh", onRefresh);
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+      socket?.off("data-refresh", onRefresh);
+    };
+  }, [calendarFacilityId]);
 
   const filteredRows = useMemo(() => {
     const needle = search.trim().toLowerCase();
@@ -725,8 +858,8 @@ export default function SubmissionSummary({ isDark }) {
 
   const selectedCellRows = useMemo(() => {
     if (!calendarRecord) return [];
-    return buildCellStatusRows(calendarRecord, calendarDate, settings);
-  }, [calendarRecord, calendarDate, settings]);
+    return buildCellStatusRows(calendarRecord, cellOccupancy[calendarFacilityId] || null);
+  }, [calendarRecord, calendarFacilityId, cellOccupancy]);
 
   const selectedCumulativeTotals = useMemo(() => {
     if (!calendarRecord) return { m3: 0, tons: 0 };
@@ -1428,10 +1561,37 @@ export default function SubmissionSummary({ isDark }) {
                     { title: "Status", dataIndex: "status", width: 95, render: (value, row) => <Tag color={row.isActive ? "green" : "default"}>{value || "—"}</Tag> },
                     {
                       title: "Fill",
+                      // Where the figure came from, not just the figure. An
+                      // admin-declared cell is labelled as such with its base and
+                      // what has been recorded since, because the derived
+                      // baseline/submitted split does not add up to a declared
+                      // number and showing it as if it did would be misleading.
                       render: (_, row) => (
                         <Space direction="vertical" size={0}>
                           <Text>{row.used.toLocaleString(undefined, { maximumFractionDigits: 2 })} {row.unit}</Text>
                           {row.pct != null && <Text type="secondary" style={{ fontSize: 11 }}>{row.pct}% full</Text>}
+                          {row.overridden ? (
+                            <Space size={4} wrap>
+                              <Tag color="purple" style={{ marginInlineEnd: 0, fontSize: 10, lineHeight: "16px" }}>
+                                Admin-set
+                              </Tag>
+                              {row.overrideBase != null && (
+                                <Text type="secondary" style={{ fontSize: 10 }}>
+                                  {row.overrideBase.toLocaleString(undefined, { maximumFractionDigits: 2 })} declared
+                                  {row.postOverrideSubmitted > 0
+                                    ? ` + ${row.postOverrideSubmitted.toLocaleString(undefined, { maximumFractionDigits: 2 })} since`
+                                    : ""}
+                                </Text>
+                              )}
+                            </Space>
+                          ) : (
+                            row.used > 0 && (
+                              <Text type="secondary" style={{ fontSize: 10 }}>
+                                {row.baselineUsed.toLocaleString(undefined, { maximumFractionDigits: 2 })} baseline ·{" "}
+                                {row.submittedUsed.toLocaleString(undefined, { maximumFractionDigits: 2 })} submitted
+                              </Text>
+                            )
+                          )}
                         </Space>
                       ),
                     },

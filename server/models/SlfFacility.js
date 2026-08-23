@@ -126,6 +126,29 @@ const slfFacilitySchema = new mongoose.Schema(
     // admin's declaration deliberate and durable, and clearing the field hands
     // the cell back to the derived value.
     cellFillOverridden: [{ type: Boolean }],
+    // ── The override's own record, index-aligned with cellFillOverridden ──
+    //
+    // `cellFillValues[i]` is the EFFECTIVE volume every screen renders, and every
+    // recompute rewrites it. These four are the DECLARATION behind it and are
+    // written only by the admin form — no recompute ever touches them:
+    //
+    //   cellFillOverrideValues[i]  the figure the admin typed (the BASE)
+    //   cellFillOverrideUnits[i]   the unit it was typed in
+    //   cellFillOverrideAt[i]      when it was declared
+    //   cellFillOverrideBy[i]      who declared it
+    //
+    // They are separate fields rather than a re-read of cellFillValues because
+    // the two are no longer the same number: a submission recorded after the
+    // declaration is ADDED to the base (utils/cellOccupancy.js), so feeding the
+    // effective total back in as the next base would compound the override on
+    // every recompute. The timestamp is what divides "already inside the figure
+    // the admin typed" from "arrived afterwards"; a cell flagged before these
+    // fields existed has none, and keeps the older replace-forever behaviour
+    // until an admin re-declares it.
+    cellFillOverrideValues: [threeDecimalNumber],
+    cellFillOverrideUnits: [{ type: String, enum: ["m³", "tons", "m3"], default: "tons" }],
+    cellFillOverrideAt: [{ type: Date }],
+    cellFillOverrideBy: [{ type: String, trim: true }],
     // Which version of utils/cellOccupancy.js wrote the derived cell figures on
     // this facility. When the calculation changes its version is bumped and the
     // startup repair sweep recomputes every facility still carrying an older
