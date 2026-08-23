@@ -193,6 +193,22 @@ function isActiveCellStatus(status) {
   return ["Active Cell", "Operational", "Active"].includes(String(status || ""));
 }
 
+/**
+ * Who is making this request, for attribution on an admin declaration.
+ *
+ * Same rule as routes/dataSLF.js → getRequestActor: the server-verified identity
+ * (resolved from the JWT in server.js) wins, because it cannot be spoofed. The
+ * X-User-* headers are client-supplied and only stand in for older/tokenless
+ * callers.
+ */
+function getRequestActor(req, fallback = "EMBR3 ESWMP Admin") {
+  const verified = String(req.logUser || "").trim();
+  if (verified) return verified;
+  const headerName = String(req.get("x-user-name") || "").trim();
+  const headerEmail = String(req.get("x-user-email") || "").trim();
+  return headerName || headerEmail || req.user?.email || fallback;
+}
+
 function normalizeCellStatus(status) {
   const value = String(status || "").trim();
   if (/^operational$/i.test(value)) return "Active Cell";
@@ -205,6 +221,11 @@ const CELL_INFRA_ARRAYS = [
   "cellNames", "cellCapacities", "cellCapacityUnits", "cellStatuses",
   "cellTypes", "cellSubmissionAllowed", "cellNotes", "cellFillValues", "cellFillUnits",
   "cellFillOverridden",
+  // The admin declaration behind an overridden cell. Listed here so it is
+  // remapped with everything else when cells are added, removed or reordered —
+  // a base that drifted out of alignment with its flag would be applied to the
+  // wrong cell.
+  "cellFillOverrideValues", "cellFillOverrideUnits", "cellFillOverrideAt", "cellFillOverrideBy",
 ];
 const PROTECTED_CELL_STATUSES = new Set(["Used/Completed", "Under Construction", "Reserved Area", "Not Existed"]);
 
@@ -229,7 +250,7 @@ const PROTECTED_CELL_STATUSES = new Set(["Used/Completed", "Under Construction",
  * The wipe guard (an entirely EMPTY array over a populated one) still applies in
  * both modes — that is the accident this was built to stop.
  */
-function mergeCellInfrastructureUpdate(update, record, { authoritative = false } = {}) {
+function mergeCellInfrastructureUpdate(update, record, { authoritative = false, originIndexes = null } = {}) {
   const preserved = [];
   const touchesCells = CELL_INFRA_ARRAYS.some((key) => Array.isArray(update[key])) || update.numberOfCell !== undefined;
   if (!touchesCells) return preserved;
@@ -291,10 +312,47 @@ function mergeCellInfrastructureUpdate(update, record, { authoritative = false }
     if (next === undefined && prev !== undefined) return prev;
     return next !== false;
   });
-  // Marks which cells carry an admin-declared Waste in Cell. Never sent by a
-  // client — it is derived below from what actually changed — so an incoming
-  // value is ignored and the stored flag is carried forward.
-  mergeArray("cellFillOverridden", (next, prev) => prev === true);
+  // ── The admin declaration behind an overridden cell ──
+  //
+  // `cellFillOverridden` and its three companion arrays are SERVER-derived: no
+  // client sends them, so an incoming value is ignored entirely and the stored
+  // one is carried to the cell it belongs to.
+  //
+  // "The cell it belongs to" is the whole point of remapping by ORIGIN INDEX.
+  // The Cell Infrastructure editor can insert, delete and reorder cells, and it
+  // already remaps `cellFillValues` by `_origIndex` — but the flag beside it was
+  // only ever carried forward POSITIONALLY, so deleting Cell 1 slid every
+  // declaration up one cell: Cell 3's admin-declared figure started being
+  // applied to Cell 2. `cellOriginIndexes` is that editor's own mapping, so the
+  // declaration follows its cell exactly as its value does.
+  //
+  // A NEW cell carries an explicit null in that mapping, and `Number(null)` is
+  // 0 — so a numeric-only check silently maps every newly added cell onto stored
+  // cell 0 and hands it that cell's declaration. Reject the blank before
+  // coercing.
+  const sourceIndexOf = (index) => {
+    if (!originIndexes) return index;
+    const raw = originIndexes[index];
+    if (raw === null || raw === undefined || raw === "") return null;
+    const numeric = Number(raw);
+    return Number.isInteger(numeric) && numeric >= 0 ? numeric : null;
+  };
+  const carryDerived = (key, empty) => {
+    const existing = Array.isArray(record[key]) ? record[key] : [];
+    update[key] = Array.from({ length: targetCount }, (_, index) => {
+      const from = sourceIndexOf(index);
+      const value = from === null ? undefined : existing[from];
+      return value === undefined || value === null ? empty : value;
+    });
+  };
+  carryDerived("cellFillOverridden", false);
+  carryDerived("cellFillOverrideValues", null);
+  carryDerived("cellFillOverrideUnits", null);
+  carryDerived("cellFillOverrideAt", null);
+  carryDerived("cellFillOverrideBy", "");
+  // A flag that survived a remap must not point at a base that did not: a cell
+  // whose declaration is gone is a derived cell again.
+  update.cellFillOverridden = update.cellFillOverridden.map((flag) => flag === true);
   mergeArray("cellTypes", (next, prev) => next || prev || "Residual");
   mergeArray("cellNotes", (next, prev) => next ?? prev ?? "");
   mergeArray("cellCapacityUnits", (next, prev) => normalizeUnitStrict(next) || normalizeUnitStrict(prev) || "tons");
@@ -383,6 +441,16 @@ router.get("/portal/:id", async (req, res) => {
       "isDummy " +
       "province lgu barangay category ownership statusOfSLF remainingLifeSpan " +
       "volumeCapacity volumeCapacityUnit receivingVolumeCapacity receivingVolumeCapacityUnit numberOfCell cellNames cellCapacities cellCapacityUnits cellStatuses cellTypes cellSubmissionAllowed cellNotes cellFillValues cellFillUnits estimatedVolumeWaste estimatedVolumeWasteUnit actualResidualWasteReceived wasteReceivedUnit " +
+      // The portal renders the PERSISTED cellFillValues, which already carry an
+      // admin-declared figure (refreshFacilityCellOccupancy recomputes and stores
+      // it on every write, including the facility save that declares it). These
+      // two say WHY a cell reads what it does, so the operator sees "admin-set"
+      // rather than a number that does not match their own submissions — the
+      // same label Cell Infrastructure shows for the same cell.
+      "cellFillOverridden cellFillOverrideValues " +
+      // Provenance split, so the portal's own tiles read the same numbers the
+      // admin dashboards do instead of re-deriving their own.
+      "cellFillBaselineValues cellFillSubmittedValues baselineVolumeTotal submittedVolumeTotal " +
       "noOfLeachatePond numberOfGasVents mrfEstablished yearStartedOperation " +
       "eccNo dischargePermit dischargePermitValidity dischargePermitStatus dischargePermits permitToOperate permitToOperateValidity permitToOperateStatus permitToOperatePermits focalPerson " +
       "receivingFacilities hasWastewaterTreatmentFacility wastewaterTreatmentFacilityType wastewaterTreatmentFacilityRemarks leachatePondDetails gasVentDetails trashSlideMeasures firePrevMeasures galleryPhotos galleryItems slfDocuments preventiveMeasureFiles preventiveMeasureFileDetails scrpDetails";
@@ -621,6 +689,10 @@ router.get("/stats", cacheJson(facilityStatsKey, FACILITY_STATS_TTL_MS), async (
           // gauges can label that contribution instead of implying a derived
           // baseline/submitted split behind it.
           cellFillOverridden: 1,
+          // …and the declaration behind it, so a client can show what the admin
+          // declared, when, and by whom without a second request.
+          cellFillOverrideValues: 1, cellFillOverrideUnits: 1,
+          cellFillOverrideAt: 1, cellFillOverrideBy: 1,
           leachatePondDetails: 1, gasVentDetails: 1,
           // preventiveMeasureFileDetails carries each document's ORIGINAL file name;
           // without it the Preventive Measures panel could only show opaque storage ids.
@@ -825,21 +897,96 @@ router.put("/:id", adminOnly, async (req, res) => {
       ? [...update.cellFillValues]
       : null;
 
+    // The Cell Infrastructure editor's row → original-cell mapping, used by the
+    // merge to move each cell's server-derived override record with its cell.
+    // Consumed here: a request field, never a facility field.
+    const originIndexes = Array.isArray(update.cellOriginIndexes) ? update.cellOriginIndexes : null;
+    delete update.cellOriginIndexes;
+
     const preservedCellArrays = mergeCellInfrastructureUpdate(update, record, {
       authoritative: cellInfrastructureAuthoritative,
+      originIndexes,
     });
+    // Did this edit touch anything the per-cell occupancy is derived from? Used
+    // below to decide whether the derived rollups have to be recomputed; an edit
+    // to permits or personnel leaves them alone and must not pay for a recompute.
+    const cellFieldsChanged =
+      fillsDeclared ||
+      update.numberOfCell !== undefined ||
+      CELL_INFRA_ARRAYS.some((key) => Array.isArray(update[key]));
 
     if (declaredFills) {
+      // ── Record the DECLARATION, not just its effect ──
+      //
+      // A figure typed here is the cell's manual BASE. What makes it usable as a
+      // base is the timestamp beside it: everything already recorded when the
+      // admin typed it is inside the number and must not be re-added, while
+      // anything recorded afterwards is new waste that accumulates on top (see
+      // utils/cellOccupancy.js → readCellOverride). Without the stamp the only
+      // possible behaviour is replace-forever, which is what silently swallowed
+      // every approval that followed an override.
+      //
+      // Re-saving the SAME figure deliberately keeps the ORIGINAL timestamp. The
+      // form round-trips every cell on every save, so restamping would reset the
+      // accumulation window — and quietly absorb submissions already counted on
+      // top — each time an admin edited an unrelated field.
       const isBlank = (v) => v === null || v === undefined || v === "";
-      const storedFlags = Array.isArray(record.cellFillOverridden) ? record.cellFillOverridden : [];
+      const storedFlags = Array.isArray(update.cellFillOverridden) ? update.cellFillOverridden : [];
+      const storedBases = Array.isArray(update.cellFillOverrideValues) ? update.cellFillOverrideValues : [];
+      const storedUnits = Array.isArray(update.cellFillOverrideUnits) ? update.cellFillOverrideUnits : [];
+      const storedAt = Array.isArray(update.cellFillOverrideAt) ? update.cellFillOverrideAt : [];
+      const storedBy = Array.isArray(update.cellFillOverrideBy) ? update.cellFillOverrideBy : [];
+      const fillUnits = Array.isArray(update.cellFillUnits) ? update.cellFillUnits : [];
       const length = Array.isArray(update.cellFillValues)
         ? update.cellFillValues.length
         : declaredFills.length;
-      update.cellFillOverridden = Array.from({ length }, (_, index) =>
-        index < declaredFills.length
-          ? !isBlank(declaredFills[index])
-          : storedFlags[index] === true,
-      );
+      const actor = getRequestActor(req);
+      const now = new Date();
+
+      const flags = [];
+      const bases = [];
+      const units = [];
+      const stamps = [];
+      const authors = [];
+      for (let index = 0; index < length; index += 1) {
+        if (index >= declaredFills.length) {
+          // Beyond what the form sent: leave the stored declaration alone.
+          flags.push(storedFlags[index] === true);
+          bases.push(storedBases[index] ?? null);
+          units.push(storedUnits[index] ?? null);
+          stamps.push(storedAt[index] ?? null);
+          authors.push(storedBy[index] ?? "");
+          continue;
+        }
+        const declared = declaredFills[index];
+        if (isBlank(declared)) {
+          // Cleared → the cell goes back to being purely derived, and its
+          // declaration is removed rather than left behind to be picked up again.
+          flags.push(false);
+          bases.push(null);
+          units.push(null);
+          stamps.push(null);
+          authors.push("");
+          continue;
+        }
+        const unit = normalizeUnitStrict(fillUnits[index]) || normalizeUnitStrict(storedUnits[index]) || "tons";
+        const unchanged =
+          storedFlags[index] === true &&
+          !isBlank(storedBases[index]) &&
+          Number(storedBases[index]) === Number(declared) &&
+          normalizeUnitStrict(storedUnits[index]) === unit &&
+          !!storedAt[index];
+        flags.push(true);
+        bases.push(Number(declared));
+        units.push(unit);
+        stamps.push(unchanged ? storedAt[index] : now);
+        authors.push(unchanged ? storedBy[index] || actor : actor);
+      }
+      update.cellFillOverridden = flags;
+      update.cellFillOverrideValues = bases;
+      update.cellFillOverrideUnits = units;
+      update.cellFillOverrideAt = stamps;
+      update.cellFillOverrideBy = authors;
     }
     if (preservedCellArrays.length) {
       writeLog("warn", "slfFacility.cell_wipe_prevented", {
@@ -851,6 +998,35 @@ router.put("/:id", adminOnly, async (req, res) => {
 
     record.set(update);
     await record.save();
+
+    // ── Re-derive everything that hangs off the cell figures ──
+    //
+    // The save above persists the cell configuration and any admin declaration,
+    // but NOT the rollups derived from them: actualResidualWasteReceived, the
+    // baseline/submitted split, baselineVolumeTotal / submittedVolumeTotal and
+    // the calculation's version stamp. A cell whose capacity, status or Waste in
+    // Cell just changed makes every one of those stale, and nothing else on this
+    // path recomputes them — so the facility kept reporting its pre-edit total
+    // until an unrelated SUBMISSION happened to trigger a refresh, which is how
+    // an override could look like it had been ignored.
+    //
+    // The recompute reads the declaration we just wrote, so the effective value
+    // it stores already includes it. Best-effort by the same rule the submission
+    // paths use: a derived figure failing to refresh must never fail the admin's
+    // actual save, and the next event recomputes from scratch anyway.
+    let refreshedOccupancy = null;
+    if (cellFieldsChanged) {
+      try {
+        const { refreshFacilityCellOccupancy } = require("./dataSLF");
+        refreshedOccupancy = await refreshFacilityCellOccupancy(req, record._id);
+      } catch (refreshError) {
+        writeLog("warn", "slfFacility.occupancy_refresh_failed", {
+          message: `Could not refresh cell occupancy after updating ${record.lgu || record._id}: ${refreshError.message}`,
+          ip: req.ip,
+          meta: { facilityId: String(record._id) },
+        });
+      }
+    }
 
     // Audit a global-unit change (previous → new, scope, who).
     if (unitIsChanging && (req.user?.role === "admin" || req.user?.role === "developer")) {
@@ -1052,7 +1228,11 @@ router.put("/:id", adminOnly, async (req, res) => {
     // as well — a facility refresh alone does not reload their submission lists.
     await refreshAssignedPortalUsers(req, record._id, "submissions");
 
-    res.json(record);
+    // Answer with the POST-recompute figures. The client seats this response
+    // straight into its table row, so returning the pre-refresh document would
+    // show the admin their edit un-applied until the next socket refresh landed —
+    // the "I saved it and nothing changed" report.
+    res.json(refreshedOccupancy ? { ...record.toObject(), ...refreshedOccupancy } : record);
     writeLog("info", "slfFacility.update", {
       message: `Updated SLF: ${record.lgu}${nameChanged ? ` (renamed from "${prevDisplayName}")` : ""}`,
       ip: req.ip,
@@ -1094,6 +1274,24 @@ router.patch("/:id/cell-status", adminOnly, async (req, res) => {
       { returnDocument: "after" },
     );
     if (!updated) return res.status(404).json({ message: "Facility not found" });
+
+    // Closing or reopening a cell can move volume between cells: a BASELINE
+    // entry with no cell of its own is placed in the first ACTIVE cell of its
+    // waste type (findBestCellIndex), so the persisted per-cell figures are
+    // stale the moment a status changes. The live rollup recomputes either way,
+    // but the stored copy is what the portal tiles and the capacity gate read —
+    // leaving it behind is how the two sides end up disagreeing about which cell
+    // holds what. Best-effort: a derived figure must never fail the toggle.
+    try {
+      const { refreshFacilityCellOccupancy } = require("./dataSLF");
+      await refreshFacilityCellOccupancy(req, updated._id);
+    } catch (refreshError) {
+      writeLog("warn", "slfFacility.occupancy_refresh_failed", {
+        message: `Could not refresh cell occupancy after a cell-status change for ${updated.lgu || updated._id}: ${refreshError.message}`,
+        ip: req.ip,
+        meta: { facilityId: String(updated._id) },
+      });
+    }
 
     refreshAdmin(req, "submissions");
     await refreshAssignedPortalUsers(req, updated._id, "facility");
@@ -1479,3 +1677,9 @@ router.post("/:id/prevention-summary", adminOnly, async (req, res) => {
 });
 
 module.exports = router;
+// Pure helper exposed for tests/: the cell-array merge decides which stored
+// values survive a partial payload and — since it also remaps the admin
+// override record by origin index — whether a declaration stays attached to its
+// own cell when cells are inserted, deleted or reordered. Both are rules worth
+// exercising without a database.
+module.exports.mergeCellInfrastructureUpdate = mergeCellInfrastructureUpdate;

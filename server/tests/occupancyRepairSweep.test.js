@@ -50,8 +50,11 @@ test("the repair computes exactly what the live write path computes", () => {
   assert.match(backfill, /applyPreBaselineRule\(own, \{ exclude: excludePreBaseline \}\)/);
   assert.match(backfill, /computeCellOccupancy\(facility, counted, \{ unitSource: own \}\)/);
   assert.match(backfill, /\$\{OCCUPANCY_ENTRY_FIELDS\} dateOfDisposal/);
-  // An admin-declared Waste in Cell has to survive the sweep, so it is read.
-  assert.match(backfill, /cellFillOverridden cellOccupancyVersion/);
+  // An admin-declared Waste in Cell has to survive the sweep, so the whole
+  // declaration is read — base, unit and the date that decides what accumulates
+  // on top of it, not just the flag.
+  assert.match(backfill, /\$\{OVERRIDE_FACILITY_FIELDS\}/);
+  assert.match(backfill, /OVERRIDE_FACILITY_FIELDS,\n\} = require\("\.\/cellOccupancy"\);/);
   // The setting is read once for the whole sweep, not per facility.
   assert.match(backfill, /const excludePreBaseline = await preBaselineExclusionEnabled\(\);/);
 
@@ -72,12 +75,15 @@ test("an admin-set cell is labelled, not passed off as recorded data", () => {
   );
   assert.match(metrics, /adminSet: \{/);
   assert.match(metrics, /label: "Admin-Set Volume"/);
-  // It replaces the split rather than sitting beside it — otherwise the legend
-  // would show baseline 0 + submitted 0 against a filled arc.
-  assert.match(
-    metrics,
-    /if \(cell\.overridden && Number\(cell\.fill\) > 0\) \{\s*\n\s*return \[\{ \.\.\.VOLUME_METRICS\.adminSet, value: Number\(cell\.fill\) \}\];/,
-  );
+  // It replaces the derived split rather than sitting beside it — otherwise the
+  // legend would show baseline 0 + submitted 0 against a filled arc.
+  assert.match(metrics, /if \(cell\.overridden && Number\(cell\.fill\) > 0\) \{/);
+  assert.match(metrics, /return \[\{ \.\.\.VOLUME_METRICS\.adminSet, value: Number\(cell\.fill\) \}\];/);
+  // …but volume recorded SINCE the declaration is real submitted data and is
+  // drawn beside it, so the segments still total the fill on the gauge.
+  assert.match(metrics, /label: "Submitted Since Admin Update", value: since/);
+  assert.match(metrics, /const base = Number\(cell\.overrideBase\);/);
+  assert.match(metrics, /const since = Number\(cell\.postOverrideSubmitted\);/);
   // The dashboard supplies the flag, live first and stored as the fallback.
   const dashboard = fs.readFileSync(
     path.join(__dirname, "..", "..", "front-end", "src", "pages", "AdminHome", "DashboardContent.jsx"),

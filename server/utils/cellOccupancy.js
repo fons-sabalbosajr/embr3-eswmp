@@ -41,6 +41,18 @@ const OCCUPANCY_ENTRY_FIELDS =
   "trucks.actualVolume trucks.actualVolumeUnit trucks.wasteType trucks.cellIndex trucks.cellName " +
   "trucks.vehicles.actualVolume trucks.vehicles.actualVolumeUnit trucks.vehicles.cellIndex";
 
+/**
+ * The SlfFacility fields the ADMIN OVERRIDE needs, as a `.select()` fragment.
+ *
+ * Every caller of computeCellOccupancy must project these. Leaving one out does
+ * not fail loudly — it silently makes the override invisible to that reader, so
+ * one screen shows the admin's figure and another shows the derived one. Naming
+ * them once is what stops a projection from drifting.
+ */
+const OVERRIDE_FACILITY_FIELDS =
+  "cellFillValues cellFillUnits cellFillOverridden " +
+  "cellFillOverrideValues cellFillOverrideUnits cellFillOverrideAt cellFillOverrideBy";
+
 const isHazardousWaste = (wasteType) => /haz|inert/i.test(String(wasteType || ""));
 const isHazardousCell = (cellType) => /haz|inert/i.test(String(cellType || ""));
 
@@ -167,7 +179,7 @@ function findBestCellIndex(rows, wasteType, preferredIndex = null) {
   return operationalIndex >= 0 ? operationalIndex : 0;
 }
 
-function addVolume(rows, index, value, fromUnit, targetUnit, source) {
+function addVolume(rows, index, value, fromUnit, targetUnit, source, afterOverride = false) {
   const row = rows[index] || rows[0];
   if (!row) return;
   const converted = convertVolume(value, fromUnit, targetUnit);
@@ -179,8 +191,85 @@ function addVolume(rows, index, value, fromUnit, targetUnit, source) {
     return;
   }
   row.total += converted;
-  if (source === "submitted") row.submitted += converted;
-  else row.baseline += converted;
+  if (source === "submitted") {
+    row.submitted += converted;
+    // Kept beside the full submitted figure, never instead of it: this is the
+    // slice that arrived AFTER an admin declared this cell's volume, and it is
+    // the only part that may be added on top of that declaration. See
+    // readCellOverride.
+    if (afterOverride) row.submittedAfterOverride += converted;
+  } else row.baseline += converted;
+}
+
+/**
+ * The admin's DECLARED Waste in Cell for one cell — the manual BASE, not the
+ * effective total.
+ *
+ * ── Why the base is stored separately from `cellFillValues` ─────────────────
+ * `cellFillValues[i]` is the EFFECTIVE volume every consumer renders, and it is
+ * rewritten by every recompute. When the override was a plain replacement the
+ * two happened to be the same number, so the base could be read back out of it.
+ * They are no longer the same: an approved submission recorded after the
+ * declaration is ADDED to it (see the "Admin override" block in
+ * computeCellOccupancy), so reading the base back out of `cellFillValues` would
+ * feed the previous EFFECTIVE total in as the next BASE and compound the
+ * override on every recompute.
+ *
+ * `cellFillOverrideValues[i]` therefore holds the declared figure, in
+ * `cellFillOverrideUnits[i]`, declared at `cellFillOverrideAt[i]`. Only the
+ * admin form writes them; no recompute ever touches them.
+ *
+ * LEGACY RECORDS. A cell flagged before those fields existed has no base and no
+ * timestamp. It falls back to `cellFillValues[i]` and accumulates NOTHING —
+ * exactly the replace-forever behaviour it already had — so an un-migrated
+ * facility cannot compound. Accumulation needs BOTH an explicit base and a
+ * timestamp, which are only ever written together.
+ */
+function readCellOverride(facility, index) {
+  if (!facility?.cellFillOverridden?.[index]) return null;
+  const isBlank = (v) => v === null || v === undefined || v === "";
+  const declared = facility?.cellFillOverrideValues?.[index];
+  const at = facility?.cellFillOverrideAt?.[index];
+  if (!isBlank(declared) && at) {
+    const stamped = new Date(at);
+    if (!Number.isNaN(stamped.getTime())) {
+      return {
+        value: Number(declared),
+        unit: facility?.cellFillOverrideUnits?.[index] || facility?.cellFillUnits?.[index] || null,
+        at: stamped,
+        accumulates: true,
+      };
+    }
+  }
+  const fallback = isBlank(declared) ? facility?.cellFillValues?.[index] : declared;
+  if (isBlank(fallback)) return null;
+  return {
+    value: Number(fallback),
+    unit: facility?.cellFillOverrideUnits?.[index] || facility?.cellFillUnits?.[index] || null,
+    at: null,
+    accumulates: false,
+  };
+}
+
+/**
+ * Was this submission RECORDED after the admin declared the cell's volume?
+ *
+ * Keyed on `createdAt` — when the record came into existence — and deliberately
+ * NOT on the disposal date. Everything that already existed when the admin typed
+ * the figure was part of the total they were looking at and chose to replace;
+ * re-adding it would double-count the very waste the declaration was correcting.
+ * A record created afterwards is new information the declaration could not have
+ * accounted for, so it accumulates.
+ *
+ * Note that a pending submission ALREADY counts toward occupancy
+ * (ACTIVE_VOLUME_STATUSES), so a record created before the declaration and
+ * merely acknowledged after it was visible to the admin too — approval is not
+ * what makes a volume new.
+ */
+function isRecordedAfter(entry, at) {
+  if (!at || !entry?.createdAt) return false;
+  const created = new Date(entry.createdAt);
+  return !Number.isNaN(created.getTime()) && created > at;
 }
 
 const round3 = (value) => Math.round(Number(value || 0) * 1000) / 1000;
@@ -219,10 +308,18 @@ function computeCellOccupancy(facility, entries = [], { unitSource = null } = {}
     total: 0,
     baseline: 0,
     submitted: 0,
+    // The part of `submitted` that was recorded after this cell's admin
+    // declaration. Zero for every cell that has no accumulating override.
+    submittedAfterOverride: 0,
     unconvertible: 0,
     status: normalizeCellStatus(facility?.cellStatuses?.[index]),
     hazardous: isHazardousCell(facility?.cellTypes?.[index] || "Residual"),
   }));
+
+  // Read once per cell, before any volume is placed — `placeSubmitted` needs to
+  // know, for each incoming volume, whether it post-dates the declaration for
+  // the cell it is landing in.
+  const overrides = rows.map((row) => readCellOverride(facility, row.index));
 
   // The newest record that actually carries baseline figures IS the baseline;
   // it is never also counted as a submission.
@@ -299,7 +396,7 @@ function computeCellOccupancy(facility, entries = [], { unitSource = null } = {}
   // exists to resolve. Per-vehicle placements are more specific than the truck's
   // own, so they win when present.
   let unplacedTotal = 0;
-  const placeSubmitted = (volume, fromUnit, wasteType, cellIndex) => {
+  const placeSubmitted = (volume, fromUnit, wasteType, cellIndex, entry) => {
     const explicit =
       cellIndex === null || cellIndex === undefined || cellIndex === "" ? null : Number(cellIndex);
     if (explicit === null || !Number.isInteger(explicit) || explicit < 0 || !rows[explicit]) {
@@ -307,7 +404,10 @@ function computeCellOccupancy(facility, entries = [], { unitSource = null } = {}
       if (converted && converted > 0) unplacedTotal += converted;
       return;
     }
-    addVolume(rows, findBestCellIndex(rows, wasteType, explicit), volume, fromUnit, targetUnit, "submitted");
+    const target = findBestCellIndex(rows, wasteType, explicit);
+    const override = overrides[target];
+    const afterOverride = !!override?.accumulates && isRecordedAfter(entry, override.at);
+    addVolume(rows, target, volume, fromUnit, targetUnit, "submitted", afterOverride);
   };
 
   submissions.forEach((entry) => {
@@ -323,6 +423,7 @@ function computeCellOccupancy(facility, entries = [], { unitSource = null } = {}
             vehicle.actualVolumeUnit || truck.actualVolumeUnit || entry.baselineUnit || targetUnit,
             vehicle.wasteType || truck.wasteType,
             vehicle.cellIndex,
+            entry,
           );
         });
         return;
@@ -341,32 +442,52 @@ function computeCellOccupancy(facility, entries = [], { unitSource = null } = {}
         truck.actualVolumeUnit || entry.baselineUnit || targetUnit,
         truck.wasteType,
         explicitIndex,
+        entry,
       );
     });
   });
 
   // ── Admin override ──
+  //
   // Waste in Cell is derived, but an admin may TYPE a cell's figure (SLF Table →
   // Edit → Waste in Cell) when the recorded submissions do not reflect what is
-  // physically in the cell. Where `cellFillOverridden[i]` is set, that declared
-  // figure IS the cell's volume and replaces the derived total here — at the one
-  // place every consumer reads, so the value survives the next recompute and
-  // shows identically in Facility Details, Cell Infrastructure and the portal.
-  // The derived parts are kept beside it (never overwritten) so the override is
-  // always auditable against what the data says.
+  // physically in the cell. Where `cellFillOverridden[i]` is set, the declared
+  // figure becomes the cell's BASE, applied here — at the one place every
+  // consumer reads — so it survives the next recompute and shows identically in
+  // Facility Details, Cell Infrastructure and the portal.
+  //
+  // ── An override must not swallow later submissions ─────────────────────────
+  // The declaration replaced what was recorded AT THAT MOMENT. A submission
+  // recorded afterwards is waste the declaration could not have accounted for,
+  // so it is ADDED on top:
+  //
+  //     effective = declared base + submissions recorded after the declaration
+  //
+  // A plain replacement (what this used to be) would silently discard every
+  // approval that followed: an admin who declared 120 would still read 120 after
+  // a 10 t load was approved, and the only trace of that load would be in the
+  // provenance split nobody totals. It is not double-counted either — waste that
+  // already existed when the figure was typed is inside the declared number and
+  // is NOT re-added (see isRecordedAfter).
+  //
+  // The derived parts are kept beside the result (never overwritten) so the
+  // override stays auditable against what the data alone says.
   rows.forEach((row) => {
-    if (!facility?.cellFillOverridden?.[row.index]) return;
-    const declared = facility?.cellFillValues?.[row.index];
-    if (declared === null || declared === undefined || declared === "") return;
-    const converted = convertVolume(
-      Number(declared),
-      facility?.cellFillUnits?.[row.index] || targetUnit,
+    const override = overrides[row.index];
+    if (!override) return;
+    const base = convertVolume(
+      override.value,
+      override.unit || facility?.cellFillUnits?.[row.index] || targetUnit,
       targetUnit,
     );
-    if (converted === null || Number.isNaN(converted)) return;
+    if (base === null || Number.isNaN(base)) return;
+    const since = override.accumulates ? row.submittedAfterOverride : 0;
     row.derivedTotal = round3(row.total);
     row.overridden = true;
-    row.total = converted;
+    row.overrideBase = round3(base);
+    row.overriddenAt = override.at;
+    row.postOverrideSubmitted = round3(since);
+    row.total = base + since;
   });
 
   const cellFillValues = rows.map((row) => round3(row.total));
@@ -470,8 +591,12 @@ async function preBaselineExclusionEnabled() {
  *       longer attributed to a guessed cell; baseline record chosen
  *       container-first; pre-baseline rule applied to the stored figures too;
  *       display unit anchored to the unfiltered entry set.
+ *   3 — an admin-declared Waste in Cell is a BASE, not a replacement: submissions
+ *       recorded after the declaration are added to it instead of being
+ *       discarded. Every facility carrying an accumulating override needs its
+ *       stored figure recomputed under the new rule.
  */
-const OCCUPANCY_CALC_VERSION = 2;
+const OCCUPANCY_CALC_VERSION = 3;
 
 module.exports = {
   computeCellOccupancy,
@@ -480,6 +605,9 @@ module.exports = {
   chooseBaselineEntry,
   preBaselineExclusionEnabled,
   isBaselineEntry,
+  readCellOverride,
+  isRecordedAfter,
+  OVERRIDE_FACILITY_FIELDS,
   ACTIVE_VOLUME_STATUSES,
   OCCUPANCY_ENTRY_FIELDS,
   isActiveCellStatus,

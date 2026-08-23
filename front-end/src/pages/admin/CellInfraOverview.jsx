@@ -155,6 +155,18 @@ function deriveCells(facility, occupancy = null) {
         rollup?.overridden && rollup.derivedTotal != null
           ? Number(convertVolume(rollup.derivedTotal, rollup.unit, unit) || 0)
           : null,
+      // A declaration is a BASE, not a ceiling: `used` above is this figure plus
+      // everything recorded since. Both halves are carried so the panel can say
+      // which is which instead of presenting one unexplained number.
+      overrideBase:
+        rollup?.overrideBase != null
+          ? Number(convertVolume(rollup.overrideBase, rollup.unit, unit) || 0)
+          : null,
+      postOverrideSubmitted:
+        rollup?.postOverrideSubmitted != null
+          ? Number(convertVolume(rollup.postOverrideSubmitted, rollup.unit, unit) || 0)
+          : null,
+      overriddenAt: rollup?.overriddenAt || null,
       unit,
       percent,
       capacityStatus: getCapacityStatus(percent),
@@ -215,6 +227,18 @@ function CellHoverDetails({ cell, row }) {
             "— source",
             <>
               <Tag color="purple" style={{ marginInlineEnd: 4 }}>Admin-set</Tag>
+              {/* The declaration and what has been recorded since it, which is
+                  what the current volume is made of. Without the split an admin
+                  cannot tell a figure that has moved from one that has not. */}
+              {cell.overrideBase != null && (
+                <Text type="secondary" style={{ fontSize: 11 }}>
+                  {fmt(cell.overrideBase)} declared
+                  {cell.postOverrideSubmitted > 0
+                    ? ` + ${fmt(cell.postOverrideSubmitted)} submitted since`
+                    : ""}
+                  {" · "}
+                </Text>
+              )}
               {cell.derivedTotal != null && (
                 <Text type="secondary" style={{ fontSize: 11 }}>
                   data says {fmt(cell.derivedTotal)} {cell.unit}
@@ -385,11 +409,21 @@ export default function CellInfraOverview({
     if (!expanded) return undefined;
     let cancelled = false;
     let timer = null;
+    // Request ordering, which `cancelled` does not cover: a burst of writes can
+    // leave two loads in flight, and nothing guarantees they resolve in the order
+    // they were sent. A slower EARLIER response landing last would reinstate the
+    // figures the newer one just corrected — a stale panel that refetching makes
+    // worse rather than better.
+    let seq = 0;
+    let latest = 0;
     const load = () => {
+      const mine = (seq += 1);
       api
         .get("/data-slf/cell-occupancy")
         .then(({ data }) => {
-          if (!cancelled) setOccupancy(data?.byFacility || {});
+          if (cancelled || mine < latest) return;
+          latest = mine;
+          setOccupancy(data?.byFacility || {});
         })
         .catch(() => {
           // Non-fatal: deriveCells falls back to the facility's stored fills.
@@ -515,6 +549,13 @@ export default function CellInfraOverview({
           ? origFillUnits[c._origIndex]
           : c.unit || "m³",
       ),
+      // Which stored cell each row came from (null for a newly added one). The
+      // fill VALUE is remapped above; everything the server derives per cell —
+      // the admin-declared Waste in Cell and the declaration behind it — has to
+      // move with it, and only this editor knows the mapping. Without it those
+      // were carried forward positionally, so deleting a cell slid every
+      // declaration onto its neighbour.
+      cellOriginIndexes: editCells.map((c) => (c._origIndex == null ? null : c._origIndex)),
     };
     setSaving(true);
     try {

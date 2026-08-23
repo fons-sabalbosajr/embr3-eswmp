@@ -215,7 +215,7 @@ test("an authoritative cell payload can reopen a cell, and clear a capacity/name
     "function mergeCellInfrastructureUpdate(update, record",
     "async function enrichPortalFacilityVolumes",
   );
-  assert.match(merge, /\{ authoritative = false \} = \{\}/, "off by default — partial callers keep their guards");
+  assert.match(merge, /\{ authoritative = false,/, "off by default — partial callers keep their guards");
   // The three guards that silently discarded the editor's changes.
   assert.match(merge, /if \(!authoritative && incoming === "Active Cell" && PROTECTED_CELL_STATUSES\.has\(existing\)\)/);
   assert.match(merge, /if \(!authoritative && !incoming && existing\)/);

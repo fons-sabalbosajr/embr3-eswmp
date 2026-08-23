@@ -44,6 +44,7 @@ const {
   preBaselineExclusionEnabled,
   OCCUPANCY_CALC_VERSION,
   OCCUPANCY_ENTRY_FIELDS,
+  OVERRIDE_FACILITY_FIELDS,
   ACTIVE_VOLUME_STATUSES,
   normalizeCellStatus,
   isActiveCellStatus,
@@ -262,11 +263,14 @@ async function refreshFacilityCellOccupancy(req, facilityId) {
   const facility = await SlfFacility.findById(facilityId)
     .select(
       "numberOfCell cellNames cellStatuses cellTypes cellCapacities cellCapacityUnits " +
-      // cellFillValues + cellFillOverridden are READ here, not just written: a
-      // cell whose Waste in Cell an admin declared keeps that figure through the
-      // recompute. Without them in the projection the override was invisible to
-      // computeCellOccupancy and the next submission wiped it.
-      "cellFillValues cellFillOverridden cellFillUnits wasteReceivedUnit volumeCapacityUnit",
+      // cellFillValues cellFillOverridden cellFillUnits + the override's own
+      // record are READ here, not just written: a cell whose Waste in Cell an
+      // admin declared keeps that figure through the recompute, and the
+      // declaration's timestamp is what decides which submissions were recorded
+      // after it and therefore add on top. Without them in the projection the
+      // override was invisible to computeCellOccupancy and the next submission
+      // wiped it.
+      `${OVERRIDE_FACILITY_FIELDS} wasteReceivedUnit volumeCapacityUnit`,
     )
     .lean();
   if (!facility) return null;
@@ -5323,13 +5327,21 @@ function buildOccupancyCells(facility, occupancy, idsByCell = new Map()) {
       unit: displayUnit(unit),
       capacity,
       // `used` = baseline + valid submissions, counted exactly once each —
-      // unless an admin declared this cell's figure, in which case it is theirs
-      // and `derivedTotal` carries what the data alone would have said.
+      // unless an admin declared this cell's figure, in which case it is their
+      // BASE plus everything recorded since (`overrideBase` +
+      // `postOverrideSubmitted`), and `derivedTotal` carries what the data alone
+      // would have said.
       used: Math.round(row.total * 1000) / 1000,
       baselineUsed: Math.round(row.baseline * 1000) / 1000,
       submittedUsed: Math.round(row.submitted * 1000) / 1000,
       overridden: !!row.overridden,
       derivedTotal: row.overridden ? row.derivedTotal : undefined,
+      // The two halves of an overridden cell's figure, so a gauge can show what
+      // the admin declared and what has arrived since as separate contributions
+      // that actually add up to `used`. Undefined for a derived cell.
+      overrideBase: row.overridden ? row.overrideBase : undefined,
+      postOverrideSubmitted: row.overridden ? row.postOverrideSubmitted : undefined,
+      overriddenAt: row.overridden ? row.overriddenAt || null : undefined,
       unconvertible: row.unconvertible || 0,
       pct: capacity > 0 ? Math.min(100, (row.total / capacity) * 100) : null,
       remaining: capacity > 0 ? Math.max(0, capacity - row.total) : null,
@@ -5419,7 +5431,7 @@ function currentCellIndexOf(truck, vehicleIndex) {
 
 const FACILITY_CELL_FIELDS =
   "_id lgu slfName province numberOfCell cellNames cellStatuses cellTypes " +
-  "cellCapacities cellCapacityUnits cellFillValues cellFillOverridden cellFillUnits " +
+  `cellCapacities cellCapacityUnits ${OVERRIDE_FACILITY_FIELDS} ` +
   "wasteReceivedUnit volumeCapacityUnit";
 
 /**
@@ -9184,3 +9196,12 @@ module.exports.BASELINE_ONLY_FILTER = BASELINE_ONLY_FILTER;
 // Exposed for testing: the hauler/client roster union behind the portal's
 // Clients Served card.
 module.exports.resolveWasteSummaryHaulers = resolveWasteSummaryHaulers;
+// THE recompute-and-persist entry point for a facility's per-cell occupancy.
+//
+// Exposed because a write outside this router can change the answer too: the
+// SLF facility editor is where an admin DECLARES a cell's Waste in Cell, and
+// the derived rollups beside it (actualResidualWasteReceived, the
+// baseline/submitted split, the totals) are stale the moment that declaration
+// lands. routes/slfFacilities.js requires it lazily, from inside the handler,
+// so the two routers never have to be loaded in a fixed order.
+module.exports.refreshFacilityCellOccupancy = refreshFacilityCellOccupancy;

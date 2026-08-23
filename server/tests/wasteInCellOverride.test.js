@@ -109,6 +109,105 @@ test("clearing the field hands the cell back to the derived value", () => {
   assert.equal(flagOnly.rows[3].overridden, undefined);
 });
 
+// ── An override is a BASE, not a lid ────────────────────────────────────────
+//
+// The scenario this exists for: automatic value 100, admin declares 120, a 10 t
+// load is then approved. The admin's 120 must survive AND the 10 must be
+// recorded — 120 must not collapse back to 110, and it must not stay 120 while
+// the approval vanishes.
+const OVERRIDE_AT = new Date("2026-04-01T00:00:00Z");
+const declaredFacility = (value = 120) => ({
+  ...FACILITY,
+  cellFillValues: [value, null, null, null],
+  cellFillOverridden: [true, false, false, false],
+  cellFillOverrideValues: [value, null, null, null],
+  cellFillOverrideUnits: ["tons", null, null, null],
+  cellFillOverrideAt: [OVERRIDE_AT, null, null, null],
+});
+const load = (id, volume, createdAt, cellIndex = 0) => ({
+  _id: id,
+  status: "acknowledged",
+  baselineUnit: "tons",
+  createdAt,
+  trucks: [{ actualVolume: volume, actualVolumeUnit: "tons", wasteType: "Residual", cellIndex, vehicles: [] }],
+});
+
+test("a submission recorded AFTER the declaration is added to it, not discarded", () => {
+  const before = load("before", 100, new Date("2026-03-01"));
+  const after = load("after", 10, new Date("2026-04-05"));
+
+  const occ = computeCellOccupancy(declaredFacility(120), [before, after]);
+  assert.equal(occ.rows[0].total, 130, "120 declared + the 10 t approved since");
+  assert.equal(occ.rows[0].overrideBase, 120, "the admin's figure is untouched");
+  assert.equal(occ.rows[0].postOverrideSubmitted, 10);
+  // …and the two halves add up to what is displayed, so a gauge cannot lie.
+  assert.equal(occ.rows[0].overrideBase + occ.rows[0].postOverrideSubmitted, occ.rows[0].total);
+  // What the data alone says is still kept beside it.
+  assert.equal(occ.rows[0].derivedTotal, 110);
+});
+
+test("waste already recorded when the figure was typed is NOT re-added", () => {
+  // Both loads predate the declaration: they are inside the 120 the admin typed.
+  const occ = computeCellOccupancy(declaredFacility(120), [
+    load("a", 100, new Date("2026-03-01")),
+    load("b", 10, new Date("2026-03-20")),
+  ]);
+  assert.equal(occ.rows[0].total, 120, "the declaration replaced them, once");
+  assert.equal(occ.rows[0].postOverrideSubmitted, 0);
+});
+
+test("the accumulated figure is stable across recomputes — it never compounds", () => {
+  const facility = declaredFacility(120);
+  const entries = [load("before", 100, new Date("2026-03-01")), load("after", 10, new Date("2026-04-05"))];
+  const first = computeCellOccupancy(facility, entries);
+  // What refreshFacilityCellOccupancy persists back onto the facility.
+  const persisted = {
+    ...facility,
+    cellFillValues: first.cellFillValues,
+    cellFillUnits: first.cellFillUnits,
+  };
+  const second = computeCellOccupancy(persisted, entries);
+  assert.equal(second.rows[0].total, first.rows[0].total, "recomputing must be idempotent");
+  assert.equal(second.rows[0].overrideBase, 120, "the base is read from the declaration, never from the effective total");
+});
+
+test("only the cell the waste was placed in accumulates", () => {
+  const occ = computeCellOccupancy(declaredFacility(120), [
+    load("elsewhere", 40, new Date("2026-04-05"), 2),
+  ]);
+  assert.equal(occ.rows[0].total, 120, "Cell 1's declaration is not moved by Cell 3's load");
+  assert.equal(occ.rows[2].total, 40);
+});
+
+test("a legacy override — flagged before the declaration was recorded — still replaces", () => {
+  // No cellFillOverrideValues / cellFillOverrideAt: there is no way to tell what
+  // was already inside the figure, so nothing may be added to it. This is the
+  // behaviour those facilities already had; it must not change under them.
+  const legacy = {
+    ...FACILITY,
+    cellFillValues: [250, null, null, null],
+    cellFillOverridden: [true, false, false, false],
+  };
+  const occ = computeCellOccupancy(legacy, [load("after", 10, new Date("2099-01-01"))]);
+  assert.equal(occ.rows[0].total, 250);
+  assert.equal(occ.rows[0].postOverrideSubmitted, 0);
+  // And it cannot compound either: the effective total written back IS the base.
+  const second = computeCellOccupancy({ ...legacy, cellFillValues: occ.cellFillValues }, [
+    load("after", 10, new Date("2099-01-01")),
+  ]);
+  assert.equal(second.rows[0].total, 250);
+});
+
+test("approving a submission that predates the declaration does not inflate it", () => {
+  // A pending submission ALREADY counts toward occupancy, so it was part of what
+  // the admin saw and replaced. Acknowledging it later is not new volume.
+  const pending = { ...load("p", 30, new Date("2026-03-10")), status: "pending" };
+  const approved = { ...pending, status: "acknowledged" };
+  const facility = declaredFacility(120);
+  assert.equal(computeCellOccupancy(facility, [pending]).rows[0].total, 120);
+  assert.equal(computeCellOccupancy(facility, [approved]).rows[0].total, 120);
+});
+
 test("a facility with no override behaves exactly as before", () => {
   const before = computeCellOccupancy(FACILITY, [SUBMISSION]);
   assert.equal(before.rows[0].total, 100);
@@ -122,9 +221,15 @@ test("both the recompute and the rollup READ the override, not just write it", (
   // refreshFacilityCellOccupancy is what persists cellFillValues; without these
   // two fields in its projection the override was invisible and got overwritten.
   const refresh = slice(dataSlf, "async function refreshFacilityCellOccupancy", "refreshAdmin(req, \"facility\")");
-  assert.match(refresh, /cellFillValues cellFillOverridden cellFillUnits/);
+  assert.match(refresh, /\$\{OVERRIDE_FACILITY_FIELDS\}/);
   // The multi-facility rollup and the per-facility panel share one projection.
-  assert.match(dataSlf, /const FACILITY_CELL_FIELDS =[\s\S]*?cellFillValues cellFillOverridden cellFillUnits/);
+  assert.match(dataSlf, /const FACILITY_CELL_FIELDS =[\s\S]*?\$\{OVERRIDE_FACILITY_FIELDS\}/);
+  // ONE named fragment, so a projection cannot silently lose a field and make
+  // the override invisible to just that reader.
+  assert.match(
+    read("utils", "cellOccupancy.js"),
+    /const OVERRIDE_FACILITY_FIELDS =[\s\S]*?cellFillOverrideValues cellFillOverrideUnits cellFillOverrideAt cellFillOverrideBy/,
+  );
   // The portal reads the whole facility document, so it gets them for free.
   const facilities = read("routes", "slfFacilities.js");
   assert.match(facilities, /async function enrichPortalFacilityVolumes/);
@@ -148,8 +253,16 @@ test("only the SLF edit form declares a hand-typed Waste in Cell", () => {
     put.indexOf("const declaredFills") < put.indexOf("mergeCellInfrastructureUpdate(update, record"),
     "the declared values must be read before the merge rewrites them",
   );
-  // A blank clears the override for that cell.
-  assert.match(put, /\?\s*!isBlank\(declaredFills\[index\]\)/);
+  // A blank clears the override for that cell — flag, base, unit, stamp and
+  // author all go, so nothing is left behind to be picked up again.
+  assert.match(put, /if \(isBlank\(declared\)\) \{[\s\S]*?flags\.push\(false\);[\s\S]*?bases\.push\(null\);/);
+  // A declared figure records WHO and WHEN, because the date is what divides the
+  // volume already inside the number from the volume that arrives afterwards.
+  assert.match(put, /update\.cellFillOverrideValues = bases;/);
+  assert.match(put, /update\.cellFillOverrideAt = stamps;/);
+  assert.match(put, /update\.cellFillOverrideBy = authors;/);
+  // Re-saving the SAME figure must not restart the accumulation window.
+  assert.match(put, /stamps\.push\(unchanged \? storedAt\[index\] : now\);/);
 
   // The flag is sent by the form that has the input…
   assert.match(readUi("pages", "admin", "SLFMonitoring.jsx"), /payload\.cellFillValuesDeclared = true;/);
@@ -161,11 +274,25 @@ test("only the SLF edit form declares a hand-typed Waste in Cell", () => {
     /cellFillValuesDeclared/,
     "inferring a declaration there would mark a reordered cell as hand-set",
   );
-  // An incoming flag array is never trusted — it is derived from what changed.
+  // An incoming flag array is never trusted — the whole declaration is carried
+  // from the stored record, never from the request.
   const merge = slice(facilities, "function mergeCellInfrastructureUpdate(update, record", "async function enrichPortalFacilityVolumes");
-  assert.match(merge, /mergeArray\("cellFillOverridden", \(next, prev\) => prev === true\)/);
-  // …and it stays length-aligned when cells are added or removed.
-  assert.match(facilities, /"cellFillOverridden",\n\];/);
+  ["cellFillOverridden", "cellFillOverrideValues", "cellFillOverrideUnits", "cellFillOverrideAt", "cellFillOverrideBy"]
+    .forEach((key) => assert.match(merge, new RegExp(`carryDerived\\("${key}"`)));
+  // …and it follows its CELL when cells are inserted, deleted or reordered.
+  // Positional carry-forward slid every declaration onto its neighbour.
+  assert.match(merge, /const from = sourceIndexOf\(index\);/);
+  // A NEW cell sends an explicit null; Number(null) is 0, so the blank has to be
+  // rejected BEFORE coercion or every added cell inherits stored cell 0's
+  // declaration.
+  assert.match(merge, /if \(raw === null \|\| raw === undefined \|\| raw === ""\) return null;/);
+  assert.match(
+    readUi("pages", "admin", "CellInfraOverview.jsx"),
+    /cellOriginIndexes: editCells\.map\(/,
+    "the editor that reorders cells must send its own mapping",
+  );
+  // …and every override array stays length-aligned when cells are added/removed.
+  assert.match(facilities, /"cellFillOverrideValues", "cellFillOverrideUnits", "cellFillOverrideAt", "cellFillOverrideBy",\n\];/);
 });
 
 // ── The disabled View button ────────────────────────────────────────────────

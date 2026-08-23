@@ -74,9 +74,12 @@ export const VOLUME_METRICS = {
   },
   /**
    * A Waste in Cell figure an admin typed by hand (SLF Table → Edit → Waste in
-   * Cell). It REPLACES the derived total for that cell, so it has no
-   * baseline/submitted split behind it — labelling it as its own contribution is
-   * what stops a hand-entered number from being read as recorded data.
+   * Cell). It REPLACES the derived baseline/submitted split for that cell, so it
+   * has no such split behind it — labelling it as its own contribution is what
+   * stops a hand-entered number from being read as recorded data.
+   *
+   * It is a BASE, not a ceiling: volume recorded after the declaration is drawn
+   * beside it as ordinary Submitted Volume, because that part IS recorded data.
    */
   adminSet: {
     key: "adminSet",
@@ -110,10 +113,25 @@ export const REMAINING_COLOR = VOLUME_METRICS.remaining.color;
  * @param {{baselineFill?:number, submittedFill?:number, fill?:number}} cell
  */
 export function cellVolumeSegments(cell = {}) {
-  // An admin-declared figure REPLACES the derived total, so it is the whole arc.
-  // Showing the derived baseline/submitted split beside it would present numbers
-  // that do not add up to the value on screen.
+  // An admin-declared figure REPLACES the derived baseline/submitted split, so
+  // that split is never drawn beside it — the two do not add up to the value on
+  // screen and presenting them together would misreport where the volume came
+  // from.
+  //
+  // What IS drawn beside it is the volume recorded SINCE the declaration, which
+  // is genuinely submitted waste sitting on top of the admin's base (see
+  // server/utils/cellOccupancy.js). Those two do add up to `fill`, so the arc
+  // always totals the number in the legend. `overrideBase` is absent on a legacy
+  // override, where the declaration simply is the whole fill.
   if (cell.overridden && Number(cell.fill) > 0) {
+    const base = Number(cell.overrideBase);
+    const since = Number(cell.postOverrideSubmitted);
+    if (Number.isFinite(base) && base > 0 && Number.isFinite(since) && since > 0) {
+      return [
+        { ...VOLUME_METRICS.adminSet, value: base },
+        { ...VOLUME_METRICS.submitted, label: "Submitted Since Admin Update", value: since },
+      ];
+    }
     return [{ ...VOLUME_METRICS.adminSet, value: Number(cell.fill) }];
   }
   const segments = [];
