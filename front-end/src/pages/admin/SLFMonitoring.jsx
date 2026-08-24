@@ -79,7 +79,6 @@ import {
   FileImageOutlined,
   FolderOutlined,
   FilePdfOutlined,
-  ContainerOutlined,
   CalculatorOutlined,
   CopyOutlined,
   PlayCircleOutlined,
@@ -1021,7 +1020,25 @@ export default function SLFMonitoring({
         facility.cellFillUnits?.[i] || unit,
         unit,
       );
-      const used = Math.round(base + cellUsed[i]);
+      // `cellFillValues[i]` is ALREADY the complete Waste in Cell — baseline plus
+      // valid submissions, each counted exactly once. enrichFacilityWithBaseline
+      // fills it from the server rollup (computeCellOccupancy, which also writes
+      // the persisted SlfFacility.cellFillValues), and its client-side fallback
+      // produces the same complete total.
+      //
+      // Adding the locally re-summed `cellUsed[i]` on top therefore counted every
+      // PLACED submission twice: a cell holding 100 baseline + 30 submitted read
+      // as 160. That inflated the fill percentage, the capacity chart and the
+      // ">= 90%" cellsAtRisk alerts on this tab. The local sum also cannot see
+      // per-vehicle placements, so it was never the authoritative figure.
+      //
+      // It is kept only as the fallback for a facility that has no fill figure at
+      // all (no rollup entry and nothing stored), which is the one case where the
+      // submissions this page already loaded are the best available answer.
+      const storedFill = facility.cellFillValues?.[i];
+      const hasStoredFill =
+        storedFill !== null && storedFill !== undefined && storedFill !== "";
+      const used = Math.round(hasStoredFill ? base : cellUsed[i]);
       return {
         // Read the CURRENT name from the facility's cell infrastructure, so a
         // renamed cell updates here instead of showing a stale "Cell N".
@@ -1034,13 +1051,39 @@ export default function SLFMonitoring({
       };
     });
 
-    const monthly = Array.from(monthMap.entries())
-      .filter(([m]) => m !== "Unknown")
-      .sort(([a], [b]) => a.localeCompare(b))
-      .map(([m, v]) => ({
-        month: dayjs(`${m}-01`).format("MMM YY"),
-        volume: Math.round(v),
-      }));
+    // Monthly trend — CONTINUOUS between the first and last month that carry
+    // submissions.
+    //
+    // This used to emit only the months that happen to hold a record, so a month
+    // with no disposals was simply absent from the series. The area chart then
+    // joined the two months either side of the gap, drawing a straight line across
+    // it: a facility that submitted in January and March rendered as though
+    // February had been interpolated somewhere between the two, and the x-axis
+    // silently skipped it. A month with no submissions is a real, meaningful zero,
+    // so it is emitted as one and the chart drops to the axis.
+    //
+    // Keys are "YYYY-MM", so a plain sort is already chronological.
+    const monthKeys = Array.from(monthMap.keys())
+      .filter((m) => m !== "Unknown")
+      .sort();
+    const monthly = [];
+    if (monthKeys.length) {
+      const first = dayjs(`${monthKeys[0]}-01`);
+      const last = dayjs(`${monthKeys[monthKeys.length - 1]}-01`);
+      // Bounded walk: a malformed stored date cannot spin this into a huge series.
+      const MAX_MONTHS = 120;
+      let cursor = first;
+      for (let i = 0; i < MAX_MONTHS; i += 1) {
+        if (!cursor.isValid() || !last.isValid()) break;
+        const key = cursor.format("YYYY-MM");
+        monthly.push({
+          month: cursor.format("MMM YY"),
+          volume: Math.round(monthMap.get(key) || 0),
+        });
+        if (key === last.format("YYYY-MM")) break;
+        cursor = cursor.add(1, "month");
+      }
+    }
 
     const topGenerators = Array.from(generators.entries())
       .sort((a, b) => b[1] - a[1])
@@ -2580,8 +2623,8 @@ export default function SLFMonitoring({
     return {
       cells: {
         title: "Cell Infrastructure Management",
-        icon: <ExperimentOutlined style={{ color: "#13c2c2" }} />,
-        color: "#13c2c2",
+        icon: <ExperimentOutlined style={{ color: "#1a3353" }} />,
+        color: "#1a3353",
         primary: totalCells,
         primaryTitle: "Total Cells",
         stats: [
@@ -2598,8 +2641,8 @@ export default function SLFMonitoring({
       },
       lgu: {
         title: "LGUs Served",
-        icon: <TeamOutlined style={{ color: "#fa8c16" }} />,
-        color: "#fa8c16",
+        icon: <TeamOutlined style={{ color: "#1677ff" }} />,
+        color: "#1677ff",
         primary: totalLGUs,
         primaryTitle: "Total LGUs Served",
         stats: [
@@ -2616,8 +2659,8 @@ export default function SLFMonitoring({
       },
       private: {
         title: "Private Sector Served",
-        icon: <BankOutlined style={{ color: "#722ed1" }} />,
-        color: "#722ed1",
+        icon: <BankOutlined style={{ color: "#2d5f8a" }} />,
+        color: "#2d5f8a",
         primary: privateClientsTotal || privateSectorCount,
         primaryTitle: privateClientsTotal ? "Private Clients" : "Private SLFs",
         stats: [
@@ -2653,8 +2696,8 @@ export default function SLFMonitoring({
       },
       leachate: {
         title: "Leachate Management",
-        icon: <AlertOutlined style={{ color: "#1890ff" }} />,
-        color: "#1890ff",
+        icon: <AlertOutlined style={{ color: "#69b1ff" }} />,
+        color: "#69b1ff",
         primary: totalLeachate,
         primaryTitle: "Leachate Treatment Plant",
         stats: [
@@ -2705,8 +2748,8 @@ export default function SLFMonitoring({
       },
       capacity: {
         title: "SLF Total Capacities",
-        icon: <DatabaseOutlined style={{ color: "#eb2f96" }} />,
-        color: "#eb2f96",
+        icon: <DatabaseOutlined style={{ color: "#fa8c16" }} />,
+        color: "#fa8c16",
         primary: totalCapacity,
         primaryTitle: "Total Capacity",
         stats: [
@@ -2884,8 +2927,9 @@ export default function SLFMonitoring({
   };
 
   return (
-    <div style={{ padding: 0 }}>
+    <div className="admin-page" style={{ padding: 0 }}>
       <div
+        className="admin-page-head"
         style={{
           display: "flex",
           justifyContent: "space-between",
@@ -2931,13 +2975,6 @@ export default function SLFMonitoring({
               Filters
             </Button>
           </Badge>
-          <Button
-            size="small"
-            icon={<ContainerOutlined />}
-            onClick={() => setSlfInsightModal("cells")}
-          >
-            Cell Infrastructure
-          </Button>
           {canEdit && (
             <Button
               size="small"

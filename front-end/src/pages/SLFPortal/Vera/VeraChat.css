@@ -58,7 +58,14 @@
   width: 380px;
   max-width: calc(100vw - 32px);
   height: 560px;
+  /* `vh` on a mobile browser is measured against the LARGEST viewport — the one
+     with the URL bar retracted — so a window sized in vh is taller than the space
+     actually on screen, and the bottom of it (the composer) sits under the
+     browser chrome or behind the on-screen keyboard. `dvh` tracks the viewport as
+     it actually is. The vh line stays first as the fallback for browsers without
+     dvh; the dvh line overrides it where supported. */
   max-height: calc(100vh - 56px);
+  max-height: calc(100dvh - 56px);
   background: #ffffff;
   border-radius: 16px;
   box-shadow: 0 18px 48px rgba(20, 36, 59, 0.3);
@@ -75,8 +82,27 @@
   bottom: 0;
   width: 100%;
   max-width: 100%;
+  /* Same dvh reasoning as .vera-window above: with `82vh` the sheet was sized
+     against the retracted-URL-bar viewport, so on a phone the composer sat below
+     the fold and the keyboard covered what was left of it. */
   height: 82vh;
+  height: 82dvh;
+  max-height: 82dvh;
   border-radius: 16px 16px 0 0;
+  /* Home-indicator gutter on notched phones, so the send button is not sitting
+     under the system gesture bar. */
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+/* Landscape phone: 82% of a ~430px-tall viewport leaves almost nothing for the
+   message list once the header and composer are laid out. Give the sheet the
+   full height it can have and let the list take the remainder. */
+@media (max-height: 520px) and (orientation: landscape) {
+  .vera-window-mobile {
+    height: 100dvh;
+    max-height: 100dvh;
+    border-radius: 0;
+  }
 }
 
 /* ── Header ───────────────────────────────────────────────────────────────── */
@@ -331,18 +357,68 @@
 }
 
 /* Small screens: launcher hugs the corner tighter. */
+/* ── Tablet ──
+   The Messages FAB shrinks to 44px tall at bottom 88, so the bubble follows it
+   down rather than leaving a gap. */
+@media (max-width: 991px) {
+  .vera-nudge {
+    /* 88 + 44 + 12 */
+    bottom: 144px;
+    right: 24px;
+  }
+
+  /* ── Tablet chat window ──
+     `isMobile` in the portal is `!screens.md`, so a 768–991px tablet gets the
+     DESKTOP floating window: 380px wide and 560px tall, pinned 28px off the
+     corner. That fits, but it wastes a tablet's height and puts the composer
+     high up the screen. Widening it and letting it use the available height
+     keeps the conversation readable without switching to the mobile sheet. */
+  .vera-window {
+    width: 440px;
+    height: 620px;
+    max-height: calc(100dvh - 96px);
+    right: 24px;
+    bottom: 24px;
+  }
+
+  /* Long assistant answers get more of the wider bubble. */
+  .vera-bubble {
+    max-width: 88%;
+  }
+}
+
 @media (max-width: 576px) {
   .vera-launcher { bottom: 20px; right: 20px; }
   .vera-launcher-label { display: none; }
   .vera-launcher { padding: 0; width: 52px; height: 52px; justify-content: center; }
   .vera-launcher-icon { width: 40px; height: 40px; }
+
+  /* Corner inset drops to 20px and the Messages FAB becomes a 52px circle at
+     bottom 84, so the bubble clears 84 + 52 + 12. It also has to fit a 320px
+     screen beside its own inset. */
+  .vera-nudge {
+    bottom: 148px;
+    right: 20px;
+    left: 20px;
+    max-width: none;
+  }
 }
 
-/* ── Contextual nudge bubble ──────────────────────────────────────────────── */
+/* ── Contextual nudge bubble ──────────────────────────────────────────────────
+   The bottom-right corner holds a STACK of three things, and the nudge is the
+   topmost: the VERA launcher (bottom 32), the portal's Messages FAB
+   (.slf-msg-fab, bottom 92 — see SLFPortal.css), and this bubble above both.
+
+   `bottom: 92px` put the bubble at the Messages FAB's exact coordinates. Being
+   opaque, 290px wide and z-index 1001 against the FAB's 999, it did not merely
+   overlap that button — it hid it completely for as long as a nudge was showing,
+   which is also the moment a confused user is most likely to reach for Messages.
+   Clearing the FAB's full height keeps all three reachable at once. */
 .vera-nudge {
   position: fixed;
   right: 32px;
-  bottom: 92px;
+  /* 92 (FAB top offset) + 48 (FAB height) + 12 (gap) */
+  bottom: 152px;
   z-index: 1001;
   max-width: 290px;
   display: flex;

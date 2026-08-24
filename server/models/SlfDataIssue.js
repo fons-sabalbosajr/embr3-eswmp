@@ -42,6 +42,23 @@ const slfDataIssueSchema = new mongoose.Schema(
     resolvedAt: { type: Date, default: null },
     resolvedBy: { type: String, trim: true, default: "" },
     resolutionNotes: { type: String, trim: true, default: "" },
+
+    // ── VERA authorization ────────────────────────────────────────────────────
+    // "An administrator has ALLOWED VERA to resolve this issue" — deliberately NOT
+    // the same thing as `status`. `status: "resolved"` records that the issue is
+    // already fixed; this records permission for VERA to fix it. An issue can be
+    // veraResolvable and still open (authorized, not yet acted on), and resolving
+    // it never implies authorization was given.
+    //
+    // Persisted rather than held in React state because the selection has to
+    // survive pagination, filtering and a page refresh, and because VERA itself
+    // reads it (GET /slf-clients/issues?veraResolvable=true).
+    //
+    // At/By mirror the resolvedAt/resolvedBy pair above: this is an authorization
+    // an admin grants, so who granted it and when are part of the record.
+    veraResolvable: { type: Boolean, default: false, index: true },
+    veraResolvableAt: { type: Date, default: null },
+    veraResolvableBy: { type: String, trim: true, default: "" },
     // Bumped every sync so an issue that recurs is re-surfaced as still-open.
     lastSeenAt: { type: Date, default: Date.now },
   },

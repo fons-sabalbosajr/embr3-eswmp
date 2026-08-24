@@ -12,6 +12,8 @@
     "seed:demo:reset": "node seeds/seedDemoAccounts.js --reset",
     "test": "node --test tests/*.test.js",
     "repair:baseline-ids": "node scripts/clearBaselineSubmissionIds.js",
+    "repair:unhide-reverted": "node scripts/unhideRevertedSubmissions.js",
+    "repair:hide-deleted-slf-records": "node scripts/hideRecordsOfDeletedSlfs.js",
     "backfill:cell-index": "node scripts/backfillBaselineCellIndex.js"
   },
   "keywords": [],

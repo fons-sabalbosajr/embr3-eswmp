@@ -1,6 +1,7 @@
 import { getCellTypeConfig, getSlfCapacityColor, isNonExistentCell, resolveCellName } from "../../../../utils/cellVisuals";
-import { VOLUME_METRICS } from "../../../../utils/volumeMetrics";
-import CellGaugeLegend from "../../slf-monitoring/CellGaugeLegend";
+import { VOLUME_METRICS, cellVolumeSegments } from "../../../../utils/volumeMetrics";
+import GaugeMeter from "../../../../components/GaugeMeter";
+import CellGaugeLegend, { cellFullnessStatus } from "../../slf-monitoring/CellGaugeLegend";
 import HaulerClientsTab from "../../slf-monitoring/HaulerClientsTab";
 import SlfDashboardTab, { getStatusTag } from "../../slf-monitoring/SlfDashboardTab";
 import { ACCENT, CHART_COLORS, convertVolume, formatStringArray, getMediaKind, getServedClientCount, isActiveCellStatus, isCompletedCellStatus, isHazardousCellType, normalizeCellStatus, normalizeStoredFileUrl, normalizeUnit, resolveMediaOpenUrl, resolveMediaUrl } from "../../slf-monitoring/helpers.jsx";
@@ -740,6 +741,50 @@ export default function SlfDetailModal({
                                                   !isNonExistentCell(cellSt),
                                               },
                                             );
+                                          // Where this cell's volume came from, in
+                                          // the CAPACITY's unit so the bands and the
+                                          // denominator agree. The provenance split
+                                          // is written by the same server rollup
+                                          // that produced cellFillValues, so the
+                                          // bands always sum to the arc.
+                                          const usageRow =
+                                            detailViewRecord._cellUsageRows?.[i];
+                                          const toCap = (value) => {
+                                            const converted = convertVolume(
+                                              Number(value || 0),
+                                              cellFillUnit,
+                                              capUnit,
+                                            );
+                                            return Number.isFinite(Number(converted))
+                                              ? Number(converted)
+                                              : 0;
+                                          };
+                                          const cellSegments = cellVolumeSegments({
+                                            baselineFill: toCap(
+                                              detailViewRecord
+                                                .cellFillBaselineValues?.[i] ??
+                                                usageRow?.baseline,
+                                            ),
+                                            submittedFill: toCap(
+                                              detailViewRecord
+                                                .cellFillSubmittedValues?.[i] ??
+                                                usageRow?.submissions,
+                                            ),
+                                            fill: usedForCapacity,
+                                            overridden: usageRow?.overridden,
+                                            overrideBase: toCap(
+                                              usageRow?.overrideBase,
+                                            ),
+                                            postOverrideSubmitted: toCap(
+                                              usageRow?.postOverrideSubmitted,
+                                            ),
+                                          });
+                                          const fullness = cellFullnessStatus(
+                                            cellFill,
+                                            isClosed ||
+                                              isNonExistentCell(cellSt) ||
+                                              !isActiveCellStatus(cellSt),
+                                          );
                                           return (
                                             <Col
                                               xs={12}
@@ -749,33 +794,56 @@ export default function SlfDetailModal({
                                               key={i}
                                               style={{ textAlign: "center" }}
                                             >
-                                              <Progress
-                                                type="dashboard"
-                                                percent={
-                                                  isClosed ? 100 : cellFill
+                                              {/* The arc is drawn as the Volume in
+                                                  Cell CONTRIBUTIONS — baseline
+                                                  (blue) + submitted (gold) — which
+                                                  is exactly what CellGaugeLegend
+                                                  below this grid explains. It was a
+                                                  single solid arc in one capacity
+                                                  colour, so the legend's colour key
+                                                  described something the gauge never
+                                                  drew and every cell read as one
+                                                  colour regardless of where its
+                                                  volume came from.
+
+                                                  Segments come from the shared
+                                                  cellVolumeSegments (same helper the
+                                                  Dashboard gauges use), so an
+                                                  admin-declared figure is rendered
+                                                  as its declared base plus what has
+                                                  been submitted since, and never as
+                                                  a baseline/submitted split that
+                                                  would not add up.
+
+                                                  Fullness stays legible as the OK /
+                                                  Near Full / Full tag below — the
+                                                  arrangement CellGaugeLegend
+                                                  documents — so the capacity bands
+                                                  are still reported without
+                                                  overloading the arc's hue. */}
+                                              <GaugeMeter
+                                                percent={isClosed ? 100 : cellFill}
+                                                segments={
+                                                  isClosed ? null : cellSegments
                                                 }
+                                                segmentTotal={cap > 0 ? cap : null}
+                                                color={gaugeColor}
                                                 size={80}
-                                                strokeColor={gaugeColor}
-                                                format={() => (
-                                                  <div
-                                                    style={{
-                                                      lineHeight: 1.2,
-                                                    }}
-                                                  >
-                                                    <div
-                                                      style={{
-                                                        fontSize: 14,
-                                                        fontWeight: 700,
-                                                        color: gaugeColor,
-                                                      }}
-                                                    >
-                                                      {isClosed
-                                                        ? "—"
-                                                        : `${cellFill}%`}
-                                                    </div>
-                                                  </div>
-                                                )}
+                                                thickness={8}
+                                                percentFontSize={14}
+                                                noDataFontSize={9}
+                                                noDataText="—"
                                               />
+                                              {!isClosed && cap > 0 && (
+                                                <div style={{ marginTop: 2 }}>
+                                                  <Tag
+                                                    color={fullness.color}
+                                                    style={{ fontSize: 9, marginInlineEnd: 0 }}
+                                                  >
+                                                    {fullness.label}
+                                                  </Tag>
+                                                </div>
+                                              )}
                                               <div
                                                 style={{
                                                   marginTop: 6,

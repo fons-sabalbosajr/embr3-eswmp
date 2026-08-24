@@ -3757,35 +3757,27 @@ export default function SLFPortalModals({
         />
       </Modal>
 
-      {/* ── Admin Messages Floating Button ── */}
+      {/* ── Admin Messages Floating Button ──
+          Styling lives in SLFPortal.css (.slf-msg-fab) rather than inline, so the
+          breakpoints can collapse it to a circle the way the VERA launcher does.
+          Inline styles would have won over any media query. */}
       <Button
         type="primary"
+        className="slf-msg-fab"
         icon={<MessageOutlined />}
+        // The label is dropped on a phone, so the accessible name has to come from
+        // somewhere else or the control becomes an unlabelled icon.
+        aria-label="Messages from admin"
         onClick={() => {
           setMessageDrawerOpen(true);
           if (supportTickets.length === 0) fetchSupportTickets();
           markPortalNotificationsRead("messages");
         }}
-        style={{
-          position: "fixed",
-          bottom: 92,
-          right: 32,
-          zIndex: 999,
-          height: 48,
-          borderRadius: 24,
-          fontSize: 15,
-          fontWeight: 600,
-          display: "flex",
-          alignItems: "center",
-          gap: 8,
-          background: "#1677ff",
-          borderColor: "#1677ff",
-          boxShadow: "0 4px 16px rgba(0,0,0,0.22)",
-          paddingInline: 20,
-        }}
       >
-        Messages
-        {messageUnreadCount > 0 && <Badge count={messageUnreadCount} size="small" />}
+        <span className="slf-msg-fab-label">Messages</span>
+        {messageUnreadCount > 0 && (
+          <Badge className="slf-msg-fab-badge" count={messageUnreadCount} size="small" />
+        )}
       </Button>
 
       {/* Support & FAQ floating button retired — VERA (the floating chatbot in

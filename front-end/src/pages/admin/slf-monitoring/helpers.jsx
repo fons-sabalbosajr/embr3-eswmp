@@ -90,6 +90,32 @@ const PERMIT_STATUS_OPTIONS = [
 // drift. Tolerant of stored casing/spacing variants ("not required", "N/A").
 const isPermitNotRequired = (status) =>
   /^(not[\s_-]*required|n\/?a)$/i.test(String(status || "").trim());
+
+/**
+ * A permit that has NOT been issued — distinct from one that is not required.
+ *
+ * Operators record two things in the permit-number field when there is no permit
+ * to type: the word "None", or the application they have filed ("On going
+ * application with application No. 347672", "Application No: 214898"). Both are
+ * truthy strings, so the card treated them as a reference number, and because
+ * neither carries a validity date `permitStatus` fell through to its
+ * `statusText || "New / Complied"` branch and stamped a confident blue COMPLIED
+ * badge on a facility that holds no permit at all.
+ *
+ * This is deliberately NOT folded into `isPermitNotRequired`: "not required"
+ * means the permit does not apply and the card says so in words, whereas an
+ * application in progress is a real obligation that is simply unmet. They render
+ * differently — only the badge is suppressed here, so the application reference
+ * the operator typed still shows.
+ *
+ * Lives beside its sibling for the same reason that one does: the admin and
+ * portal renderers must not drift.
+ */
+const isPermitNotIssued = (value) => {
+  const text = String(value || "").trim();
+  if (!text) return false;
+  return /^(none|nil|wala)$/i.test(text) || /^(on[\s_-]*going|ongoing|application\s*no)\b/i.test(text);
+};
 const DP_TYPE_OPTIONS = [
   { label: "Domestic", value: "Domestic" },
   { label: "Industrial", value: "Industrial" },
@@ -448,6 +474,7 @@ export {
   CELL_STATUS_COLORS,
   PERMIT_STATUS_OPTIONS,
   isPermitNotRequired,
+  isPermitNotIssued,
   DP_TYPE_OPTIONS,
   WWTF_TYPE_OPTIONS,
   RECEIVING_FACILITY_TYPE_OPTIONS,

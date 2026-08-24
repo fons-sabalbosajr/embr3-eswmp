@@ -538,9 +538,48 @@ function computeCellOccupancy(facility, entries = [], { unitSource = null } = {}
  *
  * @returns {{ baselineDate: Date|null, counted: object[], excludedCount: number }}
  */
+/**
+ * WHEN the baseline was encoded — the date the rule below cuts on.
+ *
+ * For an SLF with a real baseline-only CONTAINER this is simply that container's
+ * createdAt: it is the record the portal writes when the operator saves their
+ * baseline, so it dates the encoding exactly.
+ *
+ * Where there is NO container the figures live on the submissions themselves, and
+ * every submission carries its own COPY of the baseline block. chooseBaselineEntry
+ * then falls through to the first `isBaselineEntry` in a list sorted newest-first —
+ * i.e. the NEWEST submission — and using that record's createdAt as the cutoff is
+ * self-defeating: the newest submission is always "the baseline", so the cutoff is
+ * always ~now, and every other submission is older than it. Measured on production:
+ * Porac counted 1 of 80 submissions, Limay 1 of 87, Floridablanca 1 of 59 — 545
+ * submissions excluded across 13 facilities, every one of them reporting exactly
+ * 0 submitted volume. It is not a threshold those facilities were failing to
+ * clear; no submission could EVER be counted, so Waste in Cell could never move.
+ *
+ * The encoding happened when those figures FIRST existed, so the cutoff is taken
+ * from the EARLIEST record carrying baseline figures. The rule keeps doing what it
+ * is for — waste disposed before the baseline was encoded stays inside the baseline
+ * total and is not added again — while a submission recorded afterwards can
+ * actually count.
+ */
+function baselineCutoffDate(entries, baselineEntry) {
+  if (!baselineEntry) return null;
+  const chosen = baselineEntry.createdAt ? new Date(baselineEntry.createdAt) : null;
+  // A genuine container dates the encoding on its own.
+  if (!(baselineEntry.trucks || []).length) return chosen;
+  let earliest = chosen;
+  for (const entry of entries) {
+    if (!isBaselineEntry(entry) || !entry?.createdAt) continue;
+    const at = new Date(entry.createdAt);
+    if (Number.isNaN(at.getTime())) continue;
+    if (!earliest || at < earliest) earliest = at;
+  }
+  return earliest;
+}
+
 function applyPreBaselineRule(entries = [], { exclude = true } = {}) {
   const baselineEntry = chooseBaselineEntry(entries);
-  const baselineDate = baselineEntry?.createdAt || null;
+  const baselineDate = baselineCutoffDate(entries, baselineEntry);
   const baselineId = baselineEntry?._id ? String(baselineEntry._id) : "";
   const countsTowardFill = (entry) => {
     if (!exclude || !baselineDate || !entry?.dateOfDisposal) return true;
@@ -595,8 +634,15 @@ async function preBaselineExclusionEnabled() {
  *       recorded after the declaration are added to it instead of being
  *       discarded. Every facility carrying an accumulating override needs its
  *       stored figure recomputed under the new rule.
+ *   4 — the pre-baseline cutoff is dated from the EARLIEST record carrying
+ *       baseline figures, not the newest copy (see baselineCutoffDate). At an SLF
+ *       with no baseline container the newest submission was always being treated
+ *       as "the baseline", so the cutoff sat at ~now and every submission was
+ *       excluded — 545 of them across 13 facilities, each stuck at 0 submitted
+ *       volume. Their stored figures were written under that rule and must be
+ *       recomputed.
  */
-const OCCUPANCY_CALC_VERSION = 3;
+const OCCUPANCY_CALC_VERSION = 4;
 
 module.exports = {
   computeCellOccupancy,
@@ -604,6 +650,7 @@ module.exports = {
   applyPreBaselineRule,
   chooseBaselineEntry,
   preBaselineExclusionEnabled,
+  baselineCutoffDate,
   isBaselineEntry,
   readCellOverride,
   isRecordedAfter,

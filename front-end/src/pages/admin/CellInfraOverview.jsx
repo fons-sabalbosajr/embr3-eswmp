@@ -45,6 +45,7 @@ import {
 } from "../../utils/cellVisuals";
 import api from "../../api";
 import { convertVolume } from "../../utils/volumeUnits";
+import { compareProvinceNames } from "../../utils/provinceSort";
 import { getSocket } from "../../utils/socket";
 
 const { Text } = Typography;
@@ -496,7 +497,22 @@ export default function CellInfraOverview({
           operators: operatorsByFacility.get(o.key) || [],
         };
       })
-      .sort((a, b) => (b.submissions || 0) - (a.submissions || 0));
+      // Primary ordering is PROVINCE (A→Z), not Total Submissions: a count-based
+      // order reshuffles every time a submission lands, so an SLF moves position
+      // between visits. compareProvinceNames is the shared comparator used by the
+      // Dashboard's Cell Infrastructure modal — it is case/accent-insensitive,
+      // whitespace-tolerant, strips a leading "Province of", and sorts missing
+      // provinces last. Total Submissions is preserved as the tiebreak (and is
+      // still shown, still column-sortable), so ordering within a province is
+      // unchanged from before.
+      .sort(
+        (a, b) =>
+          compareProvinceNames(a.facility?.province, b.facility?.province) ||
+          (b.submissions || 0) - (a.submissions || 0) ||
+          String(a.slfName || "").localeCompare(String(b.slfName || ""), undefined, {
+            sensitivity: "base",
+          }),
+      );
   }, [rows, expanded, operatorsByFacility, occupancy]);
 
   const isLoading = loading;

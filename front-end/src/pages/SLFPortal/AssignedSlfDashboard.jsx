@@ -447,7 +447,12 @@ export default function AssignedSlfDashboard({
                         }}
                       >
                         <Row gutter={[20, 16]} align="middle">
-                          <Col xs={24} sm={6} style={{ textAlign: "center" }}>
+                          {/* `sm={6}` gave the gauge a quarter of a 576–767px
+                              tablet — about 124px for a 100px dial plus its
+                              capacity tag, which then wrapped mid-word. The gauge
+                              now keeps the full row until md, where there is real
+                              width to split. */}
+                          <Col xs={24} sm={24} md={7} lg={6} style={{ textAlign: "center" }}>
                             <Progress
                               type="dashboard"
                               percent={pct}
@@ -488,7 +493,7 @@ export default function AssignedSlfDashboard({
                               {capLabel}
                             </Tag>
                           </Col>
-                          <Col xs={24} sm={18}>
+                          <Col xs={24} sm={24} md={17} lg={18}>
                             <Row gutter={[12, 12]}>
                               {/* Status */}
                               <Col xs={12} sm={12} md={6}>

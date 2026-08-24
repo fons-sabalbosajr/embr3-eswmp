@@ -1428,12 +1428,48 @@ router.delete("/:id", async (req, res) => {
     const record = await SlfFacility.findOne({ _id: req.params.id, deletedAt: null });
     if (!record) return res.status(404).json({ message: "Record not found" });
 
-    record.deletedAt = new Date();
-    record.deletedBy = req.logUser || "admin";
+    const deletedAt = new Date();
+    const deletedBy = req.logUser || "admin";
+    record.deletedAt = deletedAt;
+    record.deletedBy = deletedBy;
     await record.save();
 
-    res.json({ message: "Record moved to trash" });
-    writeLog("warn", "slfFacility.delete", { message: `Soft-deleted SLF: ${req.params.id}`, ip: req.ip });
+    // ── Cascade to the facility's OWN data ──────────────────────────────────
+    //
+    // Deleting the facility used to soft-delete this one document and nothing
+    // else. Every DataSLF record keyed to it — submissions, baseline containers,
+    // the accredited-hauler/client lists — kept `deletedAt: null`, so a deleted
+    // SLF went on feeding the submissions table, the baselines list, the
+    // cell-occupancy rollup, the dashboard tiles and every report built from
+    // them. Verified in production: Nueva Ecija LGU Guimba was deleted on
+    // 2026-08-04 and still had 70 live submissions afterwards.
+    //
+    // The cascade is a SOFT delete, matching the facility's own semantics: the
+    // records stay in the database and Restore puts them back. `deletedWithFacility`
+    // marks exactly the set the cascade took, so restoring cannot resurrect a
+    // record an admin had deleted separately beforehand.
+    const DataSLF = require("../models/DataSLF");
+    const cascade = await DataSLF.updateMany(
+      { slfGenerator: record._id, deletedAt: null },
+      { $set: { deletedAt, deletedBy, deletedWithFacility: true } },
+    );
+
+    res.json({
+      message: "Record moved to trash",
+      recordsHidden: cascade.modifiedCount,
+    });
+    writeLog("warn", "slfFacility.delete", {
+      message: `Soft-deleted SLF: ${req.params.id} (and ${cascade.modifiedCount} of its data records)`,
+      ip: req.ip,
+      meta: { facilityId: String(record._id), recordsHidden: cascade.modifiedCount },
+    });
+    // Every admin surface derives from those records, so tell them to re-read
+    // rather than leaving a deleted SLF on screen until the next manual refresh.
+    try {
+      const { refreshAdmin } = require("../utils/socketEmit");
+      refreshAdmin(req, "submissions");
+      refreshAdmin(req, "facility");
+    } catch { /* socket is best-effort */ }
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });
   }
@@ -1463,11 +1499,29 @@ router.patch("/:id/restore", async (req, res) => {
     record.deletedBy = null;
     await record.save();
 
+    // Undo exactly what the delete cascade hid — no more. Records carrying
+    // `deletedWithFacility` are the ones this facility's deletion took; anything
+    // an admin deleted on its own stays deleted.
+    const DataSLF = require("../models/DataSLF");
+    const restored = await DataSLF.updateMany(
+      { slfGenerator: record._id, deletedWithFacility: true },
+      { $set: { deletedAt: null, deletedBy: null, deletedWithFacility: false } },
+    );
+
     const populated = await SlfFacility.findById(record._id)
       .setOptions({ includeHiddenYears: true })
       .populate("slfGenerator");
     res.json(populated);
-    writeLog("info", "slfFacility.restore", { message: `Restored SLF: ${record._id}`, ip: req.ip });
+    writeLog("info", "slfFacility.restore", {
+      message: `Restored SLF: ${record._id} (and ${restored.modifiedCount} of its data records)`,
+      ip: req.ip,
+      meta: { facilityId: String(record._id), recordsRestored: restored.modifiedCount },
+    });
+    try {
+      const { refreshAdmin } = require("../utils/socketEmit");
+      refreshAdmin(req, "submissions");
+      refreshAdmin(req, "facility");
+    } catch { /* socket is best-effort */ }
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });
   }

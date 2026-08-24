@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { Card, Space, Typography, Button, Table, Empty, Select, DatePicker, Input, Tag, Badge, Tooltip } from "antd";
+import { Card, Space, Typography, Button, Table, Empty, Select, DatePicker, Input, Tag, Badge, Tooltip, Grid } from "antd";
 import { HistoryOutlined, ReloadOutlined, SearchOutlined, WarningOutlined, ClearOutlined } from "@ant-design/icons";
 import dayjs from "dayjs";
 import { groupSubmissions } from "./submissionGrouping";
@@ -25,6 +25,20 @@ const statusLabel = (s) => STATUS_LABELS[s] || String(s || "—").replace(/_/g, 
 // A record needs action while it is reverted (or an edit was approved to re-encode).
 const isActionRequired = (s) => s?.status === "reverted" || s?.status === "editApproved";
 
+// ── Narrow-screen column widths ───────────────────────────────────────────────
+// Below md only four columns survive (see `responsive` in columns/historyColumns),
+// but they kept their DESKTOP widths — 150 + 140 + 150 + 150 = 590px of declared
+// track on a ~360px phone. The table could not fit, so every row was dragged
+// sideways, and because the global table rule forces `table-layout: auto` the
+// declared widths were not even honoured on the way: columns landed wherever the
+// content pushed them and `ellipsis` never clipped anything.
+//
+// These widths re-proportion the same four columns for the space actually
+// available. `.slf-history-table` (SLFPortal.css) restores `table-layout: fixed`
+// so they are respected rather than treated as hints.
+const COMPACT_WIDTHS = { idNo: 104, dateOfDisposal: 82, status: 108, actions: 96 };
+const COMPACT_TOTAL = Object.values(COMPACT_WIDTHS).reduce((a, b) => a + b, 0);
+
 // Waste types carried on a submission (truck/vehicle level).
 const wasteTypesOf = (sub) => {
   const out = new Set();
@@ -46,6 +60,9 @@ export default function HistoryPanel({
   loadingSubmissions,
   onRefresh,
 }) {
+  // Drives the table's scroll width so it tracks the columns antd is actually
+  // rendering at this size (see the `responsive` flags in columns/historyColumns).
+  const screens = Grid.useBreakpoint();
   const [statusFilter, setStatusFilter] = useState(null);
   const [dateRange, setDateRange] = useState(null);
   const [wasteType, setWasteType] = useState(null);
@@ -93,6 +110,15 @@ export default function HistoryPanel({
     () => filtered.filter(isActionRequired).length,
     [filtered],
   );
+
+  // Below md, swap in the compact widths for the four columns that remain.
+  // Untouched at md and up, where the wider columns come back.
+  const columns = useMemo(() => {
+    if (screens.md) return historyColumns;
+    return (historyColumns || []).map((col) =>
+      COMPACT_WIDTHS[col.key] ? { ...col, width: COMPACT_WIDTHS[col.key] } : col,
+    );
+  }, [historyColumns, screens.md]);
 
   // Group, then float action-required (reverted) rows to the top, then by newest.
   const rows = useMemo(() => {
@@ -150,8 +176,10 @@ export default function HistoryPanel({
           </Button>
         }
       >
-        {/* Compact filter bar */}
-        <Space wrap size={8} style={{ marginBottom: 12, width: "100%" }}>
+        {/* Compact filter bar. The fixed control widths below (150/200px) are
+            desktop sizes; on a phone they overflowed the card, so
+            `.slf-history-filters` (SLFPortal.css) relaxes them to fluid tracks. */}
+        <Space wrap size={8} className="slf-history-filters" style={{ marginBottom: 12, width: "100%" }}>
           <Badge count={activeFilterCount} size="small">
             <Select
               allowClear
@@ -200,8 +228,9 @@ export default function HistoryPanel({
         </Space>
 
         <Table
+          className="slf-history-table"
           dataSource={rows}
-          columns={historyColumns}
+          columns={columns}
           rowKey={(r) => (r.isGroup ? r.key : r._id)}
           loading={loadingSubmissions}
           size="small"
@@ -229,17 +258,21 @@ export default function HistoryPanel({
               }
             },
           }}
-          scroll={{ x: 1100 }}
+          scroll={{ x: screens.lg ? 1100 : screens.md ? 760 : COMPACT_TOTAL }}
           expandable={{
             rowExpandable: (r) => !!r.isGroup,
             expandedRowRender: (r) => (
               <Table
+                className="slf-history-table"
                 dataSource={r.children}
-                columns={historyColumns}
+                columns={columns}
                 rowKey="_id"
                 size="small"
                 pagination={false}
                 showHeader={false}
+                // The child table must track the parent's tracks, or the two grids
+                // drift apart and an expanded group reads as a different table.
+                scroll={{ x: screens.lg ? 1100 : screens.md ? 760 : COMPACT_TOTAL }}
               />
             ),
           }}

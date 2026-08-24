@@ -52,7 +52,7 @@ import {
   YAxis,
 } from "recharts";
 import { isHazardousWasteType } from "../../utils/wasteCategories";
-import { isPermitNotRequired } from "../admin/slf-monitoring/helpers.jsx";
+import { isPermitNotRequired, isPermitNotIssued } from "../admin/slf-monitoring/helpers.jsx";
 import { VOLUME_METRICS, submittedVolumeOf } from "../../utils/volumeMetrics";
 
 /**
@@ -565,6 +565,34 @@ function OverviewPanel({
    *
    * The surrounding cell still renders, so the grid stays aligned.
    */
+  /**
+   * A permit whose reference is "None" or an in-progress application has NOT
+   * been issued, so it gets no status badge. Without this the card read
+   * "On going application with application No. 347672" and stamped a blue
+   * "New / Complied" underneath it — the badge asserting compliance for a permit
+   * the same card said was still being applied for. `permitStatus` cannot catch
+   * it alone: with no validity date it falls through to
+   * `statusText || "New / Complied"`.
+   *
+   * ── Judged on the references the card ACTUALLY DISPLAYS ─────────────────────
+   * Deliberately NOT structured like `permitNotRequired`, which ORs the flat
+   * number in separately. That is right for "not required" (it describes the
+   * permit TYPE, so it is authoritative wherever recorded) and wrong here: a
+   * facility holding a real permit in `permitToOperatePermits` while an old flat
+   * `permitToOperate` still reads "None" would have had its badge suppressed by
+   * that OR, hiding a permit it genuinely holds.
+   *
+   * `permitReferences` already folds the flat fields in when the array is empty,
+   * so reading `references` covers both shapes and cannot disagree with what is
+   * on screen. Only when EVERY displayed reference is a placeholder is the
+   * permit unissued.
+   */
+  const permitNotIssued = (legacyStatus, references) => {
+    const refs = Array.isArray(references) ? references : [];
+    if (refs.length > 0) return refs.every((row) => isPermitNotIssued(row?.permitNo));
+    return isPermitNotIssued(legacyStatus);
+  };
+
   const resolvePermitStatus = (list, permit, legacyValidity, legacyStatus, references, legacyNo) => {
     if (permitNotRequired(list, legacyStatus, legacyNo)) {
       // `notRequired` drives the VALUE line (a single neutral "Not Required"),
@@ -573,6 +601,13 @@ function OverviewPanel({
       // read the same way whichever it was.
       return { label: "Not Required", color: "default", hideStatus: true, notRequired: true };
     }
+    // Ordered AFTER "not required" (which has its own wording) but BEFORE the
+    // has-any-data check: an ongoing application IS data, so it would otherwise
+    // sail past and reach the compliance fallback.
+    if (permitNotIssued(legacyStatus, references)) {
+      return { label: "", color: "default", hideStatus: true, notIssued: true };
+    }
+
     const hasAnyData =
       (Array.isArray(references) && references.length > 0) ||
       Boolean(legacyValidity) ||
@@ -986,7 +1021,17 @@ function OverviewPanel({
                 ["Province", slfInfo?.province],
                 ["Region", slfInfo?.region || slfInfo?.regionName || "Region III"],
                 ["ECC", slfInfo?.eccNo],
-                ["Hazardous Waste Generator ID", slfInfo?.hazwasteGenerationId],
+                // Haz has no status badge of its own, so "hiding the status"
+                // here means not presenting "None" / "On going application…" as
+                // though it were an issued ID number. It falls through to the
+                // same "Not encoded" line every other unrecorded field uses,
+                // which is what the value actually means.
+                [
+                  "Hazardous Waste Generator ID",
+                  isPermitNotIssued(slfInfo?.hazwasteGenerationId)
+                    ? ""
+                    : slfInfo?.hazwasteGenerationId,
+                ],
               ].map(([label, value]) => (
                 <div key={label} style={{ padding: "8px 10px", border: "1px solid #eef2f7", borderRadius: 8, minHeight: 58 }}>
                   <Text type="secondary" style={{ fontSize: 10, textTransform: "uppercase", letterSpacing: 0.3 }}>{label}</Text>

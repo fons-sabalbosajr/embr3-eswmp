@@ -684,8 +684,67 @@ export const summarizeHaulerUpload = (rows = []) => {
   };
 };
 
-const normalizeComparableText = (value) =>
-  cleanUploadText(value).toLowerCase();
+/**
+ * Identity normalisation for HAULER/CLIENT relationship matching only.
+ *
+ * cleanUploadText (trim + collapse whitespace + lowercase) was too weak for names
+ * that operators type by hand in Excel. A compound client such as
+ * "Limay Public Market, Wawa, Poblacion, Kitang I" is written with inconsistent
+ * comma spacing, sometimes pasted with a zero-width character, and Excel's
+ * autocorrect turns hyphens into en dashes — so a client that genuinely exists in
+ * the baseline failed an exact string compare and the upload was blocked.
+ *
+ * What is normalised is FORMATTING, never identity: every word and its order is
+ * preserved, so two genuinely different clients still compare unequal. Commas,
+ * semicolons and dashes are separators rather than meaningful characters in these
+ * names, so they fold to a single space and "A, B" / "A,B" / "A - B" all agree.
+ *
+ * MUST stay behaviourally identical to normalizeRelationshipText in
+ * server/routes/dataSLF.js — the preview shows the operator what the submit-time
+ * check will decide, so any drift between the two reintroduces exactly the bug
+ * this fixes (preview passes, submit rejects, or the reverse).
+ */
+const normalizeComparableTextUncached = (value) =>
+  String(value ?? "")
+    // Full-width characters and composed accents → their canonical ASCII form.
+    .normalize("NFKC")
+    // Zero-width space/joiners, word-joiner and BOM: these survive a trim and are
+    // invisible on screen. Written as escapes, never as literal characters — a
+    // literal zero-width char in source is unreadable and unsearchable.
+    .replace(/[\u200B-\u200D\u2060\uFEFF]/g, "")
+    // Smart quotes and unicode dashes, courtesy of Excel autocorrect.
+    .replace(/[\u2018\u2019\u02BC]/g, "'")
+    .replace(/[\u201C\u201D]/g, '"')
+    .replace(/[\u2010-\u2015]/g, "-")
+    // Separators are punctuation style, not identity: comma, semicolon and dash
+    // all fold to a single space, so "Kitang I" / "Kitang-I" / "Kitang, I" and
+    // "Zambales - Iba" / "Zambales Iba" each compare equal. Word content and word
+    // ORDER still decide identity, so distinct clients remain distinct.
+    .replace(/[,;-]+/g, " ")
+    .replace(/\s*\/\s*/g, "/")
+    .replace(/\s+/g, " ")
+    // A trailing period ("… Inc.") is formatting too.
+    .replace(/[.\s]+$/g, "")
+    .trim()
+    .toLowerCase();
+
+// Memoised because findUploadClientForHauler re-normalises a hauler's ENTIRE
+// client pool on every uploaded row: a 5,000-row file against a large fleet
+// normalises the same few thousand distinct names over and over. The names repeat,
+// the result is pure, so one Map lookup replaces the whole regex chain. Cleared
+// wholesale at a cap rather than evicting per entry — this is a short-lived
+// upload-session cache, not a long-term store.
+const NORMALIZE_CACHE_MAX = 20000;
+const normalizeCache = new Map();
+const normalizeComparableText = (value) => {
+  if (typeof value !== "string") return normalizeComparableTextUncached(value);
+  const cached = normalizeCache.get(value);
+  if (cached !== undefined) return cached;
+  const normalized = normalizeComparableTextUncached(value);
+  if (normalizeCache.size >= NORMALIZE_CACHE_MAX) normalizeCache.clear();
+  normalizeCache.set(value, normalized);
+  return normalized;
+};
 
 const clientLookupValues = (client) => {
   if (typeof client === "string") return [client];

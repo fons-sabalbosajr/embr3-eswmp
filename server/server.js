@@ -364,10 +364,35 @@ app.use("/api/auth", authLimiter, authRoutes);
 app.use("/api/slf-generators", slfGeneratorRoutes);
 app.use("/api/data-slf", dataSLFRoutes);
 app.use("/api/settings", settingsRoutes);
-// Automation Agent — settings/test (developer) + query (admin/developer). The
-// burst limiter guards the whole router; DAILY per-user/global limits are
-// enforced inside the route from the usage log.
-app.use("/api", automationAgentLimiter, automationAgentRoutes);
+// Automation Agent — settings/test (developer) + query (admin/developer). DAILY
+// per-user/global limits are enforced inside the route from the usage log; the
+// burst limiter below guards the paid Anthropic call.
+//
+// The router has to be mounted at "/api" because its two URL families do not
+// share a prefix ("/developer/automation-agent/*" and "/automation-agent/query").
+// Passing the limiter to app.use() here was the bug: Express runs mount-path
+// middleware for EVERY request under the path, whether or not the router that
+// follows it handles that request. With the mount at "/api", a limiter sized for
+// paid AI calls (60 req / 15 min in production) was therefore counting the entire
+// API surface — every dashboard stat, every poll, every portal read.
+//
+// The admin dashboard alone fans out to ~16 endpoints per refresh, so the budget
+// was exhausted after roughly four refreshes and unrelated endpoints started
+// returning HTTP 429 (/slf-clients/summary, /*/stats, /vera/notifications …).
+//
+// Gating by path keeps the mount where it has to be while charging only the two
+// route families that actually reach Anthropic — the same approach
+// `sensitivePortalAuthLimiter` below takes for the portal-auth router.
+function automationAgentPathLimiter(req, res, next) {
+  // req.path is relative to the "/api" mount ("/automation-agent/query",
+  // "/developer/automation-agent/settings", "/slf-clients/summary", …).
+  const path = req.path || "";
+  const isAgent =
+    path.startsWith("/automation-agent/") ||
+    path.startsWith("/developer/automation-agent/");
+  return isAgent ? automationAgentLimiter(req, res, next) : next();
+}
+app.use("/api", automationAgentPathLimiter, automationAgentRoutes);
 // VERA chatbot (portal-user + admin). Burst limiter guards the router; per-user
 // DAILY limit is enforced inside the route from the usage log.
 app.use("/api/vera", veraLimiter, veraRoutes);
