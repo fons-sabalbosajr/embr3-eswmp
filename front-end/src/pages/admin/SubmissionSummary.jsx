@@ -274,22 +274,23 @@ function ensureSummaryTileStyles() {
   const style = document.createElement("style");
   style.id = SUMMARY_TILE_STYLE_ID;
   style.innerHTML = `
-    @keyframes summaryTileIn {
-      from { opacity: 0; transform: translateY(10px) scale(0.98); }
-      to { opacity: 1; transform: translateY(0) scale(1); }
-    }
-    @keyframes summaryIconPulse {
-      0%, 100% { transform: scale(1); }
-      50% { transform: scale(1.12); }
-    }
+    /* Summary Overview tiles are STATIC.
+       Removing only the icon pulse left three other moving parts, which is why
+       the card still read as animated:
+         - summaryTileIn: every tile slid up and faded in on each render, and
+           because the memo re-runs on filter/refresh it replayed on data changes,
+           not just on first paint;
+         - transform: translateY(-4px) on hover, with a 0.25s transition, so the
+           tile jumped under the pointer;
+         - will-change: transform, which only exists to prep that animation.
+       All three are gone. The hover box-shadow stays: it is a flat state change
+       with no transition, so the tile reacts to the pointer without moving.
+       NOTE: this is a template literal — no backticks in these comments. */
     .summary-tile {
       border-radius: 12px;
       overflow: hidden;
       position: relative;
       min-height: 132px;
-      animation: summaryTileIn 0.45s cubic-bezier(0.22, 1, 0.36, 1) both;
-      transition: transform 0.25s ease, box-shadow 0.25s ease;
-      will-change: transform;
     }
     .summary-tile .ant-card-head {
       min-height: 42px;
@@ -301,11 +302,7 @@ function ensureSummaryTileStyles() {
       align-items: center;
     }
     .summary-tile:hover {
-      transform: translateY(-4px);
       box-shadow: 0 10px 24px rgba(0,0,0,0.12);
-    }
-    .summary-tile:hover .summary-tile-icon {
-      animation: summaryIconPulse 0.9s ease-in-out infinite;
     }
     .summary-tile-icon {
       display: inline-flex;
@@ -316,7 +313,6 @@ function ensureSummaryTileStyles() {
       border-radius: 12px;
       font-size: 20px;
       flex-shrink: 0;
-      transition: transform 0.25s ease;
     }
     .summary-tile-accent {
       position: absolute;
@@ -329,24 +325,20 @@ function ensureSummaryTileStyles() {
   document.head.appendChild(style);
 }
 
-// Smoothly animates an integer value from 0 → target on mount/update.
-function CountUp({ value = 0, duration = 900, style }) {
-  const [display, setDisplay] = useState(0);
-  const target = Number(value) || 0;
-  useEffect(() => {
-    let raf;
-    const start = performance.now();
-    const from = 0;
-    const animate = (now) => {
-      const progress = Math.min((now - start) / duration, 1);
-      const eased = 1 - Math.pow(1 - progress, 3);
-      setDisplay(Math.round(from + (target - from) * eased));
-      if (progress < 1) raf = requestAnimationFrame(animate);
-    };
-    raf = requestAnimationFrame(animate);
-    return () => cancelAnimationFrame(raf);
-  }, [target, duration]);
-  return <span style={style}>{display.toLocaleString()}</span>;
+// Renders an integer. Static by design.
+//
+// This used to ride a requestAnimationFrame loop counting 0 → target over 900ms.
+// It re-ran on every change of `target`, and the tiles it feeds are driven by
+// `totals`, which recomputes on each filter keystroke, status change, refresh and
+// socket update — so the figures were rolling constantly, not just on first
+// paint. It was also the loudest of the animations left in the Summary Overview
+// card after the icon pulse was removed.
+//
+// Kept as a component (rather than inlining `.toLocaleString()` at five call
+// sites) so the tiles keep their existing markup and the `style` prop still
+// applies. The `duration` prop is accepted and ignored so no caller breaks.
+function CountUp({ value = 0, style }) {
+  return <span style={style}>{(Number(value) || 0).toLocaleString()}</span>;
 }
 
 // Compact metric used inside grouped summary cards (no card chrome of its own,
@@ -434,6 +426,9 @@ export default function SubmissionSummary({ isDark }) {
   // its own figures, so the cell table here cannot disagree with the SLF Data
   // Table, Cell Infrastructure or the portal. See buildCellStatusRows.
   const [cellOccupancy, setCellOccupancy] = useState({});
+  // Drives the Waste Cell Breakdown's own loading state — the rollup arrives on a
+  // different request from the summary rows, so it needs its own flag.
+  const [occupancyLoading, setOccupancyLoading] = useState(true);
   const [calendarLoading, setCalendarLoading] = useState(false);
   const [calendarDate, setCalendarDate] = useState(dayjs());
   // Item #2: Daily Submission Details modal (opens when a calendar date is clicked).
@@ -443,6 +438,14 @@ export default function SubmissionSummary({ isDark }) {
   const [exportRange, setExportRange] = useState(null);
   const [portalUsers, setPortalUsers] = useState([]);
   const [reportOpen, setReportOpen] = useState(false);
+  // The PDF report must never render from this page's cached page-state: the
+  // summary/reference fetches sit behind a 10-minute TTL, so opening the report
+  // straight from state could publish figures that are up to a TTL old. The
+  // report button force-refreshes both fetchers and pulls the two datasets the
+  // page itself never loads (announcements + recent changes) before opening.
+  const [reportLoading, setReportLoading] = useState(false);
+  const [announcements, setAnnouncements] = useState([]);
+  const [recentChanges, setRecentChanges] = useState([]);
 
   // Item #4: admin → portal-user direct message (from the SLF Submissions
   // Breakdown "Message User" action).
@@ -591,6 +594,44 @@ export default function SubmissionSummary({ isDark }) {
     fetchReferenceData();
   }, [fetchRecords, fetchReferenceData]);
 
+  // "Generate PDF Report" — reuses the page's own fetchers with { force: true } so
+  // the report is built from a fresh read of the same endpoints the UI renders
+  // from (no second aggregation, no divergent source of truth). Announcements and
+  // recent changes are not part of page state, so they are fetched here; both are
+  // best-effort — a failure degrades that one section rather than blocking the
+  // report. Response shapes are normalised exactly as the Generate Reports tab
+  // does, since these endpoints may answer with an array or a wrapped object.
+  const openReport = useCallback(async () => {
+    setReportLoading(true);
+    try {
+      // Every fetch is best-effort. fetchWithCache RETHROWS when `force` is set and
+      // the request fails, so an unguarded Promise.all would reject and the report
+      // would not open at all — worse than the stale-data behaviour this replaces.
+      // On failure the existing page state (and each fetcher's own onError) stands
+      // and the report still opens.
+      const [, , annRes, txnRes] = await Promise.all([
+        fetchRecords({ force: true, silent: true }).catch(() => null),
+        fetchReferenceData({ force: true }).catch(() => null),
+        api.get("/settings/app/portal-announcements").catch(() => ({ data: [] })),
+        api.get("/transactions", { params: { limit: 25 } }).catch(() => ({ data: [] })),
+      ]);
+      if (!aliveRef.current) return;
+      const annData = annRes.data;
+      setAnnouncements(
+        Array.isArray(annData)
+          ? annData
+          : annData?.items || annData?.data || (annData ? [annData] : []),
+      );
+      const txnData = txnRes.data;
+      setRecentChanges(
+        Array.isArray(txnData) ? txnData : txnData?.data || txnData?.items || [],
+      );
+      setReportOpen(true);
+    } finally {
+      if (aliveRef.current) setReportLoading(false);
+    }
+  }, [fetchRecords, fetchReferenceData]);
+
   useEffect(() => {
     const socket = getSocket();
     if (!socket) return undefined;
@@ -634,14 +675,24 @@ export default function SubmissionSummary({ isDark }) {
   // back in order. Without it a slower EARLIER response can land last and
   // reinstate the figures the newer one just corrected — a stale table that no
   // amount of refetching fixes because the refetch itself caused it.
+  // Loads on MOUNT, not on `calendarFacilityId`.
+  //
+  // This rollup used to be fetched only when an SLF's disposal calendar was
+  // opened, because the calendar was its only consumer. The Waste Cell Breakdown
+  // reads the same rollup, so gating it on a modal would have left that section
+  // permanently empty until someone happened to open a calendar.
+  //
+  // One request covers every facility (GET /data-slf/cell-occupancy returns
+  // `byFacility`, server-cached for 60s), so page-wide loading costs the same
+  // single call the calendar already made.
   useEffect(() => {
-    if (!calendarFacilityId) return undefined;
     let cancelled = false;
     let seq = 0;
     let latest = 0;
     let timer = null;
     const load = () => {
       const mine = (seq += 1);
+      setOccupancyLoading(true);
       api
         .get("/data-slf/cell-occupancy")
         .then(({ data }) => {
@@ -652,10 +703,16 @@ export default function SubmissionSummary({ isDark }) {
         .catch(() => {
           // Non-fatal: buildCellStatusRows falls back to the persisted output of
           // the same server calculation.
+        })
+        .finally(() => {
+          if (!cancelled && mine >= latest) setOccupancyLoading(false);
         });
     };
     load();
     const socket = getSocket();
+    // TASK 5.6 — a portal submission emits `data-refresh` with target
+    // "submissions", which lands here and refetches the rollup, so the breakdown
+    // follows new submissions without a page reload and without a polling timer.
     const onRefresh = ({ target } = {}) => {
       if (target && !["submissions", "baselines", "facility"].includes(target)) return;
       if (timer) clearTimeout(timer);
@@ -667,7 +724,7 @@ export default function SubmissionSummary({ isDark }) {
       if (timer) clearTimeout(timer);
       socket?.off("data-refresh", onRefresh);
     };
-  }, [calendarFacilityId]);
+  }, []);
 
   const filteredRows = useMemo(() => {
     const needle = search.trim().toLowerCase();
@@ -693,6 +750,22 @@ export default function SubmissionSummary({ isDark }) {
       if (u === "tons") counts.tons += 1;
       else if (u === "m³") counts["m³"] += 1;
     });
+    // A TIE IS NOT AN m³ MAJORITY.
+    //
+    // `counts.tons > counts["m³"] ? "tons" : "m³"` sent every non-win to m³,
+    // including an exact draw — so on a dead-even split the page silently
+    // rendered everything in m³ despite no majority existing.
+    //
+    // This is a SAFETY NET, not the fix for the reported unit flipping. That was
+    // caused by an unordered `$first` on the server picking each facility's
+    // `baselineUnit` at random (see the $sort in /summary-dashboard); with the
+    // ordering in place the vote is a real 9-7 majority and never reaches the
+    // branch below. It stays because a genuine tie is still possible as
+    // facilities are added, and defaulting that to m³ would be arbitrary in the
+    // same way. Tons is the unit the facilities' own regulatory reporting uses,
+    // and the two are kept in lockstep upstream, so it is the same measurement
+    // either way. A real majority still wins on either side.
+    if (counts.tons === counts["m³"]) return counts.tons > 0 ? "tons" : "m³";
     return counts.tons > counts["m³"] ? "tons" : "m³";
   }, [filteredRows]);
 
@@ -753,6 +826,102 @@ export default function SubmissionSummary({ isDark }) {
     });
   }, [filteredRows, facilityMap, facilityById, baselineMap]);
 
+
+  /**
+   * TASK 5 — Waste Cell Breakdown: baseline vs submitted volume, per cell.
+   *
+   * ── Why this computes nothing ────────────────────────────────────────────────
+   * Every figure here comes from `buildCellStatusRows`, which reads the server
+   * rollup (GET /data-slf/cell-occupancy → utils/cellOccupancy.js). That is the
+   * SAME function whose output writes SlfFacility.cellFillValues and feeds the
+   * SLF Data Table, Cell Infrastructure, Waste in Cell and the portal's own
+   * gauges. Deriving the split here would have made a FIFTH implementation of a
+   * calculation that already exists once — the exact mistake the long comment on
+   * buildCellStatusRows documents.
+   *
+   * So the business rules below are inherited, not re-stated:
+   *   • BASELINE (5.2) is the newest entry that actually carries baseline
+   *     figures, placed per `activeCellEntries[].cellName`. It is never derived
+   *     from submissions, and the entry chosen as the baseline is excluded from
+   *     the submission set by `_id`, so it cannot be counted twice (6.3).
+   *   • SUBMISSIONS (5.3) counts only statuses pending / acknowledged /
+   *     revert_requested — so rejected and reverted are excluded — and only
+   *     volume the operator explicitly placed in a cell. Unplaced volume is
+   *     reported separately rather than guessed into the first open cell.
+   *   • TOTAL (5.4) is the rollup's own `used`, NOT baseline + submitted summed
+   *     here. For an admin-overridden cell those are not the same number: `used`
+   *     is the declared base plus what arrived after it, and `derivedTotal` is
+   *     what the data alone would say. Re-adding the columns would have silently
+   *     contradicted the override.
+   */
+  const wasteCellBreakdown = useMemo(() => {
+    return summaryRows
+      .map((row) => {
+        // ── Join on slfGenerator FIRST ──────────────────────────────────────
+        // `row.facility` is resolved by NAME (facilityMap keys on the facility's
+        // lgu / province / slfName), and SlfFacility has no `slfName` field at
+        // all — so that lookup is unreliable and can even land on a different
+        // facility whose province happens to match this row's name. Keying on
+        // the row's own `slfGenerator`, which /summary-dashboard carries through
+        // its $group, matches exactly how the server keys `byFacility`. The
+        // name-resolved facility stays as the fallback for legacy rows that have
+        // no generator id.
+        const genId =
+          row?.slfGenerator && typeof row.slfGenerator === "object"
+            ? row.slfGenerator._id
+            : row?.slfGenerator;
+        const facilityId = genId
+          ? String(genId)
+          : row.facility?._id
+            ? String(row.facility._id)
+            : null;
+        const occupancy = facilityId ? cellOccupancy[facilityId] : null;
+        // `buildCellStatusRows` needs a facility for its fallback path, so hand
+        // it the resolved one — but when the rollup is present it supplies every
+        // figure and the facility is only used for names/capacities.
+        const source = row.facility
+          ? row
+          : { ...row, facility: facilityById.get(String(facilityId)) || null };
+        // A cell is "applicable" when it has capacity declared or any volume
+        // recorded; a placeholder cell with neither is noise.
+        const cells = buildCellStatusRows(source, occupancy).filter(
+          (cell) =>
+            cell.capacity > 0 || cell.used > 0 || cell.baselineUsed > 0 || cell.submittedUsed > 0,
+        );
+        if (!cells.length) return null;
+        const totals = cells.reduce(
+          (acc, cell) => ({
+            baseline: acc.baseline + Number(cell.baselineUsed || 0),
+            submitted: acc.submitted + Number(cell.submittedUsed || 0),
+            total: acc.total + Number(cell.used || 0),
+          }),
+          { baseline: 0, submitted: 0, total: 0 },
+        );
+        return {
+          key: row.key,
+          slfName: row.slfName,
+          unit: occupancy?.unit || cells[0]?.unit || "m³",
+          // Volume received but not yet organised into a cell. Surfaced so the
+          // per-cell figures visibly reconcile with the facility total instead of
+          // appearing to lose waste.
+          unplaced: Number(occupancy?.totals?.unplaced || 0),
+          cells,
+          totals,
+          // False when the rollup was unavailable and the rows fell back to the
+          // persisted copy — worth saying rather than presenting stale figures as
+          // live ones.
+          fromRollup: !!occupancy,
+        };
+      })
+      .filter(Boolean);
+  }, [summaryRows, cellOccupancy, facilityById]);
+
+  // Keyed for O(1) lookup from the table's expandable row renderer, which runs
+  // per visible row on every render.
+  const breakdownByKey = useMemo(
+    () => new Map(wasteCellBreakdown.map((slf) => [slf.key, slf])),
+    [wasteCellBreakdown],
+  );
 
   const selectedDayRecords = useMemo(() => {
     if (!calendarRecord) return [];
@@ -1411,7 +1580,7 @@ export default function SubmissionSummary({ isDark }) {
                   <Select.Option value="reverted">Reverted</Select.Option>
                 </Select>
                 <Button icon={<ReloadOutlined />} loading={loading} onClick={() => { fetchRecords({ force: true }); fetchReferenceData({ force: true }); }}>Refresh</Button>
-                <Button type="primary" icon={<FilePdfOutlined />} onClick={() => setReportOpen(true)}>Generate PDF Report</Button>
+                <Button type="primary" icon={<FilePdfOutlined />} loading={reportLoading} onClick={openReport}>Generate PDF Report</Button>
               </Space>
             ),
             children: (
@@ -1430,6 +1599,128 @@ export default function SubmissionSummary({ isDark }) {
           }}
           scroll={{ x: 1420 }}
           locale={{ emptyText: <Empty description="No submissions to summarize" /> }}
+          // ── Waste Cell Breakdown, merged into THIS table ────────────────────
+          // It was previously a separate Collapse under the table, which meant
+          // finding an SLF's cells required locating the same facility a second
+          // time in a second list. Expanding its own row keeps the per-cell split
+          // attached to the SLF it belongs to.
+          expandable={{
+            // Stay expandable while the rollup is still in flight, so the row
+            // offers a spinner rather than silently refusing to open.
+            rowExpandable: (row) => !!breakdownByKey.get(row.key) || occupancyLoading,
+            expandedRowRender: (row) => {
+              const slf = breakdownByKey.get(row.key);
+              if (!slf) {
+                return occupancyLoading ? (
+                  <div style={{ padding: "12px 0", textAlign: "center" }}>
+                    <Spin size="small" />
+                  </div>
+                ) : (
+                  <Empty
+                    image={Empty.PRESENTED_IMAGE_SIMPLE}
+                    description="No cells with recorded capacity or volume for this SLF"
+                    style={{ margin: "8px 0" }}
+                  />
+                );
+              }
+              return (
+                <div style={{ padding: "4px 0 4px 8px" }}>
+                  <Space wrap size={6} style={{ marginBottom: 8 }}>
+                    <Text strong style={{ fontSize: 12, color: ACCENT }}>
+                      Waste Cell Breakdown
+                    </Text>
+                    <Tag color="default" style={{ fontSize: 11, marginInlineEnd: 0 }}>
+                      {slf.cells.length} cell{slf.cells.length === 1 ? "" : "s"}
+                    </Tag>
+                    {slf.unplaced > 0 && (
+                      <Tooltip title="Received but not yet organised into a cell, so it is not in any row below.">
+                        <Tag color="warning" style={{ fontSize: 11, marginInlineEnd: 0 }}>
+                          {formatVolumeValue(slf.unplaced)} {slf.unit} unassigned
+                        </Tag>
+                      </Tooltip>
+                    )}
+                    {!slf.fromRollup && (
+                      <Tooltip title="The live rollup could not be reached; these are the last persisted figures from the same calculation.">
+                        <Tag color="default" style={{ fontSize: 11, marginInlineEnd: 0 }}>cached</Tag>
+                      </Tooltip>
+                    )}
+                  </Space>
+                  <Table
+                    size="small"
+                    rowKey="key"
+                    dataSource={slf.cells}
+                    pagination={false}
+                    scroll={{ x: 420 }}
+                    summary={(rows) => {
+                      const sum = (pick) => rows.reduce((n, r) => n + Number(pick(r) || 0), 0);
+                      return (
+                        <Table.Summary.Row style={{ fontWeight: 600 }}>
+                          <Table.Summary.Cell index={0}>Total</Table.Summary.Cell>
+                          <Table.Summary.Cell index={1} align="right">
+                            {formatVolumeValue(sum((r) => r.baselineUsed)) || "0"}
+                          </Table.Summary.Cell>
+                          <Table.Summary.Cell index={2} align="right">
+                            {formatVolumeValue(sum((r) => r.submittedUsed)) || "0"}
+                          </Table.Summary.Cell>
+                          <Table.Summary.Cell index={3} align="right">
+                            {formatVolumeValue(sum((r) => r.used)) || "0"}
+                          </Table.Summary.Cell>
+                        </Table.Summary.Row>
+                      );
+                    }}
+                    columns={[
+                      {
+                        title: "Cell",
+                        dataIndex: "cell",
+                        ellipsis: true,
+                        render: (value, cell) => (
+                          <Space size={4} wrap>
+                            <Text style={{ fontSize: 12 }}>{value}</Text>
+                            {cell.overridden && (
+                              <Tooltip
+                                title={`An admin declared this cell's figure, so Total is not Baseline + Submissions. Data alone would report ${
+                                  formatVolumeValue(cell.derivedTotal) || "0"
+                                } ${slf.unit}.`}
+                              >
+                                <Tag color="purple" style={{ fontSize: 10, marginInlineEnd: 0 }}>
+                                  declared
+                                </Tag>
+                              </Tooltip>
+                            )}
+                          </Space>
+                        ),
+                      },
+                      {
+                        title: `Baseline (${slf.unit})`,
+                        dataIndex: "baselineUsed",
+                        width: 116,
+                        align: "right",
+                        render: (v) => <Text style={{ fontSize: 12 }}>{formatVolumeValue(v) || "0"}</Text>,
+                      },
+                      {
+                        title: `Submissions (${slf.unit})`,
+                        dataIndex: "submittedUsed",
+                        width: 130,
+                        align: "right",
+                        render: (v) => <Text style={{ fontSize: 12 }}>{formatVolumeValue(v) || "0"}</Text>,
+                      },
+                      {
+                        title: `Total (${slf.unit})`,
+                        dataIndex: "used",
+                        width: 116,
+                        align: "right",
+                        render: (v) => (
+                          <Text strong style={{ fontSize: 12 }}>
+                            {formatVolumeValue(v) || "0"}
+                          </Text>
+                        ),
+                      },
+                    ]}
+                  />
+                </div>
+              );
+            },
+          }}
         />
               </>
             ),
@@ -1666,6 +1957,8 @@ export default function SubmissionSummary({ isDark }) {
             facilities={facilities}
             baselines={baselines}
             totals={totals}
+            announcements={announcements}
+            recentChanges={recentChanges}
           />
         </Suspense>
       )}

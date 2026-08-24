@@ -1074,6 +1074,12 @@ export default function AdminHome() {
             open={drawerOpen}
             onClose={() => setDrawerOpen(false)}
             size={260}
+            // `app-nav-drawer` opts this OUT of the global rule that stretches
+            // left/right drawers to 100vw on a phone (index.css). That rule is
+            // right for content panels but wrong for navigation: at full width
+            // there is no mask left to tap, and `closable={false}` means there is
+            // no X either — the menu became a dead end you could not back out of.
+            rootClassName="app-nav-drawer"
             styles={{
               body: {
                 padding: 0,
@@ -1091,7 +1097,10 @@ export default function AdminHome() {
         )}
 
         <Layout style={{ height: "100vh", overflow: "auto" }}>
-          <Header style={s.header}>
+          <Header className="admin-header" style={s.header}>
+            {/* No logo here. The Sider owns the EMB mark at every width — it
+                keeps showing it when collapsed, and on mobile the drawer carries
+                it — so a second one beside this button was always a duplicate. */}
             <Button
               type="text"
               icon={
@@ -1112,6 +1121,7 @@ export default function AdminHome() {
               {!isMobile && <LiveClock isDark={isDark} />}
               <Tooltip title="Check SLF portal announcements">
                 <Tag
+                  className="admin-header-announce"
                   color={portalAnnouncementActive ? "green" : "default"}
                   icon={<BellOutlined />}
                   onClick={() => setPortalAnnouncementModalOpen(true)}
@@ -1122,8 +1132,11 @@ export default function AdminHome() {
                     alignItems: "center",
                   }}
                 >
-                  Portal Announcements
-                </Tag>  
+                  {/* Below md the label is dropped and the tag becomes its icon —
+                      the tooltip still names it. Spelled out, this one control ate
+                      about a third of a phone header and forced the rest to wrap. */}
+                  <span className="admin-header-announce-label">Portal Announcements</span>
+                </Tag>
               </Tooltip>
               <Switch
                 checked={!isDark}
@@ -1311,13 +1324,16 @@ export default function AdminHome() {
                 menu={{ items: userMenuItems, onClick: handleUserMenuClick }}
                 trigger={["click"]}
               >
-                <div style={s.userInfo}>
+                <div className="admin-header-user" style={s.userInfo}>
                   <Avatar
                     style={{ backgroundColor: isDark ? "#2a4060" : "#1a3353" }}
                     icon={<UserOutlined />}
                   />
+                  {/* The avatar alone identifies the account on a phone; the name
+                      is restored from sm up (see .admin-header-user-name). */}
                   <Text
                     strong
+                    className="admin-header-user-name"
                     style={{
                       marginLeft: 8,
                       cursor: "pointer",

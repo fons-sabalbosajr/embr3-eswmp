@@ -88,23 +88,36 @@ export default function HaulerClientsEditor({ slfGeneratorId, slfLabel, canEdit 
     [haulers],
   );
 
-  const openCreate = () => {
-    form.resetFields();
-    form.setFieldsValue({ haulerName: haulers[0], clientType: "LGU" });
-    setEditing({});
-  };
-  const openEdit = (row) => {
-    form.resetFields();
-    form.setFieldsValue({
-      haulerName: row.haulerName,
-      clientName: row.clientName,
-      clientType: row.clientType || undefined,
-      provinceName: row.provinceName,
-      municipalityName: row.municipalityName,
-      regionName: row.regionName,
-    });
-    setEditing(row);
-  };
+  // The form is populated through `initialValues`, NOT by calling setFieldsValue
+  // before the modal opens.
+  //
+  // A Modal does not render its children until it first opens, and this one is
+  // destroyed again on close, so at the moment openEdit/openCreate ran there were
+  // no mounted Form.Items for the values to land on. antd dropped them (the
+  // "Instance created by `useForm` is not connected to any Form element" case) and
+  // the modal then mounted a fresh, EMPTY form — which is why Edit opened blank and
+  // Save had nothing to submit. Ordering the calls the other way would not fix it
+  // either: the state update is async, so the fields still are not mounted yet.
+  //
+  // initialValues is applied by antd AT MOUNT, which is exactly when the fields
+  // exist, so the record's values are there on the first render of the modal.
+  const openCreate = () => setEditing({});
+  const openEdit = (row) => setEditing(row);
+
+  // Recomputed per open; the modal is destroyed on close, so the form remounts and
+  // re-reads these each time rather than reusing the previous record's values.
+  const modalInitialValues = useMemo(() => {
+    if (!editing) return undefined;
+    if (!editing.clientName) return { haulerName: haulers[0], clientType: "LGU" };
+    return {
+      haulerName: editing.haulerName,
+      clientName: editing.clientName,
+      clientType: editing.clientType || undefined,
+      provinceName: editing.provinceName,
+      municipalityName: editing.municipalityName,
+      regionName: editing.regionName,
+    };
+  }, [editing, haulers]);
 
   const handleSave = async () => {
     let values;
@@ -304,7 +317,10 @@ export default function HaulerClientsEditor({ slfGeneratorId, slfLabel, canEdit 
         okText={editing?.clientName ? "Save Changes" : "Add Client"}
         confirmLoading={saving}
         okButtonProps={{ disabled: saving }}
-        destroyOnClose
+        // antd v6 name. `destroyOnClose` was renamed and is no longer honoured, so
+        // the modal was not actually being destroyed; naming it correctly is what
+        // guarantees the form remounts per open and re-applies initialValues.
+        destroyOnHidden
       >
         <Alert
           type="info"
@@ -312,7 +328,12 @@ export default function HaulerClientsEditor({ slfGeneratorId, slfLabel, canEdit 
           style={{ marginBottom: 12 }}
           message="This edits the portal user's baseline data and is visible to them immediately."
         />
-        <Form form={form} layout="vertical" preserve={false}>
+        <Form
+          form={form}
+          layout="vertical"
+          preserve={false}
+          initialValues={modalInitialValues}
+        >
           <Form.Item name="haulerName" label="Hauler" rules={[{ required: true, message: "Select the hauler this client belongs to." }]}>
             <Select
               showSearch

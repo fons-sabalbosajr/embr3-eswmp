@@ -16,6 +16,7 @@ import CellWastePlacement from "./CellWastePlacement";
 import SupportTickets from "./SupportTickets";
 import { useState, useEffect } from "react";
 import api from "../../api";
+import { NAVY } from "../../utils/palette";
 
 const { Title, Text } = Typography;
 
@@ -183,11 +184,11 @@ export default function SLFWasteGenerators({
   ].filter((item) => !item.hidden);
 
   return (
-    <div style={{ padding: 0 }}>
-      <div style={{ marginBottom: 16 }}>
+    <div className="admin-page" style={{ padding: 0 }}>
+      <div className="admin-page-head" style={{ marginBottom: 16 }}>
         <Space direction="vertical" size={2}>
           <Title level={4} style={{ margin: 0 }}>
-            <InboxOutlined style={{ color: "#1a3353", marginRight: 8 }} />
+            <InboxOutlined style={{ color: NAVY, marginRight: 8 }} />
             Portal Submissions
           </Title>
           <Text type="secondary">
@@ -197,6 +198,7 @@ export default function SLFWasteGenerators({
         </Space>
       </div>
       <Card
+        className="admin-page-card"
         style={{ borderRadius: 8 }}
         bodyStyle={{ padding: "8px 16px 16px" }}
       >
@@ -205,6 +207,10 @@ export default function SLFWasteGenerators({
           onChange={setActiveTab}
           items={tabItems}
           destroyOnHidden={false}
+          // Seven tabs, each an icon plus a label, never fit a phone. antd's
+          // default is to hide the overflow behind a "more" dropdown, which
+          // buries whole sections; swiping keeps them all discoverable.
+          moreIcon={null}
         />
       </Card>
     </div>

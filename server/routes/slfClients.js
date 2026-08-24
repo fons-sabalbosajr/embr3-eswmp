@@ -501,6 +501,9 @@ router.get("/issues", requirePermission(PERM, "view"), async (req, res) => {
       filter.status = req.query.status;
     }
     if (req.query.flagType) filter.flagType = req.query.flagType;
+    // Lets VERA (and the admin table) ask for only the authorized set.
+    if (req.query.veraResolvable === "true") filter.veraResolvable = true;
+    else if (req.query.veraResolvable === "false") filter.veraResolvable = { $ne: true };
 
     // PAGINATED. This returned every matching document — 28,547 of them on
     // production, each carrying its own `meta` object. The response never
@@ -512,9 +515,12 @@ router.get("/issues", requirePermission(PERM, "view"), async (req, res) => {
     const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
     const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 25, 1), 100);
 
-    const [data, total, byStatus] = await Promise.all([
+    const [data, total, byStatus, veraResolvableCount] = await Promise.all([
       SlfDataIssue.find(filter)
-        .select("flagType description portalUserEmail hauler clientName status updatedAt")
+        // veraResolvable is projected so the table can render the CURRENT
+        // authorization straight from the database — that is what makes the
+        // selection survive pagination and a page refresh.
+        .select("flagType description portalUserEmail hauler clientName status updatedAt veraResolvable")
         .sort({ status: 1, updatedAt: -1 })
         .skip((page - 1) * limit)
         .limit(limit)
@@ -523,6 +529,10 @@ router.get("/issues", requirePermission(PERM, "view"), async (req, res) => {
       // Counts for the whole set, so the UI can show what is out there without
       // fetching it.
       SlfDataIssue.aggregate([{ $group: { _id: "$status", n: { $sum: 1 } } }]),
+      // How many of the CURRENT filter are authorized. Counted in the database so
+      // the UI can say "N of M selected" across the whole result set rather than
+      // across the page it happens to be showing.
+      SlfDataIssue.countDocuments({ ...filter, veraResolvable: true }),
     ]);
 
     res.json({
@@ -531,6 +541,7 @@ router.get("/issues", requirePermission(PERM, "view"), async (req, res) => {
       page,
       limit,
       counts: byStatus.reduce((acc, row) => ({ ...acc, [row._id]: row.n }), {}),
+      veraResolvableCount,
     });
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });
@@ -549,6 +560,82 @@ router.get("/issues/count", requirePermission(PERM, "view"), async (req, res) =>
     if (req.query.flagType) filter.flagType = req.query.flagType;
     const count = await SlfDataIssue.countDocuments(filter);
     res.json({ count });
+  } catch (error) {
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+});
+
+/**
+ * ── Mark issues as VERA-resolvable (admin authorization) ────────────────────
+ *
+ * This records PERMISSION for VERA to resolve an issue. It does not resolve
+ * anything — `status` is untouched — because "VERA may fix this" and "this is
+ * fixed" are different states (see the model).
+ *
+ * SELECTION IS DATASET-WIDE, NOT PAGE-WIDE.
+ *
+ * The Issues table is paginated (25–100 rows of 28,000+ on production), so a
+ * selection built from the rows on screen could never express "authorize every
+ * unclassified-region issue". Shipping all matching ids to the browser to work
+ * around that is not an option either — it is the very payload that made
+ * GET /issues time out before it was paginated.
+ *
+ * So the selection is applied WHERE THE DATA IS. Two mutually exclusive modes:
+ *
+ *   { ids: [...] }                explicit rows the admin ticked (any pages).
+ *   { all: true, status, flagType }  every document matching the SAME filter the
+ *                                    table is showing — resolved by the database
+ *                                    via updateMany, never enumerated client-side.
+ *                                    `excludeIds` supports "select all except…".
+ *
+ * Idempotent: re-authorizing an already-authorized issue is a no-op.
+ */
+router.patch("/issues/vera-resolvable", requirePermission(PERM, "edit"), async (req, res) => {
+  try {
+    const SlfDataIssue = require("../models/SlfDataIssue");
+    const { ids, all, status, flagType, excludeIds } = req.body || {};
+    const veraResolvable = req.body?.veraResolvable !== false; // default: authorize
+
+    let filter;
+    if (all) {
+      // Rebuild the LIST filter exactly, so "select all" can never authorize a
+      // wider set than the admin is looking at.
+      filter = {};
+      if (status && ["open", "resolved", "ignored"].includes(status)) filter.status = status;
+      if (flagType) filter.flagType = flagType;
+      const skip = (Array.isArray(excludeIds) ? excludeIds : [])
+        .filter((id) => mongoose.isValidObjectId(id));
+      if (skip.length) filter._id = { $nin: skip };
+    } else {
+      const list = (Array.isArray(ids) ? ids : []).filter((id) => mongoose.isValidObjectId(id));
+      if (!list.length) {
+        return res.status(400).json({ message: "No issues selected." });
+      }
+      filter = { _id: { $in: list } };
+    }
+
+    const who = actor(req);
+    const update = veraResolvable
+      ? { $set: { veraResolvable: true, veraResolvableAt: new Date(), veraResolvableBy: who } }
+      : { $set: { veraResolvable: false, veraResolvableAt: null, veraResolvableBy: "" } };
+
+    const result = await SlfDataIssue.updateMany(filter, update);
+    const veraResolvableCount = await SlfDataIssue.countDocuments({ veraResolvable: true });
+
+    writeLog("info", "slf-issue.vera-resolvable", {
+      message: `${veraResolvable ? "Marked" : "Cleared"} ${result.modifiedCount} issue(s) as VERA-resolvable`,
+      user: who,
+      ip: req.ip,
+      meta: { mode: all ? "all-matching-filter" : "explicit-ids", status, flagType, modified: result.modifiedCount },
+    });
+
+    res.json({
+      message: `${result.modifiedCount} issue(s) updated`,
+      matched: result.matchedCount,
+      modified: result.modifiedCount,
+      veraResolvable,
+      veraResolvableCount,
+    });
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });
   }

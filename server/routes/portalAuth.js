@@ -956,13 +956,25 @@ router.get("/my-submissions", async (req, res) => {
       {
         submittedBy: user.email,
         deletedAt: null,
-        hiddenFromPortal: { $ne: true },
         // Only real submissions. A record with no transport entries is the
         // baseline-only container written by PATCH /portal-save-baseline — never
         // something the user submitted — and listing it put a phantom
         // "0 / No Waste Data / Pending" row in Submission History after the first
         // baseline save. See SUBMISSION_HAS_TRUCKS in routes/dataSLF.js.
         "trucks.0": { $exists: true },
+        // A REVERTED submission is always listed, even if the user had previously
+        // removed it from their history.
+        //
+        // Hiding is the user's own housekeeping, but a revert is the admin handing
+        // the record BACK with "correct this and resubmit" — and the unresolved
+        // -revert rule then blocks their next submission until they do. While
+        // `hiddenFromPortal` could out-rank that, the row they were told to fix was
+        // unreachable: SLF-LGU-NE-0111 was reverted on 2026-08-12 and stayed
+        // invisible to its operator. The revert routes clear the flag, but that only
+        // holds until the next hide, so the guarantee belongs HERE, in the read —
+        // where nothing later can undo it. PATCH /my-submissions/:id/hide also
+        // refuses a reverted row, so the two agree.
+        $or: [{ hiddenFromPortal: { $ne: true } }, { status: "reverted" }],
       },
       PORTAL_SUBMISSION_LIST_FIELDS,
     )
@@ -976,6 +988,20 @@ router.get("/my-submissions", async (req, res) => {
       const { cellsAssigned, unplacedCount, missingCapacityCount } = summarizeCellAssignment(entry);
       const { trucks, ...rest } = entry;
       return { ...rest, cellsAssigned, unplacedCount, missingCapacityCount };
+    });
+
+    // REVERTED FIRST — these are the only rows that need the operator to do
+    // something, and they are what blocks their next submission. Newest-first alone
+    // buried a revert under every submission made since. Ordering is applied here
+    // rather than in the query because it is a two-level sort (needs-action, then
+    // recency) and the list is one operator's own history, not a paged set.
+    //
+    // Within each group the original newest-first order is preserved.
+    const needsAction = (row) => (String(row.status || "") === "reverted" ? 0 : 1);
+    rows.sort((a, b) => {
+      const byAction = needsAction(a) - needsAction(b);
+      if (byAction !== 0) return byAction;
+      return new Date(b.createdAt || 0) - new Date(a.createdAt || 0);
     });
 
     res.json(rows);
@@ -1226,10 +1252,21 @@ router.patch("/my-submissions/:id/hide", async (req, res) => {
     const user = ctx.portalUser;
 
     const DataSLF = require("../models/DataSLF");
-    const submission = await DataSLF.findById(req.params.id).select("submittedBy hiddenFromPortal idNo");
+    const submission = await DataSLF.findById(req.params.id).select("submittedBy hiddenFromPortal idNo status");
     if (!submission) return res.status(404).json({ message: "Submission not found" });
     if (String(submission.submittedBy || "").toLowerCase() !== String(user.email).toLowerCase()) {
       return res.status(403).json({ message: "You can only remove your own submissions." });
+    }
+    // A reverted submission is waiting on THIS user to correct and resubmit it, and
+    // leaving it unresolved blocks their next submission. Hiding it would remove the
+    // only way to reach it, so the action is refused with the reason. GET
+    // /my-submissions lists reverted rows regardless of this flag, so the read and
+    // the write agree rather than one silently overriding the other.
+    if (String(submission.status || "") === "reverted") {
+      return res.status(400).json({
+        message:
+          "This submission was reverted and needs your correction. Update and resubmit it — it cannot be removed from your history while it is reverted.",
+      });
     }
 
     submission.hiddenFromPortal = true;

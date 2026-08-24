@@ -327,6 +327,80 @@ test("the pre-baseline rule never excludes the record supplying the baseline", (
   assert.equal(occ.rows[0].baseline, 153240);
 });
 
+test("with no baseline container the cutoff comes from the EARLIEST baseline copy", () => {
+  // The bug this pins: at an SLF with no baseline-only container, every submission
+  // carries a COPY of the baseline block, so chooseBaselineEntry — scanning a
+  // newest-first list — always picked the NEWEST submission as "the baseline".
+  // Its createdAt then dated the cutoff, so the cutoff was always ~now and every
+  // other submission fell before it. That is not a threshold the data failed to
+  // clear: no submission could EVER count, so Waste in Cell could never move.
+  // Measured on production: Porac counted 1 of 80, Limay 1 of 87,
+  // Floridablanca 1 of 59 — 545 submissions dropped across 13 facilities.
+  const baselineBlock = {
+    totalVolumeAccepted: 5000,
+    activeCellEntries: [{ cellName: "CELL 01", wasteType: "Residual", volume: 5000, unit: "m³" }],
+  };
+  const sub = (id, createdAt, disposal) => ({
+    _id: id,
+    status: "acknowledged",
+    baselineUnit: "m³",
+    createdAt: new Date(createdAt),
+    dateOfDisposal: new Date(disposal),
+    ...baselineBlock, // every submission carries the copy — this is the trap
+    trucks: [{ actualVolume: 10, actualVolumeUnit: "m³", wasteType: "Residual", cellIndex: 0 }],
+  });
+
+  // Newest-first, exactly how the routes load them.
+  const entries = [
+    sub("newest", "2026-07-20", "2026-07-19"),
+    sub("mid", "2026-06-10", "2026-06-09"),
+    sub("oldest", "2026-05-14", "2026-05-13"),
+  ];
+
+  const { counted, excludedCount } = applyPreBaselineRule(entries, { exclude: true });
+  assert.ok(
+    counted.length >= 2,
+    `the cutoff must not exclude the facility's whole history (counted ${counted.length} of 3)`,
+  );
+  assert.ok(excludedCount <= 1, "at most the earliest record predates the encoding");
+
+  // And the submitted volume must actually reach the cell.
+  const occ = computeCellOccupancy(FACILITY, counted, { unitSource: entries });
+  assert.ok(
+    occ.placedSubmittedTotal > 0,
+    "submitted volume must reach the cell — this is the empty Submission column",
+  );
+  assert.equal(occ.rows[0].baseline, 5000, "the baseline is still counted exactly once");
+});
+
+test("a real baseline container still dates the cutoff on its own", () => {
+  // The container is authoritative: an operator who saves their baseline AFTER
+  // submitting is declaring a total that already contains that waste, so those
+  // submissions must stay excluded. This is the rule working, not the bug above.
+  const container = {
+    _id: "container",
+    status: "pending",
+    baselineUnit: "tons",
+    createdAt: new Date("2026-08-14"),
+    totalVolumeAccepted: 596981,
+    activeCellEntries: [{ cellName: "CELL 01", wasteType: "Residual", volume: 596981, unit: "tons" }],
+    trucks: [], // no transport entries — this is what makes it a container
+  };
+  const earlier = {
+    _id: "earlier",
+    status: "acknowledged",
+    baselineUnit: "tons",
+    createdAt: new Date("2026-07-16"),
+    dateOfDisposal: new Date("2026-07-11"),
+    totalVolumeAccepted: 596981,
+    trucks: [{ actualVolume: 25, actualVolumeUnit: "tons", wasteType: "Residual", cellIndex: 0 }],
+  };
+  const { counted, excludedCount } = applyPreBaselineRule([container, earlier], { exclude: true });
+  assert.equal(excludedCount, 1, "waste disposed before the container was saved stays inside it");
+  assert.ok(counted.some((e) => String(e._id) === "container"));
+  assert.ok(!counted.some((e) => String(e._id) === "earlier"));
+});
+
 // ── The declared unit must not move ─────────────────────────────────────────
 test("the display unit does not change with how many submissions are filtered out", () => {
   const baseline = {

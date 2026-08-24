@@ -250,6 +250,14 @@ const dataSLFSchema = new mongoose.Schema(
     // Soft delete
     deletedAt: { type: Date, default: null },
     deletedBy: { type: String, trim: true, default: null },
+    // This record was soft-deleted BY THE CASCADE when its SLF facility was
+    // deleted, not by an admin deleting the record itself.
+    //
+    // Restoring the facility must put back exactly what the cascade took and
+    // nothing else: a submission an admin had already deleted on its own stays
+    // deleted. Without this marker, restore would have to clear deletedAt for
+    // every record of the facility and would resurrect those too.
+    deletedWithFacility: { type: Boolean, default: false, index: true },
   },
   { timestamps: true }
 );

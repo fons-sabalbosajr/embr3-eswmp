@@ -21,17 +21,40 @@ export function makeHistoryColumns({
   handleEditRevertedRow,
   handleHideSubmission,
 }) {
+  // ── Responsive column priority ──────────────────────────────────────────────
+  // The table declared a fixed `scroll.x` of 1100px with several unsized columns,
+  // so on a phone (~375px) every row had to be dragged sideways through roughly
+  // three screens, and the unsized columns collapsed to unreadable slivers on the
+  // way. antd hides a column entirely below the breakpoints listed in
+  // `responsive`, which shrinks the table to fit rather than scrolling it.
+  //
+  // What survives on the smallest screen is what an operator acts on: which
+  // submission it is, when it was for, what state it is in, and what they can do
+  // about it. Everything hidden here is still reachable — the row opens the same
+  // detail modal, which shows the full record.
+  //
+  //   xs  (<576)  ID No. · Date · Status · Actions
+  //   md  (>=768) + # · Entries
+  //   lg  (>=992) + Type · Submitted
+  //   xl  (>=1200) + Company/Address · Cell Assigned
+  const FROM_MD = ["md", "lg", "xl", "xxl"];
+  const FROM_LG = ["lg", "xl", "xxl"];
+  const FROM_XL = ["xl", "xxl"];
+
   return [
-      { title: "#", key: "index", width: 50, render: (_, __, i) => i + 1 },
+      { title: "#", key: "index", width: 50, align: "left", responsive: FROM_MD, render: (_, __, i) => i + 1 },
       {
         title: "ID No.",
         dataIndex: "idNo",
         key: "idNo",
+        // Sized and clipped so it cannot stretch the table on a narrow screen.
+        width: 150,
+        ellipsis: true,
         // A group row shows the batch identifier + how many submissions it holds.
         render: (v, r) =>
           r.isGroup ? (
             <Space direction="vertical" size={0}>
-              <Text strong style={{ fontSize: 13 }}>
+              <Text strong style={{ fontSize: 11 }}>
                 {r.groupId || "Submission group"}
               </Text>
               <Tag color="geekblue" style={{ fontSize: 11 }}>
@@ -46,6 +69,7 @@ export function makeHistoryColumns({
         title: "Date of Disposal",
         dataIndex: "dateOfDisposal",
         key: "dateOfDisposal",
+        width: 140,
         // For a group, show the reporting period its children actually span.
         render: (v, r) => {
           if (!r.isGroup) return v ? dayjs(v).format("MM/DD/YYYY") : "—";
@@ -58,16 +82,15 @@ export function makeHistoryColumns({
       {
         title: "Company / Address",
         key: "companyAddr",
+        // An operator's own company — the least useful cell on a small screen.
+        responsive: FROM_XL,
+        width: 220,
+        ellipsis: true,
         render: (_, r) => (
           <div>
             <Text strong style={{ fontSize: 13 }}>
               {r.lguCompanyName}
             </Text>
-            {r.address && (
-              <div style={{ fontSize: 12, color: "#888" }}>
-                {maskSensitive ? MASK_PLACEHOLDER : r.address}
-              </div>
-            )}
           </div>
         ),
       },
@@ -75,12 +98,16 @@ export function makeHistoryColumns({
         title: "Type",
         dataIndex: "companyType",
         key: "companyType",
+        width: 80,
+        responsive: FROM_LG,
         render: (v) => <Tag color={v === "LGU" ? "blue" : "green"}>{v}</Tag>,
       },
       {
         title: "Entries",
         key: "truckCount",
         width: 70,
+        responsive: FROM_MD,
+        align: "center",
         // Denormalized on the record; the list no longer ships trucks[].
         render: (_, r) => Number(r.truckCount || 0),
       },
@@ -88,6 +115,7 @@ export function makeHistoryColumns({
         title: "Cell Assigned",
         key: "cellsAssigned",
         width: 200,
+        responsive: FROM_XL,
         // Which cells this submission's waste was actually placed into. Resolved
         // SERVER-side from each truck/vehicle's canonical cellIndex, so a cell an
         // admin has since renamed shows its CURRENT name, not the copy frozen at
@@ -138,6 +166,7 @@ export function makeHistoryColumns({
         title: "Status",
         dataIndex: "status",
         key: "status",
+        width: 150,
         filters: [
           { text: "Pending", value: "pending" },
           { text: "Approved", value: "acknowledged" },
@@ -188,9 +217,7 @@ export function makeHistoryColumns({
           if (v === "reverted" || v === "editApproved") {
             return (
               <Space direction="vertical" size={2}>
-                <Tag icon={<UndoOutlined />} color="volcano">
-                  REVERTED — NEEDS EDIT
-                </Tag>
+                <Tag icon={<UndoOutlined />} color="volcano" />
                 {r.revertReason && (
                   <Text type="secondary" style={{ fontSize: 10 }}>
                     {r.revertReason}
@@ -220,11 +247,21 @@ export function makeHistoryColumns({
       {
         title: "Submitted",
         dataIndex: "createdAt",
+        width: 200,
         key: "createdAt",
-        // Newest first by default — the most recent submission is what an
-        // operator opens this tab to check. Still togglable, and `sorter` makes
-        // the header show the direction rather than sorting invisibly.
-        defaultSortOrder: "descend",
+        responsive: FROM_LG,
+        // NO `defaultSortOrder` here.
+        //
+        // It used to default to descending, which made antd re-sort the rows by
+        // date — silently discarding the order HistoryPanel had already applied,
+        // where REVERTED rows are floated to the top because they are the only ones
+        // waiting on the operator (and the only ones blocking their next
+        // submission). A revert then sank underneath every submission made since:
+        // SLF-LGU-NE-0111, reverted on 2026-08-12, sat below newer approved rows.
+        //
+        // The incoming order is now what renders: action-required first, then
+        // newest. The column stays sortable, so clicking it still gives a pure
+        // date order when that is what the operator wants.
         sorter: (a, b) => {
           // Missing/invalid dates sort to the bottom instead of being treated
           // as the epoch, which would park them above real submissions when the
@@ -242,6 +279,7 @@ export function makeHistoryColumns({
         title: "Actions",
         key: "actions",
         width: 150,
+        align: "center",
         render: (_, r) => (
           <Space size="small">
             <Tooltip title="View Details">

@@ -784,7 +784,39 @@ export default function SlfSubmissionReport({
 
       const updatesList = (items) =>
         `<ul style="font-size:12px;margin:4px 0 10px">${items.map((u) => `<li>${esc(u)}</li>`).join("")}</ul>`;
-      const updatesHtml = `<h3 style="color:#2f54eb">Recent Updates</h3>
+      const emptyNote = (text) =>
+        `<p style="font-size:12px;color:#888;margin:4px 0 10px">${esc(text)}</p>`;
+      // The DOCX export previously emitted only the static RECENT_UPDATES notes,
+      // so it silently dropped the live announcements and portal/admin changes the
+      // on-screen report shows. Mirror that section exactly — same sources, same
+      // ordering, same slice limits — so PDF and DOCX cannot disagree.
+      const liveAnnouncements = (Array.isArray(announcements) ? announcements : [])
+        .filter((a) => a && (a.title || a.message))
+        .slice(0, 6)
+        .map((a) => {
+          const when = a.startAt || a.updatedAt;
+          return `${esc(a.title || "Announcement")}${a.message ? ` — ${esc(a.message)}` : ""}${
+            when ? ` (${esc(dayjs(when).format("MM/DD/YYYY"))})` : ""
+          }`;
+        });
+      const liveChanges = (Array.isArray(recentChanges) ? recentChanges : [])
+        .slice(0, 10)
+        .map((t) => {
+          const label = t.type ? `${esc(String(t.type).replace(/_/g, " "))}: ` : "";
+          const body = esc(t.description || t.message || t.companyName || "Change recorded");
+          return `${label}${body}${t.createdAt ? ` (${esc(dayjs(t.createdAt).format("MM/DD/YYYY"))})` : ""}`;
+        });
+      // updatesList() escapes each item; these two are pre-escaped above, so emit
+      // them directly rather than double-escaping the markup.
+      const rawList = (items) =>
+        `<ul style="font-size:12px;margin:4px 0 10px">${items.map((u) => `<li>${u}</li>`).join("")}</ul>`;
+      const updatesHtml = `<h3 style="color:#2f54eb">Recent Announcements &amp; Changes</h3>
+        <h4 style="color:#722ed1;margin:6px 0 2px">Current Announcements</h4>${
+          liveAnnouncements.length ? rawList(liveAnnouncements) : emptyNote("No active portal announcements.")
+        }
+        <h4 style="color:#1677ff;margin:6px 0 2px">Recent Portal / Admin Changes</h4>${
+          liveChanges.length ? rawList(liveChanges) : emptyNote("No recent changes recorded.")
+        }
         <h4 style="color:#2f54eb;margin:6px 0 2px">Updates</h4>${updatesList(RECENT_UPDATES.updates)}
         <h4 style="color:#52c41a;margin:6px 0 2px">New Features</h4>${updatesList(RECENT_UPDATES.features)}
         <h4 style="color:#cf1322;margin:6px 0 2px">Fixes</h4>${updatesList(RECENT_UPDATES.fixes)}`;

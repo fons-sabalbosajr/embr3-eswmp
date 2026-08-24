@@ -95,23 +95,6 @@ function optionalAuth(req, _res, next) {
   next();
 }
 
-// Push the unit the PORTAL declared (its baseline "Unit of Measurement") onto the
-// linked SLF facility, so the admin side reads the same declared unit.
-//
-// The portal is the source of truth for the WASTE VOLUME unit: it is where the
-// operator declares what they are reporting in. The admin, however, reads the unit
-// off the facility (`wasteReceivedUnit`, `cellFillUnits`) — so without this the two
-// sides could disagree about what a number means.
-//
-// Deliberately limited to the fields the portal actually owns:
-//   • wasteReceivedUnit / estimatedVolumeWasteUnit — waste RECEIVED (portal-declared)
-//   • cellFillUnits[]                              — how full a cell is (portal-driven)
-// It never touches cellCapacityUnits / volumeCapacityUnit: those describe capacities
-// the ADMIN entered, and re-labelling them without converting the values would
-// silently reinterpret every capacity in the facility.
-//
-// Existing cellFillValues are CONVERTED into the new unit so the stored numbers stay
-// truthful rather than merely being re-labelled.
 async function syncFacilityDeclaredUnit(slfGeneratorId, declaredUnit) {
   const unit = strictNormalizeUnit(declaredUnit);
   if (!slfGeneratorId || !unit) return;
@@ -1290,7 +1273,37 @@ function sanitizeClient(client) {
   };
 }
 
-const normalizeRelationshipText = (value) => String(value || "").trim().replace(/\s+/g, " ").toLowerCase();
+// Identity normalisation for HAULER/CLIENT relationship matching only (every call
+// site is the relationship check below). Trim + collapse-whitespace + lowercase was
+// too weak for hand-typed Excel names: a compound client such as "Limay Public
+// Market, Wawa, Poblacion, Kitang I" is written with inconsistent comma spacing,
+// sometimes carries a pasted zero-width character, and Excel autocorrects hyphens
+// into en dashes — so a client that genuinely exists in the baseline failed the
+// exact compare and its upload was rejected.
+//
+// Only FORMATTING is normalised, never identity: every word and its order survives,
+// so two genuinely different clients still compare unequal and an invalid
+// hauler/client pair is still rejected. Commas, semicolons and dashes act as
+// separators in these names, so they fold to a single space.
+//
+// MUST stay behaviourally identical to normalizeComparableText in
+// front-end/src/pages/SLFPortal/uploadHelpers.js — the upload preview uses that one
+// to tell the operator what THIS check will decide. Drift between them is the bug.
+const normalizeRelationshipText = (value) =>
+  String(value ?? "")
+    .normalize("NFKC")
+    .replace(/[\u200B-\u200D\u2060\uFEFF]/g, "")
+    .replace(/[\u2018\u2019\u02BC]/g, "'")
+    .replace(/[\u201C\u201D]/g, '"')
+    .replace(/[\u2010-\u2015]/g, "-")
+    // Comma, semicolon and dash all fold to a single space (see the front-end
+    // counterpart): word content and word ORDER still decide identity.
+    .replace(/[,;-]+/g, " ")
+    .replace(/\s*\/\s*/g, "/")
+    .replace(/\s+/g, " ")
+    .replace(/[.\s]+$/g, "")
+    .trim()
+    .toLowerCase();
 const clientRelationshipValues = (client) => {
   if (typeof client === "string") return [client];
   if (!client || typeof client !== "object") return [];
@@ -3506,6 +3519,9 @@ router.patch("/:id/approve-edit", async (req, res) => {
     entry.revertedAt = new Date();
     entry.revertReason = reason || entry.revertReason || "Edit request approved by admin";
     entry.revertRequested = false;
+    // Same rule as PATCH /:id/admin-revert: approving an edit request reverts the
+    // entry so the portal user can edit it, so it must be visible in their history.
+    entry.hiddenFromPortal = false;
     await entry.save();
 
     // Notify portal user
@@ -3521,6 +3537,12 @@ router.patch("/:id/approve-edit", async (req, res) => {
       });
     } catch { /* silent */ }
     notifyPortal(req, entry.submittedBy, { type: "submission_edit_approved", title: "Edit Approved" });
+    // Emit the data-refresh too, not just the bell notification. admin-revert and
+    // bulk-revert both do; this path did not, so a portal tab that was already open
+    // (or that missed the notification stream) kept showing the pre-revert list
+    // until a manual reload. Same event name, so the portal's existing handler
+    // picks it up with no client change.
+    if (entry.submittedBy) refreshPortal(req, entry.submittedBy, "submissions");
     refreshAdmin(req, "submissions");
 
     try {
@@ -3990,6 +4012,26 @@ router.get("/summary-by-slf", cacheJson(() => SUMMARY_BY_SLF_CACHE_KEY, 60000), 
   try {
     const rows = await DataSLF.aggregate([
       { $match: { deletedAt: null, isDummy: { $ne: true } } },
+      // ── ORDER THE GROUP SO `$first` MEANS SOMETHING ────────────────────────
+      //
+      // Without this, the `$first` accumulators below took whichever document
+      // Mongo happened to return first, so a facility whose submissions declare
+      // mixed units reported a DIFFERENT `baselineUnit` between two identical
+      // requests.
+      //
+      // The admin summary picks its one display unit by majority vote over those
+      // per-group values, and this database sits on an exact 8-8 split between
+      // tons and m³ — so a single group flipping was enough to swing the whole
+      // page from tons to m³ and back between refreshes.
+      //
+      // Newest-first makes `$first` mean "the unit this facility most recently
+      // declared", which is stable and is what an operator expects. It also pins
+      // `slfName` to the newest spelling.
+      //
+      // Placed immediately after $match, before $project, so it can use the
+      // { deletedAt: 1, dateOfDisposal: -1 } index — a sort after a projection
+      // no longer matches one and becomes a blocking in-memory sort.
+      { $sort: { dateOfDisposal: -1, _id: -1 } },
       {
         $project: {
           slfGenerator: 1,
@@ -4000,12 +4042,55 @@ router.get("/summary-by-slf", cacheJson(() => SUMMARY_BY_SLF_CACHE_KEY, 60000), 
           dateOfDisposal: 1,
           baselineUnit: 1,
           truckCount: { $ifNull: ["$truckCount", { $size: { $ifNull: ["$trucks", []] } }] },
+          // ── VOLUME COUNTS ONLY WHERE THE SUBMISSION STILL STANDS ──────────
+          //
+          // This stage had NO status rule, so every volume sum below included
+          // rejected and reverted submissions. The Summary Overview's Waste
+          // Breakdown (Residual / Hazardous) reads these sums directly, so it
+          // reported waste that an admin had already thrown out — and disagreed
+          // with the SLF Data Table, Cell Infrastructure and the portal gauges,
+          // all of which run through utils/cellOccupancy.js and exclude those
+          // statuses.
+          //
+          // `ACTIVE_VOLUME_STATUSES` is imported from that module rather than
+          // restated here, so this cannot drift into a fourth status rule. A
+          // revert that has only been REQUESTED is still live waste sitting in a
+          // cell, which is why revert_requested is in the set and `reverted`
+          // (the request granted, record handed back) is not.
+          //
+          // Only the VOLUME fields are gated. `submissions`, `trucks` and the
+          // per-status counts below deliberately still span every status —
+          // those exist to report that a rejected submission happened.
+          // `$ifNull` → "pending" matches how every other consumer reads a
+          // missing status (see cellOccupancy's `entry.status || "pending"`).
+          // Without it a legacy record with no status field would silently lose
+          // its volume, which would be a new bug rather than a fix.
+          _counts: {
+            $cond: [
+              { $in: [{ $ifNull: ["$status", "pending"] }, [...ACTIVE_VOLUME_STATUSES]] },
+              1,
+              0,
+            ],
+          },
           totalM3: { $ifNull: ["$totalVolumeM3", 0] },
           totalTons: { $ifNull: ["$totalVolumeTons", 0] },
           residualM3: { $ifNull: ["$residualVolumeM3", 0] },
           residualTons: { $ifNull: ["$residualVolumeTons", 0] },
           hazardousM3: { $ifNull: ["$hazardousVolumeM3", 0] },
           hazardousTons: { $ifNull: ["$hazardousVolumeTons", 0] },
+        },
+      },
+      {
+        // Zero out the volumes of submissions that no longer stand, so the sums
+        // below need no further conditionals and the "all statuses" counts stay
+        // untouched.
+        $addFields: {
+          totalM3: { $multiply: ["$totalM3", "$_counts"] },
+          totalTons: { $multiply: ["$totalTons", "$_counts"] },
+          residualM3: { $multiply: ["$residualM3", "$_counts"] },
+          residualTons: { $multiply: ["$residualTons", "$_counts"] },
+          hazardousM3: { $multiply: ["$hazardousM3", "$_counts"] },
+          hazardousTons: { $multiply: ["$hazardousTons", "$_counts"] },
         },
       },
       {
@@ -4029,8 +4114,7 @@ router.get("/summary-by-slf", cacheJson(() => SUMMARY_BY_SLF_CACHE_KEY, 60000), 
         $group: {
           _id: "$_groupKey",
           // Only a fallback: the display name is resolved from the facility record
-          // below. For name-keyed groups every doc shares this value anyway, so no
-          // ordering stage (and no blocking in-memory sort) is needed here.
+          // below. With the sort above this is now the most recent spelling.
           slfName: { $first: { $ifNull: ["$slfName", "Unassigned SLF"] } },
           slfGenerator: { $first: "$slfGenerator" },
           baselineUnit: { $first: "$baselineUnit" },
@@ -4266,6 +4350,19 @@ router.get("/summary-dashboard", cacheJson(() => ADMIN_SUMMARY_DASHBOARD_KEY, 60
   try {
     const [facet = {}] = await DataSLF.aggregate([
       { $match: { deletedAt: null, isDummy: { $ne: true } } },
+      // Sorted HERE, before $facet, not inside the rows sub-pipeline.
+      //
+      // The `rows` facet needs a deterministic order for its `$first`
+      // accumulators (see the note in /summary-by-slf — an unordered $first made
+      // the page's display unit flip between identical requests). Placing the
+      // sort at the top level rather than inside the facet matters twice over:
+      // $facet sub-pipelines cannot use an index at all, and a sort placed after
+      // $project no longer matches one either. Directly after this $match it can
+      // use { deletedAt: 1, dateOfDisposal: -1 }.
+      //
+      // The `tiles` facet groups on a single null key, so inheriting this order
+      // costs it nothing.
+      { $sort: { dateOfDisposal: -1, _id: -1 } },
       {
         $facet: {
           tiles: [
@@ -4274,12 +4371,32 @@ router.get("/summary-dashboard", cacheJson(() => ADMIN_SUMMARY_DASHBOARD_KEY, 60
                 status: 1,
                 companyType: 1,
                 truckCount: { $ifNull: ["$truckCount", { $size: { $ifNull: ["$trucks", []] } }] },
+                // See the identical gate in /summary-by-slf. THIS is the endpoint
+                // the Submission Summary page actually calls, so this facet is
+                // what the Summary Overview's Waste Breakdown tiles read.
+                _counts: {
+                  $cond: [
+                    { $in: [{ $ifNull: ["$status", "pending"] }, [...ACTIVE_VOLUME_STATUSES]] },
+                    1,
+                    0,
+                  ],
+                },
                 totalM3: { $ifNull: ["$totalVolumeM3", 0] },
                 totalTons: { $ifNull: ["$totalVolumeTons", 0] },
                 residualM3: { $ifNull: ["$residualVolumeM3", 0] },
                 residualTons: { $ifNull: ["$residualVolumeTons", 0] },
                 hazardousM3: { $ifNull: ["$hazardousVolumeM3", 0] },
                 hazardousTons: { $ifNull: ["$hazardousVolumeTons", 0] },
+              },
+            },
+            {
+              $addFields: {
+                totalM3: { $multiply: ["$totalM3", "$_counts"] },
+                totalTons: { $multiply: ["$totalTons", "$_counts"] },
+                residualM3: { $multiply: ["$residualM3", "$_counts"] },
+                residualTons: { $multiply: ["$residualTons", "$_counts"] },
+                hazardousM3: { $multiply: ["$hazardousM3", "$_counts"] },
+                hazardousTons: { $multiply: ["$hazardousTons", "$_counts"] },
               },
             },
             {
@@ -4314,12 +4431,33 @@ router.get("/summary-dashboard", cacheJson(() => ADMIN_SUMMARY_DASHBOARD_KEY, 60
                 dateOfDisposal: 1,
                 baselineUnit: 1,
                 truckCount: { $ifNull: ["$truckCount", { $size: { $ifNull: ["$trucks", []] } }] },
+                // Same gate again: these per-SLF rows are what the page sums into
+                // the Waste Breakdown once the table has loaded (the tiles facet
+                // above only covers the pre-load fallback), so BOTH have to apply
+                // the rule or the figure changes as the table arrives.
+                _counts: {
+                  $cond: [
+                    { $in: [{ $ifNull: ["$status", "pending"] }, [...ACTIVE_VOLUME_STATUSES]] },
+                    1,
+                    0,
+                  ],
+                },
                 totalM3: { $ifNull: ["$totalVolumeM3", 0] },
                 totalTons: { $ifNull: ["$totalVolumeTons", 0] },
                 residualM3: { $ifNull: ["$residualVolumeM3", 0] },
                 residualTons: { $ifNull: ["$residualVolumeTons", 0] },
                 hazardousM3: { $ifNull: ["$hazardousVolumeM3", 0] },
                 hazardousTons: { $ifNull: ["$hazardousVolumeTons", 0] },
+              },
+            },
+            {
+              $addFields: {
+                totalM3: { $multiply: ["$totalM3", "$_counts"] },
+                totalTons: { $multiply: ["$totalTons", "$_counts"] },
+                residualM3: { $multiply: ["$residualM3", "$_counts"] },
+                residualTons: { $multiply: ["$residualTons", "$_counts"] },
+                hazardousM3: { $multiply: ["$hazardousM3", "$_counts"] },
+                hazardousTons: { $multiply: ["$hazardousTons", "$_counts"] },
               },
             },
             {
@@ -4334,6 +4472,8 @@ router.get("/summary-dashboard", cacheJson(() => ADMIN_SUMMARY_DASHBOARD_KEY, 60
               },
             },
             {
+              // NOTE: the deterministic ordering these `$first` accumulators
+              // depend on is applied ABOVE the $facet, not here — see that sort.
               $group: {
                 _id: "$_groupKey",
                 slfName: { $first: { $ifNull: ["$slfName", "Unassigned SLF"] } },
@@ -7158,6 +7298,9 @@ router.patch("/bulk-revert", async (req, res) => {
       entry.revertedBy = performedBy || getRequestActor(req);
       entry.revertedAt = new Date();
       entry.revertRequested = false;
+      // Same rule as PATCH /:id/admin-revert: a reverted record must be visible to
+      // the portal user who has to act on it.
+      entry.hiddenFromPortal = false;
       await entry.save();
       updated.push(entry);
 
@@ -7935,6 +8078,16 @@ router.patch("/:id/admin-revert", async (req, res) => {
     entry.revertReason = reason;
     entry.revertedBy = performedBy || getRequestActor(req);
     entry.revertedAt = new Date();
+    // A revert HANDS THE RECORD BACK to the portal user, so it must be visible in
+    // their history — GET /portal-auth/my-submissions filters on
+    // `hiddenFromPortal: { $ne: true }`. A user who had earlier removed this
+    // submission from their own history (PATCH /my-submissions/:id/hide) would
+    // otherwise never see it return: the notification and email say "correct and
+    // resubmit" while the row stays filtered out of the API response, and the
+    // unresolved-revert rule then blocks their next submission with no way to
+    // clear it. Un-hiding is scoped to the revert itself and does not touch
+    // deletedAt or any other visibility rule.
+    entry.hiddenFromPortal = false;
     if (sendFollowUp) {
       const days = Math.max(1, Number(temporaryDeleteAfterDays) || 3);
       entry.revertFollowUpSubject = followUpSubject || "Follow-Up Required: Reverted SLF Submission";
@@ -8058,6 +8211,9 @@ router.patch("/:id/approve-revert", async (req, res) => {
     entry.revertRequested = false;
     entry.revertReason = "";
     entry.revertRequestedAt = undefined;
+    // Handing the entry back for editing must also make it visible in the portal
+    // user's history — same reason as PATCH /:id/admin-revert.
+    entry.hiddenFromPortal = false;
     await entry.save();
 
     try {
@@ -8076,6 +8232,17 @@ router.patch("/:id/approve-revert", async (req, res) => {
 
     const populated = await DataSLF.findById(entry._id).populate("slfGenerator");
     res.json(populated);
+
+    // This route emitted NOTHING — no bell notification and no data-refresh — so
+    // an approved revert reached the database but never reached the portal user's
+    // open tab, and the admin's own list stayed stale too. Every other revert path
+    // (admin-revert, bulk-revert, approve-edit) emits both; match them.
+    if (entry.submittedBy) {
+      notifyPortal(req, entry.submittedBy, { type: "revert_approved", title: "Revert Approved" });
+      refreshPortal(req, entry.submittedBy, "submissions");
+    }
+    refreshAdmin(req, "submissions");
+
     writeLog("info", "submission.revert-approved", {
       message: `Revert approved for ${entry.idNo}`,
       user: getRequestActor(req, "admin"),

@@ -17,6 +17,14 @@ import { exportToExcel } from "../../utils/exportExcel";
 import { withSizeChanger } from "../../utils/tablePagination";
 import { getSocket } from "../../utils/socket";
 import { invalidateRelationshipMap } from "../../utils/relationshipMapCache";
+import {
+  NAVY,
+  NAVY_MID,
+  BLUE,
+  GREEN,
+  REGION_TILE,
+  AVATAR_COLORS as PALETTE_AVATAR_COLORS,
+} from "../../utils/palette";
 
 const { Title, Text } = Typography;
 
@@ -98,7 +106,7 @@ const uniqueUserNames = (r, byId = {}) => {
   return [...seen.values()].sort((a, b) => a.localeCompare(b));
 };
 const initials = (name) => String(name || "?").trim().split(/\s+/).slice(0, 2).map((w) => w[0]).join("").toUpperCase() || "?";
-const AVATAR_COLORS = ["#1677ff", "#722ed1", "#13c2c2", "#fa8c16", "#52c41a", "#eb2f96"];
+const AVATAR_COLORS = PALETTE_AVATAR_COLORS;
 const avatarColor = (name) => {
   let h = 0; const s = String(name || "");
   for (let i = 0; i < s.length; i += 1) h = (h * 31 + s.charCodeAt(i)) | 0;
@@ -157,6 +165,10 @@ export default function SlfClients({ isDark, canView = true, canEdit = true, can
   const [issueFixable, setIssueFixable] = useState({});
   const [selectedIssueKeys, setSelectedIssueKeys] = useState([]);
   const [bulkFixing, setBulkFixing] = useState(false);
+  // How many issues in the CURRENT filter are marked VERA-resolvable, as counted by
+  // the server over the whole result set (not the page).
+  const [veraCount, setVeraCount] = useState(0);
+  const [veraMarking, setVeraMarking] = useState(false);
 
   // Only HIGH-confidence proposals are bulk-selectable. An ambiguous match needs
   // a province chosen by a person, so it stays a one-at-a-time decision.
@@ -166,20 +178,77 @@ export default function SlfClients({ isDark, canView = true, canEdit = true, can
   };
   const fixableOnPage = issues.filter((i) => i.status === "open" && isBulkFixable(i._id));
 
-  const runBulkVeraFix = async () => {
-    if (!selectedIssueKeys.length) return;
+  // Checkboxes are now open to any OPEN issue, because authorizing VERA is a
+  // decision an admin may take on any of them. A bulk REPAIR is still restricted to
+  // high-confidence proposals, so it narrows the same selection here rather than
+  // relying on which boxes were enabled.
+  const selectedFixableKeys = selectedIssueKeys.filter(isBulkFixable);
+
+  /**
+   * Mark (or unmark) issues as VERA-resolvable.
+   *
+   * `scope: "selected"` sends the ticked ids — which may span several pages.
+   * `scope: "all"` sends no ids at all: the SERVER re-applies the current filter
+   * and updates every matching document. That is what makes this a selection over
+   * the whole dataset (28,000+ issues) instead of over the 10–100 rows rendered.
+   */
+  const markVeraResolvable = async (scope, veraResolvable) => {
+    const count = scope === "all" ? issuesPaging.total : selectedIssueKeys.length;
+    if (scope === "selected" && !count) return;
     const confirm = await Swal.fire({
       icon: "question",
-      title: `Repair ${selectedIssueKeys.length} issue(s)?`,
+      title: veraResolvable ? `Allow VERA to resolve ${count.toLocaleString()} issue(s)?` : `Remove VERA permission from ${count.toLocaleString()} issue(s)?`,
+      text: veraResolvable
+        ? "This records that VERA is allowed to resolve them. It does NOT resolve them now — they stay open until repaired."
+        : "VERA will no longer be allowed to resolve them. Their status is unchanged.",
+      showCancelButton: true,
+      confirmButtonText: veraResolvable ? "Mark as VERA-resolvable" : "Remove permission",
+      confirmButtonColor: "#1a3353",
+    });
+    if (!confirm.isConfirmed) return;
+    setVeraMarking(true);
+    try {
+      const { data } = await api.patch("/slf-clients/issues/vera-resolvable", {
+        veraResolvable,
+        ...(scope === "all"
+          ? { all: true, ...(issuesStatus ? { status: issuesStatus } : {}) }
+          : { ids: selectedIssueKeys }),
+      });
+      setSelectedIssueKeys([]);
+      // Re-read so the table shows the PERSISTED flag, never an optimistic guess.
+      await loadIssues(issuesPaging.current, issuesPaging.pageSize, issuesStatus);
+      Swal.fire({
+        icon: "success",
+        title: `${(data?.modified || 0).toLocaleString()} issue(s) updated`,
+        text: veraResolvable
+          ? "VERA is now allowed to resolve them. They remain open until repaired."
+          : "VERA permission removed.",
+        confirmButtonColor: "#1a3353",
+      });
+    } catch (err) {
+      Swal.fire("Error", err.response?.data?.message || "Could not update VERA permission.", "error");
+    } finally {
+      setVeraMarking(false);
+    }
+  };
+
+  const runBulkVeraFix = async () => {
+    // Only high-confidence proposals are repaired in bulk. The checkbox column is
+    // shared with the VERA-resolvable marking, which may legitimately include rows
+    // that need a person, so the eligible subset is taken here.
+    if (!selectedFixableKeys.length) return;
+    const confirm = await Swal.fire({
+      icon: "question",
+      title: `Repair ${selectedFixableKeys.length} issue(s)?`,
       text: "VERA will set the province and municipality on each client from the Region 3 masterlist, then resolve the issue. This is recorded against your account.",
       showCancelButton: true,
       confirmButtonText: "Approve & Repair",
-      confirmButtonColor: "#722ed1",
+      confirmButtonColor: "#1a3353",
     });
     if (!confirm.isConfirmed) return;
     setBulkFixing(true);
     try {
-      const { data } = await api.post("/slf-clients/issues/apply-batch", { ids: selectedIssueKeys });
+      const { data } = await api.post("/slf-clients/issues/apply-batch", { ids: selectedFixableKeys });
       setSelectedIssueKeys([]);
       await loadIssues(issuesPaging.current, issuesPaging.pageSize, issuesStatus);
       fetchOpenIssueCount();
@@ -374,17 +443,23 @@ export default function SlfClients({ isDark, canView = true, canEdit = true, can
     return s;
   }, [filtered]);
 
-  const openAdd = () => { setEditing(null); form.resetFields(); form.setFieldsValue({ status: "Active" }); setModalOpen(true); };
-  const openEdit = (r) => {
-    setEditing(r);
-    form.setFieldsValue({
+  // Populated via `initialValues` at mount, not by setFieldsValue before opening —
+  // a Modal does not render its children until it first opens, so on the first Edit
+  // after load there were no mounted Form.Items to receive the values and the form
+  // came up blank. Same defect and same fix as HaulerClientsEditor.
+  const openAdd = () => { setEditing(null); setModalOpen(true); };
+  const openEdit = (r) => { setEditing(r); setModalOpen(true); };
+
+  const clientInitialValues = useMemo(() => {
+    if (!editing) return { status: "Active" };
+    const r = editing;
+    return {
       name: r.name, type: r.type, portalUser: r.portalUser || undefined, hauler: r.hauler,
       location: r.location, province: r.province, municipalityCity: r.municipalityCity,
       address: r.address, contactPerson: r.contactPerson,
       contactNumber: r.contactNumber, contactEmail: r.contactEmail, status: r.status, notes: r.notes,
-    });
-    setModalOpen(true);
-  };
+    };
+  }, [editing]);
 
   const handleSave = async () => {
     let values;
@@ -603,7 +678,11 @@ export default function SlfClients({ isDark, canView = true, canEdit = true, can
       // so the checkboxes can be limited to those. Non-blocking: the table shows
       // immediately and the boxes enable when the answer lands.
       setIssueFixable({});
-      setSelectedIssueKeys([]);
+      // NOTE: the staged selection is deliberately NOT cleared here. Paging used to
+      // wipe it, so a selection could never span more than the rows on screen —
+      // which is precisely what the VERA-resolvable marking has to be able to do.
+      // Combined with `preserveSelectedRowKeys` on the table, ticks made on page 1
+      // are still there after visiting page 3 and coming back.
       if (rows.length) {
         api
           .post("/slf-clients/issues/suggest-batch", { ids: rows.map((r) => r._id) })
@@ -616,6 +695,9 @@ export default function SlfClients({ isDark, canView = true, canEdit = true, can
         total: Array.isArray(data) ? rows.length : data?.total || 0,
       });
       setIssuesCounts(data?.counts || {});
+      // How many of the CURRENT filter are already authorized for VERA, counted in
+      // the database over the whole result set — not over this page.
+      setVeraCount(Number(data?.veraResolvableCount || 0));
     } catch (err) {
       setIssues([]);
       // Say so, rather than rendering "No data issues" over a failed request.
@@ -697,7 +779,7 @@ export default function SlfClients({ isDark, canView = true, canEdit = true, can
                 </div>
               }
             >
-              <Button type="text" size="small" aria-label={`View ${users.length} linked portal user${users.length === 1 ? "" : "s"} and baseline sources`} icon={<TeamOutlined style={{ color: "#722ed1" }} />} />
+              <Button type="text" size="small" aria-label={`View ${users.length} linked portal user${users.length === 1 ? "" : "s"} and baseline sources`} icon={<TeamOutlined style={{ color: "#1a3353" }} />} />
             </Popover>
           </Space>
         );
@@ -710,7 +792,7 @@ export default function SlfClients({ isDark, canView = true, canEdit = true, can
         const n = haulerCount(r);
         const primary = r.haulerRelationships?.[0]?.hauler || r.hauler || "";
         return primary
-          ? <Space size={4}><SolutionOutlined style={{ color: "#13c2c2" }} /><Text style={{ fontSize: 12 }}>{primary}</Text>{n > 1 && <Tag color="cyan">+{n - 1}</Tag>}</Space>
+          ? <Space size={4}><SolutionOutlined style={{ color: "#1677ff" }} /><Text style={{ fontSize: 12 }}>{primary}</Text>{n > 1 && <Tag color="cyan">+{n - 1}</Tag>}</Space>
           : <Text type="secondary">—</Text>;
       },
     },
@@ -759,7 +841,7 @@ export default function SlfClients({ isDark, canView = true, canEdit = true, can
       title: "Actions", key: "actions", width: 130, fixed: "right",
       render: (_, r) => (
         <Space size={2}>
-          <Tooltip title="View Details"><Button type="text" size="small" icon={<EyeOutlined style={{ color: "#1890ff" }} />} onClick={() => setDetail(r)} /></Tooltip>
+          <Tooltip title="View Details"><Button type="text" size="small" icon={<EyeOutlined style={{ color: "#1677ff" }} />} onClick={() => setDetail(r)} /></Tooltip>
           {canEdit && <Tooltip title="Edit"><Button type="text" size="small" icon={<EditOutlined style={{ color: "#52c41a" }} />} onClick={() => openEdit(r)} /></Tooltip>}
           {canDelete && (
             <Tooltip title={r.status === "Active" ? "Deactivate" : "Activate"}>
@@ -781,8 +863,8 @@ export default function SlfClients({ isDark, canView = true, canEdit = true, can
   }
 
   return (
-    <div>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16, flexWrap: "wrap", gap: 12 }}>
+    <div className="admin-page">
+      <div className="admin-page-head" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16, flexWrap: "wrap", gap: 12 }}>
         <Title level={4} style={{ margin: 0 }}><TeamOutlined /> Hauler Clients</Title>
         <Space wrap>
           <Input placeholder="Search clients..." prefix={<SearchOutlined />} value={search} onChange={(e) => setSearch(e.target.value)} style={{ width: "100%", maxWidth: 220 }} allowClear />
@@ -817,24 +899,28 @@ export default function SlfClients({ isDark, canView = true, canEdit = true, can
       )}
 
       <Row gutter={[12, 12]} style={{ marginBottom: 16 }}>
-        <Col xs={12} sm={12} lg={6}>
-          <Card size="small" hoverable style={{ borderRadius: 10, borderLeft: "3px solid #722ed1" }}>
-            <Statistic title="Total Clients" value={summary.total} prefix={<TeamOutlined style={{ color: "#722ed1" }} />} />
+        {/* Total is the structural figure (navy); LGU and Private are the two
+            categories it splits into (blue / mid navy — the same pairing the
+            SLF Data Table tiles use); Active is the only status here, so it is
+            the only card allowed a status colour. */}
+        <Col xs={12} sm={8} md={6} lg={6} className="hauler-tile-col">
+          <Card size="small" hoverable style={{ borderRadius: 10, borderLeft: `3px solid ${NAVY}` }}>
+            <Statistic title="Total Clients" value={summary.total} prefix={<TeamOutlined style={{ color: NAVY }} />} />
           </Card>
         </Col>
-        <Col xs={12} sm={12} lg={6}>
-          <Card size="small" hoverable style={{ borderRadius: 10, borderLeft: "3px solid #1677ff" }}>
-            <Statistic title="LGU Clients" value={summary.lgu} prefix={<BankOutlined style={{ color: "#1677ff" }} />} />
+        <Col xs={12} sm={8} md={6} lg={6} className="hauler-tile-col">
+          <Card size="small" hoverable style={{ borderRadius: 10, borderLeft: `3px solid ${BLUE}` }}>
+            <Statistic title="LGU Clients" value={summary.lgu} prefix={<BankOutlined style={{ color: BLUE }} />} />
           </Card>
         </Col>
-        <Col xs={12} sm={12} lg={6}>
-          <Card size="small" hoverable style={{ borderRadius: 10, borderLeft: "3px solid #722ed1" }}>
-            <Statistic title="Private Sector" value={summary.private} prefix={<BankOutlined style={{ color: "#722ed1" }} />} />
+        <Col xs={12} sm={8} md={6} lg={6} className="hauler-tile-col">
+          <Card size="small" hoverable style={{ borderRadius: 10, borderLeft: `3px solid ${NAVY_MID}` }}>
+            <Statistic title="Private Sector" value={summary.private} prefix={<BankOutlined style={{ color: NAVY_MID }} />} />
           </Card>
         </Col>
-        <Col xs={12} sm={12} lg={6}>
-          <Card size="small" hoverable style={{ borderRadius: 10, borderLeft: "3px solid #52c41a" }}>
-            <Statistic title="Active" value={summary.active} suffix={`/ ${summary.total}`} prefix={<CheckCircleOutlined style={{ color: "#52c41a" }} />} />
+        <Col xs={12} sm={8} md={6} lg={6} className="hauler-tile-col">
+          <Card size="small" hoverable style={{ borderRadius: 10, borderLeft: `3px solid ${GREEN}` }}>
+            <Statistic title="Active" value={summary.active} suffix={`/ ${summary.total}`} prefix={<CheckCircleOutlined style={{ color: GREEN }} />} />
           </Card>
         </Col>
       </Row>
@@ -843,14 +929,18 @@ export default function SlfClients({ isDark, canView = true, canEdit = true, can
           Clicking a tile filters the table to the matching active records. */}
       <Row gutter={[12, 12]} style={{ marginBottom: 16 }}>
         {[
-          { title: "LGUs Served — Within Region 3", value: regionSummary?.withinR3?.lgu || 0, color: "#1677ff", type: "LGU", region: "within-region-3" },
-          { title: "LGUs Served — Outside Region 3", value: regionSummary?.outsideR3?.lgu || 0, color: "#2f54eb", type: "LGU", region: "outside-region-3" },
-          { title: "Private Sectors — Within Region 3", value: regionSummary?.withinR3?.private || 0, color: "#722ed1", type: "Private Sector", region: "within-region-3" },
-          { title: "Private Sectors — Outside Region 3", value: regionSummary?.outsideR3?.private || 0, color: "#9254de", type: "Private Sector", region: "outside-region-3" },
+          // Four tiles encoding TWO dimensions, so the colours encode two as
+          // well: hue carries the type (blue = LGU, navy = Private) and tint
+          // carries the region (full = within R3, light = outside). Previously
+          // these were four unrelated hues, which made the pairing invisible.
+          { title: "LGUs Served — Within Region 3", value: regionSummary?.withinR3?.lgu || 0, color: REGION_TILE.lguWithin, type: "LGU", region: "within-region-3" },
+          { title: "LGUs Served — Outside Region 3", value: regionSummary?.outsideR3?.lgu || 0, color: REGION_TILE.lguOutside, type: "LGU", region: "outside-region-3" },
+          { title: "Private Sectors — Within Region 3", value: regionSummary?.withinR3?.private || 0, color: REGION_TILE.privateWithin, type: "Private Sector", region: "within-region-3" },
+          { title: "Private Sectors — Outside Region 3", value: regionSummary?.outsideR3?.private || 0, color: REGION_TILE.privateOutside, type: "Private Sector", region: "outside-region-3" },
         ].map((t) => {
           const activeTile = filterType === t.type && filterRegion === t.region;
           return (
-            <Col key={t.title} xs={12} lg={6}>
+            <Col key={t.title} xs={12} sm={8} md={6} lg={6} className="hauler-tile-col">
               <Card
                 size="small" hoverable
                 onClick={() => applyRegionTile(t.type, t.region)}
@@ -865,7 +955,7 @@ export default function SlfClients({ isDark, canView = true, canEdit = true, can
 
       <Card size="small" style={{ borderRadius: 10, marginBottom: 12 }} bodyStyle={{ padding: "10px 16px" }}>
         <Row gutter={[10, 10]} align="middle">
-          <Col><FilterOutlined style={{ color: "#1890ff", marginRight: 6 }} /><Text type="secondary" style={{ fontSize: 12 }}>Filters:</Text></Col>
+          <Col><FilterOutlined style={{ color: "#1677ff", marginRight: 6 }} /><Text type="secondary" style={{ fontSize: 12 }}>Filters:</Text></Col>
           <Col flex="auto">
             <Space wrap size={8}>
               <Select placeholder="Type" value={filterType} onChange={setFilterType} allowClear size="small" style={{ minWidth: 140 }} options={TYPE_OPTIONS} />
@@ -952,9 +1042,17 @@ export default function SlfClients({ isDark, canView = true, canEdit = true, can
         confirmLoading={saving}
         width={720}
         style={{ maxWidth: "95vw" }}
-        destroyOnClose
+        // antd v6 name — `destroyOnClose` is no longer honoured, so the form was
+        // never actually remounted between records.
+        destroyOnHidden
       >
-        <Form form={form} layout="vertical" size="small">
+        <Form
+          form={form}
+          layout="vertical"
+          size="small"
+          preserve={false}
+          initialValues={clientInitialValues}
+        >
           <Row gutter={16}>
             <Col xs={24} sm={16}>
               <Form.Item name="name" label="Client Name" rules={[{ required: true, message: "Client name is required" }, { whitespace: true, message: "Client name is required" }]}>
@@ -1065,11 +1163,11 @@ export default function SlfClients({ isDark, canView = true, canEdit = true, can
                 size="small"
                 icon={<RobotOutlined />}
                 loading={bulkFixing}
-                disabled={selectedIssueKeys.length === 0}
-                style={{ background: "#722ed1", borderColor: "#722ed1" }}
+                disabled={selectedFixableKeys.length === 0}
+                style={{ background: "#1a3353", borderColor: "#1a3353" }}
                 onClick={runBulkVeraFix}
               >
-                Repair {selectedIssueKeys.length || ""} with VERA
+                Repair {selectedFixableKeys.length || ""} with VERA
               </Button>
               {fixableOnPage.length > 0 && (
                 <Button
@@ -1088,6 +1186,47 @@ export default function SlfClients({ isDark, canView = true, canEdit = true, can
               <Text type="secondary" style={{ fontSize: 11 }}>
                 {fixableOnPage.length} of {issues.length} on this page can be auto-repaired
               </Text>
+            </>
+          )}
+          {/* ── VERA-resolvable: which issues VERA is ALLOWED to resolve ──
+              Distinct from "repair now" above: this only records permission and
+              never changes an issue's status. The selection it acts on is not
+              page-bound — ticked rows persist across pages, and "Allow all
+              matching" is applied by the server over the entire filtered set. */}
+          {canEdit && (
+            <>
+              <span style={{ width: 1, height: 18, background: "#f0f0f0" }} />
+              <Button
+                size="small"
+                icon={<RobotOutlined />}
+                loading={veraMarking}
+                disabled={selectedIssueKeys.length === 0}
+                onClick={() => markVeraResolvable("selected", true)}
+              >
+                Allow VERA on {selectedIssueKeys.length || ""} selected
+              </Button>
+              {issuesPaging.total > 0 && (
+                <Button
+                  size="small"
+                  loading={veraMarking}
+                  onClick={() => markVeraResolvable("all", true)}
+                >
+                  Allow all {issuesPaging.total.toLocaleString()} matching
+                </Button>
+              )}
+              {selectedIssueKeys.length > 0 && (
+                <Button size="small" danger loading={veraMarking} onClick={() => markVeraResolvable("selected", false)}>
+                  Remove permission
+                </Button>
+              )}
+              <Tag color={veraCount ? "purple" : "default"}>
+                {veraCount.toLocaleString()} of {issuesPaging.total.toLocaleString()} VERA-resolvable
+              </Tag>
+              {selectedIssueKeys.length > 0 && (
+                <Button size="small" type="link" onClick={() => setSelectedIssueKeys([])}>
+                  Clear selection
+                </Button>
+              )}
             </>
           )}
         </Space>
@@ -1113,9 +1252,16 @@ export default function SlfClients({ isDark, canView = true, canEdit = true, can
               ? {
                   selectedRowKeys: selectedIssueKeys,
                   onChange: setSelectedIssueKeys,
-                  getCheckboxProps: (record) => ({
-                    disabled: record.status !== "open" || !isBulkFixable(record._id),
-                  }),
+                  // Keeps ticks for rows that are no longer rendered, so a
+                  // selection spans pages instead of resetting on every page
+                  // change. Without it the keys for page 1 are dropped the moment
+                  // page 2 renders.
+                  preserveSelectedRowKeys: true,
+                  // Any OPEN issue can be authorized for VERA; bulk REPAIR narrows
+                  // this selection to high-confidence rows itself
+                  // (selectedFixableKeys), so restricting the checkbox is no longer
+                  // what protects it.
+                  getCheckboxProps: (record) => ({ disabled: record.status !== "open" }),
                   columnWidth: 40,
                 }
               : undefined
@@ -1133,6 +1279,21 @@ export default function SlfClients({ isDark, canView = true, canEdit = true, can
             { title: "SLF Name", dataIndex: "portalUserEmail", width: 160, render: (v) => <Text type="secondary" style={{ fontSize: 11 }}>{v || "—"}</Text> },
             { title: "Hauler", dataIndex: "hauler", width: 160, render: (v) => <Text type="secondary" style={{ fontSize: 11 }}>{v || "—"}</Text> },
             { title: "Status", dataIndex: "status", width: 100, render: (v) => v === "open" ? <Tag color="red">Open</Tag> : v === "ignored" ? <Tag>Ignored</Tag> : <Tag color="green">Resolved</Tag> },
+            {
+              // Read straight from the persisted flag, so what is shown here is what
+              // is in the database — this is what survives a page refresh.
+              title: "VERA",
+              dataIndex: "veraResolvable",
+              width: 110,
+              render: (v) =>
+                v ? (
+                  <Tooltip title="An administrator has allowed VERA to resolve this issue. It is still open until repaired.">
+                    <Tag color="purple" icon={<RobotOutlined />}>Allowed</Tag>
+                  </Tooltip>
+                ) : (
+                  <Text type="secondary" style={{ fontSize: 11 }}>—</Text>
+                ),
+            },
             {
               title: "Action", key: "action", width: 230, fixed: "right",
               render: (_, issue) => canEdit ? (
@@ -1156,7 +1317,7 @@ export default function SlfClients({ isDark, canView = true, canEdit = true, can
                         // Purple when VERA has a confident proposal for this row,
                         // so the repairable ones are obvious at a glance.
                         type={isBulkFixable(issue._id) ? "primary" : "default"}
-                        style={isBulkFixable(issue._id) ? { background: "#722ed1", borderColor: "#722ed1" } : undefined}
+                        style={isBulkFixable(issue._id) ? { background: "#1a3353", borderColor: "#1a3353" } : undefined}
                         onClick={() => askVera(issue)}
                       >
                         VERA
@@ -1180,7 +1341,7 @@ export default function SlfClients({ isDark, canView = true, canEdit = true, can
           masterlist — never generated text — so a province can't be invented on
           a compliance record. */}
       <Modal
-        title={<Space><RobotOutlined style={{ color: "#722ed1" }} /> VERA — Suggested Fix</Space>}
+        title={<Space><RobotOutlined style={{ color: "#1a3353" }} /> VERA — Suggested Fix</Space>}
         open={veraFix.open}
         onCancel={() => setVeraFix((s) => ({ ...s, open: false }))}
         width={620}
@@ -1287,8 +1448,8 @@ export default function SlfClients({ isDark, canView = true, canEdit = true, can
             { label: "Updated", value: val(sum.updated, c.updated), color: "#1677ff" },
             { label: "Skipped", value: val(sum.skippedAdminManaged, c.skipped), color: "#8c8c8c" },
             { label: "Duplicates", value: val(sum.duplicatesDetected, c.duplicates), color: "#fa8c16" },
-            { label: "Merged", value: val(sum.duplicatesMerged, c.merged), color: "#722ed1" },
-            { label: "Removed", value: val(sum.duplicatesRemoved, c.removed), color: "#eb2f96" },
+            { label: "Merged", value: val(sum.duplicatesMerged, c.merged), color: "#1a3353" },
+            { label: "Removed", value: val(sum.duplicatesRemoved, c.removed), color: "#ff4d4f" },
             { label: "Flagged", value: val(sum.flagged, c.flagged), color: "#cf1322" },
           ];
           return (

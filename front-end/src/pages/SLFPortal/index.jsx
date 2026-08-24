@@ -8122,6 +8122,9 @@ export default function SLFPortal() {
           open={mobileDrawer}
           onClose={() => setMobileDrawer(false)}
           size={240}
+          // See AdminHome: keeps the nav drawer off the global 100vw phone rule so
+          // the mask stays tappable (this drawer is `closable={false}` too).
+          rootClassName="app-nav-drawer"
           styles={{
             body: {
               padding: 0,
@@ -8278,6 +8281,7 @@ export default function SLFPortal() {
               write. (The backend enforces read-only regardless of this banner.) */}
           {isDeveloperContext && (
             <div
+              className="slf-dev-banner"
               style={{
                 background: "linear-gradient(90deg, #531dab 0%, #722ed1 100%)",
                 color: "#fff",
@@ -8293,19 +8297,30 @@ export default function SLFPortal() {
             >
               <EyeOutlined />
               <Text strong style={{ color: "#fff" }}>Developer View</Text>
-              <span style={{ opacity: 0.75 }}>·</span>
-              <span>
+              {/* The dot separators only make sense while this reads as one line.
+                  Below md the banner wraps into stacked rows and they are hidden
+                  (see .slf-dev-banner), where they would otherwise dangle at the
+                  end of a line as stray punctuation. */}
+              <span className="slf-dev-banner-sep" style={{ opacity: 0.75 }}>·</span>
+              <span className="slf-dev-banner-field">
                 Viewing: <strong>{activeSlfName || "—"}</strong>
               </span>
-              <span style={{ opacity: 0.75 }}>·</span>
-              <span>
+              <span className="slf-dev-banner-sep" style={{ opacity: 0.75 }}>·</span>
+              <span className="slf-dev-banner-field">
                 Portal User:{" "}
                 <strong>
                   {[portalUser?.firstName, portalUser?.lastName].filter(Boolean).join(" ") ||
                     portalUser?.email}
                 </strong>
               </span>
-              <Tag color="gold" style={{ marginInlineStart: "auto", marginInlineEnd: 0 }}>
+              {/* `margin-inline-start: auto` right-aligns the tag on a single-line
+                  banner, but once the banner wraps it strands the tag alone on the
+                  last row. The class drops the auto margin below md. */}
+              <Tag
+                className="slf-dev-banner-tag"
+                color="gold"
+                style={{ marginInlineStart: "auto", marginInlineEnd: 0 }}
+              >
                 READ-ONLY
               </Tag>
             </div>
