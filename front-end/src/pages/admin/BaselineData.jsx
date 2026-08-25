@@ -776,6 +776,28 @@ export default function BaselineData({
                 </Tag>
               </Tooltip>
             )}
+            {/* This facility's baseline records were written under more than one
+                spelling of its name — `slfName` is a snapshot, so a rename leaves
+                the old wording behind. The rows are one facility and are now shown
+                as one; the older names are surfaced rather than hidden, so an
+                admin looking for the spelling they remember can still find it. */}
+            {(r.mergedFromNames || []).length > 0 && (
+              <Tooltip
+                title={
+                  <span>
+                    Also recorded under{" "}
+                    {r.mergedFromNames.map((name) => `"${name}"`).join(", ")}. These
+                    are the same facility — older name snapshots from before it was
+                    renamed — and are shown here as one row.
+                  </span>
+                }
+              >
+                <Tag color="blue" style={{ margin: 0, fontSize: 10, lineHeight: "16px" }}>
+                  +{r.mergedFromNames.length} older name
+                  {r.mergedFromNames.length === 1 ? "" : "s"}
+                </Tag>
+              </Tooltip>
+            )}
           </Space>
           <Text type="secondary" style={{ fontSize: 11, display: "block" }}>
             {r.submittedBy ? `By ${r.submittedBy}` : "No submitter"}

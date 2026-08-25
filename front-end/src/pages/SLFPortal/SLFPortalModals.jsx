@@ -32,6 +32,10 @@ import { SUPPORT_EMAIL, SUPPORT_MAILTO } from "../../config/appContact";
 import api from "../../api";
 import secureStorage from "../../utils/secureStorage";
 import { convertVolume } from "../../utils/volumeUnits";
+// The app's ONE waste-category colour system — the same map the cell gauges and
+// the admin tables read, so a load is the same colour wherever it is shown.
+import { getCellTypeConfig } from "../../utils/cellVisuals";
+import { WASTE_CATEGORY_ENUM } from "../../utils/wasteCategories";
 import {
   buildSubmissionWasteEntries,
   formatWasteEntryTotals,
@@ -52,6 +56,45 @@ const UPLOAD_PREVIEW_LONG_TEXT_FIELDS = [
   "client",
 ];
 const UPLOAD_PREVIEW_POPUP_CLASS = "slf-upload-preview-popup";
+
+// ── Client address cascade — PSGC through the server proxy ───────────────────
+//
+// Deliberately NOT `fetch("https://psgc.gitlab.io/…")` from the browser, which is
+// what these two used to do. That bypassed the server's 24-hour PSGC cache, so
+// every operator opening Add Client paid a cold external round trip — and, the
+// reason this exists at all, it could only ever return PSGC political
+// subdivisions.
+//
+// `includeSpecialZones` appends the freeports and special economic zones PSGC has
+// no entry for. Clark Freeport Zone, Subic Bay Freeport Zone and the Freeport Area
+// of Bataan are real client addresses that straddle several municipalities and
+// belong to none, so before this the only ways to encode such a client were a
+// neighbouring municipality (wrong) or a blank one (reported as incomplete).
+// See server/utils/specialZones.
+const fetchClientProvinces = async (regionCode) => {
+  const { data } = await api.get(`/settings/address/provinces/${regionCode}`);
+  return Array.isArray(data) ? data : [];
+};
+const fetchClientMunicipalities = async (provinceCode) => {
+  const { data } = await api.get(
+    `/settings/address/municipalities/${provinceCode}?includeSpecialZones=1`,
+  );
+  return Array.isArray(data) ? data : [];
+};
+
+// A zone is labelled as one and shows the LGUs it physically sits in, so
+// "Clark Freeport Zone" under Pampanga is never mistaken for a municipality —
+// and so the operator can tell the Pampanga side of it from the Tarlac side.
+const clientMunicipalityOptions = (list = []) =>
+  (list || []).map((m) => ({
+    label: m.isSpecialZone ? `${m.name} — special economic zone` : m.name,
+    value: String(m.code),
+    title: m.isSpecialZone
+      ? `${m.name}${m.authority ? ` · ${m.authority}` : ""}${
+          (m.hostLgus || []).length ? ` · within ${m.hostLgus.join(", ")}` : ""
+        }`
+      : m.name,
+  }));
 
 function convertCellDraftUnit(draft, nextUnit, declaredUnit) {
   const from = normalizeUnitLabel(draft.unit || declaredUnit || "tons");
@@ -246,6 +289,16 @@ export default function SLFPortalModals({
   uploadPreviewData,
   uploadPreviewColumns,
   uploadPreviewSummary = {},
+  // Disposal uploads only. `uploadDetection` is detectSystemGeneratedFile's
+  // verdict on the previewed file; `uploadAlignmentSummary` is what the rows
+  // resolved to against the baseline. Both advisory — neither gates Import.
+  uploadDetection = null,
+  uploadAlignmentSummary = null,
+  setUploadDetection = () => {},
+  // Resolving a client mismatch: the first points the FILE at the stored spelling,
+  // the second changes the client ON THE HAULER (a baseline draft edit).
+  onUseStoredClient = () => {},
+  onApplyClientFixToHauler = () => {},
   uploadMissingColumns,
   setUploadPreviewData,
   setUploadPreviewColumns,
@@ -1082,20 +1135,16 @@ export default function SLFPortalModals({
                                 if (r.region) {
                                   setLoadingClientAddress("province");
                                   try {
-                                    const res = await fetch(
-                                      `https://psgc.gitlab.io/api/regions/${r.region}/provinces/`,
-                                    );
-                                    setClientProvinces(await res.json());
+                                    setClientProvinces(await fetchClientProvinces(r.region));
                                   } catch (_) {}
                                   setLoadingClientAddress("");
                                 }
                                 if (r.province) {
                                   setLoadingClientAddress("municipality");
                                   try {
-                                    const res = await fetch(
-                                      `https://psgc.gitlab.io/api/provinces/${r.province}/cities-municipalities/`,
+                                    setClientMunicipalities(
+                                      await fetchClientMunicipalities(r.province),
                                     );
-                                    setClientMunicipalities(await res.json());
                                   } catch (_) {}
                                   setLoadingClientAddress("");
                                 }
@@ -4383,6 +4432,7 @@ export default function SLFPortalModals({
           setUploadPreviewData([]);
           setUploadPreviewColumns([]);
           setUploadMissingColumns([]);
+          setUploadDetection(null);
           setUploadType(null);
         }}
         onOk={handleConfirmUpload}
@@ -4395,7 +4445,7 @@ export default function SLFPortalModals({
         // takes the modal full-bleed (see .slf-upload-preview-modal) — the grid
         // simply cannot be narrowed to a phone, so it gets the whole screen and
         // scrolls sideways inside a pinned frame instead of overflowing the page.
-        width="min(1400px, 100%)"
+        width="min(1500px, 100%)"
         style={{ top: 24 }}
         className="slf-upload-modal slf-upload-preview-modal"
       >
@@ -4419,8 +4469,304 @@ export default function SLFPortalModals({
                 )}
               </>
             )}
+            {uploadType === "truck" && (uploadAlignmentSummary?.alignedCount || 0) > 0 && (
+              <Tag color="gold">
+                {uploadAlignmentSummary.alignedCount} row(s) matched to the baseline
+              </Tag>
+            )}
+            {uploadType === "truck" && (uploadAlignmentSummary?.mismatches || []).length > 0 && (
+              <Tag color="volcano">
+                {uploadAlignmentSummary.mismatches.length} client mismatch
+                {uploadAlignmentSummary.mismatches.length === 1 ? "" : "es"} to resolve
+              </Tag>
+            )}
+            {uploadType === "truck" && uploadDetection?.isSystemGenerated && (
+              <Tag color="purple">System-generated file</Tag>
+            )}
           </Space>
         </div>
+
+        {/* ── Client mismatches ────────────────────────────────────────────────
+            NOT the same failure as a missing client, and worth separating because
+            the fix is different. Here the baseline already HAS the client; the
+            file just spells it differently ("… OF PULILAN" vs "… OF PULILAN,
+            BULACAN"). Adding it again would create a duplicate that splits that
+            client's volumes across two records.
+
+            Two honest resolutions, and which is right is the operator's call:
+            point the file at the stored spelling (this import only), or correct
+            the client on the hauler (a baseline draft edit). Nothing is applied
+            automatically — a similarity score is evidence, not proof, and a trip
+            attributed to the wrong LGU is exactly what an import must not do. */}
+        {uploadType === "truck" && (uploadAlignmentSummary?.mismatches || []).length > 0 && (
+          <Alert
+            type="warning"
+            showIcon
+            style={{ marginBottom: 12 }}
+            message={
+              <Text strong style={{ fontSize: 14 }}>
+                {uploadAlignmentSummary.mismatches.length} client name mismatch
+                {uploadAlignmentSummary.mismatches.length === 1 ? "" : "es"} — the baseline has
+                these clients under a different spelling
+              </Text>
+            }
+            description={
+              <div style={{ fontSize: 13.5 }}>
+                <div style={{ marginBottom: 8 }}>
+                  Choose which spelling is correct. Nothing is changed until you pick.
+                </div>
+                <Space direction="vertical" size={10} style={{ width: "100%" }}>
+                  {uploadAlignmentSummary.mismatches.map((entry) => (
+                    <div
+                      key={entry.key}
+                      style={{
+                        border: "1px solid #ffe58f",
+                        background: "#fffbe6",
+                        borderRadius: 8,
+                        padding: "8px 10px",
+                      }}
+                    >
+                      <div style={{ marginBottom: 6 }}>
+                        <Text type="secondary">Hauler </Text>
+                        <Text strong>{entry.hauler}</Text>
+                        <Text type="secondary"> · {entry.rows} trip(s) in this file</Text>
+                      </div>
+                      <div style={{ marginBottom: 8 }}>
+                        <Text type="secondary">File says: </Text>
+                        <Text code>{entry.client}</Text>
+                      </div>
+                      <Space direction="vertical" size={6} style={{ width: "100%" }}>
+                        {entry.suggestions.map((suggestion) => (
+                          <div key={suggestion.name}>
+                            <div style={{ marginBottom: 3 }}>
+                              <Text type="secondary">Baseline has: </Text>
+                              <Text code>{suggestion.name}</Text>{" "}
+                              <Tooltip title={suggestion.reason}>
+                                <Tag
+                                  color={suggestion.score >= 0.95 ? "green" : "gold"}
+                                  style={{ fontSize: 11, marginInlineEnd: 0 }}
+                                >
+                                  {Math.round(suggestion.score * 100)}% match
+                                </Tag>
+                              </Tooltip>
+                            </div>
+                            <Space size={6} wrap>
+                              <Tooltip title="Rewrites this file's rows to the stored name. Your baseline is not changed.">
+                                <Button
+                                  size="small"
+                                  type="primary"
+                                  className="slf-primary-btn"
+                                  onClick={() => onUseStoredClient(entry, suggestion.name)}
+                                >
+                                  Use the stored name
+                                </Button>
+                              </Tooltip>
+                              <Tooltip title="Renames this client on the hauler, keeping its type, province and municipality. Needs Save Baseline Update afterwards.">
+                                <Button
+                                  size="small"
+                                  onClick={() => onApplyClientFixToHauler(entry, suggestion.name)}
+                                >
+                                  Rename it on the hauler
+                                </Button>
+                              </Tooltip>
+                            </Space>
+                          </div>
+                        ))}
+                        <div>
+                          <Tooltip title="Adds the file's name as a NEW client of this hauler. Only correct if these really are two different clients.">
+                            <Button
+                              size="small"
+                              danger
+                              onClick={() => onApplyClientFixToHauler(entry, "")}
+                            >
+                              They are different — add as a new client
+                            </Button>
+                          </Tooltip>
+                        </div>
+                      </Space>
+                    </div>
+                  ))}
+                </Space>
+                <div style={{ marginTop: 8 }}>
+                  <Text type="secondary" style={{ fontSize: 13 }}>
+                    Changing a client on the hauler updates this form only — click{" "}
+                    <b>Save Baseline Update</b> on the Baseline tab afterwards to persist it.
+                  </Text>
+                </div>
+              </div>
+            }
+          />
+        )}
+
+        {(() => {
+        // ── The two commentary panels, side by side ──────────────────────────
+        //
+        // Both explain the same batch from different angles — what the FILE is
+        // (a machine export, and what that did to it) and what VERA makes of it —
+        // so stacking them pushed the table, which is what the operator opened
+        // this modal to read, off the bottom of the screen. Paired into one row
+        // above `lg`; either one alone still takes the full width, and on a phone
+        // they stack because two columns of prose in ~180px is unreadable.
+        const showFilePanel =
+          uploadType === "truck" &&
+          (uploadDetection?.isSystemGenerated ||
+            (uploadDetection?.skippedStrayRows || 0) > 0 ||
+            (uploadAlignmentSummary?.alignedCount || 0) > 0 ||
+            (uploadAlignmentSummary?.needsEncoding || []).length > 0);
+        const showVeraPanel = haulerVeraStage !== "idle";
+        if (!showFilePanel && !showVeraPanel) return null;
+        const span = showFilePanel && showVeraPanel ? 12 : 24;
+        return (
+          <Row gutter={[12, 12]} style={{ marginBottom: 12 }} align="stretch">
+        {/* ── System-generated disposal file ───────────────────────────────────
+            A machine export names ONE party per trip; the portal records a hauler
+            AND that hauler's client. Where the two could be told apart the rows
+            were matched automatically and say so in the Match column; where they
+            could not, the missing baseline records are listed here by name. That
+            list, not the per-row errors, is the actual work — forty identical
+            "hauler is not assigned" messages are one client that needs encoding. */}
+        {showFilePanel && (
+          <Col xs={24} lg={span}>
+            <Alert
+              type={(uploadAlignmentSummary?.needsEncoding || []).length ? "warning" : "info"}
+              showIcon
+              style={{ marginBottom: 0, height: "100%" }}
+              message={
+                uploadDetection?.isSystemGenerated
+                  ? "This looks like a system-generated disposal file."
+                  : "Some rows were matched to your baseline."
+              }
+              description={
+                <div style={{ fontSize: 13 }}>
+                  {uploadDetection?.skippedStrayRows > 0 && (
+                    <div style={{ marginBottom: 6 }}>
+                      {uploadDetection.skippedStrayRows} trailing row(s) held nothing but a stray
+                      value — no date, ticket, plate, cell, waste type or volume — and were left
+                      out of this preview.
+                    </div>
+                  )}
+                  {uploadDetection?.mirroredRows > 0 && (
+                    <div style={{ marginBottom: 6 }}>
+                      {uploadDetection.mirroredRows} of {uploadDetection.consideredRows} row(s)
+                      repeat the same name in both the <b>Hauler</b> and the <b>Client</b> column
+                      — typical of a weighbridge or gate export, which records one party per
+                      trip. Each such row was resolved against your accredited haulers and
+                      their clients.
+                    </div>
+                  )}
+                  {(uploadAlignmentSummary?.alignedCount || 0) > 0 && (
+                    <div style={{ marginBottom: 6 }}>
+                      <b>{uploadAlignmentSummary.alignedCount} row(s)</b> were matched
+                      automatically. Check the <b>Match</b> column before importing — hover a
+                      gold tag to see exactly what the file said and what it was read as.
+                    </div>
+                  )}
+                  {(uploadAlignmentSummary?.needsEncoding || []).length > 0 && (
+                    <>
+                      <div style={{ marginBottom: 4 }}>
+                        These names are <b>not on your baseline</b>, so their rows cannot be
+                        imported. Add them under <b>Baseline → Accredited Haulers</b> (the
+                        hauler, or the client under its hauler), save the baseline update, then
+                        re-upload this same file:
+                      </div>
+                      <ul style={{ margin: 0, paddingLeft: 18, maxHeight: 150, overflowY: "auto" }}>
+                        {uploadAlignmentSummary.needsEncoding.slice(0, 10).map((item) => (
+                          <li key={item.label} style={{ marginBottom: 2 }}>
+                            <Text strong>{item.label}</Text> — {item.rows} trip(s) in this file
+                          </li>
+                        ))}
+                        {uploadAlignmentSummary.needsEncoding.length > 10 && (
+                          <li>
+                            +{uploadAlignmentSummary.needsEncoding.length - 10} more — VERA&apos;s
+                            assessment lists them all.
+                          </li>
+                        )}
+                      </ul>
+                    </>
+                  )}
+                </div>
+              }
+            />
+          </Col>
+        )}
+
+        {/* ── VERA assessment ──
+            Never a gate: the Import button's disabled state does not reference
+            haulerVeraStage, and it must not start to.
+            · Hauler upload — a SECOND OPINION on a batch that already passed
+              validation, pointed at what the import gets wrong QUIETLY: a
+              near-miss hauler name that adds a second hauler instead of updating
+              one, an implausible capacity, a new client with no province. None of
+              that is invalid, so none of it can be blocked by a validator.
+            · Disposal upload — the opposite case. The batch has usually FAILED,
+              and identically on every row, because a machine export names one
+              party per trip. VERA is given what the alignment pass resolved and
+              what it could not, so the answer is the list of baseline records to
+              encode rather than a restatement of the errors. */}
+        {showVeraPanel && (
+          <Col xs={24} lg={span}>
+            <div className="slf-hauler-vera-panel" style={{ marginBottom: 0, height: "100%" }}>
+              <div className="slf-hauler-vera-head">
+                <VeraFlameIcon size={18} anime={haulerVeraStage === "assessing"} />
+                <Text strong style={{ fontSize: 13.5 }}>
+                  VERA Assessment
+                </Text>
+                {haulerVeraStage === "assessing" && <Spin size="small" />}
+                {haulerVeraStage === "done" && (
+                  <Tag color="success" style={{ fontSize: 11, marginInlineEnd: 0 }}>
+                    Assessed
+                  </Tag>
+                )}
+                {haulerVeraStage === "failed" && (
+                  <Tag color="warning" style={{ fontSize: 11, marginInlineEnd: 0 }}>
+                    Not available
+                  </Tag>
+                )}
+                {haulerVeraSource === "guard" && (
+                  <Tag style={{ fontSize: 11, marginInlineEnd: 0 }}>from your data</Tag>
+                )}
+                <span style={{ flex: 1 }} />
+                {haulerVeraStage !== "assessing" && (
+                  <Button size="small" type="text" onClick={reassessHaulerUpload}>
+                    {haulerVeraStage === "failed" ? "Retry assessment" : "Re-assess edited rows"}
+                  </Button>
+                )}
+              </div>
+
+              {haulerVeraStage === "assessing" && (
+                <Text type="secondary" style={{ fontSize: 13 }}>
+                  {uploadType === "truck"
+                    ? `VERA is working out what these ${uploadPreviewData.length} row(s) need before they can be imported…`
+                    : `VERA is reviewing the ${uploadPreviewData.length} validated row(s) before you import them…`}
+                </Text>
+              )}
+
+              {/* A VERA failure is NOT a validation failure — say so plainly and
+                  leave Import exactly as available as it already was. */}
+              {haulerVeraStage === "failed" && (
+                <Alert
+                  type="warning"
+                  showIcon
+                  style={{ marginBottom: 0 }}
+                  message="VERA assessment could not be completed"
+                  description={
+                    <span style={{ fontSize: 13 }}>
+                      {haulerVeraError} Your preview is still <b>valid</b> and can be imported.
+                    </span>
+                  }
+                />
+              )}
+
+              {haulerVeraStage === "done" && (
+                <div className="slf-hauler-vera-comment">{haulerVeraComment}</div>
+              )}
+            </div>
+          </Col>
+        )}
+          </Row>
+        );
+        })()}
+
         {((uploadMissingColumns || []).length > 0 || uploadPreviewData.some((row) => row._errors?.length)) && (
           <Alert
             type="warning"
@@ -4449,165 +4795,151 @@ export default function SLFPortalModals({
               }
             />
           )}
-        {/* ── VERA assessment ──
-            A SECOND OPINION on a batch that already passed validation, never a
-            gate: the Import button's disabled state above does not reference
-            haulerVeraStage, and it must not start to. VERA is pointed at what
-            this import gets wrong QUIETLY — a near-miss hauler name that adds a
-            second hauler instead of updating one, an implausible capacity, a new
-            client with no province — none of which is invalid, so none of which
-            the validator can or should block. */}
-        {uploadType === "hauler" && haulerVeraStage !== "idle" && (
-          <div className="slf-hauler-vera-panel">
-            <div className="slf-hauler-vera-head">
-              <VeraFlameIcon size={18} anime={haulerVeraStage === "assessing"} />
-              <Text strong style={{ fontSize: 12.5 }}>
-                VERA Assessment
-              </Text>
-              {haulerVeraStage === "assessing" && <Spin size="small" />}
-              {haulerVeraStage === "done" && (
-                <Tag color="success" style={{ fontSize: 10, marginInlineEnd: 0 }}>
-                  Assessed
-                </Tag>
-              )}
-              {haulerVeraStage === "failed" && (
-                <Tag color="warning" style={{ fontSize: 10, marginInlineEnd: 0 }}>
-                  Not available
-                </Tag>
-              )}
-              {haulerVeraSource === "guard" && (
-                <Tag style={{ fontSize: 10, marginInlineEnd: 0 }}>from your data</Tag>
-              )}
-              <span style={{ flex: 1 }} />
-              {haulerVeraStage !== "assessing" && (
-                <Button size="small" type="text" onClick={reassessHaulerUpload}>
-                  {haulerVeraStage === "failed" ? "Retry assessment" : "Re-assess edited rows"}
-                </Button>
-              )}
-            </div>
-
-            {haulerVeraStage === "assessing" && (
-              <Text type="secondary" style={{ fontSize: 12 }}>
-                VERA is reviewing the {uploadPreviewData.length} validated row(s) before you
-                import them…
-              </Text>
-            )}
-
-            {/* A VERA failure is NOT a validation failure — say so plainly and
-                leave Import exactly as available as it already was. */}
-            {haulerVeraStage === "failed" && (
-              <Alert
-                type="warning"
-                showIcon
-                style={{ marginBottom: 0 }}
-                message="VERA assessment could not be completed"
-                description={
-                  <span style={{ fontSize: 12 }}>
-                    {haulerVeraError} Your preview is still <b>valid</b> and can be imported.
-                  </span>
-                }
-              />
-            )}
-
-            {haulerVeraStage === "done" && (
-              <div className="slf-hauler-vera-comment">{haulerVeraComment}</div>
-            )}
-          </div>
-        )}
         <Table
           className="slf-upload-preview-table slf-slim-scroll"
           dataSource={uploadPreviewData}
-          columns={(uploadPreviewColumns || []).map((col) => {
-            // Row number and hauler/ticket identity stay put while the rest of
-            // the grid scrolls sideways, so an edit three columns to the right is
-            // never made against a row the operator can no longer identify.
-            // Only above `lg`: on a phone two frozen columns would leave almost
-            // no scrollable area at all.
-            const isIdentityColumn =
-              col?.title === "#" ||
-              ["index", "haulerName", "disposalTicketNo"].includes(col?.key);
-            const pinned = isNarrowScreen
-              ? null
-              : isIdentityColumn
-                ? { fixed: "left" }
-                : col?.key === "actions"
-                  ? { fixed: "right" }
-                  : null;
-            // keep the row-number (#) and actions columns as-is
-            if (!col || !col.dataIndex || col.key === "actions" || col.title === "#")
-              return pinned ? { ...col, ...pinned } : col;
-            return {
-              ...col,
-              ...pinned,
-              render: (text, record) => (
-                ["truckCapacity", "actualVolume", "numberOfTrucks", "capacity"].includes(col.dataIndex) ? (
+          columns={(() => {
+            /**
+             * ONE editor, keyed on the FIELD rather than on the column.
+             *
+             * Extracted so a merged column can reuse it: "Hauler → Client" and
+             * "Capacity / Volume" hold several fields in one cell, and each of
+             * them has to stay as editable as it was when it had a column to
+             * itself. Keeping this in the modal (rather than baking editors into
+             * the stored column definitions) is deliberate — those definitions are
+             * built once at parse time, so an editor closed over that render's
+             * `updateUploadCell` would go on validating against the fleet as it
+             * was BEFORE a mismatch fix changed it.
+             */
+            const editor = (field, value, record) => (
+              ["truckCapacity", "actualVolume", "numberOfTrucks", "capacity"].includes(field) ? (
                   <InputNumber
                     size="small"
-                    value={text ?? null}
+                    value={value ?? null}
                     min={0}
                     controls={false}
                     onChange={(value) =>
-                      updateUploadCell(record.key, col.dataIndex, value)
+                      updateUploadCell(record.key, field, value)
                     }
                     style={{ width: "100%" }}
                   />
-                ) : col.dataIndex === "cellName" && uploadType === "truck" ? (
+                ) : field === "cellName" && uploadType === "truck" ? (
                   // The cell that came from the file is pre-selected here, so a
                   // valid uploaded placement never has to be re-assigned by hand.
                   // A picker (not free text) is what keeps an EDITED placement a
                   // real cell — updateUploadCell re-resolves the canonical
                   // cellIndex from this value before import.
+                  //
+                  // `optionLabelProp="value"` is what lets this column be narrow.
+                  // The option LABEL is descriptive — "Cell 4 - Treated Hazardous
+                  // Waste" — which is what you need while choosing, and the dropdown
+                  // still shows it (and still searches it, via optionFilterProp).
+                  // Once chosen, the closed selector shows the VALUE, "Cell 4",
+                  // because the type is not what you re-read on a row you have
+                  // already placed. Before this the full label sat in the cell and
+                  // wrapped onto three lines, so the column had to be wide enough
+                  // for a sentence to hold two words.
                   <Select
                     size="small"
-                    value={text || undefined}
-                    placeholder="Select cell"
+                    value={value || undefined}
+                    placeholder="Cell"
                     style={{ width: "100%" }}
                     allowClear
                     showSearch
                     optionFilterProp="label"
-                    status={record.cellIndex == null && text ? "error" : ""}
+                    optionLabelProp="value"
+                    status={record.cellIndex == null && value ? "error" : ""}
                     classNames={{ popup: { root: UPLOAD_PREVIEW_POPUP_CLASS } }}
                     options={activeCellOptions.map((option) => ({
                       label: option.label,
                       value: option.value,
                     }))}
                     onChange={(value) =>
-                      updateUploadCell(record.key, col.dataIndex, value || "")
+                      updateUploadCell(record.key, field, value || "")
                     }
                   />
-                ) : col.dataIndex === "capacityUnit" ? (
+                ) : field === "wasteType" ? (
+                  // Enum-constrained on the stored record, so a picker rather than
+                  // free text — the same reason Unit and Cell are pickers. The
+                  // options carry the app's STANDARD category colours
+                  // (utils/cellVisuals: Residual green, Hazardous red, Treated
+                  // volcano), the same ones the cell gauges and the admin tables
+                  // use, so a load reads as the same colour wherever it appears.
+                  //
+                  // A value the file supplied that is NOT one of the three is kept
+                  // as a grey option rather than silently dropped: it would fail
+                  // the server's enum on submit, and the operator has to be able to
+                  // see it in order to correct it.
+                  <Select
+                    size="small"
+                    value={value || undefined}
+                    placeholder="Waste type"
+                    style={{ width: "100%" }}
+                    status={value && !WASTE_CATEGORY_ENUM.includes(String(value)) ? "warning" : ""}
+                    classNames={{ popup: { root: UPLOAD_PREVIEW_POPUP_CLASS } }}
+                    optionLabelProp="label"
+                    options={[
+                      ...WASTE_CATEGORY_ENUM.map((type) => ({
+                        value: type,
+                        label: (
+                          <Tag color={getCellTypeConfig(type).tag} style={{ marginInlineEnd: 0 }}>
+                            {type}
+                          </Tag>
+                        ),
+                      })),
+                      ...(value && !WASTE_CATEGORY_ENUM.includes(String(value))
+                        ? [
+                            {
+                              value: String(value),
+                              label: (
+                                <Tag color="default" style={{ marginInlineEnd: 0 }}>
+                                  {String(value)} (not a valid waste type)
+                                </Tag>
+                              ),
+                            },
+                          ]
+                        : []),
+                    ]}
+                    onChange={(next) => updateUploadCell(record.key, field, next || "")}
+                  />
+                ) : field === "capacityUnit" || field === "actualVolumeUnit" ? (
                   // A picker, not free text: the stored unit is enum-constrained,
                   // so an unusable value from the file is corrected in one click
                   // instead of sending the operator back to the spreadsheet.
+                  //
+                  // Both field names, because the two uploads spell it differently
+                  // — `capacityUnit` on a hauler row, `actualVolumeUnit` on a
+                  // disposal row — and only the first was listed here, so the
+                  // disposal upload's unit fell through to a plain text box.
                   <Select
                     size="small"
-                    value={text || undefined}
+                    value={value || undefined}
                     placeholder="Unit"
                     style={{ width: "100%" }}
-                    status={text && !["tons", "m³", "m3"].includes(String(text)) ? "error" : ""}
+                    status={value && !["tons", "m³", "m3"].includes(String(value)) ? "error" : ""}
                     classNames={{ popup: { root: UPLOAD_PREVIEW_POPUP_CLASS } }}
                     options={[
                       { label: "tons", value: "tons" },
                       { label: "m³", value: "m³" },
                     ]}
                     onChange={(value) =>
-                      updateUploadCell(record.key, col.dataIndex, value || "")
+                      updateUploadCell(record.key, field, value || "")
                     }
                   />
-                ) : col.dataIndex === "privateSectorClients" ? (
+                ) : field === "privateSectorClients" ? (
                   <Select
                     mode="tags"
                     size="small"
-                    value={Array.isArray(text) ? text : []}
+                    value={Array.isArray(value) ? value : []}
                     onChange={(value) =>
-                      updateUploadCell(record.key, col.dataIndex, value)
+                      updateUploadCell(record.key, field, value)
                     }
                     // The clients already on this baseline, plus whatever the
                     // row itself carries (a name typed in the file that is not
                     // stored yet must still show as a selected tag).
                     options={mergeSelectOptions(
                       uploadClientOptions,
-                      (Array.isArray(text) ? text : []).map((clientName) => ({
+                      (Array.isArray(value) ? value : []).map((clientName) => ({
                         label: String(clientName ?? "").trim(),
                         value: String(clientName ?? "").trim(),
                       })),
@@ -4624,7 +4956,7 @@ export default function SLFPortalModals({
                     // hid the very client names this preview exists to check.
                     // The selector wraps them onto as many lines as they need.
                   />
-                ) : UPLOAD_PREVIEW_LONG_TEXT_FIELDS.includes(col.dataIndex) ? (
+                ) : UPLOAD_PREVIEW_LONG_TEXT_FIELDS.includes(field) ? (
                   // Long free-text columns edit in an auto-sizing TextArea, not a
                   // single-line Input: an Input scrolls its value out of sight, so
                   // a long hauler name or address was hidden by the very cell it
@@ -4633,9 +4965,9 @@ export default function SLFPortalModals({
                   <TextArea
                     size="small"
                     autoSize={{ minRows: 1, maxRows: 4 }}
-                    value={Array.isArray(text) ? text.join(", ") : text ?? ""}
+                    value={Array.isArray(value) ? value.join(", ") : value ?? ""}
                     onChange={(e) =>
-                      updateUploadCell(record.key, col.dataIndex, e.target.value)
+                      updateUploadCell(record.key, field, e.target.value)
                     }
                     style={{
                       border: "none",
@@ -4649,12 +4981,12 @@ export default function SLFPortalModals({
                 ) : (
                   <Input
                     size="small"
-                    value={Array.isArray(text) ? text.join(", ") : text ?? ""}
+                    value={Array.isArray(value) ? value.join(", ") : value ?? ""}
                     onChange={(e) =>
-                      updateUploadCell(record.key, col.dataIndex, e.target.value)
+                      updateUploadCell(record.key, field, e.target.value)
                     }
                     placeholder={
-                      col.dataIndex === "privateSectorClients"
+                      field === "privateSectorClients"
                         ? "Comma-separated clients (optional)"
                         : undefined
                     }
@@ -4662,24 +4994,83 @@ export default function SLFPortalModals({
                       border: "none",
                       background: "transparent",
                       padding: "2px 4px",
-                      fontSize: 11,
-                      lineHeight: 1.25,
+                      fontSize: 13,
+                      lineHeight: 1.3,
                     }}
                   />
                 )
-              ),
-              onCell: () => ({
-                style: {
-                  fontSize: 11,
-                  lineHeight: 1.25,
-                  whiteSpace: "normal",
-                  overflowWrap: "anywhere",
-                  wordBreak: "break-word",
-                  verticalAlign: "top",
-                },
-              }),
-            };
-          })}
+            );
+
+            const editableCell = () => ({
+              style: {
+                fontSize: 13,
+                lineHeight: 1.3,
+                whiteSpace: "normal",
+                overflowWrap: "anywhere",
+                wordBreak: "break-word",
+                verticalAlign: "top",
+              },
+            });
+
+            return (uploadPreviewColumns || []).map((col) => {
+              // Row number and hauler/ticket identity stay put while the rest of
+              // the grid scrolls sideways, so an edit three columns to the right is
+              // never made against a row the operator can no longer identify.
+              // Only above `lg`: on a phone two frozen columns would leave almost
+              // no scrollable area at all.
+              const isIdentityColumn =
+                col?.title === "#" ||
+                ["index", "haulerName", "disposalTicketNo"].includes(col?.key);
+              const pinned = isNarrowScreen
+                ? null
+                : isIdentityColumn
+                  ? { fixed: "left" }
+                  : col?.key === "actions"
+                    ? { fixed: "right" }
+                    : null;
+
+              // A MERGED column: several fields sharing one cell, each still
+              // editable and each labelled, because without the column header to
+              // name them two stacked inputs are indistinguishable.
+              if (col?.stackedFields) {
+                return {
+                  ...col,
+                  ...pinned,
+                  render: (_, record) => (
+                    <Space direction="vertical" size={5} style={{ width: "100%" }}>
+                      {col.stackedFields.map(({ field, label }) => (
+                        <div key={field} style={{ width: "100%" }}>
+                          <div
+                            style={{
+                              fontSize: 10.5,
+                              color: "#8c8c8c",
+                              lineHeight: 1.2,
+                              textTransform: "uppercase",
+                              letterSpacing: 0.3,
+                            }}
+                          >
+                            {label}
+                          </div>
+                          {editor(field, record?.[field], record)}
+                        </div>
+                      ))}
+                    </Space>
+                  ),
+                  onCell: editableCell,
+                };
+              }
+
+              // keep the row-number (#) and actions columns as-is
+              if (!col || !col.dataIndex || col.key === "actions" || col.title === "#")
+                return pinned ? { ...col, ...pinned } : col;
+              return {
+                ...col,
+                ...pinned,
+                render: (value, record) => editor(col.dataIndex, value, record),
+                onCell: editableCell,
+              };
+            });
+          })()}
           rowKey="key"
           size="small"
           tableLayout="fixed"
@@ -4988,10 +5379,7 @@ export default function SLFPortalModals({
                     setClientMunicipalities([]);
                     setLoadingClientAddress("province");
                     try {
-                      const res = await fetch(
-                        `https://psgc.gitlab.io/api/regions/${v}/provinces/`,
-                      );
-                      setClientProvinces(await res.json());
+                      setClientProvinces(await fetchClientProvinces(v));
                     } catch (_) {}
                     setLoadingClientAddress("");
                   }}
@@ -5017,26 +5405,29 @@ export default function SLFPortalModals({
                     setClientMunicipalities([]);
                     setLoadingClientAddress("municipality");
                     try {
-                      const res = await fetch(
-                        `https://psgc.gitlab.io/api/provinces/${v}/cities-municipalities/`,
-                      );
-                      setClientMunicipalities(await res.json());
+                      setClientMunicipalities(await fetchClientMunicipalities(v));
                     } catch (_) {}
                     setLoadingClientAddress("");
                   }}
                 />
               </Form.Item>
-              <Form.Item label="Municipality/City">
+              <Form.Item
+                label="Municipality/City"
+                extra={
+                  <span style={{ fontSize: 11 }}>
+                    Special economic zones (Clark Freeport Zone, Subic Bay Freeport Zone,
+                    Freeport Area of Bataan …) are listed here alongside the province&apos;s
+                    municipalities — pick the zone itself for a client located inside one.
+                  </span>
+                }
+              >
                 <Select
-                  placeholder="Select municipality"
+                  placeholder="Select municipality or special economic zone"
                   value={clientDraft.municipality || undefined}
                   loading={loadingClientAddress === "municipality"}
                   showSearch
                   optionFilterProp="label"
-                  options={(clientMunicipalities || []).map((m) => ({
-                    label: m.name,
-                    value: String(m.code),
-                  }))}
+                  options={clientMunicipalityOptions(clientMunicipalities)}
                   onChange={(v) =>
                     setClientDraft((d) => ({ ...d, municipality: v }))
                   }

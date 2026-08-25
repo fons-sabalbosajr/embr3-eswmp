@@ -333,6 +333,12 @@ router.get("/relationship-map", requirePermission(PERM, "view"), async (req, res
     // duplicate record. Municipality-level = lguType ∈ {Municipality, City} (the
     // user-confirmed definition; Provinces are excluded). Match by normalized
     // name + province (with aliases) against the master list.
+    //
+    // Special Zones are DELIBERATELY excluded here even though the address pickers
+    // and utils/lguMatch accept them: Clark Freeport Zone is a valid address but it
+    // is not a local government unit, so counting it would inflate "LGUs Served"
+    // with something no LGU is accountable for. This is the one place the narrower
+    // definition applies — hence the local constant rather than Region3Lgu.MUNI_TYPES.
     const MUNI_TYPES = ["Municipality", "City"];
     let masterMunis = [];
     let resolveMunicipality = () => null;
@@ -781,7 +787,7 @@ router.post("/issues/suggest-batch", requirePermission(PERM, "view"), async (req
       .select("flagType clientName clientType client").lean();
 
     const [masters, clients] = await Promise.all([
-      Region3Lgu.find({ status: "Active", lguType: { $in: ["Municipality", "City"] } })
+      Region3Lgu.find({ status: "Active", lguType: { $in: Region3Lgu.MUNI_TYPES } })
         .select("name municipalityCity province").lean(),
       SlfClient.find({ name: { $in: [...new Set(issues.map((i) => i.clientName).filter(Boolean))] }, deletedAt: null })
         .select("name type province municipalityCity address").lean(),
@@ -818,7 +824,7 @@ router.post("/issues/apply-batch", requirePermission(PERM, "edit"), async (req, 
 
     const issues = await SlfDataIssue.find({ _id: { $in: ids }, status: "open" });
     const [masters, clients] = await Promise.all([
-      Region3Lgu.find({ status: "Active", lguType: { $in: ["Municipality", "City"] } })
+      Region3Lgu.find({ status: "Active", lguType: { $in: Region3Lgu.MUNI_TYPES } })
         .select("name municipalityCity province").lean(),
       SlfClient.find({ name: { $in: [...new Set(issues.map((i) => i.clientName).filter(Boolean))] }, deletedAt: null })
         .select("name type").lean(),
@@ -894,7 +900,7 @@ router.get("/issues/:id/suggestion", requirePermission(PERM, "view"), async (req
     // Shares buildIssueSuggestion with the batch endpoint, so a single-row
     // proposal and a bulk one can never disagree.
     const [masters, client] = await Promise.all([
-      Region3Lgu.find({ status: "Active", lguType: { $in: ["Municipality", "City"] } })
+      Region3Lgu.find({ status: "Active", lguType: { $in: Region3Lgu.MUNI_TYPES } })
         .select("name municipalityCity province").lean(),
       issue.client
         ? SlfClient.findById(issue.client).lean()
@@ -1054,7 +1060,7 @@ router.get("/sync/:jobId", requirePermission(PERM, "view"), async (req, res) => 
 // changed here; linking happens only via the explicit /link-lgu action below.
 async function loadMuniMasters() {
   const Region3Lgu = require("../models/Region3Lgu");
-  return Region3Lgu.find({ status: "Active", lguType: { $in: ["Municipality", "City"] } })
+  return Region3Lgu.find({ status: "Active", lguType: { $in: Region3Lgu.MUNI_TYPES } })
     .select("name normalizedName province normalizedProvince municipalityCity psgcCode lguType aliases")
     .lean();
 }
@@ -1135,7 +1141,7 @@ router.post("/:id/link-lgu", requirePermission(PERM, "edit"), async (req, res) =
     if (!client) return res.status(404).json({ message: "Client not found" });
     if (client.type !== "LGU") return res.status(400).json({ message: "Only LGU clients can be linked" });
     const master = await Region3Lgu.findById(masterId);
-    if (!master || master.status !== "Active" || !["Municipality", "City"].includes(master.lguType)) {
+    if (!master || master.status !== "Active" || !Region3Lgu.MUNI_TYPES.includes(master.lguType)) {
       return res.status(400).json({ message: "Selected masterlist municipality is not valid" });
     }
 

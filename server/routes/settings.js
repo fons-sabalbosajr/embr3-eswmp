@@ -3,6 +3,11 @@ const PortalField = require("../models/PortalField");
 const AppSettings = require("../models/AppSettings");
 const UserPortal = require("../models/UserPortal");
 const { clearYearVisibilityCache } = require("../utils/yearVisibility");
+const {
+  bypassSlfVisibility,
+  clearSlfVisibilityCache,
+  isNonOperationalStatus,
+} = require("../utils/slfVisibility");
 const { sendPortalAnnouncementEmail } = require("../utils/email");
 const { verifyDriveAccess, getDriveConfigStatus } = require("../utils/googleDrive");
 const { invalidateDriveMaintenanceCache } = require("../utils/driveMaintenanceGuard");
@@ -14,6 +19,13 @@ const { NON_DUMMY_CLAUSE } = require("../utils/dummyFilter");
 const serverCache = require("../utils/serverCache");
 const { cacheJson, invalidateOnWrite } = require("../middleware/cacheRoute");
 const { PORTAL_FIELDS_CACHE_KEY, PSGC_PREFIX } = require("../utils/cacheKeys");
+const { specialZoneOptions, isSpecialZoneCode } = require("../utils/specialZones");
+const {
+  buildProvinceOptions,
+  isRegionBucketCode,
+  provincelessLgus,
+  regionCodeFromBucket,
+} = require("../utils/psgcAddress");
 
 const router = express.Router();
 
@@ -237,6 +249,7 @@ router.put("/app", authMiddleware, adminOnly, async (req, res) => {
     }
     await settings.save();
     clearYearVisibilityCache();
+    clearSlfVisibilityCache();
     const outData = settings.toObject({ flattenMaps: true });
     if (outData.automationAgent?.provider) {
       outData.automationAgent.apiKeySet = !!(outData.automationAgent.provider.apiKeyEnc || outData.automationAgent.provider.apiKey);
@@ -351,6 +364,7 @@ router.post("/app/portal-announcements", authMiddleware, adminOnly, async (req, 
     if (item.enabled) syncCurrentAnnouncement(settings, savedItem);
     await settings.save();
     clearYearVisibilityCache();
+    clearSlfVisibilityCache();
     res.status(201).json({ message: "Announcement created", data: savedItem, settings });
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });
@@ -373,6 +387,7 @@ router.put("/app/portal-announcements/:id", authMiddleware, adminOnly, async (re
     else if (String(settings.portalAnnouncementActiveId || "") === String(item._id)) clearCurrentAnnouncement(settings);
     await settings.save();
     clearYearVisibilityCache();
+    clearSlfVisibilityCache();
     res.json({ message: "Announcement updated", data: item, settings });
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });
@@ -390,6 +405,7 @@ router.delete("/app/portal-announcements/:id", authMiddleware, adminOnly, async 
     if (wasActive) clearCurrentAnnouncement(settings);
     await settings.save();
     clearYearVisibilityCache();
+    clearSlfVisibilityCache();
     res.json({ message: "Announcement deleted" });
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });
@@ -842,6 +858,65 @@ router.put("/org-chart", authMiddleware, adminOnly, async (req, res) => {
   }
 });
 
+/**
+ * The non-operational facilities and what hiding each one costs.
+ *
+ * The settings screen needs to show WHICH facilities the rule covers and how many
+ * records each would take out of Portal Submissions — turning on a switch labelled
+ * only "hide non-operational SLFs" is asking an admin to hide an unknown quantity
+ * of real data.
+ *
+ * Read inside `bypassSlfVisibility` on purpose: this is the one screen that must
+ * see through the rule it configures. Without it, switching the rule on would hide
+ * the list of what it is hiding, and there would be no way to review or undo it.
+ */
+router.get("/app/non-operational-slf", authMiddleware, adminOnly, async (_req, res) => {
+  try {
+    const DataSLF = require("../models/DataSLF");
+    const SlfFacility = require("../models/SlfFacility");
+    const settings = await AppSettings.findOne()
+      .select("hideNonOperationalSlfEnabled nonOperationalSlfExceptions")
+      .lean();
+
+    const { facilities, counts } = await bypassSlfVisibility(async () => {
+      const all = await SlfFacility.find({ deletedAt: null })
+        .select("lgu province ownership statusOfSLF")
+        .lean();
+      const nonOperational = all.filter((f) => isNonOperationalStatus(f.statusOfSLF));
+      if (!nonOperational.length) return { facilities: [], counts: new Map() };
+      const grouped = await DataSLF.aggregate([
+        { $match: { slfGenerator: { $in: nonOperational.map((f) => f._id) }, deletedAt: null } },
+        { $group: { _id: "$slfGenerator", records: { $sum: 1 } } },
+      ]).option({ includeHiddenYears: true, includeNonOperationalSlf: true });
+      return {
+        facilities: nonOperational,
+        counts: new Map(grouped.map((row) => [String(row._id), row.records])),
+      };
+    });
+
+    const exceptions = new Set(
+      (settings?.nonOperationalSlfExceptions || []).map((id) => String(id)),
+    );
+    res.json({
+      enabled: !!settings?.hideNonOperationalSlfEnabled,
+      facilities: facilities
+        .map((facility) => ({
+          _id: facility._id,
+          lgu: facility.lgu || "",
+          province: facility.province || "",
+          ownership: facility.ownership || "",
+          statusOfSLF: facility.statusOfSLF || "",
+          recordCount: counts.get(String(facility._id)) || 0,
+          // Listed as an exception → its data stays visible despite the rule.
+          alwaysVisible: exceptions.has(String(facility._id)),
+        }))
+        .sort((a, b) => a.province.localeCompare(b.province) || a.lgu.localeCompare(b.lgu)),
+    });
+  } catch (error) {
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+});
+
 // ── Philippine Address API Proxy (PSGC) — 24-hour cache ──
 // A miss here costs an EXTERNAL network round trip (psgc.gitlab.io), not a Mongo
 // query, so it is the most expensive miss in the app and the one most worth
@@ -868,19 +943,112 @@ router.get("/address/regions", async (_req, res) => {
   }
 });
 
-router.get("/address/provinces/:regionCode", async (req, res) => {
+/**
+ * EVERY province nationwide, in one request.
+ *
+ * For editors that fix many records at once — the baseline completion modal —
+ * where the region is not being chosen and walking Region → Province for each row
+ * would be 17 round trips to populate one dropdown. PSGC serves the flat list
+ * directly, so this is a single cached call.
+ *
+ * The province-less region buckets are appended for the same reason they exist on
+ * the per-region route: without them a Metro Manila client has nothing to select.
+ * They are built from the regions list rather than re-derived per region, since a
+ * bucket is only offered where a region actually has province-less LGUs.
+ */
+router.get("/address/provinces", async (_req, res) => {
   try {
-    const data = await fetchPsgc(`https://psgc.gitlab.io/api/regions/${encodeURIComponent(req.params.regionCode)}/provinces/`);
-    res.json(data);
+    const [provinces, regions] = await Promise.all([
+      fetchPsgc("https://psgc.gitlab.io/api/provinces/"),
+      fetchPsgc("https://psgc.gitlab.io/api/regions/").catch(() => []),
+    ]);
+    const buckets = [];
+    await Promise.all(
+      (Array.isArray(regions) ? regions : []).map(async (region) => {
+        const code = encodeURIComponent(region.code);
+        const lgus = await fetchPsgc(
+          `https://psgc.gitlab.io/api/regions/${code}/cities-municipalities/`,
+        ).catch(() => []);
+        if (!provincelessLgus(lgus).length) return;
+        const regionProvinces = (Array.isArray(provinces) ? provinces : []).filter(
+          (province) => province.regionCode === region.code,
+        );
+        buckets.push(...buildProvinceOptions(regionProvinces, lgus, region).filter((o) => o.isRegionBucket));
+      }),
+    );
+    res.json([...(Array.isArray(provinces) ? provinces : []), ...buckets]);
   } catch (error) {
     res.status(500).json({ message: "Failed to fetch provinces", error: error.message });
   }
 });
 
+/**
+ * Provinces of a region, plus a bucket for the LGUs that belong to no province.
+ *
+ * NCR has no provinces at all — its 17 cities hang off legislative DISTRICTS, a
+ * different level of the PSGC hierarchy — so this used to answer with an empty
+ * array and the cascade dead-ended on a required field. Two other regions have a
+ * single province-less city each (Isabela City, Cotabato City) that was likewise
+ * unreachable. See utils/psgcAddress.
+ *
+ * The region's own city list is fetched on every call to detect that condition
+ * rather than exceptions being hardcoded — PSGC reassigns LGUs between regions,
+ * so a hardcoded list would go stale silently. It costs nothing in practice: it
+ * goes through the same 24-hour single-flight cache as everything else here, so
+ * it is one extra upstream request per region per day, and none at all once warm.
+ */
+router.get("/address/provinces/:regionCode", async (req, res) => {
+  try {
+    const regionCode = req.params.regionCode;
+    const encoded = encodeURIComponent(regionCode);
+    const [provinces, regionLgus, region] = await Promise.all([
+      fetchPsgc(`https://psgc.gitlab.io/api/regions/${encoded}/provinces/`),
+      // Both are additive: if either lookup fails the real province list still
+      // goes out, exactly as it did before this bucket existed.
+      fetchPsgc(`https://psgc.gitlab.io/api/regions/${encoded}/cities-municipalities/`).catch(() => []),
+      fetchPsgc(`https://psgc.gitlab.io/api/regions/${encoded}/`).catch(() => ({})),
+    ]);
+    res.json(buildProvinceOptions(provinces, regionLgus, { ...region, code: regionCode }));
+  } catch (error) {
+    res.status(500).json({ message: "Failed to fetch provinces", error: error.message });
+  }
+});
+
+/**
+ * Cities/municipalities of a province, optionally with the special economic zones
+ * hosted by it appended.
+ *
+ * `?includeSpecialZones=1` is OPT-IN, not the default, because a zone carries a
+ * synthetic `SZ-…` code rather than a PSGC one: a cascade that continues down to
+ * Barangay would then ask PSGC for the barangays of a code it has never heard of.
+ * Only the pickers that stop at City/Municipality — the client address forms —
+ * ask for them. See utils/specialZones for why PSGC cannot supply these at all.
+ */
 router.get("/address/municipalities/:provinceCode", async (req, res) => {
   try {
+    // The province-less bucket from the route above. Its members live in the
+    // REGION's city list, not in any province's, so that is what is filtered.
+    // Handled before the special-zone branch because it must work for every
+    // caller, including the facility-address cascade that does not opt in.
+    if (isRegionBucketCode(req.params.provinceCode)) {
+      const regionCode = encodeURIComponent(regionCodeFromBucket(req.params.provinceCode));
+      const regionLgus = await fetchPsgc(`https://psgc.gitlab.io/api/regions/${regionCode}/cities-municipalities/`);
+      return res.json(provincelessLgus(regionLgus));
+    }
     const data = await fetchPsgc(`https://psgc.gitlab.io/api/provinces/${encodeURIComponent(req.params.provinceCode)}/cities-municipalities/`);
-    res.json(data);
+    if (!/^(1|true|yes)$/i.test(String(req.query.includeSpecialZones || ""))) {
+      return res.json(data);
+    }
+    // Zones are keyed by province NAME, and the caller only has the code — so the
+    // province is resolved through the same cached proxy rather than by hardcoding
+    // PSGC codes here, which would silently stop matching if PSGC re-issued one.
+    let provinceName = "";
+    try {
+      const province = await fetchPsgc(`https://psgc.gitlab.io/api/provinces/${encodeURIComponent(req.params.provinceCode)}/`);
+      provinceName = province?.name || "";
+    } catch { /* zones are additive — a lookup failure must not lose the PSGC list */ }
+    const zones = provinceName ? specialZoneOptions(provinceName) : [];
+    res.json([...(Array.isArray(data) ? data : []), ...zones]);
   } catch (error) {
     res.status(500).json({ message: "Failed to fetch municipalities", error: error.message });
   }
@@ -888,6 +1056,10 @@ router.get("/address/municipalities/:provinceCode", async (req, res) => {
 
 router.get("/address/barangays/:municipalityCode", async (req, res) => {
   try {
+    // A special zone has no PSGC barangays. Answering with an empty list is the
+    // honest result and keeps the caller on its normal path; forwarding the
+    // synthetic code upstream would only produce a 404 rendered as a load error.
+    if (isSpecialZoneCode(req.params.municipalityCode)) return res.json([]);
     const data = await fetchPsgc(`https://psgc.gitlab.io/api/cities-municipalities/${encodeURIComponent(req.params.municipalityCode)}/barangays/`);
     res.json(data);
   } catch (error) {

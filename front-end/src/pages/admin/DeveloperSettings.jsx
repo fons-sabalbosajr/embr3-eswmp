@@ -43,6 +43,7 @@ import {
   FileTextOutlined,
   ReloadOutlined,
   DeleteOutlined,
+  StopOutlined,
   DownloadOutlined,
   CloudDownloadOutlined,
   TeamOutlined,
@@ -133,7 +134,13 @@ const TAB_GROUPS = [
     key: "grp-maintenance",
     label: "Data Maintenance",
     icon: <DeleteOutlined />,
-    tabs: ["deleted-submissions", "deleted-slf-data", "slf-data-files", "dummy-data"],
+    tabs: [
+      "non-operational-slf",
+      "deleted-submissions",
+      "deleted-slf-data",
+      "slf-data-files",
+      "dummy-data",
+    ],
   },
   {
     key: "grp-integrations",
@@ -1046,6 +1053,75 @@ export default function DeveloperSettings({onSettingsSaved, isDark, isDeveloper 
     }
   };
 
+  // ── Non-operational SLF visibility ────────────────────────────────────────
+  //
+  // The list is fetched through an endpoint that deliberately sees THROUGH the
+  // rule it configures (bypassSlfVisibility server-side): this is the one screen
+  // that must show what is being hidden, or switching the rule on would hide the
+  // means of reviewing and undoing it.
+  const [nonOpSlf, setNonOpSlf] = useState({ enabled: false, facilities: [] });
+  const [nonOpLoading, setNonOpLoading] = useState(false);
+  const [nonOpSaving, setNonOpSaving] = useState(false);
+
+  const fetchNonOperationalSlf = async () => {
+    setNonOpLoading(true);
+    try {
+      const { data } = await api.get("/settings/app/non-operational-slf");
+      setNonOpSlf({
+        enabled: !!data?.enabled,
+        facilities: Array.isArray(data?.facilities) ? data.facilities : [],
+      });
+    } catch {
+      Swal.fire("Error", "Could not load the non-operational SLF list", "error");
+    } finally {
+      setNonOpLoading(false);
+    }
+  };
+
+  const saveNonOperationalSlf = async (patch) => {
+    setNonOpSaving(true);
+    try {
+      await api.put("/settings/app", patch);
+      await fetchNonOperationalSlf();
+    } catch {
+      Swal.fire("Error", "Could not update the non-operational SLF setting", "error");
+      await fetchNonOperationalSlf();
+    } finally {
+      setNonOpSaving(false);
+    }
+  };
+
+  const toggleNonOperationalHiding = async (checked) => {
+    const hidden = nonOpSlf.facilities.filter((f) => !f.alwaysVisible);
+    const records = hidden.reduce((sum, f) => sum + (f.recordCount || 0), 0);
+    if (checked && records > 0) {
+      // Naming the cost before it is paid: this removes real records from the
+      // lists admins reconcile against, and the count is the only honest way to
+      // say how much.
+      const confirmed = await Swal.fire({
+        icon: "warning",
+        title: "Hide non-operational SLF data?",
+        html:
+          `<p>This hides <b>${records.toLocaleString()} record(s)</b> from <b>${hidden.length} facility(ies)</b> ` +
+          "across every Portal Submissions tab — baselines, submissions, summaries, reports and cell placements.</p>" +
+          "<p>Nothing is deleted. Turning this off restores them, and any facility can be kept visible individually below.</p>",
+        showCancelButton: true,
+        confirmButtonText: "Hide them",
+        confirmButtonColor: "#faad14",
+      });
+      if (!confirmed.isConfirmed) return;
+    }
+    setNonOpSlf((prev) => ({ ...prev, enabled: checked }));
+    await saveNonOperationalSlf({ hideNonOperationalSlfEnabled: checked });
+  };
+
+  const toggleNonOperationalException = async (facilityId, alwaysVisible) => {
+    const current = nonOpSlf.facilities
+      .filter((f) => (String(f._id) === String(facilityId) ? alwaysVisible : f.alwaysVisible))
+      .map((f) => f._id);
+    await saveNonOperationalSlf({ nonOperationalSlfExceptions: current });
+  };
+
   const saveVeraDevMode = async (checked) => {
     setVeraDevMode(checked);
     setVeraDevModeSaving(true);
@@ -1113,6 +1189,7 @@ export default function DeveloperSettings({onSettingsSaved, isDark, isDeveloper 
     if (key === "portal-security" && portalSecurityUsers.length === 0) fetchPortalSecurityUsers();
     if (key === "deleted-submissions" && deletedEntries.length === 0) fetchDeletedEntries();
     if (key === "deleted-slf-data" && deletedSlfEntries.length === 0) fetchDeletedSlfEntries();
+    if (key === "non-operational-slf" && nonOpSlf.facilities.length === 0) fetchNonOperationalSlf();
   };
 
   // Which leaf keys actually rendered this pass (some are developer-gated).
@@ -3036,6 +3113,170 @@ export default function DeveloperSettings({onSettingsSaved, isDark, isDeveloper 
                     }}>Disable All Maintenance</Button>
                   </Col>
                 </Row>
+              </Card>
+            ),
+          },
+          {
+            key: "non-operational-slf",
+            label: <span><StopOutlined /> Non-Operational SLFs</span>,
+            children: (
+              <Card
+                style={{ borderRadius: 10 }}
+                title={
+                  <Space>
+                    <StopOutlined style={{ color: "#faad14" }} />
+                    <span>Non-Operational SLF Visibility</span>
+                    <Tag color={nonOpSlf.enabled ? "orange" : "default"}>
+                      {nonOpSlf.enabled ? "Hiding" : "Showing all"}
+                    </Tag>
+                  </Space>
+                }
+                extra={
+                  <Button
+                    icon={<ReloadOutlined />}
+                    size="small"
+                    onClick={fetchNonOperationalSlf}
+                    loading={nonOpLoading}
+                  >
+                    Refresh
+                  </Button>
+                }
+              >
+                <Text type="secondary" style={{ display: "block", marginBottom: 12 }}>
+                  When a facility is marked <b>non-operational</b>, its data can be hidden{" "}
+                  <b>across the whole app</b> — every Portal Submissions tab (baseline data,
+                  submissions, summaries, reports, cell placements) and the dashboards that read
+                  them. Nothing is deleted: turning this off brings it all back, and any facility
+                  below can be kept visible on its own.
+                </Text>
+                <Alert
+                  type="warning"
+                  showIcon
+                  style={{ marginBottom: 16 }}
+                  message="Two things worth knowing before you turn this on"
+                  description={
+                    <ul style={{ margin: 0, paddingLeft: 18, fontSize: 12.5 }}>
+                      <li>
+                        <b>The facility itself stays visible in SLF Monitoring.</b> Only its
+                        records are hidden — that screen is where a facility&apos;s status is
+                        reviewed and changed, so hiding it there would remove the only way to mark
+                        it operational again.
+                      </li>
+                      <li>
+                        <b>It applies to the SLF Portal too.</b> A portal user assigned to a hidden
+                        facility will not see that facility&apos;s own history. Use{" "}
+                        <b>Keep visible</b> on that row if its operators still need access.
+                      </li>
+                    </ul>
+                  }
+                />
+
+                <Row gutter={[16, 16]} align="middle" style={{ marginBottom: 16 }}>
+                  <Col xs={24} md={12}>
+                    <Space>
+                      <Switch
+                        checked={nonOpSlf.enabled}
+                        loading={nonOpSaving}
+                        onChange={toggleNonOperationalHiding}
+                        checkedChildren="On"
+                        unCheckedChildren="Off"
+                      />
+                      <Text strong>Hide non-operational SLF data</Text>
+                    </Space>
+                  </Col>
+                  <Col xs={24} md={12}>
+                    <Text type="secondary" style={{ fontSize: 12 }}>
+                      {nonOpSlf.facilities.length === 0
+                        ? "No facility is currently marked non-operational."
+                        : `${nonOpSlf.facilities.filter((f) => !f.alwaysVisible).length} of ${nonOpSlf.facilities.length} non-operational facility(ies) would be hidden — ` +
+                          `${nonOpSlf.facilities
+                            .filter((f) => !f.alwaysVisible)
+                            .reduce((sum, f) => sum + (f.recordCount || 0), 0)
+                            .toLocaleString()} record(s).`}
+                    </Text>
+                  </Col>
+                </Row>
+
+                {nonOpSlf.facilities.length === 0 && !nonOpLoading ? (
+                  <div style={{ textAlign: "center", padding: "32px 0", color: isDark ? "#666" : "#999" }}>
+                    <StopOutlined style={{ fontSize: 32, marginBottom: 12, opacity: 0.3 }} />
+                    <div>Every facility is currently operational.</div>
+                    <Text type="secondary" style={{ fontSize: 12 }}>
+                      Mark a facility non-operational in SLF Monitoring and it will appear here.
+                    </Text>
+                    <div>
+                      <Button type="link" size="small" loading={nonOpLoading} onClick={fetchNonOperationalSlf}>
+                        Reload
+                      </Button>
+                    </div>
+                  </div>
+                ) : (
+                  <ResponsiveTable
+                    dataSource={nonOpSlf.facilities}
+                    rowKey="_id"
+                    size="small"
+                    loading={nonOpLoading}
+                    pagination={withSizeChanger({ pageSize: 10, size: "small" })}
+                    scroll={{ x: 800 }}
+                    columns={[
+                      { title: "Province", dataIndex: "province", key: "province", width: 150 },
+                      {
+                        title: "SLF",
+                        dataIndex: "lgu",
+                        key: "lgu",
+                        width: 260,
+                        ellipsis: true,
+                        render: (v) => <Text strong>{v || "—"}</Text>,
+                      },
+                      {
+                        title: "Status",
+                        dataIndex: "statusOfSLF",
+                        key: "statusOfSLF",
+                        width: 150,
+                        render: (v) => <Tag color="red">{v || "—"}</Tag>,
+                      },
+                      {
+                        title: "Records",
+                        dataIndex: "recordCount",
+                        key: "recordCount",
+                        width: 110,
+                        align: "center",
+                        render: (v) => <Tag color={v ? "blue" : "default"}>{(v || 0).toLocaleString()}</Tag>,
+                      },
+                      {
+                        // Per-facility override, so a closed site still under
+                        // review keeps its records in the lists.
+                        title: "Keep visible",
+                        key: "alwaysVisible",
+                        width: 130,
+                        align: "center",
+                        render: (_, r) => (
+                          <Tooltip title="Keep this facility's records visible even while hiding is on">
+                            <Switch
+                              size="small"
+                              checked={!!r.alwaysVisible}
+                              disabled={nonOpSaving}
+                              onChange={(checked) => toggleNonOperationalException(r._id, checked)}
+                            />
+                          </Tooltip>
+                        ),
+                      },
+                      {
+                        title: "Effect",
+                        key: "effect",
+                        width: 130,
+                        render: (_, r) =>
+                          !nonOpSlf.enabled ? (
+                            <Tag>Visible</Tag>
+                          ) : r.alwaysVisible ? (
+                            <Tag color="green">Visible</Tag>
+                          ) : (
+                            <Tag color="orange">Hidden</Tag>
+                          ),
+                      },
+                    ]}
+                  />
+                )}
               </Card>
             ),
           },

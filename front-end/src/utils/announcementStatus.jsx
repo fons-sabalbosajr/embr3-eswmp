@@ -28,24 +28,12 @@ import {
 //   false    startAt && now >= startAt         → unpublished (window reached, toggled off)
 //   false    otherwise                         → draft
 
-export const ANNOUNCEMENT_STATUSES = ["draft", "scheduled", "active", "unpublished", "expired"];
-
-export function resolveAnnouncementStatus(a, now = Date.now()) {
-  const start = a?.startAt ? new Date(a.startAt).getTime() : null;
-  const end = a?.endAt ? new Date(a.endAt).getTime() : null;
-  const hasStart = start != null && !Number.isNaN(start);
-  const hasEnd = end != null && !Number.isNaN(end);
-  const expired = hasEnd && now > end;
-
-  if (a?.enabled) {
-    if (hasStart && now < start) return "scheduled";
-    if (expired) return "expired";
-    return "active";
-  }
-  if (expired) return "expired";
-  if (hasStart && now >= start) return "unpublished";
-  return "draft";
-}
+// The pure lifecycle rules — resolveAnnouncementStatus, selectLatestAnnouncement
+// and ANNOUNCEMENT_STATUSES — live in ./announcementLifecycle.js, which holds no
+// JSX and so can be imported by the test suite (plain Node cannot load JSX).
+// This module keeps only the PRESENTATION: labels, antd Tag colours and icons.
+// Deliberately not re-exported from here — a re-export makes every export in the
+// file opaque to react-refresh, which then flags the whole module.
 
 // Presentation for each status — label, antd Tag color, and an icon.
 export const ANNOUNCEMENT_STATUS_META = {

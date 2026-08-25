@@ -1,0 +1,314 @@
+// ── Portal user's own disposal report ───────────────────────────────────────
+//
+// The aggregation behind GET /portal-auth/my-report. Kept out of the route so
+// the shaping is testable without a database or an HTTP request — the route's
+// job is identity, this module's job is arithmetic.
+//
+// SCOPE, and why it is what it is
+// -------------------------------
+// The report covers the SUBMISSIONS THE CALLER MADE (`submittedBy`), presented
+// against THEIR ASSIGNED FACILITY's details. That is the same boundary
+// GET /my-submissions already draws, which matters for two reasons:
+//
+//   • it cannot leak. The caller is resolved from their token by
+//     resolvePortalContext; this module never widens that, and every figure here
+//     is derived from records that carry the caller's own email.
+//   • it matches what they see. A report that totalled a co-operator's
+//     submissions would not reconcile against the Submission History the user is
+//     looking at, and they would have no way to explain the difference.
+//
+// Where a facility has several operators, each one's report therefore covers
+// their own submissions. The payload says so explicitly (`scope`) rather than
+// leaving the reader to assume it is facility-wide.
+//
+// VOLUME RULE. Volumes count only for statuses where the waste still stands —
+// the same ACTIVE_VOLUME_STATUSES the admin summary uses. A reverted submission
+// is reported in the status counts (it happened) but contributes no volume (it no
+// longer stands). Reusing that set rather than restating it is what keeps the
+// operator's own report reconcilable against the admin figures for the same
+// period; they must not be able to disagree.
+
+const { ACTIVE_VOLUME_STATUSES } = require("./cellOccupancy");
+const { TON_PER_M3 } = require("./volumeUnits");
+const { isHazardousWasteType } = require("./wasteCategories");
+
+const num = (value) => {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : 0;
+};
+
+const text = (value) => String(value ?? "").trim();
+
+/**
+ * A stored volume in TONS, whichever unit it was recorded in.
+ *
+ * The per-hauler / per-client / per-cell breakdowns are summed from the raw
+ * `actualVolume` on each vehicle, and that figure carries its own unit — a
+ * facility declaring m³ stores m³ there. Summing those as if they were tons made
+ * the breakdowns disagree with the header totals, which are normalised: against
+ * live data the haulers summed to 2,570 t under a stated total of 1,464 t. A
+ * report whose parts exceed its whole is worse than no report.
+ *
+ * Uses the SAME TON_PER_M3 the model's own metrics use, so the two can only ever
+ * agree. The unit falls back the same way too: the vehicle's, then the truck's,
+ * then the submission's declared baseline unit, then m³.
+ */
+const normalizeVolumeUnit = (unit) =>
+  String(unit || "m³").replace("m3", "m³").trim().toLowerCase();
+
+const toTons = (volume, unitRaw) => {
+  const amount = num(volume);
+  if (!amount) return 0;
+  return normalizeVolumeUnit(unitRaw) === "tons" ? amount : amount * TON_PER_M3;
+};
+
+const toM3 = (volume, unitRaw) => {
+  const amount = num(volume);
+  if (!amount) return 0;
+  return normalizeVolumeUnit(unitRaw) === "tons" ? amount / TON_PER_M3 : amount;
+};
+
+/** Does this submission's waste still stand? */
+const countsTowardVolume = (status) => ACTIVE_VOLUME_STATUSES.has(text(status) || "pending");
+
+/** Accumulate into a keyed bucket map. */
+function bump(map, key, patch) {
+  if (!key) return;
+  const existing = map.get(key) || { key, trips: 0, tons: 0, m3: 0, submissions: new Set() };
+  existing.trips += patch.trips || 0;
+  existing.tons += patch.tons || 0;
+  existing.m3 += patch.m3 || 0;
+  if (patch.submissionId) existing.submissions.add(patch.submissionId);
+  map.set(key, existing);
+}
+
+const rank = (map, limit = 0) => {
+  const rows = [...map.values()]
+    .map((row) => ({
+      name: row.key,
+      trips: row.trips,
+      tons: Number(row.tons.toFixed(2)),
+      m3: Number(row.m3.toFixed(2)),
+      submissions: row.submissions.size,
+    }))
+    .sort((a, b) => b.tons - a.tons || b.trips - a.trips || a.name.localeCompare(b.name));
+  return limit > 0 ? rows.slice(0, limit) : rows;
+};
+
+/**
+ * Build the report payload from the caller's own submissions.
+ *
+ * @param {Array}  submissions  DataSLF documents (lean) WITH their trucks
+ * @param {object} options.facility   the caller's assigned SlfFacility (lean)
+ * @param {object} options.range      { from, to } ISO strings, both optional
+ */
+function buildPortalReport(submissions = [], { facility = null, range = {} } = {}) {
+  const list = Array.isArray(submissions) ? submissions : [];
+
+  const statuses = {};
+  const monthly = new Map();
+  const byHauler = new Map();
+  const byClient = new Map();
+  const byCell = new Map();
+  const byWasteType = new Map();
+
+  let trucks = 0;
+  let totalTons = 0;
+  let totalM3 = 0;
+  let residualTons = 0;
+  let hazardousTons = 0;
+  // Work still outstanding on the operator's own records — the same two things
+  // the portal blocks a new submission on, so the report doubles as a to-do list.
+  let unplacedEntries = 0;
+  let missingCapacityEntries = 0;
+  let firstDisposal = null;
+  let lastDisposal = null;
+
+  list.forEach((entry) => {
+    const status = text(entry.status) || "pending";
+    statuses[status] = (statuses[status] || 0) + 1;
+
+    const entryTrucks = Array.isArray(entry.trucks) ? entry.trucks : [];
+    trucks += entryTrucks.length;
+
+    const disposal = entry.dateOfDisposal ? new Date(entry.dateOfDisposal) : null;
+    if (disposal && !Number.isNaN(disposal.getTime())) {
+      if (!firstDisposal || disposal < firstDisposal) firstDisposal = disposal;
+      if (!lastDisposal || disposal > lastDisposal) lastDisposal = disposal;
+    }
+
+    if (!countsTowardVolume(status)) return;
+
+    // Volumes are derived from the SAME per-vehicle walk that produces the
+    // breakdowns below, NOT from the denormalized totals on the record.
+    //
+    // Two reasons, both found against live data:
+    //   • the denormalized tons field is 0 on records written before both units
+    //     were populated in lockstep — Limay's SLF-LGU-BA-0100 stores 188.16 m³
+    //     and 0 tons — so a report summing it understated the facility by more
+    //     than half;
+    //   • deriving both from one walk makes the parts sum to the whole BY
+    //     CONSTRUCTION. A report whose per-hauler figures exceed its own header
+    //     total is worse than no report, and no amount of care keeps two
+    //     independent sums agreeing.
+    let entryTons = 0;
+    let entryM3 = 0;
+    let entryResidual = 0;
+    let entryHazardous = 0;
+
+    entryTrucks.forEach((truck) => {
+      // Placement and volume live on the VEHICLES when a truck carries them, and
+      // on the truck itself otherwise — the same rule the server's cell
+      // accounting applies. Reading only one level would drop whichever shape the
+      // record happens to use.
+      const vehicles = Array.isArray(truck.vehicles) && truck.vehicles.length
+        ? truck.vehicles
+        : [truck];
+      const haulerName = text(truck.hauler);
+      const submissionId = text(entry.idNo || entry.submissionId || entry._id);
+
+      vehicles.forEach((vehicle) => {
+        // Normalised before it is summed ANYWHERE — see toTons. The unit falls
+        // back the same way the model's own metrics do: vehicle, then truck, then
+        // the submission's declared baseline unit.
+        const unit = vehicle.actualVolumeUnit || truck.actualVolumeUnit || entry.baselineUnit;
+        const rawVolume = vehicle.actualVolume ?? truck.actualVolume;
+        const tons = toTons(rawVolume, unit);
+        const m3 = toM3(rawVolume, unit);
+        const cellName = text(vehicle.cellName || truck.cellName);
+        const wasteType = text(vehicle.wasteType || truck.wasteType) || "Residual";
+        const clients = Array.isArray(vehicle.selectedClients) ? vehicle.selectedClients : [];
+
+        entryTons += tons;
+        entryM3 += m3;
+        // The SAME classifier the model and the portal use, so a legacy value
+        // ("HW", "hazardous_waste") is bucketed identically everywhere.
+        if (isHazardousWasteType(wasteType)) entryHazardous += tons;
+        else entryResidual += tons;
+
+        if (haulerName) bump(byHauler, haulerName, { trips: 1, tons, m3, submissionId });
+        if (cellName) bump(byCell, cellName, { trips: 1, tons, m3, submissionId });
+        bump(byWasteType, wasteType, { trips: 1, tons, m3, submissionId });
+        clients.forEach((client) => {
+          const clientName = text(typeof client === "string" ? client : client?.clientName);
+          if (clientName) bump(byClient, clientName, { trips: 1, tons, m3, submissionId });
+        });
+
+        if (!cellName && tons > 0) unplacedEntries += 1;
+        if (!(num(vehicle.capacity) > 0) && !(num(truck.truckCapacity) > 0)) {
+          missingCapacityEntries += 1;
+        }
+      });
+    });
+
+    totalTons += entryTons;
+    totalM3 += entryM3;
+    residualTons += entryResidual;
+    hazardousTons += entryHazardous;
+
+    const monthKey =
+      disposal && !Number.isNaN(disposal.getTime())
+        ? `${disposal.getUTCFullYear()}-${String(disposal.getUTCMonth() + 1).padStart(2, "0")}`
+        : "undated";
+    const month = monthly.get(monthKey) || {
+      month: monthKey, submissions: 0, trucks: 0, tons: 0, residualTons: 0, hazardousTons: 0,
+    };
+    month.submissions += 1;
+    month.trucks += entryTrucks.length;
+    month.tons += entryTons;
+    month.residualTons += entryResidual;
+    month.hazardousTons += entryHazardous;
+    monthly.set(monthKey, month);
+  });
+
+  // Facility cells with their current utilisation, so the report says how much
+  // room is left rather than only how much was disposed.
+  const cells = [];
+  if (facility) {
+    const count = Math.max(
+      num(facility.numberOfCell),
+      (facility.cellStatuses || []).length,
+      (facility.cellCapacities || []).length,
+    );
+    for (let i = 0; i < count; i += 1) {
+      const status = facility.cellStatuses?.[i] || "Active Cell";
+      if (/not\s*exist/i.test(status)) continue;
+      const capacity = num(facility.cellCapacities?.[i]);
+      const fill = num(facility.cellFillValues?.[i]);
+      cells.push({
+        name: facility.cellNames?.[i] || `Cell ${i + 1}`,
+        status,
+        type: facility.cellTypes?.[i] || "Residual",
+        unit: facility.cellCapacityUnits?.[i] || "m³",
+        capacity: Number(capacity.toFixed(2)),
+        fill: Number(fill.toFixed(2)),
+        remaining: Number(Math.max(0, capacity - fill).toFixed(2)),
+        utilization: capacity > 0 ? Math.min(100, Math.round((fill / capacity) * 100)) : null,
+      });
+    }
+  }
+
+  const volumeBearing = Object.entries(statuses)
+    .filter(([status]) => countsTowardVolume(status))
+    .reduce((sum, [, n]) => sum + n, 0);
+
+  return {
+    generatedAt: new Date().toISOString(),
+    scope: {
+      // Stated in the payload so the document can print it. A reader must not
+      // have to assume whether this covers one operator or the whole facility.
+      basis: "submissions-by-this-operator",
+      description:
+        "Covers the disposal submissions made by this portal account, for its assigned facility.",
+      from: range.from || (firstDisposal ? firstDisposal.toISOString() : null),
+      to: range.to || (lastDisposal ? lastDisposal.toISOString() : null),
+    },
+    facility: facility
+      ? {
+          name: facility.lgu || facility.slfName || "",
+          province: facility.province || "",
+          barangay: facility.barangay || "",
+          category: facility.category || "",
+          ownership: facility.ownership || "",
+          status: facility.statusOfSLF || "",
+          permitToOperate: facility.permitToOperate || "",
+          permitToOperateValidity: facility.permitToOperateValidity || null,
+          dischargePermit: facility.dischargePermit || "",
+          dischargePermitValidity: facility.dischargePermitValidity || null,
+          eccNo: facility.eccNo || "",
+        }
+      : null,
+    totals: {
+      submissions: list.length,
+      // The count the volumes are derived from — without it a reader cannot tell
+      // why 26 submissions contributed nothing.
+      volumeBearingSubmissions: volumeBearing,
+      trucks,
+      totalTons: Number(totalTons.toFixed(2)),
+      totalM3: Number(totalM3.toFixed(2)),
+      residualTons: Number(residualTons.toFixed(2)),
+      hazardousTons: Number(hazardousTons.toFixed(2)),
+      firstDisposal: firstDisposal ? firstDisposal.toISOString() : null,
+      lastDisposal: lastDisposal ? lastDisposal.toISOString() : null,
+    },
+    statuses,
+    outstanding: {
+      unplacedEntries,
+      missingCapacityEntries,
+      revertedSubmissions: statuses.reverted || 0,
+    },
+    monthly: [...monthly.values()].sort((a, b) => a.month.localeCompare(b.month)).map((row) => ({
+      ...row,
+      tons: Number(row.tons.toFixed(2)),
+      residualTons: Number(row.residualTons.toFixed(2)),
+      hazardousTons: Number(row.hazardousTons.toFixed(2)),
+    })),
+    byHauler: rank(byHauler),
+    byClient: rank(byClient),
+    byCell: rank(byCell),
+    byWasteType: rank(byWasteType),
+    cells,
+  };
+}
+
+module.exports = { buildPortalReport, countsTowardVolume };

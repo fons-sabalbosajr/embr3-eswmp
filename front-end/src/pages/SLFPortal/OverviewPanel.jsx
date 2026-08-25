@@ -1379,7 +1379,7 @@ function OverviewPanel({
             <Tag color="geekblue" style={{ margin: 0 }}>{haulerDirectory.length}</Tag>
           </Space>
         }
-        width={900}
+        width={1200}
         footer={[<Button key="close" onClick={() => setHaulersOpen(false)}>Close</Button>]}
         destroyOnHidden
       >
@@ -1397,29 +1397,21 @@ function OverviewPanel({
             size="small"
             rowKey="key"
             dataSource={filteredHaulers}
-            pagination={{ pageSize: 8, size: "small", showSizeChanger: false, showTotal: (t) => `${t} hauler(s)` }}
+            pagination={{ pageSize: 10, size: "small", showSizeChanger: false, showTotal: (t) => `${t} hauler(s)` }}
             expandable={{
-              // Only offer the expander where there is something to expand — a
-              // hauler with a declared truck count but no plates on file has
-              // nothing to show, and an empty drawer reads as a loading failure.
               rowExpandable: (row) => row.vehicles.length > 0,
-              // A wrapped row of tags forced the eye to re-parse "plate · type ·
-              // capacity" for every vehicle. A fleet is a LIST of comparable
-              // things, so it gets aligned columns: plates read down one edge,
-              // capacities down another, and a missing capacity is visible as a
-              // gap in a column instead of a silently shorter tag.
               expandedRowRender: (row) => (
                 <Table
                   size="small"
                   rowKey="plate"
                   dataSource={row.vehicles}
-                  pagination={row.vehicles.length > 6 ? { pageSize: 6, size: "small" } : false}
+                  pagination={row.vehicles.length > 6 ? { pageSize: 15, size: "small" } : false}
                   showHeader={row.vehicles.length > 1}
                   columns={[
                     {
                       title: "Plate No.",
                       dataIndex: "plate",
-                      width: 130,
+                      width: 80,
                       render: (v) => (
                         <Text strong style={{ fontSize: 12, fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace" }}>
                           {v}
@@ -1430,7 +1422,7 @@ function OverviewPanel({
                       title: "Vehicle Type",
                       dataIndex: "type",
                       ellipsis: true,
-                      width: 200,
+                      width: 80,
                       render: (v) =>
                         v ? (
                           <Text style={{ fontSize: 12 }}>{v}</Text>
@@ -1441,8 +1433,8 @@ function OverviewPanel({
                     {
                       title: "Capacity",
                       dataIndex: "capacity",
-                      width: 100,
-                      align: "right",
+                      width: 50,
+                      align: "left",
                       render: (v, vehicle) =>
                         v ? (
                           <Text style={{ fontSize: 12, fontVariantNumeric: "tabular-nums" }}>
@@ -1477,6 +1469,7 @@ function OverviewPanel({
                 title: "Hauler",
                 dataIndex: "name",
                 ellipsis: true,
+                width: 200,
                 render: (v) => <Tooltip title={v}><Text strong style={{ fontSize: 12 }}>{v}</Text></Tooltip>,
               },
               {

@@ -39,6 +39,9 @@ export default function BasicInfoTab({
                             "companyMunicipality" in changed ||
                             "companyBarangay" in changed
                           ) {
+                            const province = provinces.find(
+                              (p) => p.code === vals.companyProvince,
+                            );
                             const parts = [
                               barangays.find(
                                 (b) => b.code === vals.companyBarangay,
@@ -46,9 +49,11 @@ export default function BasicInfoTab({
                               municipalities.find(
                                 (m) => m.code === vals.companyMunicipality,
                               )?.name,
-                              provinces.find(
-                                (p) => p.code === vals.companyProvince,
-                              )?.name,
+                              // NCR has no provinces, so the option offered in
+                              // that slot IS the region (see utils/psgcAddress).
+                              // Printing it would put the region in the address
+                              // twice — "…, National Capital Region, NCR".
+                              province?.hasNoProvinces ? null : province?.name,
                               regions.find((r) => r.code === vals.companyRegion)
                                 ?.name,
                             ].filter(Boolean);

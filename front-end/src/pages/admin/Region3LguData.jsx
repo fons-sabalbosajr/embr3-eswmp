@@ -19,10 +19,17 @@ import { isDeveloper as isDeveloperUser } from "../../utils/adminIdentity";
 
 const { Title, Text } = Typography;
 
+// Mirrors Region3Lgu.LGU_TYPES on the server. "Special Zone" covers freeports and
+// special economic zones — real client addresses that PSGC does not list as
+// political subdivisions, so they can never arrive through a PSGC import. The
+// nationally chartered ones (Clark Freeport Zone, Subic Bay Freeport Zone, the
+// Freeport Area of Bataan …) ship as built-ins in server/utils/specialZones and
+// need no encoding here; this type is how any that are missing get added.
 const LGU_TYPES = [
   { label: "Province", value: "Province" },
   { label: "City", value: "City" },
   { label: "Municipality", value: "Municipality" },
+  { label: "Special Zone", value: "Special Zone" },
 ];
 const STATUS_OPTIONS = [
   { label: "Active", value: "Active" },
@@ -36,6 +43,7 @@ const dupKey = (r) => (String(r.psgcCode || "").trim() ? `psgc:${String(r.psgcCo
 const lguTypeTag = (t) =>
   t === "Province" ? <Tag color="geekblue">Province</Tag>
   : t === "City" ? <Tag color="blue">City</Tag>
+  : t === "Special Zone" ? <Tag color="purple">Special Zone</Tag>
   : <Tag color="cyan">Municipality</Tag>;
 const statusTag = (s) => s === "Active" ? <Tag color="green">Active</Tag> : <Tag>Inactive</Tag>;
 
@@ -187,7 +195,7 @@ export default function Region3LguData({ isDark }) {
           const issues = [];
           if (!rec.name) issues.push("Missing name");
           if (!rec.province) issues.push("Missing province");
-          if (!["Province", "City", "Municipality"].includes(rec.lguType)) issues.push("Invalid type");
+          if (!LGU_TYPES.some((type) => type.value === rec.lguType)) issues.push("Invalid type");
           const k = dupKey(rec);
           let state = "new";
           if (issues.length) state = "invalid";

@@ -41,6 +41,10 @@ export default function WasteGeneratorPane({
   assignSelectedTrucksToCell,
   openUploadGuide,
   setActiveTab,
+  // Feature-tour anchors, owned by index.jsx (the tour lives there); this pane
+  // only attaches them to the elements the steps point at.
+  truckUploadRef,
+  truckTableRef,
 }) {
   return (
   <Form
@@ -156,21 +160,24 @@ export default function WasteGeneratorPane({
           >
             Add Entry
           </Button>
-          <Button
-            size="small"
-            icon={<UploadOutlined />}
-            style={{
-              background: "rgba(255,255,255,0.12)",
-              border: "1px solid rgba(255,255,255,0.3)",
-              color: "#fff",
-            }}
-            onClick={() => openUploadGuide("truck")}
-          >
-            Upload Excel/CSV
-          </Button>
+          <span ref={truckUploadRef}>
+            <Button
+              size="small"
+              icon={<UploadOutlined />}
+              style={{
+                background: "rgba(255,255,255,0.12)",
+                border: "1px solid rgba(255,255,255,0.3)",
+                color: "#fff",
+              }}
+              onClick={() => openUploadGuide("truck")}
+            >
+              Upload Excel/CSV
+            </Button>
+          </span>
         </Space>
       </div>
       <div
+        ref={truckTableRef}
         style={{
           padding: trucks.length === 0 ? 0 : "10px 12px",
         }}

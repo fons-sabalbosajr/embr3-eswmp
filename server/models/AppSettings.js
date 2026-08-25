@@ -230,6 +230,21 @@ const appSettingsSchema = new mongoose.Schema(
     hideRecordsBeforeOrEqualYear: { type: Number, default: null },
     hiddenRecordYears: { type: [Number], default: [] },
 
+    // Non-operational SLF visibility (App Settings → Data Maintenance).
+    // When on, a facility marked non-operational has its DATA hidden from Portal
+    // Submissions — baselines, submissions, summaries, reports, cell placements.
+    // The facility record itself stays visible in SLF Monitoring, which is where
+    // its status is set; hiding it there would remove the only way back.
+    // Defaults OFF: this hides real records from real reports, so it is an
+    // explicit choice rather than something that changes silently on upgrade.
+    // See utils/slfVisibility.
+    hideNonOperationalSlfEnabled: { type: Boolean, default: false },
+    // Facilities kept visible despite being non-operational — a closed site still
+    // under review whose records have to stay in the lists.
+    nonOperationalSlfExceptions: [
+      { type: mongoose.Schema.Types.ObjectId, ref: "SlfFacility" },
+    ],
+
     // Baseline/submission volume analysis
     excludePreBaselineDisposalFromCellFill: { type: Boolean, default: true },
     preBaselineDisposalDetectorEnabled: { type: Boolean, default: true },

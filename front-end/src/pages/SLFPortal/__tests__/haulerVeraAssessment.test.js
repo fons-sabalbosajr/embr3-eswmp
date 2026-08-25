@@ -192,22 +192,34 @@ test("VERA runs only on a CLEAN hauler preview", () => {
   assert.match(portal, /if \(cleanPreview\) \{/);
 });
 
-test("the hauler assessment is invoked deliberately, never from an effect", () => {
+test("the upload assessment is invoked deliberately, never from an effect", () => {
   // An effect keyed on preview data would re-fire on every re-render and could
   // issue an assessment per keystroke in the editable preview.
   assert.doesNotMatch(
     portal,
-    /useEffect\([^)]*runHaulerVeraAssessment/s,
+    /useEffect\([^)]*runUploadVeraAssessment/s,
     "no effect may start an assessment",
   );
-  // Two CALL sites: the clean-preview path and the explicit re-assess helper.
-  // (The definition reads `const runHaulerVeraAssessment = useCallback(`.)
+  // Three CALL sites: the clean hauler preview, the disposal preview, and the
+  // explicit re-assess helper. (The definition reads
+  // `const runUploadVeraAssessment = useCallback(`, which has no bare call paren.)
   assert.equal(
-    (portal.match(/runHaulerVeraAssessment\(/g) || []).length,
-    2,
-    "clean preview + the re-assess button, and nothing else",
+    (portal.match(/runUploadVeraAssessment\(/g) || []).length,
+    3,
+    "hauler preview + disposal preview + the re-assess button, and nothing else",
   );
-  assert.match(portal, /const runHaulerVeraAssessment = useCallback\(/);
+  assert.match(portal, /const runUploadVeraAssessment = useCallback\(/);
+});
+
+test("the disposal assessment runs when there is something to explain, not on every file", () => {
+  // The hauler upload asks VERA only about a CLEAN batch. The disposal upload is
+  // the opposite case — it is a failing batch that needs explaining — but an
+  // ordinary file that parsed cleanly and matched exactly still gets no
+  // commentary, because there is nothing to say about it.
+  assert.match(portal, /const worthExplaining =/);
+  assert.match(portal, /detection\.isSystemGenerated \|\|/);
+  assert.match(portal, /alignment\.needsEncoding\.length > 0/);
+  assert.match(portal, /if \(worthExplaining\) \{/);
 });
 
 test("a new upload discards the previous assessment", () => {
@@ -253,8 +265,13 @@ test("edited preview rows can be re-assessed against what is on screen NOW", () 
   assert.match(portal, /const reassessHaulerUpload = useCallback\(/);
   assert.match(
     portal,
-    /runHaulerVeraAssessment\(uploadPreviewRows, uploadPreviewSummary, haulers\)/,
+    /buildHaulerVeraContext\(\s*\n\s*uploadPreviewRows,\s*\n\s*uploadPreviewSummary,\s*\n\s*haulers,/,
     "re-assessment reads the CURRENT rows, not the originally parsed ones",
+  );
+  assert.match(
+    portal,
+    /buildDisposalVeraContext\(\s*\n\s*uploadPreviewRows,\s*\n\s*uploadAlignmentSummary,/,
+    "and the same holds for a disposal preview",
   );
   assert.match(modals, /Re-assess edited rows/);
 });

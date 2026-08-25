@@ -214,7 +214,95 @@ const KNOWLEDGE_BASE = [
     ],
     answer:
       "The portal accepts Excel (.xlsx, .xls) and CSV files for bulk accredited-hauler and transport-entry uploads. Rows are validated on import; fix any flagged rows before adding them. Every uploaded disposal row must include a Truck Capacity greater than 0.",
-    related: ["add-haulers", "vehicle-capacity", "validation-errors"],
+    related: ["add-haulers", "vehicle-capacity", "validation-errors", "system-generated-upload"],
+  },
+  {
+    id: "system-generated-upload",
+    category: "upload",
+    question:
+      "My system-generated disposal file is rejected — every row says the hauler is not assigned. Why?",
+    keywords: [
+      "system generated", "system-generated", "generated file", "weighbridge", "gate system",
+      "machine generated", "export from our system", "hauler is not assigned",
+      "not assigned under this slf", "client is not assigned", "every row fails",
+      "all rows rejected", "upload rejected", "same name", "hauler and client the same",
+      "alignment", "matched", "does not match baseline",
+    ],
+    answer:
+      "That is the usual symptom of a file exported from your own weighbridge or gate system rather than typed into the portal template. Those systems record ONE party per trip — whoever the ticket was issued to — and write that single value into both the Hauler and the Client column. The portal records a trip as Hauler → Client, so neither column matches your baseline as written and every row fails with the same message.\n\nThe upload preview now resolves this for you. When the file is uploaded it is checked against your accredited haulers and their clients, and a row is matched automatically when the answer is unambiguous — a combined \"HAULER - CLIENT\" value that can be split into a hauler and one of its own clients, or a client name served by exactly one of your accredited haulers. (A company that hauls its own waste needs nothing special: if it is on your baseline as a hauler listing itself as a client, the repeated name matches on its own.) Matched rows are tagged in the preview's Match column; hover the tag to see what the file said and what it was read as, and confirm it before you import.\n\nRows that still cannot be matched name a record your baseline does not have. The preview lists those names, and I list them grouped by hauler with the number of trips waiting on each. Add them under Baseline / Accredited Haulers — the hauler itself, or the client under its hauler — save the baseline update, then re-upload the same file unchanged.\n\nNothing is guessed: where two readings are equally possible the row is left blocked rather than attributed to the wrong hauler, because that would misstate that hauler's volumes and the served-LGU counts.",
+    related: ["upload-formats", "hauler-clients", "baseline-completeness", "add-haulers"],
+  },
+  {
+    id: "client-name-mismatch",
+    category: "upload",
+    question:
+      "The upload says my client is not on the hauler, but I can see it there. What is a client name mismatch?",
+    keywords: [
+      "client name mismatch", "mismatch", "not one of its clients", "i can see it there",
+      "client is not assigned", "client not on hauler", "spelled differently",
+      "different spelling", "same client twice", "duplicate client", "rename client",
+      "use the stored name", "closest match", "did you mean",
+    ],
+    answer:
+      "It means the baseline HAS that client, under a different spelling from the one in your file — for example \"GREEN RESCUE - MUNICIPALITY OF PULILAN\" stored against \"GREEN RESCUE - MUNICIPALITY OF PULILAN, BULACAN\" in the file. That is a different problem from a client the baseline is missing, and it has a different fix: adding it again would create a DUPLICATE that splits that client's disposal volumes across two records.\n\nThe upload preview detects this and offers you the choice, because only you know which spelling is right:\n\n• **Use the stored name** — rewrites this file's rows to the name already on the baseline. Your baseline is not changed; only this import.\n• **Rename it on the hauler** — corrects the client on the hauler, keeping its type, province and municipality. This is a baseline edit, so click Save Baseline Update afterwards.\n• **They are different — add as a new client** — only if the two names really are two different clients.\n\nOne choice settles every row in the file carrying that hauler and client, so a name repeated on forty trips is one decision. Nothing is applied automatically: a candidate must be the other name plus a qualifier, or share every word with it, and even then it is only ever offered for you to accept — attributing a trip to the wrong LGU is exactly what an import must not do on a guess.",
+    related: ["system-generated-upload", "upload-preview-columns", "hauler-clients"],
+  },
+  {
+    id: "upload-preview-columns",
+    category: "upload",
+    question: "What do the Match and Validation columns in the upload preview mean?",
+    keywords: [
+      "match column", "validation column", "preview column", "preview table",
+      "what does match mean", "exact", "matched", "name mismatch", "not on baseline",
+      "ambiguous", "issues", "preview", "upload preview", "waste type colour",
+      "waste type color", "capacity volume column", "hauler client column",
+    ],
+    answer:
+      "The preview grid shows, for every row, what will be imported and what is stopping it.\n\n• **Match** — how the row was resolved against your baseline. *Exact* means the file's hauler and client matched as written. *Matched* (gold) means the row was resolved for you — hover it to see exactly what the file said and what it was read as, and confirm before importing. *Name mismatch* means the baseline has that client under a different spelling, and the panel above the table offers the fix. *Not on baseline* means the record has to be encoded first.\n• **Validation** — every problem with the row, one per line, in words: what is wrong and what to do about it. A row with issues cannot be imported until they are cleared.\n\nHauler and Client share one column because a trip is attributed through Hauler → Client and they are validated as a pair. Truck Capacity, Volume and Unit share one because the unit applies to both figures and the plausibility check needs all three together. Waste types carry the same colours used on the cell gauges — Residual green, Hazardous red, Treated Hazardous orange — and are chosen from a list, since only those three values can be stored.",
+    related: ["system-generated-upload", "upload-formats", "validation-errors"],
+  },
+  {
+    id: "cell-placement-inheritance",
+    category: "submission",
+    question: "Why do I still have to choose a disposal cell for each vehicle?",
+    keywords: [
+      "choose a cell", "select a cell", "assign a disposal cell", "cell for each vehicle",
+      "already placed", "cell already", "why do i have to pick a cell", "per vehicle cell",
+      "assign to cell", "cell placement", "placed cell", "disposal cell required",
+    ],
+    answer:
+      "You should not have to, if the entry is already placed. When a transport entry has a disposal cell — set through **Assign to Cell**, carried in from an upload, or chosen on the entry itself — every vehicle on that entry now inherits that placement, and the form no longer asks you to choose one again.\n\nThe inheritance is real, not just a relaxed check: the placement is written onto each vehicle when you save. That matters because EMB's side reads the cell from each vehicle and ignores the entry-level one when vehicles are present — so a vehicle left without a cell was counted as unplaced waste, and the entry came back to you in Organize Cells even though you had already placed it.\n\nYou are still asked for a cell when nothing is placed yet. If a vehicle genuinely went to a different cell from the rest of the entry, set that vehicle's own cell — a placement of its own always wins over the inherited one. And if your facility currently has no cell that can accept waste, you are not blocked on choosing one; there is nothing to choose, and the Organize Cells step will ask once a cell reopens.",
+    related: ["organize-cells", "approved-unassigned", "required-to-submit"],
+  },
+  {
+    id: "baseline-completeness",
+    category: "haulers",
+    question:
+      "Which of my haulers or clients are incomplete — missing an address, a province, or clients?",
+    keywords: [
+      "incomplete", "missing address", "no address", "office address", "hauler address",
+      "client address", "missing province", "missing municipality", "no clients",
+      "hauler has no clients", "complete the baseline", "update addresses",
+      "which haulers", "data completeness", "encode address",
+    ],
+    answer:
+      "Ask me and I check your own baseline live and name the records, not just the count. I look at four things:\n\n• Haulers with no clients — the most disruptive. Every disposal row is attributed through Hauler → Client, so a hauler with an empty client list cannot have a single trip uploaded against it.\n• Haulers with no Office Address — fix in Baseline Data → Accredited Haulers → Edit → Office Address. Note that Office Address is an OPTIONAL column of the hauler bulk upload and a blank cell means \"keep what is stored\", so re-uploading a file that leaves it empty will not fill it in; the value has to be supplied in the file or typed in.\n• Clients with no Client Type, Province or City/Municipality — the province is what classifies a client within or outside Region 3, so these reach EMB as incomplete records and are left out of the regional figures.\n• Clients with no address.\n\nFor bulk work: open a hauler, use Export Client List, correct the file in Excel and upload it back through Upload Client List — the export and the uploader are the same format by construction. A blank cell never clears a stored value, so you can fill in just the column you are correcting.",
+    related: ["hauler-clients", "add-haulers", "special-economic-zones", "upload-formats"],
+  },
+  {
+    id: "special-economic-zones",
+    category: "haulers",
+    question:
+      "My client is inside Clark Freeport Zone — how do I encode a special economic zone as the municipality?",
+    keywords: [
+      "clark", "clark freeport", "freeport", "freeport zone", "subic", "subic bay",
+      "special economic zone", "ecozone", "economic zone", "peza", "sbma", "afab",
+      "freeport area of bataan", "apeco", "new clark city", "cannot find municipality",
+      "municipality not in the list", "zone", "cdc", "bcda",
+    ],
+    answer:
+      "Pick the zone itself. Special economic zones and freeports are listed in the client's City/Municipality picker under their host province, alongside the ordinary municipalities and labelled \"special economic zone\".\n\nThey have to be listed separately because they are not political subdivisions: Clark Freeport Zone straddles Angeles City, Mabalacat and Porac in Pampanga plus Bamban and Capas in Tarlac and is administered by a zone authority rather than by any of them, so it appears nowhere in the national PSGC list the picker is otherwise built from. A zone that spans two provinces is offered under both — pick the province the client is actually in.\n\nThe zones available include Clark Freeport Zone, Clark Special Economic Zone, New Clark City, Subic Bay Freeport Zone, the Freeport Area of Bataan, Bataan Economic Zone and the Aurora Pacific Economic Zone and Freeport, plus the major zones outside Region III. Do NOT substitute a neighbouring municipality for a client inside a zone: it puts the trip against an LGU that has no responsibility for the waste and distorts the served-LGU counts. If the zone you need is genuinely missing, email eswmr3@emb.gov.ph and EMB Region III can encode it.",
+    related: ["baseline-completeness", "hauler-clients"],
   },
   {
     id: "my-backlogs",

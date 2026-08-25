@@ -736,7 +736,7 @@ const normalizeComparableTextUncached = (value) =>
 // upload-session cache, not a long-term store.
 const NORMALIZE_CACHE_MAX = 20000;
 const normalizeCache = new Map();
-const normalizeComparableText = (value) => {
+export const normalizeComparableText = (value) => {
   if (typeof value !== "string") return normalizeComparableTextUncached(value);
   const cached = normalizeCache.get(value);
   if (cached !== undefined) return cached;
@@ -745,6 +745,42 @@ const normalizeComparableText = (value) => {
   normalizeCache.set(value, normalized);
   return normalized;
 };
+
+/**
+ * Every DISTINCT client of one hauler, de-duplicated by normalized name.
+ *
+ * One client is routinely stored in THREE places on the same hauler:
+ * privateSectorClients, clients, and each vehicle's selectedClients. Any code
+ * that reasons about "this hauler's clients" has to collapse those copies first
+ * or it will report one client as several — which is exactly the bug that made
+ * every uploaded row fail with "Client is duplicated or ambiguous".
+ */
+export const haulerClientPool = (hauler) => {
+  if (!hauler || hauler.ambiguous) return [];
+  const pool = [];
+  const seen = new Set();
+  [
+    ...(Array.isArray(hauler.privateSectorClients) ? hauler.privateSectorClients : []),
+    ...(Array.isArray(hauler.clients) ? hauler.clients : []),
+    ...(Array.isArray(hauler.vehicles)
+      ? hauler.vehicles.flatMap((vehicle) => vehicle.selectedClients || [])
+      : []),
+  ].forEach((client) => {
+    const identity = normalizeComparableText(
+      typeof client === "string" ? client : client?.clientName || client?.name,
+    );
+    if (!identity || seen.has(identity)) return;
+    seen.add(identity);
+    pool.push(client);
+  });
+  return pool;
+};
+
+/** Display name of a stored client record, whichever shape it is in. */
+export const clientDisplayName = (client) =>
+  cleanUploadText(
+    typeof client === "string" ? client : client?.clientName || client?.name,
+  );
 
 const clientLookupValues = (client) => {
   if (typeof client === "string") return [client];
@@ -778,29 +814,9 @@ export const findUploadHauler = (haulers = [], haulerName) => {
 export const findUploadClientForHauler = (hauler, clientValue) => {
   const target = normalizeComparableText(clientValue);
   if (!target || !hauler || hauler.ambiguous) return null;
-  // One client is routinely stored in THREE places on the same hauler:
-  // privateSectorClients, clients, and each vehicle's selectedClients. Counting
-  // those copies as separate records made every uploaded row report "Client is
-  // duplicated or ambiguous" and blocked the whole import. Collapse the pool by
-  // normalized client name first — the same identity key the server-side
-  // relationship check and GET /hauler-clients already use — so only genuinely
-  // different clients can be ambiguous.
-  const clientPools = [];
-  const seenClients = new Set();
-  [
-    ...(Array.isArray(hauler.privateSectorClients) ? hauler.privateSectorClients : []),
-    ...(Array.isArray(hauler.clients) ? hauler.clients : []),
-    ...(Array.isArray(hauler.vehicles)
-      ? hauler.vehicles.flatMap((vehicle) => vehicle.selectedClients || [])
-      : []),
-  ].forEach((client) => {
-    const identity = normalizeComparableText(
-      typeof client === "string" ? client : client?.clientName || client?.name,
-    );
-    if (!identity || seenClients.has(identity)) return;
-    seenClients.add(identity);
-    clientPools.push(client);
-  });
+  // De-duplicated by normalized name (see haulerClientPool) so only genuinely
+  // different clients can ever be reported as ambiguous.
+  const clientPools = haulerClientPool(hauler);
   const matches = clientPools.filter((client) =>
     clientLookupValues(client).some((value) => normalizeComparableText(value) === target),
   );

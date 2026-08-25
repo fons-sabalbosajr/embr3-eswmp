@@ -1,5 +1,6 @@
 const mongoose = require("mongoose");
 const { dateFieldYearVisibilityPlugin } = require("../utils/yearVisibility");
+const { createSlfVisibilityPlugin } = require("../utils/slfVisibility");
 const { isHazardousWasteType } = require("../utils/wasteCategories");
 
 const clientSchema = new mongoose.Schema(
@@ -535,6 +536,12 @@ dataSLFSchema.pre("save", function () {
 });
 
 dataSLFSchema.plugin(dateFieldYearVisibilityPlugin("dateOfDisposal"));
+// A non-operational facility's DATA is hidden across Portal Submissions when the
+// setting is on. Applied on the model, not per endpoint: the module spans seven
+// tabs and a dozen queries, and a hiding rule that is forgotten on one of them
+// fails silently — the symptom is data appearing, which looks normal.
+// See utils/slfVisibility; defaults to hiding nothing.
+dataSLFSchema.plugin(createSlfVisibilityPlugin({ field: "slfGenerator" }));
 
 const DataSLFModel = mongoose.model("DataSLF", dataSLFSchema, "data-slf");
 DataSLFModel.PSGC_PROVINCE_CODES = PSGC_PROVINCE_CODES;

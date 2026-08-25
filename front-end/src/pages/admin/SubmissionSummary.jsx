@@ -32,6 +32,10 @@ import {
   WarningOutlined,
   CheckCircleOutlined,
   ClockCircleOutlined,
+  UndoOutlined,
+  CloseCircleOutlined,
+  ExclamationCircleOutlined,
+  QuestionCircleOutlined,
   MessageOutlined,
 } from "@ant-design/icons";
 import dayjs from "dayjs";
@@ -314,6 +318,34 @@ function ensureSummaryTileStyles() {
       font-size: 20px;
       flex-shrink: 0;
     }
+    /* Compact variant — Summary Overview now fits every submission status AND
+       the waste breakdown on one line, which only works if each tile gives up
+       some of its padding. */
+    .summary-tile-icon.is-compact {
+      width: 34px;
+      height: 34px;
+      border-radius: 9px;
+      font-size: 15px;
+    }
+    /* The separator between the submission counts and the waste figures. It
+       stretches to the row rather than sitting at a fixed height, and turns
+       HORIZONTAL once the row wraps — a vertical rule between two stacked
+       groups points the wrong way. */
+    .summary-group-divider {
+      align-self: stretch;
+      width: 1px;
+      background: rgba(140, 140, 140, 0.28);
+      margin: 0 2px;
+      flex: 0 0 1px;
+    }
+    @media (max-width: 991px) {
+      .summary-group-divider {
+        width: 100%;
+        height: 1px;
+        flex-basis: 100%;
+        margin: 2px 0;
+      }
+    }
     .summary-tile-accent {
       position: absolute;
       top: 0;
@@ -343,11 +375,74 @@ function CountUp({ value = 0, style }) {
 
 // Compact metric used inside grouped summary cards (no card chrome of its own,
 // so several sit cleanly within one grouped Card).
-function MiniStat({ icon, color, label, children, subtitle }) {
-  return (
-    <div style={{ display: "flex", gap: 10, alignItems: "flex-start" }}>
+/**
+ * Every submission status, and how it is shown in Summary Overview.
+ *
+ * WHY A LIST RATHER THAN HARDCODED TILES. The card used to render Acknowledged
+ * and Pending only, while `totals.statuses` had been accumulating `reverted`,
+ * `rejected` and `revert_requested` all along. The counts were computed, correct,
+ * and invisible — so the card read "732 total, 705 acknowledged, 1 pending" and
+ * simply did not add up, with nothing to say where the other 26 had gone (they
+ * were reverted).
+ *
+ * Deriving the tiles from this list means a status can never be silently dropped
+ * again: anything here gets a tile, and anything NOT here is caught by the
+ * unaccounted check below rather than disappearing.
+ */
+const SUBMISSION_STATUS_TILES = [
+  {
+    key: "acknowledged",
+    label: "Acknowledged",
+    subtitle: "Reviewed & accepted",
+    color: "#389e0d",
+    icon: <CheckCircleOutlined />,
+  },
+  {
+    key: "pending",
+    label: "Pending",
+    subtitle: "Awaiting admin action",
+    color: "#d48806",
+    icon: <ClockCircleOutlined />,
+  },
+  {
+    key: "reverted",
+    label: "Reverted",
+    subtitle: "Sent back for correction",
+    color: "#cf1322",
+    icon: <UndoOutlined />,
+  },
+  {
+    key: "rejected",
+    label: "Rejected",
+    subtitle: "Not accepted",
+    color: "#8c8c8c",
+    icon: <CloseCircleOutlined />,
+  },
+  {
+    // A portal user has ASKED for a revert and no admin has acted yet. A distinct
+    // status server-side, so it needs its own tile or it lands in the
+    // unaccounted bucket. Hidden when zero — it is the rarest of the five and an
+    // always-zero tile is noise.
+    key: "revert_requested",
+    label: "Revert Requested",
+    subtitle: "Portal user awaiting approval",
+    color: "#722ed1",
+    icon: <ExclamationCircleOutlined />,
+    hideWhenZero: true,
+  },
+];
+
+/**
+ * `compact` shrinks the icon, the value and the label so a tile fits a shared
+ * row. The SUBTITLE is dropped rather than shrunk: at this size it is the first
+ * thing that becomes unreadable, and it is explanatory rather than load-bearing —
+ * so it moves to the tile's tooltip, where it is still reachable.
+ */
+function MiniStat({ icon, color, label, children, subtitle, compact = false }) {
+  const body = (
+    <div style={{ display: "flex", gap: compact ? 8 : 10, alignItems: "flex-start" }}>
       <span
-        className="summary-tile-icon"
+        className={`summary-tile-icon${compact ? " is-compact" : ""}`}
         style={{ background: `${color}1f`, color, flexShrink: 0 }}
       >
         {icon}
@@ -355,13 +450,20 @@ function MiniStat({ icon, color, label, children, subtitle }) {
       <div style={{ minWidth: 0 }}>
         <Text
           type="secondary"
-          style={{ fontSize: 12, display: "block", lineHeight: 1.2 }}
+          style={{
+            fontSize: compact ? 11 : 12,
+            display: "block",
+            lineHeight: 1.2,
+            whiteSpace: "nowrap",
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+          }}
         >
           {label}
         </Text>
         <div
           style={{
-            fontSize: 20,
+            fontSize: compact ? 17 : 20,
             fontWeight: 700,
             color,
             lineHeight: 1.25,
@@ -371,7 +473,7 @@ function MiniStat({ icon, color, label, children, subtitle }) {
         >
           {children}
         </div>
-        {subtitle && (
+        {subtitle && !compact && (
           <Text type="secondary" style={{ fontSize: 11 }}>
             {subtitle}
           </Text>
@@ -379,6 +481,7 @@ function MiniStat({ icon, color, label, children, subtitle }) {
       </div>
     </div>
   );
+  return compact && subtitle ? <Tooltip title={subtitle}>{body}</Tooltip> : body;
 }
 
 /**
@@ -1261,6 +1364,32 @@ export default function SubmissionSummary({ isDark }) {
     return acc;
   }, [filteredRows, tiles]);
 
+  // The status tiles actually rendered, and whatever the itemised ones fail to
+  // account for.
+  //
+  // `unaccountedSubmissions` is the safety net that makes this card honest: if
+  // the server ever reports a status these tiles do not name, the difference
+  // surfaces as "Other" instead of the total quietly exceeding the sum of its
+  // parts — which is precisely how 26 reverted submissions went missing here.
+  // Floored at zero: a per-facility filter can trim the rows the statuses come
+  // from, and a negative "Other" would be nonsense rather than informative.
+  const statusTiles = useMemo(
+    () =>
+      SUBMISSION_STATUS_TILES.map((tile) => ({
+        ...tile,
+        count: Number(totals.statuses?.[tile.key] || 0),
+      })).filter((tile) => !tile.hideWhenZero || tile.count > 0),
+    [totals.statuses],
+  );
+
+  const unaccountedSubmissions = useMemo(() => {
+    const itemised = SUBMISSION_STATUS_TILES.reduce(
+      (sum, tile) => sum + Number(totals.statuses?.[tile.key] || 0),
+      0,
+    );
+    return Math.max(0, Number(totals.submissions || 0) - itemised);
+  }, [totals.statuses, totals.submissions]);
+
   // Detail-heavy records (trucks, calendar) are loaded only when an SLF's
   // calendar is opened — not on initial page render.
   const openCalendar = useCallback(async (row) => {
@@ -1402,130 +1531,112 @@ export default function SubmissionSummary({ isDark }) {
                 Summary Overview
               </Text>
             ),
+            // ONE row: submission counts, a separator, then the waste figures.
+            // Everything sits DIRECTLY in the Summary Overview card — the two
+            // inner cards that used to wrap these groups were titled boxes inside
+            // an already-titled collapsible, costing a row of chrome each and
+            // splitting a single overview across two panels. Flat and compact,
+            // the whole summary reads on one line.
+            //
+            // Every status gets a tile (SUBMISSION_STATUS_TILES) plus an
+            // unaccounted check, so the figures always add up to Total
+            // Submissions. They previously did not: Acknowledged and Pending were
+            // the only statuses shown, and the reverted ones simply went missing
+            // from the arithmetic.
             children: (
-      <Row gutter={[12, 12]}>
-        {/* Group 1 — Submissions & Facilities (Total Submissions, Acknowledged,
-            Pending, Reporting SLFs grouped together, plus Truck Entries). */}
-        <Col xs={24} lg={15}>
-          <Card
-            size="small"
-            className="summary-tile"
-            title={
-              <Text strong style={{ fontSize: 13 }}>
-                <InboxOutlined /> Submissions &amp; Facilities
-              </Text>
-            }
-            style={{
-              borderRadius: 12,
-              height: "100%",
-              background: isDark ? "#1f1f1f" : "#fff",
-            }}
-            styles={{ body: { padding: "14px 16px" } }}
+      <div
+        style={{
+          display: "flex",
+          flexWrap: "wrap",
+          alignItems: "stretch",
+          gap: 12,
+          rowGap: 14,
+        }}
+      >
+        <MiniStat
+          compact
+          icon={<InboxOutlined />}
+          color="#13c2c2"
+          label="Total Submissions"
+          subtitle="All statuses combined"
+        >
+          <CountUp value={totals.submissions} />
+        </MiniStat>
+        {statusTiles.map((tile) => (
+          <MiniStat
+            compact
+            key={tile.key}
+            icon={tile.icon}
+            color={tile.color}
+            label={tile.label}
+            subtitle={tile.subtitle}
           >
-            {/* #2: single compact row on desktop — items flex-distribute evenly and
-                wrap cleanly on smaller screens (no oversized cards or large gaps). */}
-            <Row gutter={[10, 10]} wrap>
-              <Col flex="1 1 120px" style={{ minWidth: 0 }}>
-                <MiniStat
-                  icon={<InboxOutlined />}
-                  color="#13c2c2"
-                  label="Total Submissions"
-                  subtitle={`${totals.statuses.pending || 0} pending review`}
-                >
-                  <CountUp value={totals.submissions} />
-                </MiniStat>
-              </Col>
-              <Col flex="1 1 120px" style={{ minWidth: 0 }}>
-                <MiniStat
-                  icon={<CheckCircleOutlined />}
-                  color="#389e0d"
-                  label="Acknowledged"
-                  subtitle="Reviewed & accepted"
-                >
-                  <CountUp value={totals.statuses.acknowledged || 0} />
-                </MiniStat>
-              </Col>
-              <Col flex="1 1 120px" style={{ minWidth: 0 }}>
-                <MiniStat
-                  icon={<ClockCircleOutlined />}
-                  color="#d48806"
-                  label="Pending"
-                  subtitle="Awaiting admin action"
-                >
-                  <CountUp value={totals.statuses.pending || 0} />
-                </MiniStat>
-              </Col>
-              <Col flex="1 1 120px" style={{ minWidth: 0 }}>
-                <MiniStat
-                  icon={<BankOutlined />}
-                  color="#2f54eb"
-                  label="Reporting SLFs"
-                  subtitle="Active landfill facilities"
-                >
-                  <CountUp value={filteredRows.length} />
-                </MiniStat>
-              </Col>
-              <Col flex="1 1 120px" style={{ minWidth: 0 }}>
-                <MiniStat
-                  icon={<CarOutlined />}
-                  color="#fa8c16"
-                  label="Truck Entries"
-                  subtitle="Total disposal trips"
-                >
-                  <CountUp value={totals.trucks} />
-                </MiniStat>
-              </Col>
-            </Row>
-          </Card>
-        </Col>
-        {/* Group 2 — Waste Breakdown (Residual + Hazardous merged into one card).
-            Hazardous uses the safe formatter so a valid-but-empty value reads "0"
-            rather than "-". */}
-        <Col xs={24} lg={9}>
-          <Card
-            size="small"
-            className="summary-tile"
-            title={
-              <Text strong style={{ fontSize: 13 }}>
-                <ExperimentOutlined /> Waste Breakdown
-              </Text>
-            }
-            style={{
-              borderRadius: 12,
-              height: "100%",
-              background: isDark ? "#1f1f1f" : "#fff",
-            }}
-            styles={{ body: { padding: "14px 16px" } }}
+            <CountUp value={tile.count} />
+          </MiniStat>
+        ))}
+        {/* Only ever appears when the parts do not sum to the whole — a status
+            the server reports that this card does not know about yet. Without
+            it, such a status would go missing silently, which is the exact
+            defect this card had. */}
+        {unaccountedSubmissions > 0 && (
+          <MiniStat
+            compact
+            icon={<QuestionCircleOutlined />}
+            color="#fa541c"
+            label="Other"
+            subtitle="Status not itemised above"
           >
-            <Row gutter={[16, 16]}>
-              <Col xs={12}>
-                <MiniStat
-                  icon={<ExperimentOutlined />}
-                  color="#52c41a"
-                  label="Residual Waste"
-                  subtitle="Non-hazardous volume"
-                >
-                  <span style={{ fontSize: 17, fontWeight: 700 }}>
-                    {formatVolumeSafe(totals.residualM3, totals.residualTons, displayUnit)}
-                  </span>
-                </MiniStat>
-              </Col>
-              <Col xs={12}>
-                <MiniStat
-                  icon={<WarningOutlined />}
-                  color="#cf1322"
-                  label="Hazardous Waste"
-                  subtitle="Treated hazardous volume"
-                >
-                  <span style={{ fontSize: 17, fontWeight: 700 }}>
-                    {formatVolumeSafe(totals.hazardousM3, totals.hazardousTons, displayUnit)}
-                  </span>
-                </MiniStat>
-              </Col>
-            </Row>
-          </Card>
-        </Col>
-      </Row>
+            <CountUp value={unaccountedSubmissions} />
+          </MiniStat>
+        )}
+        <MiniStat
+          compact
+          icon={<BankOutlined />}
+          color="#2f54eb"
+          label="Reporting SLFs"
+          subtitle="Facilities with submissions"
+        >
+          <CountUp value={filteredRows.length} />
+        </MiniStat>
+        <MiniStat
+          compact
+          icon={<CarOutlined />}
+          color="#fa8c16"
+          label="Truck Entries"
+          // Named for what it actually counts. "Total disposal trips" was
+          // ambiguous against the per-vehicle rows inside each entry, which is a
+          // different (smaller) number.
+          subtitle="Transport entries in all submissions"
+        >
+          <CountUp value={totals.trucks} />
+        </MiniStat>
+
+        <span className="summary-group-divider" aria-hidden="true" />
+
+        {/* Waste Breakdown. Counts of submissions on the left of the separator,
+            VOLUMES on the right — the divider is what keeps two different units
+            of measure from reading as one continuous series of figures.
+            Hazardous uses the safe formatter so a valid-but-empty value reads
+            "0" rather than "-". */}
+        <MiniStat
+          compact
+          icon={<ExperimentOutlined />}
+          color="#52c41a"
+          label="Residual Waste"
+          subtitle="Non-hazardous volume"
+        >
+          {formatVolumeSafe(totals.residualM3, totals.residualTons, displayUnit)}
+        </MiniStat>
+        <MiniStat
+          compact
+          icon={<WarningOutlined />}
+          color="#cf1322"
+          label="Hazardous Waste"
+          subtitle="Treated hazardous volume"
+        >
+          {formatVolumeSafe(totals.hazardousM3, totals.hazardousTons, displayUnit)}
+        </MiniStat>
+      </div>
             ),
           },
         ]}
@@ -1592,9 +1703,9 @@ export default function SubmissionSummary({ isDark }) {
           rowKey="key"
           size="middle"
           pagination={{
-            defaultPageSize: 12,
+            defaultPageSize: 20,
             showSizeChanger: true,
-            pageSizeOptions: ["12", "25", "50", "100"],
+            pageSizeOptions: ["20", "30", "50", "100"],
             showTotal: (total) => `${total} SLF summary row(s)`,
           }}
           scroll={{ x: 1420 }}
