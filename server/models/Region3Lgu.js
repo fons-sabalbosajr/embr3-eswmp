@@ -4,7 +4,13 @@ const { normalizeName } = require("../utils/region3");
 // Region 3 (Central Luzon) LGU master data — the official province/city/
 // municipality list used to classify clients as within/outside Region 3.
 // Managed under Developer → App Settings → Region 3 LGU Data.
-const LGU_TYPES = ["Province", "City", "Municipality"];
+// "Special Zone" covers freeports and special economic zones (Clark Freeport
+// Zone, Subic Bay Freeport Zone, Freeport Area of Bataan …). They are real
+// addresses that PSGC does not list as subdivisions, so they cannot arrive via
+// the PSGC import — utils/specialZones ships the nationally chartered ones as
+// built-ins, and this type is how an admin encodes any that are missing.
+const LGU_TYPES = ["Province", "City", "Municipality", "Special Zone"];
+const MUNI_TYPES = ["Municipality", "City", "Special Zone"];
 
 const region3LguSchema = new mongoose.Schema(
   {
@@ -40,6 +46,11 @@ region3LguSchema.index({ normalizedName: 1, normalizedProvince: 1, lguType: 1 })
 region3LguSchema.index({ status: 1, lguType: 1 });
 
 region3LguSchema.statics.LGU_TYPES = LGU_TYPES;
+// The types that can be a client's City/Municipality value — i.e. everything a
+// municipality-level matcher may resolve to. Exported rather than re-spelled at
+// each call site: it was already duplicated across seven queries, which is how
+// "Special Zone" would otherwise have been added to some of them and not others.
+region3LguSchema.statics.MUNI_TYPES = MUNI_TYPES;
 region3LguSchema.statics.normalize = normalizeName;
 
 module.exports = mongoose.model("Region3Lgu", region3LguSchema);

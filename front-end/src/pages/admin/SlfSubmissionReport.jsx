@@ -20,6 +20,10 @@ import {
 import dayjs from "dayjs";
 import api from "../../api";
 import { convertVolume } from "../../utils/volumeUnits";
+// The ONE place that decides which announcement is current — the same resolver
+// the announcements admin screen uses, so the report cannot call a different one
+// "active" than the console does.
+import { selectLatestAnnouncement } from "../../utils/announcementLifecycle";
 
 const { Title, Text, Paragraph } = Typography;
 
@@ -283,6 +287,14 @@ export default function SlfSubmissionReport({
   const [removedOpKeys, setRemovedOpKeys] = useState(() => new Set());
   const [removedBaselineKeys, setRemovedBaselineKeys] = useState(() => new Set());
   const printRef = useRef(null);
+
+  // ONE announcement, selected once and read by both the on-screen report and the
+  // DOCX export — the two are required to agree, and had already drifted apart
+  // here once.
+  const latestAnnouncement = useMemo(
+    () => selectLatestAnnouncement(announcements),
+    [announcements],
+  );
 
   const removeOperator = (key) =>
     setRemovedOpKeys((prev) => new Set(prev).add(key));
@@ -790,15 +802,18 @@ export default function SlfSubmissionReport({
       // so it silently dropped the live announcements and portal/admin changes the
       // on-screen report shows. Mirror that section exactly — same sources, same
       // ordering, same slice limits — so PDF and DOCX cannot disagree.
-      const liveAnnouncements = (Array.isArray(announcements) ? announcements : [])
-        .filter((a) => a && (a.title || a.message))
-        .slice(0, 6)
-        .map((a) => {
-          const when = a.startAt || a.updatedAt;
-          return `${esc(a.title || "Announcement")}${a.message ? ` — ${esc(a.message)}` : ""}${
-            when ? ` (${esc(dayjs(when).format("MM/DD/YYYY"))})` : ""
-          }`;
-        });
+      // The SAME single announcement the on-screen report shows — one selector,
+      // so the two documents cannot state different things as current.
+      const liveAnnouncements = latestAnnouncement
+        ? [
+            (() => {
+              const when = latestAnnouncement.startAt || latestAnnouncement.updatedAt;
+              return `${esc(latestAnnouncement.title || "Announcement")}${
+                latestAnnouncement.message ? ` — ${esc(latestAnnouncement.message)}` : ""
+              }${when ? ` (${esc(dayjs(when).format("MM/DD/YYYY"))})` : ""}`;
+            })(),
+          ]
+        : [];
       const liveChanges = (Array.isArray(recentChanges) ? recentChanges : [])
         .slice(0, 10)
         .map((t) => {
@@ -811,8 +826,8 @@ export default function SlfSubmissionReport({
       const rawList = (items) =>
         `<ul style="font-size:12px;margin:4px 0 10px">${items.map((u) => `<li>${u}</li>`).join("")}</ul>`;
       const updatesHtml = `<h3 style="color:#2f54eb">Recent Announcements &amp; Changes</h3>
-        <h4 style="color:#722ed1;margin:6px 0 2px">Current Announcements</h4>${
-          liveAnnouncements.length ? rawList(liveAnnouncements) : emptyNote("No active portal announcements.")
+        <h4 style="color:#722ed1;margin:6px 0 2px">Current Announcement</h4>${
+          liveAnnouncements.length ? rawList(liveAnnouncements) : emptyNote("No active portal announcement.")
         }
         <h4 style="color:#1677ff;margin:6px 0 2px">Recent Portal / Admin Changes</h4>${
           liveChanges.length ? rawList(liveChanges) : emptyNote("No recent changes recorded.")
@@ -1281,24 +1296,20 @@ export default function SlfSubmissionReport({
             the static release notes. Reflects the current portal/admin state. */}
         <Section title="Recent Announcements & Changes">
           <div style={{ fontSize: 12, lineHeight: 1.7 }}>
-            <Text strong style={{ color: "#722ed1" }}>Current Announcements</Text>
-            {(Array.isArray(announcements) ? announcements : []).filter((a) => a && (a.title || a.message)).length ? (
-              <ul style={{ margin: "4px 0 10px", paddingLeft: 18 }}>
-                {(Array.isArray(announcements) ? announcements : [])
-                  .filter((a) => a && (a.title || a.message))
-                  .slice(0, 6)
-                  .map((a, i) => (
-                    <li key={`a${i}`}>
-                      <b>{a.title || "Announcement"}</b>
-                      {a.message ? ` — ${a.message}` : ""}
-                      {a.startAt || a.updatedAt ? (
-                        <Text type="secondary"> ({dayjs(a.startAt || a.updatedAt).format("MM/DD/YYYY")})</Text>
-                      ) : null}
-                    </li>
-                  ))}
-              </ul>
+            <Text strong style={{ color: "#722ed1" }}>Current Announcement</Text>
+            {latestAnnouncement ? (
+              <div style={{ margin: "4px 0 10px" }}>
+                <b>{latestAnnouncement.title || "Announcement"}</b>
+                {latestAnnouncement.message ? ` — ${latestAnnouncement.message}` : ""}
+                {latestAnnouncement.startAt || latestAnnouncement.updatedAt ? (
+                  <Text type="secondary">
+                    {" "}
+                    ({dayjs(latestAnnouncement.startAt || latestAnnouncement.updatedAt).format("MM/DD/YYYY")})
+                  </Text>
+                ) : null}
+              </div>
             ) : (
-              <div style={{ margin: "4px 0 10px" }}><Text type="secondary">No active portal announcements.</Text></div>
+              <div style={{ margin: "4px 0 10px" }}><Text type="secondary">No active portal announcement.</Text></div>
             )}
             <Text strong style={{ color: "#1677ff" }}>Recent Portal / Admin Changes</Text>
             {(Array.isArray(recentChanges) ? recentChanges : []).length ? (

@@ -851,14 +851,20 @@
   display: none;
 }
 
+/* 13px, not the 11px this started at. 11px is a density that only pays off when
+   a grid is scanned rather than read, and this one is READ — the operator is
+   checking hauler and client names against their own baseline and working through
+   full-sentence validation messages. The table already wraps and scrolls
+   sideways under a pinned header, so the extra size costs row height, not
+   content. Row height is the cheap axis here; legibility is not. */
 .slf-upload-preview-table .ant-table {
-  font-size: 11px;
+  font-size: 13px;
 }
 
 .slf-upload-preview-table .ant-table-thead > tr > th,
 .slf-upload-preview-table .ant-table-tbody > tr > td {
   padding: 6px 8px !important;
-  font-size: 11px;
+  font-size: 13px;
   line-height: 1.25;
   white-space: normal;
   overflow-wrap: anywhere;
@@ -880,7 +886,26 @@
 .slf-upload-preview-table .ant-input,
 .slf-upload-preview-table .ant-input-number,
 .slf-upload-preview-table .ant-input-number-input {
-  font-size: 11px;
+  font-size: 13px;
+}
+
+/* ── Tags wrap instead of widening their column ───────────────────────────────
+   `.ant-tag` is an inline-block with `white-space: nowrap`, so however wide its
+   content is, that is the minimum width of the cell — and the table then widens
+   the whole COLUMN to fit it, squeezing every other column and distorting the
+   grid. The cells themselves already wrap (rule above); the tags inside them did
+   not, which is what made one long validation message reflow the entire preview.
+
+   Belt and braces: the Validation column no longer puts sentences in a tag at
+   all, but any tag anywhere in this table is now incapable of forcing a column
+   wider than it was declared. */
+.slf-upload-preview-table .ant-tag {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  max-width: 100%;
+  height: auto;
+  line-height: 1.35;
 }
 
 /* ── Preview pickers wrap instead of ellipsizing ──────────────────────────────
@@ -893,7 +918,7 @@
    `padding-inline-end` reserves the arrow's lane so wrapped text never runs
    underneath it. */
 .slf-upload-preview-table .ant-select {
-  font-size: 11px;
+  font-size: 13px;
 }
 
 .slf-upload-preview-table .ant-select .ant-select-selector {
@@ -1011,7 +1036,7 @@
    than being truncated, so nothing it says is hidden and the preview table below
    stays reachable — the table is what the operator came here to check. */
 .slf-hauler-vera-comment {
-  font-size: 12.5px;
+  font-size: 13.5px;
   line-height: 1.55;
   white-space: pre-wrap;
   max-height: 180px;

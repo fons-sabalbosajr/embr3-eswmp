@@ -48,12 +48,27 @@ function sanitizeHistory(history) {
 }
 
 // ── Role context ─────────────────────────────────────────────────────────────
+// The vocabulary that makes a question read as a PORTAL question on its own
+// words, before retrieval is consulted. A word missing here means VERA answers
+// the out-of-scope reply to a question it has a knowledge entry for — the
+// failure is silent from the code's side and total from the user's.
+//
+// The second block was added with the client/address features: "client" was
+// absent entirely, so "which of my clients have no address?" only stayed in
+// scope when retrieval happened to rescue it, and "my client is inside Clark
+// Freeport Zone" was turned away outright.
 const PORTAL_SCOPE_TERMS = [
   "portal", "submit", "submission", "baseline", "hauler", "cell", "cells", "disposal",
   "waste", "capacity", "vehicle", "truck", "status", "pending", "reverted", "approved",
   "rejected", "upload", "excel", "csv", "review", "ticket", "support", "vera", "slf",
   "landfill", "organize", "validation", "error", "plate", "volume", "generator",
   "request", "edit", "revert", "acknowledged", "hazardous",
+  // Clients, their addresses, and the places those addresses name.
+  "client", "clients", "address", "addresses", "province", "municipality", "city",
+  "lgu", "region", "zone", "freeport", "ecozone", "clark", "subic", "bataan",
+  // Encoding and reconciling records.
+  "encode", "encoded", "incomplete", "complete", "mismatch", "duplicate", "placement",
+  "placed", "accredited",
 ];
 
 function isAdminRole(role) {

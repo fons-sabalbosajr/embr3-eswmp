@@ -15,6 +15,10 @@ const Region3Lgu = require("../models/Region3Lgu");
 // classified identically in both modules.
 const { matchClient } = require("../utils/lguMatch");
 const { getRegion3ProvinceSet, classifyRegion } = require("../utils/region3");
+// `slfName` on a baseline record is a SNAPSHOT of the facility's display name, so
+// a rename leaves older spellings behind and a name-grouped list shows one site
+// twice. This collapses those on the canonical facility id.
+const { mergeBaselineRowsByFacility } = require("../utils/slfIdentity");
 const { notifyAdmin, notifyPortal, refreshAdmin, refreshPortal } = require("../utils/socketEmit");
 const { cacheJson } = require("../middleware/cacheRoute");
 const {
@@ -2568,15 +2572,31 @@ router.get("/baselines", optionalAuth, cacheJson(baselinesCacheKey, 120000), asy
     });
     });
 
+    // The aggregation groups by slfName, which is a SNAPSHOT of the facility's
+    // display name — so a renamed facility (or one record typed with a different
+    // wording) appears as two rows for one site. Collapse on the canonical key,
+    // the facility id, and show the facility's current name. Exact, not
+    // heuristic: two distinct facilities cannot be merged by it.
+    const facilityIds = [...new Set(results.map((r) => String(r.slfGenerator || "")).filter(Boolean))];
+    const facilities = facilityIds.length
+      ? await SlfFacility.find({ _id: { $in: facilityIds } })
+          .select("lgu ownership")
+          .lean()
+          .catch(() => [])
+      : [];
+    const merged = mergeBaselineRowsByFacility(results, facilities).sort((a, b) =>
+      String(a.slfName || "").localeCompare(String(b.slfName || "")),
+    );
+
     const durationMs = Date.now() - startedAt;
     if (durationMs > 1500) {
       writeLog("warn", "baselines.slow", {
-        message: `GET /baselines took ${durationMs}ms for ${results.length} SLF`,
-        meta: { durationMs, slfCount: results.length, includeDummy },
+        message: `GET /baselines took ${durationMs}ms for ${merged.length} SLF`,
+        meta: { durationMs, slfCount: merged.length, includeDummy },
       });
     }
 
-    res.json(results);
+    res.json(merged);
   } catch (error) {
     if (error.statusCode) return res.status(error.statusCode).json({ message: error.message });
     res.status(500).json({ message: "Server error", error: error.message });
@@ -2842,7 +2862,7 @@ router.get("/hauler-clients/:slfGeneratorId", adminOnly, async (req, res) => {
     // Both lookups are done ONCE per request, not per row.
     const [region3ProvinceSet, masterMunis] = await Promise.all([
       getRegion3ProvinceSet(),
-      Region3Lgu.find({ status: "Active", lguType: { $in: ["Municipality", "City"] } })
+      Region3Lgu.find({ status: "Active", lguType: { $in: Region3Lgu.MUNI_TYPES } })
         .select("name normalizedName province normalizedProvince psgcCode aliases lguType")
         .lean(),
     ]);

@@ -42,3 +42,12 @@ docs/JWT_SECRET_ROTATION.md
 # copy would go stale the moment the import format changes. The README beside
 # them IS tracked: it documents the test environment and the order of use.
 docs/dev-test-data/*.xlsx
+
+# Real files shared by portal users for troubleshooting — weighbridge exports,
+# baseline workbooks and the like. These carry a facility's actual disposal
+# records (clients, plate numbers, volumes, ticket numbers), which is operational
+# data belonging to the SLF operator and has no business in the repo. Dropped
+# here to reproduce a bug, not to be versioned. The directory itself is kept so
+# the drop point survives a clean checkout.
+docs/files/*
+!docs/files/.gitkeep

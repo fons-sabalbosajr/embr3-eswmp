@@ -14,6 +14,7 @@
 // multiple | none | invalid.
 
 const { normalizeName } = require("./region3");
+const { specialZoneMasters } = require("./specialZones");
 
 // Extra normalization on top of region3.normalizeName: strip common LGU prefixes
 // ("city of", "municipality of", "mun. of", "brgy") and collapse whitespace so
@@ -69,13 +70,31 @@ function matchClient({ municipality, province, name } = {}, masters = []) {
   }
 
   // Restrict to the correct province (never cross-province).
-  const inProvince = masters.filter((m) => (m.normalizedProvince || normalizeName(m.province)) === prov);
+  //
+  // Special economic zones are appended to the province's pool as first-class
+  // candidates. A freeport is a real address but not a PSGC subdivision, so it is
+  // absent from the Region3Lgu masterlist by construction — without this, every
+  // client inside Clark Freeport Zone or the Freeport Area of Bataan resolved to
+  // "none" and was reported as an unmatched municipality forever. Merged BEFORE
+  // matching, not bolted on after, so a zone is held to exactly the same
+  // exact → alias → fuzzy rules and confidence levels as a municipality.
+  // Masterlist entries win a collision: an admin who encodes a zone by hand in
+  // Region 3 LGU Data is overriding the built-in, which is the point of encoding it.
+  const encoded = masters.filter((m) => (m.normalizedProvince || normalizeName(m.province)) === prov);
+  const encodedNames = new Set(encoded.map((m) => normMuni(m.normalizedName || m.name)));
+  const inProvince = [
+    ...encoded,
+    ...specialZoneMasters(province).filter((z) => !encodedNames.has(normMuni(z.name))),
+  ];
   if (inProvince.length === 0) {
     return { classification: "none", suggestions: [], reason: `No masterlist municipalities encoded for province "${province}".` };
   }
 
   const mk = (m, confidence, method, reason, score) => ({
     masterId: String(m._id), name: m.name, province: m.province || "", psgc: m.psgcCode || "",
+    // Surfaced so a caller can say "Clark Freeport Zone (special economic zone)"
+    // rather than presenting it as an ordinary municipality.
+    isSpecialZone: !!m.isSpecialZone || m.lguType === "Special Zone",
     confidence, method, reason, score: score == null ? undefined : Math.round(score * 100) / 100,
   });
 

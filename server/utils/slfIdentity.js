@@ -75,10 +75,125 @@ function isSameSlfSite(a, b) {
   return !!keyA && !!keyB && keyA === keyB;
 }
 
+/**
+ * Collapse baseline rows that are the SAME FACILITY under different name
+ * snapshots.
+ *
+ * `DataSLF.slfName` is a snapshot of the facility's display name at the moment
+ * the record was written, and the facility record is the source of truth. So any
+ * rename — or one record hand-typed with a different wording — leaves the older
+ * spelling behind, and a list grouped by name shows one facility twice. Observed
+ * live: Floridablanca Enviro Park had 58 records under
+ * "Pampanga - Floridablanca Enviro Park Sanitary Landfill (Cat 4) (Private)" and
+ * 1 under "Floridablanca Enviro Park - Category 4 Sanitary Landfill (Private)",
+ * both pointing at the SAME facility id.
+ *
+ * This groups on the canonical key — the facility `_id` — and falls back to the
+ * normalized name only for rows that cannot be resolved to a facility at all.
+ * It is therefore exact, not heuristic: no two distinct facilities can be merged
+ * by it, which is why it is safe to apply automatically (unlike slfDuplicateKey,
+ * which only nominates candidates for human review).
+ *
+ * The surviving row is renamed to the facility's CURRENT display name, so the
+ * list stops showing a spelling the facility no longer uses, and carries
+ * `mergedFromNames` so the older spellings remain visible rather than vanishing.
+ *
+ * @param {Array} rows        baseline rows, each with { slfName, slfGenerator, … }
+ * @param {Array} facilities  [{ _id, lgu, ownership }]
+ * @param {Function} [score]  row → number; the highest-scoring row survives.
+ *                            Defaults to "most complete baseline wins".
+ */
+function baselineCompletenessScore(row = {}) {
+  let score = 0;
+  if (Number(row.totalVolumeAccepted) > 0) score += 4;
+  if ((row.activeCellEntries || []).length) score += 2;
+  if ((row.closedCellEntries || []).length) score += 2;
+  if ((row.accreditedHaulers || []).length) score += 1;
+  return score;
+}
+
+function mergeBaselineRowsByFacility(rows = [], facilities = [], score = baselineCompletenessScore) {
+  const list = Array.isArray(rows) ? rows : [];
+  if (!list.length) return list;
+
+  const byId = new Map();
+  // A name may legitimately belong to two facilities (same LGU, two sites). Such
+  // a name resolves to nothing rather than to an arbitrary one of them — an
+  // ambiguous match is exactly where an automatic merge would be wrong.
+  const byName = new Map();
+  const ambiguous = new Set();
+  (Array.isArray(facilities) ? facilities : []).forEach((facility) => {
+    const id = String(facility?._id || "");
+    if (!id) return;
+    byId.set(id, facility);
+    [facilityDisplayName(facility), facility?.lgu].forEach((name) => {
+      const key = normalizeSlfName(name);
+      if (!key) return;
+      if (byName.has(key) && byName.get(key) !== id) ambiguous.add(key);
+      else byName.set(key, id);
+    });
+  });
+  ambiguous.forEach((key) => byName.delete(key));
+
+  const groupKeyOf = (row) => {
+    const generatorId = String(row?.slfGenerator || "");
+    if (generatorId && byId.has(generatorId)) return `id:${generatorId}`;
+    // A row whose generator is set but points at a facility we did not load is
+    // still keyed by that id — two such rows are still the same facility.
+    if (generatorId) return `id:${generatorId}`;
+    const byNameId = byName.get(normalizeSlfName(row?.slfName));
+    return byNameId ? `id:${byNameId}` : `name:${normalizeSlfName(row?.slfName)}`;
+  };
+
+  const groups = new Map();
+  list.forEach((row) => {
+    const key = groupKeyOf(row);
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(row);
+  });
+
+  const out = [];
+  groups.forEach((members, key) => {
+    if (members.length === 1) {
+      out.push(members[0]);
+      return;
+    }
+    const winner = members.reduce((best, row) => {
+      const delta = score(row) - score(best);
+      if (delta !== 0) return delta > 0 ? row : best;
+      // Same completeness → the most recently updated record is the live one.
+      return new Date(row.lastUpdated || 0) > new Date(best.lastUpdated || 0) ? row : best;
+    }, members[0]);
+
+    const facility = key.startsWith("id:") ? byId.get(key.slice(3)) : null;
+    const canonicalName = facility ? facilityDisplayName(facility) : winner.slfName;
+    out.push({
+      ...winner,
+      slfName: canonicalName || winner.slfName,
+      // An update request or approval on ANY of the merged records still applies
+      // to the facility, so the flags are unioned rather than taken from the
+      // winner — dropping one would silently hide a pending request.
+      baselineUpdateRequested: members.some((row) => row.baselineUpdateRequested),
+      baselineUpdateApproved: members.some((row) => row.baselineUpdateApproved),
+      mergedFromNames: [
+        ...new Set(
+          members
+            .map((row) => String(row.slfName || "").trim())
+            .filter((name) => name && name !== canonicalName),
+        ),
+      ],
+    });
+  });
+
+  return out;
+}
+
 module.exports = {
   buildSlfDisplayName,
   facilityDisplayName,
   normalizeSlfName,
   slfDuplicateKey,
   isSameSlfSite,
+  baselineCompletenessScore,
+  mergeBaselineRowsByFacility,
 };

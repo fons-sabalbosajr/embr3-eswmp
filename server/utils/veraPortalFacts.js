@@ -29,7 +29,7 @@ const { isDemoRequest, MASK } = require("./demoMode");
 /** Topics this provider can ground. Deliberately narrow — a miss just means
  *  VERA answers from the knowledge base, which is the old behaviour. */
 const FACTS_QUESTION_RE =
-  /\b(permit|permits|pto|ecc|discharge|hazwaste|hazardous waste id|valid(ity|ity date)?|expir\w*|cell|cells|capacity|utili[sz]ation|full|remaining|baseline|submission|submissions|submitted|pending|approved|rejected|reverted|ticket|tickets|support|notification|notifications|hauler|haulers|client|clients|dashboard|summary|status)\b/i;
+  /\b(permit|permits|pto|ecc|discharge|hazwaste|hazardous waste id|valid(ity|ity date)?|expir\w*|cell|cells|capacity|utili[sz]ation|full|remaining|baseline|submission|submissions|submitted|pending|approved|rejected|reverted|ticket|tickets|support|notification|notifications|hauler|haulers|client|clients|address|addresses|province|municipality|incomplete|encoded|upload|uploads|dashboard|summary|status)\b/i;
 
 function wantsPortalFacts(message) {
   return FACTS_QUESTION_RE.test(String(message || ""));
@@ -64,6 +64,100 @@ const num = (value) => {
 /** Volumes/capacities are confidential; counts, statuses and dates are not. */
 const vol = (value, masked) =>
   masked ? MASK : Number(num(value).toFixed(2)).toLocaleString();
+
+const trimmed = (value) => String(value ?? "").trim();
+
+// A stored PSGC identifier, not a place name. The portal's address cascade saves
+// the CODE in province/municipality and the readable name alongside it; a record
+// carrying only the code is located but not readable, and VERA must not quote
+// "0354010000" back to an operator as their municipality.
+const isCodeLike = (value) => /^[0-9]{4,}$/.test(trimmed(value));
+const placeName = (name, code) => trimmed(name) || (isCodeLike(code) ? "" : trimmed(code));
+
+/**
+ * What the facility's OWN baseline is missing, so VERA can answer "which of my
+ * haulers have no address?" and "why is my upload rejecting every row?" from
+ * facts instead of from general advice.
+ *
+ * Mirrors the rule in front-end/src/pages/SLFPortal/baselineCompleteness.js.
+ * The two are separate implementations of one definition — the browser derives it
+ * from the baseline it has loaded, this derives it from the database — so a
+ * change to what "incomplete" means has to be made in both, and any drift shows
+ * up as VERA and the portal panel disagreeing about the same facility.
+ *
+ * A hauler with NO CLIENTS is called out first: every disposal row is attributed
+ * through Hauler → Client, so such a hauler cannot have a single trip imported,
+ * and that is the single most common cause of a whole upload being rejected.
+ */
+function summarizeBaselineGaps(baselines = []) {
+  // accreditedHaulers is duplicated onto every one of an SLF's baseline records
+  // (see routes/dataSLF#getAuthoritativeHaulersForEntry), so the same hauler
+  // appears many times over. Collapsed by name, newest record first, so each
+  // hauler is judged once and on its most recent state.
+  const byName = new Map();
+  baselines.forEach((baseline) => {
+    (baseline.accreditedHaulers || []).forEach((hauler) => {
+      const key = trimmed(hauler?.haulerName).toLowerCase();
+      if (!key || byName.has(key)) return;
+      byName.set(key, hauler);
+    });
+  });
+
+  const haulersMissingAddress = [];
+  const haulersWithoutClients = [];
+  const clientsMissingLocation = [];
+  const clientsMissingAddress = [];
+  let clientCount = 0;
+
+  byName.forEach((hauler) => {
+    const name = trimmed(hauler.haulerName) || "(unnamed hauler)";
+    if (!trimmed(hauler.officeAddress)) haulersMissingAddress.push(name);
+
+    const seen = new Set();
+    const clients = [];
+    [
+      ...(Array.isArray(hauler.privateSectorClients) ? hauler.privateSectorClients : []),
+      ...(Array.isArray(hauler.clients) ? hauler.clients : []),
+      ...(Array.isArray(hauler.vehicles)
+        ? hauler.vehicles.flatMap((vehicle) => vehicle.selectedClients || [])
+        : []),
+    ].forEach((entry) => {
+      const client = typeof entry === "string" ? { clientName: entry } : entry || {};
+      const key = trimmed(client.clientName).toLowerCase();
+      if (!key || seen.has(key)) return;
+      seen.add(key);
+      clients.push(client);
+    });
+
+    if (clients.length === 0) {
+      haulersWithoutClients.push(name);
+      return;
+    }
+    clientCount += clients.length;
+    clients.forEach((client) => {
+      const label = `${name} → ${trimmed(client.clientName)}`;
+      const province = placeName(client.provinceName, client.province);
+      const municipality = placeName(client.municipalityName, client.municipality);
+      const missing = [];
+      if (!trimmed(client.clientType)) missing.push("type");
+      if (!province) missing.push("province");
+      if (!municipality) missing.push("municipality");
+      if (missing.length) clientsMissingLocation.push(`${label} (no ${missing.join(", ")})`);
+      if (!trimmed(client.clientAddress) && !trimmed(client.address)) {
+        clientsMissingAddress.push(label);
+      }
+    });
+  });
+
+  return {
+    haulerCount: byName.size,
+    clientCount,
+    haulersMissingAddress,
+    haulersWithoutClients,
+    clientsMissingLocation,
+    clientsMissingAddress,
+  };
+}
 
 function permitRow(label, number, validity, status) {
   const hasAny = number || validity || String(status || "").trim();
@@ -106,8 +200,8 @@ async function getPortalFacts(portalUser) {
   const slfIds = Array.isArray(portalUser.assignedSlf) ? portalUser.assignedSlf : [];
   if (!slfIds.length) return null;
 
-  // One round trip for all four sources rather than four sequential awaits.
-  const [facility, submissions, tickets, unreadNotifications] = await Promise.all([
+  // One round trip for all five sources rather than five sequential awaits.
+  const [facility, submissions, tickets, unreadNotifications, baselines] = await Promise.all([
     SlfFacility.findById(slfIds[0])
       .select(
         "lgu province barangay statusOfSLF numberOfCell cellNames cellStatuses cellCapacities cellFillValues cellTypes cellCapacityUnits " +
@@ -126,6 +220,19 @@ async function getPortalFacts(portalUser) {
       recipient: portalUser.email,
       read: { $ne: true },
     }).catch(() => 0),
+    // Only the records that actually carry haulers, newest first — the array is
+    // duplicated across an SLF's baselines and is by far the largest field on the
+    // document, so this reads the fewest of them that can answer the question.
+    DataSLF.find({
+      slfGenerator: { $in: slfIds },
+      deletedAt: null,
+      "accreditedHaulers.0": { $exists: true },
+    })
+      .select("accreditedHaulers")
+      .sort({ createdAt: -1 })
+      .limit(25)
+      .lean()
+      .catch(() => []),
   ]);
 
   if (!facility) return null;
@@ -183,6 +290,7 @@ async function getPortalFacts(portalUser) {
     tickets: ticketCounts,
     ticketTotal: (tickets || []).length,
     unreadNotifications: num(unreadNotifications),
+    baseline: summarizeBaselineGaps(baselines || []),
     masked,
   };
 
@@ -228,6 +336,54 @@ function factsToPromptBlock(facts) {
     .join(", ");
   lines.push(`Support tickets (${facts.ticketTotal} total): ${tix || "none"}`);
   lines.push(`Unread notifications: ${facts.unreadNotifications}`);
+
+  // Baseline completeness. Names are listed, not just counted, because the whole
+  // value of this block is that VERA can answer "WHICH haulers have no address?"
+  // — a count sends the operator back to the table to work it out themselves.
+  // Capped so a large fleet cannot crowd out the rest of the prompt.
+  const baseline = facts.baseline;
+  if (baseline) {
+    const list = (values, cap = 12) =>
+      values.slice(0, cap).join("; ") +
+      (values.length > cap ? ` (+${values.length - cap} more)` : "");
+    lines.push(
+      `Baseline: ${baseline.haulerCount} accredited hauler(s), ${baseline.clientCount} client record(s).`,
+    );
+    if (baseline.haulersWithoutClients.length) {
+      lines.push(
+        `  - ${baseline.haulersWithoutClients.length} hauler(s) have NO clients encoded: ${list(baseline.haulersWithoutClients)}. ` +
+          "Every disposal row is attributed through Hauler → Client, so no trip can be uploaded for these until a client is added under them.",
+      );
+    }
+    if (baseline.haulersMissingAddress.length) {
+      lines.push(
+        `  - ${baseline.haulersMissingAddress.length} hauler(s) have NO office address: ${list(baseline.haulersMissingAddress)}. ` +
+          "Fixed in Baseline Data → Accredited Haulers → Edit → Office Address.",
+      );
+    }
+    if (baseline.clientsMissingLocation.length) {
+      lines.push(
+        `  - ${baseline.clientsMissingLocation.length} client(s) are missing type/province/municipality: ${list(baseline.clientsMissingLocation)}. ` +
+          "The province is what classifies a client within or outside Region 3, so these are reported to EMB as incomplete.",
+      );
+    }
+    if (baseline.clientsMissingAddress.length) {
+      lines.push(
+        `  - ${baseline.clientsMissingAddress.length} client(s) have no address: ${list(baseline.clientsMissingAddress)}.`,
+      );
+    }
+    if (
+      !baseline.haulersWithoutClients.length &&
+      !baseline.haulersMissingAddress.length &&
+      !baseline.clientsMissingLocation.length &&
+      !baseline.clientsMissingAddress.length
+    ) {
+      lines.push("  - No gaps: every hauler has an office address and clients, and every client has a location.");
+    }
+    lines.push(
+      "  - Note on special economic zones: Clark Freeport Zone, Subic Bay Freeport Zone, the Freeport Area of Bataan and similar zones ARE selectable as a client's City/Municipality — they appear in the picker under their host province alongside the ordinary municipalities. A client inside one should be encoded with the zone itself, not with a neighbouring municipality.",
+    );
+  }
 
   if (facts.masked) {
     lines.push(

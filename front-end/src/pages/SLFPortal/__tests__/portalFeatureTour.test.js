@@ -62,13 +62,17 @@ test("the version is a marker that can be compared, not a boolean", () => {
 });
 
 // ── VERA's half of the walkthrough ──────────────────────────────────────────
+// The entries THIS release's tour must be able to reach. Update this set when
+// PORTAL_FEATURE_TOUR_VERSION is bumped — that is the point of the test: a tour
+// step whose question lands on the previous release's material walks the user
+// through a workflow that no longer exists.
 const NEW_ENTRY_IDS = new Set([
-  "hauler-upload-columns",
-  "hauler-upload-rows",
-  "hauler-export-roundtrip",
-  "hauler-client-list-upload",
-  "vera-upload-assessment",
-  "whats-new-haulers",
+  "baseline-completeness",
+  "special-economic-zones",
+  "system-generated-upload",
+  "client-name-mismatch",
+  "upload-preview-columns",
+  "cell-placement-inheritance",
 ]);
 
 test("VERA's knowledge base actually carries the new workflow", () => {
@@ -107,10 +111,11 @@ test("asking about the change in plain words finds it", () => {
   // The phrasing a portal user would actually type, rather than the tour's own
   // wording — which is the only phrasing the tour itself guarantees.
   for (const question of [
-    "what changed in accredited haulers?",
-    "how many rows do I need if a hauler has multiple clients?",
-    "how do I upload a client list for one hauler?",
-    "what does vera check before I import haulers?",
+    "which of my haulers have no address?",
+    "my client is in clark freeport zone, what municipality do I pick?",
+    "why is my whole disposal upload being rejected?",
+    "the client is already on the hauler but the upload says it is not",
+    "do I have to pick a disposal cell if the entry is already placed?",
   ]) {
     const ids = idsFor(question);
     assert.ok(
@@ -199,10 +204,40 @@ test("the panel its steps point at is opened first", () => {
   assert.match(portal, /activeKey=\{baselineSections\}/);
 });
 
-test("closing the tour at any step counts as seen", () => {
-  // A user who has read enough to close it must not be interrupted again.
-  assert.match(portal, /onClose=\{markFeatureTourSeen\}/);
+test("closing is dismissal, and only a deliberate act records the release as seen", () => {
+  // Dismissing something in the middle of a task is not a decision never to see
+  // it again. So CLOSING (X / Esc / clicking away) closes for now only, and the
+  // tour may return on the next sign-in.
+  assert.match(
+    portal,
+    /onClose=\{\(\) => setFeatureTourOpen\(false\)\}/,
+    "closing must not record the version as seen",
+  );
+  // Two acts do record it: finishing the last step…
   assert.match(portal, /onFinish=\{markFeatureTourSeen\}/);
+  // …and the explicit opt-out, which every step offers.
+  assert.match(portal, /Don&apos;t show this again/);
+  assert.match(portal, /onClick=\{markFeatureTourSeen\}/);
+});
+
+test("the opt-out is on EVERY step, not only the last", () => {
+  // It is rendered inside the shared step-description mapper rather than being
+  // appended to one step, so a user who has seen enough on step 1 can say so.
+  const mapper = portal.slice(
+    portal.indexOf("return PORTAL_FEATURE_TOUR_STEPS.map((step) => ({"),
+    portal.indexOf("}, [askVeraAboutFeature, markFeatureTourSeen]);"),
+  );
+  assert.match(mapper, /Don&apos;t show this again/);
+  assert.match(mapper, /Ask VERA about this/);
+});
+
+test("steps that live on another tab switch to it before anchoring", () => {
+  // The Data Entry tabs render lazily. Advancing straight to a step whose target
+  // is not mounted anchors it to nothing, and antd centres a targetless step —
+  // which reads as a broken tour.
+  assert.match(portal, /tab: targets\[step\.key\]\?\.tab \|\| "baseline"/);
+  assert.match(portal, /if \(tab && tab !== activeTab\) \{/);
+  assert.match(portal, /setTimeout\(\(\) => setFeatureTourCurrent\(next\), 160\);/);
 });
 
 test("Ask VERA hands off with the question already asked", () => {

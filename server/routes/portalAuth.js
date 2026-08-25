@@ -26,6 +26,9 @@ const {
   isEmailDeliverable,
 } = require("../utils/email");
 const { notifyAdmin } = require("../utils/socketEmit");
+// Report arithmetic lives outside the route: the route's job is identity, the
+// module's is aggregation, and the latter is then testable without a database.
+const { buildPortalReport } = require("../utils/portalReport");
 const Notification = require("../models/Notification");
 const {
   resolvePortalContext,
@@ -1235,6 +1238,92 @@ router.get("/my-submissions/:id", async (req, res) => {
 
     const { cellsAssigned, unplacedCount, missingCapacityCount } = summarizeCellAssignment(submission);
     res.json({ ...submission, cellsAssigned, unplacedCount, missingCapacityCount });
+  } catch (error) {
+    return sendPortalContextError(res, error);
+  }
+});
+
+/**
+ * The portal user's OWN disposal report.
+ *
+ * Identity is resolved from the token by resolvePortalContext, exactly as
+ * /my-submissions does — a `targetPortalUserId`/`email` naming anyone else is
+ * refused there and audited, so this endpoint cannot be pointed at another
+ * operator. The query then filters on that resolved email, which means the
+ * scoping is a property of the query rather than a check that could be forgotten.
+ *
+ * `trucks` IS selected here, unlike the list endpoint that drops it: the
+ * per-hauler, per-client and per-cell breakdowns are the point of a report, and
+ * they are aggregated SERVER-side (see utils/portalReport) so the browser is sent
+ * a summary rather than every transport row.
+ *
+ * `from` / `to` are optional ISO dates. They narrow by DISPOSAL date, not by
+ * submission date, because that is the period an operator reports on.
+ */
+router.get("/my-report", async (req, res) => {
+  try {
+    const ctx = await resolvePortalContext(req, {
+      targetPortalUserId: req.query.targetPortalUserId,
+      targetEmail: req.query.email,
+    });
+    const user = ctx.portalUser;
+
+    const DataSLF = require("../models/DataSLF");
+    const SlfFacility = require("../models/SlfFacility");
+
+    const range = {};
+    const from = req.query.from ? new Date(req.query.from) : null;
+    const to = req.query.to ? new Date(req.query.to) : null;
+    const dateFilter = {};
+    if (from && !Number.isNaN(from.getTime())) {
+      dateFilter.$gte = from;
+      range.from = from.toISOString();
+    }
+    if (to && !Number.isNaN(to.getTime())) {
+      dateFilter.$lte = to;
+      range.to = to.toISOString();
+    }
+
+    const query = {
+      submittedBy: user.email,
+      deletedAt: null,
+      // Baseline-only containers carry no transport entries and are not
+      // submissions — the same exclusion /my-submissions applies.
+      "trucks.0": { $exists: true },
+    };
+    if (Object.keys(dateFilter).length) query.dateOfDisposal = dateFilter;
+
+    const assignedIds = Array.isArray(user.assignedSlf)
+      ? user.assignedSlf.filter(Boolean)
+      : user.assignedSlf
+        ? [user.assignedSlf]
+        : [];
+
+    const [submissions, facility] = await Promise.all([
+      DataSLF.find(query)
+        .select(
+          "idNo submissionId status dateOfDisposal createdAt baselineUnit " +
+            "totalVolumeM3 totalVolumeTons residualVolumeTons hazardousVolumeTons trucks",
+        )
+        .sort({ dateOfDisposal: -1 })
+        .lean(),
+      assignedIds.length
+        ? SlfFacility.findById(assignedIds[0])
+            .select(
+              "lgu slfName province barangay category ownership statusOfSLF numberOfCell " +
+                "cellNames cellStatuses cellCapacities cellFillValues cellTypes cellCapacityUnits " +
+                "permitToOperate permitToOperateValidity dischargePermit dischargePermitValidity eccNo",
+            )
+            .lean()
+            .catch(() => null)
+        : null,
+    ]);
+
+    const report = buildPortalReport(submissions, { facility, range });
+    res.json({
+      ...report,
+      preparedFor: { name: user.name || "", email: user.email, facility: report.facility?.name || "" },
+    });
   } catch (error) {
     return sendPortalContextError(res, error);
   }

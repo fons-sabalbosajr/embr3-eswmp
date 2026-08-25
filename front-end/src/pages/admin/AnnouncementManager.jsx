@@ -43,8 +43,11 @@ import dayjs from "dayjs";
 import Swal from "sweetalert2";
 import api from "../../api";
 import ResponsiveTable from "./shared/ResponsiveTable";
+// Lifecycle RULES (pure, testable) and PRESENTATION (antd tags + icons) live in
+// two modules, so the rules can be imported by the test suite — which runs on
+// plain Node and cannot load JSX.
+import { resolveAnnouncementStatus } from "../../utils/announcementLifecycle";
 import {
-  resolveAnnouncementStatus,
   statusMeta,
   typeMeta,
   priorityMeta,

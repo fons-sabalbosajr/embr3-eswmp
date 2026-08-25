@@ -224,7 +224,7 @@ async function computeAdminFindings() {
   // ── Unlinked LGU records (reconciliation) ──────────────────────────────────
   try {
     const [masters, clients] = await Promise.all([
-      Region3Lgu.find({ status: "Active", lguType: { $in: ["Municipality", "City"] } })
+      Region3Lgu.find({ status: "Active", lguType: { $in: Region3Lgu.MUNI_TYPES } })
         .select("name normalizedName province normalizedProvince municipalityCity psgcCode lguType aliases").lean(),
       SlfClient.find({ deletedAt: null, isCanonical: true, mergedInto: null, status: "Active", isDummy: { $ne: true }, type: "LGU" })
         .select("name municipalityCity province").lean(),

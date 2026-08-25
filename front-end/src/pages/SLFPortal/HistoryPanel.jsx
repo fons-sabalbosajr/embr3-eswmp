@@ -1,8 +1,9 @@
 import { useMemo, useState } from "react";
 import { Card, Space, Typography, Button, Table, Empty, Select, DatePicker, Input, Tag, Badge, Tooltip, Grid } from "antd";
-import { HistoryOutlined, ReloadOutlined, SearchOutlined, WarningOutlined, ClearOutlined } from "@ant-design/icons";
+import { HistoryOutlined, ReloadOutlined, SearchOutlined, WarningOutlined, ClearOutlined, FilePdfOutlined } from "@ant-design/icons";
 import dayjs from "dayjs";
 import { groupSubmissions } from "./submissionGrouping";
+import PortalReportModal from "./PortalReportModal";
 
 const { Text } = Typography;
 const { RangePicker } = DatePicker;
@@ -67,6 +68,7 @@ export default function HistoryPanel({
   const [dateRange, setDateRange] = useState(null);
   const [wasteType, setWasteType] = useState(null);
   const [search, setSearch] = useState("");
+  const [reportOpen, setReportOpen] = useState(false);
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(20);
 
@@ -171,9 +173,22 @@ export default function HistoryPanel({
           </Space>
         }
         extra={
-          <Button size="small" icon={<ReloadOutlined />} onClick={onRefresh} loading={loadingSubmissions} disabled={loadingSubmissions}>
-            Refresh
-          </Button>
+          <Space size={8} wrap>
+            {/* Submission History is where an operator comes to look at what they
+                have filed, so it is where the report of it belongs. */}
+            <Button
+              size="small"
+              type="primary"
+              className="slf-primary-btn"
+              icon={<FilePdfOutlined />}
+              onClick={() => setReportOpen(true)}
+            >
+              Generate Report
+            </Button>
+            <Button size="small" icon={<ReloadOutlined />} onClick={onRefresh} loading={loadingSubmissions} disabled={loadingSubmissions}>
+              Refresh
+            </Button>
+          </Space>
         }
       >
         {/* Compact filter bar. The fixed control widths below (150/200px) are
@@ -286,6 +301,9 @@ export default function HistoryPanel({
           }}
         />
       </Card>
+      {/* Scoped to the caller by the server, not by anything passed from here —
+          the modal takes no user or facility prop for exactly that reason. */}
+      <PortalReportModal open={reportOpen} onClose={() => setReportOpen(false)} />
       <style>{`
         .slf-history-action-row > td { background: rgba(250, 84, 28, 0.06) !important; }
         .slf-history-action-row:hover > td { background: rgba(250, 84, 28, 0.12) !important; }

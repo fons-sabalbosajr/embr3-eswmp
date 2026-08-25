@@ -198,6 +198,19 @@ import {
   buildHaulerVeraContext,
   HAULER_VERA_ASSESSMENT_PROMPT,
 } from "./haulerVeraContext";
+import {
+  alignDisposalRow,
+  detectSystemGeneratedFile,
+  isTripRow,
+  summarizeAlignment,
+} from "./systemGeneratedUpload";
+import { summarizeBaselineCompleteness } from "./baselineCompleteness";
+import BaselineCompletionModal from "./BaselineCompletionModal";
+import { inheritEntryCell, vehicleNeedsCell } from "./cellPlacement";
+import {
+  buildDisposalVeraContext,
+  DISPOSAL_VERA_ASSESSMENT_PROMPT,
+} from "./disposalVeraContext";
 import { convertVolume, resolveCellUnit, resolveFacilityUnit } from "../../utils/volumeUnits";
 import { isHazardousWasteType } from "../../utils/wasteCategories";
 // Canonical cell helpers — shared with the admin side so the Portal and the admin
@@ -498,6 +511,11 @@ export default function SLFPortal() {
   const haulerUploadRef = useRef(null);
   const haulerExportRef = useRef(null);
   const haulerTableRef = useRef(null);
+  // Feature-tour anchors for this release: the incomplete-records panel, the
+  // disposal upload button, and the Transport & Disposal table.
+  const baselineGapsRef = useRef(null);
+  const truckUploadRef = useRef(null);
+  const truckTableRef = useRef(null);
   // Idempotency key for the current submit attempt — reused across recoverable
   // retries (so a lost-response retry returns the saved record instead of
   // duplicating) and cleared only after a confirmed success.
@@ -515,11 +533,20 @@ export default function SLFPortal() {
   const [uploadPreviewData, setUploadPreviewData] = useState([]);
   const [uploadPreviewColumns, setUploadPreviewColumns] = useState([]);
   const [uploadMissingColumns, setUploadMissingColumns] = useState([]);
-  // ── VERA assessment of a hauler upload ──
+  // The fix-everything-in-one-place editor for incomplete baseline records,
+  // opened from the warning panel in the Data Entry pane.
+  const [completionModalOpen, setCompletionModalOpen] = useState(false);
+  // What detectSystemGeneratedFile made of the file that is currently previewed
+  // (disposal uploads only; null for a hauler upload). Advisory — it changes what
+  // the preview explains, never whether a row is valid.
+  const [uploadDetection, setUploadDetection] = useState(null);
+  // ── VERA assessment of an upload ──
   // Deliberately separate from the validation outcome: "the preview is valid but
   // VERA could not answer" must be sayable without reading as a validation
   // failure. The cycle ref discards a late answer that describes a file the user
-  // has already replaced.
+  // has already replaced. Named for the hauler upload it was built for; it now
+  // also carries the disposal upload's assessment, which asks a different
+  // question of a different snapshot but needs exactly this state machine.
   const [haulerVeraStage, setHaulerVeraStage] = useState("idle"); // idle | assessing | done | failed
   const [haulerVeraComment, setHaulerVeraComment] = useState("");
   const [haulerVeraError, setHaulerVeraError] = useState(null);
@@ -897,12 +924,17 @@ export default function SLFPortal() {
   // anchoring to nothing — antd renders a targetless step centred, which reads
   // as a broken tour.
   const featureTourSteps = useMemo(() => {
+    // Each step names the TAB its target lives on as well as the ref. The Data
+    // Entry tabs render their children lazily, so a step pointing into a tab that
+    // is not open would anchor to nothing and antd would centre it — which reads
+    // as a broken tour. The order below crosses tabs exactly once.
     const targets = {
-      "hauler-upload": haulerUploadRef,
-      "hauler-export": haulerExportRef,
-      "hauler-guide": haulerUploadRef,
-      "hauler-client-list": haulerTableRef,
-      "vera-assessment": haulerUploadRef,
+      completeness: { ref: baselineGapsRef, tab: "baseline" },
+      "special-zones": { ref: haulerTableRef, tab: "baseline" },
+      "system-generated": { ref: truckUploadRef, tab: "disposal" },
+      mismatch: { ref: truckUploadRef, tab: "disposal" },
+      "preview-grid": { ref: truckUploadRef, tab: "disposal" },
+      "cell-placement": { ref: truckTableRef, tab: "disposal" },
     };
     return PORTAL_FEATURE_TOUR_STEPS.map((step) => ({
       key: step.key,
@@ -910,20 +942,35 @@ export default function SLFPortal() {
       description: (
         <div>
           <div style={{ marginBottom: 8 }}>{step.description}</div>
-          <Button
-            size="small"
-            type="link"
-            style={{ padding: 0, height: "auto" }}
-            onClick={() => askVeraAboutFeature(step.ask)}
-          >
-            Ask VERA about this →
-          </Button>
+          <Space size={8} wrap>
+            <Button
+              size="small"
+              type="link"
+              style={{ padding: 0, height: "auto" }}
+              onClick={() => askVeraAboutFeature(step.ask)}
+            >
+              Ask VERA about this →
+            </Button>
+            {/* Offered on EVERY step, not only the last. Closing the tour is not
+                the same as never wanting to see it — this is the action that says
+                so, and it is the only one besides finishing that records the
+                release as seen. */}
+            <Button
+              size="small"
+              type="link"
+              style={{ padding: 0, height: "auto", color: "#8c8c8c" }}
+              onClick={markFeatureTourSeen}
+            >
+              Don&apos;t show this again
+            </Button>
+          </Space>
         </div>
       ),
-      target: () => targets[step.key]?.current || haulerTableRef.current,
+      tab: targets[step.key]?.tab || "baseline",
+      target: () => targets[step.key]?.ref?.current || haulerTableRef.current,
       placement: "top",
     }));
-  }, [askVeraAboutFeature]);
+  }, [askVeraAboutFeature, markFeatureTourSeen]);
 
   const updateTourSteps = useMemo(() => {
     const steps = [
@@ -2803,7 +2850,12 @@ export default function SLFPortal() {
         v.actualVolume !== 0
       )
         vehErr.actualVolume = "Enter the waste volume";
-      if (activeCellOptions.length > 0 && !v.cellName?.trim())
+      // A cell is required per vehicle only when neither the vehicle NOR the
+      // entry already has one. When the entry has been placed — through Assign to
+      // Cell, an upload, or its own cell field — that placement is inherited by
+      // every vehicle on save (inheritEntryCell in handleSaveTruck), so demanding
+      // it again asks the operator to re-choose a cell the waste is already in.
+      if (vehicleNeedsCell(v, truckDraft, activeCellOptions.length))
         vehErr.cellName = "Assign a disposal cell";
       if (
         isTreatedHazardousWaste(v.wasteType) &&
@@ -3196,12 +3248,18 @@ export default function SLFPortal() {
             : isFirst
               ? record.hazWasteCode
               : []) || [],
-        cellName: v.cellName || (isFirst ? record.cellName : "") || "",
-        cellType: v.cellType || (isFirst ? record.cellType : "") || "",
+        // The CELL is inherited by EVERY vehicle, not only the first — unlike the
+        // volume and waste type above, which are genuinely per-vehicle and would
+        // be double-counted if copied across. A cell is a placement of the whole
+        // entry: all of its vehicles went to it. Restricting this to the first
+        // vehicle is what left vehicles 2..n of an already-placed entry showing
+        // no cell and demanding one.
+        cellName: v.cellName || record.cellName || "",
+        cellType: v.cellType || record.cellType || "",
         cellIndex:
           typeof v.cellIndex === "number"
             ? v.cellIndex
-            : isFirst && typeof record.cellIndex === "number"
+            : typeof record.cellIndex === "number"
               ? record.cellIndex
               : null,
       });
@@ -3616,12 +3674,25 @@ export default function SLFPortal() {
     // Every transport-entry unit is forced to the SLF's declared baseline unit so
     // an entry can never carry a mismatched unit (see validateTransportUnits).
     const entryUnit = baselineUnit || slfUnit;
-    // Flatten first vehicle into top-level fields for backward compat
-    const vehicles = (truckDraft.vehicles || []).map(({ key, ...rest }) => ({
-      ...rest,
-      capacityUnit: entryUnit,
-      actualVolumeUnit: entryUnit,
-    }));
+    // Flatten first vehicle into top-level fields for backward compat.
+    //
+    // A vehicle with NO cell of its own inherits the ENTRY's placement. The entry
+    // is placed as a whole — that is what Assign to Cell does, and what a cell
+    // chosen on the entry means — so every vehicle in it went to that cell.
+    //
+    // This is not cosmetic. The server reads placement from EACH VEHICLE and
+    // ignores the truck-level cell when vehicles are present (see
+    // portalAuth#summarizeCellAssignment), so a vehicle left without one is
+    // counted as unplaced waste and lands the operator in the Organize Cells
+    // backlog for an entry they had already placed.
+    const vehicles = inheritEntryCell(
+      (truckDraft.vehicles || []).map(({ key, ...rest }) => ({
+        ...rest,
+        capacityUnit: entryUnit,
+        actualVolumeUnit: entryUnit,
+      })),
+      truckDraft,
+    );
     const first = vehicles[0] || {};
     // Derive entry-level totals from the per-vehicle waste placements so that
     // downstream summaries (which read truck-level fields) stay correct.
@@ -4594,7 +4665,11 @@ export default function SLFPortal() {
           const parsed = dayjs(text, ["YYYY-MM-DD", "MM/DD/YYYY", "M/D/YYYY", "YYYY/MM/DD"], true);
           return parsed.isValid() ? parsed.format("YYYY-MM-DD") : text;
         };
-        const normalized = jsonData.map((row, i) => {
+        // PASS 1 — file values → the Portal's row shape. No validation and no
+        // baseline lookups yet: the alignment pass below has to see the raw
+        // Hauler / Client the file actually wrote, and the detector has to see
+        // them before anything rewrites them.
+        const parsedRows = jsonData.map((row, i) => {
           const normalized = { key: `upload-${i}-${Date.now()}`, _rowNumber: i + 2 };
           // Haulers are mapped by the shared schema (uploadHelpers) rather than
           // an inline header chain, so the sample template and the parser can
@@ -4633,23 +4708,70 @@ export default function SLFPortal() {
                   .filter(Boolean);
             }
           }
-          const relationshipErrors = effectiveType === "truck"
-            ? getUploadRelationshipErrors(normalized, haulers)
-            : [];
-          if (effectiveType === "truck" && relationshipErrors.length === 0) {
-            const matchedHauler = findUploadHauler(haulers, normalized.hauler);
-            const matchedClient = findUploadClientForHauler(matchedHauler, normalized.client);
+          return normalized;
+        });
+
+        // PASS 2 — drop spreadsheet remnants, then work out whether this is a
+        // machine export rather than a hand-made file.
+        //
+        // A remnant is a row carrying no date, ticket, plate, cell, waste type or
+        // volume — nothing a trip is made of — typically a stray number an
+        // operator left in a cell below the data. The real Prime Waste Solution
+        // export ends with three of them. They could only ever fail validation,
+        // and while they were in the batch they appeared in the list of clients
+        // missing from the baseline as bare numbers. The count is reported rather
+        // than the removal being silent.
+        //
+        // Detection itself is advisory: it changes what the preview SAYS and what
+        // VERA is shown, never whether a row is valid. See systemGeneratedUpload
+        // for why a gate system writes one party into both columns.
+        const tripRows =
+          effectiveType === "truck" ? parsedRows.filter(isTripRow) : parsedRows;
+        const skippedStrayRows = parsedRows.length - tripRows.length;
+        const detection =
+          effectiveType === "truck"
+            ? { ...detectSystemGeneratedFile(headers, tripRows), skippedStrayRows }
+            : { isSystemGenerated: false, skippedStrayRows: 0 };
+        setUploadDetection(effectiveType === "truck" ? detection : null);
+        if (effectiveType === "truck" && tripRows.length === 0) {
+          setUploadProgressError(true);
+          setUploadStatusText(
+            "No disposal entries found. Every row is missing a date, ticket number, plate, cell, waste type and volume — check that the first sheet holds the disposal data.",
+          );
+          return;
+        }
+
+        // PASS 3 — resolve each row against the baseline, then validate.
+        //
+        // Alignment runs BEFORE validation deliberately: where it succeeds it has
+        // rewritten Hauler / Client to the baseline's own spelling, so the ordinary
+        // relationship check then passes — and, because those are the canonical
+        // names, so does the server's identical check at submit time. Where it
+        // fails it contributes an error naming the record that is actually
+        // missing, in place of the relationship check's "hauler is not assigned",
+        // which was true but pointed at the wrong thing.
+        const normalized = tripRows.map((parsed) => {
+          const row = effectiveType === "truck" ? alignDisposalRow(parsed, haulers) : parsed;
+          const alignmentErrors = row._alignmentErrors || [];
+          const relationshipErrors =
+            effectiveType === "truck" && alignmentErrors.length === 0
+              ? getUploadRelationshipErrors(row, haulers)
+              : [];
+          if (effectiveType === "truck" && alignmentErrors.length === 0 && relationshipErrors.length === 0) {
+            const matchedHauler = findUploadHauler(haulers, row.hauler);
+            const matchedClient = findUploadClientForHauler(matchedHauler, row.client);
             if (matchedClient && !matchedClient.ambiguous && !matchedClient.inactiveOnly) {
-              normalized._matchedClient = matchedClient;
+              row._matchedClient = matchedClient;
             }
           }
-          const cellKnown = effectiveType !== "truck" || !normalized.cellName || normalized.cellIndex != null || activeCellOptions.length === 0;
+          const cellKnown = effectiveType !== "truck" || !row.cellName || row.cellIndex != null || activeCellOptions.length === 0;
           return {
-            ...normalized,
+            ...row,
             _errors: [
-              ...getUploadRowErrors(normalized, effectiveType),
+              ...getUploadRowErrors(row, effectiveType),
+              ...alignmentErrors,
               ...relationshipErrors,
-              ...(cellKnown ? [] : [`Row ${normalized._rowNumber} — Cell or Disposal Area "${normalized.cellName}" is not an available cell under this SLF.`]),
+              ...(cellKnown ? [] : [`Row ${row._rowNumber} — Cell or Disposal Area "${row.cellName}" is not an available cell under this SLF.`]),
             ],
           };
         });
@@ -4665,11 +4787,66 @@ export default function SLFPortal() {
               title: "Ticket No.",
               dataIndex: "disposalTicketNo",
               key: "disposalTicketNo",
-              width: 130,
+              width: 100,
             },
             { title: "Disposal Date", dataIndex: "disposalDate", key: "disposalDate", width: 130 },
-            { title: "Hauler", dataIndex: "hauler", key: "hauler", width: 170 },
-            { title: "Client", dataIndex: "client", key: "client", width: 170 },
+            {
+              // Merged: these two are ONE fact — a trip is attributed through
+              // Hauler → Client, they are validated as a pair, and every alignment
+              // and mismatch message names both. Side by side they cost 340px of a
+              // grid that already scrolls sideways; stacked in one cell they cost
+              // 260 and read as the relationship they are. `stackedFields` keeps
+              // each of them individually editable (see the preview modal's
+              // column mapper).
+              title: "Hauler → Client",
+              key: "haulerClient",
+              width: 300,
+              stackedFields: [
+                { field: "hauler", label: "Hauler" },
+                { field: "client", label: "Client" },
+              ],
+            },
+            {
+              // What the file said versus what it was resolved to. A row the
+              // alignment pass rewrote MUST show that it was rewritten: the
+              // operator is about to import a trip attributed to a hauler/client
+              // pair the file did not literally name, and they have to be able to
+              // see — and reject — that before it is saved.
+              title: "Match",
+              key: "alignment",
+              width: 100,
+              render: (_, row) => {
+                const alignment = row._alignment;
+                if (!alignment) {
+                  return <Tag color="green">Exact</Tag>;
+                }
+                if (alignment.status === "aligned") {
+                  return (
+                    <Tooltip
+                      title={`${alignment.note} Written in the file as: "${alignment.originalHauler}" / "${alignment.originalClient}".`}
+                    >
+                      <Tag color="gold">Matched · {alignment.method}</Tag>
+                    </Tooltip>
+                  );
+                }
+                if (alignment.status === "mismatch") {
+                  return (
+                    <Tooltip
+                      title={`${alignment.note} Resolve it in the panel above the table.`}
+                    >
+                      <Tag color="volcano">Name mismatch</Tag>
+                    </Tooltip>
+                  );
+                }
+                return (
+                  <Tooltip title={alignment.note}>
+                    <Tag color="red">
+                      {alignment.status === "ambiguous" ? "Ambiguous" : "Not on baseline"}
+                    </Tag>
+                  </Tooltip>
+                );
+              },
+            },
             {
               title: "Plate No.",
               dataIndex: "plateNumber",
@@ -4677,30 +4854,93 @@ export default function SLFPortal() {
               width: 120,
             },
             {
-              title: "Capacity",
-              dataIndex: "truckCapacity",
-              key: "truckCapacity",
-              width: 110,
+              // Merged: three numbers that are only meaningful together. The unit
+              // applies to BOTH the capacity and the volume, and the one check an
+              // operator makes here — is the load plausible against the truck's
+              // registered capacity? — needs all three in the same glance. Three
+              // separate columns put the unit two columns away from the figures it
+              // qualifies, and cost 310px instead of 170.
+              title: "Capacity / Volume",
+              key: "capacityVolume",
+              width: 150,
+              stackedFields: [
+                { field: "truckCapacity", label: "Truck capacity" },
+                { field: "actualVolume", label: "Volume disposed" },
+                { field: "actualVolumeUnit", label: "Unit" },
+              ],
             },
-            { title: "Volume", dataIndex: "actualVolume", key: "actualVolume", width: 110 },
-            { title: "Unit", dataIndex: "actualVolumeUnit", key: "actualVolumeUnit", width: 90 },
-            { title: "Cell", dataIndex: "cellName", key: "cellName", width: 130 },
-            { title: "Waste Type", dataIndex: "wasteType", key: "wasteType", width: 150 },
             {
+              // Narrow on purpose, and only viable because the picker now shows
+              // the cell's VALUE once chosen ("Cell 4" — see optionLabelProp in
+              // the preview modal) rather than its descriptive label. The full
+              // "Cell 4 - Treated Hazardous Waste" still appears in the dropdown,
+              // where it is what you actually read while choosing; at this width
+              // it would otherwise have wrapped onto three or four lines in every
+              // row. A value from the file that is not a cell at all is the one
+              // exception — it wraps, and is flagged in red.
+              title: "Cell",
+              dataIndex: "cellName",
+              key: "cellName",
+              width: 100,
+            },
+            { title: "Waste Type", dataIndex: "wasteType", key: "wasteType", width: 190 },
+            {
+              // The messages are TEXT, not a tag.
+              //
+              // They used to be joined into one `<Tag color="red">`, and a Tag is
+              // an inline-block with `white-space: nowrap` — so a row's errors
+              // became a single unbreakable box wider than the column, which the
+              // table then widened the whole column to fit, pushing every other
+              // column off to the side. The td already wraps (see
+              // .slf-upload-preview-table in SLFPortal.css); only the Tag did not.
+              // The relationship and alignment messages are full sentences, so this
+              // was guaranteed to distort the grid on any file with a problem.
+              //
+              // A short Tag now carries the COUNT — which is what the eye scans
+              // for — and the messages sit under it in a wrapping block, one per
+              // line rather than comma-joined, so several issues on one row stay
+              // readable.
               title: "Validation",
               key: "validation",
-              width: 180,
-              render: (_, row) =>
-                row._errors?.length ? (
-                  <Tag color="red">Issue: {row._errors.join(", ")}</Tag>
-                ) : (
-                  <Tag color="green">Ready</Tag>
-                ),
+              // The widest column in the grid, and deliberately so: it is the only
+              // one holding sentences rather than values. The relationship and
+              // alignment messages name a hauler AND a client AND the fix, so at
+              // anything narrower they wrapped into a tall, thin ribbon that was
+              // harder to read than the error it described. The table scrolls
+              // sideways under a pinned header, so the extra width costs nothing
+              // the operator cannot scroll to.
+              width: 380,
+              onCell: () => ({
+                style: {
+                  whiteSpace: "normal",
+                  overflowWrap: "anywhere",
+                  wordBreak: "break-word",
+                  verticalAlign: "top",
+                },
+              }),
+              render: (_, row) => {
+                const errors = row._errors || [];
+                if (errors.length === 0) return <Tag color="green">Ready</Tag>;
+                return (
+                  <div style={{ whiteSpace: "normal", overflowWrap: "anywhere" }}>
+                    <Tag color="red" style={{ marginInlineEnd: 0, marginBottom: 4 }}>
+                      {errors.length} issue{errors.length === 1 ? "" : "s"}
+                    </Tag>
+                    <div style={{ color: "#a8071a", fontSize: 12.5, lineHeight: 1.4 }}>
+                      {errors.map((message, index) => (
+                        <div key={index} style={{ marginTop: index === 0 ? 0 : 3 }}>
+                          {message}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                );
+              },
             },
             {
               title: "Actions",
               key: "actions",
-              width: 60,
+              width: 80,
               render: (_, r) => (
                 <Button
                   type="text"
@@ -4717,24 +4957,6 @@ export default function SLFPortal() {
             },
           ]);
         } else {
-          // One column per UPLOAD_COLUMNS.hauler field plus the row number, the
-          // Action tag and the delete button — the preview shows every value the
-          // file can carry, including the client location the Add Client form
-          // requires, so nothing arrives unseen.
-          //
-          // Widths are apportioned by what each column actually holds: the
-          // free-text columns that carry real sentences (hauler name, both
-          // addresses, clients) get the room, and the numeric/coded ones are
-          // sized to their widest realistic value rather than to their header.
-          // Nothing is truncated at any width — text cells wrap and the pickers
-          // wrap too (see .slf-upload-preview-table) — so a narrow column only
-          // makes a row taller, never hides a value. At sixteen columns the sum
-          // is wider than the modal on a laptop, so the table scrolls
-          // horizontally under a pinned header rather than squeezing columns
-          // past the point of being readable.
-          //
-          // scroll.x is the SUM of these widths, so the header and the body can
-          // never disagree about where a column starts.
           setUploadPreviewColumns([
             { title: "#", key: "index", width: 40, render: (_, __, i) => i + 1 },
             {
@@ -4801,7 +5023,7 @@ export default function SLFPortal() {
             {
               title: "",
               key: "actions",
-              width: 40,
+              width: 60,
               render: (_, r) => (
                 <Button
                   type="text"
@@ -4838,7 +5060,42 @@ export default function SLFPortal() {
             normalized.every((row) => !row._errors?.length);
           if (cleanPreview) {
             const annotated = annotateHaulerUploadRows(normalized, haulers);
-            runHaulerVeraAssessment(annotated, summarizeHaulerUpload(annotated), haulers);
+            runUploadVeraAssessment({
+              message: HAULER_VERA_ASSESSMENT_PROMPT,
+              pageContext: buildHaulerVeraContext(
+                annotated,
+                summarizeHaulerUpload(annotated),
+                haulers,
+              ),
+            });
+          } else {
+            setHaulerVeraStage("idle");
+            setHaulerVeraComment("");
+            setHaulerVeraError(null);
+            setHaulerVeraSource(null);
+          }
+        }
+
+        // A disposal upload asks VERA when there is something it can usefully
+        // explain: rows the alignment pass matched for the operator (which they
+        // should confirm before importing), rows it could not (which name the
+        // baseline records to encode), or a file that looks machine-generated. A
+        // clean, ordinary file needs no commentary and gets none.
+        if (effectiveType === "truck") {
+          haulerVeraCycleRef.current += 1;
+          const alignment = summarizeAlignment(normalized);
+          const worthExplaining =
+            normalized.length > 0 &&
+            (detection.isSystemGenerated ||
+              alignment.alignedCount > 0 ||
+              alignment.ambiguousCount > 0 ||
+              alignment.mismatches.length > 0 ||
+              alignment.needsEncoding.length > 0);
+          if (worthExplaining) {
+            runUploadVeraAssessment({
+              message: DISPOSAL_VERA_ASSESSMENT_PROMPT,
+              pageContext: buildDisposalVeraContext(normalized, alignment, detection),
+            });
           } else {
             setHaulerVeraStage("idle");
             setHaulerVeraComment("");
@@ -4909,29 +5166,37 @@ export default function SLFPortal() {
     [uploadPreviewRows, uploadType],
   );
 
-  // ── VERA assessment of a validated hauler upload ──────────────────────────
+  // ── VERA assessment of an upload preview ──────────────────────────────────
   //
-  // Same discipline as Bulk Organize Cells: VERA is a SECOND OPINION on a batch
-  // that already passed validation, never a gate. It runs only on a clean
-  // preview, is invoked deliberately (never from an effect, which would re-fire
+  // Same discipline as Bulk Organize Cells: VERA is a SECOND OPINION, never a
+  // gate. It is invoked deliberately (never from an effect, which would re-fire
   // on every re-render), and a failure to reach it leaves the import exactly as
   // available as it was.
   //
   // The stage is separate from the validation outcome for the same reason: "the
   // preview is valid but VERA could not answer" has to be a state the UI can say
   // out loud, rather than one that reads as a validation problem.
-  const runHaulerVeraAssessment = useCallback(
-    async (rows, summary, existingHaulers) => {
+  //
+  // WHEN IT RUNS differs by upload kind, and deliberately so:
+  //   · hauler   — only on a CLEAN preview. There is nothing useful to say about
+  //                rows that have not passed validation yet; VERA is pointed at
+  //                what such an import gets wrong QUIETLY.
+  //   · disposal — on a failing preview too. A machine-exported disposal file
+  //                fails every row with the same unhelpful message, and the
+  //                alignment pass already knows which baseline records are
+  //                missing. Explaining that IS the help.
+  const runUploadVeraAssessment = useCallback(
+    async ({ message, pageContext }) => {
       const cycle = haulerVeraCycleRef.current;
       setHaulerVeraStage("assessing");
       setHaulerVeraComment("");
       setHaulerVeraError(null);
       try {
         const { data } = await api.post("/vera/chat", {
-          message: HAULER_VERA_ASSESSMENT_PROMPT,
+          message,
           history: [],
           page: "data-entry",
-          pageContext: buildHaulerVeraContext(rows, summary, existingHaulers),
+          pageContext,
         });
         // A newer file was uploaded (or the preview was closed) while this was in
         // flight — its answer describes rows that are no longer on screen.
@@ -4960,12 +5225,54 @@ export default function SLFPortal() {
     [],
   );
 
+  // What the loaded baseline is missing — recomputed whenever the haulers change,
+  // so completing a record in the Baseline tab clears it from the warning without
+  // a reload. Feeds the incomplete-records panel and the hauler table's per-row
+  // indicator, which is why it is derived once here rather than in either of them.
+  const baselineGaps = useMemo(
+    () => summarizeBaselineCompleteness(haulers),
+    [haulers],
+  );
+
+  // What the previewed disposal rows resolved to, re-derived on every render from
+  // the rows themselves — so it stays true after an inline edit or a deletion.
+  const uploadAlignmentSummary = useMemo(
+    () => (uploadType === "truck" ? summarizeAlignment(uploadPreviewRows) : null),
+    [uploadPreviewRows, uploadType],
+  );
+
   // Re-assess the rows as they stand NOW — after inline preview edits or a row
   // deletion — which is also what the Retry path uses.
   const reassessHaulerUpload = useCallback(() => {
     haulerVeraCycleRef.current += 1;
-    runHaulerVeraAssessment(uploadPreviewRows, uploadPreviewSummary, haulers);
-  }, [runHaulerVeraAssessment, uploadPreviewRows, uploadPreviewSummary, haulers]);
+    runUploadVeraAssessment(
+      uploadType === "truck"
+        ? {
+            message: DISPOSAL_VERA_ASSESSMENT_PROMPT,
+            pageContext: buildDisposalVeraContext(
+              uploadPreviewRows,
+              uploadAlignmentSummary,
+              uploadDetection,
+            ),
+          }
+        : {
+            message: HAULER_VERA_ASSESSMENT_PROMPT,
+            pageContext: buildHaulerVeraContext(
+              uploadPreviewRows,
+              uploadPreviewSummary,
+              haulers,
+            ),
+          },
+    );
+  }, [
+    runUploadVeraAssessment,
+    uploadType,
+    uploadPreviewRows,
+    uploadPreviewSummary,
+    uploadAlignmentSummary,
+    uploadDetection,
+    haulers,
+  ]);
 
   const handleConfirmUpload = () => {
     if (uploadPreviewRows.length === 0) return;
@@ -5073,6 +5380,7 @@ export default function SLFPortal() {
     setUploadModalOpen(false);
     setUploadPreviewData([]);
     setUploadMissingColumns([]);
+    setUploadDetection(null);
     Swal.fire({
       icon: "success",
       title: "Data Imported",
@@ -5086,6 +5394,61 @@ export default function SLFPortal() {
   };
 
   // Update preview data cell
+  /**
+   * Re-run alignment and validation over one previewed row.
+   *
+   * The SAME sequence the initial parse applies (align → validate), extracted so
+   * an edited row is judged by exactly the rules the file was. Before this, an
+   * inline edit re-ran the relationship check but not the alignment pass, so
+   * correcting a client by hand left the row's `_alignment` describing the value
+   * it no longer held — and a row fixed through a mismatch suggestion could never
+   * clear, because nothing re-resolved it.
+   *
+   * `fleet` is passed in rather than read from state so a caller that is fixing
+   * the baseline and the rows in one go can validate against the NEW fleet
+   * instead of the one React has not re-rendered with yet.
+   */
+  const revalidateUploadRow = useCallback(
+    (row, fleet = haulers) => {
+      if (uploadType !== "truck") {
+        return {
+          ...row,
+          _errors: [...getUploadRowErrors(row, uploadType || "truck")],
+        };
+      }
+      const aligned = alignDisposalRow(row, fleet);
+      const alignmentErrors = aligned._alignmentErrors || [];
+      const relationshipErrors =
+        alignmentErrors.length === 0 ? getUploadRelationshipErrors(aligned, fleet) : [];
+      const matchedHauler =
+        alignmentErrors.length === 0 && relationshipErrors.length === 0
+          ? findUploadHauler(fleet, aligned.hauler)
+          : null;
+      const matchedClient = matchedHauler
+        ? findUploadClientForHauler(matchedHauler, aligned.client)
+        : null;
+      const cellKnown =
+        !aligned.cellName || aligned.cellIndex != null || activeCellOptions.length === 0;
+      return {
+        ...aligned,
+        _matchedClient:
+          matchedClient && !matchedClient.ambiguous && !matchedClient.inactiveOnly
+            ? matchedClient
+            : undefined,
+        _relationshipErrors: relationshipErrors,
+        _errors: [
+          ...getUploadRowErrors(aligned, "truck"),
+          ...alignmentErrors,
+          ...relationshipErrors,
+          ...(cellKnown
+            ? []
+            : [`Row ${aligned._rowNumber} — Cell or Disposal Area "${aligned.cellName}" is not an available cell under this SLF.`]),
+        ],
+      };
+    },
+    [uploadType, haulers, activeCellOptions],
+  );
+
   const updateUploadCell = (key, field, value) => {
     setUploadPreviewData((prev) =>
       prev.map((row) => {
@@ -5102,31 +5465,92 @@ export default function SLFPortal() {
         // the user picked in the preview.
         const cellPatch =
           field === "cellName" ? resolveUploadCellValue(coercedValue) : null;
-        const updated = { ...row, [field]: coercedValue, ...(cellPatch || {}) };
-        if (uploadType === "truck") {
-          updated._relationshipErrors = getUploadRelationshipErrors(updated, haulers);
-        }
-        // Same cell-availability rule the initial parse applies, re-run against
-        // the EDITED value so an unknown/closed cell cannot pass by being typed
-        // in after the upload.
-        const cellKnown =
-          uploadType !== "truck" ||
-          !updated.cellName ||
-          updated.cellIndex != null ||
-          activeCellOptions.length === 0;
-        return {
-          ...updated,
-          _errors: [
-            ...getUploadRowErrors(updated, uploadType || "truck"),
-            ...(updated._relationshipErrors || []),
-            ...(cellKnown
-              ? []
-              : [`Row ${updated._rowNumber} — Cell or Disposal Area "${updated.cellName}" is not an available cell under this SLF.`]),
-          ],
-        };
+        return revalidateUploadRow({ ...row, [field]: coercedValue, ...(cellPatch || {}) });
       }),
     );
   };
+
+  // ── Resolving a client MISMATCH from the upload preview ────────────────────
+  //
+  // A mismatch is the baseline and the file disagreeing about how to spell the
+  // same client — not a client the baseline is missing. There are two honest ways
+  // to settle that, and which one is right is the operator's call, not ours:
+  //
+  //   · the BASELINE is right → rewrite the file's rows to the stored name. The
+  //     baseline is untouched; only this import changes.
+  //   · the FILE is right → correct the client on the hauler. That is a baseline
+  //     edit, so it lands in the draft and needs Save Baseline Update, exactly
+  //     like Add Client and the per-hauler client upload.
+  //
+  // Both apply to EVERY row carrying that pair, because one decision about one
+  // client should not have to be repeated forty times.
+
+  /** The file is wrong: point its rows at the client the baseline already has. */
+  const useStoredClientForRows = useCallback(
+    (entry, storedName) => {
+      const affected = new Set(entry?.rowKeys || []);
+      if (!affected.size || !storedName) return;
+      setUploadPreviewData((prev) =>
+        prev.map((row) =>
+          affected.has(row.key) ? revalidateUploadRow({ ...row, client: storedName }) : row,
+        ),
+      );
+    },
+    [revalidateUploadRow],
+  );
+
+  /**
+   * The file is right: change the client ON THE HAULER.
+   *
+   * `storedName` renames that client in place; omitting it adds the file's value
+   * as a new client instead. The rows are revalidated against the NEW fleet in
+   * the same tick — passing it explicitly rather than relying on `haulers`, which
+   * this render still sees as the old list.
+   */
+  const applyClientFixToHauler = useCallback(
+    (entry, storedName = "") => {
+      const haulerKey = cleanUploadText(entry?.hauler).toLowerCase();
+      const target = cleanUploadText(entry?.client);
+      if (!haulerKey || !target) return;
+      const nextFleet = haulers.map((hauler) => {
+        if (cleanUploadText(hauler.haulerName || hauler.name).toLowerCase() !== haulerKey) {
+          return hauler;
+        }
+        const clients = Array.isArray(hauler.privateSectorClients)
+          ? hauler.privateSectorClients.map((client) =>
+              typeof client === "string" ? { clientName: client } : { ...client },
+            )
+          : [];
+        if (storedName) {
+          const index = clients.findIndex(
+            (client) =>
+              cleanUploadText(client.clientName).toLowerCase() ===
+              cleanUploadText(storedName).toLowerCase(),
+          );
+          if (index >= 0) {
+            // A RENAME keeps the record — and with it the client's type, province
+            // and municipality, which is the whole reason renaming beats adding.
+            clients[index] = { ...clients[index], clientName: target };
+            return { ...hauler, privateSectorClients: clients };
+          }
+        }
+        // Added with the type carried over from the closest existing client where
+        // there is one, since a new client with no type is itself an incomplete
+        // record. Province and municipality are deliberately left blank — they
+        // are not guessable, and the completeness panel will ask for them.
+        const donor = clients.find((client) => cleanUploadText(client.clientType));
+        clients.push({
+          key: `client-fix-${Date.now()}`,
+          clientName: target,
+          clientType: donor?.clientType || "Private",
+        });
+        return { ...hauler, privateSectorClients: clients };
+      });
+      setHaulers(nextFleet);
+      setUploadPreviewData((prev) => prev.map((row) => revalidateUploadRow(row, nextFleet)));
+    },
+    [haulers, revalidateUploadRow],
+  );
 
   /**
    * Build a sample-template workbook FROM the upload schema.
@@ -6397,16 +6821,37 @@ export default function SLFPortal() {
   // ── Table column definitions — see columns/ ──
   const truckColumns = makeTruckColumns({ slfUnit, openTruckModal, removeTruck });
 
-  // Hauler table columns
-  const haulerColumns = makeHaulerColumns({
-    slfUnit,
-    baselineSaved,
-    openHaulerModal,
-    removeHauler,
-    setHaulerDeleteModal,
-    setHaulerDeleteReason,
-    setHaulerDeleteFile,
-  });
+  // Hauler table columns.
+  //
+  // Memoized on the fleet because the column definitions now carry FILTER option
+  // lists derived from it — distinct hauler names, vehicle types and client names
+  // — which is O(haulers × clients) to build. Facilities here run 80–141
+  // accredited haulers, so rebuilding those lists on every render of the pane
+  // would be the same class of waste the dashboard derivations were memoized to
+  // stop. It also keeps the columns array stable, so AntD does not drop the
+  // operator's active filters on an unrelated re-render.
+  const haulerColumns = useMemo(
+    () =>
+      makeHaulerColumns({
+        slfUnit,
+        baselineSaved,
+        haulers,
+        openHaulerModal,
+        removeHauler,
+        setHaulerDeleteModal,
+        setHaulerDeleteReason,
+        setHaulerDeleteFile,
+      }),
+    // openHaulerModal / removeHauler and the three delete setters are omitted
+    // deliberately. They are recreated on every render, so listing them would
+    // defeat the memo entirely — and they are safe to leave out: the setters are
+    // useState setters (stable by contract), removeHauler mutates through the
+    // functional form `setHaulers((prev) => …)` so it cannot read a stale fleet,
+    // and openHaulerModal works from the `record` the row hands it plus `slfUnit`,
+    // which IS a dependency. No stale closure is reachable through any of them.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [slfUnit, baselineSaved, haulers],
+  );
 
   // Portal user removes a submission from their own history. The record is
   // retained on the admin side — this only hides it from the portal view.
@@ -7793,7 +8238,18 @@ export default function SLFPortal() {
                                         pageSizeOptions: ["10", "20", "50", "100"],
                                         showTotal: (total) => `${total} hauler(s)`,
                                       }}
-                                      scroll={{ x: 980 }}
+                                      // Summed from the columns rather than
+                                      // hardcoded, so the header and the body can
+                                      // never disagree about where a column
+                                      // starts. The literal 980 it replaced was
+                                      // already short of the real total, and each
+                                      // column added since made it shorter.
+                                      scroll={{
+                                        x: haulerColumns.reduce(
+                                          (sum, col) => sum + (Number(col?.width) || 120),
+                                          0,
+                                        ),
+                                      }}
                                       locale={{
                                         emptyText: (
                                           <Text
@@ -7886,6 +8342,8 @@ export default function SLFPortal() {
                         assignSelectedTrucksToCell={assignSelectedTrucksToCell}
                         openUploadGuide={openUploadGuide}
                         setActiveTab={setActiveTab}
+                        truckUploadRef={truckUploadRef}
+                        truckTableRef={truckTableRef}
                       />
                     ),
                   },
@@ -7895,66 +8353,101 @@ export default function SLFPortal() {
             </Card>
           </Col>
           <Col xs={24} xl={5}>
-            {/* #11: Incomplete hauler-client warning — derived from the already-
-                loaded baseline haulers (no extra fetch), recalculated whenever the
-                clients change. Non-blocking; distinct from validation errors. */}
+            {/* Incomplete baseline warning — derived from the already-loaded
+                haulers (no extra fetch), recalculated whenever they change.
+                Non-blocking; distinct from validation errors.
+
+                It covers the HAULER as well as its clients. It used to look only
+                at clients, so a hauler with no office address or with no clients
+                at all read as complete — the second of which is the reason a
+                disposal upload rejects every one of that hauler's trips.
+
+                The rule itself lives in baselineCompleteness so this panel, the
+                hauler table and VERA's server-side view of the same facility
+                cannot drift apart on what "incomplete" means. */}
             {(() => {
-              // #11: list EACH incomplete hauler-client pair and the EXACT detail(s)
-              // that are missing, instead of only a count — so the user knows which
-              // client (and which field) to fix.
-              const issues = [];
-              (haulers || []).forEach((h) => {
-                const haulerName = String(h.haulerName || "").trim();
-                (h.privateSectorClients || []).forEach((c) => {
-                  const missing = [];
-                  if (!String(c.clientName || "").trim()) missing.push("Client Name");
-                  if (!String(c.clientType || "").trim()) missing.push("Client Type");
-                  if (!String(c.provinceName || c.province || "").trim()) missing.push("Province");
-                  if (!String(c.municipalityName || c.municipality || "").trim()) missing.push("Municipality");
-                  if (!haulerName) missing.push("Hauler Name");
-                  if (missing.length) {
-                    issues.push({
-                      hauler: haulerName || "(unnamed hauler)",
-                      client: String(c.clientName || "").trim() || "(unnamed client)",
-                      missing,
-                    });
-                  }
-                });
-              });
-              if (!issues.length) return null;
+              const completeness = baselineGaps;
+              if (!completeness.total) return null;
+              const onlyAddresses = completeness.requiredCount === 0;
               return (
+                <div ref={baselineGapsRef}>
                 <Alert
-                  type="warning"
+                  type={onlyAddresses ? "info" : "warning"}
                   showIcon
                   style={{ marginBottom: 12, borderRadius: 8 }}
-                  message={<Text strong style={{ fontSize: 12 }}>{issues.length} incomplete hauler-client record{issues.length === 1 ? "" : "s"}</Text>}
+                  message={
+                    <Text strong style={{ fontSize: 12 }}>
+                      {completeness.total} incomplete baseline record
+                      {completeness.total === 1 ? "" : "s"}
+                    </Text>
+                  }
                   description={
                     <div style={{ fontSize: 12 }}>
                       <div style={{ marginBottom: 6 }}>
-                        Complete the following client details for accurate regional reporting and submission validation:
+                        {onlyAddresses
+                          ? "Everything needed for reporting is present. These records are only missing contact details EMB Region III asks for:"
+                          : "Complete these details for accurate regional reporting and to keep disposal uploads from being rejected:"}
                       </div>
+                      {completeness.haulersMissingAddress > 0 && (
+                        <div style={{ marginBottom: 4 }}>
+                          <Text type="secondary">
+                            {completeness.haulersMissingAddress} hauler
+                            {completeness.haulersMissingAddress === 1 ? " has" : "s have"} no office
+                            address
+                            {completeness.clientsMissingAddress > 0
+                              ? `, and ${completeness.clientsMissingAddress} client${completeness.clientsMissingAddress === 1 ? " has" : "s have"} no address.`
+                              : "."}
+                          </Text>
+                        </div>
+                      )}
                       <ul style={{ margin: 0, paddingLeft: 16, maxHeight: 168, overflowY: "auto" }}>
-                        {issues.slice(0, 12).map((it, i) => (
+                        {completeness.rows.slice(0, 12).map((row, i) => (
                           <li key={i} style={{ marginBottom: 3 }}>
-                            <Text strong>{it.hauler}</Text>
-                            {" → "}
-                            <Text>{it.client}</Text>
+                            <Text strong>{row.hauler}</Text>
+                            {row.client ? (
+                              <>
+                                {" → "}
+                                <Text>{row.client}</Text>
+                              </>
+                            ) : null}
                             {": "}
-                            <Text type="danger">missing {it.missing.join(", ")}</Text>
+                            {row.required.length > 0 && (
+                              <Text type="danger">missing {row.required.join(", ")}</Text>
+                            )}
+                            {row.required.length > 0 && row.recommended.length > 0 && "; "}
+                            {row.recommended.length > 0 && (
+                              <Text type="secondary">no {row.recommended.join(", ")}</Text>
+                            )}
                           </li>
                         ))}
                       </ul>
-                      {issues.length > 12 && (
-                        <Text type="secondary">+{issues.length - 12} more record(s)…</Text>
+                      {completeness.total > 12 && (
+                        <Text type="secondary">+{completeness.total - 12} more record(s)…</Text>
                       )}
                       <div style={{ marginTop: 8 }}>
-                        <Button size="small" type="primary" onClick={() => setActiveTab("baseline")}>
-                          Complete in Baseline Data
-                        </Button>
+                        <Space size={6} wrap>
+                          {/* Fix them HERE. Sending the operator to the Accredited
+                              Haulers tab meant finding each record by hand — open
+                              the hauler, find the client inside it, fill one field,
+                              close, repeat — which with eighty haulers is why the
+                              gaps never closed. */}
+                          <Button
+                            size="small"
+                            type="primary"
+                            onClick={() => setCompletionModalOpen(true)}
+                          >
+                            Complete {completeness.total} record
+                            {completeness.total === 1 ? "" : "s"}
+                          </Button>
+                          <Button size="small" onClick={() => setActiveTab("baseline")}>
+                            Open Baseline Data
+                          </Button>
+                        </Space>
                       </div>
                     </div>
                   }
                 />
+                </div>
               );
             })()}
             <Card
@@ -9354,6 +9847,21 @@ export default function SLFPortal() {
           />
         )}
 
+        {/* Writes into the hauler DRAFT, exactly as Add Client and the per-hauler
+            client upload do — "Save Baseline Update" is still what persists it. */}
+        <BaselineCompletionModal
+          open={completionModalOpen}
+          onClose={() => setCompletionModalOpen(false)}
+          haulers={haulers}
+          onApply={(nextHaulers) => setHaulers(nextHaulers)}
+          onOpenHauler={(haulerIndex, focus) => {
+            const hauler = haulers[haulerIndex];
+            if (!hauler) return;
+            setCompletionModalOpen(false);
+            openHaulerModal(hauler, focus);
+          }}
+        />
+
         <PreviousNotificationsModal
           open={previousNotifOpen}
           onClose={() => setPreviousNotifOpen(false)}
@@ -9460,9 +9968,14 @@ export default function SLFPortal() {
           uploadPreviewSummary={uploadPreviewSummary}
           uploadPreviewColumns={uploadPreviewColumns}
           uploadMissingColumns={uploadMissingColumns}
+          uploadDetection={uploadDetection}
+          uploadAlignmentSummary={uploadAlignmentSummary}
+          onUseStoredClient={useStoredClientForRows}
+          onApplyClientFixToHauler={applyClientFixToHauler}
           setUploadPreviewData={setUploadPreviewData}
           setUploadPreviewColumns={setUploadPreviewColumns}
           setUploadMissingColumns={setUploadMissingColumns}
+          setUploadDetection={setUploadDetection}
           uploadProgressOpen={uploadProgressOpen}
           uploadProgress={uploadProgress}
           uploadStatusText={uploadStatusText}
@@ -9645,14 +10158,29 @@ export default function SLFPortal() {
           steps={updateTourSteps}
         />
 
-        {/* Feature tour — one time per RELEASE. Closing it at any step marks the
-            release seen: a user who has read enough to close it should not be
-            interrupted again, and What's New reopens it on demand. */}
+        {/* Feature tour — one time per RELEASE.
+            CLOSING it (X, Esc, clicking away) closes it for now and does NOT
+            record the release as seen: dismissing something in the middle of a
+            task is not a decision never to see it. Two actions do record it —
+            finishing the last step, and the "Don't show this again" button on
+            every step — and What's New reopens it on demand either way. */}
         <Tour
           open={featureTourOpen}
           current={featureTourCurrent}
-          onChange={setFeatureTourCurrent}
-          onClose={markFeatureTourSeen}
+          // Steps span both Data Entry tabs, and the tabs render lazily — so when
+          // the next step lives on the other one, switch first and let it mount
+          // before antd measures the target. Advancing immediately would anchor
+          // the step to nothing.
+          onChange={(next) => {
+            const tab = featureTourSteps[next]?.tab;
+            if (tab && tab !== activeTab) {
+              setActiveTab(tab);
+              setTimeout(() => setFeatureTourCurrent(next), 160);
+              return;
+            }
+            setFeatureTourCurrent(next);
+          }}
+          onClose={() => setFeatureTourOpen(false)}
           onFinish={markFeatureTourSeen}
           steps={featureTourSteps}
         />
