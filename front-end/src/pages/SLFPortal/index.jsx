@@ -141,6 +141,7 @@ import {
   PORTAL_UPDATE_TOUR_SEEN_PREFIX,
   PORTAL_TOUR_DISMISSED_PREFIX,
   PORTAL_FEATURE_TOUR_SEEN_PREFIX,
+  PORTAL_FEATURE_TOUR_OPT_OUT_PREFIX,
   ORGANIZE_CELLS_ENABLED,
 } from "./constants";
 import {
@@ -187,7 +188,7 @@ import {
   getUploadRowErrors,
   getUploadRelationshipErrors,
   findUploadHauler,
-  findUploadClientForHauler,
+  findUploadClientsForHauler,
   resolveUploadCell,
   parseHaulerUploadRow,
   annotateHaulerUploadRows,
@@ -253,12 +254,23 @@ const { TextArea } = Input;
  *                                 its pane is closed/unmounted
  * @param {*}       storeValue     value from the full form store
  */
-function resolveTotalVolumeForSave({ authoritative, computed, mountedValue, storeValue }) {
+function resolveTotalVolumeForSave({
+  authoritative,
+  computed,
+  mountedValue,
+  storeValue,
+  // The SLF's figure as the SERVER resolved it. The LAST resort, used only when
+  // the form supplies nothing usable — which is the state Edit & Resubmit leaves
+  // it in, and the reason a submission could go out carrying no Total Volume
+  // Accepted at all while the facility had one on record.
+  baselineValue,
+}) {
   const candidate = authoritative ? computed : (mountedValue ?? storeValue);
   const explicitlyOnScreen =
     mountedValue !== undefined && mountedValue !== null && mountedValue !== "" && Number(mountedValue) > 0;
   const meaningful = authoritative || explicitlyOnScreen || Number(candidate) > 0;
-  return meaningful ? candidate : undefined;
+  if (meaningful) return candidate;
+  return Number(baselineValue) > 0 ? baselineValue : undefined;
 }
 
 /**
@@ -446,6 +458,15 @@ export default function SLFPortal() {
   // (`slfUnit`) until a real per-record unit is loaded — a separate default here
   // was the classic stale-unit source flagged in Item #3.
   const [baselineUnit, setBaselineUnit] = useState("");
+  // The SLF's Total Volume Accepted as the SERVER resolves it (GET /baseline).
+  //
+  // Held apart from the form on purpose. The form is written by several hydration
+  // paths — the baseline load, the socket refresh, Edit & Resubmit — and any of
+  // them can leave it blank or stamp a submission's stale snapshot over it. This
+  // is the facility-level fact, so it is the authority for what to display, what
+  // to send, and whether the submit gate is satisfied. `null` = the server has no
+  // value for this SLF, which is a real state and different from "not loaded".
+  const [baselineTotalVolume, setBaselineTotalVolume] = useState(null);
   const [acceptsHazardousWaste, setAcceptsHazardousWaste] = useState(false);
   const [supportForm] = Form.useForm();
   // Support ticket states
@@ -470,6 +491,9 @@ export default function SLFPortal() {
   const supportTicketsLoadAttemptedRef = useRef(false);
   const [portalNotifications, setPortalNotifications] = useState([]);
   const [portalUnreadCount, setPortalUnreadCount] = useState(0);
+  // Queued drafts / scheduled runs that failed to submit — drives the sidebar
+  // badge on Drafts & Scheduled.
+  const [queueAttentionCount, setQueueAttentionCount] = useState(0);
   const [notificationPanelOpen, setNotificationPanelOpen] = useState(false);
   // "Previous Notifications" full-history modal + the single notification opened
   // for its complete message. Reuses the already-fetched portalNotifications list
@@ -499,6 +523,9 @@ export default function SLFPortal() {
   // Records WHICH release the user has seen, so a portal user who dismissed the
   // orientation tour is still shown a workflow change. See portalFeatureTour.js.
   const [featureTourSeenVersion, setFeatureTourSeenVersion] = useState(null);
+  // Permanent "Don't show this again" for the feature tour, independent of the
+  // release marker above.
+  const [featureTourOptOut, setFeatureTourOptOut] = useState(false);
   const [featureTourOpen, setFeatureTourOpen] = useState(false);
   const [featureTourCurrent, setFeatureTourCurrent] = useState(0);
   // Which Baseline sections are expanded. Closed by default, as before — this is
@@ -705,9 +732,29 @@ export default function SLFPortal() {
   const resolveField = (watched, store, field) =>
     watched !== undefined && watched !== null ? watched : store?.[field];
 
-  const missingBaselineInfo = !(
-    Number(resolveField(watchedTotalVolumeAccepted, baselineStore, "totalVolumeAccepted")) > 0
-  );
+  // THE Total Volume Accepted this session is working with, in one place.
+  //
+  // Order matters. The form comes first (an operator editing an unlocked baseline
+  // must see their own typing win), and the SERVER's resolved figure backs it —
+  // because the form can legitimately be blank while the facility has a value:
+  // Edit & Resubmit hydrates from a submission, and a submission's copy is a
+  // SNAPSHOT that may be absent or stale. Live example: reverted SLF-LGU-PA-0016
+  // stores 0 while Prime Waste Solution's baseline holds 596,981.38 — so opening
+  // it put 0 in a DISABLED field and the submit gate reported the baseline
+  // incomplete, with no way to fix it from that screen.
+  //
+  // A stored 0 from the form is still honoured; it is only the ABSENCE of a form
+  // value that falls through to the facility's figure.
+  const effectiveTotalVolumeAccepted = (() => {
+    const fromForm = resolveField(
+      watchedTotalVolumeAccepted,
+      baselineStore,
+      "totalVolumeAccepted",
+    );
+    if (fromForm !== undefined && fromForm !== null && fromForm !== "") return fromForm;
+    return baselineTotalVolume;
+  })();
+  const missingBaselineInfo = !(Number(effectiveTotalVolumeAccepted) > 0);
   const missingGeneralInfo = [
     resolveField(watchedCompanyName, companyStore, "lguCompanyName"),
     resolveField(watchedCompanyRegion, companyStore, "companyRegion"),
@@ -751,10 +798,19 @@ export default function SLFPortal() {
   const featureTourSeenKey = portalUser?.email
     ? `${PORTAL_FEATURE_TOUR_SEEN_PREFIX}${portalUser.email}`
     : null;
+  const featureTourOptOutKey = portalUser?.email
+    ? `${PORTAL_FEATURE_TOUR_OPT_OUT_PREFIX}${portalUser.email}`
+    : null;
   // The tour is DUE when the user has not seen THIS release. A user who
   // dismissed the orientation tour, or a previous feature tour, is still shown
   // this one — which is the whole reason the marker is a version.
-  const featureTourDue = featureTourSeenVersion !== PORTAL_FEATURE_TOUR_VERSION;
+  // The tour is DUE when this release has not been seen AND the user has not
+  // opted out for good. The two are separate answers: finishing or closing the
+  // tour says "seen this one", and the next release is new information worth
+  // offering once; the "Don't show this again" button says NEVER, and honouring
+  // that only until the next version bump made the button's label untrue.
+  const featureTourDue =
+    !featureTourOptOut && featureTourSeenVersion !== PORTAL_FEATURE_TOUR_VERSION;
 
   // `manual: true` = the user asked for it from What's New, which always opens.
   // Only the AUTOMATIC opening honours the seen-marker.
@@ -794,6 +850,30 @@ export default function SLFPortal() {
         // user with an error for closing a tour.
       });
   }, [featureTourSeenKey]);
+
+  // "Don't show this again" — the button, which means NEVER.
+  //
+  // Records the release as seen AND sets the permanent opt-out. Recording both
+  // matters: the opt-out is what stops the next version reopening it, and the
+  // version keeps the two answers consistent for anything that reads the marker.
+  const optOutOfFeatureTour = useCallback(() => {
+    setFeatureTourOpen(false);
+    setFeatureTourOptOut(true);
+    setFeatureTourSeenVersion(PORTAL_FEATURE_TOUR_VERSION);
+    try {
+      if (featureTourOptOutKey) secureStorage.set(featureTourOptOutKey, "1");
+      if (featureTourSeenKey) secureStorage.set(featureTourSeenKey, PORTAL_FEATURE_TOUR_VERSION);
+    } catch { /* storage blocked — the server copy still answers next login */ }
+    api
+      .patch("/portal-auth/ui-preferences", {
+        featureTourOptOut: true,
+        featureTourVersionSeen: PORTAL_FEATURE_TOUR_VERSION,
+      })
+      .catch(() => {
+        // Best-effort, like every other tour write: never interrupt somebody for
+        // closing a tour. The local mirror already holds it for this browser.
+      });
+  }, [featureTourOptOutKey, featureTourSeenKey]);
 
   // Hand the user to VERA with the question already asked, so "tell me more"
   // lands them in a conversation rather than an empty chat. Closing the tour
@@ -890,6 +970,11 @@ export default function SLFPortal() {
     try {
       const seen = featureTourSeenKey && secureStorage.get(featureTourSeenKey);
       if (seen) setFeatureTourSeenVersion(seen);
+      // The opt-out mirror answers before the server does, so a user who said
+      // "never" does not get one flash of the tour on a slow connection.
+      if (featureTourOptOutKey && secureStorage.get(featureTourOptOutKey) === "1") {
+        setFeatureTourOptOut(true);
+      }
     } catch { /* blocked */ }
 
     api
@@ -911,12 +996,20 @@ export default function SLFPortal() {
             if (featureTourSeenKey) secureStorage.set(featureTourSeenKey, data.featureTourVersionSeen);
           } catch { /* blocked */ }
         }
+        if (data?.featureTourOptOut) {
+          setFeatureTourOptOut(true);
+          // Re-seat the mirror the same way the orientation tour's does: a logout
+          // wipes it, and this read is what repairs it for the session.
+          try {
+            if (featureTourOptOutKey) secureStorage.set(featureTourOptOutKey, "1");
+          } catch { /* blocked */ }
+        }
       })
       .catch(() => { /* keep whatever the mirror said */ })
       .finally(() => { if (!cancelled) setUiPrefsLoaded(true); });
 
     return () => { cancelled = true; };
-  }, [portalUser?.email, tourDismissedKey, featureTourSeenKey]);
+  }, [portalUser?.email, tourDismissedKey, featureTourSeenKey, featureTourOptOutKey]);
 
   // Feature-tour steps: copy comes from portalFeatureTour.js (VERA reads the
   // same list), targets are resolved here because the refs are local. A step
@@ -953,13 +1046,16 @@ export default function SLFPortal() {
             </Button>
             {/* Offered on EVERY step, not only the last. Closing the tour is not
                 the same as never wanting to see it — this is the action that says
-                so, and it is the only one besides finishing that records the
-                release as seen. */}
+                so.
+                It calls optOutOfFeatureTour, NOT markFeatureTourSeen: the latter
+                records only the current release, so the tour came back at the
+                next version bump for someone who had explicitly asked it not to.
+                What's New still reopens it on demand. */}
             <Button
               size="small"
               type="link"
               style={{ padding: 0, height: "auto", color: "#8c8c8c" }}
-              onClick={markFeatureTourSeen}
+              onClick={optOutOfFeatureTour}
             >
               Don&apos;t show this again
             </Button>
@@ -970,7 +1066,7 @@ export default function SLFPortal() {
       target: () => targets[step.key]?.ref?.current || haulerTableRef.current,
       placement: "top",
     }));
-  }, [askVeraAboutFeature, markFeatureTourSeen]);
+  }, [askVeraAboutFeature, optOutOfFeatureTour]);
 
   const updateTourSteps = useMemo(() => {
     const steps = [
@@ -1521,8 +1617,23 @@ export default function SLFPortal() {
   // with 0 in the form AND sent that 0 to the server — where it is a valid
   // number, so the data-loss guard correctly applied it. That is why the value
   // "disappeared" right after saving.
+  //
+  // …and only while the baseline is UNLOCKED. The auto-calculation exists so that
+  // EDITING the cell entries keeps the total honest — but a locked baseline's
+  // entries cannot be edited, so recomputing there can only replace the stored
+  // figure with a derived one. Two ways that bites:
+  //   • Edit & Resubmit loads a reverted submission's cell entries — a SNAPSHOT
+  //     taken when that submission was created — into the same state the baseline
+  //     tab uses, and the recomputed sum was then sent as the record's Total
+  //     Volume Accepted. Live data: 19 of the 26 outstanding reverted submissions
+  //     would resubmit a substituted figure, e.g. Prime Waste Solution's real
+  //     baseline of 596,981.38 going back as 318,065.35.
+  //   • A locked baseline whose stored total legitimately differs from the sum of
+  //     its rows (General Tinio stores 9 against rows summing 27) DISPLAYED the
+  //     recomputed number, so the portal showed a figure the database did not hold.
+  // Locked means "show what is stored", in both cases.
   const cellVolumeTotalIsAuthoritative =
-    hasCellVolumeEntries && computedTotalVolumeAccepted > 0;
+    !baselineSaved && hasCellVolumeEntries && computedTotalVolumeAccepted > 0;
 
   useEffect(() => {
     if (!cellVolumeTotalIsAuthoritative) return;
@@ -2242,6 +2353,12 @@ export default function SLFPortal() {
         const lock = resolveBaselineLock(data);
         setBaselineSaved(lock.locked);
         setBaselineUpdatePending(lock.updatePending);
+        // Recorded BEFORE the payload check: this is the facility's figure and it
+        // must be held even when the rest of the baseline is thin, because it is
+        // what every later fallback reads.
+        setBaselineTotalVolume(
+          data?.totalVolumeAccepted == null ? null : Number(data.totalVolumeAccepted),
+        );
 
         if (hasBaselinePayload(data)) {
           const unit =
@@ -2562,6 +2679,35 @@ export default function SLFPortal() {
       if (!silent) setLoadingSubmissions(false);
     }
   }, [portalUser?.email]);
+
+  // The other half of the History badge is `revertedCount`, derived from
+  // `submissions` — and that list was only refreshed while the History or
+  // Overview menu was open (see the effect below). So an admin reverting a
+  // submission while the operator was on Data Entry moved the badge not at all
+  // until they happened to navigate to the very screen the badge exists to send
+  // them to. This subscribes wherever they are; the initial load and the 60s
+  // fallback poll stay with the menus that actually render the list, so nothing
+  // starts polling in the background.
+  useEffect(() => {
+    if (!portalUser?.email) return undefined;
+    if (activeMenu === "history" || activeMenu === "overview") return undefined; // owned below
+    const sock = connectSocket("portal", portalUser.email);
+    let timer = null;
+    const handler = () => {
+      clearTimeout(timer);
+      timer = setTimeout(() => {
+        invalidateCache(`${PORTAL_SUBMISSIONS_CACHE_KEY}-${portalUser?.email || ""}`);
+        fetchSubmissions(true);
+      }, 400);
+    };
+    sock.on("notification", handler);
+    sock.on("data-refresh", handler);
+    return () => {
+      clearTimeout(timer);
+      sock.off("notification", handler);
+      sock.off("data-refresh", handler);
+    };
+  }, [activeMenu, portalUser?.email, fetchSubmissions]);
 
   useEffect(() => {
     if ((activeMenu === "history" || activeMenu === "overview") && portalUser) {
@@ -3953,6 +4099,7 @@ export default function SLFPortal() {
         storeValue:
           baselineValues.totalVolumeAccepted
           ?? baselineForm.getFieldValue("totalVolumeAccepted"),
+        baselineValue: baselineTotalVolume,
       });
       const disposalValues = entryForm.getFieldsValue(true);
       const addressParts = [
@@ -4413,6 +4560,16 @@ export default function SLFPortal() {
         action: "requests",
       };
     }
+    // A scheduled run that exhausted its retries. The record is still in the
+    // queue and is retryable, so the notice takes the operator to it.
+    if (notification.type === "scheduled_submission_failed") {
+      return {
+        label: "Scheduled Submission",
+        color: "red",
+        icon: <CloseCircleOutlined />,
+        action: "drafts",
+      };
+    }
     return {
       label: "Admin Update",
       color: "default",
@@ -4480,6 +4637,62 @@ export default function SLFPortal() {
     activeMenu === "history" ||
     activeMenu === "requests";
 
+  // ── The BADGE feed: always on, wherever the operator is ─────────────────────
+  //
+  // The unread counts used to be fetched and subscribed inside the effect below,
+  // which is gated on `shouldLoadPortalActivityData` — the notification panel
+  // being open, or the History / Requests menu being active. So on Data Entry,
+  // Overview and Drafts (where an operator spends nearly all of their time) NO
+  // socket listener was attached and no count was ever fetched: the bell badge
+  // sat at whatever it had been, and a reverted submission or an admin message
+  // arriving right then showed nothing at all.
+  //
+  // A badge whose only job is to tell you something arrived cannot be gated on
+  // already looking at the thing it is pointing to. This effect owns the counts
+  // and nothing else: it subscribes once per signed-in session and re-reads on
+  // each event, coalesced so one admin action that emits several events costs one
+  // request. The heavier panel payloads (support tickets) stay gated below.
+  // How many queued drafts / scheduled runs FAILED to submit.
+  //
+  // Counted here, not in DraftsScheduledPanel, because that panel is unmounted on
+  // every other menu — and this is precisely the number the operator needs while
+  // they are somewhere else. `?status=failed` is answered by the queue's own
+  // {status} index and returns only the handful of offending records, so it is a
+  // cheap thing to keep current.
+  const fetchQueueAttention = useCallback(async () => {
+    if (!portalEmail) return;
+    try {
+      const { data } = await api.get("/portal-queue", {
+        params: { email: portalEmail, status: "failed" },
+      });
+      setQueueAttentionCount(Array.isArray(data) ? data.length : 0);
+    } catch {
+      /* silent — a badge must never break the page */
+    }
+  }, [portalEmail]);
+
+  useEffect(() => {
+    if (!portalUser?.email) return undefined;
+    fetchPortalNotifications();
+    fetchQueueAttention();
+    const sock = connectSocket("portal", portalUser.email);
+    let timer = null;
+    const refreshBadges = () => {
+      clearTimeout(timer);
+      timer = setTimeout(() => {
+        fetchPortalNotifications();
+        fetchQueueAttention();
+      }, 400);
+    };
+    sock.on("notification", refreshBadges);
+    sock.on("data-refresh", refreshBadges);
+    return () => {
+      clearTimeout(timer);
+      sock.off("notification", refreshBadges);
+      sock.off("data-refresh", refreshBadges);
+    };
+  }, [portalUser?.email, fetchPortalNotifications, fetchQueueAttention]);
+
   useEffect(() => {
     if (!portalUser?.email || !shouldLoadPortalActivityData) return;
     const sock = connectSocket("portal", portalUser.email);
@@ -4494,15 +4707,7 @@ export default function SLFPortal() {
       ) {
         fetchSupportTickets();
       }
-      fetchPortalNotifications();
     };
-    if (
-      notificationPanelOpen ||
-      activeMenu === "history" ||
-      activeMenu === "requests"
-    ) {
-      fetchPortalNotifications();
-    }
     if (
       (supportDrawerOpen || messageDrawerOpen) &&
       !supportTicketsLoadAttemptedRef.current
@@ -4518,13 +4723,10 @@ export default function SLFPortal() {
   }, [
     portalUser?.email,
     shouldLoadPortalActivityData,
-    notificationPanelOpen,
     supportDrawerOpen,
     messageDrawerOpen,
-    activeMenu,
     supportTickets.length,
     fetchSupportTickets,
-    fetchPortalNotifications,
   ]);
 
   const handleSubmitTicket = async (values) => {
@@ -4759,10 +4961,11 @@ export default function SLFPortal() {
               : [];
           if (effectiveType === "truck" && alignmentErrors.length === 0 && relationshipErrors.length === 0) {
             const matchedHauler = findUploadHauler(haulers, row.hauler);
-            const matchedClient = findUploadClientForHauler(matchedHauler, row.client);
-            if (matchedClient && !matchedClient.ambiguous && !matchedClient.inactiveOnly) {
-              row._matchedClient = matchedClient;
-            }
+            // Plural: a single Client cell may name several clients served on the
+            // same trip. All of them are bound to the row, so the submission
+            // records every client the waste actually came from.
+            const matchedClients = findUploadClientsForHauler(matchedHauler, row.client).clients;
+            if (matchedClients.length) row._matchedClients = matchedClients;
           }
           const cellKnown = effectiveType !== "truck" || !row.cellName || row.cellIndex != null || activeCellOptions.length === 0;
           return {
@@ -5312,7 +5515,7 @@ export default function SLFPortal() {
                 cellIndex: d.cellIndex,
                 cellName: d.cellName || "",
                 cellType: d.cellType || "",
-                selectedClients: d._matchedClient ? [d._matchedClient] : [],
+                selectedClients: d._matchedClients || [],
               },
             ]
           : [],
@@ -5323,7 +5526,7 @@ export default function SLFPortal() {
         cellName: d.cellName || "",
         cellType: d.cellType || "",
         hazWasteCode: d.hazWasteCode || [],
-        selectedClients: d._matchedClient ? [d._matchedClient] : [],
+        selectedClients: d._matchedClients || [],
       }));
       const uploadDates = [...new Set(newTrucks.map((truck) => truck.disposalDate).filter(Boolean))];
       if (uploadDates.length === 1 && !entryForm.getFieldValue("dateOfDisposal")) {
@@ -5424,17 +5627,17 @@ export default function SLFPortal() {
         alignmentErrors.length === 0 && relationshipErrors.length === 0
           ? findUploadHauler(fleet, aligned.hauler)
           : null;
-      const matchedClient = matchedHauler
-        ? findUploadClientForHauler(matchedHauler, aligned.client)
-        : null;
+      // One trip can serve SEVERAL clients written into one cell
+      // ("A, B, C"). findUploadClientsForHauler tries the cell whole first and
+      // only then as a list, so a client name containing a comma still resolves.
+      const matchedClients = matchedHauler
+        ? findUploadClientsForHauler(matchedHauler, aligned.client).clients
+        : [];
       const cellKnown =
         !aligned.cellName || aligned.cellIndex != null || activeCellOptions.length === 0;
       return {
         ...aligned,
-        _matchedClient:
-          matchedClient && !matchedClient.ambiguous && !matchedClient.inactiveOnly
-            ? matchedClient
-            : undefined,
+        _matchedClients: matchedClients.length ? matchedClients : undefined,
         _relationshipErrors: relationshipErrors,
         _errors: [
           ...getUploadRowErrors(aligned, "truck"),
@@ -5734,36 +5937,112 @@ export default function SLFPortal() {
     });
     companyForm.setFieldsValue({
       lguCompanyName: record.lguCompanyName,
+      // `companyType` is READ back out of this form when the resubmission payload
+      // is built, and it was never written into it — so the read fell through to
+      // the disposal form and, failing that, to a hardcoded "LGU" derived from
+      // `slfInfo.ownership`. While slfInfo was still loading that default fired on
+      // a PRIVATE facility, which rewrote companyType on save AND re-minted the ID
+      // No. under the wrong TYPE segment. Live proof: SLF-PVT-PA-0006 came back
+      // from a resubmission as SLF-LGU-PA-0016 on Prime Waste Solution (Private).
+      // The record already knows what it is; seed it from there.
+      companyType: record.companyType,
       companyRegion: record.companyRegion,
       companyProvince: record.companyProvince,
       companyMunicipality: record.companyMunicipality,
       companyBarangay: record.companyBarangay,
     });
+    // ── Baseline: the record's copy is a SNAPSHOT, not the baseline ────────────
+    //
+    // Every field below used to be assigned straight from `record`, and
+    // setFieldsValue({ x: undefined }) CLEARS a control rather than leaving it
+    // alone. A submission only carries the baseline columns that existed when it
+    // was created, so on any SLF whose baseline had drifted the record hands back
+    // `undefined` — and Edit & Resubmit then wiped the resolved baseline this form
+    // was already holding from GET /data-slf/baseline/:slfName.
+    //
+    // For Total Volume Accepted that is a DEAD END, not a cosmetic loss:
+    // `missingBaselineInfo` blocks Review & Submit until the field is a positive
+    // number, while `setBaselineSaved(true)` below renders that very input
+    // `disabled`. The operator is told to enter a value into a field they cannot
+    // type in, and the reverted submission can never be sent back. Measured
+    // against live data: 18 of the 26 outstanding reverted submissions are in
+    // exactly that state (Porac ×15, Prime Waste Solution, Santa Rosa).
+    //
+    // So each field is taken from the record only when the record actually
+    // carries it, and otherwise keeps what the form already holds — the same rule
+    // the baseline loader applies to the address fields (`keepCurrent`). `??` and
+    // not `||`: 0 is a real volume.
+    const keepBaseline = (incoming, field) =>
+      incoming ?? baselineForm.getFieldValue(field);
     baselineForm.setFieldsValue({
-      totalVolumeAccepted: record.totalVolumeAccepted,
+      // The FACILITY's figure wins over the record's snapshot for this one field.
+      //
+      // Every other baseline value on a submission is at worst stale; this one is
+      // a hard gate — `missingBaselineInfo` blocks Review & Submit until it is a
+      // positive number, and Edit & Resubmit locks the input. So a snapshot of 0
+      // (reverted SLF-LGU-PA-0016 stores exactly that, against a real baseline of
+      // 596,981.38) put an unfixable 0 in a disabled field and made the entry
+      // impossible to resubmit. `??` did not catch it: 0 is not nullish.
+      //
+      // The record's copy is still the fallback, for a facility whose baseline the
+      // server cannot resolve at all.
+      totalVolumeAccepted:
+        baselineTotalVolume ??
+        keepBaseline(record.totalVolumeAccepted, "totalVolumeAccepted"),
       baselineUnit: recordBaselineUnit,
       totalVolumeAcceptedUnit:
         record.totalVolumeAcceptedUnit || recordBaselineUnit,
-      activeCellResidualVolume: record.activeCellResidualVolume,
+      activeCellResidualVolume: keepBaseline(
+        record.activeCellResidualVolume,
+        "activeCellResidualVolume",
+      ),
       activeCellResidualUnit:
         record.activeCellResidualUnit || recordBaselineUnit,
-      activeCellInertVolume: record.activeCellInertVolume,
+      activeCellInertVolume: keepBaseline(
+        record.activeCellInertVolume,
+        "activeCellInertVolume",
+      ),
       activeCellInertUnit: record.activeCellInertUnit || recordBaselineUnit,
-      closedCellResidualVolume: record.closedCellResidualVolume,
+      closedCellResidualVolume: keepBaseline(
+        record.closedCellResidualVolume,
+        "closedCellResidualVolume",
+      ),
       closedCellResidualUnit:
         record.closedCellResidualUnit || recordBaselineUnit,
-      closedCellInertVolume: record.closedCellInertVolume,
+      closedCellInertVolume: keepBaseline(
+        record.closedCellInertVolume,
+        "closedCellInertVolume",
+      ),
       closedCellInertUnit: record.closedCellInertUnit || recordBaselineUnit,
     });
-    setActiveCellEntries(
-      (record.activeCellEntries || []).map((entry, index) => ({
+    // ── The BASELINE panes keep the facility's baseline, not the record's copy ──
+    //
+    // Cell entries and accredited haulers are FACILITY-level baseline data. What a
+    // submission stores is a SNAPSHOT taken when it was created, and it goes stale
+    // the moment the baseline is edited — so loading the record over the top
+    // replaced the operator's real baseline with an old, usually smaller, copy.
+    //
+    // Haulers is where that bites hardest, and it is the reported "Accredited
+    // Haulers are missing": Prime Waste Solution's baseline lists 150 accredited
+    // haulers, its reverted submission carries 1 — so clicking Edit & Resubmit
+    // collapsed 150 to 1, and resubmitting would have written that back.
+    //
+    // The baseline is LOCKED in this mode (setBaselineSaved(true) below), so the
+    // operator is correcting DISPOSAL data, not the baseline: what is already
+    // loaded from GET /data-slf/baseline/:slfName is the right thing to show. The
+    // record's snapshot is kept only as a FALLBACK, for a legacy SLF whose
+    // baseline cannot be resolved — same rule as the volume fields above.
+    const keepList = (incoming, current) =>
+      current?.length ? current : Array.isArray(incoming) ? incoming : [];
+    setActiveCellEntries((current) =>
+      keepList(record.activeCellEntries, current).map((entry, index) => ({
         ...entry,
         unit: entry.unit || recordBaselineUnit,
         key: `reverted-active-${index}-${Date.now()}`,
       })),
     );
-    setClosedCellEntries(
-      (record.closedCellEntries || []).map((entry, index) => ({
+    setClosedCellEntries((current) =>
+      keepList(record.closedCellEntries, current).map((entry, index) => ({
         ...entry,
         unit: entry.unit || recordBaselineUnit,
         key: `reverted-closed-${index}-${Date.now()}`,
@@ -5775,9 +6054,14 @@ export default function SLFPortal() {
       key: `reverted-${i}-${Date.now()}`,
     }));
     setTrucks(loadedTrucks);
-    // Load haulers
-    setHaulers(
-      mergeHaulersByName(record.accreditedHaulers || [], recordBaselineUnit),
+    // Accredited haulers: the loaded baseline wins over the record's snapshot —
+    // see the note above setActiveCellEntries. The record's copy is the fallback,
+    // so a facility whose baseline could not be resolved still shows something.
+    setHaulers((current) =>
+      mergeHaulersByName(
+        keepList(record.accreditedHaulers, current),
+        recordBaselineUnit,
+      ),
     );
     setEditingRevertedId(record._id);
     setSubmitted(false);
@@ -5842,6 +6126,7 @@ export default function SLFPortal() {
         // provides the same "is it actually on screen" signal.
         mountedValue: baselineForm.getFieldsValue().totalVolumeAccepted,
         storeValue: baselineValues.totalVolumeAccepted,
+        baselineValue: baselineTotalVolume,
       });
       const entry = {
         ...disposalValues,
@@ -6090,6 +6375,7 @@ export default function SLFPortal() {
       computed: computedTotalVolumeAccepted,
       mountedValue: baselineForm.getFieldsValue().totalVolumeAccepted,
       storeValue: baselineValues.totalVolumeAccepted,
+      baselineValue: baselineTotalVolume,
     });
     return {
       ...disposalValues,
@@ -6223,11 +6509,23 @@ export default function SLFPortal() {
     return (
       (submissions || []).find((s) => {
         if (s?.status !== "reverted") return false;
+        // THE ONE BEING CORRECTED RIGHT NOW DOES NOT COUNT.
+        //
+        // This rule blocks a NEW submission while an old revert sits unresolved.
+        // It was also counting the record the operator had just opened with
+        // Edit & Resubmit — which is the act that resolves it — so "Correct and
+        // resubmit your reverted submission first" appeared as a blocker ON the
+        // resubmission of that very submission. The only way out of a revert was
+        // closed by the rule that exists to push you through it.
+        //
+        // The record stays `reverted` in the list until the PUT lands, so it has
+        // to be excluded by id rather than by status.
+        if (editingRevertedId && String(s._id) === String(editingRevertedId)) return false;
         const ts = s.revertedAt || s.updatedAt;
         return ts && new Date(ts).getTime() <= cutoff;
       }) || null
     );
-  }, [submissions]);
+  }, [submissions, editingRevertedId]);
 
   // #5: single source of truth for what still blocks a submission. Drives the
   // disabled state + tooltip on "Review & Submit" (frontend), and mirrors the
@@ -6270,7 +6568,17 @@ export default function SLFPortal() {
     if (!watchedDisposalDate) list.push("Select the Date of Disposal.");
     if ((trucks || []).length === 0) list.push("Add at least one transport entry.");
     else if (wasteGenValidationIssues.length > 0) {
-      list.push("Complete every required Waste Generation Information field (incl. a disposal cell for each entry).");
+      // NAME the fields that are actually missing.
+      //
+      // This used to be one sentence ending "(incl. a disposal cell for each
+      // entry)", which is a list of one example presented as the whole problem.
+      // On the reverted SLF-LGU-PA-0016 the failures were Actual Volume and Waste
+      // Type; the operator read the message, placed a cell, and the blocker did
+      // not move — because the cell had never been the issue. The per-field
+      // messages already exist on every issue, so say them.
+      formatWasteGenIssues(wasteGenValidationIssues, 6).forEach((line) =>
+        list.push(`Waste Generation Information — ${line}`),
+      );
     }
     if (allCellsUnavailable) {
       list.push(NO_AVAILABLE_CELL_MESSAGE);
@@ -6294,7 +6602,10 @@ export default function SLFPortal() {
     missingBaselineInfo,
     watchedDisposalDate,
     trucks,
-    wasteGenValidationIssues.length,
+    // The whole issue list, not just its length: the blockers now quote each
+    // message, so a change of WHICH field is failing has to re-render even when
+    // the count happens to stay the same.
+    wasteGenValidationIssues,
     allCellsUnavailable,
     missingHazardousCodeTrucks.length,
     haulerVehiclesMissingCapacity.length,
@@ -6380,18 +6691,15 @@ export default function SLFPortal() {
     return { fullCells, nearFullCells };
   }, [trucks, slfInfo]);
 
-  // Every portal WRITE goes through here first. In Developer Portal Mode the
-  // backend will refuse the request anyway; this just explains why instead of
-  // surfacing a bare 403.
-  const blockedByDeveloperContext = (action = "change this data") => {
-    if (!isDeveloperContext) return false;
-    showError({
-      type: "error",
-      title: "Developer View is Read-Only",
-      message: `You are inspecting another portal user's data and cannot ${action}. Use Developer Settings → Submission RAW Data to correct records.`,
-    });
-    return true;
-  };
+  // Developer Portal Mode now has FULL CONTROL — see assertPortalWriteAllowed in
+  // server/utils/portalContext.js. This used to refuse every write locally to
+  // explain the backend's 403; both sides now permit it, and the server records
+  // each one against the developer's own identity.
+  //
+  // The call sites are kept: a developer writing to somebody else's account is
+  // still worth a deliberate pause, and this is where that lives. It returns
+  // false (never blocks) — the confirmation is the operator-facing part.
+  const blockedByDeveloperContext = () => false;
 
   const handleConfirmSubmit = async () => {
     if (blockedByDeveloperContext("submit on their behalf")) return;
@@ -7084,6 +7392,9 @@ export default function SLFPortal() {
     } else if (meta.action === "requests") {
       setActiveMenu("requests");
       markPortalNotificationsRead("requests");
+    } else if (meta.action === "drafts") {
+      setActiveMenu("drafts");
+      await markPortalNotificationRead(notification);
     } else {
       await markPortalNotificationRead(notification);
     }
@@ -7242,7 +7553,18 @@ export default function SLFPortal() {
     {
       key: "drafts",
       icon: <FileTextOutlined />,
-      label: "Drafts & Scheduled",
+      label: (
+        <span>
+          Drafts & Scheduled
+          {queueAttentionCount > 0 && (
+            <Badge
+              count={queueAttentionCount}
+              size="small"
+              style={{ marginLeft: 8, backgroundColor: "#fa541c" }}
+            />
+          )}
+        </span>
+      ),
     },
     {
       key: "requests",
@@ -8770,8 +9092,10 @@ export default function SLFPortal() {
         >
           {/* Developer Portal Mode — an unmissable, persistent banner. A developer
               must never be able to mistake another user's context for their own,
-              so this states WHOSE data is on screen and that the session cannot
-              write. (The backend enforces read-only regardless of this banner.) */}
+              so this states WHOSE data is on screen. It matters MORE now than it
+              did as an inspection mode: the session writes, so every action here
+              lands on that operator's real records under their name (the server
+              audits each one against the developer's identity). */}
           {isDeveloperContext && (
             <div
               className="slf-dev-banner"
@@ -8809,12 +9133,16 @@ export default function SLFPortal() {
               {/* `margin-inline-start: auto` right-aligns the tag on a single-line
                   banner, but once the banner wraps it strands the tag alone on the
                   last row. The class drops the auto margin below md. */}
+              {/* The mode WRITES now, so the banner has to say so. A stale
+                  "READ-ONLY" tag over a session that can submit, save a baseline
+                  and delete a draft is worse than no tag: it tells the developer
+                  their next click is safe when it is not. */}
               <Tag
                 className="slf-dev-banner-tag"
-                color="gold"
+                color="volcano"
                 style={{ marginInlineStart: "auto", marginInlineEnd: 0 }}
               >
-                READ-ONLY
+                FULL CONTROL — WRITES ARE LIVE
               </Tag>
             </div>
           )}
@@ -9012,6 +9340,7 @@ export default function SLFPortal() {
               portalUser={portalUser}
               isMobile={isMobile}
               onSubmitted={handleDraftSubmitted}
+              onAttentionCountChange={setQueueAttentionCount}
             />
           )}
         </Content>
@@ -9853,6 +10182,10 @@ export default function SLFPortal() {
           open={completionModalOpen}
           onClose={() => setCompletionModalOpen(false)}
           haulers={haulers}
+          // The modal stages into this draft; Save Baseline Update persists it.
+          // That button is unavailable on a locked baseline, so the modal has to
+          // know — otherwise an operator fills in hundreds of rows and loses them.
+          baselineLocked={baselineSaved}
           onApply={(nextHaulers) => setHaulers(nextHaulers)}
           onOpenHauler={(haulerIndex, focus) => {
             const hauler = haulers[haulerIndex];

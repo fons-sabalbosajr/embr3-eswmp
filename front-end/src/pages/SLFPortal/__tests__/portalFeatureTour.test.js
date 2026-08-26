@@ -145,12 +145,41 @@ const portal = fs.readFileSync(path.join(here, "..", "index.jsx"), "utf8");
 test("the tour is due when the user has not seen THIS release", () => {
   assert.match(
     portal,
-    /const featureTourDue = featureTourSeenVersion !== PORTAL_FEATURE_TOUR_VERSION;/,
-    "the check must compare versions, never a boolean",
+    /const featureTourDue =\s*!featureTourOptOut && featureTourSeenVersion !== PORTAL_FEATURE_TOUR_VERSION;/,
+    "the check must compare versions, never a boolean — and honour the opt-out",
   );
-  // And it must not be tied to the orientation tour's dismissal, which would
+  // And it must not be tied to the ORIENTATION tour's dismissal, which would
   // hide it from everyone who dismissed that one.
   assert.doesNotMatch(portal, /featureTourDue[^\n]*tourDismissed/);
+});
+
+test('"Don\'t show this again" means NEVER, not "not until the next release"', () => {
+  // The bug: the button recorded only the current release, so the tour returned
+  // at the next version bump for someone who had explicitly asked it not to.
+  // Two live accounts hit exactly that — their marker moved from
+  // 2026-08-20-hauler-bulk-clients to 2026-08-25-uploads-baseline-completeness.
+  //
+  // The opt-out is now its own flag, and it outranks the version marker.
+  assert.match(portal, /const optOutOfFeatureTour = useCallback\(/);
+  assert.match(portal, /featureTourOptOut: true,/, "the server copy is what survives logout");
+  assert.match(
+    portal,
+    /secureStorage\.set\(featureTourOptOutKey, "1"\)/,
+    "and a local mirror, so a slow response cannot flash the tour at them",
+  );
+  // It still records the release too, so nothing reading the marker disagrees.
+  const optOut = portal.slice(
+    portal.indexOf("const optOutOfFeatureTour = useCallback("),
+    portal.indexOf("// Hand the user to VERA with the question already asked"),
+  );
+  assert.match(optOut, /featureTourVersionSeen: PORTAL_FEATURE_TOUR_VERSION/);
+});
+
+test("the opt-out is reversible and never a one-way door", () => {
+  // What's New reopens the tour regardless — same principle as the orientation
+  // tour, whose dismissal deliberately does not disable its own button.
+  assert.match(portal, /if \(!manual && !featureTourDue\) return;/);
+  assert.match(portal, /onClick=\{\(\) => openFeatureTour\(\)\}/);
 });
 
 test("seeing it is recorded both locally and on the server", () => {
@@ -213,20 +242,23 @@ test("closing is dismissal, and only a deliberate act records the release as see
     /onClose=\{\(\) => setFeatureTourOpen\(false\)\}/,
     "closing must not record the version as seen",
   );
-  // Two acts do record it: finishing the last step…
+  // Finishing the last step records the RELEASE as seen — the user got the
+  // walkthrough, and the next release is new information worth offering once.
   assert.match(portal, /onFinish=\{markFeatureTourSeen\}/);
-  // …and the explicit opt-out, which every step offers.
+  // The explicit opt-out is a different, stronger answer and calls its own
+  // handler. Wiring the button to markFeatureTourSeen is the bug: that records
+  // only this release, so the tour came back at the next version bump.
   assert.match(portal, /Don&apos;t show this again/);
-  assert.match(portal, /onClick=\{markFeatureTourSeen\}/);
+  assert.match(portal, /onClick=\{optOutOfFeatureTour\}/);
 });
 
 test("the opt-out is on EVERY step, not only the last", () => {
   // It is rendered inside the shared step-description mapper rather than being
   // appended to one step, so a user who has seen enough on step 1 can say so.
-  const mapper = portal.slice(
-    portal.indexOf("return PORTAL_FEATURE_TOUR_STEPS.map((step) => ({"),
-    portal.indexOf("}, [askVeraAboutFeature, markFeatureTourSeen]);"),
-  );
+  const start = portal.indexOf("return PORTAL_FEATURE_TOUR_STEPS.map((step) => ({");
+  const end = portal.indexOf("}, [askVeraAboutFeature, optOutOfFeatureTour]);");
+  assert.ok(start > -1 && end > start, "the step mapper must be locatable");
+  const mapper = portal.slice(start, end);
   assert.match(mapper, /Don&apos;t show this again/);
   assert.match(mapper, /Ask VERA about this/);
 });

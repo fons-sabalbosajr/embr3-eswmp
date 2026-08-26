@@ -6,6 +6,11 @@ import { FilePdfOutlined, FileWordOutlined, PrinterOutlined, ReloadOutlined } fr
 import dayjs from "dayjs";
 
 import api from "../../api";
+import {
+  buildReportDocument,
+  wrapPrintable,
+  wrapWord,
+} from "./portalReportDocument";
 
 const { Text, Title } = Typography;
 const { RangePicker } = DatePicker;
@@ -152,35 +157,83 @@ export default function PortalReportModal({ open, onClose }) {
     [report],
   );
 
+  // ONE document, built from the report DATA, behind both buttons. See
+  // portalReportDocument.js for why neither may serialise the live modal.
+  const documentBody = () =>
+    buildReportDocument(report, { unitLabel, statusRows, formatDate: dt });
+
+  const fileStem = () =>
+    `SLF-Disposal-Report-${(report?.facility?.name || "Facility")
+      .replace(/[^\w\s-]/g, "")
+      .trim()
+      .replace(/\s+/g, "-")
+      .slice(0, 60)}-${dayjs().format("YYYYMMDD")}`;
+
+  /**
+   * Print / Save as PDF.
+   *
+   * Printed from its OWN window rather than by hiding the app around it. The old
+   * approach set `body * { visibility: hidden }` and revealed `#slf-portal-report`
+   * at `position:absolute; top:0` — but that element lives inside antd's Modal,
+   * which is `position:fixed` inside a scrolled `.ant-modal-wrap`. An absolutely
+   * positioned child of a fixed, clipped, scrolled ancestor is laid out against
+   * THAT box, so anything past the first viewport was cut off: a long report
+   * printed as one page with the rest missing.
+   *
+   * A clean window has no such ancestor, gets only the report's own stylesheet,
+   * and prints what it shows. Falls back to the in-page path when a popup blocker
+   * refuses the window, so the button always does something.
+   */
   const handlePrint = () => {
-    ensurePrintStyles();
-    window.print();
+    const html = wrapPrintable(documentBody(), fileStem());
+    let win = null;
+    try {
+      win = window.open("", "_blank", "width=980,height=1200");
+    } catch {
+      win = null;
+    }
+    if (!win) {
+      ensurePrintStyles();
+      window.print();
+      return;
+    }
+    win.document.open();
+    win.document.write(html);
+    win.document.close();
+    // Give the new document a frame to lay out (and its fonts to settle) before
+    // printing; printing an unlaid-out document yields blank pages in Safari.
+    win.onload = () => {
+      win.focus();
+      win.print();
+    };
+    setTimeout(() => {
+      try {
+        if (!win.closed) {
+          win.focus();
+          win.print();
+        }
+      } catch {
+        /* the window may already have been closed by the user */
+      }
+    }, 400);
   };
 
   /**
-   * Word export. The same HTML the screen shows, wrapped in the MHTML envelope
-   * Word understands — the approach the admin report already uses, so the two
-   * behave identically and an operator who has seen one knows the other.
+   * Word export. Same document, wrapped in the Office envelope so Word opens it
+   * in Print view with A4 margins rather than as a web page.
    */
   const handleWordExport = () => {
-    if (!printRef.current) return;
-    const header =
-      "<html xmlns:o='urn:schemas-microsoft-com:office:office' " +
-      "xmlns:w='urn:schemas-microsoft-com:office:word' " +
-      "xmlns='http://www.w3.org/TR/REC-html40'><head><meta charset='utf-8'>" +
-      "<style>body{font-family:Segoe UI,Arial,sans-serif;font-size:11pt;color:#222}" +
-      "table{border-collapse:collapse;width:100%;margin:6px 0}" +
-      "th,td{border:1px solid #d9d9d9;padding:4px 6px;font-size:10pt;text-align:left}" +
-      "th{background:#fafafa}h2{color:#1a3353}h3{color:#1a3353;margin:10px 0 4px}" +
-      "</style></head><body>";
-    const blob = new Blob([`${header}${printRef.current.innerHTML}</body></html>`], {
+    if (!report) return;
+    const blob = new Blob(["﻿", wrapWord(documentBody(), fileStem())], {
       type: "application/msword",
     });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `SLF-Disposal-Report-${dayjs().format("YYYYMMDD")}.doc`;
+    a.download = `${fileStem()}.doc`;
+    document.body.appendChild(a);
     a.click();
+    a.remove();
     URL.revokeObjectURL(url);
   };
 

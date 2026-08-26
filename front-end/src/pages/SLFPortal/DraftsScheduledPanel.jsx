@@ -1,17 +1,18 @@
 import { useState, useEffect, useCallback } from "react";
 import {
   Card, Tabs, Table, Tag, Button, Space, Empty, Spin, Popconfirm, Tooltip,
-  Modal, Descriptions, Typography, Alert,
+  Modal, Descriptions, Typography, Alert, Badge,
 } from "antd";
 import {
   FileTextOutlined, ClockCircleOutlined, ReloadOutlined, SendOutlined,
-  DeleteOutlined, StopOutlined, EyeOutlined, CheckCircleOutlined,
+  DeleteOutlined, StopOutlined, EyeOutlined, CheckCircleOutlined, DownloadOutlined,
   CloseCircleOutlined, ExclamationCircleOutlined,
 } from "@ant-design/icons";
 import dayjs from "dayjs";
 import Swal from "sweetalert2";
 import api from "../../api";
 import { fetchWithCache, invalidateCache } from "../../utils/pageCache";
+import { exportToExcel } from "../../utils/exportExcel";
 
 const QUEUE_CACHE_TTL = 3 * 60 * 1000;
 
@@ -251,12 +252,24 @@ const statusTag = (status) => {
 
 const safeDate = (v, fmt = "MMM D, YYYY h:mm A") => (v ? dayjs(v).format(fmt) : "—");
 
-export default function DraftsScheduledPanel({ portalUser, isMobile, onSubmitted }) {
+export default function DraftsScheduledPanel({
+  portalUser,
+  isMobile,
+  onSubmitted,
+  // Reports how many queued records need the operator's attention, so the sidebar
+  // badge follows an action taken HERE without waiting for its own poll. The
+  // parent also counts independently (this panel is unmounted on every other
+  // menu, and a badge that only updates while you are looking at the thing is no
+  // badge at all).
+  onAttentionCountChange,
+}) {
   const [drafts, setDrafts] = useState([]);
   const [scheduled, setScheduled] = useState([]);
   const [loading, setLoading] = useState(false);
   const [busyId, setBusyId] = useState(null);
   const [viewRecord, setViewRecord] = useState(null);
+  // When the rows below were read. See the overdue-badge note further down.
+  const [fetchedAt, setFetchedAt] = useState(() => Date.now());
 
   const email = portalUser?.email;
   const cacheKey = `portal-queue-${email || ""}`;
@@ -287,6 +300,10 @@ export default function DraftsScheduledPanel({ portalUser, isMobile, onSubmitted
                 rows.filter((r) => r.type === "draft" && r.status !== "submitted"),
               );
               setScheduled(rows.filter((r) => r.type === "scheduled"));
+              setFetchedAt(Date.now());
+              onAttentionCountChange?.(
+                rows.filter((r) => r.status === "failed").length,
+              );
             },
           },
         );
@@ -297,7 +314,7 @@ export default function DraftsScheduledPanel({ portalUser, isMobile, onSubmitted
         setLoading(false);
       }
     },
-    [email, cacheKey],
+    [email, cacheKey, onAttentionCountChange],
   );
 
   useEffect(() => {
@@ -322,7 +339,26 @@ export default function DraftsScheduledPanel({ portalUser, isMobile, onSubmitted
       // Let the portal refresh Submission History so the entry appears there.
       onSubmitted?.();
     } catch (err) {
-      Swal.fire({ icon: "error", title: "Submission Failed", text: err.response?.data?.message || "Could not submit. Please review the data and try again." });
+      // The reason a queued submission is refused is almost always something the
+      // operator can act on — an unresolved revert, a client not yet accredited, a
+      // cell that cannot accept waste. It used to be shown as a bare sentence with
+      // no next step, on a row whose Submit button then disappeared. The button
+      // stays now (a failed record is retryable), so the message names where the
+      // fix lives instead of leaving them to guess.
+      const reason =
+        err.response?.data?.message ||
+        "Could not submit. Please review the data and try again.";
+      const nextStep = /reverted submission/i.test(reason)
+        ? "Open <b>Submission History</b>, correct the reverted entry and resubmit it — then retry this one."
+        : /client|hauler/i.test(reason)
+          ? "Open <b>Data Entry → Baseline → Accredited Haulers</b> to add or correct the record it names, then retry."
+          : "Fix what the message names, then use <b>Retry submission</b> on this row.";
+      Swal.fire({
+        icon: "error",
+        title: "Submission Failed",
+        html: `<div style="text-align:left;font-size:13px"><p style="margin:0 0 10px">${reason}</p><p style="margin:0;color:#555">${nextStep}</p></div>`,
+        confirmButtonColor: "#1a3353",
+      });
       fetchQueue(true);
     } finally {
       setBusyId(null);
@@ -356,19 +392,31 @@ export default function DraftsScheduledPanel({ portalUser, isMobile, onSubmitted
   };
 
   const commonActions = (record, { isScheduled } = {}) => {
-    const editable = record.status === "draft" || record.status === "scheduled";
+    // A FAILED record is still submittable, and hiding the button was a dead end.
+    //
+    // POST /portal-queue/:id/submit stamps `status = "failed"` when submission is
+    // rejected — a rejection is routinely something the operator can fix (an
+    // unresolved revert, a missing cell, a client not yet accredited). But the
+    // button was gated on draft/scheduled only, so the FIRST failure removed the
+    // one control that could retry it, and PUT /:id refused to edit it. The draft
+    // became unreachable: view or delete, nothing else. Live example:
+    // rtabella@piwsi.ph has a Prime Waste Solution draft stranded at
+    // retryCount=1 since its revert blocked it.
+    //
+    // `submitted` and `cancelled` stay terminal — those are genuinely done.
+    const retryable = ["draft", "scheduled", "failed"].includes(record.status);
     return (
       <Space size={2} wrap>
         <Tooltip title="View data">
           <Button size="small" type="text" icon={<EyeOutlined />} onClick={() => setViewRecord(record)} />
         </Tooltip>
-        {editable && (
-          <Tooltip title="Submit now">
+        {retryable && (
+          <Tooltip title={record.status === "failed" ? "Retry submission" : "Submit now"}>
             <Button
               size="small"
               type="text"
               icon={<SendOutlined />}
-              style={{ color: "#52c41a" }}
+              style={{ color: record.status === "failed" ? "#fa8c16" : "#52c41a" }}
               loading={busyId === record._id}
               onClick={() => submitNow(record)}
             />
@@ -415,15 +463,119 @@ export default function DraftsScheduledPanel({ portalUser, isMobile, onSubmitted
     { title: "Actions", key: "actions", width: 140, render: (_, r) => commonActions(r, { isScheduled: true }) },
   ];
 
+  // ── Export ──────────────────────────────────────────────────────────────────
+  //
+  // One row per QUEUED RECORD, flattened — a draft's payload is a whole submission
+  // (trucks, vehicles, haulers, baseline), and a spreadsheet of nested objects is
+  // unreadable. The columns are what the operator is actually chasing: what it is,
+  // whether it went, when it is due, and WHY it did not go. `failureReason` is the
+  // point of the export — it is the one field the table truncates and the one that
+  // says what to fix.
+  const exportRows = (rows, kind) =>
+    rows.map((r) => {
+      const payload = r.payload || {};
+      const trucks = Array.isArray(payload.trucks) ? payload.trucks : [];
+      const volume = trucks.reduce((sum, t) => {
+        const vehicles = Array.isArray(t?.vehicles) ? t.vehicles : [];
+        return (
+          sum +
+          (vehicles.length
+            ? vehicles.reduce((s, v) => s + Number(v?.actualVolume || 0), 0)
+            : Number(t?.actualVolume || 0))
+        );
+      }, 0);
+      return {
+        Type: kind,
+        Facility: r.slfName || DASH,
+        Status: STATUS_META[r.status]?.label || r.status || DASH,
+        "Date of Disposal": payload.dateOfDisposal
+          ? safeDate(payload.dateOfDisposal, "MMM D, YYYY")
+          : DASH,
+        "Transport Entries": trucks.length,
+        "Total Volume": volume ? Number(volume.toFixed(2)) : 0,
+        Unit: unitOf(payload.baselineUnit, "m³"),
+        "Scheduled For": r.scheduledAt ? safeDate(r.scheduledAt) : DASH,
+        "Submitted At": r.submittedAt ? safeDate(r.submittedAt) : DASH,
+        "Submission ID": r.resultSubmissionId || DASH,
+        Attempts: r.retryCount || 0,
+        "Failure Reason": r.failureReason || DASH,
+        Created: safeDate(r.createdAt),
+        "Last Updated": safeDate(r.updatedAt),
+      };
+    });
+
+  const handleExport = () => {
+    const rows = [...exportRows(drafts, "Draft"), ...exportRows(scheduled, "Scheduled")];
+    if (rows.length === 0) {
+      Swal.fire({
+        icon: "info",
+        title: "Nothing to Export",
+        text: "You have no drafts or scheduled submissions yet.",
+        timer: 1600,
+        showConfirmButton: false,
+      });
+      return;
+    }
+    exportToExcel(
+      rows,
+      `drafts-scheduled-${dayjs().format("YYYY-MM-DD")}`,
+      "Drafts & Scheduled",
+    );
+  };
+
   const emptyState = (text) => (
     <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={text} style={{ padding: 24 }} />
+  );
+
+  // ── Tab badges ──────────────────────────────────────────────────────────────
+  //
+  // The counts were plain "Drafts (3)" text, which reads as a total and says
+  // nothing about whether anything NEEDS the operator. What actually needs them
+  // is a record that failed to submit, and a scheduled run that is now due — both
+  // were invisible until the tab was opened and the Status column read.
+  //
+  // So the count stays as text and a red badge carries the ATTENTION count only:
+  // it appears when something is wrong and is absent when the queue is merely
+  // non-empty. `failed` covers both tabs; a scheduled record whose time has
+  // passed while it is still pending is the scheduler having missed it.
+  // "Overdue" is measured against the moment the list was READ, not against the
+  // clock at render time: the rows are only ever as fresh as the last fetch, and
+  // reading the clock during render is impure (it would also need a ticker to
+  // stay true). `fetchedAt` moves on every load and Refresh, which is exactly
+  // when the answer can actually change.
+  const failedDrafts = drafts.filter((r) => r.status === "failed").length;
+  const failedScheduled = scheduled.filter((r) => r.status === "failed").length;
+  const overdueScheduled = scheduled.filter(
+    (r) => r.status === "scheduled" && r.scheduledAt && new Date(r.scheduledAt).getTime() < fetchedAt,
+  ).length;
+  const tabLabel = (icon, text, total, attention, attentionTitle) => (
+    <span>
+      {icon} {text} ({total})
+      {attention > 0 && (
+        <Tooltip title={attentionTitle}>
+          <Badge count={attention} size="small" style={{ marginLeft: 6 }} />
+        </Tooltip>
+      )}
+    </span>
   );
 
   return (
     <Card
       style={{ borderRadius: 12 }}
       title={<Space><FileTextOutlined style={{ color: "#722ed1" }} /><Text strong>Drafts & Scheduled Submissions</Text></Space>}
-      extra={<Button size="small" icon={<ReloadOutlined />} onClick={() => fetchQueue(true)} loading={loading}>Refresh</Button>}
+      extra={
+        <Space size={8} wrap>
+          <Button
+            size="small"
+            icon={<DownloadOutlined />}
+            onClick={handleExport}
+            disabled={loading || drafts.length + scheduled.length === 0}
+          >
+            Export
+          </Button>
+          <Button size="small" icon={<ReloadOutlined />} onClick={() => fetchQueue(true)} loading={loading}>Refresh</Button>
+        </Space>
+      }
     >
       <Spin spinning={loading}>
         <Tabs
@@ -431,7 +583,13 @@ export default function DraftsScheduledPanel({ portalUser, isMobile, onSubmitted
           items={[
             {
               key: "drafts",
-              label: <span><FileTextOutlined /> Drafts ({drafts.length})</span>,
+              label: tabLabel(
+                <FileTextOutlined />,
+                "Drafts",
+                drafts.length,
+                failedDrafts,
+                `${failedDrafts} draft(s) failed to submit — open to see why, then retry.`,
+              ),
               children: drafts.length === 0
                 ? emptyState("No saved drafts yet. Use \u201CSave as Draft\u201D on the review screen.")
                 : (
@@ -447,7 +605,18 @@ export default function DraftsScheduledPanel({ portalUser, isMobile, onSubmitted
             },
             {
               key: "scheduled",
-              label: <span><ClockCircleOutlined /> Scheduled ({scheduled.length})</span>,
+              label: tabLabel(
+                <ClockCircleOutlined />,
+                "Scheduled",
+                scheduled.length,
+                failedScheduled + overdueScheduled,
+                [
+                  failedScheduled ? `${failedScheduled} failed to submit` : "",
+                  overdueScheduled ? `${overdueScheduled} past its scheduled time` : "",
+                ]
+                  .filter(Boolean)
+                  .join(" · "),
+              ),
               children: scheduled.length === 0
                 ? emptyState("No scheduled submissions. Use \u201CSchedule\u201D on the review screen.")
                 : (

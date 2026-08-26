@@ -10,6 +10,9 @@ export const PORTAL_TOUR_DISMISSED_PREFIX = "slf-portal-tour-dismissed-"; // sta
 // the value is compared against PORTAL_FEATURE_TOUR_VERSION so the next release
 // shows again. See portalFeatureTour.js.
 export const PORTAL_FEATURE_TOUR_SEEN_PREFIX = "slf-portal-feature-tour-seen-";
+// The permanent "Don't show this again" for the feature tour, kept apart from the
+// per-release marker above — see portalFeatureTourOptOutAt in models/UserPortal.js.
+export const PORTAL_FEATURE_TOUR_OPT_OUT_PREFIX = "slf-portal-feature-tour-optout-";
 export const ORGANIZE_CELLS_ENABLED = true;
 
 // Request/amendment type → label + tag color, used by the "My Requests" table.
