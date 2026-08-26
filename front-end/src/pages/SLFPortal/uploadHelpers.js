@@ -833,6 +833,61 @@ export const findUploadClientForHauler = (hauler, clientValue) => {
   return activeMatches[0];
 };
 
+/**
+ * One trip, several clients.
+ *
+ * An operator routinely serves more than one client on a single trip and writes
+ * them into ONE Client cell: "Limay Public Market, Wawa, Poblacion, Kitang I".
+ * Every one of those is a registered client of the hauler — but the cell was only
+ * ever compared as a SINGLE name, and normalizeComparableText folds commas to
+ * spaces, so it became the one long token
+ * "limay public market wawa poblacion kitang i", matched nothing, and the whole
+ * submission was rejected with "Client … is not assigned to hauler …".
+ *
+ * Splitting is a FALLBACK, never the first move: a client name may legitimately
+ * contain a comma, so the cell is always tried whole first (see
+ * findUploadClientsForHauler). Only when the whole cell matches NOTHING is it
+ * read as a list.
+ */
+export const splitClientCell = (value) => {
+  const raw = String(value ?? "");
+  if (!raw.trim()) return [];
+  return raw
+    .split(/[,;]+/)
+    .map((part) => cleanUploadText(part))
+    .filter(Boolean);
+};
+
+/**
+ * Resolve a Client cell to the hauler's registered client record(s).
+ *
+ * Returns `{ clients, single }`:
+ *   • `clients` — the matched records; EMPTY means the row is not acceptable.
+ *   • `single`  — the whole-cell match when there was one, so the caller can keep
+ *                 reporting "ambiguous" / "inactive" exactly as before.
+ *
+ * A list is accepted ONLY when EVERY part resolves to one active registered
+ * client of that hauler. A partial match is a rejection: silently dropping the
+ * part that did not resolve would file that client's waste under the others.
+ */
+export const findUploadClientsForHauler = (hauler, clientValue) => {
+  const whole = findUploadClientForHauler(hauler, clientValue);
+  // The cell matched as one name (or matched ambiguously / inactive-only, both of
+  // which are real states the caller must report). Behaviour is unchanged.
+  if (whole) {
+    return { clients: whole.ambiguous || whole.inactiveOnly ? [] : [whole], single: whole };
+  }
+  const parts = splitClientCell(clientValue);
+  if (parts.length < 2) return { clients: [], single: null };
+  const resolved = [];
+  for (const part of parts) {
+    const match = findUploadClientForHauler(hauler, part);
+    if (!match || match.ambiguous || match.inactiveOnly) return { clients: [], single: null };
+    resolved.push(match);
+  }
+  return { clients: resolved, single: null, split: true };
+};
+
 export const getUploadRelationshipErrors = (row, haulers = []) => {
   if (!row || typeof row !== "object") return [];
   const rowLabel = row._rowNumber ? `Row ${row._rowNumber}` : "Row";
@@ -846,18 +901,16 @@ export const getUploadRelationshipErrors = (row, haulers = []) => {
     errors.push(`${rowLabel} — Hauler "${row.hauler || ""}" is duplicated or ambiguous under this SLF.`);
     return errors;
   }
-  const client = findUploadClientForHauler(hauler, row.client);
-  if (!client) {
-    errors.push(`${rowLabel} — Client "${row.client || ""}" is not assigned to hauler "${row.hauler || ""}" under this SLF.`);
-    return errors;
-  }
-  if (client.ambiguous) {
+  const { clients, single } = findUploadClientsForHauler(hauler, row.client);
+  if (clients.length > 0) return [];
+  if (single?.ambiguous) {
     errors.push(`${rowLabel} — Client "${row.client || ""}" is duplicated or ambiguous for hauler "${row.hauler || ""}" under this SLF.`);
     return errors;
   }
-  if (client.inactiveOnly) {
+  if (single?.inactiveOnly) {
     errors.push(`${rowLabel} — Client "${row.client || ""}" is inactive for hauler "${row.hauler || ""}" under this SLF.`);
     return errors;
   }
-  return [];
+  errors.push(`${rowLabel} — Client "${row.client || ""}" is not assigned to hauler "${row.hauler || ""}" under this SLF.`);
+  return errors;
 };

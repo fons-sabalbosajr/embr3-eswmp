@@ -52,6 +52,48 @@ async function processDueScheduledSubmissions() {
           user: record.portalUserEmail,
           meta: { queueId: record._id, status: record.status },
         });
+
+        // ── TELL THE OPERATOR ────────────────────────────────────────────────
+        //
+        // A scheduled submission that has exhausted its retries is finished, and
+        // until now it ended in silence: the record was stamped `failed`, a line
+        // went into the server log, and nothing reached the person whose data it
+        // was. The only way to find out was to open Drafts & Scheduled and read
+        // the Status column — so a submission the operator believed was filed
+        // could sit unfiled indefinitely.
+        //
+        // The notification is what puts a number on their sidebar badge and a
+        // line in their bell. Written on the FINAL failure only: the intermediate
+        // retries are transient by definition and a notice for each would train
+        // the operator to ignore them. There is no `req` here (this is a timer,
+        // not a request) so no socket emit is possible — the record is persisted
+        // instead, which the portal's badge feed reads on load and on its next
+        // refresh. Never allowed to break the sweep.
+        if (record.status === "failed" && record.portalUserEmail) {
+          try {
+            const Notification = require("../models/Notification");
+            const UserPortal = require("../models/UserPortal");
+            const portalUser = await UserPortal.findOne({
+              email: String(record.portalUserEmail).trim().toLowerCase(),
+            }).select("_id");
+            if (portalUser) {
+              await Notification.create({
+                recipient: portalUser._id.toString(),
+                type: "scheduled_submission_failed",
+                title: "Scheduled Submission Failed",
+                message: `Your scheduled submission for ${record.slfName || "your SLF"} could not be submitted after ${record.retryCount} attempts. Reason: ${record.failureReason} — open Drafts & Scheduled to correct and retry it.`,
+                meta: {
+                  queueId: String(record._id),
+                  slfName: record.slfName,
+                  failureReason: record.failureReason,
+                  retryCount: record.retryCount,
+                },
+              });
+            }
+          } catch {
+            /* a missed notice must never stop the queue from draining */
+          }
+        }
       }
     }
   } catch (err) {

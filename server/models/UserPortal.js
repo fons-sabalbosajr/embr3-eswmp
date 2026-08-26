@@ -160,6 +160,22 @@ const userPortalSchema = new mongoose.Schema(
     // PORTAL_FEATURE_TOUR_VERSION and the tour returns exactly once.
     portalFeatureTourVersionSeen: { type: String, trim: true, default: null },
     portalFeatureTourSeenAt: { type: Date, default: null },
+    // "Don't show this again" — the BUTTON, not the version marker above.
+    //
+    // The two are different promises and were being served by one field. The
+    // version marker means "this release has been seen", which is right for
+    // finishing the tour or closing it: the next release is new information and
+    // should be offered once. The button says *never*, and a user who clicks it
+    // and is shown the tour again after the next deploy was told something
+    // untrue. Two accounts hit exactly that — their marker moved from
+    // 2026-08-20-hauler-bulk-clients to 2026-08-25-uploads-baseline-completeness
+    // having already asked not to see it.
+    //
+    // So the opt-out is its own flag, permanent and version-independent. What's
+    // New still reopens the tour on demand, for the same reason the orientation
+    // tour's dismissal does not disable its button: an opt-out must not be a
+    // one-way door.
+    portalFeatureTourOptOutAt: { type: Date, default: null },
   },
   { timestamps: true, collection: "user_portal" }
 );

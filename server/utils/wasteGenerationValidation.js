@@ -44,6 +44,12 @@ function hasCellIndex(value) {
   return Number.isInteger(n) && n >= 0;
 }
 
+// Does this record (entry OR vehicle) carry a usable disposal cell? Twin of
+// hasCellPlacement in front-end/src/pages/SLFPortal/cellPlacement.js.
+function hasCellPlacement(record) {
+  return !isBlank(record?.cellName) || hasCellIndex(record?.cellIndex);
+}
+
 const issue = (truckIndex, field, message, vehicleIndex = null) => ({
   tab: TAB,
   truckIndex,
@@ -101,7 +107,29 @@ function validateWasteGeneration(trucks, options = {}) {
     }
 
     const vehicles = Array.isArray(truck?.vehicles) ? truck.vehicles : [];
-    const usesVehicles = vehicles.length > 0;
+    // ── Which LEVEL does this truck report its load at? ───────────────────────
+    //
+    // The presence of a vehicle ROW used to be enough to say "per-vehicle", and
+    // that is not the same question. A truck can carry a STUB vehicle — a row
+    // holding a plate number and nothing else — while its actual load sits at the
+    // truck level. Live example, the reverted SLF-LGU-PA-0016: the truck records
+    // 3.1 m³ of Residual, and its single vehicle row has no volume, no waste type
+    // and no cell. Validation took the per-vehicle branch and demanded all three
+    // from the stub, so the operator was told to complete fields that had no
+    // business existing — and placing a cell, which is what the message named,
+    // could never clear it.
+    //
+    // It also disagreed with the rest of the system: hasTruckVolume(),
+    // computeSlfMetrics() and the occupancy walk all read the truck level when the
+    // vehicles carry nothing, so this record's 3.1 m³ was counted everywhere while
+    // being rejected here.
+    //
+    // A vehicle counts as load-bearing when it carries a VOLUME or a WASTE TYPE.
+    // Deliberately not its cell: entry→vehicle inheritance copies a cell onto
+    // every stub, and treating that as "this vehicle reports its own load" would
+    // re-create the same demand the moment a cell was placed.
+    const vehicleCarriesLoad = (v) => !isBlank(v?.actualVolume) || !isBlank(v?.wasteType);
+    const usesVehicles = vehicles.some(vehicleCarriesLoad);
 
     if (usesVehicles) {
       // Placement lives on each vehicle.
@@ -112,7 +140,13 @@ function validateWasteGeneration(trucks, options = {}) {
         if (isBlank(v?.wasteType)) {
           issues.push(issue(t, "wasteType", "Waste Type is required for every vehicle.", vi));
         }
-        if (isBlank(v?.cellName) && !hasCellIndex(v?.cellIndex)) {
+        // A vehicle with no cell of its own INHERITS the entry's placement.
+        // sanitizeTrucksForSave materialises that inheritance before this runs, so
+        // by the time a real submission reaches here the vehicle usually carries
+        // its own copy — this accepts the entry's placement as well so the rule
+        // holds for any caller, and so the portal's mirrored copy (which gates the
+        // Review & Submit button) and this one can never disagree.
+        if (!hasCellPlacement(v) && !hasCellPlacement(truck)) {
           issues.push(issue(t, "cellName", "Disposal Cell is required for every vehicle.", vi));
         }
         if (isTreatedHazardous(v?.wasteType) && isBlank(v?.hazWasteCode)) {

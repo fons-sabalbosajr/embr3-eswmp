@@ -272,6 +272,59 @@ const hasEnoughSubstance = (shorter, longer) =>
  * a person decides, because "these two names describe one client" is a judgement
  * about the world that a string comparison cannot make.
  */
+/**
+ * Tokens that DISTINGUISH one client from another rather than describing it.
+ *
+ * This is the guard that makes auto-applying a near miss safe, and it exists
+ * because of what the live rosters actually contain. Measured across all 667
+ * clients on this app's hauler rosters, these pairs are DIFFERENT clients:
+ *
+ *   "barangay 1"      vs "barangay 2" … "barangay 4" vs "barangay 5"   90.0%
+ *   "brgy. 03 (rcb)"  vs "brgy. 04 (rcb)"                              92.9%
+ *
+ * Ten collisions among Baler's barangays alone. Names that differ by a single
+ * digit are MAXIMALLY similar as strings and completely different places, so any
+ * percentage threshold — 90 included — files Barangay 1's waste under Barangay 2.
+ * That is why this module rejected similarity scoring in the first place (see the
+ * note above), and a threshold alone would reintroduce exactly that.
+ *
+ * So the differing tokens are inspected instead: if what separates two names
+ * carries a number or a short code, they are held apart no matter how similar the
+ * strings are. A qualifier that is pure words ("corporation", "incorporated",
+ * ", bulacan") describes the same entity and does not block the match.
+ */
+const IDENTIFIER_TOKEN = /\d/;
+
+/** The tokens present in one normalized name and absent from the other. */
+const differingTokens = (a, b) => {
+  const aTokens = tokensOf(a);
+  const bTokens = tokensOf(b);
+  const inB = new Set(bTokens);
+  const inA = new Set(aTokens);
+  return [
+    ...aTokens.filter((t) => !inB.has(t)),
+    ...bTokens.filter((t) => !inA.has(t)),
+  ];
+};
+
+/**
+ * Do these two names differ only by DESCRIPTIVE words, never by an identifier?
+ *
+ * Exported for the auto-apply decision and pinned by tests — this predicate is
+ * the whole safety argument.
+ */
+export const differsOnlyByQualifier = (a, b) => {
+  const diff = differingTokens(normalizeComparableText(a), normalizeComparableText(b));
+  if (diff.length === 0) return true;
+  return !diff.some((token) => IDENTIFIER_TOKEN.test(token));
+};
+
+// A near miss is auto-applied only from the CONTAINMENT class — one name is the
+// other plus a qualifier. The token-subset class (0.85, abbreviations) stays a
+// suggestion: "corp"→"corporation" is usually right, but it is an inference about
+// what an abbreviation stands for, and it is not worth a misattributed trip.
+export const AUTO_ALIGN_MIN_SCORE = 0.95;
+
 export const findClientNearMisses = (hauler, clientValue, limit = 4) => {
   const target = normalizeComparableText(clientValue);
   if (!target || !hauler || hauler.ambiguous) return [];
@@ -417,6 +470,38 @@ export const resolveDisposalIdentity = (row = {}, haulers = []) => {
     // missing, it is one spelled two ways. Reported as a MISMATCH so the preview
     // can offer the fix instead of sending the operator off to add a duplicate.
     const suggestions = findClientNearMisses(direct, rawClient);
+    // ── Auto-adopt the stored spelling when it cannot be the wrong client ──────
+    //
+    // The operator's ask: stop blocking a row when the only difference is how the
+    // client is spelled, and just use the stored name. Applied only when ALL of
+    // these hold, because each one rules out a way of getting it wrong:
+    //
+    //   • exactly ONE candidate reaches the containment class (≥0.95) — two
+    //     equally good candidates is a choice, not a correction;
+    //   • no OTHER candidate is anywhere near it, so there is nothing to weigh;
+    //   • the names differ only by descriptive words, never by a number or code
+    //     (see differsOnlyByQualifier — this is what keeps Barangay 1 and
+    //     Barangay 2 apart, and no percentage threshold can do it).
+    //
+    // Anything short of that stays a MISMATCH for a person to resolve, exactly as
+    // before. The row records what was adopted, so the preview shows it and it is
+    // never a silent rewrite.
+    const strong = suggestions.filter((s) => s.score >= AUTO_ALIGN_MIN_SCORE);
+    if (
+      strong.length === 1 &&
+      suggestions.filter((s) => s !== strong[0]).every((s) => s.score < AUTO_ALIGN_MIN_SCORE) &&
+      differsOnlyByQualifier(rawClient, strong[0].name)
+    ) {
+      return {
+        status: "aligned",
+        method: "client-spelling",
+        hauler: haulerName(direct),
+        client: strong[0].name,
+        note:
+          `Client "${rawClient}" was recorded as "${strong[0].name}" on the baseline — ` +
+          "the stored spelling was used. The two names differ only by a qualifier.",
+      };
+    }
     if (suggestions.length) {
       return {
         status: "mismatch",
@@ -613,5 +698,7 @@ export default {
   alignDisposalRow,
   summarizeAlignment,
   findClientNearMisses,
+  differsOnlyByQualifier,
+  AUTO_ALIGN_MIN_SCORE,
   isTripRow,
 };

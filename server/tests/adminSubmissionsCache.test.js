@@ -158,8 +158,73 @@ test("the save REFUSES to write a locked baseline", () => {
   assert.match(saveRoute, /locked: true/);
   assert.match(
     saveRoute,
-    /req\.user\?\.role === "portal_user" && baselineOnlyIds\.length/,
+    /if \(req\.user\?\.role === "portal_user"\) \{/,
     "enforcement applies to portal callers; admins own the approve/lock endpoints",
+  );
+});
+
+test("the lock is enforced for a container-less SLF too", () => {
+  // The check used to be gated on `baselineOnlyIds.length`, which is EMPTY for a
+  // legacy SLF whose baseline only ever lived on its submissions — eleven of the
+  // seventeen live facilities. So the endpoint the guard exists to protect was
+  // unguarded for exactly the SLFs most likely to reach it, and a locked baseline
+  // could be overwritten by calling it directly.
+  //
+  // Scope now mirrors the READ (see the flagSource test above): container(s) when
+  // the SLF has any, otherwise every record carrying baseline data. The two sides
+  // therefore agree on "is this locked" by construction.
+  assert.match(
+    saveRoute,
+    /const lockScopeIds = baselineOnlyIds\.length\s*\?\s*baselineOnlyIds\s*:\s*await resolveSlfRecordIds\(/,
+    "no container → fall back to the SLF's baseline-carrying records",
+  );
+  assert.match(
+    saveRoute,
+    /requireBaselineData: true/,
+    "an SLF with no baseline at all must resolve to an empty scope",
+  );
+  assert.match(
+    saveRoute,
+    /if \(lockScopeIds\.length && approvedCount === 0\)/,
+    "an empty scope is a genuine first save, not a locked one",
+  );
+});
+
+test("the baseline WRITE target excludes trashed containers, matching the read", () => {
+  // The read filters `deletedAt: null` everywhere; the write did not, so a
+  // container that had been moved to the trash kept absorbing baseline saves that
+  // no read could ever return — the operator's Total Volume Accepted went to the
+  // database and came back as the previous value. Six live facilities were in
+  // that state. These two must never diverge again.
+  const finder = source.slice(
+    source.indexOf("async function findMatchingBaselineOnlyIds("),
+    source.indexOf("async function ensurePortalAccountCanSubmit("),
+  );
+  assert.ok(finder.length > 0, "findMatchingBaselineOnlyIds should exist");
+  assert.match(
+    finder,
+    /const baseFilter = \{\s*deletedAt: null,/,
+    "the write target must exclude soft-deleted containers",
+  );
+  assert.match(
+    baselineRead,
+    /\{ deletedAt: null \}/,
+    "the read this is aligned with filters soft-deleted records out",
+  );
+});
+
+test("a NEW container never starts life without the stored Total Volume Accepted", () => {
+  // The partial-update guard expresses "this edit did not provide a value" by
+  // dropping the field, which preserves what is stored. On the CREATE branch
+  // there is nothing to preserve, and a container is authoritative the moment it
+  // exists — so an absent value there reads as "the operator has none" rather
+  // than "look at the siblings". Carry the resolved value forward instead.
+  assert.match(saveRoute, /if \(!\("totalVolumeAccepted" in updateFields\)\) \{/);
+  assert.match(saveRoute, /baseline\.total_volume\.carried_forward/, "the carry-forward must be audited");
+  assert.match(
+    saveRoute,
+    /const storedTotalVolume = await DataSLF\.findOne\(\{[\s\S]{0,200}deletedAt: null/,
+    "seeded from LIVE records only — a trashed container is not resurrected",
   );
 });
 

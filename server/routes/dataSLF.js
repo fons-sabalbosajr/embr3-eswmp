@@ -1178,10 +1178,37 @@ function sanitizeTrucksForSave(trucks, fallbackUnit, errors) {
     const tc = coerceVolume(cleaned.truckCapacity, `Truck ${ti + 1} capacity`, errors);
     if (tc !== undefined) cleaned.truckCapacity = tc;
 
+    // ── Entry → vehicle cell inheritance, made REAL ────────────────────────────
+    //
+    // The server reads placement from EACH VEHICLE and ignores the entry-level
+    // cell when vehicles are present (portalAuth#summarizeCellAssignment). So an
+    // entry placed as a whole — by an upload carrying a cell column, by Assign to
+    // Cell, or by its own cell field — whose vehicles carry no cell of their own
+    // was stored as UNPLACED waste, and the operator was sent to Organize Cells
+    // for an entry they had already placed.
+    //
+    // The portal materialises this on save (cellPlacement.js → inheritEntryCell),
+    // but only through the truck modal: an uploaded row edited in the preview, a
+    // draft promoted by the scheduler, and a resubmission all reach the database
+    // without passing through it. Doing it here covers every write path at once,
+    // and makes the matching relaxation in validateWasteGeneration truthful —
+    // the placement is recorded, not merely assumed.
+    //
+    // Only the CELL is inherited. Volume, waste type and hazardous codes are
+    // genuinely per-vehicle; copying those would double-count the entry's waste.
+    const entryHasCell =
+      String(cleaned.cellName || "").trim() !== "" || typeof cleaned.cellIndex === "number";
     if (Array.isArray(cleaned.vehicles)) {
       cleaned.vehicles = cleaned.vehicles.map((vehicle, vi) => {
         if (!vehicle || typeof vehicle !== "object") return vehicle;
         const cv = { ...vehicle };
+        const vehicleHasCell =
+          String(cv.cellName || "").trim() !== "" || typeof cv.cellIndex === "number";
+        if (!vehicleHasCell && entryHasCell) {
+          cv.cellName = cleaned.cellName;
+          cv.cellType = cleaned.cellType;
+          cv.cellIndex = typeof cleaned.cellIndex === "number" ? cleaned.cellIndex : null;
+        }
         // Per-vehicle wasteType is where the portal actually stores each load's
         // classification. Normalize it to the canonical category (same as the truck
         // level) so hazardous loads carried on a vehicle are never miscounted as
@@ -1413,17 +1440,50 @@ async function validateUploadedClientRelationships(item) {
       continue;
     }
 
-    const clientTargetValues = clientRelationshipValues(client).map(normalizeRelationshipText).filter(Boolean);
-    const candidates = (haulerMatches[0].clients || []).filter((candidate) => {
-      const values = clientRelationshipValues(candidate).map(normalizeRelationshipText).filter(Boolean);
-      return values.some((value) => clientTargetValues.includes(value));
-    });
-    const activeCandidates = candidates.filter(
-      (candidate) => String(candidate?.status || candidate?.active || "active").toLowerCase() !== "inactive" && candidate?.isActive !== false,
-    );
+    const pool = haulerMatches[0].clients || [];
+    const activeMatchesFor = (value) => {
+      const targets = clientRelationshipValues(value).map(normalizeRelationshipText).filter(Boolean);
+      if (!targets.length) return [];
+      return pool
+        .filter((candidate) => {
+          const values = clientRelationshipValues(candidate).map(normalizeRelationshipText).filter(Boolean);
+          return values.some((v) => targets.includes(v));
+        })
+        .filter(
+          (candidate) =>
+            String(candidate?.status || candidate?.active || "active").toLowerCase() !== "inactive" &&
+            candidate?.isActive !== false,
+        );
+    };
+
+    const activeCandidates = activeMatchesFor(client);
     if (activeCandidates.length === 0) {
+      // ── One trip, several clients ────────────────────────────────────────────
+      //
+      // Operators record every client served on a trip in ONE cell —
+      // "Limay Public Market, Wawa, Poblacion, Kitang I" — and each of those is a
+      // registered client of that hauler. The value was only ever compared as a
+      // SINGLE name, and normalizeRelationshipText folds commas to spaces, so it
+      // became one long token that matched nothing and the whole submission was
+      // rejected. Live example: all four of Limay's names above are among hauler
+      // MUNICIPAL's twelve registered clients.
+      //
+      // Tried only AFTER the whole value has failed, because a client name may
+      // legitimately contain a comma — and accepted only when EVERY part resolves
+      // to one active registered client, since dropping an unresolved part would
+      // file that client's waste under the others. Mirrors
+      // findUploadClientsForHauler in the portal's uploadHelpers.js, which is what
+      // the operator saw in the preview.
       const clientName = client?.clientName || client;
-      issues.push(`${rowLabel} — Client "${clientName}" is not assigned to hauler "${truck?.hauler || ""}" under this SLF.`);
+      const parts = String(clientName ?? "")
+        .split(/[,;]+/)
+        .map((part) => part.trim())
+        .filter(Boolean);
+      const everyPartResolves =
+        parts.length > 1 && parts.every((part) => activeMatchesFor(part).length === 1);
+      if (!everyPartResolves) {
+        issues.push(`${rowLabel} — Client "${clientName}" is not assigned to hauler "${truck?.hauler || ""}" under this SLF.`);
+      }
       continue;
     }
     if (activeCandidates.length > 1) {
@@ -1473,9 +1533,35 @@ function sanitizeAccreditedHaulers(haulers = [], fallbackUnit = "m³") {
   });
 }
 
+// The baseline-only CONTAINERS a portal save writes into.
+//
+// `deletedAt: null` is load-bearing, not tidiness. Every baseline READ filters
+// soft-deleted records out (GET /baseline/:slfName, GET /baselines' portal twin,
+// the waste-received summary), and this — the WRITE target — did not. So once a
+// container was moved to the trash, the two sets diverged: the portal kept saving
+// its Total Volume Accepted, cell entries and accredited haulers into a document
+// no read could ever return again. The save reported success, the values went to
+// the database, and the operator's next load showed the OLD figures, because the
+// read had fallen back to whichever submission happened to still carry a copy.
+//
+// Measured on live data: SIX containers were in that state — Limay, Porac,
+// Floridablanca, Dipaculao, Guimba and BESLF, trashed 2026-07-20/08-13 — and
+// Limay's, Floridablanca's and BESLF's were still absorbing writes this week.
+//
+// The fallback is worse than a stale read, because a submission's baseline
+// columns are a SNAPSHOT taken when it was created. Once the figure drops out of
+// the read's 50-record recency window it is gone from the portal entirely, and
+// every submission made afterwards inherits the gap. Dipaculao has already
+// reached that point (0 of its records carry the value); Limay's last surviving
+// copy sits at position 25 of 50.
+//
+// Excluding the trashed container makes the write set equal the read set again:
+// the save either lands on a container the portal can read back, or falls through
+// to the create branch below, which mints a fresh live one.
 async function findMatchingBaselineOnlyIds({ slfName, slfGenerator, lguCompanyName }) {
   const namesToMatch = [...new Set([slfName, lguCompanyName].filter(Boolean))];
   const baseFilter = {
+    deletedAt: null,
     $or: [{ trucks: { $exists: false } }, { trucks: { $size: 0 } }],
   };
   const directOr = [];
@@ -1973,21 +2059,18 @@ async function submitEntries({ entries, submittedBy, req, idempotencyKey = null 
 // Submit SLF data — batch (client portal)
 router.post("/", optionalAuth, requirePortalRule("can_submit_slf_data"), async (req, res) => {
   try {
-    // A developer holding a read-only portal context must never be able to create
-    // a REAL submission under the inspected user's name. This is the single most
-    // consequential portal write, so it is refused explicitly rather than relying
-    // on the client hiding the button.
+    // Developer Portal Mode may submit on the inspected user's behalf. This is
+    // the most consequential portal write there is — it creates a REAL submission
+    // under that operator's name — so it is recorded loudly and specifically
+    // rather than blocked. See assertPortalWriteAllowed in utils/portalContext.js
+    // for why the audit trail is the control that matters here.
     const devContext = getDeveloperPortalContext(req);
     if (devContext) {
-      writeLog("warn", "portal.context.write-blocked", {
-        message: `Developer blocked from submitting as portal user (context ${devContext})`,
+      writeLog("warn", "portal.context.developer-submit", {
+        message: `Developer submitted as portal user (context ${devContext})`,
         user: req.headers.authorization ? "developer" : "",
         ip: req.ip,
-        meta: { path: req.originalUrl },
-      });
-      return res.status(403).json({
-        message:
-          "Developer Portal Mode is read-only. Use Developer Settings → Submission RAW Data to correct records.",
+        meta: { path: req.originalUrl, portalContextUserId: devContext },
       });
     }
 
@@ -2100,28 +2183,33 @@ router.put("/:id", optionalAuth, requirePortalRule("can_edit_submitted_data"), a
     entry.revertedBy = "";
     entry.revertedAt = undefined;
 
-    // Regenerate idNo based on current companyType and SLF province
+    // ── The ID No. SURVIVES a resubmission ─────────────────────────────────────
+    //
+    // A resubmission is the SAME submission, corrected. This used to mint a brand
+    // new sequence number on every one of them, so the record an admin reverted
+    // came back into their queue under a different ID No. — while the revert
+    // notification, the revert email and the Transaction History entry all still
+    // named the old one. From the admin's seat the reverted submission simply
+    // never returned and an unfamiliar row appeared in Pending, which is the
+    // "resubmission is not accepted on the admin side" report.
+    //
+    // It also corrupted the ID it minted, twice over:
+    //   • The TYPE segment came from the INCOMING companyType, so a payload that
+    //     defaulted to "LGU" restamped a PRIVATE facility's record — live proof:
+    //     SLF-PVT-PA-0006 came back from a resubmission as SLF-LGU-PA-0016 on
+    //     Prime Waste Solution (Private), companyType rewritten to match.
+    //   • Its `findOne({ idNo })` ran WITHOUT `includeHiddenYears`, so with the
+    //     year-visibility filter on it read the highest ID of the VISIBLE year and
+    //     could hand back a number already in use. Exactly the defect that was
+    //     fixed in the baseline-container path, reintroduced here.
+    //
+    // The model's pre("save") hook already owns ID assignment and gets both right:
+    // it re-mints ONLY when companyType actually changed, and its
+    // nextIdNoSequence() reads across all years. Deleting this block hands the
+    // rule back to the one place that implements it correctly — a genuine
+    // LGU↔Private correction still re-stamps the ID and records the old one in
+    // `previousIdNos`, and an ordinary correction leaves the identity alone.
     const previousIdNo = entry.idNo;
-    let province = "";
-    if (entry.slfGenerator) {
-      const facility = await SlfFacility.findById(entry.slfGenerator).select("province");
-      if (facility) province = facility.province;
-    }
-    const provCode = getProvinceCode(province);
-    const typeCode = entry.companyType === "Private" ? "PVT" : entry.companyType === "LGU" ? "LGU" : "OTH";
-    const pattern = new RegExp(`^SLF-${typeCode}-${provCode}-`);
-    const lastDoc = await DataSLF.findOne({ idNo: pattern, _id: { $ne: entry._id } }).sort({ idNo: -1 });
-    let seq = 1;
-    if (lastDoc && lastDoc.idNo) {
-      const parts = lastDoc.idNo.split("-");
-      const lastNum = parseInt(parts[3], 10);
-      if (!isNaN(lastNum)) seq = lastNum + 1;
-    }
-    entry.idNo = `SLF-${typeCode}-${provCode}-${String(seq).padStart(4, "0")}`;
-    if (!Array.isArray(entry.previousIdNos)) entry.previousIdNos = [];
-    if (previousIdNo && previousIdNo !== entry.idNo && !entry.previousIdNos.includes(previousIdNo)) {
-      entry.previousIdNos.push(previousIdNo);
-    }
 
     await entry.save();
 
@@ -2145,7 +2233,15 @@ router.put("/:id", optionalAuth, requirePortalRule("can_edit_submitted_data"), a
           ? `Resubmitted updated entry ${entry.idNo} — "${resubmitComment}"`
           : `Resubmitted updated entry ${entry.idNo}`,
         performedBy: entry.submittedBy || "portal",
-        meta: { idNo: entry.idNo, previousIdNo, comment: resubmitComment || undefined },
+        // Recorded only when the ID actually moved (a companyType correction the
+        // model's hook re-stamped). Filing the same value under both keys on
+        // every resubmission made the history read as a rename that never
+        // happened.
+        meta: {
+          idNo: entry.idNo,
+          previousIdNo: previousIdNo && previousIdNo !== entry.idNo ? previousIdNo : undefined,
+          comment: resubmitComment || undefined,
+        },
       });
     } catch { /* silent */ }
 
@@ -8449,12 +8545,27 @@ router.patch("/portal-save-baseline/:slfName", optionalAuth, requirePortalRule("
     // Scope: portal callers only. Admin/developer callers reach this route acting
     // on an operator's behalf and already own the approve/lock endpoints — gating
     // them here would take away the very controls that manage the lock.
-    if (req.user?.role === "portal_user" && baselineOnlyIds.length) {
-      const approvedCount = await DataSLF.countDocuments({
-        _id: { $in: baselineOnlyIds },
-        baselineUpdateApproved: true,
-      }).setOptions({ includeHiddenYears: true });
-      if (approvedCount === 0) {
+    // The lock is resolved over the SAME set GET /baseline/:slfName reads its
+    // flags from: the container(s) when the SLF has any, otherwise every record
+    // that carries baseline data. Reading it off `baselineOnlyIds` alone left the
+    // check inert for a container-less SLF — eleven of the seventeen live
+    // facilities — which is exactly the "reloading bypasses the lock" case this
+    // block exists to close. An SLF with no baseline at all still resolves to an
+    // empty set, so a genuine first save is not gated.
+    if (req.user?.role === "portal_user") {
+      const lockScopeIds = baselineOnlyIds.length
+        ? baselineOnlyIds
+        : await resolveSlfRecordIds(slfName, {
+            slfGenerator: genId,
+            requireBaselineData: true,
+          });
+      const approvedCount = lockScopeIds.length
+        ? await DataSLF.countDocuments({
+            _id: { $in: lockScopeIds },
+            baselineUpdateApproved: true,
+          }).setOptions({ includeHiddenYears: true })
+        : 0;
+      if (lockScopeIds.length && approvedCount === 0) {
         writeLog("warn", "baseline.locked_save_rejected", {
           message: "Portal user attempted to save a LOCKED baseline",
           user: submittedBy || "",
@@ -8581,6 +8692,56 @@ router.patch("/portal-save-baseline/:slfName", optionalAuth, requirePortalRule("
       // The hook resolves the province from the linked facility, falls back to
       // companyProvince and then to a sibling record's code, and reads across all
       // years — which is exactly what "aligned to the current database" requires.
+      //
+      // ── Carry the stored Total Volume Accepted onto the NEW container ────────
+      //
+      // The guard above expresses "this edit did not provide a value" by dropping
+      // the field, which preserves what is stored — on an UPDATE. On this branch
+      // there is nothing to preserve: the document is new, so a dropped field is
+      // an absent one. And the moment this container exists it becomes
+      // AUTHORITATIVE (makeBaselineFieldReader stops falling through to siblings
+      // once a container is present, because a container is the only record that
+      // can express a deletion) — so an absent value here does not read as "look
+      // elsewhere", it reads as "the operator has none". That is the missing half
+      // of the guard, and it is the step that would otherwise turn the container
+      // fix above into a fresh way to lose the figure.
+      //
+      // Seeded from what the READ currently resolves — live records only, same set
+      // and same "newest record that carries it" rule as GET /baseline/:slfName.
+      // Nothing is invented, and a value sitting only on a TRASHED container is
+      // deliberately NOT resurrected: the new container starts life showing
+      // exactly what the operator was already being shown.
+      if (!("totalVolumeAccepted" in updateFields)) {
+        const storedTotalVolume = await DataSLF.findOne({
+          $and: [
+            { deletedAt: null },
+            { totalVolumeAccepted: { $exists: true, $ne: null } },
+            genId ? { slfGenerator: genId } : { $or: [{ slfName }, { lguCompanyName: slfName }] },
+          ],
+        })
+          .setOptions({ includeHiddenYears: true })
+          .select("totalVolumeAccepted totalVolumeAcceptedUnit baselineUnit")
+          .sort({ updatedAt: -1, createdAt: -1 })
+          .lean();
+        if (storedTotalVolume) {
+          updateFields.totalVolumeAccepted = storedTotalVolume.totalVolumeAccepted;
+          // The volume and the unit it was recorded in must travel together —
+          // pairing a carried-forward figure with this request's unit would
+          // silently reinterpret tons as m³.
+          if (updateFields.totalVolumeAcceptedUnit === undefined) {
+            updateFields.totalVolumeAcceptedUnit = normalizeVolumeUnit(
+              storedTotalVolume.totalVolumeAcceptedUnit ||
+                storedTotalVolume.baselineUnit ||
+                baselineFallbackUnit,
+            );
+          }
+          writeLog("info", "baseline.total_volume.carried_forward", {
+            message: `Carried the stored Total Volume Accepted onto a new baseline container for "${slfName}" — this save did not provide one`,
+            user: submittedBy || slfName,
+            meta: { slfName, value: storedTotalVolume.totalVolumeAccepted },
+          });
+        }
+      }
       const newDoc = new DataSLF({
         ...updateFields,
         slfGenerator: genId,

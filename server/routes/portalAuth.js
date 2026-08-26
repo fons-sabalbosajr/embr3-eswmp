@@ -778,7 +778,7 @@ router.get("/me", async (req, res) => {
     const payload = user.toObject ? user.toObject() : { ...user };
     if (ctx.impersonating) {
       payload.developerContext = true;
-      payload.readOnly = true;
+      payload.readOnly = false;
       payload.developerEmail = ctx.actor;
     }
     res.json(payload);
@@ -806,7 +806,7 @@ router.get("/me", async (req, res) => {
 // the other.
 const UI_PREFERENCE_FIELDS =
   "portalTourDismissedAt portalAnnouncementDismissedVersion portalAnnouncementDismissedAt " +
-  "portalFeatureTourVersionSeen portalFeatureTourSeenAt";
+  "portalFeatureTourVersionSeen portalFeatureTourSeenAt portalFeatureTourOptOutAt";
 
 const uiPreferencePayload = (doc) => ({
   tourDismissed: !!doc?.portalTourDismissedAt,
@@ -819,6 +819,9 @@ const uiPreferencePayload = (doc) => ({
   // user who dismissed the last one still sees the next.
   featureTourVersionSeen: doc?.portalFeatureTourVersionSeen || null,
   featureTourSeenAt: doc?.portalFeatureTourSeenAt || null,
+  // …and the permanent opt-out, which outranks the version above: "Don't show
+  // this again" means never, not "not until the next release".
+  featureTourOptOut: !!doc?.portalFeatureTourOptOutAt,
 });
 
 router.get("/ui-preferences", async (req, res) => {
@@ -842,11 +845,31 @@ router.get("/ui-preferences", async (req, res) => {
 
 router.patch("/ui-preferences", async (req, res) => {
   try {
-    // WRITE: a developer inspecting this account must not consume the real user's
-    // tour or their unread announcement on their behalf. The client keeps a local
-    // mirror, so both still stay closed for the developer's own session.
+    // The ONE thing Developer Portal Mode still may not write.
+    //
+    // Developer Portal Mode now has full control of the portal side — it submits,
+    // saves baselines, edits and deletes on the operator's behalf, all audited.
+    // This is deliberately excluded because it is not an ACTION a developer takes,
+    // it is a side effect of LOOKING: opening the portal to inspect an account
+    // would mark that operator's one-time tour and their unread "What's New" as
+    // consumed, and they can never be shown again. Destroying a one-time event for
+    // someone by viewing their screen is not control, it is damage.
+    //
+    // The client keeps a local mirror, so both still stay closed for the
+    // developer's own session — nothing about the inspection experience changes.
     const ctx = await resolvePortalContext(req);
-    assertPortalWriteAllowed(ctx, req);
+    if (ctx.impersonating) {
+      writeLog("warn", "portal.context.preference-write-blocked", {
+        message: `Developer blocked from consuming ${ctx.email}'s tour/announcement`,
+        user: ctx.actor,
+        ip: req.ip,
+        meta: { targetEmail: ctx.email, path: req.originalUrl },
+      });
+      return res.status(403).json({
+        message:
+          "Developer Portal Mode does not consume the portal user's tour or announcements — that would use up a one-time notice they have not seen yet.",
+      });
+    }
 
     const update = {};
     if (Object.hasOwn(req.body || {}, "tourDismissed")) {
@@ -864,6 +887,13 @@ router.patch("/ui-preferences", async (req, res) => {
       const version = String(req.body.featureTourVersionSeen ?? "").trim().slice(0, 80);
       update.portalFeatureTourVersionSeen = version || null;
       update.portalFeatureTourSeenAt = version ? new Date() : null;
+    }
+    if (Object.hasOwn(req.body || {}, "featureTourOptOut")) {
+      // Explicitly reversible: `false` clears it, so What's New can put a user
+      // back on the tour if they change their mind.
+      const optOut =
+        req.body.featureTourOptOut === true || req.body.featureTourOptOut === "true";
+      update.portalFeatureTourOptOutAt = optOut ? new Date() : null;
     }
     if (!Object.keys(update).length) {
       return res.status(400).json({ message: "No preference was provided." });

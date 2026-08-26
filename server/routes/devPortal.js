@@ -255,8 +255,9 @@ router.get("/portal-users", async (req, res) => {
 //
 //   • the session can never be mistaken for the portal user's own session,
 //   • revoking the developer's role immediately revokes this access,
-//   • Developer Portal Mode is READ-ONLY (assertPortalWriteAllowed blocks writes
-//     to the target's data through ordinary portal endpoints),
+//   • Developer Portal Mode has FULL CONTROL of the portal side — writes to the
+//     target's data through the ordinary portal endpoints are permitted, and every
+//     one is audited against the DEVELOPER's identity (assertPortalWriteAllowed),
 //   • every context resolution is audited.
 router.post("/impersonate", async (req, res) => {
   try {
@@ -277,7 +278,7 @@ router.post("/impersonate", async (req, res) => {
       { expiresIn: "2h" },
     );
     writeLog("warn", "dev-portal.context.open", {
-      message: `Developer ${dev.email} opened a read-only portal context on ${portalUser.email}`,
+      message: `Developer ${dev.email} opened a WRITE-ENABLED portal context on ${portalUser.email}`,
       user: dev.email,
       ip: req.ip,
       meta: {
@@ -292,12 +293,12 @@ router.post("/impersonate", async (req, res) => {
     delete safe.resetToken;
     delete safe.resetTokenExpiry;
     res.json({
-      message: "Developer portal context opened (read-only).",
+      message: "Developer portal context opened (full control).",
       token,
       user: safe,
       impersonation: true,       // kept: the Portal client already reads this flag
       developerContext: true,
-      readOnly: true,
+      readOnly: false,
       developerEmail: dev.email,
     });
   } catch (e) {

@@ -45,6 +45,15 @@ const issue = (truckIndex, field, message, vehicleIndex = null) => ({
 });
 
 /**
+ * Does this record (entry OR vehicle) carry a usable disposal cell?
+ *
+ * Kept identical to hasCellPlacement in cellPlacement.js — that module owns the
+ * entry⇄vehicle inheritance rule and this is the validation half of it.
+ */
+export const hasCellPlacement = (record) =>
+  !isBlank(record?.cellName) || hasCellIndex(record?.cellIndex);
+
+/**
  * @returns {Array<{tab,truckIndex,vehicleIndex,field,message}>} empty when valid.
  */
 export function validateWasteGeneration(trucks, options = {}) {
@@ -87,8 +96,18 @@ export function validateWasteGeneration(trucks, options = {}) {
     }
 
     const vehicles = Array.isArray(truck?.vehicles) ? truck.vehicles : [];
+    // Which LEVEL this truck reports its load at. A STUB vehicle — a row with a
+    // plate number and nothing else — does not make a truck "per-vehicle": its
+    // load still sits at the truck level, and demanding volume/waste type/cell
+    // from the stub blocked a submission over fields that should not exist. See
+    // the full note in server/utils/wasteGenerationValidation.js; the two copies
+    // must agree or the portal and the server disagree about what is complete.
+    //
+    // Cell placement deliberately does NOT count as load-bearing: entry→vehicle
+    // inheritance copies a cell onto every stub.
+    const vehicleCarriesLoad = (v) => !isBlank(v?.actualVolume) || !isBlank(v?.wasteType);
 
-    if (vehicles.length > 0) {
+    if (vehicles.some(vehicleCarriesLoad)) {
       vehicles.forEach((v, vi) => {
         if (!isPositiveNumber(v?.actualVolume)) {
           issues.push(issue(t, "actualVolume", "Actual Volume is required for every vehicle.", vi));
@@ -96,7 +115,14 @@ export function validateWasteGeneration(trucks, options = {}) {
         if (isBlank(v?.wasteType)) {
           issues.push(issue(t, "wasteType", "Waste Type is required for every vehicle.", vi));
         }
-        if (isBlank(v?.cellName) && !hasCellIndex(v?.cellIndex)) {
+        // A vehicle with no cell of its own INHERITS the entry's placement (see
+        // cellPlacement.js → inheritEntryCell, applied on save and again by the
+        // server's sanitizer). Demanding one here anyway asked the operator to
+        // re-choose a cell the waste was already in — and, because this same
+        // function drives the Review & Submit gate, it left the button disabled
+        // on an entry that WAS placed: through an upload carrying a cell column,
+        // through Assign to Cell, or through the entry's own cell field.
+        if (!hasCellPlacement(v) && !hasCellPlacement(truck)) {
           issues.push(issue(t, "cellName", "Disposal Cell is required for every vehicle.", vi));
         }
         if (isTreatedHazardous(v?.wasteType) && isBlank(v?.hazWasteCode)) {

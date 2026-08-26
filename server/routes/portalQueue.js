@@ -20,6 +20,17 @@ const {
 
 const ACTIVE_STATUSES = ["draft", "scheduled"];
 
+// Statuses a record can still be WORKED ON from: edited, cancelled, or submitted
+// again. `failed` belongs here — POST /:id/submit already accepts it (it refuses
+// only `submitted` and `cancelled`), but the EDIT gate did not, so a rejection
+// the operator could fix (an unresolved revert, a client not yet accredited, a
+// missing cell) froze the record's data at exactly the state that had just been
+// rejected. Retrying it unchanged could only fail again, which is what made
+// "Submit Now" look broken.
+//
+// `submitted` and `cancelled` stay terminal.
+const EDITABLE_STATUSES = [...ACTIVE_STATUSES, "failed"];
+
 // Every route below acts on a queue record that BELONGS to someone. The caller's
 // identity now comes from the token (see utils/portalContext), never from the
 // request body/query — previously `submittedBy` / `?email=` were taken at face
@@ -168,14 +179,26 @@ router.put("/:id", async (req, res) => {
     const ctx = await writableRecordOr403(req, res, record);
     if (!ctx) return undefined;
     const email = ctx.email;
-    if (!ACTIVE_STATUSES.includes(record.status)) {
+    if (!EDITABLE_STATUSES.includes(record.status)) {
       return res.status(400).json({ message: `A ${record.status} submission can no longer be edited.` });
     }
 
     const { type, payload, scheduledAt, slfName, slfGenerator } = req.body || {};
+    // Read BEFORE anything mutates it: the `type` block below assigns
+    // `record.status`, so a "was this failed?" test placed after it never fires
+    // and the stale failure reason survives the edit that fixed it.
+    const wasFailed = record.status === "failed";
     if (type && ["draft", "scheduled"].includes(type)) {
       record.type = type;
       record.status = type;
+    }
+    // Editing a FAILED record is the operator correcting what was rejected, so it
+    // returns to the ordinary queue and the stale reason goes with it — otherwise
+    // the row keeps reporting a failure that has already been addressed.
+    // `retryCount` is deliberately kept: it is history, not state.
+    if (wasFailed) {
+      record.status = record.type === "scheduled" ? "scheduled" : "draft";
+      record.failureReason = "";
     }
     if (payload && typeof payload === "object") record.payload = payload;
     if (slfName !== undefined) record.slfName = slfName;
@@ -215,7 +238,9 @@ router.patch("/:id/cancel", async (req, res) => {
     // scheduled submission just by knowing/guessing its id.
     const ctx = await writableRecordOr403(req, res, record);
     if (!ctx) return undefined;
-    if (!ACTIVE_STATUSES.includes(record.status)) {
+    // A FAILED scheduled run can be cancelled too — it never submitted, so
+    // "give up on this one" is a legitimate ending for it.
+    if (!EDITABLE_STATUSES.includes(record.status)) {
       return res.status(400).json({ message: `A ${record.status} submission cannot be cancelled.` });
     }
     record.status = "cancelled";

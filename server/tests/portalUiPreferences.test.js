@@ -206,12 +206,62 @@ test("an unauthenticated caller cannot read or write preferences", async () => {
 });
 
 test("Developer Portal Mode cannot consume the user's tour or announcement", async () => {
+  // Developer Portal Mode otherwise has FULL CONTROL of the portal side now — it
+  // submits, saves baselines and deletes on the operator's behalf. This stays
+  // refused because it is not an action a developer takes, it is a side effect of
+  // LOOKING: inspecting an account would burn that operator's one-time tour and
+  // their unread announcement, and neither can be shown again.
   for (const body of [{ tourDismissed: true }, { announcementDismissedVersion: "v1" }]) {
     const res = await call("PATCH", developerToken, body);
     assert.equal(res.status, 403, JSON.stringify(body));
-    assert.match(res.body.message, /read-only/i);
+    assert.match(res.body.message, /one-time notice/i);
   }
   assert.equal(updateCalls.length, 0, "the portal user's preferences are untouched");
+});
+
+// ── "Don't show this again" is permanent, not per-release ───────────────────
+
+test("the feature-tour opt-out is stored apart from the release marker", async () => {
+  // They are different promises. The version marker means "this release has been
+  // seen", which is right for finishing or closing the tour — the next release is
+  // new information and should be offered once. The BUTTON says never, and
+  // serving both from one field made its label untrue: two live accounts were
+  // shown the tour again after clicking it, their marker having moved from
+  // 2026-08-20-hauler-bulk-clients to 2026-08-25-uploads-baseline-completeness.
+  updateCalls.length = 0;
+  const res = await call("PATCH", portalToken(), { featureTourOptOut: true });
+  assert.equal(res.status, 200);
+  const { update } = updateCalls.at(-1);
+  assert.ok(update.portalFeatureTourOptOutAt instanceof Date, "the opt-out is its own field");
+  assert.equal(
+    Object.hasOwn(update, "portalFeatureTourVersionSeen"),
+    false,
+    "…and does not quietly rewrite the release marker on its own",
+  );
+});
+
+test("the opt-out is reversible", async () => {
+  // What's New can put a user back on the tour; an opt-out must not be a one-way
+  // door.
+  updateCalls.length = 0;
+  const res = await call("PATCH", portalToken(), { featureTourOptOut: false });
+  assert.equal(res.status, 200);
+  assert.equal(updateCalls.at(-1).update.portalFeatureTourOptOutAt, null);
+});
+
+test("the read reports the opt-out so the client can honour it before it flashes", () => {
+  const source = fs.readFileSync(
+    path.join(__dirname, "..", "routes", "portalAuth.js"),
+    "utf8",
+  );
+  assert.match(source, /featureTourOptOut: !!doc\?\.portalFeatureTourOptOutAt/);
+  assert.match(source, /portalFeatureTourOptOutAt/, "…and is selected by the read");
+  // The field must exist on the model, or findByIdAndUpdate silently drops it in
+  // strict mode and the preference never persists at all.
+  assert.match(
+    fs.readFileSync(path.join(__dirname, "..", "models", "UserPortal.js"), "utf8"),
+    /portalFeatureTourOptOutAt: \{ type: Date, default: null \}/,
+  );
 });
 
 // ── Never break the portal over a preference ────────────────────────────────

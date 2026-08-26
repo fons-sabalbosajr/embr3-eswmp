@@ -66,6 +66,54 @@ test("the baseline-only record no longer mints its own ID No.", () => {
   assert.doesNotMatch(handler, /idNo: `SLF-/, "ID generation belongs to the model hook");
 });
 
+// ── A resubmission keeps its identity ───────────────────────────────────────
+//
+// The record an admin reverts must come BACK to them under the same ID No.
+// PUT /:id used to mint a fresh sequence number on every resubmission, so the
+// revert notification, the revert email and the Transaction History all named an
+// ID that no longer existed, and the corrected submission arrived looking like a
+// stranger. It also stamped the TYPE segment from the incoming payload — which
+// restamped a Private facility as LGU (SLF-PVT-PA-0006 → SLF-LGU-PA-0016 on
+// Prime Waste Solution) — and read the "last" ID without includeHiddenYears, so
+// it could reissue a number already in use.
+test("a resubmission does not re-mint the ID No.", () => {
+  const dataSlf = readSource("dataSLF.js");
+  const resubmit = codeOnly(
+    dataSlf.slice(
+      dataSlf.indexOf('router.put("/:id"'),
+      dataSlf.indexOf('router.get("/baseline/:slfName"'),
+    ),
+  );
+  assert.ok(resubmit.length > 0, "the resubmit route should exist");
+  assert.doesNotMatch(resubmit, /entry\.idNo = `SLF-/, "ID assignment belongs to the model hook");
+  assert.doesNotMatch(
+    resubmit,
+    /entry\.companyType === "Private" \? "PVT"/,
+    "the TYPE segment must not be derived from the incoming payload here",
+  );
+  assert.doesNotMatch(
+    resubmit,
+    /DataSLF\.findOne\(\{ idNo: pattern/,
+    "the un-bypassed sequence scan could reissue an ID already in use",
+  );
+});
+
+test("the model hook re-mints an ID ONLY on a real companyType change", () => {
+  const model = fs.readFileSync(path.join(__dirname, "..", "models", "DataSLF.js"), "utf8");
+  assert.match(
+    model,
+    /if \(!this\.isNew && this\.idNo && this\.isModified\("companyType"\)\)/,
+    "an ordinary correction leaves the identity alone",
+  );
+  // …and when it does re-mint, it reads across every year rather than only the
+  // visible one — the guard the route's hand-rolled copy was missing.
+  assert.match(
+    model,
+    /const lastDoc = await DataSLF\.findOne\(\{ idNo: pattern \}\)\s*\.setOptions\(\{ includeHiddenYears: true \}\)/,
+  );
+  assert.match(model, /this\.previousIdNos\.push\(this\.idNo\)/, "the old ID is kept as history");
+});
+
 test("a baseline-only record is never given an ID No.", () => {
   const baseline = new DataSLF({
     dateOfDisposal: new Date("2026-08-13"),

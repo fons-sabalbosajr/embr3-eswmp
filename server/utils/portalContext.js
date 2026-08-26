@@ -133,25 +133,31 @@ async function resolvePortalContext(req, { targetEmail, targetPortalUserId } = {
   throw new PortalContextError("Portal access requires a portal account or developer role.", 403);
 }
 
-// Developer Portal Mode is for INSPECTION. A developer viewing another user's
-// context must not be able to mutate that user's data through the ordinary portal
-// endpoints — hiding their submissions, editing their profile, changing their
-// credentials, submitting on their behalf. Corrections go through the dedicated,
-// audited developer tooling (Submission RAW Data), which is the controlled path.
+// Developer Portal Mode has FULL CONTROL of the portal side.
+//
+// It used to be inspection-only: a developer viewing an operator's context was
+// refused every ordinary portal write and told to go to Developer Settings →
+// Submission RAW Data. That made the one role expected to fix the system the only
+// role that could not use it — a developer could see an operator's broken
+// submission, know the fix, and still have to reproduce it through a different
+// screen. Writes are now permitted deliberately.
+//
+// What does NOT change is the RECORD of it. A developer write is still a write to
+// somebody else's data under their name, so every one is audited at `warn` with
+// the actor, the target, the route and the method. That trail is the reason this
+// stays a function call at the top of each write route rather than being deleted:
+// the call site is what makes the action attributable, and removing it would make
+// developer edits indistinguishable from the operator's own.
 //
 // Call this at the top of any portal route that WRITES.
 function assertPortalWriteAllowed(ctx, req) {
   if (!ctx.impersonating) return;
-  writeLog("warn", "portal.context.write-blocked", {
-    message: `Developer blocked from writing to ${ctx.email}'s portal data`,
+  writeLog("warn", "portal.context.developer-write", {
+    message: `Developer wrote to ${ctx.email}'s portal data`,
     user: ctx.actor,
     ip: req?.ip,
     meta: { targetEmail: ctx.email, path: req?.originalUrl, method: req?.method },
   });
-  throw new PortalContextError(
-    "Developer Portal Mode is read-only. Use Developer Settings → Submission RAW Data to correct records.",
-    403,
-  );
 }
 
 // Express helper: turn a PortalContextError into its response.

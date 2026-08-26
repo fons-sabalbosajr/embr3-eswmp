@@ -22,6 +22,7 @@ import assert from "node:assert/strict";
 import {
   alignDisposalRow,
   detectSystemGeneratedFile,
+  differsOnlyByQualifier,
   findClientNearMisses,
   isTripRow,
   resolveDisposalIdentity,
@@ -237,22 +238,83 @@ const MISMATCH_HAULERS = [
   },
 ];
 
-test("a client stored without the file's trailing qualifier is reported as a MISMATCH", () => {
+test("a client stored without the file's trailing qualifier ADOPTS the stored spelling", () => {
+  // Was reported as a mismatch for a person to resolve. It is now applied on the
+  // operator's behalf, because this is the one shape where the answer is not a
+  // judgement: exactly ONE stored client contains the file's name as whole words,
+  // nothing else comes close, and the only difference is the descriptive
+  // qualifier ", BULACAN". See differsOnlyByQualifier for what still blocks.
   const result = resolveDisposalIdentity(row(COMPOUND, COMPOUND), MISMATCH_HAULERS);
-  assert.equal(result.status, "mismatch", "not 'unresolved' — the client is already there");
+  assert.equal(result.status, "aligned");
+  assert.equal(result.method, "client-spelling");
   assert.equal(result.hauler, COMPOUND);
-  assert.equal(result.suggestions[0].name, "GREEN RESCUE - MUNICIPALITY OF PULILAN");
-  assert.equal(result.suggestions[0].score, 0.98);
+  assert.equal(result.client, "GREEN RESCUE - MUNICIPALITY OF PULILAN");
 });
 
-test("a mismatch row is blocked, keeps its values, and names the fix", () => {
+test("an adopted spelling is written onto the row and reported, never silent", () => {
   const aligned = alignDisposalRow(row(COMPOUND, COMPOUND, { disposalTicketNo: "045730" }), MISMATCH_HAULERS);
-  assert.equal(aligned._alignment.status, "mismatch");
-  // Nothing is auto-applied: the row still carries what the file said.
-  assert.equal(aligned.client, COMPOUND);
-  assert.equal(aligned._alignmentErrors.length, 1);
-  assert.match(aligned._alignmentErrors[0], /GREEN RESCUE - MUNICIPALITY OF PULILAN/);
-  assert.match(aligned._alignmentErrors[0], /Resolve it above/);
+  assert.equal(aligned._alignment.status, "aligned");
+  assert.equal(aligned._alignment.method, "client-spelling");
+  assert.equal(aligned.client, "GREEN RESCUE - MUNICIPALITY OF PULILAN", "the stored spelling is used");
+  assert.equal(aligned._alignmentErrors.length, 0, "the row is no longer blocked");
+  // The operator can see what was changed and what it was changed from.
+  assert.equal(aligned._alignment.originalClient, COMPOUND);
+  assert.match(aligned._alignment.note, /was recorded as/);
+});
+
+test("names separated by a NUMBER are never adopted, however similar", () => {
+  // The measured failure mode. On live rosters "barangay 1" … "barangay 5" are
+  // five different places scoring 90.0% against each other, and "brgy. 03 (rcb)"
+  // vs "brgy. 04 (rcb)" scores 92.9%. A percentage threshold cannot tell them
+  // apart; the differing-token rule can.
+  const baler = {
+    haulerName: "LGU BALER",
+    privateSectorClients: [
+      { clientName: "Barangay 1" },
+      { clientName: "Barangay 2" },
+      { clientName: "Barangay 3" },
+    ],
+  };
+  for (const typed of ["Barangay 4", "Barangay 2"]) {
+    const result = resolveDisposalIdentity(row("LGU BALER", typed), [baler]);
+    assert.notEqual(result.method, "client-spelling", `"${typed}" must not adopt a sibling barangay`);
+  }
+  const rcb = {
+    haulerName: "H",
+    privateSectorClients: [{ clientName: "Brgy. 03 (RCB)" }],
+  };
+  const result = resolveDisposalIdentity(row("H", "Brgy. 04 (RCB)"), [rcb]);
+  assert.notEqual(result.method, "client-spelling");
+  assert.notEqual(result.client, "Brgy. 03 (RCB)");
+});
+
+test("the qualifier guard admits words and refuses identifiers", () => {
+  assert.equal(differsOnlyByQualifier("Green Rescue - Municipality of Pulilan, Bulacan", "Green Rescue - Municipality of Pulilan"), true);
+  assert.equal(differsOnlyByQualifier("ABC Corporation", "ABC Corporation Inc"), true);
+  assert.equal(differsOnlyByQualifier("Barangay 1", "Barangay 2"), false);
+  assert.equal(differsOnlyByQualifier("Brgy. 03 (RCB)", "Brgy. 04 (RCB)"), false);
+  assert.equal(differsOnlyByQualifier("Cell 1 Client", "Cell 1 Client"), true);
+});
+
+test("two equally good candidates stay a MISMATCH — a choice is not a correction", () => {
+  // BOTH stored names are contiguous runs of whole words inside the typed one, so
+  // both reach the containment class. Picking either is a guess.
+  const twoWays = {
+    haulerName: "H",
+    privateSectorClients: [
+      { clientName: "Green Rescue Municipality of Pulilan" },
+      { clientName: "Municipality of Pulilan Bulacan" },
+    ],
+  };
+  const typed = "Green Rescue Municipality of Pulilan Bulacan";
+  assert.equal(
+    findClientNearMisses(twoWays, typed).filter((s) => s.score >= 0.95).length,
+    2,
+    "fixture must actually produce two containment-class candidates",
+  );
+  const result = resolveDisposalIdentity(row("H", typed), [twoWays]);
+  assert.notEqual(result.method, "client-spelling", "ambiguity must never auto-resolve");
+  assert.equal(result.status, "mismatch");
 });
 
 test("two different municipalities are NOT proposed as each other's mismatch", () => {
@@ -301,11 +363,19 @@ test("a short prefix is rejected however cleanly it is contained", () => {
 });
 
 test("mismatches are grouped per hauler+client, carrying every affected row", () => {
-  const rows = [
-    alignDisposalRow(row(COMPOUND, COMPOUND, { _rowNumber: 2, key: "r1", disposalTicketNo: "1" }), MISMATCH_HAULERS),
-    alignDisposalRow(row(COMPOUND, COMPOUND, { _rowNumber: 3, key: "r2", disposalTicketNo: "2" }), MISMATCH_HAULERS),
-    alignDisposalRow(row(COMPOUND, COMPOUND, { _rowNumber: 4, key: "r3", disposalTicketNo: "3" }), MISMATCH_HAULERS),
+  // Uses the ABBREVIATION class (0.85), which is deliberately NOT auto-applied —
+  // "corp" → "corporation" is an inference about what a shortening stands for.
+  // The containment class is adopted instead, so it no longer reaches here.
+  const ABBREV = [
+    { haulerName: "H", privateSectorClients: [{ clientName: "ABC Manufacturing Corporation" }] },
   ];
+  const typed = "ABC Manufacturing Corp";
+  const rows = [
+    alignDisposalRow(row("H", typed, { _rowNumber: 2, key: "r1", disposalTicketNo: "1" }), ABBREV),
+    alignDisposalRow(row("H", typed, { _rowNumber: 3, key: "r2", disposalTicketNo: "2" }), ABBREV),
+    alignDisposalRow(row("H", typed, { _rowNumber: 4, key: "r3", disposalTicketNo: "3" }), ABBREV),
+  ];
+  assert.equal(rows[0]._alignment.status, "mismatch");
   const summary = summarizeAlignment(rows);
   assert.equal(summary.mismatches.length, 1, "one decision, not three");
   assert.equal(summary.mismatches[0].rows, 3);
