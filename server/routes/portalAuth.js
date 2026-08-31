@@ -687,8 +687,18 @@ router.post("/login", async (req, res) => {
       return res.status(401).json({ message: "Invalid credentials" });
     }
 
+    // `email` rides in the token so the ownership guards ("your own tickets",
+    // "your own drafts") have an identity to compare against without a DB read.
+    // Without it `req.user.email` was undefined on every portal request, and the
+    // support-ticket self-check compared "" against the requested address and
+    // refused — every portal user, not just one account.
     const token = jwt.sign(
-      { id: user._id, role: "portal_user", isDemo: Boolean(user.isDemo) },
+      {
+        id: user._id,
+        role: "portal_user",
+        email: String(user.email || "").trim().toLowerCase(),
+        isDemo: Boolean(user.isDemo),
+      },
       process.env.JWT_SECRET,
       { expiresIn: "7d" }
     );
@@ -715,6 +725,12 @@ router.post("/login", async (req, res) => {
         allowCredentialSelfService: user.allowCredentialSelfService,
         status: user.status,
         isVerified: user.isVerified,
+        // The per-user rule set the portal gates its own controls on (Save
+        // Baseline, Upload Excel, Submit, VERA). It only arrived on the /me
+        // refresh that follows, so the first render after signing in showed
+        // every control regardless of what the account is actually allowed —
+        // and a control that disappears a second later reads as a glitch.
+        portalAccess: user.portalAccess,
         role: "portal_user",
       },
     });

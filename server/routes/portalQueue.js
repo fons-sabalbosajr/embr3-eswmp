@@ -11,7 +11,7 @@ const router = express.Router();
 // be possible. Both frontends always send a Bearer token.
 const { requireAnyAuth } = require("../middleware/auth");
 router.use(requireAnyAuth);
-const { submitEntries } = dataSLFRoutes;
+const { submitEntries, isDatabaseTimeout, DB_TIMEOUT_MESSAGE } = dataSLFRoutes;
 const {
   resolvePortalContext,
   assertPortalWriteAllowed,
@@ -19,6 +19,49 @@ const {
 } = require("../utils/portalContext");
 
 const ACTIVE_STATUSES = ["draft", "scheduled"];
+
+// A queue record's `payload` is a WHOLE submission — trucks, their vehicles and
+// every selected client on each. Listing a user's queue used to hydrate all of
+// them as Mongoose documents with no projection, no limit and an unindexed sort,
+// which is why Drafts & Scheduled stalled and eventually died on the driver's
+// socket timeout for anyone with a real backlog.
+//
+// The panel's TABLE needs none of that: it renders the facility, the status, the
+// dates and the failure reason. So `?summary=1` answers with those plus a small
+// precomputed digest of the payload (what the export column needs), and the full
+// payload is fetched one record at a time from GET /:id when a row is opened.
+const SUMMARY_FIELDS =
+  "portalUserEmail slfName slfGenerator type status scheduledAt submittedAt " +
+  "resultSubmissionId failureReason retryCount createdAt updatedAt";
+
+// Hard ceiling on one page of queue records. Generous enough that no real
+// operator paginates, low enough that a runaway account cannot ask the database
+// for an unbounded result set.
+const QUEUE_MAX_LIMIT = 1000;
+const QUEUE_MAX_TIME_MS = Number(process.env.PORTAL_QUEUE_MAX_TIME_MS || 15000);
+
+// The few payload facts the panel shows outside the detail modal (the export's
+// Date of Disposal / Transport Entries / Total Volume / Unit columns).
+function summarizePayload(payload) {
+  const source = payload && typeof payload === "object" ? payload : {};
+  const trucks = Array.isArray(source.trucks) ? source.trucks : [];
+  const totalVolume = trucks.reduce((sum, truck) => {
+    const vehicles = Array.isArray(truck?.vehicles) ? truck.vehicles : [];
+    return (
+      sum +
+      (vehicles.length
+        ? vehicles.reduce((s, v) => s + Number(v?.actualVolume || 0), 0)
+        : Number(truck?.actualVolume || 0))
+    );
+  }, 0);
+  return {
+    dateOfDisposal: source.dateOfDisposal || null,
+    lguCompanyName: source.lguCompanyName || "",
+    baselineUnit: source.baselineUnit || source.totalVolumeAcceptedUnit || "",
+    truckCount: trucks.length,
+    totalVolume: Number.isFinite(totalVolume) ? Number(totalVolume.toFixed(2)) : 0,
+  };
+}
 
 // Statuses a record can still be WORKED ON from: edited, cancelled, or submitted
 // again. `failed` belongs here — POST /:id/submit already accepts it (it refuses
@@ -70,6 +113,65 @@ async function resolvePortalUser(email) {
   return UserPortal.findOne({ email: normalized }).select("_id email status");
 }
 
+// Query flags arrive as strings ("1", "true"); an absent flag must read false.
+function isTruthyFlag(value) {
+  return value === true || value === "1" || value === "true" || value === "yes";
+}
+
+// WHICH transaction a draft is about.
+//
+// A draft is a work-in-progress of one facility's disposal report for one day,
+// so that pair identifies it. Saving the same one again is the operator
+// revising their work, not filing a second draft — see findEquivalentDraft.
+// Returns "" when the payload does not identify a transaction yet (no date), in
+// which case nothing is merged and a new draft is created as before.
+function draftIdentity({ slfGenerator, slfName, payload }) {
+  const source = payload && typeof payload === "object" ? payload : {};
+  const day = String(source.dateOfDisposal || "").trim();
+  if (!day) return "";
+  const facility =
+    String(slfGenerator || source.slfGenerator || "").trim() ||
+    String(slfName || source.slfName || "").trim().toLowerCase();
+  if (!facility) return "";
+  return `${facility}|${day.slice(0, 10)}`;
+}
+
+/**
+ * The draft this save is a revision OF, if any.
+ *
+ * Every "Save as Draft" click sends a fresh clientRequestId, so the idempotency
+ * check above only ever caught a double-click on ONE click — an operator who
+ * saved the same day's report again after editing it got a second draft, then a
+ * third. Those piles are both confusing (which one is current?) and the reason a
+ * queue grows big enough to be slow to load. Same facility + same disposal date,
+ * still editable → update that record in place.
+ *
+ * Scheduled records are deliberately excluded: scheduling the same report twice
+ * is a legitimate thing to do and each run has its own time.
+ */
+async function findEquivalentDraft(email, identity) {
+  if (!identity) return null;
+  const candidates = await PortalSubmissionQueue.find({
+    portalUserEmail: email,
+    type: "draft",
+    status: { $in: ["draft", "failed"] },
+  })
+    .sort({ updatedAt: -1 })
+    .limit(QUEUE_MAX_LIMIT)
+    .select("slfGenerator slfName payload.dateOfDisposal payload.slfGenerator payload.slfName")
+    .maxTimeMS(QUEUE_MAX_TIME_MS)
+    .lean();
+  const match = candidates.find(
+    (record) =>
+      draftIdentity({
+        slfGenerator: record.slfGenerator,
+        slfName: record.slfName,
+        payload: record.payload,
+      }) === identity,
+  );
+  return match ? PortalSubmissionQueue.findById(match._id) : null;
+}
+
 function sanitizeScheduledAt(value) {
   if (!value) return null;
   const date = new Date(value);
@@ -92,8 +194,65 @@ router.get("/", async (req, res) => {
       filter.type = req.query.type;
     }
     if (req.query.status) filter.status = req.query.status;
-    const records = await PortalSubmissionQueue.find(filter).sort({ updatedAt: -1 });
+
+    // The sidebar's "needs attention" badge only ever wanted the NUMBER. It used
+    // to download every failed record — payloads included — and call `.length`
+    // on the result, on every socket event.
+    if (isTruthyFlag(req.query.countOnly)) {
+      const count = await PortalSubmissionQueue.countDocuments(filter).maxTimeMS(QUEUE_MAX_TIME_MS);
+      return res.json({ count });
+    }
+
+    const limit = Math.min(
+      QUEUE_MAX_LIMIT,
+      Math.max(1, Number(req.query.limit) || QUEUE_MAX_LIMIT),
+    );
+    const summaryOnly = isTruthyFlag(req.query.summary);
+
+    const query = PortalSubmissionQueue.find(filter)
+      .sort({ updatedAt: -1 })
+      .limit(limit)
+      .maxTimeMS(QUEUE_MAX_TIME_MS)
+      .lean();
+    // `payload` is excluded at the DATABASE, not after the fact — shipping it out
+    // of Mongo is the cost this mode exists to avoid.
+    if (summaryOnly) query.select(SUMMARY_FIELDS);
+
+    const records = await query;
+    if (summaryOnly) {
+      // The digest still needs the payload, so read the handful of fields it
+      // summarizes in one narrow second pass rather than the whole thing.
+      const digests = await PortalSubmissionQueue.find(filter)
+        .sort({ updatedAt: -1 })
+        .limit(limit)
+        .select(
+          "payload.dateOfDisposal payload.lguCompanyName payload.baselineUnit " +
+            "payload.totalVolumeAcceptedUnit payload.trucks.actualVolume " +
+            "payload.trucks.vehicles.actualVolume",
+        )
+        .maxTimeMS(QUEUE_MAX_TIME_MS)
+        .lean();
+      const byId = new Map(digests.map((d) => [String(d._id), d.payload]));
+      records.forEach((record) => {
+        record.payloadSummary = summarizePayload(byId.get(String(record._id)));
+      });
+    }
     res.json(records);
+  } catch (error) {
+    return sendPortalContextError(res, error);
+  }
+});
+
+// One queue record in full, including its payload. The list is summary-only for
+// the panel, so the detail modal and "edit this draft" read the payload here —
+// one record at a time instead of every record on every page load.
+router.get("/:id", async (req, res) => {
+  try {
+    const record = await PortalSubmissionQueue.findById(req.params.id).lean();
+    if (!record) return res.status(404).json({ message: "Record not found" });
+    const ctx = await ownedRecordOr403(req, res, record);
+    if (!ctx) return undefined;
+    res.json(record);
   } catch (error) {
     return sendPortalContextError(res, error);
   }
@@ -137,6 +296,43 @@ router.post("/", async (req, res) => {
           message: kind === "scheduled" ? "Submission scheduled" : "Draft saved",
           data: existing,
           deduplicated: true,
+        });
+      }
+    }
+
+    // Re-saving the SAME transaction updates the draft that already holds it
+    // instead of stacking another copy beside it.
+    if (kind === "draft") {
+      const identity = draftIdentity({ slfGenerator, slfName, payload });
+      const existing = await findEquivalentDraft(email, identity);
+      if (existing) {
+        existing.payload = payload && typeof payload === "object" ? payload : {};
+        if (slfName !== undefined) existing.slfName = slfName || payload?.slfName || existing.slfName;
+        if (slfGenerator !== undefined) {
+          existing.slfGenerator = slfGenerator || payload?.slfGenerator || existing.slfGenerator;
+        }
+        // A revision of a draft that had been REJECTED is the operator fixing
+        // what was refused, so it rejoins the ordinary queue and the stale
+        // reason goes with it — the same rule PUT /:id applies.
+        if (existing.status === "failed") {
+          existing.status = "draft";
+          existing.failureReason = "";
+        }
+        existing.scheduledAt = undefined;
+        existing.updatedBy = email;
+        await existing.save();
+
+        writeLog("info", "portal.queue.draft_updated", {
+          message: `Portal draft updated in place (${existing.slfName || "SLF"})`,
+          user: email,
+          ip: req.ip,
+          meta: { queueId: existing._id, identity },
+        });
+
+        return res.status(200).json({
+          message: "Draft updated",
+          data: existing,
+          updatedExisting: true,
         });
       }
     }
@@ -329,6 +525,19 @@ router.post("/:id/submit", async (req, res) => {
       });
       res.json({ message: "Submitted successfully", data: record, submissionId, removedFromDrafts });
     } catch (submitErr) {
+      // A DATABASE timeout is not a rejected submission. Stamping the record
+      // `failed` with the driver's raw text ("connection … :27017 timed out")
+      // told the operator their data was wrong when nothing about it was, and
+      // left a permanent failure on a record that would submit fine on a retry.
+      if (isDatabaseTimeout?.(submitErr)) {
+        writeLog("error", "portal.queue.submit_timeout", {
+          message: `Portal ${record.type} submit timed out against the database`,
+          user: record.portalUserEmail,
+          ip: req.ip,
+          meta: { queueId: record._id },
+        });
+        return res.status(503).json({ message: DB_TIMEOUT_MESSAGE, code: "DB_TIMEOUT", data: record });
+      }
       record.status = "failed";
       record.failureReason = submitErr.message || "Submission failed";
       record.retryCount = (record.retryCount || 0) + 1;
@@ -348,3 +557,9 @@ router.post("/:id/submit", async (req, res) => {
 });
 
 module.exports = router;
+// Exposed for testing: the two pure rules behind the queue's behaviour — WHICH
+// transaction a draft is about (so re-saving it updates rather than duplicates)
+// and the payload digest the summary list ships in place of the payload itself.
+module.exports.draftIdentity = draftIdentity;
+module.exports.summarizePayload = summarizePayload;
+module.exports.isTruthyFlag = isTruthyFlag;

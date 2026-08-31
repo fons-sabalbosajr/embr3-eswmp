@@ -522,6 +522,24 @@ dataSLFSchema.index({ submittedBy: 1, createdAt: -1 });
 // Indexes for summary aggregations + grouped/paginated list queries
 dataSLFSchema.index({ deletedAt: 1, slfGenerator: 1, createdAt: -1 });
 dataSLFSchema.index({ deletedAt: 1, slfName: 1, createdAt: -1 });
+
+// The SAME two lookups, without a `deletedAt` bound.
+//
+// `deletedAt` is the PREFIX of both indexes above, so a query that does not
+// constrain it cannot use either — and the submit path has two that don't: the
+// authoritative accredited-hauler roster and the declared truck capacities are
+// both read as `{ slfGenerator, "accreditedHaulers.0": { $exists: true } }`.
+// With no usable index those became a COLLSCAN of the whole collection,
+// fetching every submission document — each carrying its full `trucks` and
+// `accreditedHaulers` arrays — and then sorting them in memory, once per entry
+// being submitted. That is what exhausted the driver's socket timeout and
+// reached the operator as "connection <n> to <atlas host>:27017 timed out".
+//
+// Adding the un-prefixed pair costs two indexes and changes no behaviour: the
+// same documents match, they are simply found instead of scanned for, and the
+// `createdAt` sort is served by the index rather than in memory.
+dataSLFSchema.index({ slfGenerator: 1, createdAt: -1 });
+dataSLFSchema.index({ slfName: 1, createdAt: -1 });
 dataSLFSchema.index({ deletedAt: 1, dateOfDisposal: -1 });
 dataSLFSchema.index({ deletedAt: 1, companyType: 1, status: 1 });
 dataSLFSchema.index({ deletedAt: 1, submittedBy: 1, status: 1, createdAt: -1 });

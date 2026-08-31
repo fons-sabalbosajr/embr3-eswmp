@@ -61,6 +61,13 @@ const portalSubmissionQueueSchema = new mongoose.Schema(
 );
 
 portalSubmissionQueueSchema.index({ status: 1, scheduledAt: 1 });
+// THE query the Drafts & Scheduled panel runs: one user's queue, newest first.
+// `portalUserEmail` alone selected the rows but left the sort to be done in
+// memory over every one of them — on a large queue that is the slow half, and
+// on a very large one it is the half that fails outright (32MB in-memory sort).
+portalSubmissionQueueSchema.index({ portalUserEmail: 1, updatedAt: -1 });
+// The sidebar's failed-count badge, and the "same transaction?" draft lookup.
+portalSubmissionQueueSchema.index({ portalUserEmail: 1, type: 1, status: 1, updatedAt: -1 });
 // Enforces the idempotency guarantee at the DB level too: one queue record per
 // (user, clientRequestId). Sparse so records without the key are unaffected.
 portalSubmissionQueueSchema.index(

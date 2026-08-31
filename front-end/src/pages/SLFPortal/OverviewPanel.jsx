@@ -63,6 +63,40 @@ import { VOLUME_METRICS, submittedVolumeOf } from "../../utils/volumeMetrics";
  */
 const CHART_LABEL_STYLE = { fontSize: 10, fill: "#595959", fontWeight: 600 };
 
+// ── Chart legibility helpers ────────────────────────────────────────────────
+
+// One bar's worth of vertical space in the ranked hauler chart, plus the room
+// the axis itself needs. A hauler gets a row; the card scrolls.
+const HAULER_BAR_HEIGHT = 26;
+const HAULER_CHART_CHROME = 24;
+
+// A hauler name is free text and routinely longer than the axis is wide
+// ("Prime Integrated Waste Solutions Inc. — Pampanga Branch"). Truncating in the
+// tick keeps every row on ONE line at a readable size; the full name is in the
+// bar's tooltip, which is where the detail belongs.
+const HAULER_NAME_MAX = 22;
+const truncateName = (value) => {
+  const name = String(value ?? "");
+  return name.length > HAULER_NAME_MAX ? `${name.slice(0, HAULER_NAME_MAX - 1)}…` : name;
+};
+
+/**
+ * An axis tick / bar label that FITS.
+ *
+ * A volume axis carries numbers like 1,240,000, and at a quarter-width card
+ * those ticks were wider than the space reserved for them — so they were clipped
+ * and the bar labels printed over one another. Thousands and millions are
+ * abbreviated; anything smaller keeps its digits, because that is where the
+ * precision actually matters.
+ */
+const compactNumber = (value) => {
+  const num = Number(value || 0);
+  const abs = Math.abs(num);
+  if (abs >= 1_000_000) return `${(num / 1_000_000).toFixed(abs >= 10_000_000 ? 0 : 1)}M`;
+  if (abs >= 1_000) return `${(num / 1_000).toFixed(abs >= 10_000 ? 0 : 1)}K`;
+  return num.toLocaleString(undefined, { maximumFractionDigits: abs < 10 ? 2 : 0 });
+};
+
 const { Text } = Typography;
 
 // ── Portal Overview dashboard ──
@@ -287,12 +321,17 @@ function OverviewPanel({
       const declared = Number(hauler.numberOfTrucks || 0);
       byName.set(name, Math.max(byName.get(name) || 0, vehicles, declared, 1));
     });
-    const rows = [...byName.entries()]
+    // EVERY hauler, named.
+    //
+    // This used to keep the top 7 and fold the rest into one "Others (135)" bar.
+    // On a facility with a large fleet — Prime Waste Solution runs 142 — that is
+    // not a summary, it is the chart refusing to answer the question it exists
+    // to answer: the card says 142 and the chart could account for 7 of them.
+    // The bars are laid out at a fixed height each and the card scrolls (see the
+    // chart below), so the list is complete and every name stays readable.
+    return [...byName.entries()]
       .map(([name, value]) => ({ name, value }))
-      .sort((a, b) => b.value - a.value);
-    if (rows.length <= 8) return rows;
-    const others = rows.slice(7).reduce((sum, row) => sum + row.value, 0);
-    return [...rows.slice(0, 7), { name: `Others (${rows.length - 7})`, value: others }];
+      .sort((a, b) => b.value - a.value || a.name.localeCompare(b.name));
   })();
 
   const clientChartData = [
@@ -501,6 +540,12 @@ function OverviewPanel({
     return `${Number(value || 0).toLocaleString(undefined, { maximumFractionDigits: 2 })} ${unit}`;
   };
   const formatUnitValue = (value) => masked ? MASK_PLACEHOLDER : `${Number(value || 0).toLocaleString(undefined, { maximumFractionDigits: 2 })} ${normalizeUnit(baselineUnit)}`;
+  // The on-bar label: short enough to fit above a narrow bar, and still masked
+  // for a demo session. The full figure with its unit stays in the tooltip.
+  // A zero is left blank rather than printed — a "0" floating above an absent
+  // bar reads as a value that is not there.
+  const compactMaskedValue = (value) =>
+    masked ? MASK_PLACEHOLDER : Number(value || 0) ? compactNumber(value) : "";
   const submissionStatusData = [
     { name: "Pending", value: statusCounts.pending, color: "#faad14" },
     { name: "Approved", value: statusCounts.approved, color: "#52c41a" },
@@ -1156,19 +1201,55 @@ function OverviewPanel({
             bodyStyle={{ height: 250 }}
           >
             {haulerChartData.length ? (
-              <ResponsiveContainer width="100%" height="100%">
-                <BarChart data={haulerChartData} layout="vertical" margin={{ top: 4, right: 16, left: 4, bottom: 0 }}>
-                  <CartesianGrid strokeDasharray="3 3" horizontal={false} />
-                  <XAxis type="number" allowDecimals={false} tick={{ fontSize: 11 }} />
-                  <YAxis type="category" dataKey="name" tick={{ fontSize: 10 }} width={110} />
-                  <RTooltip formatter={(value) => [`${value} vehicle(s)`, "Fleet"]} />
-                  {/* Palette blue rather than a loose hex, so the fleet bars match
-                      Baseline Volume wherever the two appear together. */}
-                  <Bar dataKey="value" name="Vehicles" fill={VOLUME_METRICS.baseline.color} radius={[0, 4, 4, 0]} isAnimationActive={false}>
-                    <LabelList dataKey="value" position="right" style={CHART_LABEL_STYLE} />
-                  </Bar>
-                </BarChart>
-              </ResponsiveContainer>
+              /* The card keeps its 250px height so the dashboard grid stays even;
+                 the CHART inside is as tall as it needs to be to give every
+                 hauler its own labelled row, and this div scrolls. Fitting 142
+                 bars into 250px is what made the names unreadable — the previous
+                 answer to that was to stop drawing 135 of them. */
+              <div
+                className="slf-slim-scroll"
+                style={{ height: "100%", overflowY: "auto", overflowX: "hidden", paddingRight: 4 }}
+              >
+                <ResponsiveContainer
+                  width="100%"
+                  height={Math.max(
+                    226,
+                    haulerChartData.length * HAULER_BAR_HEIGHT + HAULER_CHART_CHROME,
+                  )}
+                >
+                  <BarChart
+                    data={haulerChartData}
+                    layout="vertical"
+                    margin={{ top: 4, right: 28, left: 4, bottom: 0 }}
+                    barCategoryGap="18%"
+                  >
+                    <CartesianGrid strokeDasharray="3 3" horizontal={false} />
+                    <XAxis type="number" allowDecimals={false} tick={{ fontSize: 11 }} />
+                    {/* `interval={0}` forces a tick for EVERY hauler — Recharts
+                        drops labels to avoid collisions otherwise, which on a long
+                        list silently leaves most bars unnamed. */}
+                    <YAxis
+                      type="category"
+                      dataKey="name"
+                      tick={{ fontSize: 11 }}
+                      width={150}
+                      interval={0}
+                      tickFormatter={truncateName}
+                    />
+                    {/* The tooltip carries the FULL name, so truncation on the
+                        axis never costs the operator the information. */}
+                    <RTooltip
+                      formatter={(value) => [`${value} vehicle(s)`, "Fleet"]}
+                      labelFormatter={(label) => label}
+                    />
+                    {/* Palette blue rather than a loose hex, so the fleet bars match
+                        Baseline Volume wherever the two appear together. */}
+                    <Bar dataKey="value" name="Vehicles" fill={VOLUME_METRICS.baseline.color} radius={[0, 4, 4, 0]} isAnimationActive={false}>
+                      <LabelList dataKey="value" position="right" style={CHART_LABEL_STYLE} />
+                    </Bar>
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
             ) : (
               <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No accredited haulers recorded" />
             )}
@@ -1239,21 +1320,32 @@ function OverviewPanel({
         </Col>
         <Col xs={24} md={12} xl={6} className="eswmp-col-5">
           <Card title={<Text strong style={{ fontSize: 14 }}>Baseline Breakdown</Text>} loading={wasteReceivedLoading} style={{ borderRadius: 8, height: "100%" }} bodyStyle={{ height: 250 }}>
+            {/* Readability, in three parts:
+                  • `top: 22` — the value labels sit ABOVE each bar, and an 8px
+                    margin clipped them on the tallest bar in the chart, which is
+                    always the one the operator most wants to read.
+                  • `left: 0` with a widened axis — a volume tick is "1,240,000",
+                    and the -16px pull cut its leading digits off. The ticks are
+                    abbreviated (1.2M) so they fit at this card width.
+                  • the bar labels are abbreviated too, and the unit moved to the
+                    axis title. "12,345.67 m³" over a 40px bar overlapped its
+                    neighbour; the exact figure is one hover away in the tooltip,
+                    which still prints it in full with its unit. */}
             <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={groupedVolumeData} margin={{ top: 8, right: 8, left: -16, bottom: 0 }}>
+              <BarChart data={groupedVolumeData} margin={{ top: 22, right: 12, left: 0, bottom: 0 }}>
                 <CartesianGrid strokeDasharray="3 3" vertical={false} />
-                <XAxis dataKey="category" tick={{ fontSize: 11 }} />
-                <YAxis tick={{ fontSize: 11 }} />
+                <XAxis dataKey="category" tick={{ fontSize: 11 }} interval={0} />
+                <YAxis tick={{ fontSize: 11 }} width={52} tickFormatter={compactNumber} />
                 <RTooltip formatter={(value, name) => [formatUnitValue(value), name === "baseline" ? "Baseline Volume" : "Submitted Volume"]} />
-                <Legend />
-                {/* Volumes are masked for demo sessions, so the label reuses the
-                    same formatter as the tooltip instead of printing the raw
-                    number — otherwise a masked chart would still leak its value. */}
+                <Legend wrapperStyle={{ fontSize: 11 }} />
+                {/* Volumes are masked for demo sessions, so a masked chart must
+                    not print the raw number here either — the formatter checks
+                    `masked` before it abbreviates. */}
                 <Bar dataKey="baseline" name="Baseline Volume" fill={VOLUME_METRICS.baseline.color} radius={[4, 4, 0, 0]} isAnimationActive={false}>
-                  <LabelList dataKey="baseline" position="top" formatter={formatUnitValue} style={CHART_LABEL_STYLE} />
+                  <LabelList dataKey="baseline" position="top" formatter={compactMaskedValue} style={CHART_LABEL_STYLE} />
                 </Bar>
                 <Bar dataKey="submitted" name="Submitted Volume" fill={VOLUME_METRICS.submitted.color} radius={[4, 4, 0, 0]} isAnimationActive={false}>
-                  <LabelList dataKey="submitted" position="top" formatter={formatUnitValue} style={CHART_LABEL_STYLE} />
+                  <LabelList dataKey="submitted" position="top" formatter={compactMaskedValue} style={CHART_LABEL_STYLE} />
                 </Bar>
               </BarChart>
             </ResponsiveContainer>

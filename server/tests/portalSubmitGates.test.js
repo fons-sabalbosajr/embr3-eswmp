@@ -244,7 +244,10 @@ test("the Drafts & Scheduled MENU carries a failed-count badge", () => {
   );
   // Counted in the parent, not in the panel: the panel is unmounted on every
   // other menu, which is exactly where the badge has to be right.
-  assert.match(portal, /params: \{ email: portalEmail, status: "failed" \}/);
+  // …asked for as a COUNT. The badge needs one number; fetching the failed
+  // records themselves pulled a whole submission payload per row on every
+  // socket event that touched the account.
+  assert.match(portal, /params: \{ email: portalEmail, status: "failed", countOnly: 1 \}/);
   assert.match(portal, /count=\{queueAttentionCount\}/);
   assert.doesNotMatch(
     portal,

@@ -1,12 +1,12 @@
 import { useState, useEffect, useCallback } from "react";
 import {
   Card, Tabs, Table, Tag, Button, Space, Empty, Spin, Popconfirm, Tooltip,
-  Modal, Descriptions, Typography, Alert, Badge,
+  Modal, Descriptions, Typography, Alert, Badge, Progress,
 } from "antd";
 import {
   FileTextOutlined, ClockCircleOutlined, ReloadOutlined, SendOutlined,
   DeleteOutlined, StopOutlined, EyeOutlined, CheckCircleOutlined, DownloadOutlined,
-  CloseCircleOutlined, ExclamationCircleOutlined,
+  CloseCircleOutlined, ExclamationCircleOutlined, RedoOutlined,
 } from "@ant-design/icons";
 import dayjs from "dayjs";
 import Swal from "sweetalert2";
@@ -92,7 +92,25 @@ function QueueRecordDetails({ record }) {
   return (
     <Space direction="vertical" size={14} style={{ width: "100%" }}>
       {record.failureReason && (
-        <Alert type="error" showIcon message="Last attempt failed" description={record.failureReason} />
+        <Alert
+          type={isTransientFailure(record.failureReason) ? "warning" : "error"}
+          showIcon
+          message={
+            isTransientFailure(record.failureReason)
+              ? "Last attempt did not reach the server"
+              : "Last attempt failed"
+          }
+          description={
+            <Space direction="vertical" size={4} style={{ width: "100%" }}>
+              <span>{readableFailure(record.failureReason)}</span>
+              {Number(record.retryCount) > 0 && (
+                <Text type="secondary" style={{ fontSize: 12 }}>
+                  Attempted {Number(record.retryCount) + 1} times so far.
+                </Text>
+              )}
+            </Space>
+          }
+        />
       )}
       {record.status === "draft" && rows.length === 0 && (
         <Alert
@@ -106,7 +124,7 @@ function QueueRecordDetails({ record }) {
       <Descriptions size="small" column={{ xs: 1, sm: 2 }} bordered title="Queue Record">
         <Descriptions.Item label="Facility">{orDash(record.slfName)}</Descriptions.Item>
         <Descriptions.Item label="Type">{STATUS_META[record.type]?.label || record.type}</Descriptions.Item>
-        <Descriptions.Item label="Status">{statusTag(record.status)}</Descriptions.Item>
+        <Descriptions.Item label="Status">{statusTag(record.status, record.retryCount)}</Descriptions.Item>
         <Descriptions.Item label="Saved">{safeDate(record.createdAt)}</Descriptions.Item>
         {record.scheduledAt && (
           <Descriptions.Item label="Scheduled For">{safeDate(record.scheduledAt)}</Descriptions.Item>
@@ -245,9 +263,49 @@ const STATUS_META = {
   cancelled: { color: "default", label: "Cancelled", icon: <StopOutlined /> },
 };
 
-const statusTag = (status) => {
+/**
+ * A stored failure reason, in words the operator can act on.
+ *
+ * `failureReason` is written by the server and shown verbatim. When a submission
+ * died on the database connection that text was the driver's own —
+ * "connection 8574 to 35.240.228.82:27017 timed out" — which names an
+ * infrastructure address and implies the operator's data is at fault. It is
+ * neither. The server no longer records a timeout as a failure at all, but rows
+ * stamped before that change still carry the string, so it is translated on the
+ * way to the screen. Every other reason is a real, actionable rejection and is
+ * passed through untouched.
+ */
+const TRANSIENT_FAILURE_RE =
+  /connection \d+ to [\d.]+:\d+|timed out|timeout|ECONNRESET|socket hang up|server selection|topology was destroyed|not connected/i;
+
+const isTransientFailure = (reason) => TRANSIENT_FAILURE_RE.test(String(reason || ""));
+
+const readableFailure = (reason) =>
+  isTransientFailure(reason)
+    ? "The connection to the server dropped while this was being submitted. Nothing was submitted and nothing was lost — use Retry submission."
+    : reason;
+
+const statusTag = (status, retryCount = 0) => {
   const meta = STATUS_META[status] || { color: "default", label: status || "—" };
-  return <Tag color={meta.color} icon={meta.icon}>{meta.label}</Tag>;
+  const attempts = Number(retryCount) || 0;
+  return (
+    <Space size={4} wrap>
+      <Tag color={meta.color} icon={meta.icon} style={{ marginInlineEnd: 0 }}>
+        {meta.label}
+      </Tag>
+      {/* How many times this row has been sent. It is the difference between
+          "it failed" and "it has failed four times", which is what tells an
+          operator to stop retrying and raise a ticket. Only shown once there
+          IS a retry to report. */}
+      {attempts > 0 && (
+        <Tooltip title={`This submission has been attempted ${attempts + 1} time${attempts ? "s" : ""} in total.`}>
+          <Tag color={attempts >= 3 ? "volcano" : "orange"} style={{ marginInlineEnd: 0 }}>
+            <RedoOutlined /> {attempts} {attempts === 1 ? "retry" : "retries"}
+          </Tag>
+        </Tooltip>
+      )}
+    </Space>
+  );
 };
 
 const safeDate = (v, fmt = "MMM D, YYYY h:mm A") => (v ? dayjs(v).format(fmt) : "—");
@@ -268,6 +326,10 @@ export default function DraftsScheduledPanel({
   const [loading, setLoading] = useState(false);
   const [busyId, setBusyId] = useState(null);
   const [viewRecord, setViewRecord] = useState(null);
+  const [viewLoading, setViewLoading] = useState(false);
+  // What a running "Submit now" / "Retry submission" is doing, for the progress
+  // modal. Null when nothing is in flight. See submitNow.
+  const [submitProgress, setSubmitProgress] = useState(null);
   // When the rows below were read. See the overdue-badge note further down.
   const [fetchedAt, setFetchedAt] = useState(() => Date.now());
 
@@ -277,6 +339,14 @@ export default function DraftsScheduledPanel({
   // Cached + resilient loader so re-entering the tab is instant and large
   // queues (up to thousands of drafts/scheduled) don't re-fetch every time.
   // Pass force to bypass the cache after a mutating action.
+  //
+  // `summary: 1` leaves the payloads in the database. Each one is a whole
+  // submission — trucks, their vehicles, and every client selected on each — and
+  // the table below shows none of it: facility, status, dates, failure reason.
+  // Downloading all of them to render those columns is what made this tab slow
+  // to open and, for an operator with a real backlog, slow enough that the
+  // database connection timed out before the list arrived. The full payload is
+  // read one record at a time, when a row is actually opened (openRecord).
   const fetchQueue = useCallback(
     async (force = false) => {
       if (!email) return;
@@ -287,7 +357,7 @@ export default function DraftsScheduledPanel({
           cacheKey,
           () =>
             api
-              .get("/portal-queue", { params: { email } })
+              .get("/portal-queue", { params: { email, summary: 1 } })
               .then(({ data }) => (Array.isArray(data) ? data : [])),
           {
             ttl: QUEUE_CACHE_TTL,
@@ -321,10 +391,91 @@ export default function DraftsScheduledPanel({
     fetchQueue();
   }, [fetchQueue]);
 
+  // The payload-derived facts the panel shows outside the detail modal: the
+  // export's four columns, and the "how many transport entries am I sending?"
+  // line in the progress modal. They come from `payloadSummary`, which the
+  // server computes while the payload is still in the database (see
+  // summarizePayload in routes/portalQueue.js). A record fetched in full — one
+  // the detail modal has opened — is summarised locally instead, so both paths
+  // give the same answer.
+  const summaryOf = (r) => {
+    if (r.payloadSummary) return r.payloadSummary;
+    const payload = r.payload || {};
+    const trucks = Array.isArray(payload.trucks) ? payload.trucks : [];
+    const totalVolume = trucks.reduce((sum, t) => {
+      const vehicles = Array.isArray(t?.vehicles) ? t.vehicles : [];
+      return (
+        sum +
+        (vehicles.length
+          ? vehicles.reduce((s, v) => s + Number(v?.actualVolume || 0), 0)
+          : Number(t?.actualVolume || 0))
+      );
+    }, 0);
+    return {
+      dateOfDisposal: payload.dateOfDisposal || null,
+      baselineUnit: payload.baselineUnit || "",
+      truckCount: trucks.length,
+      totalVolume: totalVolume ? Number(totalVolume.toFixed(2)) : 0,
+    };
+  };
+
+  // Open one record's detail. The list carries no payload, so the record is read
+  // in full here — the modal opens on the summary immediately and fills in.
+  const openRecord = async (record) => {
+    setViewRecord(record);
+    if (record.payload) return;
+    setViewLoading(true);
+    try {
+      // The same `email` the list was fetched with. A developer inspecting an
+      // account holds a developer token, and the server requires an explicit
+      // portal context from one — without it this read is refused for exactly
+      // the rows the list just returned.
+      const { data } = await api.get(`/portal-queue/${record._id}`, { params: { email } });
+      setViewRecord((current) => (current?._id === record._id ? data : current));
+    } catch {
+      Swal.fire("Error", "Could not load this record's data. Please try again.", "error");
+    } finally {
+      setViewLoading(false);
+    }
+  };
+
   const submitNow = async (record) => {
     setBusyId(record._id);
+    // What is actually being sent, so the modal can say so rather than spin.
+    const entries = summaryOf(record).truckCount || 0;
+    setSubmitProgress({
+      record,
+      entries,
+      phase: "uploading",
+      percent: 0,
+      startedAt: Date.now(),
+    });
     try {
-      await api.post(`/portal-queue/${record._id}/submit`);
+      await api.post(
+        `/portal-queue/${record._id}/submit`,
+        {},
+        {
+          // REAL progress, not a timer: axios reports bytes actually put on the
+          // wire. The server phase that follows cannot be measured from here —
+          // it is one request — so the bar stops where the measurement stops and
+          // the label says which phase it is in. A bar that kept climbing on a
+          // setInterval would be inventing a number.
+          onUploadProgress: (event) => {
+            if (!event.total) return;
+            const percent = Math.min(99, Math.round((event.loaded / event.total) * 100));
+            setSubmitProgress((current) =>
+              current && current.record._id === record._id
+                ? { ...current, percent, phase: percent >= 99 ? "processing" : "uploading" }
+                : current,
+            );
+          },
+        },
+      );
+      setSubmitProgress((current) =>
+        current && current.record._id === record._id
+          ? { ...current, phase: "done", percent: 100 }
+          : current,
+      );
       Swal.fire({
         icon: "success",
         title: "Submitted",
@@ -348,20 +499,31 @@ export default function DraftsScheduledPanel({
       const reason =
         err.response?.data?.message ||
         "Could not submit. Please review the data and try again.";
-      const nextStep = /reverted submission/i.test(reason)
-        ? "Open <b>Submission History</b>, correct the reverted entry and resubmit it — then retry this one."
-        : /client|hauler/i.test(reason)
-          ? "Open <b>Data Entry → Baseline → Accredited Haulers</b> to add or correct the record it names, then retry."
-          : "Fix what the message names, then use <b>Retry submission</b> on this row.";
+      // A dropped connection or a server that ran out of time is NOT something
+      // the operator can fix by correcting their data, so it must not be given
+      // the "fix what the message names" instruction — that sent people looking
+      // for a mistake that was not there.
+      const transient =
+        err.response?.data?.code === "DB_TIMEOUT" ||
+        !err.response ||
+        isTransientFailure(reason);
+      const nextStep = transient
+        ? "Nothing was submitted and nothing was lost. Use <b>Retry submission</b> on this row in a moment."
+        : /reverted submission/i.test(reason)
+          ? "Open <b>Submission History</b>, correct the reverted entry and resubmit it — then retry this one."
+          : /client|hauler/i.test(reason)
+            ? "Open <b>Data Entry → Baseline → Accredited Haulers</b> to add or correct the record it names, then retry."
+            : "Fix what the message names, then use <b>Retry submission</b> on this row.";
       Swal.fire({
-        icon: "error",
-        title: "Submission Failed",
-        html: `<div style="text-align:left;font-size:13px"><p style="margin:0 0 10px">${reason}</p><p style="margin:0;color:#555">${nextStep}</p></div>`,
+        icon: transient ? "warning" : "error",
+        title: transient ? "Submission Did Not Go Through" : "Submission Failed",
+        html: `<div style="text-align:left;font-size:13px"><p style="margin:0 0 10px">${readableFailure(reason)}</p><p style="margin:0;color:#555">${nextStep}</p></div>`,
         confirmButtonColor: "#1a3353",
       });
       fetchQueue(true);
     } finally {
       setBusyId(null);
+      setSubmitProgress(null);
     }
   };
 
@@ -408,7 +570,7 @@ export default function DraftsScheduledPanel({
     return (
       <Space size={2} wrap>
         <Tooltip title="View data">
-          <Button size="small" type="text" icon={<EyeOutlined />} onClick={() => setViewRecord(record)} />
+          <Button size="small" type="text" icon={<EyeOutlined />} onClick={() => openRecord(record)} />
         </Tooltip>
         {retryable && (
           <Tooltip title={record.status === "failed" ? "Retry submission" : "Submit now"}>
@@ -440,7 +602,7 @@ export default function DraftsScheduledPanel({
 
   const draftColumns = [
     { title: "Facility", dataIndex: "slfName", key: "slfName", render: (v) => <Text strong>{v || "—"}</Text> },
-    { title: "Status", dataIndex: "status", key: "status", width: 120, render: statusTag },
+    { title: "Status", dataIndex: "status", key: "status", width: 170, render: (_, r) => statusTag(r.status, r.retryCount) },
     { title: "Created", dataIndex: "createdAt", key: "createdAt", width: 170, render: (v) => <Text type="secondary" style={{ fontSize: 12 }}>{safeDate(v)}</Text> },
     { title: "Last Updated", dataIndex: "updatedAt", key: "updatedAt", width: 170, render: (v) => <Text type="secondary" style={{ fontSize: 12 }}>{safeDate(v)}</Text> },
     { title: "Actions", key: "actions", width: 140, render: (_, r) => commonActions(r) },
@@ -448,17 +610,31 @@ export default function DraftsScheduledPanel({
 
   const scheduledColumns = [
     { title: "Facility", dataIndex: "slfName", key: "slfName", render: (v) => <Text strong>{v || "—"}</Text> },
-    { title: "Status", dataIndex: "status", key: "status", width: 120, render: statusTag },
+    { title: "Status", dataIndex: "status", key: "status", width: 170, render: (_, r) => statusTag(r.status, r.retryCount) },
     { title: "Scheduled For", dataIndex: "scheduledAt", key: "scheduledAt", width: 180, render: (v) => <Tag color="blue">{safeDate(v)}</Tag> },
     { title: "Submitted", dataIndex: "submittedAt", key: "submittedAt", width: 170, render: (v) => <Text type="secondary" style={{ fontSize: 12 }}>{safeDate(v)}</Text> },
     {
       title: "Result",
       key: "result",
       width: 180,
-      render: (_, r) => r.status === "failed"
-        ? <Tooltip title={r.failureReason}><Text type="danger" style={{ fontSize: 12 }}><ExclamationCircleOutlined /> {r.failureReason || "Failed"}</Text></Tooltip>
-        : r.status === "submitted" ? <Text type="success" style={{ fontSize: 12 }}>Submitted to Admin</Text>
-        : <Text type="secondary" style={{ fontSize: 12 }}>—</Text>,
+      render: (_, r) => {
+        if (r.status !== "failed") {
+          return r.status === "submitted"
+            ? <Text type="success" style={{ fontSize: 12 }}>Submitted to Admin</Text>
+            : <Text type="secondary" style={{ fontSize: 12 }}>—</Text>;
+        }
+        // A dropped connection is not a rejection of the data, and colouring it
+        // like one sent operators hunting for a mistake that was not there.
+        const transient = isTransientFailure(r.failureReason);
+        const text = readableFailure(r.failureReason) || "Failed";
+        return (
+          <Tooltip title={text}>
+            <Text type={transient ? "warning" : "danger"} style={{ fontSize: 12 }}>
+              <ExclamationCircleOutlined /> {transient ? "Connection dropped — retry" : text}
+            </Text>
+          </Tooltip>
+        );
+      },
     },
     { title: "Actions", key: "actions", width: 140, render: (_, r) => commonActions(r, { isScheduled: true }) },
   ];
@@ -473,32 +649,22 @@ export default function DraftsScheduledPanel({
   // says what to fix.
   const exportRows = (rows, kind) =>
     rows.map((r) => {
-      const payload = r.payload || {};
-      const trucks = Array.isArray(payload.trucks) ? payload.trucks : [];
-      const volume = trucks.reduce((sum, t) => {
-        const vehicles = Array.isArray(t?.vehicles) ? t.vehicles : [];
-        return (
-          sum +
-          (vehicles.length
-            ? vehicles.reduce((s, v) => s + Number(v?.actualVolume || 0), 0)
-            : Number(t?.actualVolume || 0))
-        );
-      }, 0);
+      const summary = summaryOf(r);
       return {
         Type: kind,
         Facility: r.slfName || DASH,
         Status: STATUS_META[r.status]?.label || r.status || DASH,
-        "Date of Disposal": payload.dateOfDisposal
-          ? safeDate(payload.dateOfDisposal, "MMM D, YYYY")
+        "Date of Disposal": summary.dateOfDisposal
+          ? safeDate(summary.dateOfDisposal, "MMM D, YYYY")
           : DASH,
-        "Transport Entries": trucks.length,
-        "Total Volume": volume ? Number(volume.toFixed(2)) : 0,
-        Unit: unitOf(payload.baselineUnit, "m³"),
+        "Transport Entries": summary.truckCount || 0,
+        "Total Volume": summary.totalVolume || 0,
+        Unit: unitOf(summary.baselineUnit, "m³"),
         "Scheduled For": r.scheduledAt ? safeDate(r.scheduledAt) : DASH,
         "Submitted At": r.submittedAt ? safeDate(r.submittedAt) : DASH,
         "Submission ID": r.resultSubmissionId || DASH,
         Attempts: r.retryCount || 0,
-        "Failure Reason": r.failureReason || DASH,
+        "Failure Reason": readableFailure(r.failureReason) || DASH,
         Created: safeDate(r.createdAt),
         "Last Updated": safeDate(r.updatedAt),
       };
@@ -634,12 +800,66 @@ export default function DraftsScheduledPanel({
         />
       </Spin>
 
+      {/* ── Submission progress ────────────────────────────────────────────────
+          Not closable and with no footer: the request is already in flight, and
+          a Cancel that cannot actually stop the server would be a lie. It clears
+          itself when the request settles (the `finally` in submitNow). */}
+      <Modal
+        open={!!submitProgress}
+        title={
+          <Space size={8}>
+            <SendOutlined style={{ color: "#52c41a" }} />
+            <span>Submitting to EMB Region III</span>
+          </Space>
+        }
+        closable={false}
+        maskClosable={false}
+        keyboard={false}
+        footer={null}
+        width={460}
+        style={{ maxWidth: "94vw" }}
+      >
+        {submitProgress && (
+          <Space direction="vertical" size={12} style={{ width: "100%" }}>
+            <Progress
+              percent={submitProgress.percent}
+              status={submitProgress.phase === "done" ? "success" : "active"}
+              strokeColor={{ from: "#1677ff", to: "#52c41a" }}
+            />
+            <Text style={{ fontSize: 13 }}>
+              {submitProgress.phase === "uploading"
+                ? "Sending your data to the server…"
+                : submitProgress.phase === "processing"
+                  ? "Received. The server is validating and saving it…"
+                  : "Done."}
+            </Text>
+            <Descriptions size="small" column={1} bordered>
+              <Descriptions.Item label="Facility">
+                {submitProgress.record.slfName || DASH}
+              </Descriptions.Item>
+              <Descriptions.Item label="Transport entries">
+                {submitProgress.entries || 0}
+              </Descriptions.Item>
+              <Descriptions.Item label="Attempt">
+                {(Number(submitProgress.record.retryCount) || 0) + 1}
+              </Descriptions.Item>
+            </Descriptions>
+            {/* Said once, plainly, so a slow submit does not look like a lost
+                one and get clicked again. */}
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              Please keep this page open. If the connection drops, nothing is
+              submitted and nothing is lost — the row stays here to retry.
+            </Text>
+          </Space>
+        )}
+      </Modal>
+
       <Modal
         title={
           <Space size={8} wrap>
             <FileTextOutlined style={{ color: "#722ed1" }} />
             <span>{viewRecord?.type === "scheduled" ? "Scheduled Submission" : "Draft Submission"}</span>
-            {viewRecord && statusTag(viewRecord.status)}
+            {viewRecord && statusTag(viewRecord.status, viewRecord.retryCount)}
           </Space>
         }
         open={!!viewRecord}
@@ -650,7 +870,11 @@ export default function DraftsScheduledPanel({
         classNames={{ body: "slf-slim-scroll" }}
         destroyOnHidden
       >
-        {viewRecord && <QueueRecordDetails record={viewRecord} />}
+        {/* The payload arrives a moment after the modal (see openRecord), so the
+            spinner covers the fill-in rather than the modal being empty. */}
+        <Spin spinning={viewLoading} tip="Loading submission data…">
+          {viewRecord && <QueueRecordDetails record={viewRecord} />}
+        </Spin>
       </Modal>
     </Card>
   );

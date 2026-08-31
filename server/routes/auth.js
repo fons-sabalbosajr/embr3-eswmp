@@ -94,8 +94,16 @@ router.post("/login", async (req, res) => {
     // `isDemo` rides in the token so every downstream request can tell it is a
     // demonstration session without a second DB lookup — that is what the
     // server-side masking middleware keys off.
+    // `email` rides along for the same reason it does on the portal token: the
+    // audit trail (`writeLog({ user: req.user?.email })`) and the ownership
+    // guards both read it off the token, and both recorded/compared "" without it.
     const token = jwt.sign(
-      { id: user._id, role: user.role, isDemo: Boolean(user.isDemo) },
+      {
+        id: user._id,
+        role: user.role,
+        email: String(user.email || "").trim().toLowerCase(),
+        isDemo: Boolean(user.isDemo),
+      },
       process.env.JWT_SECRET,
       { expiresIn: "7d" },
     );
