@@ -35,6 +35,36 @@ function requireAnyAuth(req, res, next) {
   }
 }
 
+/**
+ * The e-mail address of the authenticated caller, lowercased ("" if unknown).
+ *
+ * Tokens historically carried only `{ id, role }` — no `email` — so every
+ * "is this record yours?" check that compared `req.user.email` against a
+ * requested address was comparing against `undefined` and refusing. Portal
+ * tokens live for 7 days, so simply adding the claim at login (which we now do)
+ * would have left everyone already signed in locked out until it expired; this
+ * falls back to the account the token identifies so an in-flight session works
+ * immediately. Cached per-request — several guards may ask on one call.
+ */
+async function resolveCallerEmail(req) {
+  if (req._callerEmail !== undefined) return req._callerEmail;
+  let email = String(req.user?.email || "").trim().toLowerCase();
+  if (!email && req.user?.id) {
+    try {
+      const Model =
+        req.user.role === "portal_user"
+          ? require("../models/UserPortal")
+          : require("../models/User");
+      const doc = await Model.findById(req.user.id).select("email").lean();
+      email = String(doc?.email || "").trim().toLowerCase();
+    } catch {
+      email = "";
+    }
+  }
+  req._callerEmail = email;
+  return email;
+}
+
 function adminOnly(req, res, next) {
   if (req.user?.role !== "admin" && req.user?.role !== "developer") {
     return res.status(403).json({ message: "Admin access required" });
@@ -88,4 +118,11 @@ function requirePermission(key, level = "view") {
   };
 }
 
-module.exports = { authMiddleware, requireAnyAuth, adminOnly, developerOnly, requirePermission };
+module.exports = {
+  authMiddleware,
+  requireAnyAuth,
+  adminOnly,
+  developerOnly,
+  requirePermission,
+  resolveCallerEmail,
+};

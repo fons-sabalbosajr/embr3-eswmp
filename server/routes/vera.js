@@ -22,6 +22,11 @@ const crypto = require("crypto");
 const router = express.Router();
 
 const { requireAnyAuth } = require("../middleware/auth");
+// `can_view_vera_responses` is a real portal rule with a real switch in Developer
+// Settings, but nothing ever ENFORCED it — turning it off changed nothing, and a
+// portal user it had been withdrawn from kept the assistant. Admin/developer
+// callers pass straight through (the rule constrains the portal realm only).
+const { requirePortalRule } = require("../utils/portalPolicy");
 const AppSettings = require("../models/AppSettings");
 const UsageLog = require("../models/AutomationAgentUsageLog");
 const AppLog = require("../models/AppLog");
@@ -303,7 +308,7 @@ router.get("/public-status", (_req, res) => {
 // submission. Derived server-side from their account + past submissions, so it is
 // authoritative rather than whatever the browser happens to have loaded. Scoped to
 // the CALLER: there is no id parameter, so one portal user can never read another's.
-router.get("/portal-readiness", requireAnyAuth, async (req, res) => {
+router.get("/portal-readiness", requireAnyAuth, requirePortalRule("can_view_vera_responses"), async (req, res) => {
   if (req.user?.role !== "portal_user") {
     return res.status(403).json({ message: "Portal account required." });
   }
@@ -520,7 +525,7 @@ router.post("/backlogs/scan", requireAnyAuth, async (req, res) => {
 
 // ── POST /api/vera/chat ───────────────────────────────────────────────────────
 // Body: { message, history?: [{role,content}], page? }
-router.post("/chat", requireAnyAuth, async (req, res) => {
+router.post("/chat", requireAnyAuth, requirePortalRule("can_view_vera_responses"), async (req, res) => {
   if (!VERA_ENABLED()) {
     return res.status(200).json({ ok: false, code: "disabled", message: "VERA is currently unavailable. Please open a support ticket." });
   }

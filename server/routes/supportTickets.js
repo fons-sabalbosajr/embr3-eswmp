@@ -15,10 +15,23 @@ const router = express.Router();
 // Require an authenticated caller on every route below. Support tickets contain
 // user contact details and attachments; they must not be readable/editable
 // anonymously. Both frontends always send a Bearer token.
-const { requireAnyAuth, adminOnly } = require("../middleware/auth");
+const { requireAnyAuth, adminOnly, resolveCallerEmail } = require("../middleware/auth");
 const { requirePortalRule } = require("../utils/portalPolicy");
 const { investigateTicket } = require("../utils/veraTicketInvestigator");
 router.use(requireAnyAuth);
+
+// Is this ticket the calling portal user's own? Admins/developers always pass —
+// they answer tickets for a living. Used by the by-id routes the portal reaches
+// (thread refresh, portal reply), which previously accepted ANY ticket id from
+// ANY signed-in portal account.
+async function ownsTicketOr403(req, res, ticket) {
+  if (req.user?.role !== "portal_user") return true;
+  const callerEmail = await resolveCallerEmail(req);
+  const ticketEmail = String(ticket?.portalUserEmail || "").trim().toLowerCase();
+  if (callerEmail && ticketEmail && callerEmail === ticketEmail) return true;
+  res.status(403).json({ message: "You can only view your own support tickets." });
+  return false;
+}
 
 const MAX_TICKET_UPLOAD_MB = 15;
 const MAX_TICKET_UPLOAD_BYTES = MAX_TICKET_UPLOAD_MB * 1024 * 1024;
@@ -131,21 +144,26 @@ router.post("/", requirePortalRule("can_create_support_tickets"), async (req, re
       meta: { ticketNo: ticket.ticketNo },
     });
 
-    // VERA answers first for portal tickets. This is best-effort: ticket creation
-    // must not fail if VERA cannot investigate, but when it succeeds the portal
-    // user sees an immediate first reply while admins/developers can still follow
-    // up on the same thread.
-    try {
-      await runVeraInvestigation(ticket, req);
-    } catch (veraErr) {
+    // The ticket is SAVED — tell the user so now.
+    //
+    // VERA's investigation reads the account's 30-day activity log and recent
+    // submissions, and it used to run before this response. The operator sat on a
+    // spinner for the whole of it, and when those reads were slow the request
+    // timed out client-side on a ticket that had in fact been filed — so they
+    // filed it again. VERA's reply reaches them over the socket
+    // (notifyPortal "support_ticket_reply", which the portal already refetches
+    // on), which is how an admin's reply reaches them too.
+    res.status(201).json({ message: "Support ticket created", data: ticket });
+
+    // Best-effort, after the response: ticket creation must never fail — or
+    // wait — on the investigation.
+    runVeraInvestigation(ticket, req).catch((veraErr) => {
       writeLog("warn", "support.vera.auto-reply.failed", {
         message: `VERA could not auto-reply to ${ticket.ticketNo}: ${veraErr.message}`,
         user: portalUserEmail,
         meta: { ticketNo: ticket.ticketNo },
       });
-    }
-
-    res.status(201).json({ message: "Support ticket created", data: ticket });
+    });
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });
   }
@@ -157,11 +175,17 @@ router.get("/my-tickets/:email", async (req, res) => {
     // Case-insensitive exact match so a mixed-case stored email still resolves
     // the portal user's own tickets (they otherwise come up empty).
     const email = String(req.params.email || "").trim();
-    if (
-      req.user?.role === "portal_user" &&
-      String(req.user?.email || "").trim().toLowerCase() !== email.toLowerCase()
-    ) {
-      return res.status(403).json({ message: "You can only view your own support tickets." });
+    if (req.user?.role === "portal_user") {
+      // The caller's address comes from the token when it carries one and from
+      // their account when it does not. Reading it straight off the token was
+      // what made this refuse EVERY portal user: portal tokens carried no
+      // `email` claim, so this compared "" against the requested address and
+      // answered 403 "You can only view your own support tickets" — the exact
+      // message operators were seeing instead of their ticket list.
+      const callerEmail = await resolveCallerEmail(req);
+      if (!callerEmail || callerEmail !== email.toLowerCase()) {
+        return res.status(403).json({ message: "You can only view your own support tickets." });
+      }
     }
     const escaped = email.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
     const { page = 1, limit = 10, search = "", status = "all", sortField = "createdAt", sortOrder = "descend" } = req.query;
@@ -196,7 +220,10 @@ router.get("/my-tickets/:email", async (req, res) => {
 });
 
 // Admin: Get all tickets (paginated)
-router.get("/", async (req, res) => {
+// `adminOnly` — this returns EVERY user's tickets, contact details and
+// attachments. It was reachable by any authenticated caller, so a portal user
+// could list the whole queue instead of just their own (/my-tickets/:email).
+router.get("/", adminOnly, async (req, res) => {
   try {
     const { status, search, page = 1, limit = 50 } = req.query;
     const filter = {};
@@ -221,19 +248,22 @@ router.get("/", async (req, res) => {
   }
 });
 
-// Admin: Get ticket by ID
+// Get ticket by ID. The portal reads this to refresh a thread after replying, so
+// it stays open to portal users — but only for their OWN ticket.
 router.get("/:id", async (req, res) => {
   try {
     const ticket = await SupportTicket.findById(req.params.id);
     if (!ticket) return res.status(404).json({ message: "Ticket not found" });
+    if (!(await ownsTicketOr403(req, res, ticket))) return undefined;
     res.json(ticket);
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });
   }
 });
 
-// Admin: Reply to ticket
-router.post("/:id/reply", async (req, res) => {
+// Admin: Reply to ticket. A reply is posted as EMB — a portal user's own reply
+// goes through /:id/portal-reply, which files it as theirs.
+router.post("/:id/reply", adminOnly, async (req, res) => {
   try {
     const ticket = await SupportTicket.findById(req.params.id);
     if (!ticket) return res.status(404).json({ message: "Ticket not found" });
@@ -277,7 +307,7 @@ router.post("/:id/reply", async (req, res) => {
 });
 
 // Admin: Update ticket status
-router.patch("/:id/status", async (req, res) => {
+router.patch("/:id/status", adminOnly, async (req, res) => {
   try {
     const ticket = await SupportTicket.findById(req.params.id);
     if (!ticket) return res.status(404).json({ message: "Ticket not found" });
@@ -301,7 +331,7 @@ router.patch("/:id/status", async (req, res) => {
 });
 
 // Admin: Delete ticket
-router.delete("/:id", async (req, res) => {
+router.delete("/:id", adminOnly, async (req, res) => {
   try {
     await SupportTicket.findByIdAndDelete(req.params.id);
     res.json({ message: "Ticket deleted" });
@@ -315,6 +345,9 @@ router.post("/:id/portal-reply", async (req, res) => {
   try {
     const ticket = await SupportTicket.findById(req.params.id);
     if (!ticket) return res.status(404).json({ message: "Ticket not found" });
+    // A portal user may only add to their own thread — the id alone used to be
+    // enough to post into somebody else's conversation.
+    if (!(await ownsTicketOr403(req, res, ticket))) return undefined;
 
     const { message, repliedBy, repliedByName, attachments = [] } = req.body;
     if (!message) return res.status(400).json({ message: "Message is required" });

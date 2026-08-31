@@ -1516,3 +1516,298 @@
   font-size: 11px;
   line-height: 18px;
 }
+
+/* ══════════════════════════════════════════════════════════════════════════════
+   PORTAL RESPONSIVE LAYER
+   ─────────────────────────────────────────────────────────────────────────────
+   Scope: `body.slf-portal-active`, added while the SLF Portal page is mounted
+   (see the effect in index.jsx). It is on <body> rather than on a wrapper
+   because modals and drawers render through a React portal into document.body —
+   a class on the portal's own markup never reaches them, and the modals are
+   where the worst of the small-screen layout was. It is removed on unmount, so
+   none of this follows the stylesheet into the admin app, which loads it for the
+   shared VERA chat.
+
+   What this fixes: the portal's GRID already collapses correctly — the columns
+   carry xs/sm/md spans and the tables scroll. What did not survive the collapse
+   is everything INSIDE a collapsed cell: a KPI title clipped to "Total Submi…",
+   an action row pushed past the right edge, a filter frozen at its desktop
+   width, a two-column Descriptions squeezed into two slivers, a 1200px modal
+   with its confirm button off-screen. Same 992 / 768 / 576 breakpoints as the
+   rest of this file.
+   ══════════════════════════════════════════════════════════════════════════ */
+
+/* ── KPI tiles: fluid, not stepped ──────────────────────────────────────────
+   The values are declared at a fixed 20px inline — right on a desktop, too big
+   at 360px where the same tile is half the screen. `clamp` scales between the
+   two continuously, so nothing jumps as the window is dragged. `!important` is
+   unavoidable: the size is an inline `valueStyle` on every Statistic. */
+body.slf-portal-active .ant-statistic-content-value,
+body.slf-portal-active .ant-statistic-content-suffix {
+  font-size: clamp(15px, 4.2vw, 20px) !important;
+  line-height: 1.25;
+}
+
+/* A tile's LABEL is the half that says what the number means, so it wraps
+   instead of truncating — antd ellipsizes by default, which turned
+   "Unorganized Submissions" into "Unorganiz…" on every phone. */
+body.slf-portal-active .ant-statistic-title {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  line-height: 1.35;
+  font-size: clamp(11px, 3vw, 14px);
+}
+
+/* ── Card heads: title and actions stop competing for one line ──────────────
+   A card head is a flex row of title + `extra`, and the portal's extras are
+   button groups (Refresh / Export / Add Entry). Narrow, the two halves fight:
+   the title truncates to nothing while the buttons overflow. Below md the head
+   becomes two stacked rows, each free to wrap. */
+@media (max-width: 767px) {
+  body.slf-portal-active .ant-card-head {
+    padding: 0 12px;
+  }
+
+  body.slf-portal-active .ant-card-head-wrapper {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+    padding: 10px 0;
+  }
+
+  body.slf-portal-active .ant-card-head-title {
+    white-space: normal;
+    overflow-wrap: anywhere;
+    padding: 0;
+    line-height: 1.4;
+  }
+
+  body.slf-portal-active .ant-card-extra {
+    margin-inline-start: 0;
+    padding: 0;
+    width: 100%;
+  }
+
+  body.slf-portal-active .ant-card-extra > .ant-space {
+    width: 100%;
+    flex-wrap: wrap;
+    row-gap: 8px;
+  }
+}
+
+@media (max-width: 576px) {
+  /* Tiles sit two-up at this width; desktop padding leaves almost nothing for
+     the number between them. */
+  body.slf-portal-active .ant-card-small > .ant-card-body {
+    padding: 10px;
+  }
+
+  body.slf-portal-active .ant-statistic-content-prefix {
+    margin-inline-end: 4px;
+  }
+}
+
+/* ── Buttons ────────────────────────────────────────────────────────────────
+   A Space of buttons is the portal's standard action row. `wrap` is set on most
+   of them in the JSX but not all, and a label longer than the viewport still
+   overflowed. Wrapping becomes unconditional, and a label shortens before its
+   button is cut off. */
+@media (max-width: 767px) {
+  body.slf-portal-active .ant-space-horizontal {
+    flex-wrap: wrap;
+  }
+
+  body.slf-portal-active .ant-btn {
+    max-width: 100%;
+  }
+
+  body.slf-portal-active .ant-btn > span:not(.anticon) {
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+}
+
+@media (max-width: 576px) {
+  /* A phone-width primary action reads better full-width than as a pill
+     stranded mid-row. Deliberately NOT applied to icon-only table actions —
+     those stay compact so a row of them still fits in its column. */
+  body.slf-portal-active .slf-primary-btn,
+  body.slf-portal-active .ant-card-extra > .ant-btn:only-child {
+    width: 100%;
+  }
+
+  body.slf-portal-active .ant-btn-sm {
+    padding-inline: 8px;
+  }
+}
+
+/* ── Filters and inputs ─────────────────────────────────────────────────────
+   Several filters carry a desktop size inline (`width: 200`, `minWidth: 150`).
+   At 360px those are wider than the space they sit in, so the row scrolls
+   sideways. Below md an inline width becomes a CEILING rather than a fixed
+   size: the control fills what it has and no more. */
+@media (max-width: 767px) {
+  body.slf-portal-active .ant-select,
+  body.slf-portal-active .ant-picker,
+  body.slf-portal-active .ant-input-affix-wrapper,
+  body.slf-portal-active .ant-input-number,
+  body.slf-portal-active .ant-input-group-wrapper {
+    max-width: 100%;
+    min-width: 0 !important;
+  }
+
+  /* A filter bar built as a flex row: each control claims a full row rather
+     than being compressed to an unusable width beside its neighbours. */
+  body.slf-portal-active .ant-space-item > .ant-select,
+  body.slf-portal-active .ant-space-item > .ant-picker {
+    width: 100% !important;
+  }
+}
+
+/* ── Descriptions ───────────────────────────────────────────────────────────
+   The review and detail panes use multi-column Descriptions. antd keeps the
+   declared column count unless told otherwise, and the portal sets a responsive
+   count in only some places — elsewhere a two-column table renders as two
+   slivers. Below md every Descriptions stacks to one column, label above
+   value. */
+@media (max-width: 767px) {
+  body.slf-portal-active .ant-descriptions-row > td,
+  body.slf-portal-active .ant-descriptions-row > th {
+    display: block;
+    width: 100% !important;
+  }
+
+  body.slf-portal-active .ant-descriptions-item-label,
+  body.slf-portal-active .ant-descriptions-item-content {
+    display: block;
+    width: 100%;
+    overflow-wrap: anywhere;
+  }
+
+  body.slf-portal-active .ant-descriptions-item-label {
+    font-weight: 600;
+    padding-bottom: 2px !important;
+  }
+}
+
+/* ── Tabs ───────────────────────────────────────────────────────────────────
+   antd already scrolls an overflowing tab bar, but the portal's labels carry
+   counts and badges, and at 360px the more-menu swallowed nearly all of them.
+   Tighter spacing keeps two or three visible, which is what makes the bar a bar
+   rather than a dropdown in disguise. */
+@media (max-width: 576px) {
+  body.slf-portal-active .ant-tabs-tab {
+    padding: 8px 10px;
+    font-size: 12px;
+  }
+
+  body.slf-portal-active .ant-tabs-tab + .ant-tabs-tab {
+    margin-left: 4px;
+  }
+}
+
+/* ── Tables ─────────────────────────────────────────────────────────────────
+   The tables set `scroll={{ x }}` so they pan rather than crush. What they did
+   not do is stay INSIDE their card: a table wider than its parent widened the
+   card, and the card widened the page — so the whole portal scrolled sideways
+   instead of just the table. Pinning the wrapper confines the scroll to where
+   it belongs. */
+body.slf-portal-active .ant-table-wrapper {
+  max-width: 100%;
+}
+
+@media (max-width: 767px) {
+  body.slf-portal-active .ant-table {
+    font-size: 12px;
+  }
+
+  body.slf-portal-active .ant-table-thead > tr > th,
+  body.slf-portal-active .ant-table-tbody > tr > td {
+    padding: 8px;
+  }
+
+  /* Pagination is a row of controls that does not wrap on its own. */
+  body.slf-portal-active .ant-pagination {
+    display: flex;
+    flex-wrap: wrap;
+    row-gap: 6px;
+  }
+}
+
+/* ── Text labels ────────────────────────────────────────────────────────────
+   Facility, hauler and client names and e-mail addresses are all user-supplied
+   and routinely longer than a phone is wide. Wherever the portal renders one as
+   a tag, a form label or an alert, it wraps instead of forcing the layout
+   open. */
+@media (max-width: 767px) {
+  body.slf-portal-active .ant-form-item-label > label {
+    white-space: normal;
+    height: auto;
+    line-height: 1.4;
+  }
+
+  body.slf-portal-active .ant-tag {
+    white-space: normal;
+    overflow-wrap: anywhere;
+    max-width: 100%;
+  }
+
+  body.slf-portal-active .ant-alert-message,
+  body.slf-portal-active .ant-alert-description {
+    overflow-wrap: anywhere;
+  }
+}
+
+/* ── Modals and drawers ─────────────────────────────────────────────────────
+   The portal's modals are declared at fixed desktop widths (880–1200px). antd
+   does not shrink them, so on a phone they hung off the right edge with their
+   footer buttons out of reach — the review-and-submit modal among them, which
+   is the one screen a submission cannot be completed without.
+
+   This is the rule that needed the <body> scope: a modal is not rendered inside
+   the portal's markup. */
+@media (max-width: 767px) {
+  body.slf-portal-active .ant-modal {
+    max-width: calc(100vw - 16px);
+    margin: 8px auto;
+    top: 8px;
+    padding-bottom: 8px;
+  }
+
+  body.slf-portal-active .ant-modal-body {
+    padding: 12px;
+    /* A tall form must scroll inside the modal, not push its footer past the
+       bottom of the screen. */
+    max-height: calc(100vh - 140px);
+    overflow-y: auto;
+  }
+
+  body.slf-portal-active .ant-modal-title {
+    white-space: normal;
+    overflow-wrap: anywhere;
+    line-height: 1.4;
+    padding-inline-end: 24px;
+  }
+
+  /* Footer stacks with the CONFIRM action on top (column-reverse), where a
+     thumb reaches it, and Cancel below it. */
+  body.slf-portal-active .ant-modal-footer {
+    display: flex;
+    flex-direction: column-reverse;
+    gap: 8px;
+  }
+
+  body.slf-portal-active .ant-modal-footer > .ant-btn {
+    width: 100%;
+    margin-inline-start: 0 !important;
+  }
+
+  /* The support / notifications drawers open at a fixed width too. */
+  body.slf-portal-active .ant-drawer-content-wrapper {
+    max-width: 100vw;
+  }
+
+  body.slf-portal-active .ant-drawer-body {
+    padding: 12px;
+  }
+}

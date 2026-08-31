@@ -953,18 +953,111 @@ function summarizePortalOrganizeNeed(entry) {
   return { unplacedCount, missingCapacityCount };
 }
 
+// A query this gate issues must fail LOUDLY and quickly rather than hold the
+// submission open until the driver's socket dies — a killed socket takes the
+// pooled connection with it and the user sees a raw driver error.
+const PORTAL_GATE_MAX_TIME_MS = Number(process.env.PORTAL_GATE_MAX_TIME_MS || 15000);
+
+/** A submit stage slower than this is recorded by name. See submitEntries. */
+const SLOW_STAGE_LOG_MS = Number(process.env.SLOW_STAGE_LOG_MS || 2000);
+
+/**
+ * Did this fail because the DATABASE ran out of time, rather than because the
+ * submission was wrong?
+ *
+ * The two need different answers. A rejected submission tells the operator what
+ * to fix; a database timeout used to reach them as a bare 500 carrying the
+ * driver's own words ("connection 8574 to 35.240.228.82:27017 timed out"),
+ * which reads as data loss and is not actionable. Covers the server-side
+ * deadline (MaxTimeMSExpired, code 50), the driver's socket/selection timeouts,
+ * and Mongoose's own command buffering timeout.
+ */
+function isDatabaseTimeout(error) {
+  if (!error) return false;
+  if (error.code === 50 || error.codeName === "MaxTimeMSExpired") return true;
+  const name = String(error.name || "");
+  if (name === "MongoNetworkTimeoutError" || name === "MongoServerSelectionError") return true;
+  return /timed out|timeout|buffering timed out/i.test(String(error.message || ""));
+}
+
+const DB_TIMEOUT_MESSAGE =
+  "The server took too long to check your account before submitting. Nothing was submitted and nothing was lost — please try again in a moment.";
+
 async function assertNoUnorganizedPortalSubmissions(submittedBy) {
   const email = String(submittedBy || "").trim();
   if (!email) return;
-  const prior = await DataSLF.find({
-    deletedAt: null,
-    hiddenFromPortal: { $ne: true },
-    submittedBy: new RegExp(`^${escapeRegExp(email)}$`, "i"),
-    status: { $nin: ["reverted", "rejected"] },
-  })
-    .select("idNo submissionId dateOfDisposal status trucks truckCount submittedBy slfGenerator")
-    .populate({ path: "slfGenerator", select: "cellNames cellStatuses" })
-    .lean();
+
+  // `$map` rather than a sub-field `select`, for the reason spelled out on the
+  // declared-capacity read: projecting `trucks.vehicles.cellIndex` and friends
+  // makes the server rebuild the nested array per document and is pathologically
+  // slow on a large account (measured at 7.6 s). Building the same trimmed shape
+  // inside the pipeline costs a fraction of it.
+  //
+  // The shape below is EXACTLY what summarizePortalOrganizeNeed reads, so that
+  // function — the one that decides whether a submission is blocked — runs
+  // afterwards completely unchanged. This moved the transport, not the rule.
+  const trimmedTrucks = {
+    $map: {
+      input: { $ifNull: ["$trucks", []] },
+      as: "t",
+      in: {
+        cellIndex: "$$t.cellIndex",
+        actualVolume: "$$t.actualVolume",
+        truckCapacity: "$$t.truckCapacity",
+        vehicles: {
+          $map: {
+            input: { $ifNull: ["$$t.vehicles", []] },
+            as: "v",
+            in: {
+              cellIndex: "$$v.cellIndex",
+              actualVolume: "$$v.actualVolume",
+              capacity: "$$v.capacity",
+            },
+          },
+        },
+      },
+    },
+  };
+
+  const prior = await DataSLF.aggregate([
+    {
+      $match: {
+        deletedAt: null,
+        hiddenFromPortal: { $ne: true },
+        submittedBy: new RegExp(`^${escapeRegExp(email)}$`, "i"),
+        status: { $nin: ["reverted", "rejected"] },
+        // A record with no trucks carries no waste placement, so
+        // summarizePortalOrganizeNeed can only ever score it 0/0 — it is
+        // incapable of blocking a submission. Excluding it changes no outcome
+        // and skips exactly the heavy documents: the BASELINE containers, which
+        // are the ones holding the multi-megabyte accreditedHaulers array. One
+        // account has 82 of them, and this gate was fetching every one to look
+        // at a `trucks` array that is not there.
+        ...SUBMISSION_HAS_TRUCKS,
+      },
+    },
+    { $project: { idNo: 1, submissionId: 1, slfGenerator: 1, trucks: trimmedTrucks } },
+  ])
+    .option({ maxTimeMS: PORTAL_GATE_MAX_TIME_MS })
+    .exec();
+
+  // `populate` is a query-builder feature; an aggregation needs the facilities
+  // fetched and attached. One read for the whole set — isValidPortalCellRef
+  // still receives the same populated `slfGenerator` object it always did.
+  const facilityIds = [
+    ...new Set(prior.map((entry) => entry.slfGenerator && String(entry.slfGenerator)).filter(Boolean)),
+  ];
+  if (facilityIds.length) {
+    const facilities = await SlfFacility.find({ _id: { $in: facilityIds } })
+      .select("cellNames cellStatuses")
+      .maxTimeMS(PORTAL_GATE_MAX_TIME_MS)
+      .lean();
+    const byId = new Map(facilities.map((facility) => [String(facility._id), facility]));
+    prior.forEach((entry) => {
+      if (entry.slfGenerator) entry.slfGenerator = byId.get(String(entry.slfGenerator)) || null;
+    });
+  }
+
   const blockers = prior
     .map((entry) => ({ entry, summary: summarizePortalOrganizeNeed(entry) }))
     .filter(({ summary }) => summary.unplacedCount > 0 || summary.missingCapacityCount > 0);
@@ -1394,22 +1487,258 @@ function mergeAccreditedHaulerCopies(haulers = []) {
   }));
 }
 
-async function getAuthoritativeHaulersForEntry(item) {
-  const query = item?.slfGenerator
-    ? { slfGenerator: item.slfGenerator, "accreditedHaulers.0": { $exists: true } }
-    : { slfName: item?.slfName, "accreditedHaulers.0": { $exists: true } };
-  const baselines = await DataSLF.find(query).select("accreditedHaulers createdAt").sort({ createdAt: -1 }).lean();
-  const savedHaulers = baselines.flatMap((baseline) => baseline.accreditedHaulers || []);
-  return mergeAccreditedHaulerCopies(
+// How many baseline documents define a facility's roster. A facility has a
+// handful; the ceiling exists so a data problem cannot turn one validation into
+// an unbounded read.
+const BASELINE_LOOKUP_LIMIT = Number(process.env.BASELINE_LOOKUP_LIMIT || 200);
+
+/** The facility scope for a baseline read, by id when we have one, else by name. */
+function baselineScopeFor(item, { castId = false } = {}) {
+  if (item?.slfGenerator) {
+    const id = String(item.slfGenerator);
+    if (!castId) return { slfGenerator: item.slfGenerator };
+    return mongoose.Types.ObjectId.isValid(id)
+      ? { slfGenerator: new mongoose.Types.ObjectId(id) }
+      : null;
+  }
+  if (item?.slfName) return { slfName: item.slfName };
+  return null;
+}
+
+/**
+ * The facility's accredited-hauler roster, as one record per hauler with the
+ * UNION of its clients.
+ *
+ * This read is the reason a submission timed out for a large facility, and the
+ * cost had nothing to do with the size of the submission — a 15-row upload paid
+ * it in full.
+ *
+ * `accreditedHaulers` is deliberately duplicated onto EVERY one of an SLF's
+ * baseline-carrying records (see mergeAccreditedHaulerCopies), and each copy
+ * carries every hauler's vehicles AND its private-sector clients. The comment on
+ * PORTAL_BASELINE_SELECT records what that measures out to on production data:
+ * Prime Waste Solution's 22 baseline-carrying records hold 5,099 KB of
+ * accreditedHaulers. Data Entry was fixed by projecting the array away; this
+ * path could not do that, because the union across those copies is exactly what
+ * it needs — so it pulled all 5 MB, parsed it, and did the union in JavaScript.
+ *
+ * The union is now done WHERE THE DATA IS. What crosses the wire is proportional
+ * to the number of DISTINCT hauler/client pairs (142 for that facility) instead
+ * of to how many times the array has been copied — the same $unwind/$group
+ * collapse the Hauler Clients read already uses for this array.
+ *
+ * The result is still passed through mergeAccreditedHaulerCopies unchanged: the
+ * pipeline groups on a lowercase/trimmed key, which is STRICTLY FINER than
+ * normalizeRelationshipText (that also folds commas, semicolons and dashes), so
+ * it can only remove pairs the JavaScript merge would have collapsed anyway. The
+ * canonical identity rules — the ones that decide "duplicated or ambiguous" —
+ * stay in one place and are untouched.
+ */
+async function getAuthoritativeHaulersForEntry(item, cache = null) {
+  const cacheKey =
+    (item?.slfGenerator && `id:${String(item.slfGenerator)}`) ||
+    (item?.slfName && `name:${String(item.slfName).trim().toLowerCase()}`) ||
+    "";
+  if (cache && cacheKey && cache.has(cacheKey)) return cache.get(cacheKey);
+
+  // `$match` does not cast, unlike `find` — an uncast id matches nothing.
+  const scope = baselineScopeFor(item, { castId: true });
+  const normalizedKey = (expr) => ({ $toLower: { $trim: { input: { $ifNull: [expr, ""] } } } });
+
+  let rows = [];
+  if (scope) {
+    rows = await DataSLF.aggregate([
+      { $match: { ...scope, "accreditedHaulers.0": { $exists: true } } },
+      // Newest first, so `$first` below keeps the most recent copy of a pair —
+      // the same "newest copy wins" rule the JavaScript loop had.
+      { $sort: { createdAt: -1 } },
+      { $limit: BASELINE_LOOKUP_LIMIT },
+      { $project: { accreditedHaulers: 1 } },
+      { $unwind: "$accreditedHaulers" },
+      {
+        $project: {
+          // `haulerName || name`, exactly: `$ifNull` alone would keep an EMPTY
+          // haulerName and never reach the fallback, where the JavaScript `||`
+          // falls through. A hauler that only carries `name` would then group
+          // under "" and be dropped as unnamed.
+          haulerName: {
+            $let: {
+              vars: { primary: { $ifNull: ["$accreditedHaulers.haulerName", ""] } },
+              in: {
+                $cond: [
+                  { $eq: ["$$primary", ""] },
+                  { $ifNull: ["$accreditedHaulers.name", ""] },
+                  "$$primary",
+                ],
+              },
+            },
+          },
+          // The same three places haulerClientPool() reads a client from.
+          client: {
+            $concatArrays: [
+              { $ifNull: ["$accreditedHaulers.privateSectorClients", []] },
+              { $ifNull: ["$accreditedHaulers.clients", []] },
+              {
+                $reduce: {
+                  input: { $ifNull: ["$accreditedHaulers.vehicles", []] },
+                  initialValue: [],
+                  in: {
+                    $concatArrays: ["$$value", { $ifNull: ["$$this.selectedClients", []] }],
+                  },
+                },
+              },
+            ],
+          },
+        },
+      },
+      // `preserveNullAndEmptyArrays` — a hauler with NO clients yet must survive
+      // this stage. Dropping it would turn "this hauler has no clients on file"
+      // into "this hauler is not assigned under this SLF", which refuses a
+      // submission that should have been accepted.
+      { $unwind: { path: "$client", preserveNullAndEmptyArrays: true } },
+      {
+        $group: {
+          _id: {
+            hauler: normalizedKey("$haulerName"),
+            // Mirrors clientIdentityKey: a bare string IS the name, otherwise
+            // `clientName || name` — again with the empty-string fallthrough.
+            client: normalizedKey({
+              $cond: [
+                { $eq: [{ $type: "$client" }, "string"] },
+                "$client",
+                {
+                  $let: {
+                    vars: { primary: { $ifNull: ["$client.clientName", ""] } },
+                    in: {
+                      $cond: [
+                        { $eq: ["$$primary", ""] },
+                        { $ifNull: ["$client.name", ""] },
+                        "$$primary",
+                      ],
+                    },
+                  },
+                },
+              ],
+            }),
+          },
+          haulerName: { $first: "$haulerName" },
+          client: { $first: "$client" },
+        },
+      },
+      {
+        $group: {
+          _id: "$_id.hauler",
+          haulerName: { $first: "$haulerName" },
+          clients: { $push: "$client" },
+        },
+      },
+    ])
+      .option({ maxTimeMS: PORTAL_GATE_MAX_TIME_MS })
+      .exec();
+  }
+
+  const savedHaulers = rows.map((row) => ({
+    haulerName: row.haulerName || "",
+    // The placeholder a client-less hauler contributed is not a client.
+    clients: (row.clients || []).filter((client) => client !== null && client !== undefined),
+  }));
+
+  const merged = mergeAccreditedHaulerCopies(
     savedHaulers.length
       ? savedHaulers
       : Array.isArray(item?.accreditedHaulers)
         ? item.accreditedHaulers
         : [],
   );
+  if (cache && cacheKey) cache.set(cacheKey, merged);
+  return merged;
 }
 
-async function validateUploadedClientRelationships(item) {
+// `cache` is shared across the entries of ONE submit. A bulk upload validates
+// every entry against the same facility's roster, and without it each entry
+// re-read that roster from the database — N identical reads of the heaviest
+// document set the facility has.
+/**
+ * plate (lowercased) → the capacity declared for it on the SLF's baseline.
+ *
+ * Module-level rather than a closure inside submitEntries so the submit-gate
+ * benchmark can time the REAL read. It was mirrored in the benchmark once, the
+ * mirror went stale the moment this changed, and the benchmark then reported a
+ * cost that no longer existed.
+ *
+ * Two fields per vehicle are all this reads, but
+ * `find().select("accreditedHaulers.vehicles.plateNumber …")` is the wrong way
+ * to ask for them: a sub-field projection into a nested array makes the server
+ * walk and rebuild the whole structure per document, and on this array (5 MB
+ * across a large facility's records) that is pathologically slow — measured at
+ * 14 s for one facility, and it timed out outright without a deadline.
+ * `$project` of the whole field is cheap by comparison, so the trim happens with
+ * `$map` inside the pipeline.
+ *
+ * Newest first, so a plate declared more than once resolves to its most recent
+ * declaration. The old loop kept whichever copy the storage engine happened to
+ * return first; the copies agree in practice, and "newest wins" is the rule the
+ * roster read uses.
+ */
+async function readDeclaredCapacityMap(item, cache = null) {
+  const slfName = item?.slfName ? String(item.slfName).trim() : "";
+  const key = (item?.slfGenerator && String(item.slfGenerator)) || slfName.toLowerCase();
+  if (!key) return new Map();
+  if (cache && cache.has(key)) return cache.get(key);
+
+  const scope = baselineScopeFor(item, { castId: true });
+  const map = new Map();
+  if (!scope) return map;
+
+  const rows = await DataSLF.aggregate([
+    { $match: { ...scope, "accreditedHaulers.0": { $exists: true } } },
+    { $sort: { createdAt: -1 } },
+    { $limit: BASELINE_LOOKUP_LIMIT },
+    {
+      $project: {
+        vehicles: {
+          $reduce: {
+            input: { $ifNull: ["$accreditedHaulers", []] },
+            initialValue: [],
+            in: {
+              $concatArrays: [
+                "$$value",
+                {
+                  $map: {
+                    input: { $ifNull: ["$$this.vehicles", []] },
+                    as: "v",
+                    in: { plateNumber: "$$v.plateNumber", capacity: "$$v.capacity" },
+                  },
+                },
+              ],
+            },
+          },
+        },
+      },
+    },
+    { $unwind: "$vehicles" },
+    {
+      $project: {
+        plate: { $toLower: { $trim: { input: { $ifNull: ["$vehicles.plateNumber", ""] } } } },
+        capacity: "$vehicles.capacity",
+      },
+    },
+    { $match: { plate: { $ne: "" } } },
+    { $group: { _id: "$plate", capacity: { $first: "$capacity" } } },
+  ])
+    .option({ maxTimeMS: PORTAL_GATE_MAX_TIME_MS })
+    .exec();
+
+  rows.forEach((row) => {
+    const cap = Number(row.capacity);
+    // Same guard the loop had: only a real, positive capacity is a declaration.
+    if (Number.isFinite(cap) && cap > 0) map.set(row._id, cap);
+  });
+  if (cache) cache.set(key, map);
+  return map;
+}
+
+async function validateUploadedClientRelationships(item, cache = null) {
   const issues = [];
   const trucks = Array.isArray(item?.trucks) ? item.trucks : [];
   const uploadRows = trucks
@@ -1417,7 +1746,7 @@ async function validateUploadedClientRelationships(item) {
     .filter(({ truck }) => String(truck?.entrySource || "").trim().toLowerCase() === "upload");
   if (!uploadRows.length) return issues;
 
-  const haulers = await getAuthoritativeHaulersForEntry(item);
+  const haulers = await getAuthoritativeHaulersForEntry(item, cache);
   for (const { truck, index } of uploadRows) {
     const rowLabel = `Row ${index + 1}`;
     const selectedClients = Array.isArray(truck?.selectedClients) && truck.selectedClients.length
@@ -1659,6 +1988,7 @@ async function assertNoUnresolvedRevert(email) {
     .setOptions({ includeHiddenYears: true })
     .select("idNo revertedAt updatedAt")
     .sort({ revertedAt: 1 })
+    .maxTimeMS(PORTAL_GATE_MAX_TIME_MS)
     .lean();
   if (!stale) return;
   const revertedAt = stale.revertedAt || stale.updatedAt;
@@ -1679,13 +2009,54 @@ async function submitEntries({ entries, submittedBy, req, idempotencyKey = null 
   // Idempotency: if this exact request was already processed, return the saved
   // records instead of creating duplicates (protects against retries / lost
   // responses / double-clicks). Keyed by a client-supplied X-Idempotency-Key.
+  // Stage timings.
+  //
+  // A submission that is slow used to be a single opaque driver error — the
+  // operator saw "connection <n> to <host>:27017 timed out" and there was no way
+  // to tell WHICH of the eight database round-trips behind a submit had been the
+  // slow one. Each stage is now timed, and anything over the threshold is
+  // written to AppLog with its name, so the next slow submit identifies itself
+  // instead of being diagnosed by reading code.
+  const stageTimings = {};
+  const timeStage = async (name, run) => {
+    const started = Date.now();
+    try {
+      return await run();
+    } catch (error) {
+      // Name the stage on the error itself, so a timeout is attributable even
+      // when it is answered as a 503 and never reaches a log line of its own.
+      if (error && !error.slowStage) {
+        error.slowStage = name;
+        error.stageTimings = { ...stageTimings, [name]: Date.now() - started };
+      }
+      throw error;
+    } finally {
+      const elapsed = Date.now() - started;
+      stageTimings[name] = elapsed;
+      if (elapsed >= SLOW_STAGE_LOG_MS) {
+        writeLog("warn", "submission.stage.slow", {
+          message: `Submit stage "${name}" took ${elapsed}ms`,
+          user: submittedBy || "",
+          ip: req?.ip || "",
+          meta: { stage: name, ms: elapsed },
+        });
+      }
+    }
+  };
+
   if (idempotencyKey) {
-    const prior = await DataSLF.find({ idempotencyKey, deletedAt: null }).lean();
+    const prior = await timeStage("idempotency", () =>
+      DataSLF.find({ idempotencyKey, deletedAt: null })
+        .maxTimeMS(PORTAL_GATE_MAX_TIME_MS)
+        .lean(),
+    );
     if (prior.length) return { saved: prior, submissionId: prior[0].submissionId, idempotent: true };
   }
-  const portalAccount = await ensurePortalAccountCanSubmit(submittedBy);
-  await assertNoUnresolvedRevert(submittedBy);
-  await assertNoUnorganizedPortalSubmissions(submittedBy);
+  const portalAccount = await timeStage("account-check", () =>
+    ensurePortalAccountCanSubmit(submittedBy),
+  );
+  await timeStage("unresolved-revert", () => assertNoUnresolvedRevert(submittedBy));
+  await timeStage("organize-cells", () => assertNoUnorganizedPortalSubmissions(submittedBy));
   const submitterIsDummy = Boolean(portalAccount?.isDummy);
   const items = Array.isArray(entries) ? entries : entries ? [entries] : [];
   if (items.length === 0) {
@@ -1712,12 +2083,20 @@ async function submitEntries({ entries, submittedBy, req, idempotencyKey = null 
   }
 
   const uploadClientIssues = [];
-  for (let idx = 0; idx < sanitizedItems.length; idx += 1) {
-    const itemIssues = await validateUploadedClientRelationships(sanitizedItems[idx]);
-    itemIssues.forEach((message) => {
-      uploadClientIssues.push(`${sanitizedItems.length > 1 ? `Entry ${idx + 1}: ` : ""}${message}`);
-    });
-  }
+  // One roster read per FACILITY, not one per entry — see the note on
+  // validateUploadedClientRelationships.
+  const haulerRosterCache = new Map();
+  await timeStage("client-relationships", async () => {
+    for (let idx = 0; idx < sanitizedItems.length; idx += 1) {
+      const itemIssues = await validateUploadedClientRelationships(
+        sanitizedItems[idx],
+        haulerRosterCache,
+      );
+      itemIssues.forEach((message) => {
+        uploadClientIssues.push(`${sanitizedItems.length > 1 ? `Entry ${idx + 1}: ` : ""}${message}`);
+      });
+    }
+  });
   if (uploadClientIssues.length) {
     const error = new Error(uploadClientIssues.slice(0, 8).join(" | ") + (uploadClientIssues.length > 8 ? ` (+${uploadClientIssues.length - 8} more)` : ""));
     error.statusCode = 400;
@@ -1787,45 +2166,24 @@ async function submitEntries({ entries, submittedBy, req, idempotencyKey = null 
   // submission. Declared capacities are read from the SLF's own baseline haulers,
   // never trusted from the client payload.
   const declaredCapacityCache = new Map(); // slf key -> Map(plate -> declared capacity)
-  const getDeclaredCapacityMap = async (item) => {
-    const slfName = item?.slfName ? String(item.slfName).trim() : "";
-    const key = (item?.slfGenerator && String(item.slfGenerator)) || slfName.toLowerCase();
-    if (!key) return new Map();
-    if (declaredCapacityCache.has(key)) return declaredCapacityCache.get(key);
-    const query = item?.slfGenerator
-      ? { slfGenerator: item.slfGenerator, "accreditedHaulers.0": { $exists: true } }
-      : { slfName: item.slfName, "accreditedHaulers.0": { $exists: true } };
-    const baselines = await DataSLF.find(query).select("accreditedHaulers").lean();
-    const map = new Map();
-    baselines.forEach((b) => {
-      (b.accreditedHaulers || []).forEach((h) => {
-        (h.vehicles || []).forEach((v) => {
-          const plate = String(v?.plateNumber || "").trim().toLowerCase();
-          const cap = Number(v?.capacity);
-          if (plate && Number.isFinite(cap) && cap > 0 && !map.has(plate)) {
-            map.set(plate, cap);
-          }
-        });
-      });
-    });
-    declaredCapacityCache.set(key, map);
-    return map;
-  };
+  const getDeclaredCapacityMap = (item) => readDeclaredCapacityMap(item, declaredCapacityCache);
 
   const transportIssues = [];
-  for (let idx = 0; idx < sanitizedItems.length; idx += 1) {
-    const item = sanitizedItems[idx];
-    const entryIndex = sanitizedItems.length > 1 ? idx : null;
-    validateTransportUnits(item?.trucks, item?.baselineUnit).forEach((i) => {
-      transportIssues.push({ ...i, entryIndex });
-    });
-    const capMap = await getDeclaredCapacityMap(item);
-    const getDeclared = (_hauler, plate) =>
-      capMap.get(String(plate || "").trim().toLowerCase()) || null;
-    validateTruckCapacityElevation(item?.trucks, getDeclared).forEach((i) => {
-      transportIssues.push({ ...i, entryIndex });
-    });
-  }
+  await timeStage("declared-capacities", async () => {
+    for (let idx = 0; idx < sanitizedItems.length; idx += 1) {
+      const item = sanitizedItems[idx];
+      const entryIndex = sanitizedItems.length > 1 ? idx : null;
+      validateTransportUnits(item?.trucks, item?.baselineUnit).forEach((i) => {
+        transportIssues.push({ ...i, entryIndex });
+      });
+      const capMap = await getDeclaredCapacityMap(item);
+      const getDeclared = (_hauler, plate) =>
+        capMap.get(String(plate || "").trim().toLowerCase()) || null;
+      validateTruckCapacityElevation(item?.trucks, getDeclared).forEach((i) => {
+        transportIssues.push({ ...i, entryIndex });
+      });
+    }
+  });
   if (transportIssues.length) {
     const summary = transportIssues
       .slice(0, 8)
@@ -2141,6 +2499,15 @@ router.post("/", optionalAuth, requirePortalRule("can_submit_slf_data"), async (
     // Unexpected failure of a real submission — record it so it surfaces to admins
     // (App Logs + VERA notification bell) instead of failing silently for the user.
     logSlfCrudError(req, "submission.create.error", error, { submittedBy: req.body?.submittedBy });
+    if (isDatabaseTimeout(error)) {
+      writeLog("error", "submission.db_timeout", {
+        message: `Submission timed out at stage "${error.slowStage || "unknown"}"`,
+        user: req.body?.submittedBy || "",
+        ip: req.ip,
+        meta: { stage: error.slowStage || "unknown", timings: error.stageTimings || {} },
+      });
+      return res.status(503).json({ message: DB_TIMEOUT_MESSAGE, code: "DB_TIMEOUT" });
+    }
     res.status(500).json({ message: "Server error", error: error.message });
   }
 });
@@ -9553,3 +9920,17 @@ module.exports.resolveWasteSummaryHaulers = resolveWasteSummaryHaulers;
 // lands. routes/slfFacilities.js requires it lazily, from inside the handler,
 // so the two routers never have to be loaded in a fixed order.
 module.exports.refreshFacilityCellOccupancy = refreshFacilityCellOccupancy;
+// Shared by the drafts/scheduled queue so a submission refused because the
+// DATABASE ran out of time reads the same way there as it does here.
+module.exports.isDatabaseTimeout = isDatabaseTimeout;
+module.exports.DB_TIMEOUT_MESSAGE = DB_TIMEOUT_MESSAGE;
+// Exposed for the roster parity check (scripts/verifyHaulerRosterParity.js),
+// which runs the old and the new read side by side against live data.
+module.exports.getAuthoritativeHaulersForEntry = getAuthoritativeHaulersForEntry;
+// Exposed for the submit-gate benchmark (scripts/benchSubmitGates.js), which
+// times the account-scoped reads a submission pays for without performing one.
+module.exports.assertNoUnorganizedPortalSubmissions = assertNoUnorganizedPortalSubmissions;
+module.exports.assertNoUnresolvedRevert = assertNoUnresolvedRevert;
+// Exposed so the submit-gate benchmark times the REAL declared-capacity read
+// instead of a mirror of it that can go stale.
+module.exports.readDeclaredCapacityMap = readDeclaredCapacityMap;

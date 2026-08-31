@@ -81,6 +81,9 @@ const CATEGORY_META = {
   },
 };
 
+// Ceiling on ONE evidence read. See the note on the AppLog query below.
+const EVIDENCE_MAX_TIME_MS = Number(process.env.VERA_EVIDENCE_MAX_TIME_MS || 8000);
+
 // Gather evidence for the ticket's portal user. All queries are best-effort and
 // degrade to empty so the investigation never crashes on a data-source hiccup.
 async function gatherEvidence(ticket) {
@@ -98,7 +101,16 @@ async function gatherEvidence(ticket) {
       user: new RegExp(`^${email.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "i"),
       createdAt: { $gte: since },
       level: { $in: ["warn", "error"] },
-    }).select("level action message createdAt").sort({ createdAt: -1 }).limit(50).lean();
+    })
+      .select("level action message createdAt")
+      .sort({ createdAt: -1 })
+      .limit(50)
+      // A case-insensitive match cannot use the index, so on a large log this is
+      // a scan. Bounded so a slow evidence read degrades to "unavailable" — which
+      // this investigator already handles by answering with the supportive
+      // Awaiting-User fallback — instead of holding the ticket thread open.
+      .maxTimeMS(EVIDENCE_MAX_TIME_MS)
+      .lean();
 
     facts.logsAvailable = true;
     for (const l of logs) {
@@ -114,7 +126,11 @@ async function gatherEvidence(ticket) {
   try {
     const DataSLF = require("../models/DataSLF");
     const subs = await DataSLF.find({ submittedBy: new RegExp(`^${email.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "i"), deletedAt: null })
-      .select("status createdAt idNo").sort({ createdAt: -1 }).limit(10).lean();
+      .select("status createdAt idNo")
+      .sort({ createdAt: -1 })
+      .limit(10)
+      .maxTimeMS(EVIDENCE_MAX_TIME_MS)
+      .lean();
     facts.submissionsAvailable = true;
     facts.recentSubmissions = subs.length;
     const reverted = subs.filter((s) => s.status === "reverted" || s.status === "rejected").length;

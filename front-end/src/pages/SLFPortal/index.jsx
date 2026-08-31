@@ -1149,6 +1149,21 @@ export default function SLFPortal() {
 
   const isMobile = !screens.md;
 
+  // Scope for the portal's small-screen rules (the "Portal responsive layer" in
+  // SLFPortal.css).
+  //
+  // It has to live on <body>, not on a wrapper here: modals and drawers render
+  // through a React portal into document.body, so a class on the portal's own
+  // markup does not reach them — and the modals are where the worst of the
+  // small-screen layout was (fixed 1000–1200px widths that hung off the right
+  // edge with their footer buttons out of reach). Added on mount and removed on
+  // unmount, so nothing in the admin app is touched: this stylesheet is loaded
+  // there too, via the shared VERA chat.
+  useEffect(() => {
+    document.body.classList.add("slf-portal-active");
+    return () => document.body.classList.remove("slf-portal-active");
+  }, []);
+
   useEffect(() => {
     supportTicketsLoadAttemptedRef.current = false;
   }, [portalUser?.email]);
@@ -4656,16 +4671,21 @@ export default function SLFPortal() {
   //
   // Counted here, not in DraftsScheduledPanel, because that panel is unmounted on
   // every other menu — and this is precisely the number the operator needs while
-  // they are somewhere else. `?status=failed` is answered by the queue's own
-  // {status} index and returns only the handful of offending records, so it is a
-  // cheap thing to keep current.
+  // they are somewhere else.
+  //
+  // `countOnly` makes the server answer with the NUMBER. This used to download
+  // every failed record — each one carrying a whole submission payload — and
+  // then call `.length` on the array, on every socket event that touched the
+  // account. A badge is not worth a payload download, let alone a repeated one.
   const fetchQueueAttention = useCallback(async () => {
     if (!portalEmail) return;
     try {
       const { data } = await api.get("/portal-queue", {
-        params: { email: portalEmail, status: "failed" },
+        params: { email: portalEmail, status: "failed", countOnly: 1 },
       });
-      setQueueAttentionCount(Array.isArray(data) ? data.length : 0);
+      setQueueAttentionCount(
+        Array.isArray(data) ? data.length : Number(data?.count) || 0,
+      );
     } catch {
       /* silent — a badge must never break the page */
     }
@@ -7052,7 +7072,7 @@ export default function SLFPortal() {
     setSavingDraft(true);
     try {
       const entry = buildSubmissionEntry();
-      await api.post("/portal-queue", {
+      const { data } = await api.post("/portal-queue", {
         type: "draft",
         payload: entry,
         clientRequestId: newClientRequestId(),
@@ -7060,10 +7080,17 @@ export default function SLFPortal() {
         slfGenerator: activeSlfId || null,
       });
       setReviewModalOpen(false);
+      // Saving the same facility + disposal date again REPLACES the draft that
+      // already holds it rather than stacking another copy beside it, so the
+      // message has to say which of the two just happened — "Saved as Draft"
+      // after an update reads as though a second draft now exists.
+      const updatedExisting = Boolean(data?.updatedExisting);
       Swal.fire({
         icon: "success",
-        title: "Saved as Draft",
-        text: "Your encoded data was saved. You can submit it later from Drafts & Scheduled.",
+        title: updatedExisting ? "Draft Updated" : "Saved as Draft",
+        text: updatedExisting
+          ? "Your existing draft for this facility and disposal date was updated. Submit it from Drafts & Scheduled when it is complete."
+          : "Your encoded data was saved. You can submit it later from Drafts & Scheduled.",
         confirmButtonColor: "#1a3353",
       });
     } catch (err) {
@@ -9082,6 +9109,7 @@ export default function SLFPortal() {
 
         {/* Content */}
         <Content
+          className="slf-portal-content"
           style={{
             padding: isMobile ? "12px 6px" : "24px 24px",
             background: "#f0f2f5",
@@ -10434,23 +10462,33 @@ export default function SLFPortal() {
         {/* VERA — Virtual Environmental Response Assistant (floating chatbot).
             Replaces the retired Support & FAQ button; folds ticket access in via
             the support drawer handlers. */}
-        <VeraChat
-          activeMenu={activeMenu}
-          isMobile={isMobile}
-          onOpenNewTicket={() => {
-            setSupportTab("new-ticket");
-            setSupportDrawerOpen(true);
-            if (supportTickets.length === 0) fetchSupportTickets();
-            markPortalNotificationsRead("support");
-          }}
-          onOpenMyTickets={() => {
-            setSupportTab("my-tickets");
-            setSupportDrawerOpen(true);
-            if (supportTickets.length === 0) fetchSupportTickets();
-            markPortalNotificationsRead("support");
-          }}
-        />
-        <VeraOnboarding portal="slf" userId={portalUser?.email || portalUser?._id} />
+        {/* `canViewVera === false` is a deliberate withdrawal of the assistant
+            from this account (Developer Settings → Portal User Rules), so the
+            launcher goes with it — the server refuses /vera/chat for them either
+            way, and a button that only ever answers "not permitted" is worse
+            than no button. Undefined means "not configured" → the rule's default
+            (allowed), which is every account that was never touched. */}
+        {portalUser?.portalAccess?.canViewVera !== false && (
+          <>
+            <VeraChat
+              activeMenu={activeMenu}
+              isMobile={isMobile}
+              onOpenNewTicket={() => {
+                setSupportTab("new-ticket");
+                setSupportDrawerOpen(true);
+                if (supportTickets.length === 0) fetchSupportTickets();
+                markPortalNotificationsRead("support");
+              }}
+              onOpenMyTickets={() => {
+                setSupportTab("my-tickets");
+                setSupportDrawerOpen(true);
+                if (supportTickets.length === 0) fetchSupportTickets();
+                markPortalNotificationsRead("support");
+              }}
+            />
+            <VeraOnboarding portal="slf" userId={portalUser?.email || portalUser?._id} />
+          </>
+        )}
         <Modal
           title={
             <Space>
