@@ -51,3 +51,11 @@ docs/dev-test-data/*.xlsx
 # the drop point survives a clean checkout.
 docs/files/*
 !docs/files/.gitkeep
+
+# Generated documentation outputs (DOCX, PDF, PPTX) — large binary files
+# regenerated on demand from docs/build/; not versioned.
+generated-docs/
+
+# Documentation build tooling, generators, captured screenshots, and node deps —
+# all regenerated on demand; the build artefacts have no place in the repo.
+docs/build/

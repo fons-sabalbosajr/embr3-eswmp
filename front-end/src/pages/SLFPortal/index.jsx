@@ -259,10 +259,6 @@ function resolveTotalVolumeForSave({
   computed,
   mountedValue,
   storeValue,
-  // The SLF's figure as the SERVER resolved it. The LAST resort, used only when
-  // the form supplies nothing usable — which is the state Edit & Resubmit leaves
-  // it in, and the reason a submission could go out carrying no Total Volume
-  // Accepted at all while the facility had one on record.
   baselineValue,
 }) {
   const candidate = authoritative ? computed : (mountedValue ?? storeValue);
