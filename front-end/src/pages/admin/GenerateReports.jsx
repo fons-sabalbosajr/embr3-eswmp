@@ -32,6 +32,7 @@ import dayjs from "dayjs";
 import api from "../../api";
 import { exportToExcel } from "../../utils/exportExcel";
 import { aggregateHaulerClients, countClientsByType, classifyClientType } from "../../utils/haulerClients";
+import { fetchAllSubmissions } from "./shared/submissionRecords";
 
 const SlfSubmissionReport = lazy(() => import("./SlfSubmissionReport"));
 
@@ -74,9 +75,9 @@ const REPORTS = [
     ],
     run: async ({ dateRange, status, search }) => {
       // includeTrucks so the report carries the RELATED detail (cell placement,
-      // waste split), not just the top-line volume.
-      const { data } = await api.get("/data-slf", { params: { mode: "list", includeTrucks: "true" } });
-      const rows = Array.isArray(data?.data) ? data.data : Array.isArray(data) ? data : [];
+      // waste split), not just the top-line volume. Paged, because that detail is
+      // what makes the full set too large to return in one response.
+      const rows = await fetchAllSubmissions({ includeTrucks: "true" });
       const num = (v) => Number(v || 0).toLocaleString(undefined, { maximumFractionDigits: 2 });
       return rows
         .filter((r) => inRange(r.dateOfDisposal, dateRange))

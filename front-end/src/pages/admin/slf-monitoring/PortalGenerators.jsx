@@ -5,7 +5,7 @@ import { PieChart, Pie, Cell as RCell, BarChart, Bar, LineChart, Line, XAxis, YA
 import dayjs from 'dayjs';
 import api from '../../../api';
 import { buildFilters, matchesFilter, rowMatchesSearch } from '../shared/tableFilters';
-import { getSubmissionVolumeSummary, getTruckCapacityText, getTruckPlateText, normalizeSubmissionRecord } from '../shared/submissionRecords';
+import { fetchAllSubmissions, getSubmissionVolumeSummary, getTruckCapacityText, getTruckPlateText, normalizeSubmissionRecord } from '../shared/submissionRecords';
 import ResponsiveTable from '../shared/ResponsiveTable';
 import { getSocket } from '../../../utils/socket';
 import Swal from 'sweetalert2';
@@ -74,16 +74,14 @@ function PortalGenerators({
 
   const fetchSubmissions = useCallback((showLoading = true) => {
     if (showLoading) setLoadingSub(true);
-    api
-      // `mode: "list"` is not optional. Without it the server takes its
-      // unpaginated, UNPROJECTED branch: every submission as a full document with
-      // its facility populated — measured on production at over two minutes. The
-      // list branch returns the same array, projected. `includeTrucks` is
-      // required because the expandable row below renders each truck.
-      .get("/data-slf", { params: { mode: "list", includeTrucks: true } })
-      .then(({ data }) =>
-        setSubmissions((data || []).map(normalizeSubmissionRecord)),
-      )
+    // Paged. This panel is unscoped — it wants EVERY submission — and
+    // `includeTrucks` is required because the expandable row renders each truck,
+    // which put the whole collection at ~36 KB a record into one response. That
+    // overran the MongoDB socket timeout and answered 500, and because the
+    // rejection was swallowed below the panel simply rendered empty rather than
+    // reporting anything.
+    fetchAllSubmissions({ includeTrucks: true })
+      .then((rows) => setSubmissions(rows.map(normalizeSubmissionRecord)))
       .catch(() => {})
       .finally(() => {
         if (showLoading) setLoadingSub(false);
