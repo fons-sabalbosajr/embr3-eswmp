@@ -117,6 +117,7 @@ import {
 } from "recharts";
 import ResponsiveTable from "./shared/ResponsiveTable";
 import {
+  fetchAllSubmissions,
   getSubmissionVolumeSummary,
   getTruckCapacityText,
   getTruckPlateText,
@@ -773,14 +774,16 @@ export default function SLFMonitoring({
     if (slfName) {
       setDetailSubmissionsLoading(true);
       setDetailProgress({ stage: "Loading submissions", done: 0, total: 0 });
-      api
-        .get("/data-slf", {
-          params: { mode: "list", includeTrucks: true, search: slfName },
-          signal: controller.signal,
-        })
-        .then(({ data }) => {
+      // Paged: scoped to one facility, but a busy SLF still runs to hundreds of
+      // records with their trucks attached — too much for a single response.
+      // The abort signal is forwarded so closing the modal stops the loop
+      // instead of letting it fetch every remaining page.
+      fetchAllSubmissions(
+        { includeTrucks: true, search: slfName },
+        { signal: controller.signal },
+      )
+        .then((rows) => {
           if (cancelled) return;
-          const rows = Array.isArray(data) ? data : data?.data || [];
           setDetailProgress({
             stage: "Normalizing records",
             done: 0,

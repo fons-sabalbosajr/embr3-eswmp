@@ -44,6 +44,7 @@ import GaugeMeter, { computeGaugePercent } from "../../components/GaugeMeter";
 const SummaryDisposalCalendar = lazy(() => import("./SummaryDisposalCalendar"));
 const SlfSubmissionReport = lazy(() => import("./SlfSubmissionReport"));
 import api from "../../api";
+import { fetchAllSubmissions } from "./shared/submissionRecords";
 import CellInfraOverview from "./CellInfraOverview";
 import { fetchWithCache, invalidateCache } from "../../utils/pageCache";
 import { getSocket } from "../../utils/socket";
@@ -1398,17 +1399,16 @@ export default function SubmissionSummary({ isDark }) {
     setCalendarLoading(true);
     try {
       const genId = row.slfGenerator?._id || row.slfGenerator || undefined;
-      const { data } = await api.get("/data-slf", {
-        params: {
-          mode: "list",
-          includeTrucks: true,
-          // Scope server-side by facility id when known (fast, exact); otherwise
-          // fall back to a name search. This keeps the calendar from downloading
-          // every SLF's records + trucks on open.
-          ...(genId ? { slfGenerator: genId } : { search: row.slfName }),
-        },
+      // Paged: server-side scoping keeps this to one SLF, but a busy facility
+      // still runs to hundreds of records with their trucks attached, which is
+      // more than one response should carry.
+      const records = await fetchAllSubmissions({
+        includeTrucks: true,
+        // Scope server-side by facility id when known (fast, exact); otherwise
+        // fall back to a name search. This keeps the calendar from downloading
+        // every SLF's records + trucks on open.
+        ...(genId ? { slfGenerator: genId } : { search: row.slfName }),
       });
-      const records = Array.isArray(data?.data) ? data.data : Array.isArray(data) ? data : [];
       // Scope the fetched records to this SLF robustly: match by facility id when
       // available, otherwise by normalized name (with a contains fallback so a
       // slightly different stored name format still resolves). This prevents the

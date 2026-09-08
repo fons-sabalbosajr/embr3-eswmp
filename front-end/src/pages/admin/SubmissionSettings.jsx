@@ -738,27 +738,39 @@ export default function SubmissionSettings({
   const handleExportSubmissions = useCallback(async () => {
     setExportingSubmissions(true);
     try {
-      const { data: resp } = await api.get("/data-slf", {
-        params: {
-          mode: "list",
-          grouped: "true",
-          includeTrucks: "true",
-          page: 1,
-          limit: 1,
-          // Export the ENTIRE filtered result set (every group + all its entries),
-          // not just the current page — the server returns all groups when all=true.
-          all: "true",
-          // The export follows the tab on screen, so an "Actual Submissions"
-          // export can never contain test records.
-          ...scopeParams,
-          ...(statusFilter && statusFilter !== "all" ? { status: statusFilter } : {}),
-          ...(cellPlacementFilter && cellPlacementFilter !== "all"
-            ? { cellPlacement: cellPlacementFilter }
-            : {}),
-          ...(debouncedSearch.trim() ? { search: debouncedSearch.trim() } : {}),
-        },
-      });
-      const records = Array.isArray(resp) ? resp : Array.isArray(resp?.data) ? resp.data : [];
+      const exportParams = {
+        mode: "list",
+        grouped: "true",
+        includeTrucks: "true",
+        // The export follows the tab on screen, so an "Actual Submissions"
+        // export can never contain test records.
+        ...scopeParams,
+        ...(statusFilter && statusFilter !== "all" ? { status: statusFilter } : {}),
+        ...(cellPlacementFilter && cellPlacementFilter !== "all"
+          ? { cellPlacement: cellPlacementFilter }
+          : {}),
+        ...(debouncedSearch.trim() ? { search: debouncedSearch.trim() } : {}),
+      };
+      // Export the ENTIRE filtered result set, a page of GROUPS at a time.
+      //
+      // This used to pass `all: "true"`, which returned every group with its full
+      // `trucks` arrays in one response. On the whole table that is several MB and
+      // overran the MongoDB socket timeout, so the export failed with a 500
+      // instead of producing a file. Grouped pagination never splits a group
+      // across pages, so concatenating the pages yields exactly the same entries.
+      const EXPORT_PAGE_SIZE = 50;
+      const records = [];
+      // `total` counts GROUPS while each response carries that page's ENTRIES, so
+      // the stop condition counts pages of groups — not accumulated rows.
+      for (let page = 1; ; page += 1) {
+        const { data: resp } = await api.get("/data-slf", {
+          params: { ...exportParams, page, limit: EXPORT_PAGE_SIZE },
+        });
+        const batch = Array.isArray(resp) ? resp : Array.isArray(resp?.data) ? resp.data : [];
+        records.push(...batch);
+        const totalGroups = Number(resp?.total || 0);
+        if (!batch.length || page * EXPORT_PAGE_SIZE >= totalGroups) break;
+      }
 
       const seen = new Set();
       const rows = [];

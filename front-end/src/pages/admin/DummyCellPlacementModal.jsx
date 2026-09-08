@@ -14,8 +14,8 @@ import {
   Card,
 } from "antd";
 import { DatabaseOutlined } from "@ant-design/icons";
-import api from "../../api";
 import { convertVolume } from "../../utils/volumeUnits";
+import { fetchAllSubmissions } from "./shared/submissionRecords";
 
 const { Text } = Typography;
 // Display-only unit label. Conversion comes from utils/volumeUnits.js.
@@ -44,23 +44,16 @@ export default function DummyCellPlacementModal({ open, facility, onClose }) {
     if (!open || !facility?._id) return;
     let cancelled = false;
     setLoading(true);
-    api
-      .get("/data-slf", {
-        params: {
-          mode: "list",
-          includeTrucks: true,
-          withTruckVolume: true,
-          includeDummy: "true", // honored for developer role
-          search: facility.lgu || facilityDisplayName(facility),
-        },
-      })
-      .then(({ data }) => {
+    // Paged — the search below scopes this to one facility, but the response
+    // carries full trucks, which is more than one request should return.
+    fetchAllSubmissions({
+      includeTrucks: true,
+      withTruckVolume: true,
+      includeDummy: "true", // honored for developer role
+      search: facility.lgu || facilityDisplayName(facility),
+    })
+      .then((rows) => {
         if (cancelled) return;
-        const rows = Array.isArray(data?.data)
-          ? data.data
-          : Array.isArray(data)
-            ? data
-            : [];
         // Keep only this dummy facility's records (by facility id, with a name fallback).
         const own = rows.filter((r) => {
           const genId = String(r.slfGenerator?._id || r.slfGenerator || "");

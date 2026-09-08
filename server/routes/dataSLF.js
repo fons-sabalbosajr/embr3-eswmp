@@ -650,6 +650,38 @@ function getRequestActor(req, fallback = ADMIN_DISPLAY_NAME) {
 // count towards submission totals.
 const SUBMISSION_HAS_TRUCKS = { "trucks.0": { $exists: true } };
 
+// Hard ceilings for the GET / branches that are NOT server-paginated.
+//
+// Read without a `limit`, this endpoint returned the ENTIRE matched set in one
+// response. With `includeTrucks` that measured ~30 MB across 828 submissions:
+// the MongoDB socket timed out mid-fetch and the caller got a 500 with no
+// partial result at all. Six admin panels read this endpoint whole; every one of
+// them now pages through it via the client-side `fetchAllSubmissions` helper.
+//
+// The ceiling is on BYTES in practice, not documents, so there is one per
+// response shape rather than a single number. Measured against production:
+//
+//   raw, unprojected document   ~134 KB   (carries accreditedHaulers et al.)
+//   list projection + trucks     ~36 KB
+//   list projection, no trucks    ~7.5 KB
+//
+// That last figure is per RECORD, not per truck: projecting `trucks.cellName`
+// and its ten sibling sub-paths still returns them for EVERY truck on the
+// record, and submissions here average ~9 trucks. Sizing that tier off a single
+// truck's worth of fields (~1.7 KB) put its cap at 2000, which never trimmed the
+// 828-record set — so that shape still timed out, at 6.2 MB. Each tier below is
+// sized to roughly a 3 MB response instead.
+//
+// These are BACKSTOPS, not the pagination strategy: with every caller paging,
+// reaching one of these ceilings means a caller regressed to fetching whole, not
+// that a legitimate read was truncated. A trip is logged (`data-slf.capped`)
+// because `cacheJson` stores only the JSON body — a response header would be
+// dropped on a cache hit, so a header is not a signal a caller could rely on.
+const UNPAGINATED_MAX_RAW = Math.max(Number(process.env.DATA_SLF_UNPAGINATED_MAX_RAW) || 25, 1);
+const UNPAGINATED_MAX_HEAVY = Math.max(Number(process.env.DATA_SLF_UNPAGINATED_MAX_HEAVY) || 100, 1);
+const UNPAGINATED_MAX = Math.max(Number(process.env.DATA_SLF_UNPAGINATED_MAX) || 400, 1);
+const EXPORT_GROUP_MAX = Math.max(Number(process.env.DATA_SLF_EXPORT_GROUP_MAX) || 150, 1);
+
 const baselineDataMatch = {
   $or: [
     { totalVolumeAccepted: { $exists: true, $ne: null } },
@@ -2680,26 +2712,6 @@ router.get("/baseline/:slfName", async (req, res) => {
       ? { slfGenerator: slfObjectId }
       : { $or: nameOrFilters };
 
-    // TWO reads, deliberately.
-    //
-    // The recency window alone silently lost the baseline. PATCH
-    // /portal-save-baseline writes an SLF's baseline values into its BASELINE-ONLY
-    // containers (findMatchingBaselineOnlyIds → updateMany), and a container is
-    // created on the FIRST baseline save — so it is the OLDEST document the
-    // facility owns. Every disposal submission made afterwards is newer, so on a
-    // busy SLF the `createdAt: -1` window never reached it: Zambales - Iba's
-    // container ranked 79th of 80 and Nueva Ecija - Santa Rosa's 68th of 69. The
-    // portal then hydrated Data Entry from whatever submission happened to sort
-    // first — one that carries no baseline columns at all — and every field came
-    // up empty, including a Total Volume Accepted that is stored and intact.
-    //
-    // Asking for the containers directly makes the read window irrelevant to
-    // correctness: it can only ever add fallback material now, never decide the
-    // answer. Containers are at most a handful per facility.
-    // The facility rides along in the SAME round trip rather than waiting for the
-    // baseline to be chosen first. The portal always sends ?slfId, so the id is
-    // known up front; only a caller that omits it pays for a follow-up lookup
-    // (handled after `latest` is resolved, below).
     const facilityCellSelect = "numberOfCell cellNames cellTypes cellStatuses cellCapacities";
     const [containers, recent, facilityById] = await Promise.all([
       DataSLF.find({
@@ -2821,51 +2833,11 @@ router.get("/baseline/:slfName", async (req, res) => {
           matchedCandidates.find((item) => item?.accreditedHaulers?.length > 0)) ||
       latest;
 
-    // Resolve the approval/request flags ACROSS every candidate for this SLF, not
-    // off the single record chooseBaselineRecord happens to pick.
-    //
-    // This is the "admin approved but the portal still says Pending" bug. The three
-    // sides disagreed on scope:
-    //   • admin WRITE  (baseline-update-approve) → updateMany over every record with
-    //                    baseline data
-    //   • admin READ   (GET /baselines)          → $max of the flags across all of an
-    //                    SLF's records ("any record approved" wins)
-    //   • portal READ  (here)                    → flags off ONE chosen record
-    // So whenever the chosen record wasn't among the ones the write touched, the
-    // admin list showed Approved while the portal kept showing Pending — with no way
-    // to clear it. Verified in production data: three SLFs currently hold records
-    // that disagree with each other on baselineUpdateApproved.
-    //
-    // Matching the admin's $max here makes both sides agree by construction, and is
-    // the safe direction: an approval that reached ANY record unlocks the portal,
-    // rather than being silently swallowed.
-    //
-    // ── …with one correction: "ANY record wins" cannot survive a container ──────
-    //
-    // A submission INHERITS the baseline columns of the record it was created
-    // from, `baselineUpdateApproved` included. So every submission made during an
-    // approved (unlocked) window keeps that approval forever, and "any record
-    // wins" then reads it back as a permanent unlock that nothing can clear.
-    // Measured on production: 624 records carry baselineUpdateApproved=true and
-    // 621 of them are SUBMISSIONS, which left 17 of 19 assigned SLFs permanently
-    // unlocked — the "saving the baseline does not lock it" report.
-    //
-    // The baseline-only CONTAINER is the authoritative record for baseline state.
-    // Every VALUE above is already read from it verbatim when one exists, for the
-    // same reason (it is the only record that can express a deletion). The
-    // workflow flags now follow that same rule: read them from the container(s),
-    // and fall back to the across-all-records scan only for a legacy SLF that has
-    // no container — where the old behaviour is still the safe direction.
     const containerCandidates = matchedCandidates.filter((item) => isBaselineOnlyRecord(item));
     const flagSource = containerCandidates.length ? containerCandidates : matchedCandidates;
     const anyFlag = (field) => flagSource.some((item) => !!item?.[field]);
     const baselineUpdateApproved = anyFlag("baselineUpdateApproved");
 
-    // Now that ONE record has won the election above, fetch its haulers in full.
-    // Everything up to this point only needed `.length`, which the trimmed
-    // projection preserves — see PORTAL_BASELINE_SELECT for the measured cost of
-    // carrying every candidate's copy instead. Skipped entirely when the winner
-    // has no haulers, so the common case adds no round trip at all.
     const haulerDoc =
       haulerSource?._id && haulerSource.accreditedHaulers?.length
         ? await DataSLF.findById(haulerSource._id)
@@ -2874,18 +2846,6 @@ router.get("/baseline/:slfName", async (req, res) => {
             .lean()
         : null;
 
-    // ── Bind the baseline's cell rows to the ADMIN's cell configuration ────────
-    //
-    // Every other endpoint resolves cell names at the API boundary
-    // (applyResolvedCellNames); this one did not, and it is the only read that
-    // feeds Data Entry. So Data Entry rendered each row's frozen snapshot name
-    // while the submission lists, the admin table and the reports all rendered
-    // the admin's current name — the reported "portal cells don't match Admin".
-    //
-    // Resolution needs the facility, not just its names, because 94.6% of stored
-    // baseline rows carry NO cellIndex and have to be re-bound by name first.
-    // A facility that cannot be loaded (or a legacy SLFGenerator ref) simply
-    // leaves the rows untouched — never worse than before.
     const facilityForCells =
       facilityById ||
       (latest.slfGenerator
@@ -2897,11 +2857,6 @@ router.get("/baseline/:slfName", async (req, res) => {
 
     res.json({
       baselineUnit,
-      // Carried so the demo-session response masker can tell this is demo-owned
-      // data and leave its figures readable (see utils/demoMode.js). Without it
-      // the hand-built payload below has no isolation flag, every volume comes
-      // back as "***********", and the demo account can never satisfy the
-      // Total Volume Accepted gate.
       isDummy: latest.isDummy === true,
       lguCompanyName: valueOf("lguCompanyName"),
       companyType: valueOf("companyType"),
@@ -2949,32 +2904,13 @@ const baselinesCacheKey = (req) =>
 
 router.get("/baselines", optionalAuth, cacheJson(baselinesCacheKey, 120000), async (req, res) => {
   try {
-    // Aggregate from DataSLF directly — covers both SLFGenerator and SlfFacility refs
-    // Include soft-deleted records since baseline is facility-level data
-    // Match any record that has baseline data: totalVolumeAccepted set, OR activeCellEntries/closedCellEntries present
-    // Dummy/test (SAMPLE) baselines are excluded from the production view by
-    // default; only developers may opt into seeing them inline via
-    // ?includeDummy=true (they are highlighted as SAMPLE on the client).
+
     const includeDummy = devWantsDummy(req);
     const matchStage = includeDummy
       ? baselineDataMatch
       : { $and: [baselineDataMatch, { isDummy: { $ne: true } }] };
     const startedAt = Date.now();
-    // ELECT the winning record per SLF on ranking KEYS ONLY, then fetch the
-    // payload for the handful of winners. The election used to carry each whole
-    // document ($project: BASELINE_PROJECTION → $sort → `$group: { $first:
-    // "$$ROOT" }`), and `accreditedHaulers` — which holds every hauler's
-    // vehicles AND private-sector clients, duplicated onto every one of an SLF's
-    // baseline records — is by far the largest thing on a document: measured on
-    // production, 28.8 MB of the 47.4 MB flowing into that sort. A blocking
-    // in-memory $sort is capped at 32 MB, and `allowDiskUse` does NOT lift it on
-    // a shared Atlas tier (the server ignores the flag and still answers
-    // QueryExceededMemoryLimitNoDiskUseAllowed), so once the data crossed 32 MB
-    // this endpoint began failing outright — HTTP 500 on BOTH the SLF Data Table
-    // and the Baseline Data tab, which are the two pages that read it.
-    //
-    // Ranking on ~6 scalar fields puts the sort at a few hundred KB, which the
-    // limit is nowhere near, and it stops growing with hauler/client counts.
+
     const latestIdsPerSlf = await DataSLF.aggregate([
       {
         $match: matchStage,
@@ -3106,23 +3042,6 @@ router.get("/baselines", optionalAuth, cacheJson(baselinesCacheKey, 120000), asy
   }
 });
 
-// ── Hauler Clients CRUD (SLF Data Table → Edit Modal → Hauler Clients) ──────────
-//
-// Admins maintain the clients that live INSIDE the portal user's baseline
-// (accreditedHaulers[].privateSectorClients / .clients), because portal users
-// routinely leave Client Type and address blank. Writing here — rather than to the
-// canonical slf_clients collection — is what makes the correction visible to the
-// portal user in their own baseline, and it flows into slf_clients on the next sync.
-//
-// Records are matched BY VALUE (hauler name + client name), never by array index:
-// an SLF's accreditedHaulers array is duplicated across every one of its baseline
-// documents and those copies are not identically ordered, so an index-based write
-// would edit the wrong client in some of them.
-//
-// Every mutation writes to ALL of the SLF's records that carry accreditedHaulers.
-// That is deliberate: the portal read path (GET /baseline/:slfName → haulerSource),
-// the admin list, and syncBaselineClients each select a record by different rules,
-// and a partial write is exactly how "the edit reverted on reload" bugs happen.
 const normalizeKey = (value) => String(value || "").trim().toLowerCase();
 
 // Client entry as stored (see clientSchema): display names plus PSGC codes.
@@ -3153,20 +3072,6 @@ function findHaulerClientRecords(slfGeneratorId) {
   }).setOptions({ includeHiddenYears: true });
 }
 
-// Push the change out to admin views AND to every portal account that submitted for
-// this SLF, so the portal user's baseline reflects the correction without a reload.
-/**
- * Coalesced canonical-client resync.
- *
- * `runBaselineClientSync` is a FULL pass over every baseline. Correcting a batch
- * of hauler clients — the normal way an admin works, one row after another —
- * would otherwise queue one full sync per edit, each redoing the last one's work.
- *
- * So: wait for the edits to stop, then run ONCE. A request arriving mid-run sets
- * `dirty`, which triggers exactly one more pass afterwards, so the last edit is
- * never the one that gets dropped. The `clients` refresh is emitted only when a
- * pass actually finishes, which is the point the figures have really moved.
- */
 const CLIENT_SYNC_DEBOUNCE_MS = 3000;
 let clientSyncTimer = null;
 let clientSyncRunning = false;
@@ -3217,16 +3122,6 @@ async function announceHaulerClientChange(req, records) {
     });
   }
 
-  // Push the correction into the CANONICAL client collection.
-  //
-  // Hauler-client edits are written into the portal's baseline
-  // (accreditedHaulers[].privateSectorClients) so the portal user sees them —
-  // but "LGUs Served" and "Private Sectors Served" are computed from
-  // `slf_clients`, which only picked the change up on the NEXT scheduled sync.
-  // Until then an admin could correct a client's municipality and watch the
-  // coverage figures not move at all.
-  //
-  // Detached and COALESCED — see scheduleClientSync.
   scheduleClientSync(req);
 }
 
@@ -3237,21 +3132,7 @@ router.get("/hauler-clients/:slfGeneratorId", adminOnly, async (req, res) => {
     if (!mongoose.isValidObjectId(slfGeneratorId)) {
       return res.status(400).json({ message: "A valid SLF id is required." });
     }
-    // The collapse to distinct (hauler, client) pairs happens in the DATABASE.
-    //
-    // An SLF's accreditedHaulers array is duplicated across every one of its
-    // baseline documents, so loading them all to de-duplicate in JS meant
-    // shipping the whole set into Node first. Measured on production:
-    // Floridablanca holds 59 baseline docs carrying 4,366 hauler copies (Prime
-    // Waste 2,962; Porac 946), each with its own clients and vehicles arrays —
-    // tens of thousands of sub-documents materialised to produce a few hundred
-    // distinct rows. That is the bottleneck behind the Server Error on
-    // Edit SLF Facility → Hauler Clients.
-    //
-    // $unwind + $group does the same collapse where the data already lives, so
-    // the payload is proportional to the DISTINCT rows the UI renders rather than
-    // to how many times the array has been copied. The projection also drops
-    // `vehicles`, which this view never reads.
+
     const grouped = await DataSLF.aggregate([
       { $match: { slfGenerator: new mongoose.Types.ObjectId(String(slfGeneratorId)), deletedAt: null, "accreditedHaulers.0": { $exists: true } } },
       { $sort: { createdAt: -1 } },
@@ -3272,9 +3153,6 @@ router.get("/hauler-clients/:slfGeneratorId", adminOnly, async (req, res) => {
       },
       { $unwind: "$client" },
       {
-        // One row per (hauler, client); the FIRST wins, and because the pipeline
-        // is sorted newest-first that is the most recent copy — same "newest
-        // copy wins" rule the old JS loop had.
         $group: {
           _id: {
             hauler: { $toLower: { $trim: { input: { $ifNull: ["$haulerName", ""] } } } },
@@ -3353,16 +3231,6 @@ router.get("/hauler-clients/:slfGeneratorId", adminOnly, async (req, res) => {
       });
     });
 
-    // ── Municipality resolution + Region III classification ───────────────────
-    //
-    // Client addresses are free text typed by portal users, so raw string
-    // comparison misclassifies anything with different casing, a "City of"
-    // prefix or a known abbreviation. Resolve each one against the SAME
-    // Region III masterlist and matcher the LGU dashboard uses
-    // (utils/lguMatch + Region3Lgu), so a municipality is classified
-    // identically wherever it appears in the system.
-    //
-    // Both lookups are done ONCE per request, not per row.
     const [region3ProvinceSet, masterMunis] = await Promise.all([
       getRegion3ProvinceSet(),
       Region3Lgu.find({ status: "Active", lguType: { $in: Region3Lgu.MUNI_TYPES } })
@@ -3379,10 +3247,6 @@ router.get("/hauler-clients/:slfGeneratorId", adminOnly, async (req, res) => {
         },
         masterMunis,
       );
-      // Only an exact or high-confidence match may rewrite the stored text.
-      // "medium"/"multiple" are reported but NOT applied — silently replacing a
-      // municipality on a fuzzy guess would corrupt served-LGU counts, which is
-      // exactly what the matcher's confidence levels exist to prevent.
       const classification = match?.classification || "none";
       const confident = classification === "exact" || classification === "high";
       const suggestion = match?.suggestions?.[0];
@@ -3422,22 +3286,6 @@ router.get("/hauler-clients/:slfGeneratorId", adminOnly, async (req, res) => {
   }
 });
 
-// CREATE — add a client under a named hauler, across every baseline record.
-/**
- * Fan out a hauler/client mutation to every module that reads that data.
- *
- * Hauler and client names feed the Portal panes, dashboard summaries, reports
- * and the submission forms, all of which cache their own copy. Without this the
- * three CRUD routes below persisted correctly but nothing else noticed until a
- * manual page reload — the "changes don't propagate" symptom.
- *
- * `refreshAdmin("baselines")` also invalidates the summary / cell-usage caches
- * (see utils/socketEmit), so admin totals recompute rather than serving a stale
- * aggregate. Portal users assigned to this facility are notified individually,
- * because their panes are scoped to their own email room.
- *
- * Fire-and-forget: a socket problem must never fail an already-committed write.
- */
 function notifyHaulerClientChange(req, slfGeneratorId) {
   refreshAdmin(req, "baselines");
   refreshAdmin(req, "hauler-clients");
@@ -4535,25 +4383,7 @@ router.get("/summary-by-slf", cacheJson(() => SUMMARY_BY_SLF_CACHE_KEY, 60000), 
   try {
     const rows = await DataSLF.aggregate([
       { $match: { deletedAt: null, isDummy: { $ne: true } } },
-      // ── ORDER THE GROUP SO `$first` MEANS SOMETHING ────────────────────────
-      //
-      // Without this, the `$first` accumulators below took whichever document
-      // Mongo happened to return first, so a facility whose submissions declare
-      // mixed units reported a DIFFERENT `baselineUnit` between two identical
-      // requests.
-      //
-      // The admin summary picks its one display unit by majority vote over those
-      // per-group values, and this database sits on an exact 8-8 split between
-      // tons and m³ — so a single group flipping was enough to swing the whole
-      // page from tons to m³ and back between refreshes.
-      //
-      // Newest-first makes `$first` mean "the unit this facility most recently
-      // declared", which is stable and is what an operator expects. It also pins
-      // `slfName` to the newest spelling.
-      //
-      // Placed immediately after $match, before $project, so it can use the
-      // { deletedAt: 1, dateOfDisposal: -1 } index — a sort after a projection
-      // no longer matches one and becomes a blocking in-memory sort.
+
       { $sort: { dateOfDisposal: -1, _id: -1 } },
       {
         $project: {
@@ -4565,29 +4395,6 @@ router.get("/summary-by-slf", cacheJson(() => SUMMARY_BY_SLF_CACHE_KEY, 60000), 
           dateOfDisposal: 1,
           baselineUnit: 1,
           truckCount: { $ifNull: ["$truckCount", { $size: { $ifNull: ["$trucks", []] } }] },
-          // ── VOLUME COUNTS ONLY WHERE THE SUBMISSION STILL STANDS ──────────
-          //
-          // This stage had NO status rule, so every volume sum below included
-          // rejected and reverted submissions. The Summary Overview's Waste
-          // Breakdown (Residual / Hazardous) reads these sums directly, so it
-          // reported waste that an admin had already thrown out — and disagreed
-          // with the SLF Data Table, Cell Infrastructure and the portal gauges,
-          // all of which run through utils/cellOccupancy.js and exclude those
-          // statuses.
-          //
-          // `ACTIVE_VOLUME_STATUSES` is imported from that module rather than
-          // restated here, so this cannot drift into a fourth status rule. A
-          // revert that has only been REQUESTED is still live waste sitting in a
-          // cell, which is why revert_requested is in the set and `reverted`
-          // (the request granted, record handed back) is not.
-          //
-          // Only the VOLUME fields are gated. `submissions`, `trucks` and the
-          // per-status counts below deliberately still span every status —
-          // those exist to report that a rejected submission happened.
-          // `$ifNull` → "pending" matches how every other consumer reads a
-          // missing status (see cellOccupancy's `entry.status || "pending"`).
-          // Without it a legacy record with no status field would silently lose
-          // its volume, which would be a new bug rather than a fix.
           _counts: {
             $cond: [
               { $in: [{ $ifNull: ["$status", "pending"] }, [...ACTIVE_VOLUME_STATUSES]] },
@@ -4719,24 +4526,6 @@ router.get("/summary-by-slf", cacheJson(() => SUMMARY_BY_SLF_CACHE_KEY, 60000), 
   }
 });
 
-// Per-cell waste volumes for the SLF Data Table, pre-collapsed in the database.
-//
-// The admin SLF Monitoring page used to load EVERY submission (mode=list&
-// cellUsage=true, unpaginated) purely so buildFacilityCellUsage could sum truck
-// volumes per cell — ~3.2MB and ~39s on the wire, of which the cell math needs
-// almost nothing. buildFacilityCellUsage adds each truck's volume to a cell chosen
-// from (wasteType, cellIndex/cellName) and the unit, so trucks sharing all four
-// values are interchangeable: summing them here is arithmetically identical to
-// summing them in the browser. Measured on live data, 18,991 trucks collapse to
-// 788 distinct tuples — the same numbers in ~1/13th the bytes.
-//
-// The collapse is an ORDER-PRESERVING $reduce, not a $group, because
-// getPortalVolumeUnit picks the unit of the FIRST positive-volume truck; a
-// reordered array could silently change a facility's display unit.
-//
-// This deliberately drops trucks[].vehicles — the cell rollup never reads it. The
-// cell-ASSIGNMENT editor does, and it keeps its own per-facility fetch (which needs
-// real truck/vehicle indices to write placements back).
 const cellUsageCacheKey = (req) => `${CELL_USAGE_CACHE_PREFIX}:${devWantsDummy(req) ? "dummy" : "default"}`;
 router.get("/cell-usage", cacheJson(cellUsageCacheKey, 60000), async (req, res) => {
   try {
@@ -4863,28 +4652,10 @@ router.get("/cell-usage", cacheJson(cellUsageCacheKey, 60000), async (req, res) 
   }
 });
 
-// Combined dashboard payload for the Submission Summary page. This keeps the
-// legacy /summary-tiles and /summary-by-slf endpoints intact, but lets the main
-// dashboard fetch both from one aggregate scan instead of two duplicate requests.
-// Rollup tile beside the submissions table: no query parameters, no user context,
-// ~1.4s per call. One computation serves every admin; invalidated by the same
-// submission/baseline/facility writes that change the table.
 router.get("/summary-dashboard", cacheJson(() => ADMIN_SUMMARY_DASHBOARD_KEY, 60000), async (req, res) => {
   try {
     const [facet = {}] = await DataSLF.aggregate([
       { $match: { deletedAt: null, isDummy: { $ne: true } } },
-      // Sorted HERE, before $facet, not inside the rows sub-pipeline.
-      //
-      // The `rows` facet needs a deterministic order for its `$first`
-      // accumulators (see the note in /summary-by-slf — an unordered $first made
-      // the page's display unit flip between identical requests). Placing the
-      // sort at the top level rather than inside the facet matters twice over:
-      // $facet sub-pipelines cannot use an index at all, and a sort placed after
-      // $project no longer matches one either. Directly after this $match it can
-      // use { deletedAt: 1, dateOfDisposal: -1 }.
-      //
-      // The `tiles` facet groups on a single null key, so inheriting this order
-      // costs it nothing.
       { $sort: { dateOfDisposal: -1, _id: -1 } },
       {
         $facet: {
@@ -5794,7 +5565,12 @@ router.get("/", optionalAuth, cacheJson(adminSubmissionsCacheKey, 60000), async 
       pipeline.push({
         $facet: {
           // exportAll → no skip/limit (every group). Otherwise the current page.
-          page: exportAll ? [] : [{ $skip: skip }, { $limit: limit }],
+          // exportAll → every group, up to the backstop cap. `total` below still
+          // reports the TRUE group count, so a trimmed export is visible to the
+          // caller rather than silently short.
+          page: exportAll
+            ? [{ $limit: EXPORT_GROUP_MAX }]
+            : [{ $skip: skip }, { $limit: limit }],
           meta: [{ $count: "total" }],
           // Total SUBMISSION ENTRIES across all matched groups (respects every
           // filter, incl. cell-placement) — the true submission count the admin
@@ -5850,7 +5626,24 @@ router.get("/", optionalAuth, cacheJson(adminSubmissionsCacheKey, 60000), async 
           .forEach((e) => rows.push(enrich(e)));
       });
 
-      return res.json({ data: rows, total, totalEntries, page, limit });
+      const exportCapped = exportAll && total > EXPORT_GROUP_MAX;
+      if (exportCapped) {
+        writeLog("warn", "data-slf.capped", {
+          message:
+            `Export (all=true) matched ${total} groups, above the ${EXPORT_GROUP_MAX} cap, and was trimmed. ` +
+            "The caller should page this endpoint instead of requesting every group at once.",
+          req,
+          meta: { cap: EXPORT_GROUP_MAX, total, path: req.originalUrl },
+        });
+      }
+      return res.json({
+        data: rows,
+        total,
+        totalEntries,
+        page,
+        limit,
+        ...(exportCapped ? { capped: true, cap: EXPORT_GROUP_MAX } : {}),
+      });
     }
 
     let query = DataSLF.find(filter)
@@ -5891,13 +5684,35 @@ router.get("/", optionalAuth, cacheJson(adminSubmissionsCacheKey, 60000), async 
         );
       }
     }
+    // Pick the ceiling matching what this response actually carries: whole
+    // unprojected documents (no list mode, no page — the heaviest shape by far),
+    // the list projection with full `trucks`, or the light list projection.
+    const unpaginatedCap = !listMode
+      ? UNPAGINATED_MAX_RAW
+      : includeTrucks
+        ? UNPAGINATED_MAX_HEAVY
+        : UNPAGINATED_MAX;
     if (paginated) {
       query = query.skip((page - 1) * limit).limit(limit);
+    } else {
+      // One over the cap, so an over-cap result set is detectable without paying
+      // for a second count query on a request that is already the expensive one.
+      query = query.limit(unpaginatedCap + 1);
     }
     const [entries, total] = await Promise.all([
       query.lean(),
       paginated ? DataSLF.countDocuments(filter) : Promise.resolve(null),
     ]);
+    if (!paginated && entries.length > unpaginatedCap) {
+      entries.length = unpaginatedCap;
+      writeLog("warn", "data-slf.capped", {
+        message:
+          `Unpaginated GET /data-slf exceeded ${unpaginatedCap} records and was capped. ` +
+          "The caller should page this endpoint (pass `limit`) instead of fetching it whole.",
+        req,
+        meta: { cap: unpaginatedCap, path: req.originalUrl, listMode, includeTrucks },
+      });
+    }
     // Configured truck-capacity allowance (default 10%) — used to compute the
     // "Exceeded truck capacity" admin remark. Fetched once per request.
     const allowancePct = await readCapacityAllowancePct();
