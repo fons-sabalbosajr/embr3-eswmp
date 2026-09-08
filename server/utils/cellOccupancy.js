@@ -42,6 +42,78 @@ const OCCUPANCY_ENTRY_FIELDS =
   "trucks.vehicles.actualVolume trucks.vehicles.actualVolumeUnit trucks.vehicles.cellIndex";
 
 /**
+ * The SAME projection as OCCUPANCY_ENTRY_FIELDS, expressed as a `find()`
+ * projection object so it can additionally DROP zero-volume vehicles in the
+ * database instead of shipping them.
+ *
+ * Why this exists: the all-facilities read (`GET /cell-occupancy`) pulls every
+ * submission ever recorded in order to answer "how full is each cell?" —
+ * measured on production, 830 entries carrying 24,699 trucks and 22,557
+ * vehicles, of which 62% of the vehicles record NO volume at all. Those cannot
+ * affect any figure: every consumer already filters vehicles to `actualVolume >
+ * 0` before reading one (see computeCellOccupancy's per-truck loop and
+ * hasTruckVolume), and resolveTargetUnit elects the unit from TRUCK-level rows
+ * only. So they are pure transfer cost, and they grow with every submission.
+ *
+ * What is deliberately NOT filtered: `trucks` itself. chooseBaselineEntry
+ * identifies the baseline container by `trucks.length === 0`, so dropping a
+ * zero-volume TRUCK would let a submission pass for the baseline — which both
+ * loses that submission's waste and dates the pre-baseline cutoff from the wrong
+ * record. Every truck is mapped, only its vehicle list is filtered.
+ *
+ * Keep in step with OCCUPANCY_ENTRY_FIELDS — tests/cellOccupancyProjection.test.js
+ * asserts the two select exactly the same paths.
+ */
+const OCCUPANCY_ENTRY_PROJECTION = {
+  _id: 1,
+  slfGenerator: 1,
+  slfName: 1,
+  status: 1,
+  createdAt: 1,
+  dataYear: 1,
+  totalVolumeAccepted: 1,
+  totalVolumeAcceptedUnit: 1,
+  baselineUnit: 1,
+  activeCellResidualVolume: 1,
+  activeCellResidualUnit: 1,
+  activeCellInertVolume: 1,
+  activeCellInertUnit: 1,
+  activeCellHazardousVolume: 1,
+  activeCellHazardousUnit: 1,
+  activeCellEntries: 1,
+  trucks: {
+    $map: {
+      input: { $ifNull: ["$trucks", []] },
+      as: "t",
+      in: {
+        actualVolume: "$$t.actualVolume",
+        actualVolumeUnit: "$$t.actualVolumeUnit",
+        wasteType: "$$t.wasteType",
+        cellIndex: "$$t.cellIndex",
+        cellName: "$$t.cellName",
+        vehicles: {
+          $map: {
+            input: {
+              $filter: {
+                input: { $ifNull: ["$$t.vehicles", []] },
+                as: "v",
+                cond: { $gt: [{ $ifNull: ["$$v.actualVolume", 0] }, 0] },
+              },
+            },
+            as: "v",
+            in: {
+              actualVolume: "$$v.actualVolume",
+              actualVolumeUnit: "$$v.actualVolumeUnit",
+              cellIndex: "$$v.cellIndex",
+            },
+          },
+        },
+      },
+    },
+  },
+};
+
+/**
  * The SlfFacility fields the ADMIN OVERRIDE needs, as a `.select()` fragment.
  *
  * Every caller of computeCellOccupancy must project these. Leaving one out does
@@ -657,6 +729,7 @@ module.exports = {
   OVERRIDE_FACILITY_FIELDS,
   ACTIVE_VOLUME_STATUSES,
   OCCUPANCY_ENTRY_FIELDS,
+  OCCUPANCY_ENTRY_PROJECTION,
   isActiveCellStatus,
   normalizeCellStatus,
   parseCellIndex,

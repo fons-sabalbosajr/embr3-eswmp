@@ -75,7 +75,12 @@ function PortalGenerators({
   const fetchSubmissions = useCallback((showLoading = true) => {
     if (showLoading) setLoadingSub(true);
     api
-      .get("/data-slf")
+      // `mode: "list"` is not optional. Without it the server takes its
+      // unpaginated, UNPROJECTED branch: every submission as a full document with
+      // its facility populated — measured on production at over two minutes. The
+      // list branch returns the same array, projected. `includeTrucks` is
+      // required because the expandable row below renders each truck.
+      .get("/data-slf", { params: { mode: "list", includeTrucks: true } })
       .then(({ data }) =>
         setSubmissions((data || []).map(normalizeSubmissionRecord)),
       )

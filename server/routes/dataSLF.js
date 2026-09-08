@@ -48,6 +48,7 @@ const {
   preBaselineExclusionEnabled,
   OCCUPANCY_CALC_VERSION,
   OCCUPANCY_ENTRY_FIELDS,
+  OCCUPANCY_ENTRY_PROJECTION,
   OVERRIDE_FACILITY_FIELDS,
   ACTIVE_VOLUME_STATUSES,
   normalizeCellStatus,
@@ -664,11 +665,10 @@ const baselineDataMatch = {
   ],
 };
 
-// Exactly the fields GET /baselines returns (plus the internal `_hasTruckVolume`
-// ranking flag). Applied as a $project before the aggregation's $sort/$group so
-// those stages never carry the `trucks[]` array — see the pipeline for why.
+// Exactly the fields GET /baselines returns. Applied as the `.select()` of that
+// route's second phase, which fetches the payload of the one record per SLF that
+// won the ranking election — see the pipeline for why the two are separate.
 const BASELINE_PROJECTION = {
-  _hasTruckVolume: 1,
   createdAt: 1,
   updatedAt: 1,
   slfGenerator: 1,
@@ -698,6 +698,19 @@ const BASELINE_PROJECTION = {
   submittedBy: 1,
   baselineUpdateApproved: 1,
   baselineUpdateRequested: 1,
+};
+
+// The ranking keys of GET /baselines' "which record is this SLF's baseline?"
+// election — and NOTHING else. Kept deliberately scalar-only: this is what flows
+// through that pipeline's blocking $sort, which is capped at 32 MB of in-memory
+// documents and cannot spill to disk on a shared Atlas tier. See the pipeline.
+const BASELINE_RANK_PROJECTION = {
+  _hasTruckVolume: 1,
+  createdAt: 1,
+  slfName: 1,
+  lguCompanyName: 1,
+  baselineUpdateRequested: 1,
+  baselineUpdateApproved: 1,
 };
 
 // The portal read adds the General Information (company address) columns on top of
@@ -2947,7 +2960,22 @@ router.get("/baselines", optionalAuth, cacheJson(baselinesCacheKey, 120000), asy
       ? baselineDataMatch
       : { $and: [baselineDataMatch, { isDummy: { $ne: true } }] };
     const startedAt = Date.now();
-    const latestPerSlf = await DataSLF.aggregate([
+    // ELECT the winning record per SLF on ranking KEYS ONLY, then fetch the
+    // payload for the handful of winners. The election used to carry each whole
+    // document ($project: BASELINE_PROJECTION → $sort → `$group: { $first:
+    // "$$ROOT" }`), and `accreditedHaulers` — which holds every hauler's
+    // vehicles AND private-sector clients, duplicated onto every one of an SLF's
+    // baseline records — is by far the largest thing on a document: measured on
+    // production, 28.8 MB of the 47.4 MB flowing into that sort. A blocking
+    // in-memory $sort is capped at 32 MB, and `allowDiskUse` does NOT lift it on
+    // a shared Atlas tier (the server ignores the flag and still answers
+    // QueryExceededMemoryLimitNoDiskUseAllowed), so once the data crossed 32 MB
+    // this endpoint began failing outright — HTTP 500 on BOTH the SLF Data Table
+    // and the Baseline Data tab, which are the two pages that read it.
+    //
+    // Ranking on ~6 scalar fields puts the sort at a few hundred KB, which the
+    // limit is nowhere near, and it stops growing with hauler/client counts.
+    const latestIdsPerSlf = await DataSLF.aggregate([
       {
         $match: matchStage,
       },
@@ -2970,33 +2998,45 @@ router.get("/baselines", optionalAuth, cacheJson(baselinesCacheKey, 120000), asy
           },
         },
       },
-      // ...then drop `trucks` (and every other unused field) BEFORE the sort.
-      // The $sort + `$group: { $first: "$$ROOT" }` below used to carry each
-      // submission's whole trucks[]/vehicles[] payload through an in-memory
-      // blocking sort — that, not the $match scan, was the bottleneck here.
-      // Every field kept is one the response actually returns.
-      { $project: BASELINE_PROJECTION },
+      // ...then drop everything that is not a ranking or grouping key BEFORE the
+      // sort. `_id` rides along implicitly and is all the second phase needs.
+      { $project: BASELINE_RANK_PROJECTION },
       { $sort: { _hasTruckVolume: 1, createdAt: -1 } },
       {
         $group: {
           _id: { $ifNull: ["$slfName", "$lguCompanyName"] },
-          doc: { $first: "$$ROOT" },
+          docId: { $first: "$_id" },
           _anyUpdateRequested: { $max: { $ifNull: ["$baselineUpdateRequested", false] } },
           _anyUpdateApproved: { $max: { $ifNull: ["$baselineUpdateApproved", false] } },
         },
       },
-      {
-        $replaceRoot: {
-          newRoot: {
-            $mergeObjects: [
-              "$doc",
-              { baselineUpdateRequested: "$_anyUpdateRequested", baselineUpdateApproved: "$_anyUpdateApproved" },
-            ],
-          },
-        },
-      },
-      { $sort: { slfName: 1 } },
     ]).allowDiskUse(true);
+
+    // Phase two: the winners' payloads, one document per SLF. The visibility
+    // plugins (year / non-operational SLF) already ran on the election above, so
+    // every id here has passed them — re-running them on this lookup would be a
+    // no-op, and opting out keeps the fetch an exact `_id` match.
+    const winnerIds = latestIdsPerSlf.map((g) => g.docId).filter(Boolean);
+    const winnerDocs = winnerIds.length
+      ? await DataSLF.find({ _id: { $in: winnerIds } })
+          .select(BASELINE_PROJECTION)
+          .setOptions({ includeHiddenYears: true, includeNonOperationalSlf: true })
+          .lean()
+      : [];
+    const winnerById = new Map(winnerDocs.map((d) => [String(d._id), d]));
+
+    const latestPerSlf = latestIdsPerSlf
+      .map((g) => {
+        const doc = winnerById.get(String(g.docId));
+        if (!doc) return null;
+        return {
+          ...doc,
+          baselineUpdateRequested: g._anyUpdateRequested,
+          baselineUpdateApproved: g._anyUpdateApproved,
+        };
+      })
+      .filter(Boolean)
+      .sort((a, b) => String(a.slfName || "").localeCompare(String(b.slfName || "")));
 
     const results = latestPerSlf.map((d) => {
       const baselineUnit = d.baselineUnit || d.totalVolumeAcceptedUnit || "m³";
@@ -5414,7 +5454,20 @@ router.get("/", optionalAuth, cacheJson(adminSubmissionsCacheKey, 60000), async 
     const listMode = req.query.mode === "list";
     const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
     const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 0, 0), 100);
-    const paginated = listMode && limit > 0;
+    // `limit` means what it says, in EVERY mode.
+    //
+    // This used to read `listMode && limit > 0`, so a caller that asked for a
+    // page WITHOUT `mode=list` silently got the unpaginated branch instead: every
+    // matching submission, as a full document, with its facility populated and no
+    // projection at all. Measured on production, `?page=1&limit=50` ran past two
+    // minutes and returned the whole collection — the one thing the caller had
+    // explicitly said it did not want. A bound the server quietly discards is
+    // worse than no bound, because the caller has no way to tell.
+    //
+    // Nothing in the app relied on that: every live caller passes `mode=list`
+    // (the sole bare-GET caller, PortalGenerators, now does too), so this can
+    // only affect a request that was already asking to be paginated.
+    const paginated = limit > 0;
     if (rejectUnauthorizedDummyAccess(req, res)) return;
     const filter = { deletedAt: null, ...SUBMISSION_HAS_TRUCKS };
     // Three mutually exclusive views, all developer-gated except the default:
@@ -5806,7 +5859,14 @@ router.get("/", optionalAuth, cacheJson(adminSubmissionsCacheKey, 60000), async 
       // it the order among ties is unspecified — rows could repeat or vanish
       // across pages.
       .sort({ createdAt: -1, _id: -1 });
-    if (listMode) {
+    // `|| paginated`: a caller that asked for a PAGE gets the projection too.
+    // Without this, `?limit=50` (no `mode=list`) was bounded by the fix above but
+    // still shipped fifty COMPLETE submission documents — measured here at ~2.7 MB
+    // against 91 KB for the same fifty rows projected, enough to exceed the Mongo
+    // socket timeout on a slow link. Asking for a page and being handed whole
+    // documents is not a contract worth preserving; the unlimited, unprojected
+    // branch below is left exactly as it was for anything that wants raw records.
+    if (listMode || paginated) {
       // cellUsage=true → lean projection used only for SLF Data Table cell-fill
       // enrichment. Returns just the fields buildFacilityCellUsage needs, slashing
       // payload + client memory vs. the full submission documents.
@@ -6078,20 +6138,43 @@ const FACILITY_CELL_FIELDS =
 const cellOccupancyAllKey = (req) =>
   `${CELL_PLACEMENT_PREFIX}:all:${devWantsDummy(req) ? "dummy" : "default"}`;
 
-router.get("/cell-occupancy", cacheJson(cellOccupancyAllKey, 60000), async (req, res) => {
+// TTL, and why it is not the 60s the other rollups use.
+//
+// This is the widest read in the module: it pulls EVERY submission ever recorded
+// — 830 entries / 24,699 trucks on production — to answer a 31 KB rollup, and it
+// costs that on every miss. A 60-second TTL meant paying it on a timer whether or
+// not anything had changed, which on an idle afternoon is the entire cost of the
+// endpoint for no benefit at all.
+//
+// Correctness does not rest on the TTL: every write that can move a figure here
+// invalidates CELL_PLACEMENT_PREFIX through socketEmit.staleKeysFor — submission
+// writes, baseline saves, cell assignments, facility edits, hauler-client edits,
+// and (newly) App Settings changes, which is the case that was missing and the
+// reason this could not be lengthened before. The TTL is now only the backstop
+// for a change that reaches the database WITHOUT an emit (a script, a direct
+// edit), so it is set to bound that staleness rather than to drive the refresh.
+const CELL_OCCUPANCY_TTL_MS = 10 * 60 * 1000;
+
+router.get("/cell-occupancy", cacheJson(cellOccupancyAllKey, CELL_OCCUPANCY_TTL_MS), async (req, res) => {
   try {
     const includeDummy = devWantsDummy(req);
     const [facilities, entries, appSettings] = await Promise.all([
       SlfFacility.find({ deletedAt: null, ...(includeDummy ? {} : { isDummy: { $ne: true } }) })
         .select(FACILITY_CELL_FIELDS)
         .lean(),
-      DataSLF.find({
-        deletedAt: null,
-        slfGenerator: { $ne: null },
-        ...(includeDummy ? {} : { isDummy: { $ne: true } }),
-      })
+      // Projection object, not `.select(OCCUPANCY_ENTRY_FIELDS)`: it selects the
+      // same paths but drops zero-volume vehicles in the database — 62% of the
+      // vehicle rows here, and none of them can change a figure. See
+      // OCCUPANCY_ENTRY_PROJECTION for why trucks themselves are NOT filtered.
+      DataSLF.find(
+        {
+          deletedAt: null,
+          slfGenerator: { $ne: null },
+          ...(includeDummy ? {} : { isDummy: { $ne: true } }),
+        },
+        { ...OCCUPANCY_ENTRY_PROJECTION, dateOfDisposal: 1 },
+      )
         .setOptions({ includeHiddenYears: true })
-        .select(`${OCCUPANCY_ENTRY_FIELDS} dateOfDisposal`)
         .sort({ createdAt: -1 })
         .lean(),
       require("../models/AppSettings")

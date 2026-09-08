@@ -84,6 +84,22 @@ function staleKeysFor(target) {
     // next time one of the two is moved.
     case "hauler-clients":
       return [...slfData, keys.MODULE_STATS.slfClients];
+    // App Settings changes what the SAME records ANSWER, without touching one of
+    // them — so nothing here was being invalidated and every derived read kept
+    // serving the pre-change figure until its TTL lapsed. Three settings do it:
+    //   • excludePreBaselineDisposalFromCellFill — decides which disposals count
+    //     towards cell fill, i.e. the whole of /cell-occupancy;
+    //   • the year-visibility filter and the non-operational-SLF rule — these
+    //     change which RECORDS every one of these reads can see at all;
+    //   • the truck-capacity allowance — the admin remark on submission rows.
+    // PUT /settings/app already clears the in-process plugin caches
+    // (clearYearVisibilityCache / clearSlfVisibilityCache); the cached RESPONSES
+    // built from them were the half that was missed. DASHBOARD_PREFIX is swept
+    // whole because year visibility is global — it moves every module's tiles,
+    // not just the SLF ones. A settings write is rare, so a broad sweep is the
+    // cheap side of this trade.
+    case "settings":
+      return [...slfData, keys.DASHBOARD_PREFIX];
     default:
       return [];
   }
