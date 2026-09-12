@@ -184,6 +184,7 @@ import {
   isEmptyUploadValue,
   cleanUploadText,
   parseUploadNumber,
+  normalizeUploadUnit,
   getUploadMissingColumns,
   getUploadRowErrors,
   getUploadRelationshipErrors,
@@ -1874,6 +1875,18 @@ export default function SLFPortal() {
         capacityUnit || slfUnit,
       );
       const maxAllowed = cap + (cap * capacityAllowancePct) / 100;
+      // convertVolume returns NULL for a unit it cannot convert — deliberately,
+      // so nothing counts an unlabelled figure as if it were in the target unit.
+      // That null fell straight into the comparison below, and `null > anything`
+      // is false, so a load in an unconvertible unit reported "not exceeded" and
+      // sailed through the capacity gate no matter how large it was.
+      //
+      // Unconvertible is NOT "within capacity" — it is "not comparable", and the
+      // caller has to say so rather than pass it. Reported, never silently
+      // allowed and never silently blocked as an exceedance it isn't.
+      if (volInCapUnit === null) {
+        return { hasCapacity: true, exceeded: false, unconvertible: true, maxAllowed };
+      }
       // Small epsilon so exact matches (e.g. 11 vs 11) are never flagged.
       return {
         hasCapacity: true,
@@ -3027,7 +3040,9 @@ export default function SLFPortal() {
         capacity,
         capacityUnit,
       );
-      if (cap.exceeded) {
+      if (cap.unconvertible) {
+        vehErr.actualVolume = `Waste volume unit "${v.actualVolumeUnit}" cannot be compared with the truck capacity unit "${(capacityUnit || slfUnit).replace("m3", "m³")}". Set the volume unit to ${(baselineUnit || slfUnit).replace("m3", "m³")}.`;
+      } else if (cap.exceeded) {
         vehErr.actualVolume = `Waste volume exceeds the allowed truck capacity (max ${Number(
           cap.maxAllowed.toFixed(2),
         )} ${(capacityUnit || slfUnit).replace("m3", "m³")} at ${capacityAllowancePct}% allowance).`;
@@ -4914,7 +4929,13 @@ export default function SLFPortal() {
               else if (UPLOAD_COLUMNS.truck.find((column) => column.field === "actualVolume")?.matches(k))
                 normalized.actualVolume = parseUploadNumber(value);
               else if (UPLOAD_COLUMNS.truck.find((column) => column.field === "actualVolumeUnit")?.matches(k))
-                normalized.actualVolumeUnit = normalizeUnit(value || baselineUnit || slfUnit);
+                // Canonical, not cosmetic: helpers#normalizeUnit only rewrites
+                // "m3" → "m³", so "Tons"/"TONS"/"M3"/"t" reached the submit gate
+                // as-is and were rejected as a unit mismatch against an identical
+                // baseline unit. normalizeUploadUnit folds those onto the one
+                // spelling the app converts with, and leaves a genuinely unknown
+                // unit alone for getUploadRowErrors to reject by name.
+                normalized.actualVolumeUnit = normalizeUploadUnit(value, baselineUnit || slfUnit);
               else if (UPLOAD_COLUMNS.truck.find((column) => column.field === "cellName")?.matches(k))
                 Object.assign(normalized, resolveUploadCellValue(value));
               else if (k.includes("waste") && k.includes("type"))
@@ -6502,7 +6523,13 @@ export default function SLFPortal() {
           row.capacity,
           row.capacityUnit,
         );
-        if (cap.exceeded) {
+        if (cap.unconvertible) {
+          // Not comparable \u2260 within capacity. Blocks the submission with the
+          // reason, instead of the volume passing the gate unchecked.
+          capacityMessages.push(
+            `${label}: volume unit "${row.actualVolumeUnit}" cannot be converted to the capacity unit "${(row.capacityUnit || "m\u00b3").replace("m3", "m\u00b3")}"`,
+          );
+        } else if (cap.exceeded) {
           capacityMessages.push(
             `${label}: ${vol} exceeds max ${Number(
               cap.maxAllowed.toFixed(2),

@@ -19,7 +19,7 @@ import {
 } from "recharts";
 import dayjs from "dayjs";
 import api from "../../api";
-import { convertVolume } from "../../utils/volumeUnits";
+import { tonsFromMetricPair } from "../../utils/volumeUnits";
 // The ONE place that decides which announcement is current — the same resolver
 // the announcements admin screen uses, so the report cannot call a different one
 // "active" than the console does.
@@ -75,11 +75,21 @@ const computeOperatorGroupKey = (u) => {
   return `op:${normalizeKey(`${u?.firstName || ""} ${u?.lastName || ""}`)}`;
 };
 
+// ONE figure, in TONS — the app's reporting unit.
+//
+// This used to print both sides of the denormalized pair joined by " / "
+// ("1,000 m³ / 500 t"). Those are the same waste in two units, not two
+// quantities, so under a heading like "Total Waste Volume" the pair reads as a
+// sum and invites the 1,500 that isn't there. tonsFromMetricPair converts with
+// the shared TON_PER_M3 and falls back to the m³ side for legacy records whose
+// tons field was never populated.
+//
+// Decimals are kept: Math.round() on the m³ side turned every sub-tonne figure
+// into a whole number before it was even displayed.
 function formatVolume(m3, tons) {
-  const parts = [];
-  if (m3 > 0) parts.push(`${Math.round(m3).toLocaleString()} m³`);
-  if (tons > 0) parts.push(`${Math.round(tons).toLocaleString()} t`);
-  return parts.length ? parts.join(" / ") : "—";
+  const value = tonsFromMetricPair(m3, tons);
+  if (!(value > 0)) return "—";
+  return `${value.toLocaleString(undefined, { maximumFractionDigits: 2 })} t`;
 }
 
 const PIE_COLORS = ["#2f54eb", "#d9d9d9"];
@@ -655,7 +665,7 @@ export default function SlfSubmissionReport({
     [slfRows],
   );
 
-  // Waste volume by Company (m³-equivalent), aggregated across that company's
+  // Waste volume by Company, in TONS, aggregated across that company's
   // operators. Falls back to assigned SLF name, then operator name, when the
   // company field is empty — never invents a label.
   const volumeBarData = useMemo(() => {
@@ -667,12 +677,17 @@ export default function SlfSubmissionReport({
           : !r.noAssignment && r.slf
             ? r.slf.split(",")[0].trim()
             : r.operator;
-      // tons → m³ via the shared factor, not a bare literal.
-      const volume = (r._m3 || 0) + (convertVolume(r._tons || 0, "tons", "m³") || 0);
+      // `_m3` and `_tons` are the SAME waste in two units (computeSlfMetrics keeps
+      // them in lockstep). This line was `_m3 + convertVolume(_tons,"tons","m³")`
+      // — m³ plus that same m³ — so every company's bar read exactly 2× its real
+      // volume. One figure, one unit.
+      const volume = tonsFromMetricPair(r._m3, r._tons);
       byCompany.set(label, (byCompany.get(label) || 0) + volume);
     });
     return [...byCompany.entries()]
-      .map(([name, volume]) => ({ name: String(name).slice(0, 22), volume: Math.round(volume) }))
+      // Tons are half the m³ figure, so whole-number rounding here hid every
+      // facility under a tonne entirely. Chart-axis precision, not stored data.
+      .map(([name, volume]) => ({ name: String(name).slice(0, 22), volume: Number(volume.toFixed(2)) }))
       .filter((r) => r.volume > 0)
       .sort((a, b) => b.volume - a.volume)
       .slice(0, 10);
@@ -1071,14 +1086,14 @@ export default function SlfSubmissionReport({
           )}
         </Section>
 
-        <Section title="Waste Volume per Company (Top 10, m³-equivalent)">
+        <Section title="Waste Volume per Company (Top 10, tons)">
           {volumeBarData.length ? (
-            <div data-chart-title="Waste Volume per Company (Top 10, m³-equivalent)">
+            <div data-chart-title="Waste Volume per Company (Top 10, tons)">
             <BarChart width={820} height={240} data={volumeBarData} margin={{ top: 8, right: 16, bottom: 60, left: 10 }}>
               <CartesianGrid strokeDasharray="3 3" vertical={false} />
               <XAxis dataKey="name" angle={-35} textAnchor="end" interval={0} height={70} tick={{ fontSize: 11 }} />
               <YAxis tick={{ fontSize: 11 }} />
-              <Tooltip formatter={(v) => `${Number(v).toLocaleString()} m³`} />
+              <Tooltip formatter={(v) => `${Number(v).toLocaleString()} t`} />
               <Bar dataKey="volume" fill="#cf1322" isAnimationActive={false} radius={[4, 4, 0, 0]}>
                 <LabelList dataKey="volume" position="top" fill="#555" fontSize={9} formatter={(v) => Number(v).toLocaleString()} />
               </Bar>

@@ -116,6 +116,30 @@ export function resolveCellUnit(facility, index, kind = "capacity") {
   return normalizeUnit(arr?.[index]) || resolveFacilityUnit(facility);
 }
 
+/**
+ * Read the denormalized metric PAIR as one figure in TONS.
+ *
+ * `computeSlfMetrics` (server/models/DataSLF.js) stores every metric in BOTH
+ * units, kept in lockstep via TON_PER_M3: one 1,000 m³ load is written as
+ * `totalVolumeM3: 1000` AND `totalVolumeTons: 500`. They are the SAME waste in
+ * two units — never two quantities to be added.
+ *
+ * Adding them (or converting one and adding it to the other) double-counts every
+ * record exactly 2×, which is what the report's company chart was doing:
+ * `_m3 + convertVolume(_tons, "tons", "m³")` is `m3 + m3`.
+ *
+ * Tons is the app's reporting unit, so that is the side this returns. The m³
+ * fallback covers legacy records written before both fields were populated,
+ * where the tons side is still 0 — those would otherwise report as no waste.
+ */
+export function tonsFromMetricPair(m3, tons) {
+  const t = Number(tons);
+  if (Number.isFinite(t) && t > 0) return t;
+  const cubic = Number(m3);
+  if (!Number.isFinite(cubic) || cubic <= 0) return 0;
+  return cubic * TON_PER_M3;
+}
+
 // Format a normalized value for display. Formatting only — never converts.
 export function formatVolume(value, unit, { maximumFractionDigits = 2 } = {}) {
   if (value === null || value === undefined || !Number.isFinite(Number(value))) return "—";

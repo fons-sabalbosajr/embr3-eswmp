@@ -10,6 +10,14 @@
 // Explicit extension so this module also resolves under plain Node (the
 // `node --test` suite in __tests__), not only through Vite's resolver.
 import { normalizeUnit } from "./helpers.js";
+// The CANONICAL unit rules — the same module the capacity comparison, the cell
+// gauges and the server all convert with. helpers.js#normalizeUnit is a display
+// formatter ("m3" → "m³" and nothing else); it is not a validator and must never
+// be the thing that decides whether a unit is usable.
+import {
+  normalizeUnit as canonicalVolumeUnit,
+  isKnownUnit,
+} from "../../utils/volumeUnits.js";
 
 export const uploadHeaderKey = (header) =>
   String(header || "")
@@ -516,6 +524,31 @@ export const parseUploadNumber = (value) => {
   return Number.isFinite(parsed) ? parsed : Number.NaN;
 };
 
+/**
+ * A Unit of Measurement cell → the app's canonical unit.
+ *
+ * The unit is HALF of the waste volume: with TON_PER_M3 = 0.5, reading a tons
+ * figure as m³ (or the reverse) is an exact 2× error in every downstream total,
+ * gauge and report — the number on screen is unchanged while the quantity it
+ * claims is doubled or halved.
+ *
+ * A spreadsheet writes the same unit a dozen ways ("Tons", "TONS", "M3", "t",
+ * " tons "). Those are all the SAME unit and are folded onto the canonical
+ * spelling here, so the unit a file declares is the unit the app compares and
+ * converts with — no relabelling, no conversion, just one spelling.
+ *
+ * A value that is NOT a unit this app can convert ("MT", "kg", "cu.m") is
+ * returned UNCHANGED rather than being quietly turned into m³: getUploadRowErrors
+ * then rejects the row by name, which is the only honest outcome — the file's
+ * quantity is genuinely unknown and only the operator can say what it meant.
+ */
+export const normalizeUploadUnit = (value, fallback = "m³") => {
+  if (isEmptyUploadValue(value)) {
+    return canonicalVolumeUnit(fallback) || normalizeUnit(fallback);
+  }
+  return canonicalVolumeUnit(value) || cleanUploadText(value);
+};
+
 export const normalizeUploadHeaders = (headers) =>
   headers.map(uploadHeaderKey);
 
@@ -545,6 +578,24 @@ export const getUploadRowErrors = (row, type) => {
     // this rejects a present-but-invalid value (null/zero/negative/NaN).
     if (!isEmptyUploadValue(row.truckCapacity) && (truckCapacity == null || Number.isNaN(truckCapacity) || truckCapacity <= 0)) {
       errors.push("Truck Capacity must be greater than 0");
+    }
+    // The unit is validated for the SAME reason the value is.
+    //
+    // A unit this app cannot convert makes the volume unusable, and it used to
+    // pass this check silently: the preview's unit picker drew a red ring around
+    // it (SLFPortalModals — the enum was always the intent) but the row still
+    // reported "Ready" and imported. Downstream, convertVolume() returns null for
+    // it, which made evaluateCapacity read `null > maxAllowed` as false and pass
+    // the over-capacity gate; the server then coerced the unit to "m³"
+    // (dataSLF#normalizeVolumeUnit), so a tons load was stored and displayed as a
+    // m³ one — a 2× error in the submitted waste volume.
+    //
+    // The hauler branch below has always rejected an unusable Capacity Unit. This
+    // is the same rule for the disposal upload's volume unit.
+    if (!isEmptyUploadValue(row.actualVolumeUnit) && !isKnownUnit(row.actualVolumeUnit)) {
+      errors.push(
+        `Unit of Measurement "${cleanUploadText(row.actualVolumeUnit)}" is not a unit this system can convert — use tons or m³`,
+      );
     }
   }
 

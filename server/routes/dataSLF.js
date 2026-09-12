@@ -5677,10 +5677,17 @@ router.get("/", optionalAuth, cacheJson(adminSubmissionsCacheKey, 60000), async 
           "slfGenerator slfName submissionId idNo previousIdNos dateOfDisposal lguCompanyName companyType address companyRegion companyProvince companyMunicipality companyBarangay status revertRequested editRequested submittedBy createdAt updatedAt isDummy baselineUnit totalVolumeAccepted totalVolumeAcceptedUnit activeCellEntries closedCellEntries truckCount totalVolumeM3 totalVolumeTons residualVolumeM3 residualVolumeTons hazardousVolumeM3 hazardousVolumeTons";
         query = query.select(
           baseFields +
+            // `cellIndex` rides along with `cellName` on the light projection.
+            // collectCellNames() resolves the INDEX against the facility's current
+            // cell names and only falls back to the stored string; without the
+            // index in the projection, the light path silently produced worse cell
+            // names than the heavy one for records placed by index. Two numeric
+            // fields — the payload cost is nil, and it lets a caller that only
+            // needs cell placement stop asking for the whole trucks array.
             (includeTrucks
               ? " trucks"
-              : " trucks.cellName trucks.truckCapacity trucks.truckCapacityUnit trucks.actualVolume trucks.actualVolumeUnit" +
-                " trucks.vehicles.cellName trucks.vehicles.plateNumber trucks.vehicles.capacity trucks.vehicles.capacityUnit trucks.vehicles.actualVolume trucks.vehicles.actualVolumeUnit"),
+              : " trucks.cellName trucks.cellIndex trucks.truckCapacity trucks.truckCapacityUnit trucks.actualVolume trucks.actualVolumeUnit" +
+                " trucks.vehicles.cellName trucks.vehicles.cellIndex trucks.vehicles.plateNumber trucks.vehicles.capacity trucks.vehicles.capacityUnit trucks.vehicles.actualVolume trucks.vehicles.actualVolumeUnit"),
         );
       }
     }

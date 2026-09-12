@@ -414,9 +414,14 @@ export default function PortalReportModal({ open, onClose }) {
                 { title: "Cell", dataIndex: "name", key: "name" },
                 { title: "Type", dataIndex: "type", key: "type", width: 170 },
                 { title: "Status", dataIndex: "status", key: "status", width: 130 },
-                { title: "Capacity", dataIndex: "capacity", key: "capacity", width: 110, align: "right", render: (v, r) => `${num(v)} ${r.unit}` },
-                { title: "Used", dataIndex: "fill", key: "fill", width: 110, align: "right", render: (v, r) => `${num(v)} ${r.unit}` },
-                { title: "Remaining", dataIndex: "remaining", key: "remaining", width: 110, align: "right", render: (v, r) => `${num(v)} ${r.unit}` },
+                // The unit is in the HEADER, like rankColumns and like the exported
+                // document — not repeated on every figure from a per-row `r.unit`.
+                // The server now normalises cells to the report's unit, so that
+                // per-row spelling was the last thing on screen implying this table
+                // might be in a different one than the rest of the report.
+                { title: `Capacity (${unitLabel})`, dataIndex: "capacity", key: "capacity", width: 110, align: "right", render: (v) => num(v) },
+                { title: `Used (${unitLabel})`, dataIndex: "fill", key: "fill", width: 110, align: "right", render: (v) => num(v) },
+                { title: `Remaining (${unitLabel})`, dataIndex: "remaining", key: "remaining", width: 110, align: "right", render: (v) => num(v) },
                 { title: "Used %", dataIndex: "utilization", key: "utilization", width: 90, align: "right", render: (v) => (v == null ? "—" : `${v}%`) },
               ]}
               locale={{ emptyText: <Empty description="No cells encoded" image={Empty.PRESENTED_IMAGE_SIMPLE} /> }}

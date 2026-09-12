@@ -204,15 +204,27 @@ export function buildReportDocument(report, { unitLabel = "m³", statusRows = []
     section(
       "Disposal Cells",
       "Capacity and remaining space at the facility as of this report.",
+      // The unit is in the HEADERS, like every other table here — not repeated on
+      // each figure from a per-cell `c.unit`. That per-cell unit was the only
+      // thing in this document not expressed in `unitLabel`, so a facility
+      // declaring m³ printed a tons report containing one m³ table.
       table(
-        ["Cell", "Type", "Status", "Capacity", "Used", "Remaining", "Used %"],
+        [
+          "Cell",
+          "Type",
+          "Status",
+          `Capacity (${unitLabel})`,
+          `Used (${unitLabel})`,
+          `Remaining (${unitLabel})`,
+          "Used %",
+        ],
         (report.cells || []).map((c) => [
           esc(c.name),
           esc(c.type || DASH),
           esc(c.status || DASH),
-          `${fmtNumber(c.capacity)} ${esc(c.unit || "")}`,
-          `${fmtNumber(c.fill)} ${esc(c.unit || "")}`,
-          `${fmtNumber(c.remaining)} ${esc(c.unit || "")}`,
+          fmtNumber(c.capacity),
+          fmtNumber(c.fill),
+          fmtNumber(c.remaining),
           c.utilization == null ? DASH : `${esc(c.utilization)}%`,
         ]),
         { align: ["", "", "", "right", "right", "right", "right"] },

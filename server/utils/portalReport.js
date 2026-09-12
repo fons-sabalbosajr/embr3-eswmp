@@ -233,16 +233,27 @@ function buildPortalReport(submissions = [], { facility = null, range = {} } = {
     for (let i = 0; i < count; i += 1) {
       const status = facility.cellStatuses?.[i] || "Active Cell";
       if (/not\s*exist/i.test(status)) continue;
-      const capacity = num(facility.cellCapacities?.[i]);
-      const fill = num(facility.cellFillValues?.[i]);
+      // Cells are stored in the FACILITY's declared unit, which is not always the
+      // report's unit. They used to be emitted raw with that unit alongside, so a
+      // m³ facility produced a report whose every other table was tons and whose
+      // Disposal Cells table was m³ — and "Used" there disagreed with the same
+      // cell's figure in "Disposal by Cell" by exactly the conversion factor.
+      //
+      // Normalised here through the same toTons every other total in this report
+      // already passes through, so the whole document speaks one unit.
+      const cellUnit = facility.cellCapacityUnits?.[i] || "m³";
+      const capacity = toTons(num(facility.cellCapacities?.[i]), cellUnit);
+      const fill = toTons(num(facility.cellFillValues?.[i]), cellUnit);
       cells.push({
         name: facility.cellNames?.[i] || `Cell ${i + 1}`,
         status,
         type: facility.cellTypes?.[i] || "Residual",
-        unit: facility.cellCapacityUnits?.[i] || "m³",
+        unit: "tons",
         capacity: Number(capacity.toFixed(2)),
         fill: Number(fill.toFixed(2)),
         remaining: Number(Math.max(0, capacity - fill).toFixed(2)),
+        // A ratio of two figures in the SAME unit, so it is unchanged by the
+        // conversion — computed from the normalised pair for exactly that reason.
         utilization: capacity > 0 ? Math.min(100, Math.round((fill / capacity) * 100)) : null,
       });
     }

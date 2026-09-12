@@ -7,6 +7,9 @@
 //
 // Drafts are deliberately NOT validated against these rules.
 
+// Explicit extension so this module also resolves under plain Node (`node --test`).
+import { normalizeUnit as canonicalVolumeUnit } from "../../utils/volumeUnits.js";
+
 export const WASTE_GENERATION_TAB = "waste-generation-information";
 
 // Blank: null, undefined, "", whitespace-only, or an empty array.
@@ -158,7 +161,14 @@ export function validateWasteGeneration(trucks, options = {}) {
 // most 10% (measurement/loading tolerance). 1.10 = declared × 110%.
 export const TRUCK_CAPACITY_ELEVATION_FACTOR = 1.1;
 
-const normUnit = (u) => String(u || "").trim().replace("m3", "m³");
+// Compare units by IDENTITY, not by spelling.
+//
+// This was `String(u).trim().replace("m3","m³")` — case-sensitive — so a file
+// writing "Tons" against a "tons" baseline (or "M3" against "m³") was reported as
+// a unit mismatch and blocked, though the two are the same unit. Falling back to
+// the raw string keeps a genuinely unknown unit ("MT", "kg") mismatching, which
+// is what should block.
+const normUnit = (u) => canonicalVolumeUnit(u) || String(u || "").trim();
 
 // Every transport-entry unit (truck + per-vehicle capacity/volume) must match the
 // SLF's declared baseline unit. Mixed units silently distort every downstream
