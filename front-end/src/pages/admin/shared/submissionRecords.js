@@ -25,20 +25,63 @@ export const SUBMISSION_PAGE_SIZE = 100;
  *   caller can cancel mid-loop instead of finishing every remaining page
  * @returns {Promise<object[]>} the raw records, in server order
  */
+// How many page requests are allowed in flight at once.
+//
+// The loop used to be strictly sequential: every page waited for the one before
+// it, so the wall time was `pages × round-trip` even though page 3 never depends
+// on page 2. The first response carries `total`, which is all that is needed to
+// know how many pages remain — so the rest are fetched together.
+//
+// Bounded rather than unbounded: firing 50 requests at once would queue behind
+// the browser's per-host connection limit anyway while burying every other
+// request on the page (and hitting the API rate limiter). Six keeps the pipe
+// full without monopolising it.
+const PAGE_CONCURRENCY = 6;
+
 export async function fetchAllSubmissions(params = {}, options = {}) {
-  const rows = [];
   // Bounded so a server that keeps reporting a larger `total` than it returns
   // can never spin this forever.
   const maxPages = 200;
-  for (let page = 1; page <= maxPages; page += 1) {
-    const { data } = await api.get("/data-slf", {
+  const query = (page) =>
+    api.get("/data-slf", {
       params: { mode: "list", page, limit: SUBMISSION_PAGE_SIZE, ...params },
       ...options,
     });
-    const batch = Array.isArray(data?.data) ? data.data : Array.isArray(data) ? data : [];
+  const batchOf = (data) =>
+    Array.isArray(data?.data) ? data.data : Array.isArray(data) ? data : [];
+
+  const first = await query(1);
+  const firstBatch = batchOf(first.data);
+  const total = Number(first.data?.total || 0);
+  // A short first page means there is nothing after it; an absent `total` means
+  // the endpoint is not reporting one, so fall back to walking until a short page.
+  if (firstBatch.length < SUBMISSION_PAGE_SIZE) return firstBatch;
+
+  if (total > 0) {
+    const lastPage = Math.min(maxPages, Math.ceil(total / SUBMISSION_PAGE_SIZE));
+    // Indexed by page so the result keeps the server's order regardless of which
+    // request settles first — callers rely on this list being chronological.
+    const pages = new Array(lastPage);
+    pages[0] = firstBatch;
+    const remaining = [];
+    for (let page = 2; page <= lastPage; page += 1) remaining.push(page);
+    for (let i = 0; i < remaining.length; i += PAGE_CONCURRENCY) {
+      const slice = remaining.slice(i, i + PAGE_CONCURRENCY);
+      const responses = await Promise.all(slice.map((page) => query(page)));
+      responses.forEach((res, j) => {
+        pages[slice[j] - 1] = batchOf(res.data);
+      });
+    }
+    return pages.flatMap((batch) => batch || []);
+  }
+
+  // No `total` reported — walk sequentially, as before.
+  const rows = [...firstBatch];
+  for (let page = 2; page <= maxPages; page += 1) {
+    const { data } = await query(page);
+    const batch = batchOf(data);
     rows.push(...batch);
-    const total = Number(data?.total || 0);
-    if (batch.length < SUBMISSION_PAGE_SIZE || (total && rows.length >= total)) break;
+    if (batch.length < SUBMISSION_PAGE_SIZE) break;
   }
   return rows;
 }

@@ -32,6 +32,7 @@ import dayjs from "dayjs";
 import api from "../../api";
 import { exportToExcel } from "../../utils/exportExcel";
 import { aggregateHaulerClients, countClientsByType, classifyClientType } from "../../utils/haulerClients";
+import { tonsFromMetricPair } from "../../utils/volumeUnits";
 import { fetchAllSubmissions } from "./shared/submissionRecords";
 
 const SlfSubmissionReport = lazy(() => import("./SlfSubmissionReport"));
@@ -64,38 +65,56 @@ const REPORTS = [
       { title: "Type", dataIndex: "companyType", width: 90 },
       { title: "Province", dataIndex: "province", ellipsis: true },
       { title: "Trucks", dataIndex: "trucks", align: "right" },
-      { title: "Volume (m³)", dataIndex: "volumeM3", align: "right" },
+      // TONS throughout — one unit per report. Volume used to be shown in both
+      // units side by side while Residual and Hazardous were m³ only, so the
+      // three columns could not be read against each other, and the "Unit"
+      // column beside them (the facility's DECLARED unit) read as though it
+      // qualified them.
       { title: "Volume (tons)", dataIndex: "volumeTons", align: "right" },
-      { title: "Residual (m³)", dataIndex: "residualM3", align: "right" },
-      { title: "Hazardous (m³)", dataIndex: "hazardousM3", align: "right" },
-      { title: "Unit", dataIndex: "unit", width: 70 },
+      { title: "Residual (tons)", dataIndex: "residualTons", align: "right" },
+      { title: "Hazardous (tons)", dataIndex: "hazardousTons", align: "right" },
+      { title: "Declared Unit", dataIndex: "unit", width: 100 },
       { title: "Cell(s)", dataIndex: "cells", ellipsis: true },
       { title: "Submitted By", dataIndex: "submittedBy", ellipsis: true },
       { title: "Status", dataIndex: "status", render: (v) => <Tag>{v}</Tag> },
     ],
     run: async ({ dateRange, status, search }) => {
-      // includeTrucks so the report carries the RELATED detail (cell placement,
-      // waste split), not just the top-line volume. Paged, because that detail is
-      // what makes the full set too large to return in one response.
-      const rows = await fetchAllSubmissions({ includeTrucks: "true" });
+      // ── Scope on the SERVER, not after the fact ────────────────────────────
+      //
+      // This used to be `fetchAllSubmissions({ includeTrucks: "true" })` — every
+      // submission in the database, with its full trucks[] (~36 KB a record; the
+      // route's own note measures ~30 MB across 828 of them), pulled 100 at a
+      // time in sequence — and only THEN filtered by status and search in the
+      // browser. Generating a report for one status meant downloading every
+      // other status first.
+      //
+      // `status` and `search` are both supported by GET /data-slf in list mode,
+      // so they are passed down and the matching happens in Mongo.
+      //
+      // `includeTrucks` is dropped because nothing here reads a truck: the only
+      // thing it was used for is the Cell(s) column, and the list row already
+      // carries `cellNames` — computed server-side by collectCellNames, which
+      // resolves a cell's INDEX against the facility's current names and so is
+      // strictly more accurate than the raw `cellName` walk this replaces.
+      // Everything else on the row is a denormalized metric field.
+      const rows = await fetchAllSubmissions({
+        ...(status && status !== "all" ? { status } : {}),
+        ...(search ? { search } : {}),
+      });
       const num = (v) => Number(v || 0).toLocaleString(undefined, { maximumFractionDigits: 2 });
       return rows
+        // Date is the one filter the endpoint does not expose, so it stays here.
         .filter((r) => inRange(r.dateOfDisposal, dateRange))
-        .filter((r) => (status && status !== "all" ? r.status === status : true))
         .filter((r) => {
+          // The server's `search` also matches companyType and submissionId.
+          // Re-applied here so the result set is exactly what it was before.
           if (!search) return true;
           const q = search.toLowerCase();
           return [r.idNo, r.slfName, r.lguCompanyName, r.submittedBy]
             .some((v) => String(v || "").toLowerCase().includes(q));
         })
         .map((r) => {
-          const cells = [
-            ...new Set(
-              (Array.isArray(r.trucks) ? r.trucks : [])
-                .flatMap((t) => [t?.cellName, ...((t?.vehicles || []).map((v) => v?.cellName))])
-                .filter(Boolean),
-            ),
-          ];
+          const cells = Array.isArray(r.cellNames) ? r.cellNames.filter(Boolean) : [];
           return {
             key: r._id,
             idNo: r.idNo || r.submissionId || "—",
@@ -108,10 +127,13 @@ const REPORTS = [
             municipality: r.companyMunicipality || "—",
             address: r.address || "—",
             trucks: r.truckCount ?? (r.trucks?.length || 0),
-            volumeM3: num(r.totalVolumeM3),
-            volumeTons: num(r.totalVolumeTons),
-            residualM3: num(r.residualVolumeM3),
-            hazardousM3: num(r.hazardousVolumeM3),
+            // tonsFromMetricPair, not the raw tons field: the pair is kept in
+            // lockstep by computeSlfMetrics, but records written before both
+            // sides were populated carry 0 tons against a real m³ figure and
+            // would otherwise report as no waste at all.
+            volumeTons: num(tonsFromMetricPair(r.totalVolumeM3, r.totalVolumeTons)),
+            residualTons: num(tonsFromMetricPair(r.residualVolumeM3, r.residualVolumeTons)),
+            hazardousTons: num(tonsFromMetricPair(r.hazardousVolumeM3, r.hazardousVolumeTons)),
             unit: (r.baselineUnit || "m³").replace("m3", "m³"),
             cells: cells.join(", ") || "Unplaced",
             submittedBy: r.submittedBy || "—",
@@ -224,9 +246,9 @@ const REPORTS = [
       { title: "SLF", dataIndex: "slf", ellipsis: true },
       { title: "Submissions", dataIndex: "submissions", align: "right" },
       { title: "Trucks", dataIndex: "trucks", align: "right" },
-      { title: "Residual (m³)", dataIndex: "residual", align: "right" },
-      { title: "Hazardous (m³)", dataIndex: "hazardous", align: "right" },
-      { title: "Total (m³)", dataIndex: "total", align: "right" },
+      // One unit, tons — see the Submission Reports columns above.
+      { title: "Residual (tons)", dataIndex: "residualTons", align: "right" },
+      { title: "Hazardous (tons)", dataIndex: "hazardousTons", align: "right" },
       { title: "Total (tons)", dataIndex: "totalTons", align: "right" },
       { title: "Pending", dataIndex: "pending", align: "right" },
       { title: "Acknowledged", dataIndex: "acknowledged", align: "right" },
@@ -244,12 +266,9 @@ const REPORTS = [
           slf: r.slfName || r._id || "—",
           submissions: r.submissions || 0,
           trucks: r.trucks || 0,
-          residual: num(r.residualM3),
-          hazardous: num(r.hazardousM3),
-          total: num(r.totalM3),
-          residualTons: num(r.residualTons),
-          hazardousTons: num(r.hazardousTons),
-          totalTons: num(r.totalTons),
+          residualTons: num(tonsFromMetricPair(r.residualM3, r.residualTons)),
+          hazardousTons: num(tonsFromMetricPair(r.hazardousM3, r.hazardousTons)),
+          totalTons: num(tonsFromMetricPair(r.totalM3, r.totalTons)),
           pending: r.pending || 0,
           acknowledged: r.acknowledged || 0,
           rejected: r.rejected || 0,
@@ -547,9 +566,10 @@ export default function GenerateReports() {
             return [
               ["Submissions", d.submissions],
               ["Truck Entries", d.trucks],
-              ["Total Volume (m³)", d.totalM3],
-              ["Residual (m³)", d.residualM3],
-              ["Hazardous (m³)", d.hazardousM3],
+              // Reported in tons, like every other volume in this screen.
+              ["Total Volume (tons)", tonsFromMetricPair(d.totalM3, d.totalTons)],
+              ["Residual (tons)", tonsFromMetricPair(d.residualM3, d.residualTons)],
+              ["Hazardous (tons)", tonsFromMetricPair(d.hazardousM3, d.hazardousTons)],
               ["Pending", d.statuses?.pending],
               ["Acknowledged", d.statuses?.acknowledged],
               ["LGU Submissions", d.companyTypes?.LGU],

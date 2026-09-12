@@ -227,10 +227,31 @@ test("months are keyed and sorted chronologically", () => {
 test("non-existent cells are left out and remaining space is derived", () => {
   const r = buildPortalReport([ACK], { facility: FACILITY });
   assert.equal(r.cells.length, 2, "the 'Not Existed' cell is not a cell");
+  // Cells are reported in TONS, like every other figure in this report. The
+  // fixture declares no cell unit, so its capacities are m³ and are halved on
+  // the way in (TON_PER_M3 = 0.5) — the same normalisation `toTons` applies to
+  // the submission volumes above. Before this, the cells table was the one part
+  // of the document still in the facility's own unit, so "Used" here disagreed
+  // with the same cell's figure in "Disposal by Cell" by exactly that factor.
   assert.deepEqual(r.cells[0], {
-    name: "Cell 4", status: "Active Cell", type: "Residual", unit: "m³",
-    capacity: 1000, fill: 250, remaining: 750, utilization: 25,
+    name: "Cell 4", status: "Active Cell", type: "Residual", unit: "tons",
+    capacity: 500, fill: 125, remaining: 375, utilization: 25,
   });
+  // The ratio is unit-invariant: both sides converted, so the percentage the
+  // operator reads is unchanged by the normalisation.
+  assert.equal(r.cells[0].utilization, 25, "utilisation is unaffected by the unit");
+  // A facility already declaring tons is passed through untouched.
+  const inTons = buildPortalReport([], {
+    facility: {
+      numberOfCell: 1, cellNames: ["C1"], cellStatuses: ["Active Cell"],
+      cellCapacities: [1000], cellFillValues: [250], cellCapacityUnits: ["tons"],
+    },
+  });
+  assert.deepEqual(
+    { capacity: inTons.cells[0].capacity, fill: inTons.cells[0].fill, unit: inTons.cells[0].unit },
+    { capacity: 1000, fill: 250, unit: "tons" },
+    "a tons-declared cell is not converted twice",
+  );
   // A cell with no capacity reports no percentage rather than dividing by zero.
   const noCap = buildPortalReport([], {
     facility: { numberOfCell: 1, cellNames: ["C1"], cellStatuses: ["Active Cell"], cellCapacities: [0], cellFillValues: [0] },
