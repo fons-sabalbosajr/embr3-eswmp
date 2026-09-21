@@ -8,6 +8,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — "Submission Failed" for a submission that had in fact been saved
+Traced in production logs: a portal submit answered ~2 minutes after the browser
+had given up (`timeout exceeded` / `Network Error` on the client, then
+`submission.create` on the server). The record was saved and reached Admin; the
+operator was told it failed.
+- **The post-save occupancy recompute no longer holds the response.** It re-reads
+  every live record of the facility with its trucks (~1.3 MB for the largest) on
+  every submit, sat between `doc.save()` and the reply with no deadline, and was
+  outside the stage timings — so it never showed up as slow. The reply now waits
+  at most `SUBMIT_OCCUPANCY_BUDGET_MS` (8 s) for it; past that the recompute
+  finishes in the background (it emits the facility refresh itself) and the
+  deferral is logged as `submission.occupancy.deferred`. `doc.save()` and the
+  recompute are now timed stages (`persist`, `occupancy-refresh`).
+- **A retry while the original is still running is refused, not saved twice.**
+  The stored idempotency key only recognises a retry once the first attempt has
+  been persisted; a retry during processing found nothing and would have created a
+  duplicate. Keys in flight are tracked per process and answered
+  `409 SUBMISSION_IN_PROGRESS`; the Portal shows it as "Still Processing" and
+  keeps the key so the next retry resolves to the saved record.
+
+### Changed — the Organize Cells gate no longer ships the account's every truck
+The pre-submit gate was the single largest cost of every submission — 3 to 8 s on
+the heavier accounts, 40 of the 46 slow-stage records in a month — because it
+transferred a trimmed copy of every truck the account had ever filed to decide,
+almost always, that nothing blocked. The server now reports per record only the
+facts the rule can turn on (referenced cell indexes, missing capacity); the
+unchanged rule is applied to those, and trucks are read only for the records it
+implicates. `scripts/verifyOrganizeGateParity.js` runs the full read beside the
+two-pass one on live data: identical blocker sets for all 20 accounts, with the
+gate dropping from 7.2 s → 0.3 s (PWS), 5.1 s → 0.3 s, 5.2 s → 0.25 s.
+
 ### Added — portal users can produce their own disposal report
 - EMB admins have had a report of every facility since day one; an operator had no
   way to produce one for their own. **Submission History → Generate Report** now
