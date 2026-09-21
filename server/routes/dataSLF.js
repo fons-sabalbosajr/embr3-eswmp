@@ -1007,6 +1007,23 @@ const PORTAL_GATE_MAX_TIME_MS = Number(process.env.PORTAL_GATE_MAX_TIME_MS || 15
 const SLOW_STAGE_LOG_MS = Number(process.env.SLOW_STAGE_LOG_MS || 2000);
 
 /**
+ * How long a submit waits for the post-save occupancy recompute before it
+ * answers the client. Past this the recompute keeps running in the background
+ * and the response goes out — see the call site in runSubmitEntries.
+ */
+const SUBMIT_OCCUPANCY_BUDGET_MS = Number(process.env.SUBMIT_OCCUPANCY_BUDGET_MS || 8000);
+
+/**
+ * Idempotency keys whose submission is STILL running in this process.
+ *
+ * The DataSLF idempotency lookup only recognises a retry once the first attempt
+ * has been persisted. A retry that arrives while the original is still being
+ * processed — which is exactly what a client-side timeout followed by "try
+ * again" produces — found nothing and would be saved a second time.
+ */
+const inFlightSubmissionKeys = new Set();
+
+/**
  * Did this fail because the DATABASE ran out of time, rather than because the
  * submission was wrong?
  *
@@ -1029,8 +1046,186 @@ const DB_TIMEOUT_MESSAGE =
   "The server took too long to check your account before submitting. Nothing was submitted and nothing was lost — please try again in a moment.";
 
 async function assertNoUnorganizedPortalSubmissions(submittedBy) {
+  const blockers = await findUnorganizedPortalSubmissions(submittedBy);
+  if (!blockers.length) return;
+  const listed = blockers
+    .slice(0, 5)
+    .map(({ entry, summary }) => {
+      const parts = [];
+      if (summary.unplacedCount > 0) parts.push(`${summary.unplacedCount} unassigned waste entr${summary.unplacedCount === 1 ? "y" : "ies"}`);
+      if (summary.missingCapacityCount > 0) parts.push(`${summary.missingCapacityCount} missing truck capacit${summary.missingCapacityCount === 1 ? "y" : "ies"}`);
+      return `${entry.idNo || entry.submissionId || "Submission"}: ${parts.join(", ")}`;
+    })
+    .join(" | ");
+  const more = blockers.length > 5 ? ` (+${blockers.length - 5} more)` : "";
+  const error = new Error(`Organize Cells must be completed before submitting a new transaction. ${listed}${more}`);
+  error.statusCode = 409;
+  error.code = "ORGANIZE_CELLS_REQUIRED";
+  throw error;
+}
+
+/**
+ * The account's past submissions that still need Organize Cells, each with the
+ * counts summarizePortalOrganizeNeed gives it. Empty when nothing blocks.
+ *
+ * This gate was the single largest cost of every submission — 3 to 8 seconds on
+ * the heavier accounts, on EVERY submit, 40 of the 46 slow-stage records in a
+ * month — because it shipped a trimmed copy of every truck the account has
+ * ever filed (~1.3 MB for the largest) so the rule could be evaluated here.
+ * Almost all of that answered "no" for every row.
+ *
+ * The rule itself is unchanged and still runs here, in one place. What moved
+ * is the FIRST look: the server now reports, per record, only the facts the
+ * rule can turn on — which cell indexes its volume-bearing rows reference, and
+ * whether any of those rows lacks a capacity — a few dozen bytes per record.
+ * isValidPortalCellRef and the capacity rule are applied to those facts; only
+ * the records that fail come back with their trimmed trucks so
+ * summarizePortalOrganizeNeed can score them exactly as before. A clean
+ * account, which is the common case, transfers a few kilobytes and no trucks.
+ *
+ * The first look is conservative by construction: it mirrors the rule's row
+ * selection (a vehicle counts when its own volume is positive; a truck counts
+ * only when none of its vehicles do) and its capacity fallback (a vehicle may
+ * inherit the truck's), so every record the rule would block is a candidate.
+ * All numeric reads go through $convert with null on error so a legacy string
+ * value is judged like Number() judges it, never by BSON type order.
+ */
+async function findUnorganizedPortalSubmissions(submittedBy) {
   const email = String(submittedBy || "").trim();
-  if (!email) return;
+  if (!email) return [];
+
+  const scope = {
+    deletedAt: null,
+    hiddenFromPortal: { $ne: true },
+    submittedBy: new RegExp(`^${escapeRegExp(email)}$`, "i"),
+    status: { $nin: ["reverted", "rejected"] },
+    // A record with no trucks carries no waste placement, so
+    // summarizePortalOrganizeNeed can only ever score it 0/0 — it is
+    // incapable of blocking a submission. Excluding it changes no outcome
+    // and skips exactly the heavy documents: the BASELINE containers, which
+    // are the ones holding the multi-megabyte accreditedHaulers array. One
+    // account has 82 of them, and this gate was fetching every one to look
+    // at a `trucks` array that is not there.
+    ...SUBMISSION_HAS_TRUCKS,
+  };
+
+  const num = (expr) => ({ $convert: { input: expr, to: "double", onError: null, onNull: null } });
+  const positive = (expr) => ({ $gt: [num(expr), 0] });
+  // Fold the trucks into { cellRefs, missingCapacity } with the SAME row
+  // selection summarizePortalOrganizeNeed uses.
+  const rowFacts = {
+    $reduce: {
+      input: { $ifNull: ["$trucks", []] },
+      initialValue: { cellRefs: [], missingCapacity: false },
+      in: {
+        $let: {
+          vars: {
+            t: "$$this",
+            acc: "$$value",
+          },
+          in: {
+            $let: {
+              vars: {
+                volumeVehicles: {
+                  $filter: {
+                    input: { $ifNull: ["$$t.vehicles", []] },
+                    as: "v",
+                    cond: positive("$$v.actualVolume"),
+                  },
+                },
+                truckCapacityOk: positive("$$t.truckCapacity"),
+              },
+              in: {
+                $cond: [
+                  { $gt: [{ $size: "$$volumeVehicles" }, 0] },
+                  {
+                    cellRefs: {
+                      $concatArrays: [
+                        "$$acc.cellRefs",
+                        { $map: { input: "$$volumeVehicles", as: "v", in: { $ifNull: ["$$v.cellIndex", null] } } },
+                      ],
+                    },
+                    missingCapacity: {
+                      $or: [
+                        "$$acc.missingCapacity",
+                        {
+                          $anyElementTrue: [
+                            {
+                              $map: {
+                                input: "$$volumeVehicles",
+                                as: "v",
+                                in: { $not: [{ $or: [positive("$$v.capacity"), "$$truckCapacityOk"] }] },
+                              },
+                            },
+                          ],
+                        },
+                      ],
+                    },
+                  },
+                  {
+                    $cond: [
+                      positive("$$t.actualVolume"),
+                      {
+                        cellRefs: { $concatArrays: ["$$acc.cellRefs", [{ $ifNull: ["$$t.cellIndex", null] }]] },
+                        missingCapacity: { $or: ["$$acc.missingCapacity", { $not: ["$$truckCapacityOk"] }] },
+                      },
+                      "$$acc",
+                    ],
+                  },
+                ],
+              },
+            },
+          },
+        },
+      },
+    },
+  };
+
+  const facts = await DataSLF.aggregate([
+    { $match: scope },
+    { $project: { idNo: 1, submissionId: 1, slfGenerator: 1, facts: rowFacts } },
+    {
+      $project: {
+        idNo: 1,
+        submissionId: 1,
+        slfGenerator: 1,
+        cellRefs: { $setUnion: ["$facts.cellRefs", []] },
+        missingCapacity: "$facts.missingCapacity",
+      },
+    },
+  ])
+    .option({ maxTimeMS: PORTAL_GATE_MAX_TIME_MS })
+    .exec();
+  if (!facts.length) return [];
+
+  // `populate` is a query-builder feature; an aggregation needs the facilities
+  // fetched and attached. One read for the whole set — isValidPortalCellRef
+  // still receives the same populated `slfGenerator` object it always did.
+  const facilityIds = [
+    ...new Set(facts.map((entry) => entry.slfGenerator && String(entry.slfGenerator)).filter(Boolean)),
+  ];
+  const byId = new Map();
+  if (facilityIds.length) {
+    const facilities = await SlfFacility.find({ _id: { $in: facilityIds } })
+      .select("cellNames cellStatuses")
+      .maxTimeMS(PORTAL_GATE_MAX_TIME_MS)
+      .lean();
+    facilities.forEach((facility) => byId.set(String(facility._id), facility));
+  }
+  const attachFacility = (entry) => {
+    if (entry.slfGenerator) entry.slfGenerator = byId.get(String(entry.slfGenerator)) || null;
+    return entry;
+  };
+
+  const candidateIds = facts
+    .map(attachFacility)
+    .filter(
+      (entry) =>
+        entry.missingCapacity === true ||
+        (entry.cellRefs || []).some((ref) => !isValidPortalCellRef(entry, ref)),
+    )
+    .map((entry) => entry._id);
+  if (!candidateIds.length) return [];
 
   // `$map` rather than a sub-field `select`, for the reason spelled out on the
   // declared-capacity read: projecting `trucks.vehicles.cellIndex` and friends
@@ -1065,62 +1260,16 @@ async function assertNoUnorganizedPortalSubmissions(submittedBy) {
   };
 
   const prior = await DataSLF.aggregate([
-    {
-      $match: {
-        deletedAt: null,
-        hiddenFromPortal: { $ne: true },
-        submittedBy: new RegExp(`^${escapeRegExp(email)}$`, "i"),
-        status: { $nin: ["reverted", "rejected"] },
-        // A record with no trucks carries no waste placement, so
-        // summarizePortalOrganizeNeed can only ever score it 0/0 — it is
-        // incapable of blocking a submission. Excluding it changes no outcome
-        // and skips exactly the heavy documents: the BASELINE containers, which
-        // are the ones holding the multi-megabyte accreditedHaulers array. One
-        // account has 82 of them, and this gate was fetching every one to look
-        // at a `trucks` array that is not there.
-        ...SUBMISSION_HAS_TRUCKS,
-      },
-    },
+    { $match: { ...scope, _id: { $in: candidateIds } } },
     { $project: { idNo: 1, submissionId: 1, slfGenerator: 1, trucks: trimmedTrucks } },
   ])
     .option({ maxTimeMS: PORTAL_GATE_MAX_TIME_MS })
     .exec();
 
-  // `populate` is a query-builder feature; an aggregation needs the facilities
-  // fetched and attached. One read for the whole set — isValidPortalCellRef
-  // still receives the same populated `slfGenerator` object it always did.
-  const facilityIds = [
-    ...new Set(prior.map((entry) => entry.slfGenerator && String(entry.slfGenerator)).filter(Boolean)),
-  ];
-  if (facilityIds.length) {
-    const facilities = await SlfFacility.find({ _id: { $in: facilityIds } })
-      .select("cellNames cellStatuses")
-      .maxTimeMS(PORTAL_GATE_MAX_TIME_MS)
-      .lean();
-    const byId = new Map(facilities.map((facility) => [String(facility._id), facility]));
-    prior.forEach((entry) => {
-      if (entry.slfGenerator) entry.slfGenerator = byId.get(String(entry.slfGenerator)) || null;
-    });
-  }
-
-  const blockers = prior
+  return prior
+    .map(attachFacility)
     .map((entry) => ({ entry, summary: summarizePortalOrganizeNeed(entry) }))
     .filter(({ summary }) => summary.unplacedCount > 0 || summary.missingCapacityCount > 0);
-  if (!blockers.length) return;
-  const listed = blockers
-    .slice(0, 5)
-    .map(({ entry, summary }) => {
-      const parts = [];
-      if (summary.unplacedCount > 0) parts.push(`${summary.unplacedCount} unassigned waste entr${summary.unplacedCount === 1 ? "y" : "ies"}`);
-      if (summary.missingCapacityCount > 0) parts.push(`${summary.missingCapacityCount} missing truck capacit${summary.missingCapacityCount === 1 ? "y" : "ies"}`);
-      return `${entry.idNo || entry.submissionId || "Submission"}: ${parts.join(", ")}`;
-    })
-    .join(" | ");
-  const more = blockers.length > 5 ? ` (+${blockers.length - 5} more)` : "";
-  const error = new Error(`Organize Cells must be completed before submitting a new transaction. ${listed}${more}`);
-  error.statusCode = 409;
-  error.code = "ORGANIZE_CELLS_REQUIRED";
-  throw error;
 }
 
 // Collect the distinct cell names a submission's waste was placed into. The list
@@ -2050,7 +2199,27 @@ async function assertNoUnresolvedRevert(email) {
   }
 }
 
-async function submitEntries({ entries, submittedBy, req, idempotencyKey = null } = {}) {
+async function submitEntries(params = {}) {
+  const key = params.idempotencyKey ? String(params.idempotencyKey) : null;
+  if (key) {
+    if (inFlightSubmissionKeys.has(key)) {
+      const error = new Error(
+        "Your previous submission is still being processed. Please wait a moment — it will appear in your history once it completes.",
+      );
+      error.statusCode = 409;
+      error.code = "SUBMISSION_IN_PROGRESS";
+      throw error;
+    }
+    inFlightSubmissionKeys.add(key);
+  }
+  try {
+    return await runSubmitEntries(params);
+  } finally {
+    if (key) inFlightSubmissionKeys.delete(key);
+  }
+}
+
+async function runSubmitEntries({ entries, submittedBy, req, idempotencyKey = null } = {}) {
   // Idempotency: if this exact request was already processed, return the saved
   // records instead of creating duplicates (protects against retries / lost
   // responses / double-clicks). Keyed by a client-supplied X-Idempotency-Key.
@@ -2385,7 +2554,10 @@ async function submitEntries({ entries, submittedBy, req, idempotencyKey = null 
       dummyPortalUserId: submitterIsDummy ? portalAccount?._id : undefined,
       ...(idempotencyKey ? { idempotencyKey } : {}),
     });
-    await doc.save();
+    // Timed like the gates: the save runs the idNo/province pre-save hooks and
+    // writes the full baseline snapshot, and it was the first of several
+    // post-gate steps that no slow-stage log could see.
+    await timeStage("persist", () => doc.save());
     saved.push(doc);
   }
 
@@ -2409,7 +2581,42 @@ async function submitEntries({ entries, submittedBy, req, idempotencyKey = null 
   // admin gauges both read those stored values, so a full cell could keep
   // accepting waste. computeCellOccupancy RECOMPUTES from the live records rather
   // than incrementing, so calling it here is idempotent and can never double-count.
-  await refreshOccupancyForFacilities(req, saved.map((s) => s.slfGenerator));
+  //
+  // Bounded, not unbounded. The recompute re-reads EVERY live record of the
+  // facility with its trucks — ~1.3 MB for the largest facility, on every
+  // submit — and it sat between doc.save() and the response with no deadline
+  // and outside the stage timings. Traced in production: a submission whose
+  // gates all ran under the slow threshold still answered ~2 minutes after the
+  // browser had given up ("timeout exceeded" / "Network Error" on the client,
+  // then submission.create on the server). The record was saved; the operator
+  // was told it failed. So the response now waits at most
+  // SUBMIT_OCCUPANCY_BUDGET_MS for the recompute; if it is still running, the
+  // reply goes out and the recompute finishes in the background — it already
+  // never throws, and it emits the facility refresh to the portal/admin
+  // sockets itself when it lands, so the gauges still update.
+  await timeStage("occupancy-refresh", async () => {
+    const facilityIds = saved.map((s) => s.slfGenerator);
+    // Never rejects: the record is already saved, and once deferred this promise
+    // has no awaiter left — a rejection would be an unhandled one.
+    const refresh = refreshOccupancyForFacilities(req, facilityIds).then(
+      () => "done",
+      () => "done",
+    );
+    let timer = null;
+    const budget = new Promise((resolve) => {
+      timer = setTimeout(() => resolve("deferred"), SUBMIT_OCCUPANCY_BUDGET_MS);
+    });
+    const outcome = await Promise.race([refresh, budget]);
+    clearTimeout(timer);
+    if (outcome === "deferred") {
+      writeLog("warn", "submission.occupancy.deferred", {
+        message: `Occupancy recompute exceeded ${SUBMIT_OCCUPANCY_BUDGET_MS}ms; responded to the client and left it running`,
+        user: submittedBy || "",
+        ip: req?.ip || "",
+        meta: { submissionId, facilityIds: facilityIds.map((id) => String(id || "")) },
+      });
+    }
+  });
 
   // Fire-and-forget side effects (audit trail, admin notification, socket, log).
   (async () => {
@@ -9835,6 +10042,10 @@ module.exports.getAuthoritativeHaulersForEntry = getAuthoritativeHaulersForEntry
 // Exposed for the submit-gate benchmark (scripts/benchSubmitGates.js), which
 // times the account-scoped reads a submission pays for without performing one.
 module.exports.assertNoUnorganizedPortalSubmissions = assertNoUnorganizedPortalSubmissions;
+// The gate's finder and the pure scorer behind it, so the two-pass read can be
+// checked for parity against the full read on live data (scripts/verifyOrganizeGateParity.js).
+module.exports.findUnorganizedPortalSubmissions = findUnorganizedPortalSubmissions;
+module.exports.summarizePortalOrganizeNeed = summarizePortalOrganizeNeed;
 module.exports.assertNoUnresolvedRevert = assertNoUnresolvedRevert;
 // Exposed so the submit-gate benchmark times the REAL declared-capacity read
 // instead of a mirror of it that can go stale.

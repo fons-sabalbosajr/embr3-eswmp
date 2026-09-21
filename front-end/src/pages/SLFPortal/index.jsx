@@ -7035,6 +7035,17 @@ export default function SLFPortal() {
           title: "Request Timed Out",
           message: "The server took too long to respond. Please try again.",
         });
+      } else if (err.response?.data?.code === "SUBMISSION_IN_PROGRESS") {
+        // The earlier attempt (same idempotency key) is still being processed on
+        // the server — this is a retry after a client-side timeout, not a failure.
+        // Keep the key so the next retry resolves to that saved record.
+        showError({
+          type: "warning",
+          title: "Still Processing",
+          message:
+            err.response?.data?.message ||
+            "Your previous submission is still being processed. Please wait a moment before trying again.",
+        });
       } else if (err.response?.data?.code === "UNRESOLVED_REVERT") {
         // #2: backend rule block (also enforced server-side to prevent API bypass) —
         // show a clear modal with a direct action to the correction flow.
