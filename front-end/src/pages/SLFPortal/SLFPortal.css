@@ -1716,6 +1716,20 @@ body.slf-portal-active .ant-table-wrapper {
   max-width: 100%;
 }
 
+/* Fourteen of the portal's tables set no `scroll.x` at all (the cell-entry
+   lists, the overview client/fleet tables, the report breakdowns, the
+   hauler-client list). Without it antd gives the table no scrolling container,
+   so on a phone its columns crush into one-word-per-line ribbons and, once a
+   button or tag refuses to wrap, the table spills out of its card. Giving
+   every table's content pane its own horizontal scroll makes the overflow the
+   TABLE's, wherever it comes from — the tables that already declare `scroll.x`
+   are unaffected, since antd sets the same overflow on them itself. */
+body.slf-portal-active .ant-table-wrapper .ant-table-content,
+body.slf-portal-active .ant-table-wrapper .ant-table-body {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
 @media (max-width: 767px) {
   body.slf-portal-active .ant-table {
     font-size: 12px;
@@ -1724,6 +1738,39 @@ body.slf-portal-active .ant-table-wrapper {
   body.slf-portal-active .ant-table-thead > tr > th,
   body.slf-portal-active .ant-table-tbody > tr > td {
     padding: 8px;
+  }
+
+  /* A header is a label; "Client City/Municipality" broken over three lines
+     is not a narrower column, it is a taller header. Cells keep wrapping, but
+     an e-mail address or a file name breaks inside the column rather than
+     forcing the column to its own width. */
+  body.slf-portal-active .ant-table-thead > tr > th {
+    white-space: nowrap;
+  }
+
+  body.slf-portal-active .ant-table-tbody > tr > td {
+    overflow-wrap: anywhere;
+  }
+
+  /* Give a table with no declared width a floor that keeps five or more
+     columns legible, and let it pan (see the overflow rule above). Sized by
+     the header's column count, so a two-column ranking stays a plain table.
+     Tables that declare `scroll.x` carry an inline `min-width` from antd,
+     which wins over these. */
+  body.slf-portal-active .ant-table-content > table:has(> thead > tr:first-child > th:nth-child(5)) {
+    min-width: 560px;
+  }
+
+  body.slf-portal-active .ant-table-content > table:has(> thead > tr:first-child > th:nth-child(8)) {
+    min-width: 760px;
+  }
+
+  /* An action button column is the one that must stay reachable: never let
+     its icon buttons wrap onto a second line. */
+  body.slf-portal-active .ant-table-tbody > tr > td:last-child .ant-btn,
+  body.slf-portal-active .ant-table-tbody > tr > td:last-child .ant-space {
+    white-space: nowrap;
+    flex-wrap: nowrap;
   }
 
   /* Pagination is a row of controls that does not wrap on its own. */

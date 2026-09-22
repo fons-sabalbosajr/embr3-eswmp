@@ -101,7 +101,7 @@ import {
   Legend,
   ResponsiveContainer,
 } from "recharts";
-import api from "../../api";
+import api, { logClientError } from "../../api";
 import { SUPPORT_EMAIL, SUPPORT_MAILTO } from "../../config/appContact";
 import { useErrorCard } from "../../utils/ErrorHandler";
 import secureStorage from "../../utils/secureStorage";
@@ -4847,6 +4847,13 @@ export default function SLFPortal() {
   };
 
   // ── Excel/CSV Upload Handlers ──
+  // The workbook is parsed entirely in the browser, on the main thread. A file
+  // past this size is not a disposal log — it is an export with pictures or a
+  // decade of sheets — and parsing it froze the tab with the progress bar
+  // stuck at "Reading file…", which read as an upload that hung. Refuse it
+  // with the reason instead. The submission itself carries only the parsed
+  // rows, so this bounds browser work, not what the server accepts.
+  const MAX_UPLOAD_FILE_MB = 20;
   const handleExcelUpload = (file, type) => {
     const effectiveType = type || uploadType || "truck";
     setUploadType(effectiveType);
@@ -4854,10 +4861,25 @@ export default function SLFPortal() {
     setUploadProgress(8);
     setUploadStatusText("Reading file…");
     setUploadProgressOpen(true);
+    if (file && file.size > MAX_UPLOAD_FILE_MB * 1024 * 1024) {
+      setUploadProgressError(true);
+      setUploadStatusText(
+        `This file is ${(file.size / 1024 / 1024).toFixed(1)} MB; uploads are limited to ${MAX_UPLOAD_FILE_MB} MB. Remove images or extra sheets, or split it into smaller files.`,
+      );
+      logClientError({
+        message: "Upload rejected: file too large",
+        meta: { stage: "excel-upload", sizeBytes: file.size, name: file.name, type: effectiveType },
+      });
+      return false;
+    }
     const reader = new FileReader();
     reader.onerror = () => {
       setUploadProgressError(true);
       setUploadStatusText("Could not read the file. Please try again.");
+      logClientError({
+        message: "Upload failed: file could not be read",
+        meta: { stage: "excel-upload", name: file?.name, type: effectiveType },
+      });
     };
     reader.onload = (e) => {
       try {
@@ -5343,11 +5365,17 @@ export default function SLFPortal() {
             setHaulerVeraSource(null);
           }
         }
-      } catch {
+      } catch (err) {
         setUploadProgressError(true);
         setUploadStatusText(
           "Could not parse the uploaded file. Please check the format and try again.",
         );
+        // Was silent: a file the parser rejects left no trace for an admin to
+        // act on when the operator reported "the upload doesn't work".
+        logClientError({
+          message: `Upload failed: ${err?.message || "could not parse workbook"}`,
+          meta: { stage: "excel-upload", name: file?.name, sizeBytes: file?.size, type: effectiveType },
+        });
       }
     };
     // Build columns / normalize were tracked via progress; defer parsing a tick so the
@@ -7029,11 +7057,21 @@ export default function SLFPortal() {
           message:
             "Your internet connection was interrupted. Your data is still here \u2014 please try submitting again once you\u2019re back online.",
         });
-      } else if (err.code === "ECONNABORTED") {
+      } else if (
+        err.code === "ECONNABORTED" ||
+        err.response?.status === 504 ||
+        err.response?.status === 408
+      ) {
+        // A gateway 504 (Cloudflare gives up at ~100s) means the server may
+        // STILL have saved the record — 11 of these on /data-slf in one day,
+        // each shown as "Something went wrong". submitKeyRef is kept, so a
+        // retry carries the same X-Idempotency-Key and resolves to the saved
+        // record instead of filing a duplicate. Say so.
         showError({
           type: "error",
           title: "Request Timed Out",
-          message: "The server took too long to respond. Please try again.",
+          message:
+            "The server took too long to respond. Your entry may still have been saved — please try again; a retry will not create a duplicate.",
         });
       } else if (err.response?.data?.code === "SUBMISSION_IN_PROGRESS") {
         // The earlier attempt (same idempotency key) is still being processed on

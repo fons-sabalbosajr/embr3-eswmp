@@ -99,11 +99,24 @@ const supportTicketSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-// Auto-generate ticket number
+// Auto-generate ticket number.
+//
+// The next number is read from the HIGHEST existing ticketNo, not from the most
+// recently created row: the two are the same only while every ticket is filed
+// one at a time. Zero-padding keeps the lexical sort numeric up to TKT-99999.
+// The read-then-insert is still not atomic — two tickets filed in the same
+// instant (a double-click, or a portal ticket landing while an admin message
+// thread is created) can both compute the same number, and the unique index
+// then rejects the second as E11000, which the route surfaced as a bare
+// "Server error". `saveWithTicketNo` below is the retry that turns that
+// collision into the next free number.
 supportTicketSchema.pre("save", async function () {
-  if (this.isNew && !this.ticketNo) {
+  if (!this.ticketNo) {
     const SupportTicket = mongoose.model("SupportTicket");
-    const lastTicket = await SupportTicket.findOne().sort({ createdAt: -1 });
+    const lastTicket = await SupportTicket.findOne({ ticketNo: /^TKT-\d+$/ })
+      .sort({ ticketNo: -1 })
+      .select("ticketNo")
+      .lean();
     let seq = 1;
     if (lastTicket && lastTicket.ticketNo) {
       const parts = lastTicket.ticketNo.split("-");
@@ -113,6 +126,23 @@ supportTicketSchema.pre("save", async function () {
     this.ticketNo = `TKT-${String(seq).padStart(5, "0")}`;
   }
 });
+
+// Save a NEW ticket, regenerating its number when a concurrent insert took it.
+// Any other error, and a collision that persists across `attempts`, is thrown
+// unchanged so the caller's error handling is unaffected.
+supportTicketSchema.statics.saveWithTicketNo = async function saveWithTicketNo(ticket, attempts = 5) {
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      return await ticket.save();
+    } catch (error) {
+      const tookNumber =
+        error?.code === 11000 &&
+        (error.keyPattern?.ticketNo || /ticketNo/.test(String(error.message || "")));
+      if (!tookNumber || attempt >= attempts) throw error;
+      ticket.ticketNo = undefined; // the pre-save hook assigns the next free one
+    }
+  }
+};
 
 supportTicketSchema.index({ status: 1, createdAt: -1 });
 supportTicketSchema.index({ portalUserEmail: 1, createdAt: -1 });

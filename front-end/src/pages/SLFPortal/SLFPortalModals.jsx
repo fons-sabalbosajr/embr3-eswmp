@@ -4054,10 +4054,13 @@ export default function SLFPortalModals({
                       type="primary"
                       htmlType="submit"
                       loading={supportSubmitting}
+                      // An attachment still in flight is not in `ticketAttachments`
+                      // yet — submitting now files the ticket without it.
+                      disabled={ticketUploading}
                       className="slf-primary-btn"
                       block
                     >
-                      Submit Ticket
+                      {ticketUploading ? "Uploading attachment…" : "Submit Ticket"}
                     </Button>
                   </Form.Item>
                     </Form>
