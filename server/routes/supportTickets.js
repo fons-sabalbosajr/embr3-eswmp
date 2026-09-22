@@ -93,8 +93,22 @@ router.post(
 // Portal: Create a support ticket
 router.post("/", requirePortalRule("can_create_support_tickets"), async (req, res) => {
   try {
-    const { portalUser, portalUserEmail, portalUserName, companyName, slfName, subject, category, priority, message, attachments = [] } = req.body;
-    if (!portalUserEmail || !subject || !message) {
+    const body = req.body || {};
+    const { portalUserName, companyName, slfName, subject, category, priority, message, attachments = [] } = body;
+    let { portalUser, portalUserEmail } = body;
+
+    // The ticket belongs to whoever holds the token, not to whatever the client
+    // wrote in the body. A portal session whose cached `portal_user` object was
+    // stale or missing filed the ticket under the wrong (or an empty) address —
+    // it then never appeared in that user's My Tickets, and the admin queue
+    // showed an owner nobody could reply to. Admin/developer callers (who file
+    // on a user's behalf) keep the body's identity.
+    if (req.user?.role === "portal_user") {
+      const callerEmail = await resolveCallerEmail(req);
+      if (callerEmail) portalUserEmail = callerEmail;
+      if (req.user.id) portalUser = req.user.id;
+    }
+    if (!portalUserEmail || !String(subject || "").trim() || !String(message || "").trim()) {
       return res.status(400).json({ message: "Email, subject, and message are required" });
     }
 
@@ -110,7 +124,8 @@ router.post("/", requirePortalRule("can_create_support_tickets"), async (req, re
       message,
       attachments: Array.isArray(attachments) ? attachments : [],
     });
-    await ticket.save();
+    // Retries the ticket number on a concurrent-insert collision (see the model).
+    await SupportTicket.saveWithTicketNo(ticket);
 
     // Notify admin
     try {
@@ -165,6 +180,19 @@ router.post("/", requirePortalRule("can_create_support_tickets"), async (req, re
       });
     });
   } catch (error) {
+    // A failed ticket is exactly the event an admin most needs to see in App
+    // Logs — the user could not reach them any other way.
+    writeLog("error", "support.create.failed", {
+      message: `Support ticket could not be created: ${error.message}`,
+      user: req.body?.portalUserEmail || "",
+      ip: req.ip,
+      meta: { code: error.code, name: error.name },
+    });
+    // A schema rejection (unknown category/priority, empty field) is the
+    // caller's to fix; it was answered as a bare 500 "Server error".
+    if (error.name === "ValidationError") {
+      return res.status(400).json({ message: error.message });
+    }
     res.status(500).json({ message: "Server error", error: error.message });
   }
 });

@@ -837,7 +837,8 @@ router.post("/:id/message-threads", async (req, res) => {
       source: "admin_message",
       status: "in_progress",
     });
-    await thread.save();
+    // Retries the ticket number if a portal ticket took it in the same instant.
+    await SupportTicket.saveWithTicketNo(thread);
 
     try {
       await Notification.create({
