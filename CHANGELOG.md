@@ -8,6 +8,76 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — CI/CD
+- **CI** (`.github/workflows/ci.yml`): every pull request and push to `main` runs
+  the server suite (with a syntax check of every module), the front-end tests, a
+  lint report and a production build. No database or secrets are needed.
+- **Deploy** (`.github/workflows/deploy.yml` + `scripts/deploy/vps-deploy.sh`):
+  after CI passes on `main`, deploys to the VPS over SSH as the app user, with
+  a pinned host key, an optional approval gate, serialized deploys, lockfile-aware
+  installs, a health check and **automatic rollback** to the previous commit and
+  build. Server-specific values stay on the server
+  (`~/.config/eswmp-deploy.env`). See `docs/CI_CD.md`.
+
+### Added — VERA official mark
+- One icon for VERA everywhere (`VeraFlameIcon`), merged from the two design
+  studies: the **dotted flame** is the identity, and the **border beam** runs
+  only while VERA is busy. States: idle, thinking, working, searching,
+  listening, success. Under 28 px it becomes a crisp vector glyph with a
+  progress ring when busy. Also: app tile, light/dark surfaces, reduced-motion
+  stills with `aria-busy`, and one shared animation loop that pauses off-screen.
+  The chat thinking indicator, portal assessments and the remark button now show
+  real states. See `docs/VERA_MARK.md`.
+
+### Added — Ticket no. reused across submissions
+- New error remark **Ticket no. used in another submission**. Each Submissions
+  page checks its tickets against the facility's other live submissions in one
+  batched query (new index `{ slfGenerator, trucks.disposalTicketNo }`).
+  Rejected and reverted records are excluded, so resubmissions are not flagged.
+  The approval response and the VERA remark include it.
+
+### Fixed — Client Address dropped by two more read paths (found by end-to-end test)
+- The admin **Hauler Clients** list, its add/edit endpoints and the portal's
+  Clients Served summary each rebuilt client rows from a fixed field list that
+  omitted `clientAddress`. The address is now returned, saved and searchable,
+  and the admin editor has an Address column and field.
+
+### Fixed — Portal users could not enter a Client Address (Sta. Rosa, Nueva Ecija)
+- **The Add / Edit Client modal now has a Client Address field.** It only had
+  name, type and the PSGC region/province/municipality pickers, so a typed
+  address was impossible; only a bulk upload could set one. The client table in
+  the hauler modal shows the address.
+- **Editing a client no longer drops its address.** The Edit button rebuilt the
+  draft without `clientAddress`, so every edit saved the client back without it.
+  An edit now merges onto the stored client.
+- **A saved address is now what every view reads back.** `portal-save-baseline`
+  writes the hauler roster only to the SLF's baseline container, but the admin
+  Hauler Clients view and the waste summary kept the newest-by-`createdAt` copy
+  of each (hauler, client) pair — a submission's stale, address-less copy. The
+  container's copy of a pair now wins; pairs it lacks still fall back to the
+  newest copy.
+
+### Added — Submission remarks for exceeded values and improper formats, and VERA remarks
+- **Remarks column flags more problems** (Portal & Submission → Submissions):
+  Missing load volume, Disposal date in the future, Missing / Improper /
+  Duplicate ticket no., Missing / Improper plate no. format, Missing hauler,
+  Treated hazardous waste without HW code, Missing / Non-standard waste type —
+  alongside the existing capacity and cell-placement flags. Each tag's tooltip
+  names the affected loads; "Exceeded truck capacity" shows the actual volume vs
+  capacity. Tags are sorted most-severe first. Rules live in
+  `server/utils/submissionRemarks.js` and follow the submit validator: the HW code
+  is only expected for treated hazardous waste, and a vehicle row is a load only
+  when it carries a volume or waste type.
+- **Fixed: a stub vehicle row hid an exceeded load.** The capacity remark picked
+  vehicles by "has a plate", so a truck whose only vehicle row held just a plate
+  (load recorded on the truck, e.g. SLF-LGU-PA-0016) was never compared with its
+  capacity.
+- **"Ask VERA for a remark"** in the Remarks cell (`POST /api/data-slf/vera-remarks`,
+  admin only). VERA writes a short reviewer remark from the submission's own
+  figures and the detected flags; a grouped row gets one remark for all its
+  entries. Stored on the record as `veraRemark` (no model call on page load).
+  Without a configured AI model a rule-based remark is written instead.
+
 ### Fixed — "Submission Failed" for a submission that had in fact been saved
 Traced in production logs: a portal submit answered ~2 minutes after the browser
 had given up (`timeout exceeded` / `Network Error` on the client, then

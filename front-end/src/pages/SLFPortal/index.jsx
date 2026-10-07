@@ -3691,17 +3691,25 @@ export default function SLFPortal() {
       )?.name || "";
     const toSave = {
       ...clientDraft,
+      clientName: String(clientDraft.clientName || "").trim(),
+      clientAddress: String(clientDraft.clientAddress || "").trim(),
       regionName,
       provinceName,
       municipalityName,
     };
     const existing = haulerDraft.privateSectorClients || [];
     if (editingClientKey != null) {
+      // Merge onto the stored record so fields the modal does not edit survive.
+      // The legacy `address` alias is dropped: the modal now owns clientAddress,
+      // and leaving the alias would resurrect an address the user just cleared.
       updateHaulerDraft(
         "privateSectorClients",
-        existing.map((c) =>
-          c.key === editingClientKey ? { ...toSave, key: editingClientKey } : c,
-        ),
+        existing.map((c) => {
+          if (c.key !== editingClientKey) return c;
+          // eslint-disable-next-line no-unused-vars
+          const { address, ...stored } = c;
+          return { ...stored, ...toSave, key: editingClientKey };
+        }),
       );
     } else {
       updateHaulerDraft("privateSectorClients", [

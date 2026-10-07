@@ -63,6 +63,7 @@ import { withSizeChanger } from "../../utils/tablePagination";
 import dayjs from "dayjs";
 import ResponsiveTable from "./shared/ResponsiveTable";
 import MergeSlfModal from "./MergeSlfModal";
+import VeraFlameIcon from "../../components/VeraFlameIcon";
 import {
   getTruckCapacityText,
   getTruckPlateText,
@@ -1557,6 +1558,40 @@ export default function SubmissionSettings({
     [openView],
   );
 
+  // VERA writes a review remark for one submission — every entry of a grouped
+  // row shares one remark. Stored server-side; the row is patched in place so the
+  // remark shows immediately, and the server broadcast refreshes other sessions.
+  const generateVeraRemark = async (record) => {
+    const ids = (record.entryIds || [record.primaryId || record._id]).map(String);
+    const key = `${record._id}:vera`;
+    if (isActing(key)) return;
+    addActionKey(key);
+    try {
+      const { data: resp } = await api.post("/data-slf/vera-remarks", { ids });
+      if (!resp?.ok) throw new Error(resp?.message || "VERA could not generate a remark.");
+      const idSet = new Set((resp.ids || ids).map(String));
+      setData((prev) =>
+        prev.map((entry) =>
+          idSet.has(String(entry._id)) ? { ...entry, veraRemark: resp.veraRemark } : entry,
+        ),
+      );
+      invalidateCache(currentCacheKey);
+      if (resp.veraRemark?.source === "model") {
+        message.success("VERA added a remark.");
+      } else {
+        message.info(
+          resp.degraded
+            ? "VERA's AI service is unavailable — a rule-based remark was added instead."
+            : "AI model not configured — a rule-based remark was added instead.",
+        );
+      }
+    } catch (err) {
+      message.error(err?.response?.data?.message || err?.message || "VERA could not generate a remark.");
+    } finally {
+      removeActionKey(key);
+    }
+  };
+
   const columns = [
     {
       title: (
@@ -1693,37 +1728,106 @@ export default function SubmissionSettings({
       },
     },
     {
-      title: "Remarks",
+      title: (
+        <span>
+          <ExclamationCircleOutlined /> Remarks
+        </span>
+      ),
       key: "remarks",
-      width: 150,
+      width: 240,
       render: (_, r) => {
-        // Computed server-side (not stored) and aggregated across grouped entries.
+        // Flags are computed server-side (not stored) and aggregated across
+        // grouped entries; the most severe level of a label wins. The VERA remark
+        // is stored — the newest one across the group is shown.
         const sources =
           Array.isArray(r.groupedEntries) && r.groupedEntries.length
             ? r.groupedEntries
             : [r];
         const severity = { error: 3, warning: 2, info: 1 };
         const merged = new Map();
+        let vera = null;
         sources.forEach((e) => {
           (e?.remarks || []).forEach((rm) => {
             if (!rm?.text) return;
             const prev = merged.get(rm.text);
-            if (!prev || (severity[rm.level] || 0) > (severity[prev] || 0)) {
-              merged.set(rm.text, rm.level || "info");
+            if (!prev || (severity[rm.level] || 0) > (severity[prev.level] || 0)) {
+              merged.set(rm.text, { level: rm.level || "info", detail: rm.detail || prev?.detail || "" });
             }
           });
+          const vr = e?.veraRemark;
+          if (vr?.text && (!vera || new Date(vr.generatedAt || 0) > new Date(vera.generatedAt || 0))) {
+            vera = vr;
+          }
         });
-        const items = [...merged.entries()];
-        if (!items.length)
-          return <Text type="secondary" style={{ fontSize: 11 }}>—</Text>;
+        // Most severe first, so an exceeded value is never hidden behind info tags.
+        const items = [...merged.entries()].sort(
+          (a, b) => (severity[b[1].level] || 0) - (severity[a[1].level] || 0),
+        );
         const color = { error: "red", warning: "orange", info: "blue" };
+        const generating = isActing(`${r._id}:vera`);
         return (
-          <Space size={[2, 2]} wrap>
-            {items.map(([text, level]) => (
-              <Tag key={text} color={color[level] || "default"} style={{ fontSize: 10, margin: 0 }}>
-                {text}
-              </Tag>
-            ))}
+          <Space direction="vertical" size={4} style={{ width: "100%" }}>
+            {items.length ? (
+              <Space size={[2, 2]} wrap>
+                {items.map(([text, { level, detail }]) => (
+                  <Tooltip key={text} title={detail || undefined}>
+                    <Tag color={color[level] || "default"} style={{ fontSize: 10, margin: 0 }}>
+                      {text}
+                    </Tag>
+                  </Tooltip>
+                ))}
+              </Space>
+            ) : (
+              <Text type="secondary" style={{ fontSize: 11 }}>No issues flagged</Text>
+            )}
+            {vera && (
+              <Tooltip
+                title={
+                  <span>
+                    {vera.text}
+                    <br />
+                    <span style={{ opacity: 0.75, fontSize: 11 }}>
+                      {vera.source === "model" ? "Written by VERA" : "Rule-based (AI model unavailable)"}
+                      {vera.generatedAt ? ` · ${dayjs(vera.generatedAt).format("MM/DD/YYYY hh:mm A")}` : ""}
+                      {vera.generatedBy ? ` · ${vera.generatedBy}` : ""}
+                    </span>
+                  </span>
+                }
+              >
+                <div
+                  style={{
+                    display: "flex",
+                    gap: 6,
+                    alignItems: "flex-start",
+                    background: "rgba(22, 119, 255, 0.06)",
+                    border: "1px solid rgba(22, 119, 255, 0.18)",
+                    borderRadius: 6,
+                    padding: "4px 6px",
+                  }}
+                >
+                  <span style={{ flex: "none", marginTop: 1 }}>
+                    <VeraFlameIcon size={14} animated={false} />
+                  </span>
+                  <Typography.Paragraph
+                    style={{ fontSize: 11, lineHeight: 1.4, margin: 0 }}
+                    ellipsis={{ rows: 3 }}
+                  >
+                    {vera.text}
+                  </Typography.Paragraph>
+                </div>
+              </Tooltip>
+            )}
+            <Button
+              size="small"
+              type="link"
+              disabled={generating}
+              aria-busy={generating || undefined}
+              onClick={() => generateVeraRemark(r)}
+              icon={<VeraFlameIcon size={14} state={generating ? "working" : "idle"} animated={generating} />}
+              style={{ padding: 0, height: "auto", fontSize: 11 }}
+            >
+              {generating ? "VERA is reviewing…" : vera ? "Regenerate VERA remark" : "Ask VERA for a remark"}
+            </Button>
           </Space>
         );
       },

@@ -4,6 +4,8 @@ A web-based **Sanitary Landfill (SLF) monitoring system** for the **Environmenta
 
 > Version 1.4.0
 
+[![CI](https://github.com/fons-sabalbosajr/embr3-eswmp/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/fons-sabalbosajr/embr3-eswmp/actions/workflows/ci.yml)
+
 ---
 
 ## Description
@@ -65,11 +67,13 @@ Full versions and rationale: [docs/TECHNICAL_OVERVIEW.md](docs/TECHNICAL_OVERVIE
 
 ```
 embr3-eswmp/
-├── front-end/     # React + Vite SPA (Admin dashboard + SLF Portal)
-│   └── src/       # pages/, components/, utils/, api.js, App.jsx
-├── server/        # Express REST API
-│   └── ...        # routes/, models/, middleware/, utils/, server.js, .env.example
-├── docs/          # Documentation
+├── .github/workflows/  # CI (tests, lint, build) and Deploy pipelines
+├── front-end/          # React + Vite SPA (Admin dashboard + SLF Portal)
+│   └── src/            # pages/, components/, utils/, api.js, App.jsx
+├── server/             # Express REST API
+│   └── ...             # routes/, models/, middleware/, utils/, tests/, server.js, .env.example
+├── scripts/deploy/     # Server-side deploy script used by the Deploy workflow
+├── docs/               # Documentation
 ├── CHANGELOG.md
 └── README.md
 ```
@@ -155,6 +159,18 @@ Serve `front-end/dist/` with a web server and run the backend as a Node.js proce
 
 ---
 
+## Testing & CI/CD
+
+```bash
+cd server && npm test            # API test suite (no database or .env needed)
+cd front-end && npm test         # front-end unit tests
+cd front-end && npm run lint     # lint
+```
+
+Every pull request and every push to `main` runs these checks plus a production build on GitHub Actions. When CI passes on `main`, the **Deploy** workflow ships the commit to the server, health-checks it, and rolls back automatically on failure. Setup, secrets and rollback are covered in [docs/CI_CD.md](docs/CI_CD.md).
+
+---
+
 ## User Roles
 
 | Role | Access |
@@ -172,6 +188,8 @@ Serve `front-end/dist/` with a web server and run the backend as a Node.js proce
 - [Technical Overview](docs/TECHNICAL_OVERVIEW.md) — architecture, models, API, security.
 - [Admin Guide](docs/ADMIN_GUIDE.md)
 - [Developer Guide](docs/DEVELOPER_GUIDE.md)
+- [CI/CD](docs/CI_CD.md): test, build and deploy pipelines
+- [VERA Official Mark](docs/VERA_MARK.md): the assistant's icon, states and usage rules
 - Deployment Guide — *internal document, maintained separately and not published in this repository*
 - Google Drive Credential Update — *internal document, maintained separately and not published in this repository*
 - JWT Secret Rotation — *internal document, maintained separately and not published in this repository*
@@ -195,7 +213,7 @@ Serve `front-end/dist/` with a web server and run the backend as a Node.js proce
 - Keep changes focused; do not commit secrets or `.env` files.
 - Match the existing code style and conventions.
 - Update relevant documentation when behavior changes.
-- Open a pull request describing the change and its rationale.
+- Open a pull request describing the change and its rationale. CI must pass before merging.
 
 ---
 
