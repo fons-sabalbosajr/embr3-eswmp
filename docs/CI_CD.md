@@ -57,8 +57,8 @@ Both suites pass without a `server/.env`.
 
 ### Making lint blocking
 
-The front-end carries existing lint debt, so the lint step uses
-`continue-on-error: true`. Once `npm run lint` is clean, delete that line in
+The front-end carries existing lint debt, so the lint step posts a warning
+instead of failing. Once `npm run lint` is clean, remove the `|| echo …` part in
 `ci.yml` so new lint errors fail the pull request.
 
 ---
@@ -81,7 +81,7 @@ The front-end carries existing lint debt, so the lint step uses
    being deployed, so the steps that run are the reviewed ones, never a copy
    edited on the server.
 6. **Public check.** Once the script succeeds, the runner checks the public
-   `/api/health` endpoint.
+   `/eswm-pipeline/api/health` endpoint.
 
 ### What `vps-deploy.sh` does
 

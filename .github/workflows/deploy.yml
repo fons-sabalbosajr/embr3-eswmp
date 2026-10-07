@@ -67,16 +67,47 @@ jobs:
 
       - name: Configure SSH
         env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
           VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
           VPS_KNOWN_HOSTS: ${{ secrets.VPS_KNOWN_HOSTS }}
         run: |
-          test -n "$VPS_SSH_KEY" || { echo "::error::VPS_SSH_KEY secret is not set"; exit 1; }
-          test -n "$VPS_KNOWN_HOSTS" || { echo "::error::VPS_KNOWN_HOSTS secret is not set"; exit 1; }
+          # Name every missing secret at once. Secrets must be Actions *secrets*
+          # (not variables), at repository level or in the "production" environment.
+          missing=""
+          for s in VPS_HOST VPS_USER VPS_SSH_KEY VPS_KNOWN_HOSTS; do
+            [ -n "${!s}" ] || missing="$missing $s"
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::Missing secrets:$missing — add them under Settings → Secrets and variables → Actions → Secrets (repository), or Settings → Environments → production → Environment secrets."
+            exit 1
+          fi
           install -m 700 -d ~/.ssh
-          printf '%s\n' "$VPS_SSH_KEY" > ~/.ssh/deploy_key
+          # A browser text box can save the key with Windows line endings,
+          # which OpenSSH rejects as "invalid format" — strip them.
+          printf '%s\n' "$VPS_SSH_KEY" | tr -d '\r' > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
-          printf '%s\n' "$VPS_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          printf '%s\n' "$VPS_KNOWN_HOSTS" | tr -d '\r' > ~/.ssh/known_hosts
           chmod 644 ~/.ssh/known_hosts
+          # Public fingerprints only — lets you confirm the right key was pasted.
+          if ! ssh-keygen -y -f ~/.ssh/deploy_key > ~/.ssh/deploy_key.pub 2>/tmp/keyerr; then
+            echo "::error::VPS_SSH_KEY is not a valid private key ($(cat /tmp/keyerr)). Paste the whole file, from -----BEGIN to END-----."
+            exit 1
+          fi
+          echo "Deploy key: $(ssh-keygen -lf ~/.ssh/deploy_key.pub)"
+          echo "Pinned host: $(ssh-keygen -lf ~/.ssh/known_hosts 2>&1 | head -1)"
+
+      - name: Preflight — SSH login
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+          VPS_PORT: ${{ secrets.VPS_PORT || '22' }}
+        run: |
+          if ! ssh -i ~/.ssh/deploy_key -p "$VPS_PORT" -o StrictHostKeyChecking=yes -o BatchMode=yes \
+                -o ConnectTimeout=20 "$VPS_USER@$VPS_HOST" 'echo "connected as $(id -un)"'; then
+            echo "::error::SSH login failed. Check: VPS_HOST/VPS_USER values, that the deploy key's public half is in that user's ~/.ssh/authorized_keys, and that VPS_KNOWN_HOSTS matches the server (ssh-keyscan -t ed25519 <host>)."
+            exit 1
+          fi
 
       - name: Deploy
         env:
@@ -92,9 +123,11 @@ jobs:
         # that run are the reviewed ones — not whatever copy sits on the server.
 
       - name: Public health check
+        # The app is served under /eswm-pipeline/ — the bare /api/ path answers
+        # 404 over HTTPS, so it would fail every deploy.
         run: |
           for i in 1 2 3 4 5 6; do
-            code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 10 https://embr3-onlinesystems.cloud/api/health || true)
+            code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 10 https://embr3-onlinesystems.cloud/eswm-pipeline/api/health || true)
             echo "attempt $i → HTTP $code"
             [ "$code" = "200" ] && exit 0
             sleep 10
