@@ -113,6 +113,7 @@ export default function HaulerClientsEditor({ slfGeneratorId, slfLabel, canEdit 
       haulerName: editing.haulerName,
       clientName: editing.clientName,
       clientType: editing.clientType || undefined,
+      clientAddress: editing.clientAddress,
       provinceName: editing.provinceName,
       municipalityName: editing.municipalityName,
       regionName: editing.regionName,
@@ -197,6 +198,10 @@ export default function HaulerClientsEditor({ slfGeneratorId, slfLabel, canEdit 
     {
       title: "Hauler", dataIndex: "haulerName", width: 190, ellipsis: true,
       render: (v) => <Tooltip title={v}><Tag color="blue" bordered={false}>{v || "—"}</Tag></Tooltip>,
+    },
+    {
+      title: "Address", dataIndex: "clientAddress", width: 200, ellipsis: true,
+      render: (v) => (v ? <Tooltip title={v}>{v}</Tooltip> : <Text type="secondary" style={{ fontSize: 11 }}>—</Text>),
     },
     {
       title: "Municipality", dataIndex: "municipalityName", width: 150, ellipsis: true,
@@ -356,6 +361,13 @@ export default function HaulerClientsEditor({ slfGeneratorId, slfLabel, canEdit 
           </Form.Item>
           <Form.Item name="clientType" label="Client Type" rules={[{ required: true, message: "Client type is required." }]}>
             <Select options={CLIENT_TYPE_OPTIONS} placeholder="LGU or Private" />
+          </Form.Item>
+          <Form.Item
+            name="clientAddress"
+            label="Client Address"
+            rules={[{ max: 300, message: "Address is too long." }]}
+          >
+            <Input placeholder="e.g. Brgy. Poblacion, Sta. Rosa, Nueva Ecija" />
           </Form.Item>
           <Form.Item name="municipalityName" label="Municipality / City">
             <Input placeholder="e.g. Baler" />

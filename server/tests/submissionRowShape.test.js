@@ -202,7 +202,7 @@ test("a whole-record read does NOT carry the derived remarks array", () => {
   );
   assert.match(
     source,
-    /function enrichSubmissionRow\(raw, \{ allowancePct = 10, includeTrucks = false, derive = true \} = \{\}\)/,
+    /function enrichSubmissionRow\(raw, \{ allowancePct = 10, includeTrucks = false, derive = true(, ticketReuse = null)? \} = \{\}\)/,
     "…and the helper must support that",
   );
   // The derived columns are behind the flag, not unconditional.
@@ -220,8 +220,9 @@ test("a whole-record read does NOT carry the derived remarks array", () => {
 test("the table read still gets its derived columns", () => {
   // The fix must not have removed them from the reads that DO render the column.
   const source = fs.readFileSync(path.join(__dirname, "..", "routes", "dataSLF.js"), "utf8");
-  assert.match(source, /enrichSubmissionRow\(raw, \{ allowancePct, includeTrucks \}\)/, "the paginated list");
-  assert.match(source, /enrichSubmissionRow\(raw, \{ allowancePct, includeTrucks: false \}\)/, "the approval response");
+  // `ticketReuse` (cross-submission ticket flag) is an additional derived input.
+  assert.match(source, /enrichSubmissionRow\(raw, \{ allowancePct, includeTrucks(, ticketReuse)? \}\)/, "the paginated list");
+  assert.match(source, /enrichSubmissionRow\(raw, \{ allowancePct, includeTrucks: false(, ticketReuse)? \}\)/, "the approval response");
 });
 
 test("both shapes come from ONE helper, so they cannot drift apart again", () => {

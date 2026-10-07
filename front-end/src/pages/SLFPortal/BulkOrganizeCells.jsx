@@ -732,7 +732,7 @@ export default function BulkOrganizeCells({
       ) : (
         <div className="bulk-vera-panel">
           <div className="bulk-vera-head">
-            <VeraFlameIcon size={20} anime={veraStage === "assessing"} />
+            <VeraFlameIcon size={20} state={veraStage === "assessing" ? "thinking" : "idle"} />
             <Text strong style={{ fontSize: 13 }}>VERA Assessment</Text>
             {veraStage === "assessing" && <Spin size="small" />}
             {veraStage === "done" && (

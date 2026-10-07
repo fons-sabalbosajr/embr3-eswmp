@@ -443,7 +443,7 @@ export default function HaulerClientListPanel({
         {veraStage !== "idle" && (
           <div className="slf-hauler-vera-panel">
             <div className="slf-hauler-vera-head">
-              <VeraFlameIcon size={18} anime={veraStage === "assessing"} />
+              <VeraFlameIcon size={18} state={veraStage === "assessing" ? "thinking" : "idle"} />
               <Text strong style={{ fontSize: 12.5 }}>VERA Assessment</Text>
               {veraStage === "assessing" && <Spin size="small" />}
               {veraStage === "done" && (

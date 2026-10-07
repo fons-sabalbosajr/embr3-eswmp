@@ -219,6 +219,17 @@ const dataSLFSchema = new mongoose.Schema(
     // Admin waste-placement corrections, oldest first. See cellCorrectionSchema.
     cellCorrections: [cellCorrectionSchema],
 
+    // Admin review remark written by VERA on request (Submissions tab → Remarks).
+    // Unlike the derived `remarks` flags this is stored: it costs a model call, and
+    // it is a reviewer's note the admin chose to generate. Regenerating replaces it.
+    veraRemark: {
+      text: { type: String, trim: true },
+      source: { type: String, enum: ["model", "fallback"] },
+      model: { type: String, trim: true },
+      generatedBy: { type: String, trim: true },
+      generatedAt: { type: Date },
+    },
+
     // Denormalized metric fields — computed from trucks/dateOfDisposal on save.
     // Aggregations may fall back to computing from trucks when these are missing
     // on older records. See computeSlfMetrics() + scripts/backfillDataSLFMetrics.js
@@ -544,6 +555,10 @@ dataSLFSchema.index({ deletedAt: 1, dateOfDisposal: -1 });
 dataSLFSchema.index({ deletedAt: 1, companyType: 1, status: 1 });
 dataSLFSchema.index({ deletedAt: 1, submittedBy: 1, status: 1, createdAt: -1 });
 dataSLFSchema.index({ deletedAt: 1, submissionYear: 1, submissionMonth: 1 });
+// Cross-submission ticket reuse check (routes/dataSLF.js findTicketReuse): every
+// ticket on a Submissions page is looked up within its facility in one query.
+// Multikey on the trucks array; without it that lookup scans the facility.
+dataSLFSchema.index({ slfGenerator: 1, "trucks.disposalTicketNo": 1 });
 
 // Keep denormalized metrics in sync whenever trucks/dateOfDisposal change.
 dataSLFSchema.pre("save", function () {
