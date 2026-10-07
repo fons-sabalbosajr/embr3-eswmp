@@ -263,7 +263,10 @@ test("the hauler roster is UNIONED across records, never taken from one winner",
   // Blank client names are dropped rather than counted as a client.
   assert.match(haulerResolver, /\$match: \{ "_id\.client": \{ \$ne: "" \} \}/);
   // Still a projection — the vehicles graph is never materialised.
-  assert.match(haulerResolver, /\$project: \{ accreditedHaulers: 1 \}/);
+  assert.match(haulerResolver, /\$project: \{ accreditedHaulers: 1, isContainer: IS_BASELINE_CONTAINER_EXPR \}/);
+  // Per pair, the container's copy (where portal edits land) beats a newer
+  // submission's stale copy — still a union, never a single-record winner.
+  assert.match(haulerResolver, /PREFER_CONTAINER_CLIENT_STAGE/);
 });
 
 test("the summary picks its baseline record by the same container-first rule", () => {

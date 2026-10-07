@@ -82,6 +82,15 @@ const {
   normalizeWasteType: normalizeWasteCategory,
   isHazardousWasteType,
 } = require("../utils/wasteCategories");
+const {
+  computeFormatRemarks,
+  truckLoadRows,
+  isWellFormedTicket,
+  buildVeraRemarkPrompt,
+  fallbackVeraRemark,
+  clampRemark,
+  VERA_REMARK_SYSTEM,
+} = require("../utils/submissionRemarks");
 const jwt = require("jsonwebtoken");
 
 // Optional auth: decode the JWT when present so role-aware behaviour (e.g.
@@ -1326,7 +1335,100 @@ function logSlfCrudError(req, action, error, meta = {}) {
  * no longer drift. `allowancePct` is read once per request by the caller, never
  * per row.
  */
-function enrichSubmissionRow(raw, { allowancePct = 10, includeTrucks = false, derive = true } = {}) {
+// ── Ticket numbers reused across submissions ────────────────────────────────
+//
+// A disposal ticket is issued once per trip by the SLF, so the same ticket on
+// two live submissions of the same facility means a trip was reported twice and
+// its volume counted twice. The in-submission duplicate check (computeFormat-
+// Remarks) cannot see this; it needs the other records.
+//
+// One query per response, not per row: every well-formed ticket on the page is
+// looked up at once, scoped to the page's facilities, served by the
+// { slfGenerator, trucks.disposalTicketNo } index. Rejected / reverted records
+// are not "live" — a resubmission legitimately carries its predecessor's
+// tickets. Best-effort: a slow or failed lookup drops the flag, never the page.
+const TICKET_REUSE_LIVE_STATUSES = ["pending", "acknowledged", "revert_requested"];
+const ticketKey = (value) => String(value || "").trim().toUpperCase().replace(/\s+/g, "");
+
+async function findTicketReuse(entries = []) {
+  const reuse = new Map();
+  const facilityOf = (entry) => String(entry?.slfGenerator?._id || entry?.slfGenerator || "");
+  const wanted = new Map(); // facility → Set(raw ticket variants)
+  const pageTickets = []; // [{ id, facility, key, ticket }]
+  for (const entry of entries) {
+    const facility = facilityOf(entry);
+    if (!facility || !mongoose.isValidObjectId(facility)) continue;
+    // A rejected / reverted row is superseded — its tickets living on in the
+    // resubmission is the expected outcome, not a double report.
+    if (!TICKET_REUSE_LIVE_STATUSES.includes(entry?.status)) continue;
+    const seen = new Set();
+    for (const truck of Array.isArray(entry?.trucks) ? entry.trucks : []) {
+      const ticket = String(truck?.disposalTicketNo || "").trim();
+      if (!isWellFormedTicket(ticket)) continue;
+      const key = ticketKey(ticket);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      pageTickets.push({ id: String(entry._id), facility, key, ticket });
+      if (!wanted.has(facility)) wanted.set(facility, new Set());
+      [ticket, ticket.toUpperCase(), ticket.toLowerCase()].forEach((v) => wanted.get(facility).add(v));
+    }
+  }
+  if (!pageTickets.length) return reuse;
+
+  let others = [];
+  try {
+    others = await DataSLF.find({
+      deletedAt: null,
+      status: { $in: TICKET_REUSE_LIVE_STATUSES },
+      $or: [...wanted.entries()].map(([facility, tickets]) => ({
+        slfGenerator: new mongoose.Types.ObjectId(facility),
+        "trucks.disposalTicketNo": { $in: [...tickets] },
+      })),
+    })
+      .setOptions({ includeHiddenYears: true })
+      .select("idNo submissionId slfGenerator trucks.disposalTicketNo")
+      .limit(1000)
+      .maxTimeMS(5000)
+      .lean();
+  } catch (error) {
+    writeLog("warn", "submission.ticket-reuse.lookup_failed", {
+      message: `Ticket reuse lookup skipped: ${error.message}`,
+      meta: { tickets: pageTickets.length },
+    });
+    return reuse;
+  }
+
+  const holders = new Map(); // facility|key → [{ id, label }]
+  for (const other of others) {
+    const facility = String(other.slfGenerator || "");
+    const label = other.idNo || other.submissionId || String(other._id);
+    const keys = new Set((other.trucks || []).map((t) => ticketKey(t?.disposalTicketNo)).filter(Boolean));
+    keys.forEach((key) => {
+      const k = `${facility}|${key}`;
+      if (!holders.has(k)) holders.set(k, []);
+      holders.get(k).push({ id: String(other._id), label });
+    });
+  }
+  for (const { id, facility, key, ticket } of pageTickets) {
+    const elsewhere = (holders.get(`${facility}|${key}`) || []).filter((h) => h.id !== id);
+    if (!elsewhere.length) continue;
+    if (!reuse.has(id)) reuse.set(id, []);
+    reuse.get(id).push({ ticket, usedIn: [...new Set(elsewhere.map((h) => h.label))] });
+  }
+  return reuse;
+}
+
+function ticketReuseRemarks(hits) {
+  if (!Array.isArray(hits) || !hits.length) return [];
+  const parts = hits.map((h) => `"${h.ticket}" also in ${h.usedIn.slice(0, 2).join(", ")}${h.usedIn.length > 2 ? ` +${h.usedIn.length - 2}` : ""}`);
+  return [{
+    text: "Ticket no. used in another submission",
+    level: "error",
+    detail: parts.length > 3 ? `${parts.slice(0, 3).join("; ")}; +${parts.length - 3} more` : parts.join("; "),
+  }];
+}
+
+function enrichSubmissionRow(raw, { allowancePct = 10, includeTrucks = false, derive = true, ticketReuse = null } = {}) {
   const entry = applyResolvedCellNames(raw);
   return {
     ...entry,
@@ -1348,7 +1450,9 @@ function enrichSubmissionRow(raw, { allowancePct = 10, includeTrucks = false, de
       ? {
           cellPlacement: computeCellPlacementSummary(entry),
           cellNames: collectCellNames(entry),
-          remarks: computeSubmissionRemarks(entry, allowancePct),
+          remarks: computeSubmissionRemarks(entry, allowancePct).concat(
+            ticketReuseRemarks(ticketReuse?.get(String(entry._id))),
+          ),
         }
       : {}),
     trucks: includeTrucks ? entry.trucks : [],
@@ -1367,33 +1471,56 @@ async function readCapacityAllowancePct() {
   return 10;
 }
 
+// The trucks sub-paths computeFormatRemarks reads, appended to the light list
+// projections (which deliberately do not ship whole trucks). Without them every
+// format check would see blanks and flag "missing" on perfectly good rows.
+const REMARK_FORMAT_FIELDS =
+  " trucks.disposalTicketNo trucks.hauler trucks.plateNumber trucks.wasteType trucks.hazWasteCode" +
+  " trucks.vehicles.wasteType trucks.vehicles.hazWasteCode";
+
 function computeSubmissionRemarks(entry, allowancePct = 10) {
   const remarks = [];
   const trucks = Array.isArray(entry?.trucks) ? entry.trucks : [];
   const pct = Number.isFinite(Number(allowancePct)) && Number(allowancePct) >= 0 ? Number(allowancePct) : 10;
 
-  let noCapacity = false;
-  let exceeded = false;
-  const evalRow = (vol, volUnit, cap, capUnit) => {
+  // Offending loads are collected (not just flagged) so the remark can say WHICH
+  // load exceeded and by how much — shown as the tooltip detail in the table and
+  // handed to VERA as facts.
+  const exceededLoads = [];
+  const noCapacityLoads = [];
+  const round2 = (n) => Math.round(Number(n) * 100) / 100;
+  const evalRow = (label, vol, volUnit, cap, capUnit) => {
     const volume = Number(vol || 0);
     if (!(volume > 0)) return;
-    if (!(Number(cap) > 0)) { noCapacity = true; return; }
+    if (!(Number(cap) > 0)) { noCapacityLoads.push(label); return; }
+    const unit = normalizeUnit(capUnit || "m³");
     const volInCap = toComparableVolume(volume, volUnit || capUnit || "m³", capUnit || "m³");
     const maxAllowed = Number(cap) + (Number(cap) * pct) / 100;
-    if (volInCap > maxAllowed + 1e-9) exceeded = true;
-  };
-  for (const truck of trucks) {
-    const vehs = (truck?.vehicles || []).filter((v) => Number(v?.actualVolume || 0) > 0 || v?.plateNumber);
-    if (vehs.length) {
-      vehs.forEach((v) =>
-        evalRow(v.actualVolume, v.actualVolumeUnit, v.capacity ?? truck?.truckCapacity, v.capacityUnit || truck?.truckCapacityUnit),
-      );
-    } else {
-      evalRow(truck?.actualVolume, truck?.actualVolumeUnit, truck?.truckCapacity, truck?.truckCapacityUnit);
+    if (volInCap > maxAllowed + 1e-9) {
+      exceededLoads.push(`${label}: ${round2(volInCap)} ${unit} vs ${round2(cap)} ${unit} capacity`);
     }
+  };
+  // Same load rows as the format checks — see truckLoadRows: a stub vehicle that
+  // only holds a plate is not a load, so the truck-level volume is the one judged.
+  trucks.forEach((truck, index) => {
+    truckLoadRows(truck).forEach((row) =>
+      evalRow(
+        String(row.plate || `#${index + 1}`).trim(),
+        row.volume, row.volumeUnit, row.capacity, row.capacityUnit,
+      ),
+    );
+  });
+  const listLoads = (list) => (list.length > 3 ? `${list.slice(0, 3).join("; ")}; +${list.length - 3} more` : list.join("; "));
+  if (exceededLoads.length) {
+    remarks.push({
+      text: "Exceeded truck capacity",
+      level: "error",
+      detail: `${listLoads(exceededLoads)} (+${pct}% allowance)`,
+    });
   }
-  if (exceeded) remarks.push({ text: "Exceeded truck capacity", level: "error" });
-  if (noCapacity) remarks.push({ text: "No truck capacity", level: "warning" });
+  if (noCapacityLoads.length) {
+    remarks.push({ text: "No truck capacity", level: "warning", detail: listLoads(noCapacityLoads) });
+  }
 
   const placement = computeCellPlacementSummary(entry);
   if (placement.known && placement.total > 0) {
@@ -1406,6 +1533,8 @@ function computeSubmissionRemarks(entry, allowancePct = 10) {
       remarks.push({ text: "Cell used for waste placement", level: "info" });
     }
   }
+  // Format / completeness checks (tickets, plates, volumes, waste types, dates).
+  remarks.push(...computeFormatRemarks(entry));
   return remarks;
 }
 
@@ -2055,6 +2184,34 @@ function sanitizeAccreditedHaulers(haulers = [], fallbackUnit = "m³") {
     };
   });
 }
+
+// ── Roster read-back: the baseline container's copy of a client wins ────────
+//
+// PATCH /portal-save-baseline writes an edited hauler roster ONLY to the SLF's
+// baseline-only container(s). Every submission keeps the copy it was filed with.
+// The roster aggregations collapse those copies to one per (hauler, client) and
+// used to keep the NEWEST by createdAt — a submission filed after the container
+// was created, still carrying the old client. So a Client Address the operator
+// had just entered (Sta. Rosa, Nueva Ecija) was saved to the database but every
+// read returned the submission's address-less copy.
+//
+// The container is where portal edits land, so its copy of a pair is the
+// authoritative one. A pair the container does not hold falls back to the
+// newest copy, exactly as before.
+const IS_BASELINE_CONTAINER_EXPR = {
+  $eq: [{ $size: { $ifNull: ["$trucks", []] } }, 0],
+};
+// Inside a $group: the container copies of the pair, newest first. `$$REMOVE`
+// makes $push skip submission copies.
+const CONTAINER_CLIENT_ACCUMULATOR = {
+  $push: { $cond: ["$isContainer", "$client", "$$REMOVE"] },
+};
+const PREFER_CONTAINER_CLIENT_STAGE = {
+  $set: {
+    client: { $ifNull: [{ $arrayElemAt: ["$containerClients", 0] }, "$client"] },
+    containerClients: "$$REMOVE",
+  },
+};
 
 // The baseline-only CONTAINERS a portal save writes into.
 //
@@ -3259,6 +3416,7 @@ function buildClientEntry(body, existing = {}) {
   };
   assign("clientName", body.clientName);
   assign("clientType", body.clientType);
+  assign("clientAddress", body.clientAddress);
   assign("region", body.region);
   assign("regionName", body.regionName);
   assign("province", body.province);
@@ -3343,11 +3501,11 @@ router.get("/hauler-clients/:slfGeneratorId", adminOnly, async (req, res) => {
     const grouped = await DataSLF.aggregate([
       { $match: { slfGenerator: new mongoose.Types.ObjectId(String(slfGeneratorId)), deletedAt: null, "accreditedHaulers.0": { $exists: true } } },
       { $sort: { createdAt: -1 } },
-      { $project: { accreditedHaulers: 1, slfName: 1, lguCompanyName: 1, submittedBy: 1, updatedAt: 1 } },
+      { $project: { accreditedHaulers: 1, slfName: 1, lguCompanyName: 1, submittedBy: 1, updatedAt: 1, isContainer: IS_BASELINE_CONTAINER_EXPR } },
       { $unwind: "$accreditedHaulers" },
       {
         $project: {
-          slfName: 1, lguCompanyName: 1, submittedBy: 1, updatedAt: 1,
+          slfName: 1, lguCompanyName: 1, submittedBy: 1, updatedAt: 1, isContainer: 1,
           haulerName: "$accreditedHaulers.haulerName",
           officeAddress: "$accreditedHaulers.officeAddress",
           client: {
@@ -3380,12 +3538,14 @@ router.get("/hauler-clients/:slfGeneratorId", adminOnly, async (req, res) => {
           haulerName: { $first: "$haulerName" },
           officeAddress: { $first: "$officeAddress" },
           client: { $first: "$client" },
+          containerClients: CONTAINER_CLIENT_ACCUMULATOR,
           slfName: { $first: "$slfName" },
           lguCompanyName: { $first: "$lguCompanyName" },
           submittedBy: { $first: "$submittedBy" },
           updatedAt: { $first: "$updatedAt" },
         },
       },
+      PREFER_CONTAINER_CLIENT_STAGE,
       { $match: { "_id.client": { $ne: "" } } },
     ]).option({ includeHiddenYears: true }).allowDiskUse(true);
 
@@ -3425,6 +3585,9 @@ router.get("/hauler-clients/:slfGeneratorId", adminOnly, async (req, res) => {
             haulerAddress: hauler?.officeAddress || "",
             clientName,
             clientType: client.clientType || "",
+            // Free-text address the portal user entered. This whitelist used to
+            // omit it, so the admin view never showed an address at all.
+            clientAddress: String(client.clientAddress || client.address || "").trim(),
             regionName: client.regionName || "",
             provinceName: client.provinceName || "",
             municipalityName: client.municipalityName || "",
@@ -3472,7 +3635,7 @@ router.get("/hauler-clients/:slfGeneratorId", adminOnly, async (req, res) => {
     const search = String(req.query.search || "").trim().toLowerCase();
     if (search) {
       rows = rows.filter((r) =>
-        [r.clientName, r.haulerName, r.provinceName, r.municipalityName, r.clientType]
+        [r.clientName, r.haulerName, r.clientAddress, r.provinceName, r.municipalityName, r.clientType]
           .some((v) => String(v || "").toLowerCase().includes(search)),
       );
     }
@@ -5795,13 +5958,14 @@ router.get("/", optionalAuth, cacheJson(adminSubmissionsCacheKey, 60000), async 
       const idOrder = [];
       pageGroups.forEach((g) => (g.entryIds || []).forEach((id) => idOrder.push(id)));
       const baseFields =
-        "slfGenerator slfName submissionId idNo previousIdNos dateOfDisposal lguCompanyName companyType address companyRegion companyProvince companyMunicipality companyBarangay status revertRequested editRequested submittedBy createdAt updatedAt isDummy baselineUnit totalVolumeAccepted totalVolumeAcceptedUnit activeCellEntries closedCellEntries truckCount totalVolumeM3 totalVolumeTons residualVolumeM3 residualVolumeTons hazardousVolumeM3 hazardousVolumeTons";
+        "slfGenerator slfName submissionId idNo previousIdNos dateOfDisposal lguCompanyName companyType address companyRegion companyProvince companyMunicipality companyBarangay status revertRequested editRequested submittedBy createdAt updatedAt isDummy baselineUnit totalVolumeAccepted totalVolumeAcceptedUnit activeCellEntries closedCellEntries truckCount totalVolumeM3 totalVolumeTons residualVolumeM3 residualVolumeTons hazardousVolumeM3 hazardousVolumeTons veraRemark";
       const projection =
         baseFields +
         (includeTrucks
           ? " trucks"
           : " trucks.cellName trucks.truckCapacity trucks.truckCapacityUnit trucks.actualVolume trucks.actualVolumeUnit" +
-            " trucks.vehicles.cellName trucks.vehicles.plateNumber trucks.vehicles.capacity trucks.vehicles.capacityUnit trucks.vehicles.actualVolume trucks.vehicles.actualVolumeUnit");
+            " trucks.vehicles.cellName trucks.vehicles.plateNumber trucks.vehicles.capacity trucks.vehicles.capacityUnit trucks.vehicles.actualVolume trucks.vehicles.actualVolumeUnit" +
+            REMARK_FORMAT_FIELDS);
       const entryDocs = idOrder.length
         ? await DataSLF.find({ _id: { $in: idOrder } })
             .setOptions({ includeHiddenYears: true })
@@ -5811,11 +5975,15 @@ router.get("/", optionalAuth, cacheJson(adminSubmissionsCacheKey, 60000), async 
         : [];
       const byId = new Map(entryDocs.map((d) => [String(d._id), d]));
 
-      const allowancePct = await readCapacityAllowancePct();
+      // Independent reads — run together. See findTicketReuse.
+      const [allowancePct, ticketReuse] = await Promise.all([
+        readCapacityAllowancePct(),
+        findTicketReuse(entryDocs),
+      ]);
 
       // Cell names are resolved to the facility's CURRENT labels before the entry
       // leaves the server, so no consumer can render a name frozen at submit time.
-      const enrich = (raw) => enrichSubmissionRow(raw, { allowancePct, includeTrucks });
+      const enrich = (raw) => enrichSubmissionRow(raw, { allowancePct, includeTrucks, ticketReuse });
       // Return the RAW entries for this page's groups (every group is returned
       // whole, so no batch is split across pages). The admin table regroups them
       // client-side exactly as before — keeping all existing grouped-row actions
@@ -5881,7 +6049,7 @@ router.get("/", optionalAuth, cacheJson(adminSubmissionsCacheKey, 60000), async 
         // with its sub-paths (`trucks.cellName`) in one projection — Mongoose 9
         // rejects that with "Path collision at trucks".
         const baseFields =
-          "slfGenerator slfName submissionId idNo previousIdNos dateOfDisposal lguCompanyName companyType address companyRegion companyProvince companyMunicipality companyBarangay status revertRequested editRequested submittedBy createdAt updatedAt isDummy baselineUnit totalVolumeAccepted totalVolumeAcceptedUnit activeCellEntries closedCellEntries truckCount totalVolumeM3 totalVolumeTons residualVolumeM3 residualVolumeTons hazardousVolumeM3 hazardousVolumeTons";
+          "slfGenerator slfName submissionId idNo previousIdNos dateOfDisposal lguCompanyName companyType address companyRegion companyProvince companyMunicipality companyBarangay status revertRequested editRequested submittedBy createdAt updatedAt isDummy baselineUnit totalVolumeAccepted totalVolumeAcceptedUnit activeCellEntries closedCellEntries truckCount totalVolumeM3 totalVolumeTons residualVolumeM3 residualVolumeTons hazardousVolumeM3 hazardousVolumeTons veraRemark";
         query = query.select(
           baseFields +
             // `cellIndex` rides along with `cellName` on the light projection.
@@ -5894,7 +6062,8 @@ router.get("/", optionalAuth, cacheJson(adminSubmissionsCacheKey, 60000), async 
             (includeTrucks
               ? " trucks"
               : " trucks.cellName trucks.cellIndex trucks.truckCapacity trucks.truckCapacityUnit trucks.actualVolume trucks.actualVolumeUnit" +
-                " trucks.vehicles.cellName trucks.vehicles.cellIndex trucks.vehicles.plateNumber trucks.vehicles.capacity trucks.vehicles.capacityUnit trucks.vehicles.actualVolume trucks.vehicles.actualVolumeUnit"),
+                " trucks.vehicles.cellName trucks.vehicles.cellIndex trucks.vehicles.plateNumber trucks.vehicles.capacity trucks.vehicles.capacityUnit trucks.vehicles.actualVolume trucks.vehicles.actualVolumeUnit" +
+                REMARK_FORMAT_FIELDS),
         );
       }
     }
@@ -5931,8 +6100,12 @@ router.get("/", optionalAuth, cacheJson(adminSubmissionsCacheKey, 60000), async 
     // "Exceeded truck capacity" admin remark. Fetched once per request.
     const allowancePct = await readCapacityAllowancePct();
     if (paginated) {
+      // A page is bounded (≤100 rows), so the cross-submission ticket check is
+      // affordable here; the unpaginated branch below can be thousands of rows
+      // and is not a table-row read, so it skips it.
+      const ticketReuse = await findTicketReuse(entries);
       res.json({
-        data: entries.map((raw) => enrichSubmissionRow(raw, { allowancePct, includeTrucks })),
+        data: entries.map((raw) => enrichSubmissionRow(raw, { allowancePct, includeTrucks, ticketReuse })),
         total,
         page,
         limit,
@@ -7708,12 +7881,15 @@ router.patch("/bulk-status", async (req, res) => {
     // Both are pure functions of `trucks`, which is already loaded — computing
     // them costs no extra query, and it removes the asynchronous gap entirely
     // rather than papering over it with a refetch or a retry.
-    const allowancePct = await readCapacityAllowancePct();
+    const [allowancePct, ticketReuse] = await Promise.all([
+      readCapacityAllowancePct(),
+      findTicketReuse(rawUpdated),
+    ]);
     const updated = rawUpdated.map((raw) =>
       // `includeTrucks: false` matches what the Submissions tab receives from the
       // list, so the row a user sees after approving is byte-identical to the one
       // they get after a page refresh.
-      enrichSubmissionRow(raw, { allowancePct, includeTrucks: false }),
+      enrichSubmissionRow(raw, { allowancePct, includeTrucks: false, ticketReuse }),
     );
 
     // Invalidate the cached submission lists and tell every open admin/portal
@@ -7826,6 +8002,136 @@ router.patch("/bulk-status", async (req, res) => {
     });
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });
+  }
+});
+
+// ── POST /data-slf/vera-remarks ── VERA writes an admin review remark ────────
+//
+// Admin Submissions tab → Remarks column → "Ask VERA". Body: { ids: [...] } —
+// one id for a single submission, or every entry of a grouped row, which gets
+// ONE remark covering the whole submission event.
+//
+// VERA is handed the submission's own figures plus the rule-based remarks, so it
+// explains WHICH load exceeded capacity and by how much, or which field is
+// improperly formatted, instead of guessing. With no model configured (or on a
+// provider failure) a rule-based remark is written instead, so the button always
+// produces something useful. Stored on the record so the column shows it without
+// a model call on every page load.
+router.post("/vera-remarks", adminOnly, async (req, res) => {
+  const rawIds = Array.isArray(req.body?.ids) ? req.body.ids : [req.body?.id];
+  const ids = [...new Set(rawIds.map((id) => String(id || "")).filter((id) => mongoose.isValidObjectId(id)))].slice(0, 50);
+  if (!ids.length) {
+    return res.status(400).json({ ok: false, message: "At least one valid submission id is required." });
+  }
+  try {
+    const entries = await DataSLF.find({ _id: { $in: ids }, deletedAt: null })
+      .setOptions({ includeHiddenYears: true })
+      .populate("slfGenerator", SLF_GENERATOR_REF_FIELDS)
+      .select("idNo submissionId slfName slfGenerator lguCompanyName companyType dateOfDisposal status trucks truckCount baselineUnit")
+      .lean();
+    if (!entries.length) return res.status(404).json({ ok: false, message: "Submission not found." });
+
+    // Same merge the table applies to a grouped row: one remark per label, the
+    // most severe level wins.
+    const [allowancePct, ticketReuse] = await Promise.all([
+      readCapacityAllowancePct(),
+      findTicketReuse(entries),
+    ]);
+    const severity = { error: 3, warning: 2, info: 1 };
+    const merged = new Map();
+    entries.forEach((entry) =>
+      computeSubmissionRemarks(entry, allowancePct)
+        .concat(ticketReuseRemarks(ticketReuse.get(String(entry._id))))
+        .forEach((remark) => {
+          const prev = merged.get(remark.text);
+          if (!prev || (severity[remark.level] || 0) > (severity[prev.level] || 0)) merged.set(remark.text, remark);
+        }),
+    );
+    const remarks = [...merged.values()];
+
+    const AppSettings = require("../models/AppSettings");
+    const agent = require("../utils/automationAgent");
+    const UsageLog = require("../models/AutomationAgentUsageLog");
+    const settings = await AppSettings.findOne().select("automationAgent").lean().catch(() => null);
+    const agentConfig = settings?.automationAgent || {};
+    const veraEnabled = String(process.env.VERA_ENABLED ?? "true").toLowerCase() !== "false";
+
+    let text = "";
+    let source = "fallback";
+    let model = "";
+    let usage = { inputTokens: 0, outputTokens: 0 };
+    let providerError = "";
+    const started = Date.now();
+    if (veraEnabled && agent.isOperational(agentConfig)) {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), agent.resolveTimeoutMs(agentConfig) + 2000);
+      try {
+        const resp = await agent.complete(agentConfig, {
+          system: VERA_REMARK_SYSTEM,
+          prompt: buildVeraRemarkPrompt(entries, remarks, { allowancePct }),
+          signal: controller.signal,
+        });
+        text = clampRemark(resp.text);
+        if (text) {
+          source = "model";
+          model = resp.model || "";
+          usage = { inputTokens: resp.inputTokens || 0, outputTokens: resp.outputTokens || 0 };
+        }
+      } catch (error) {
+        // Never surface provider detail (it can carry key fragments) — the code is enough.
+        providerError = String(error?.code || error?.status || "provider_error");
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+    if (!text) text = fallbackVeraRemark(remarks);
+
+    const veraRemark = {
+      text,
+      source,
+      model,
+      generatedBy: getRequestActor(req),
+      generatedAt: new Date(),
+    };
+    // `timestamps: false` — a reviewer note is not an edit of the submission and
+    // must not move it in any updatedAt-ordered view.
+    await DataSLF.updateMany(
+      { _id: { $in: entries.map((entry) => entry._id) } },
+      { $set: { veraRemark } },
+      { timestamps: false },
+    );
+
+    UsageLog.create({
+      userId: req.user?.id || null,
+      userEmail: req.user?.email || "",
+      userRole: req.user?.role || "",
+      feature: "vera_submission_remark",
+      model: source === "model" ? model : "fallback",
+      success: !providerError,
+      durationMs: Date.now() - started,
+      inputTokens: usage.inputTokens,
+      outputTokens: usage.outputTokens,
+      dataCategories: ["submission-review"],
+      errorMessage: providerError || undefined,
+    }).catch(() => {});
+    writeLog("info", "submission.vera-remark", {
+      message: `VERA remark generated for ${entries.map((e) => e.idNo || e._id).join(", ")} (${source})`,
+      user: getRequestActor(req),
+      ip: req.ip,
+      meta: { ids: entries.map((e) => String(e._id)), source, providerError: providerError || undefined },
+    });
+    refreshAdmin(req, "submissions");
+
+    return res.json({
+      ok: true,
+      ids: entries.map((entry) => String(entry._id)),
+      veraRemark,
+      remarks,
+      degraded: Boolean(providerError),
+    });
+  } catch (error) {
+    logSlfCrudError(req, "submission.vera-remark.error", error, { ids });
+    return res.status(500).json({ ok: false, message: "VERA could not generate a remark. Please try again." });
   }
 });
 
@@ -9464,10 +9770,11 @@ async function resolveWasteSummaryHaulers(match) {
   const grouped = await DataSLF.aggregate([
     { $match: { $and: [match, { "accreditedHaulers.0": { $exists: true } }] } },
     { $sort: { createdAt: -1 } },
-    { $project: { accreditedHaulers: 1 } },
+    { $project: { accreditedHaulers: 1, isContainer: IS_BASELINE_CONTAINER_EXPR } },
     { $unwind: "$accreditedHaulers" },
     {
       $project: {
+        isContainer: 1,
         haulerName: "$accreditedHaulers.haulerName",
         officeAddress: "$accreditedHaulers.officeAddress",
         client: {
@@ -9500,8 +9807,10 @@ async function resolveWasteSummaryHaulers(match) {
         haulerName: { $first: "$haulerName" },
         officeAddress: { $first: "$officeAddress" },
         client: { $first: "$client" },
+        containerClients: CONTAINER_CLIENT_ACCUMULATOR,
       },
     },
+    PREFER_CONTAINER_CLIENT_STAGE,
     { $match: { "_id.client": { $ne: "" } } },
   ])
     .option({ includeHiddenYears: true })
@@ -9674,6 +9983,9 @@ router.get("/waste-received-summary/:slfName", cacheJson(wasteReceivedCacheKey, 
       return {
         clientName: client.clientName || client.company || client.lguCompanyName || fallback.clientName || "—",
         clientType: client.clientType || client.companyType || fallback.clientType || "Private",
+        // Carried so the portal's Clients Served list can show the address the
+        // operator entered — this whitelist used to drop it.
+        clientAddress: String(client.clientAddress || fallback.clientAddress || "").trim(),
         region: client.region || client.companyRegion || fallback.region || "",
         regionName: client.regionName || client.companyRegionName || fallback.regionName || "",
         province: client.province || client.companyProvince || fallback.province || "",
@@ -10012,6 +10324,10 @@ module.exports.devWantsDummyOnly = devWantsDummyOnly;
 module.exports.rejectUnauthorizedDummyAccess = rejectUnauthorizedDummyAccess;
 module.exports.SUBMISSION_HAS_TRUCKS = SUBMISSION_HAS_TRUCKS;
 module.exports.sanitizeClient = sanitizeClient;
+module.exports.computeSubmissionRemarks = computeSubmissionRemarks;
+module.exports.findTicketReuse = findTicketReuse;
+module.exports.ticketReuseRemarks = ticketReuseRemarks;
+module.exports.enrichSubmissionRow = enrichSubmissionRow;
 module.exports.sanitizeAccreditedHaulers = sanitizeAccreditedHaulers;
 // Portal baseline read — the candidate ordering and the field-source rule that
 // decide what Data Entry hydrates from.

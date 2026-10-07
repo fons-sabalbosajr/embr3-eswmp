@@ -70,7 +70,22 @@ test("the union is scoped to the caller's facility and needs no record to win", 
   assert.deepEqual(matchStage.$match.$and[0], match, "the caller's scope is preserved");
   assert.deepEqual(matchStage.$match.$and[1], { "accreditedHaulers.0": { $exists: true } });
   assert.deepEqual(sortStage.$sort, { createdAt: -1 }, "newest copy of a pair wins");
-  assert.deepEqual(projectStage.$project, { accreditedHaulers: 1 }, "the vehicles graph is never read");
+  assert.deepEqual(
+    Object.keys(projectStage.$project).sort(),
+    ["accreditedHaulers", "isContainer"],
+    "the vehicles graph is never read",
+  );
+
+  // The baseline container's copy of a pair (where portal edits land) wins over a
+  // newer submission's stale copy — otherwise a just-saved Client Address is lost.
+  const groupStage = pipeline.find((s) => s.$group);
+  assert.ok(groupStage.$group.containerClients, "container copies are collected");
+  const preferStage = pipeline.find((s) => s.$set && s.$set.client);
+  assert.ok(preferStage, "the container copy is preferred after the collapse");
+  assert.ok(
+    pipeline.indexOf(preferStage) < pipeline.findIndex((s) => JSON.stringify(s.$match || {}).includes('"_id.client"')),
+    "preference is applied before blank names are filtered",
+  );
 
   // Both roster shapes are unioned before the collapse.
   const json = JSON.stringify(pipeline);

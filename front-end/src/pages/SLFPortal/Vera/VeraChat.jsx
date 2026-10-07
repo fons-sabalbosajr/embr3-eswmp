@@ -455,7 +455,7 @@ export default function VeraChat({
                 {typing && (
                   <div className="vera-msg vera-msg-assistant">
                     <div className="vera-bubble vera-thinking" aria-live="assertive">
-                      <span className="vera-thinking-flame"><VeraFlameIcon size={16} /></span>
+                      <span className="vera-thinking-flame"><VeraFlameIcon size={28} state="thinking" /></span>
                       <span className="vera-thinking-text">{thinkingMessages[thinkStage]}</span>
                       <span className="vera-typing" aria-hidden><span /><span /><span /></span>
                       <button type="button" className="vera-cancel-btn" onClick={cancelRequest} aria-label="Cancel request">

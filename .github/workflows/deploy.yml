@@ -1,0 +1,103 @@
+# Continuous deployment — ships main to the Hostinger VPS.
+#
+# Runs only after CI has passed on main (or when started by hand), connects to
+# the VPS over SSH as the app user, and runs scripts/deploy/vps-deploy.sh — the
+# same steps as the manual update procedure, with a
+# health check and an automatic rollback.
+#
+# Required repository secrets (Settings → Secrets and variables → Actions):
+#   VPS_HOST          server IP or hostname
+#   VPS_USER          the app user that owns the checkout (never root)
+#   VPS_SSH_KEY       private key whose public half is in that user's ~/.ssh/authorized_keys
+#   VPS_KNOWN_HOSTS   output of `ssh-keyscan -t ed25519 <VPS_HOST>` (pins the host key)
+# Optional:
+#   VPS_PORT          SSH port (default 22)
+#
+# The "production" environment can be given required reviewers so every deploy
+# waits for a person to approve it. See docs/CI_CD.md.
+name: Deploy
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Commit SHA or branch to deploy (default: main)"
+        required: false
+        default: main
+
+# Never two deploys at once; a queued one waits rather than cancelling a deploy
+# that is halfway through restarting the API.
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: Deploy to VPS
+    # Automatic runs only when CI succeeded on a push to main.
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment:
+      name: production
+      url: https://embr3-onlinesystems.cloud/eswm-pipeline/
+    steps:
+      - name: Resolve the commit to deploy
+        id: ref
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_run" ]; then
+            echo "sha=${{ github.event.workflow_run.head_sha }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "sha=${{ inputs.ref || 'main' }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Checkout the commit being deployed (for the deploy script)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.ref.outputs.sha }}
+
+      - name: Configure SSH
+        env:
+          VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+          VPS_KNOWN_HOSTS: ${{ secrets.VPS_KNOWN_HOSTS }}
+        run: |
+          test -n "$VPS_SSH_KEY" || { echo "::error::VPS_SSH_KEY secret is not set"; exit 1; }
+          test -n "$VPS_KNOWN_HOSTS" || { echo "::error::VPS_KNOWN_HOSTS secret is not set"; exit 1; }
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$VPS_SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          printf '%s\n' "$VPS_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 644 ~/.ssh/known_hosts
+
+      - name: Deploy
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+          VPS_PORT: ${{ secrets.VPS_PORT || '22' }}
+          DEPLOY_REF: ${{ steps.ref.outputs.sha }}
+        run: |
+          ssh -i ~/.ssh/deploy_key -p "$VPS_PORT" -o StrictHostKeyChecking=yes -o BatchMode=yes \
+            "$VPS_USER@$VPS_HOST" \
+            "DEPLOY_REF='$DEPLOY_REF' bash -s" < scripts/deploy/vps-deploy.sh
+        # The script is streamed from this checkout of the repo, so the steps
+        # that run are the reviewed ones — not whatever copy sits on the server.
+
+      - name: Public health check
+        run: |
+          for i in 1 2 3 4 5 6; do
+            code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 10 https://embr3-onlinesystems.cloud/api/health || true)
+            echo "attempt $i → HTTP $code"
+            [ "$code" = "200" ] && exit 0
+            sleep 10
+          done
+          echo "::error::Public health check failed after deploy"
+          exit 1
