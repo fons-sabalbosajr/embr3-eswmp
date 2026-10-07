@@ -1,0 +1,86 @@
+# Continuous integration — runs on every pull request and every push to main.
+#
+# Two independent jobs, one per package, so a front-end failure never hides a
+# server failure (and vice versa). Neither job needs a database or any secret:
+# the test suites stub Mongo, and the production build is self-contained.
+#
+# See docs/CI_CD.md.
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# A newer push to the same branch/PR supersedes a run still in progress.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  NODE_VERSION: "22" # same major as production
+
+jobs:
+  server:
+    name: Server — tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: server
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: server/package-lock.json
+      - run: npm ci
+      - name: Syntax check (every server module loads)
+        run: node --check server.js && for f in routes/*.js utils/*.js models/*.js middleware/*.js; do node --check "$f"; done
+      - name: Unit + integration tests
+        run: npm test
+        env:
+          # Tests set their own JWT secret; these keep any accidental real
+          # connection or email attempt from going anywhere.
+          NODE_ENV: test
+          MONGODB_URI: mongodb://127.0.0.1:1/ci-never-connects
+          EMAIL_USER: ""
+          SMTP_HOST: ""
+
+  front-end:
+    name: Front-end — tests, lint, build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: front-end
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: front-end/package-lock.json
+      - run: npm ci
+      - name: Unit tests
+        run: npm test
+      - name: Lint (report only)
+        # The codebase carries pre-existing lint debt, so lint reports without
+        # failing the build. Tighten to blocking once the backlog is cleared
+        # (docs/CI_CD.md → "Making lint blocking").
+        continue-on-error: true
+        run: npm run lint -- --max-warnings=-1
+      - name: Production build
+        run: npm run build
+      - name: Upload build
+        uses: actions/upload-artifact@v4
+        with:
+          name: front-end-dist
+          path: front-end/dist
+          retention-days: 7

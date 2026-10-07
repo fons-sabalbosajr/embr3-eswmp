@@ -919,7 +919,7 @@ export default function Landing() {
             <div className="lp-vera-avatar-wrap">
               <span className="lp-vera-ring" aria-hidden="true" />
               <span className="lp-vera-ring lp-vera-ring-2" aria-hidden="true" />
-              <span className="lp-vera-avatar-orb"><VeraFlameIcon size={64} anime title="VERA" /></span>
+              <span className="lp-vera-avatar-orb"><VeraFlameIcon size={64} anime theme="dark" title="VERA" /></span>
             </div>
             <span className="lp-section-tag lp-vera-tag">Meet VERA</span>
             <h2>Your <span className="lp-gradient-text">AI Environmental Assistant</span></h2>

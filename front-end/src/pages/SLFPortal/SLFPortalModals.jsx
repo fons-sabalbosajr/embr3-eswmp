@@ -1052,6 +1052,7 @@ export default function SLFPortalModals({
                         setClientDraft({
                           clientName: "",
                           clientType: "Private",
+                          clientAddress: "",
                           region: "",
                           province: "",
                           municipality: "",
@@ -1100,6 +1101,12 @@ export default function SLFPortalModals({
                         ),
                       },
                       {
+                        title: "Address",
+                        key: "clientAddress",
+                        ellipsis: true,
+                        render: (_, r) => r.clientAddress || r.address || "—",
+                      },
+                      {
                         title: "Location",
                         key: "location",
                         render: (_, r) =>
@@ -1123,9 +1130,12 @@ export default function SLFPortalModals({
                               icon={<EditOutlined />}
                               onClick={async () => {
                                 setEditingClientKey(r.key);
+                                // Carry the stored address into the draft — leaving it
+                                // out made every Edit save the client back without it.
                                 setClientDraft({
                                   clientName: r.clientName,
                                   clientType: r.clientType,
+                                  clientAddress: r.clientAddress || r.address || "",
                                   region: r.region,
                                   province: r.province,
                                   municipality: r.municipality,
@@ -4710,7 +4720,7 @@ export default function SLFPortalModals({
           <Col xs={24} lg={span}>
             <div className="slf-hauler-vera-panel" style={{ marginBottom: 0, height: "100%" }}>
               <div className="slf-hauler-vera-head">
-                <VeraFlameIcon size={18} anime={haulerVeraStage === "assessing"} />
+                <VeraFlameIcon size={18} state={haulerVeraStage === "assessing" ? "thinking" : "idle"} />
                 <Text strong style={{ fontSize: 13.5 }}>
                   VERA Assessment
                 </Text>
@@ -5354,6 +5364,18 @@ export default function SLFPortalModals({
                 { label: "Private", value: "Private" },
                 { label: "LGU", value: "LGU" },
               ]}
+            />
+          </Form.Item>
+          {/* Free-text street / barangay address. Stored as `clientAddress` — the
+              same field the hauler bulk upload and export use. */}
+          <Form.Item label="Client Address">
+            <Input
+              placeholder="e.g. Brgy. Poblacion, Sta. Rosa, Nueva Ecija"
+              value={clientDraft.clientAddress || ""}
+              maxLength={300}
+              onChange={(e) =>
+                setClientDraft((d) => ({ ...d, clientAddress: e.target.value }))
+              }
             />
           </Form.Item>
           {/* Location applies to BOTH LGU and Private clients — the saved Province

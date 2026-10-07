@@ -20,6 +20,8 @@
 11. [Adding a New Module](#adding-a-new-module)
 12. [Seed Scripts](#seed-scripts)
 13. [Coding Conventions](#coding-conventions)
+14. [Testing & CI/CD](#testing--cicd)
+15. [VERA Mark](#vera-mark)
 
 ---
 
@@ -435,6 +437,30 @@ Each script connects to MongoDB, inserts/updates data, then disconnects. They ar
 - **Styles:** Module CSS (`SLFPortal.css`, `App.css`, `index.css`). Ant Design's token system for theming.
 - **Error handling:** Backend routes use try/catch with JSON error responses. Frontend uses SweetAlert2 for user-facing errors.
 - **Naming:** camelCase for variables/functions, PascalCase for components, kebab-case for API routes.
+
+---
+
+## Testing & CI/CD
+
+- **Server:** `cd server && npm test` runs `node --test tests/*.test.js`. Tests stub Mongoose (e.g. replace `DataSLF.find` / `DataSLF.aggregate` with a chain that resolves fixed rows), so they need no database and no `.env`.
+- **Front-end:** `cd front-end && npm test` runs the pure-logic tests under `src/pages/**/__tests__`. `npm run lint` and `npm run build` complete the local check.
+- **CI** runs all of the above on every pull request and every push to `main`. **Deploy** ships `main` after CI passes, with a health check and automatic rollback. See [CI_CD.md](CI_CD.md).
+- When a change alters a response shape that a source-level test pins (e.g. `submissionRowShape.test.js`), update the test's expectation together with the code, and keep the intent its comment describes.
+
+### Submission remarks
+
+The admin **Submissions → Remarks** column is derived on read, never stored:
+
+- `computeSubmissionRemarks` (routes/dataSLF.js) covers truck capacity and cell placement, then appends `computeFormatRemarks` (utils/submissionRemarks.js): missing or improperly formatted ticket and plate numbers, loads without volume, treated hazardous waste without an HW code, non-standard waste types, and future disposal dates.
+- `findTicketReuse` adds **Ticket no. used in another submission**, one batched query per page, scoped to the facility and to live statuses.
+- Remarks are `{ text, level, detail }`. Keep `text` stable (the table merges grouped entries by it) and put counts and examples in `detail`.
+- **VERA remark:** `POST /api/data-slf/vera-remarks` (admin only) asks the configured AI model for a reviewer note, falls back to a rule-based note, and stores it as `veraRemark` on the record.
+
+---
+
+## VERA Mark
+
+Every VERA icon goes through `components/VeraFlameIcon.jsx` (props `size`, `state`, `anime`, `animated`, `tile`, `theme`, `title`). Drive `state` from real work (`thinking` while a reply generates, `working` while a job runs) and return it to `idle` when the work ends. Full rules are in [VERA_MARK.md](VERA_MARK.md).
 
 ---
 
