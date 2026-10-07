@@ -71,11 +71,11 @@ jobs:
       - name: Unit tests
         run: npm test
       - name: Lint (report only)
-        # The codebase carries pre-existing lint debt, so lint reports without
-        # failing the build. Tighten to blocking once the backlog is cleared
+        # The codebase carries pre-existing lint debt, so lint reports as a
+        # warning instead of failing (a red step here read as "CI failed").
+        # Make it blocking once the backlog is cleared: drop the `|| …` part
         # (docs/CI_CD.md → "Making lint blocking").
-        continue-on-error: true
-        run: npm run lint -- --max-warnings=-1
+        run: npm run lint || echo "::warning title=Lint::ESLint reported problems (report only — not blocking). Run npm run lint locally for the list."
       - name: Production build
         run: npm run build
       - name: Upload build
